@@ -113,4 +113,11 @@ else:
     for _k in ("rife_model", "rife_gpu"):
         _args.pop(_k, None)
     clip = core.pushmpc.Enhance(clip, backend=_backend, **_args)
+# mpv's vf=vapoursynth takes planar YUV only ("Unsupported output format" for RGB): the plugin's full-chroma RGB output
+# (chroma auto/444) goes to YUV 4:4:4, so no chroma resolution is lost. mpv keeps the input's colour parameters for the
+# output, and none are known while the script loads: the same matrix guess as the plugin's and _rife's.
+if clip.format.color_family == vs.RGB:
+    _b = clip.format.bits_per_sample
+    _mat = "2020ncl" if _b > 8 and clip.width >= 3200 else ("170m" if clip.width < 1024 and clip.height < 600 else "709")
+    clip = core.resize.Point(clip, format=vs.YUV444P10 if _b > 8 else vs.YUV444P8, matrix_s=_mat)
 clip.set_output()
