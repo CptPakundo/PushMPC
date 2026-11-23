@@ -67,12 +67,14 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 300
+    timeout-minutes: 100
     defaults:
       run:
         shell: pwsh
     env:
       GH_TOKEN: ${{ github.token }}
+      GIT_TERMINAL_PROMPT: 0
+      GCM_INTERACTIVE: never
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -86,6 +88,7 @@ jobs:
           persist-credentials: false
 
       - name: Paths and pins
+        timeout-minutes: 2
         run: |
           $deps = Join-Path $env:RUNNER_TEMP 'deps'
           New-Item -ItemType Directory -Force $deps | Out-Null
@@ -104,6 +107,7 @@ jobs:
           Write-Host "PushFPS $($pin.pushfps.tag) + $($pin.pushfps.patch); MPC-VR $($pin.mpcvr.commit)"
 
       - name: Version
+        timeout-minutes: 2
         id: version
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -127,21 +131,25 @@ jobs:
 
       # PushFPS at the pinned tag (checked against the pinned commit) with our patch set: the same tree as a local build.
       - name: PushFPS source with the PushMPC patches
+        timeout-minutes: 10
         run: |
           git config --global advice.detachedHead false
           git config --global core.autocrlf false
-          git clone -q --branch $env:PUSHFPS_TAG https://github.com/$env:PUSHFPS_REPO.git PushFPS
+          git clone -q --depth 1 --branch $env:PUSHFPS_TAG https://github.com/$env:PUSHFPS_REPO.git PushFPS
           $head = git -C PushFPS rev-parse HEAD
           if ($env:PUSHFPS_COMMIT -and $head -ne $env:PUSHFPS_COMMIT) { Write-Host "::error::$env:PUSHFPS_TAG is $head, pinned $env:PUSHFPS_COMMIT (tag moved?)"; exit 1 }
           git -C PushFPS apply --whitespace=nowarn "$env:GITHUB_WORKSPACE/repo/$env:PUSHFPS_PATCH"
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::$env:PUSHFPS_PATCH does not apply to $env:PUSHFPS_TAG"; exit 1 }
 
       # PushFPS's own CI is the reference for its dependencies: the pins below are read from its workflow file at this
-      # tag, so a PushFPS bump brings its own versions (FFmpeg baseline, DLSS, XeSS, FidelityFX, AMF, Chiaki, Moonlight).
+      # tag, so a PushFPS bump brings its own versions (FFmpeg baseline, DLSS, XeSS, FidelityFX, AMF). pushcore uses only
+      # PushFPS's enhancement engine: the streaming clients (Remote Play / Chiaki, Moonlight, Xbox), their static vcpkg
+      # tree and the QML UI (Qt) are not configured, fetched or built here.
       - name: Dependency pins from PushFPS's own workflow
+        timeout-minutes: 2
         run: |
           $wf = Get-Content PushFPS/.github/workflows/build-windows.yml -Raw
-          foreach ($n in 'UPSTREAM_REPO', 'UPSTREAM_TAG', 'VCPKG_COMMIT', 'DLSS_TAG', 'NVCODEC_TAG', 'CUDART_ZIP', 'XESS_TAG', 'FFX1_TAG', 'FFX2_TAG', 'AMF_COMMIT', 'CHIAKI_COMMIT', 'MOONLIGHT_COMMIT') {
+          foreach ($n in 'UPSTREAM_REPO', 'UPSTREAM_TAG', 'VCPKG_COMMIT', 'DLSS_TAG', 'NVCODEC_TAG', 'CUDART_ZIP', 'XESS_TAG', 'FFX1_TAG', 'FFX2_TAG', 'AMF_COMMIT') {
             $m = [regex]::Match($wf, "(?m)^\s+$($n):\s*(\S+)")
             if (-not $m.Success) { Write-Host "::error::$n not found in PushFPS's build-windows.yml"; exit 1 }
             "$n=$($m.Groups[1].Value)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
@@ -152,17 +160,8 @@ jobs:
         with:
           arch: x64
 
-      - name: Qt 6.8.3 (MSVC 2022 x64)
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.3'
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-          dir: ${{ runner.temp }}
-          cache: true
-
       - name: NVIDIA DLSS SDK headers, NVENC headers, CUDA driver header, XeSS, FidelityFX, AMF headers
+        timeout-minutes: 15
         working-directory: ${{ env.DEPS }}
         shell: bash
         run: |
@@ -180,6 +179,7 @@ jobs:
           git -C amf sparse-checkout set amf/public/include && git -C amf checkout -q FETCH_HEAD
 
       - name: FidelityFX 1.x optical flow (static, /MT)
+        timeout-minutes: 20
         working-directory: ${{ env.DEPS }}/ffx1/sdk
         run: |
           cmake -S . -B build -A x64 -DFFX_API_BACKEND=DX12_X64 -DFFX_ALL=OFF -DFFX_OF=ON -DFFX_AUTO_COMPILE_SHADERS=1 `
@@ -189,6 +189,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Locate SDK roots
+        timeout-minutes: 2
         shell: bash
         run: |
           deps=$(cygpath -u "$DEPS")
@@ -206,7 +207,8 @@ jobs:
           key: pushmpc-vcpkg-${{ env.VCPKG_COMMIT }}-${{ github.run_id }}
           restore-keys: pushmpc-vcpkg-${{ env.VCPKG_COMMIT }}-
 
-      - name: FFmpeg (vcpkg at PushFPS's baseline) and the static streaming dependencies
+      - name: FFmpeg (vcpkg at PushFPS's baseline)
+        timeout-minutes: 50
         working-directory: ${{ env.DEPS }}
         run: |
           git init -q vcpkg; git -C vcpkg remote add origin https://github.com/microsoft/vcpkg.git
@@ -216,10 +218,6 @@ jobs:
           $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:DEPS\vcpkg-binary"
           & vcpkg\vcpkg.exe install "ffmpeg[core,avcodec,avformat,avfilter,swresample,swscale]:x64-windows" --clean-after-build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & vcpkg\vcpkg.exe install --classic --triplet x64-windows-static "--x-install-root=$env:DEPS\stream-installed" `
-            "--overlay-ports=$env:GITHUB_WORKSPACE\PushFPS\scripts\xbox\vcpkg-overlay" `
-            openssl opus json-c libevent miniupnpc protobuf "sdl3" "libdatachannel[srtp,ws]" nlohmann-json pkgconf zlib --clean-after-build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Save vcpkg binaries
         if: always() && steps.vcpkg-cache.outcome == 'success'
@@ -228,30 +226,9 @@ jobs:
           path: ${{ env.DEPS }}/vcpkg-binary
           key: pushmpc-vcpkg-${{ env.VCPKG_COMMIT }}-${{ github.run_id }}
 
-      - name: Streaming sources (Chiaki-ng with Veyra's patches, moonlight-common-c), as PushFPS builds them
-        working-directory: ${{ env.DEPS }}
-        run: |
-          git clone -q https://github.com/streetpea/chiaki-ng.git chiaki-clean
-          git -C chiaki-clean checkout -q $env:CHIAKI_COMMIT
-          git -C chiaki-clean submodule update -q --init --recursive
-          git -C chiaki-clean worktree add -q --detach "$env:DEPS\chiaki-stage" $env:CHIAKI_COMMIT
-          git -C chiaki-stage submodule update -q --init --recursive
-          foreach ($p in Get-ChildItem "$env:GITHUB_WORKSPACE\PushFPS\scripts\remoteplay\patches" -Filter '*.patch' | Sort-Object Name) {
-            git -C chiaki-stage apply $p.FullName
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::$($p.Name) does not apply"; exit 1 }
-          }
-          python "$env:GITHUB_WORKSPACE\PushFPS\scripts\remoteplay\verify-chiaki-stage.py" --stage "$env:DEPS\chiaki-stage" --clean "$env:DEPS\chiaki-clean"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git clone -q https://github.com/moonlight-stream/moonlight-common-c.git moonlight-common-c
-          git -C moonlight-common-c checkout -q $env:MOONLIGHT_COMMIT
-          git -C moonlight-common-c submodule update -q --init --recursive
-          python "$env:GITHUB_WORKSPACE\PushFPS\scripts\moonlight\verify-moonlight-stage.py" --source "$env:DEPS\moonlight-common-c" --lock "$env:GITHUB_WORKSPACE\PushFPS\scripts\moonlight\dependency-lock.json"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install -q protobuf
-          "$env:DEPS\stream-installed\x64-windows-static\tools\protobuf" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-
       # Optional, as in PushFPS's CI: the headers stay on the runner; nothing uploads or packages them.
       - name: NVIDIA Optical Flow headers (optional)
+        timeout-minutes: 2
         env:
           NVOF_SDK_HEADERS: ${{ secrets.NVOF_SDK_HEADERS }}
         run: |
@@ -276,7 +253,23 @@ jobs:
           python-version: '3.12'
           update-environment: false
 
+      - name: Cache PushFlow inputs
+        id: pushflow-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS }}/pushflow
+          key: pushmpc-pushflow-${{ hashFiles('PushFPS/scripts/pushflow/prepare_runtime.py') }}
+
+      - name: Cache libdovi
+        id: dovi-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS }}/libdovi
+          key: pushmpc-libdovi-d1abe0e27ff2c7ab3339614d06db9f8a058af6b2-cbindgen-0.29.4
+
       - name: PushFlow build inputs (ONNX Runtime + DirectML), as PushFPS prepares them
+        if: steps.pushflow-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         env:
           PUSHFLOW_PYTHON: ${{ steps.pushflow-python.outputs.python-path }}
         run: |
@@ -291,13 +284,15 @@ jobs:
           if ($rc -ne 0) { exit $rc }
 
       - name: Dolby Vision parsing library (libdovi, built from pinned source)
+        if: steps.dovi-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 25
         run: |
           $ErrorActionPreference = 'Stop'
           $src = "$env:DEPS\dovi_tool"; $out = "$env:DEPS\libdovi"
-          git clone -q https://github.com/quietvoid/dovi_tool $src
-          git -C $src checkout -q d1abe0e27ff2c7ab3339614d06db9f8a058af6b2
+          git init -q $src; git -C $src remote add origin https://github.com/quietvoid/dovi_tool
+          git -C $src fetch -q --depth 1 origin d1abe0e27ff2c7ab3339614d06db9f8a058af6b2
+          git -C $src checkout -q FETCH_HEAD
           Push-Location "$src\dolby_vision"
           cargo rustc --release --features capi --crate-type cdylib
           if ($LASTEXITCODE -ne 0) { throw 'libdovi did not build' }
@@ -309,25 +304,20 @@ jobs:
           $dll = Get-ChildItem $src -Recurse -File -Filter dolby_vision.dll | Where-Object FullName -match '\\release\\' | Select-Object -First 1
           $lib = Get-ChildItem $src -Recurse -File -Filter dolby_vision.dll.lib | Where-Object FullName -match '\\release\\' | Select-Object -First 1
           Copy-Item $dll.FullName "$out\bin"; Copy-Item $lib.FullName "$out\lib"
-          "LIBDOVI_ROOT=$out" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Configure PushFPS with pushcore (PUSHMPC_SOURCE_DIR)
+        timeout-minutes: 10
         run: |
+          if (Test-Path "$env:DEPS\libdovi\bin\dolby_vision.dll") { $env:LIBDOVI_ROOT = "$env:DEPS\libdovi" }
           $ffmpeg = "$env:DEPS\vcpkg\installed\x64-windows"
-          $stream = "$env:DEPS\stream-installed\x64-windows-static"
-          $env:PKG_CONFIG_PATH = "$stream\lib\pkgconfig"
           $dovi = @('-DVEYRA_ENABLE_LIBDOVI=OFF')
           if ($env:LIBDOVI_ROOT -and (Test-Path "$env:LIBDOVI_ROOT\bin\dolby_vision.dll")) { $dovi = @('-DVEYRA_ENABLE_LIBDOVI=ON', "-DVEYRA_LIBDOVI_ROOT=$env:LIBDOVI_ROOT") }
           else { Write-Host '::warning::libdovi was not built: no Dolby Vision RPU parsing in this build' }
           $nvof = @(); if ($env:NVOF_SDK_ROOT) { $nvof = @("-DVEYRA_NVOF_SDK_ROOT=$env:NVOF_SDK_ROOT") }
           cmake -S PushFPS -B $env:BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release `
-            "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR;$ffmpeg;$stream" `
-            -DVEYRA_BUILD_QML_UI=ON -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF `
-            -DVEYRA_ENABLE_REMOTEPLAY=ON -DVEYRA_ENABLE_MOONLIGHT=ON -DVEYRA_ENABLE_XBOX=ON `
-            "-DVEYRA_RP_CHIAKI_SOURCE_DIR=$env:DEPS\chiaki-stage" "-DVEYRA_RP_CHIAKI_VERIFY_DIR=$env:DEPS\chiaki-clean" `
-            "-DVEYRA_MOONLIGHT_SOURCE_DIR=$env:DEPS\moonlight-common-c" `
-            "-DPROTOC=$stream\tools\protobuf\protoc.exe" "-DPKG_CONFIG_EXECUTABLE=$stream\tools\pkgconf\pkgconf.exe" `
-            -DOPENSSL_USE_STATIC_LIBS=ON -DOPENSSL_MSVC_STATIC_RT=ON `
+            "-DCMAKE_PREFIX_PATH=$ffmpeg" `
+            -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF `
+            -DVEYRA_ENABLE_REMOTEPLAY=OFF -DVEYRA_ENABLE_MOONLIGHT=OFF -DVEYRA_ENABLE_XBOX=OFF `
             "-DVEYRA_DISPLAY_VERSION=$env:PUSHFPS_DISPLAY_VERSION" `
             "-DVEYRA_FFMPEG_ROOT=$ffmpeg" `
             "-DVEYRA_DLSS_SDK_ROOT=$env:DEPS\dlss" `
@@ -341,13 +331,20 @@ jobs:
             "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" @nvof @dovi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build PushFPS (shaders), pushcore.dll, the HIP preflight child and the GPU harness
+      # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and
+      # the GPU harness; nothing of the PushFPS app
+      - name: Build PushFPS's shaders, pushcore.dll, the HIP preflight child and the GPU harness
+        timeout-minutes: 45
         run: |
-          cmake --build $env:BUILD --target veyra_qml_ui pushcore_dll pushcore_hip_preflight pushcore_gpu_harness --parallel
+          $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
+          Write-Host "$($shaders.Count) shader targets"
+          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_hip_preflight pushcore_gpu_harness --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
 
       - name: MPC Video Renderer source (DirectShow base classes for the filter)
+        timeout-minutes: 10
         run: |
           git init -q MpcVideoRenderer
           git -C MpcVideoRenderer remote add origin https://github.com/$env:MPCVR_REPO.git
@@ -357,6 +354,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Filter (PushMpcFilter.ax, PushMpcExit.dll) and the updater (release build)
+        timeout-minutes: 20
         run: |
           cmake -S repo/filter -B "$env:RUNNER_TEMP\filter-build" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$env:GITHUB_WORKSPACE\MpcVideoRenderer"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -369,6 +367,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Code-signing certificate (optional)
+        timeout-minutes: 5
         env:
           PFX: ${{ secrets.CODESIGN_PFX_BASE64 }}
           PFX_PASSWORD: ${{ secrets.CODESIGN_PFX_PASSWORD }}
@@ -380,6 +379,7 @@ jobs:
           "PUSHMPC_CODESIGN=`"$($signtool.FullName)`" sign /f `"$pfx`" /p `"$env:PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `"{file}`"" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Stage and package (Setup, component zips, release.json + signature)
+        timeout-minutes: 20
         env:
           PUSHMPC_SIGNING_KEY: ${{ secrets.PUSHMPC_SIGNING_KEY }}
           PUSHMPC_BUILD_DIR: ${{ env.BUILD }}
@@ -476,8 +476,11 @@ jobs:
     needs: [build, gpu-smoke]
     if: ${{ always() && needs.build.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
+      GIT_TERMINAL_PROMPT: 0
+      GCM_INTERACTIVE: never
       TAG: ${{ needs.build.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
@@ -485,6 +488,7 @@ jobs:
           name: pushmpc-release
           path: release
       - name: Create the GitHub release
+        timeout-minutes: 10
         run: |
           set -e
           pre=""; [ "${{ needs.build.outputs.prerelease }}" = "true" ] && pre="--prerelease"
