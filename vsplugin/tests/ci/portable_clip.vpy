@@ -27,6 +27,6 @@ for i in range(48):
     else:
         frames.append(blank(W, H, 128))
 clip = core.std.Splice(frames)
-clip = core.std.SetFrameProps(clip, _Matrix=1, _Transfer=1, _Primaries=1, _ColorRange=1)
+clip = core.std.SetFrameProps(clip, _Matrix=1, _Transfer=1, _Primaries=1, _Range=0)  # API 4.2+ range (0 limited)
 clip = core.pushmpc.Enhance(clip, backend="portable", smoother=k)
 clip.set_output()

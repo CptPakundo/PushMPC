@@ -91,7 +91,7 @@ jobs:
               if ($LASTEXITCODE) { throw "vs_harness failed ($bits-bit, chroma $chroma)" }
             }
           }
-          $log = Get-Content "$env:RUNNER_TEMP\logs-vspipe\vsplugin-*.log" -Raw
+          $log = (Get-Content "$env:RUNNER_TEMP\logs-vspipe\vsplugin-*.log" -Raw) -join "`n"   # one log per process
           if ($log -notmatch 'flush \(warm core reused\)') { throw 'the script reloads did not reuse the warm core' }
 
       - name: mpv --vo=null with seeks (script reloads)
@@ -110,7 +110,7 @@ jobs:
           if ($mlog -notmatch 'pushmpc-ci: estimated-vf-fps=([\d.]+)') { throw 'mpv did not report the filter rate' }
           $fps = [double]$Matches[1]; Write-Host "estimated-vf-fps $fps"
           if ($fps -lt 0.8 * 23.976 * [int]$env:K) { throw "output rate $fps, expected about $(23.976 * [int]$env:K)" }
-          $log = Get-Content "$env:RUNNER_TEMP\logs-mpv\vsplugin-*.log" -Raw
+          $log = (Get-Content "$env:RUNNER_TEMP\logs-mpv\vsplugin-*.log" -Raw) -join "`n"
           $reuse = ([regex]::Matches($log, 'flush \(warm core reused\)')).Count
           if ($reuse -lt 1) { throw 'the seek reloads did not reuse the warm core' }
           Write-Host "warm core reused on $reuse reloads"

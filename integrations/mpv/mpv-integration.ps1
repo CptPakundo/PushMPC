@@ -295,6 +295,8 @@ function Invoke-PmMpvIntegration {
     $players = Find-PmPlayers $E $MpvExe
     $state = Get-PmStateFile $E
     $runtime = "$($E.LocalAppData)\PushMPC\vapoursynth"
+    # VapourSynth R7x+ portable keeps VSScript.dll in its wheel's package folder (lib\site-packages\vapoursynth)
+    if (Test-Path -LiteralPath "$runtime\lib\site-packages\vapoursynth\VSScript.dll") { $runtime = "$runtime\lib\site-packages\vapoursynth" }
     $rows = @()
     switch ($Action) {
         'Status' {
@@ -341,7 +343,7 @@ function Invoke-PmMpvIntegration {
             }
             if ($s -and $s.addedPath) {
                 $cur = Get-PmUserPath $E
-                $parts = @($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime })
+                $parts = @($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime -and $_ -ne $s.runtime })
                 if ($PSCmdlet.ShouldProcess('user PATH', "remove $runtime")) { Set-PmUserPath $E ($parts -join ';') }
             }
             if ((Test-Path -LiteralPath $state) -and $PSCmdlet.ShouldProcess($state, 'remove')) { Remove-Item -LiteralPath $state }

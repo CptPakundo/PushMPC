@@ -1856,8 +1856,13 @@ function Invoke-MpvIntegration([string]$mpvAction, [switch]$onPath, [switch]$noS
 }
 function Test-PinTodo($o) { return ($null -eq $o) -or ("$($o.url) $($o.sha256) $($o.version) $($o.tag)" -match 'TODO') }
 # 'ours' (installed or fetched), 'user' (a VapourSynth already on the PATH), 'dry', or '' (not available)
+# the folder with VSScript.dll in a runtime folder: its root (older portables) or the wheel's package folder (R7x+)
+function Get-VsScriptDir([string]$root) {
+    foreach ($d in @($root, (Join-Path $root 'lib\site-packages\vapoursynth'))) { if (Test-Path -LiteralPath (Join-Path $d 'VSScript.dll')) { return $d } }
+    return ''
+}
 function Get-VapourSynthRuntime {
-    if (Test-Path -LiteralPath (Join-Path $VsRuntimeDir 'VSScript.dll')) { Info "VapourSynth runtime: $VsRuntimeDir"; return 'ours' }
+    if (Get-VsScriptDir $VsRuntimeDir) { Info "VapourSynth runtime: $VsRuntimeDir"; return 'ours' }
     if (-not $MpvRoot) {
         foreach ($d in @($env:PATH -split ';' | Where-Object { $_ })) {
             if (Test-Path -LiteralPath (Join-Path $d 'VSScript.dll')) { Info "VapourSynth runtime: your own installation ($d)"; return 'user' }
@@ -1888,7 +1893,18 @@ function Get-VapourSynthRuntime {
         & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $file -C $stage
         if ($LASTEXITCODE -ne 0) { Warn "$leaf could not be unpacked."; return '' }
     }
-    if (-not (Test-Path (Join-Path $stage 'VSScript.dll'))) { Warn 'The VapourSynth runtime has no VSScript.dll after unpacking: not used.'; return '' }
+    # VapourSynth R7x+ portable: the runtime is a wheel inside the zip, unpacked to lib\site-packages (where its
+    # vspipe.bat looks) and that folder added to the embeddable Python's ._pth
+    if ($pin.vapoursynth.wheel) {
+        $sp = Join-Path $stage ($pin.vapoursynth.wheelTo.Replace('/', '\'))
+        New-Item -ItemType Directory -Force $sp | Out-Null
+        foreach ($w in @(Get-ChildItem (Join-Path $stage ($pin.vapoursynth.wheel.Replace('/', '\'))) -ErrorAction SilentlyContinue)) {
+            & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $w.FullName -C $sp
+            if ($LASTEXITCODE -ne 0) { Warn "$($w.Name) could not be unpacked."; return '' }
+        }
+        foreach ($pth in @(Get-ChildItem $stage -Filter 'python*._pth')) { Add-Content -LiteralPath $pth.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
+    }
+    if (-not (Get-VsScriptDir $stage)) { Warn 'The VapourSynth runtime has no VSScript.dll after unpacking: not used.'; return '' }
     Write-Manifest $stage @{ component = 'vapoursynth'; version = "$($pin.vapoursynth.tag)+python$($pin.python.version)"; 'vapoursynth-sha256' = $pin.vapoursynth.sha256; 'python-sha256' = $pin.python.sha256 }
     if (Test-Path $VsRuntimeDir) { Remove-Item $VsRuntimeDir -Recurse -Force }
     New-Item -ItemType Directory -Force (Split-Path $VsRuntimeDir) | Out-Null
@@ -2254,7 +2270,7 @@ switch ($Action) {
         if (Read-Manifest $vs) {
             $line = Component-Summary $vs; $bad = Test-ComponentFiles $vs -Hash:$Verify; if ($bad) { $line += " - PROBLEM: $bad" }
             Info ("{0,-8} {1}" -f 'vsplugin', $line)
-            Info "VapourSynth runtime: $(if (Test-Path (Join-Path $VsRuntimeDir 'VSScript.dll')) { $VsRuntimeDir } else { 'not installed' })"
+            Info "VapourSynth runtime: $(if (Get-VsScriptDir $VsRuntimeDir) { $VsRuntimeDir } else { 'not installed' })"
             if (Get-MpvIntegrationScript) { foreach ($r in (Invoke-MpvIntegration 'Status')) { Info ("{0}: installed {1} ({2}){3}" -f $r.Player, $r.Installed, $(if ($r.Config) { $r.Config } else { $r.Exe }), $(if ($r.Note) { "; $($r.Note)" } else { '' })) } }
         } else { Info 'vsplugin (mpv route): not installed' }
     }

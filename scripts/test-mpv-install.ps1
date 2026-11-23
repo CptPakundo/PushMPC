@@ -14,10 +14,16 @@ $stage = Join-Path $tmp 'stage'; $root = Join-Path $tmp 'root'
 $inst = Join-Path $root 'AppData\Local\PushMPC'
 $mpvDir = Join-Path $root 'Program Files\mpv'; $conf = Join-Path $mpvDir 'portable_config\mpv.conf'
 $rtDir = Join-Path $inst 'vapoursynth'; $userPath = Join-Path $root 'user-path.txt'
+$todoPin = Join-Path $root 'pins\vapoursynth-pin.todo.json'
 $fails = 0
 function Check([string]$what, [bool]$ok) { if ($ok) { Write-Host "  PASS  $what" } else { Write-Host "  FAIL  $what" -ForegroundColor Red; $script:fails++ } }
 function Run([string]$action, [string[]]$more = @()) {
-    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script, $action, '-StageDir', $stage, '-InstallDir', $inst, '-MpvRoot', $root) + $more
+    # a TODO pin file of the test's own: the real pins are filled, and a test must never download the runtime
+    if (-not (Test-Path $todoPin)) {
+        New-Item -ItemType Directory -Force (Split-Path $todoPin) | Out-Null
+        '{"python":{"version":"TODO","url":"TODO","sha256":"TODO"},"vapoursynth":{"tag":"TODO","url":"TODO","sha256":"TODO"}}' | Set-Content -LiteralPath $todoPin -Encoding ASCII
+    }
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script, $action, '-StageDir', $stage, '-InstallDir', $inst, '-MpvRoot', $root, '-VsPinFile', $todoPin) + $more
     $out = & powershell.exe @a 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $out; throw "$action exited $LASTEXITCODE" }
     return $out

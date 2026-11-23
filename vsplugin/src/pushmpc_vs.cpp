@@ -97,6 +97,15 @@ int64_t PropInt(const VSMap* m, const VSAPI* a, const char* key, int64_t def, bo
     if (present) *present = !err;
     return err ? def : v;
 }
+// The range in _ColorRange codes (0 full, 1 limited). VapourSynth API 4.2+ (R7x+) uses _Range with the opposite codes
+// (1 full, 0 limited, VSConstants4.h); it wins when present, _ColorRange is the fallback for older sources.
+int64_t PropRange(const VSMap* m, const VSAPI* a, bool* present)
+{
+    bool hasNew = false;
+    const int64_t r = PropInt(m, a, "_Range", 0, &hasNew);
+    if (hasNew) { if (present) *present = true; return r == 1 ? 0 : 1; }
+    return PropInt(m, a, "_ColorRange", 1, present);
+}
 std::wstring RegFilterStr(const wchar_t* name)
 {
     HKEY k = nullptr;
@@ -120,7 +129,8 @@ void SetOutProps(Enhance* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     a->mapSetInt(p, "_Matrix", d->outMatrix, maReplace);
     a->mapSetInt(p, "_Transfer", d->outTransfer, maReplace);
     a->mapSetInt(p, "_Primaries", d->outPrimaries, maReplace);
-    a->mapSetInt(p, "_ColorRange", d->outRange, maReplace);
+    a->mapSetInt(p, "_ColorRange", d->outRange, maReplace);          // older VapourSynth (0 full)
+    a->mapSetInt(p, "_Range", d->outRange == 0 ? 1 : 0, maReplace);   // API 4.2+ (1 full)
     if (OutIs420(d->fmt)) a->mapSetInt(p, "_ChromaLocation", 1, maReplace);   // the 2x2 average: centre
     a->mapSetInt(p, "PushMPCFrameKind", kind, maReplace);                       // 0 real, 1 generated, 2 repeated
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
@@ -206,7 +216,7 @@ bool CheckColour(Enhance* d, CoreHost& h, int64_t s, std::string& err)
     if (!f) return true;
     const VSMap* p = d->api->getFramePropertiesRO(f);
     bool hm, ht, hp, hr;
-    const int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm), t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropInt(p, d->api, "_ColorRange", 1, &hr);
+    const int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm), t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropRange(p, d->api, &hr);
     d->api->freeFrame(f);
     const Colour c = ColourFromProps(d->colour, m, hm, t, ht, pr, hp, r, hr);
     h.RememberColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample, d->inVi.fpsNum, d->inVi.fpsDen, c);
