@@ -9,14 +9,15 @@
     "extractTo": "."
   },
   "vapoursynth": {
-    "what": "VapourSynth portable (x64), LGPL-2.1; extracted over the Python folder; since R7x it carries the runtime as a wheel (wheel/*.whl), which is unpacked into the same folder",
+    "what": "VapourSynth portable (x64), LGPL-2.1; extracted over the Python folder; since R7x it carries the runtime as a wheel (wheel/*.whl), which is unpacked into lib/site-packages (where its vspipe.bat looks) and that folder added to the embeddable Python's ._pth",
     "repository": "vapoursynth/vapoursynth",
     "tag": "R82",
     "url": "https://github.com/vapoursynth/vapoursynth/releases/download/R82/VapourSynth64-Portable-R82.zip",
     "sha256": "F97EA50C4C9F778EEAC4BC4E3E43F86FB3B71787371D06E584E0C47F396874CA",
     "extractTo": ".",
     "wheel": "wheel/*.whl",
-    "sdkHeaders": ["vapoursynth/include/VapourSynth4.h", "vapoursynth/include/VSHelper4.h", "vapoursynth/include/VSScript4.h", "vapoursynth/include/VSConstants4.h"],
+    "wheelTo": "lib/site-packages",
+    "sdkHeaders": ["lib/site-packages/vapoursynth/include/VapourSynth4.h", "lib/site-packages/vapoursynth/include/VSHelper4.h", "lib/site-packages/vapoursynth/include/VSScript4.h", "lib/site-packages/vapoursynth/include/VSConstants4.h"],
     "source": {
       "what": "the source of the same tag, for the LGPL licence text that goes with the headers",
       "url": "https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R82.tar.gz",

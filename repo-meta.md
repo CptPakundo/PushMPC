@@ -1,4 +1,4 @@
-# PushMPC: GitHub repository settings (draft, not applied)
+# PushMPC: GitHub repository settings (applied 2026-11-23 while the repository is private)
 
 ## Description (117 characters)
 
@@ -45,7 +45,7 @@ Concept 1 "Clapper Push" (`assets/logo/pushmpc-logo-1-clapper-push.svg`), chosen
   MPCvibedRPC). Also to add: `docs/ai.md` (how the AI-made workflow works), linked from the README's AI note as in
   MPCvibedRPC.
 
-## Commands (do not run before the user's go; the repo must be public for the badges and preview to matter)
+## Commands (applied 2026-11-23 to the private repository, except private vulnerability reporting: GitHub offers it for public repositories only, so run that line after going public)
 
 ```
 gh repo edit CptPakundo/PushMPC --description "RTX Video Super Resolution, up to 8x frame generation and SDR to HDR inside MPC-HC. PushFPS's engine, one Setup."

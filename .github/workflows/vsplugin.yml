@@ -38,9 +38,13 @@ jobs:
           }
           Fetch $pin.python "$env:RUNNER_TEMP\python.zip"; Expand-Archive "$env:RUNNER_TEMP\python.zip" $vs -Force
           Fetch $pin.vapoursynth "$env:RUNNER_TEMP\vs.zip"; Expand-Archive "$env:RUNNER_TEMP\vs.zip" $vs -Force
-          # R7x+ portable: the runtime is a wheel inside the zip; unpack it into the same folder (the embeddable
-          # Python's ._pth has "." on sys.path, so "import vapoursynth" finds it there)
-          if ($pin.vapoursynth.wheel) { foreach ($w in Get-ChildItem (Join-Path $vs $pin.vapoursynth.wheel)) { Write-Host "wheel $($w.Name)"; tar -xf $w.FullName -C $vs; if ($LASTEXITCODE) { throw "unpack $($w.Name)" } } }
+          # R7x+ portable: the runtime is a wheel inside the zip, installed as its vspipe.bat expects
+          # (lib\site-packages\vapoursynth); lib\site-packages goes into the embeddable Python's ._pth
+          if ($pin.vapoursynth.wheel) {
+            $sp = Join-Path $vs $pin.vapoursynth.wheelTo; New-Item -ItemType Directory $sp -Force | Out-Null
+            foreach ($w in Get-ChildItem (Join-Path $vs $pin.vapoursynth.wheel)) { Write-Host "wheel $($w.Name)"; tar -xf $w.FullName -C $sp; if ($LASTEXITCODE) { throw "unpack $($w.Name)" } }
+            foreach ($pth in Get-ChildItem $vs -Filter 'python*._pth') { Add-Content $pth.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
+          }
           Fetch $pin.mpvForCi "$env:RUNNER_TEMP\mpv.7z"; 7z x "$env:RUNNER_TEMP\mpv.7z" "-o$mpv" -y | Out-Null
           Write-Host '--- runtime layout'; Get-ChildItem $vs -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.bat', '.pyd', '.h', '._pth' } | ForEach-Object { Write-Host "  $($_.FullName.Substring($vs.Length + 1))" }
           foreach ($b in Get-ChildItem $vs -Filter *.bat) { Write-Host "--- $($b.Name)"; Get-Content $b.FullName | Write-Host }
@@ -50,7 +54,7 @@ jobs:
           foreach ($h in $pin.vapoursynth.sdkHeaders) { Copy-Item (Join-Path $vs $h) $sdk }
           Fetch $pin.vapoursynth.source "$env:RUNNER_TEMP\vs-src.tar.gz"
           $src = Join-Path $env:RUNNER_TEMP 'vs-src'; New-Item -ItemType Directory $src -Force | Out-Null; tar -xzf "$env:RUNNER_TEMP\vs-src.tar.gz" -C $src
-          $lic = Get-ChildItem $src -Recurse -File | Where-Object { $_.Name -match '^COPYING.*LGPL|^LICENSE.*LGPL' } | Select-Object -First 1
+          $lic = Get-ChildItem $src -Recurse -File | Where-Object { $_.Name -match '^COPYING.LESSER$|^COPYING.*LGPL|^LICENSE.*LGPL' } | Select-Object -First 1
           if (-not $lic) { Get-ChildItem $src -Depth 1 | ForEach-Object { Write-Host "  src: $($_.Name)" }; throw 'no LGPL licence file in the VapourSynth source' }
           Copy-Item $lic.FullName $sdk
           @("VapourSynth SDK headers from VapourSynth $($pin.vapoursynth.tag) (github.com/vapoursynth/vapoursynth), LGPL-2.1-or-later;",

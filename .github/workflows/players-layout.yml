@@ -38,7 +38,7 @@ jobs:
           }
           function Dump-Reg([string]$key, [string]$name) {
             reg export $key "$env:OUT\$name.reg" /y 2>&1 | Out-Null
-            if (Test-Path "$env:OUT\$name.reg") { "$key -> $name.reg ($((Get-Item "$env:OUT\$name.reg").Length) bytes)" } else { "$key: not present" }
+            if (Test-Path "$env:OUT\$name.reg") { "$key -> $name.reg ($((Get-Item "$env:OUT\$name.reg").Length) bytes)" } else { "${key}: not present" }
           }
           '@ | Set-Content "$env:RUNNER_TEMP\helpers.ps1"
 
