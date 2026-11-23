@@ -366,6 +366,16 @@ jobs:
           cmake --build "$env:RUNNER_TEMP\updater-build" --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # the mpv route's plugin (optional preview component): built with the VapourSynth SDK headers in the repository
+      - name: VapourSynth plugin (pushmpc_vs.dll, mpv preview)
+        timeout-minutes: 15
+        run: |
+          cmake -S repo/vsplugin -B "$env:RUNNER_TEMP\vsplugin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP\vsplugin-build" --target pushmpc_vs --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item repo/vsplugin/bin/pushmpc_vs.dll | Format-List Name, Length
+
       - name: Code-signing certificate (optional)
         timeout-minutes: 5
         env:
@@ -385,7 +395,7 @@ jobs:
           PUSHMPC_BUILD_DIR: ${{ env.BUILD }}
         run: |
           $rel = "$env:RUNNER_TEMP\release"
-          $pre = @(); if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @('-Prerelease') }
+          $pre = @{}; if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @{ Prerelease = $true } }
           ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./repo/scripts/pushmpc-install.ps1 package -ReleaseDir $rel -ReleaseVersion '${{ steps.version.outputs.version }}' @pre
