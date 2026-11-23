@@ -57,8 +57,8 @@ set up by itself for your GPU and display. Your player stays your player.
 | Player | Status | What Setup does |
 |---|---|---|
 | **MPC-HC** (x64) | ✅ supported, tested | everything: adds the filter, sets MPC Video Renderer's HDR options |
-| **MPC-BE** (x64) | 🆕 new: automatic, not yet tested with MPC-BE itself | the same, plus its video decoder set to D3D11 copy-back (put back on uninstall) |
-| **mpv**, **SMPlayer** | 🧪 preview, not in a release yet | adds a VapourSynth filter to `mpv.conf` (SMPlayer: its own settings, experimental) and sets up the VapourSynth runtime it needs |
+| **MPC-BE** (x64) | 🆕 new: automatic, checked in CI; playback not yet tested in MPC-BE itself | the same, plus its video decoder set to D3D11 copy-back (put back on uninstall) |
+| **mpv**, **SMPlayer** | 🧪 preview, optional; not yet tested with a real GPU | when it finds one: adds a VapourSynth filter to `mpv.conf` (SMPlayer: its own settings, experimental) and sets up the VapourSynth runtime it needs (SVP's own mpv is left alone) |
 | **MPC-QT** | 🧪 preview, manual setup | nothing; steps in [mpv, SMPlayer and MPC-QT](docs/players-mpv.md#mpc-qt-by-hand) |
 | **PotPlayer** (x64) | 🧪 manual setup, untested | nothing; steps in the [user guide](docs/user-guide.md#using-pushmpc-with-potplayer-manual-setup) |
 
@@ -87,7 +87,7 @@ vs-rife-ncnn-vulkan instead when you have it installed. See
 
 1. Download **[PushMPC-Setup.exe](https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe)**
    and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\PushMPC`, adds
-   PushMPC to MPC-HC and MPC-BE (whichever is installed), and fetches the runtime for your GPU (Veyra's package, about
+   PushMPC to MPC-HC and MPC-BE (whichever is installed; mpv and SMPlayer as a preview), and fetches the runtime for your GPU (Veyra's package, about
    750 MB, resumable, checked by SHA-256) unless PushFPS or Veyra is already installed with the same files. Close the
    player first, or let Setup close it.
 2. Play a video. That's it: Auto is on.
@@ -165,6 +165,7 @@ files, Setup reuses them instead of downloading.
 
 - [User guide](docs/user-guide.md): every setting, players, GPUs, HDR, updates, troubleshooting.
 - [mpv, SMPlayer and MPC-QT](docs/players-mpv.md): the VapourSynth route, Linux and macOS (preview).
+- [Changelog](CHANGELOG.md): what is in each release and the known limitations.
 - [Release model](docs/release-model.md): what a release contains and how updates are verified.
 - [Building](docs/building.md) · [Licences](docs/licences.md)
 
@@ -191,6 +192,5 @@ Big Buck Bunny or Tears of Steel, and crop out MPC-HC's title bar and playlist):
   assets/screenshots/status.jpg        the status panel during 4x-8x playback (fps, GPU time, method, cut guard, VRR)
   optional: assets/screenshots/cut-guard.gif  short loop of a scene cut, guard off vs on
   optional: assets/screenshots/setup.jpg      the Setup wizard's first page
-Before the first public release: change the MPC-BE row once it is tested with MPC-BE itself, and the mpv row once
-pushmpc_vs.dll ships.
+Change the MPC-BE row once it is tested with MPC-BE itself, and the mpv row once it is tested with a real GPU.
 -->

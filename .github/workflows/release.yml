@@ -497,12 +497,20 @@ jobs:
         with:
           name: pushmpc-release
           path: release
+      # the release body: docs/release-notes-<version>.md of the built commit when it exists, else the text below
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          path: repo
+          sparse-checkout: docs
+          persist-credentials: false
       - name: Create the GitHub release
         timeout-minutes: 10
         run: |
           set -e
           pre=""; [ "${{ needs.build.outputs.prerelease }}" = "true" ] && pre="--prerelease"
           latest="--latest"; [ -n "$pre" ] && latest="--latest=false"
+          if [ -f "repo/docs/release-notes-${TAG#v}.md" ]; then cp "repo/docs/release-notes-${TAG#v}.md" notes.md; else
           cat > notes.md <<'EOF'
           Download **PushMPC-Setup.exe** and run it (per user, no administrator rights). It downloads Veyra's runtime package
           from Veyra's GitHub release unless PushFPS or Veyra is already installed with the same files.
@@ -513,5 +521,6 @@ jobs:
           Installed PushMPC updates itself (Windows Settings > Apps > PushMPC > Modify, or MPC-HC > Play > Filters >
           PushMPC Filter > About). The other files are the components the updater downloads.
           EOF
+          fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "PushMPC ${TAG#v}" --notes-file notes.md \
             --target "${{ needs.build.outputs.sha }}" $pre $latest release/*

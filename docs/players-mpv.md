@@ -4,8 +4,9 @@ PushMPC's engine also runs outside MPC-HC, as a VapourSynth filter (`pushmpc.Enh
 the same engine as in MPC-HC (RTX Video Super Resolution, NVIDIA frame generation and the other frame generation
 methods, the scene-cut guard, the colour chain), with the same settings and the same Auto rules.
 
-> Status: new. Built and tested against a stand-in core; the first test pass with real players and a real GPU is still
-> to come.
+> Status: **preview** in PushMPC 0.6.0, an optional component of Setup. Built and tested in CI (VapourSynth's vspipe
+> and mpv, 8 and 10 bit, warm reloads) against a stand-in core; the first test pass with real players and a real GPU is
+> still to come. The updater does not update this component yet: run a newer Setup.
 
 ## Supported players
 
@@ -21,13 +22,15 @@ there.
 
 ## Setup
 
-PushMPC's installer does this when it finds one of the players above:
+PushMPC's installer does this when it finds mpv or SMPlayer (without one, it changes nothing for this route; run Setup
+again after installing one):
 
 1. It installs the filter (`pushmpc_vs.dll`, `pushmpc.vpy`) in `%LOCALAPPDATA%\PushMPC\vsplugin`.
-2. It installs a portable VapourSynth runtime (VapourSynth plus the embeddable Python package) in
-   `%LOCALAPPDATA%\PushMPC\vapoursynth`, unless you already have VapourSynth, and puts that folder on your user PATH so
-   mpv finds it. The installer downloads the official packages and checks each against a pinned SHA-256, as it does
-   for the runtime.
+2. It installs a portable VapourSynth runtime (VapourSynth R82 portable plus Python 3.12's embeddable package) in
+   `%LOCALAPPDATA%\PushMPC\vapoursynth`, unless you already have VapourSynth on your PATH, and puts its VSScript folder
+   (`vapoursynth\lib\site-packages\vapoursynth`, where R82 keeps `VSScript.dll`) on your user PATH so mpv finds it. The
+   installer downloads the official packages and checks each against a pinned SHA-256, as it does for the
+   runtime. Uninstalling removes the folder and the PATH entry.
 3. It adds a marked block to the top of each `mpv.conf` (mpv's `portable_config` folder when mpv has one, else
    `%APPDATA%\mpv`):
 

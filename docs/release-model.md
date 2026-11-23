@@ -4,11 +4,12 @@ A PushMPC release contains only PushMPC's own work:
 
 | In the release | What |
 |---|---|
-| `PushMPC-Setup.exe` | the installer for end users: one file with the `filter` and `core` components inside |
+| `PushMPC-Setup.exe` | the installer for end users: one file with the `filter` and `core` components (and the optional `vsplugin`) inside |
 | `PushMPC-<v>.zip` | the same for a script install: `pushmpc-install.ps1`, `Install-PushMPC.cmd`, `filter\`, `core\` |
 | `filter\` | `PushMpcFilter.ax`, `PushMpcExit.dll`, `PushMpcUpdater.exe`, the installer script and `release-key.xml` (used by update, repair and uninstall), `manifest.txt` |
 | `core\` | `pushcore.dll` and its compiled shaders, `pushcore_hip_preflight.exe`, `manifest.txt` |
-| `PushMPC-filter-<v>.zip`, `PushMPC-core-<v>.zip` | the components the updater downloads |
+| `vsplugin\` (optional, preview) | the mpv route: `pushmpc_vs.dll`, `pushmpc.vpy`, `mpv-integration.ps1`, `vapoursynth-pin.json`, `manifest.txt`; marked `optional` in `release.json`, installed by Setup only when it finds mpv or SMPlayer |
+| `PushMPC-filter-<v>.zip`, `PushMPC-core-<v>.zip`, `PushMPC-vsplugin-<v>.zip` | the components (the updater downloads filter and core; vsplugin is updated by a newer Setup) |
 | `release.json`, `release.json.sig` | the release manifest (component versions, relative URLs, SHA-256, Veyra's package reference) and its signature |
 
 The **runtime** (FFmpeg, the NVIDIA or AMD components that pushcore loads, and PushFlow) is never part of a release. It
@@ -21,6 +22,7 @@ matches its pinned SHA-256, else downloaded at install time.
 | `Veyra-2.1.9-NVIDIA-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `4225ECB1...C79F362` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
 | `Veyra-2.1.9-AMD-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `F7113DB0...C2BF377` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
 | `PushFPS-4.4.0-win64.zip` (PushFPS's release v4.4.0), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
+| `VapourSynth64-Portable-R82.zip` (VapourSynth's release R82) and `python-3.12.10-embed-amd64.zip` (python.org), only for the mpv route | each zip's SHA-256 (`scripts/vapoursynth-pin.json`) | the VapourSynth runtime in `%LOCALAPPDATA%\PushMPC\vapoursynth` (R82's wheel unpacked to `lib\site-packages`) |
 
 ## Install
 
@@ -113,7 +115,7 @@ secrets `CODESIGN_PFX_BASE64` and `CODESIGN_PFX_PASSWORD` set it up.
 
 | Workflow | When | Does |
 |---|---|---|
-| `release.yml` | a tag `vX.Y.Z` (stable) or `vX.Y.Z-beta.N` (pre-release), by hand, or called by the watch | on `windows-latest`: PushFPS at the tag pinned in `scripts/pushfps-pin.json` with `patches/` applied (its dependencies fetched as PushFPS's own CI does, with the pins read from PushFPS's workflow at that tag), pushcore, MPC Video Renderer's base classes at the pinned commit, the filter, the updater (release build), `stage` and `package`; then the optional GPU smoke test; then a GitHub release with Setup, the zips, `release.json` and its signature |
+| `release.yml` | a tag `vX.Y.Z` (stable) or `vX.Y.Z-beta.N` (pre-release), by hand, or called by the watch | on `windows-latest`: PushFPS at the tag pinned in `scripts/pushfps-pin.json` with `patches/` applied (its dependencies fetched as PushFPS's own CI does, with the pins read from PushFPS's workflow at that tag), pushcore, MPC Video Renderer's base classes at the pinned commit, the filter, the updater (release build), `pushmpc_vs.dll` (the optional vsplugin component), `stage` and `package`; then the optional GPU smoke test; then a GitHub release with Setup, the zips, `release.json` and its signature, its body from `docs/release-notes-<version>.md` when that file exists. By hand it runs as a dry run by default (no release, no tag) |
 | `pushfps-watch.yml` | daily | compares DosukaSOL/PushFPS's latest release with the pin; if newer, applies our patch to the new tag (`git apply --3way`), commits the moved pin and the regenerated patch to `bot/pushfps-<tag>`, builds it with `release.yml` (published as a beta when the variable `PUSHFPS_WATCH_BETA` is `true`), then opens a pull request; a patch that does not apply or a failed build opens an issue |
 
 GPU test: hosted runners have no GPU. With the variable `PUSHMPC_GPU_RUNNER` = `true`, a self-hosted Windows runner

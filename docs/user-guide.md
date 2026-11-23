@@ -4,7 +4,8 @@
 
 Download **PushMPC-Setup.exe** from the [releases](https://github.com/CptPakundo/PushMPC/releases) and run it. It installs
 for your Windows account only, without administrator rights: welcome (it shows whether MPC-HC was found), licence and
-credits, then the installation with a progress bar. If MPC-HC or MPC-BE is running, setup offers to close it (both
+credits, then the installation with a progress bar. The welcome page lists the players it found (MPC-HC, MPC-BE, and
+mpv, SMPlayer or MPC-QT for the mpv preview). If MPC-HC or MPC-BE is running, setup offers to close it (both
 save their settings when they close, so they must not run during setup).
 
 Setup is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC" the first time: click
@@ -35,6 +36,7 @@ Everything goes into `%LOCALAPPDATA%\PushMPC`, per user, without administrator r
 | (top level) | `PushMpcUpdater.exe` (updates), `PushMpcSetup.exe` (repair, update, uninstall from Windows Apps) |
 | `core` | `pushcore.dll`, its shaders, `pushcore_hip_preflight.exe` (AMD) |
 | `runtime` | FFmpeg, the NVIDIA or AMD components and PushFlow |
+| `vsplugin`, `vapoursynth` | the mpv preview: the VapourSynth filter and its runtime (only when mpv or SMPlayer was found) |
 | `previous` | the version before the last update (rollback) |
 | `logs` | logs |
 
@@ -49,7 +51,10 @@ leaves them out).
 | Player | Support | What setup does |
 |---|---|---|
 | MPC-HC (x64) | full, tested | adds "PushMPC Filter" to External Filters (Prefer); MPC Video Renderer HDR options |
-| MPC-BE (x64) | automatic; not yet tested on a real MPC-BE install | the same, plus MPC Video Decoder set to D3D11 copy-back |
+| MPC-BE (x64) | automatic; setup's changes checked against MPC-BE 1.9.3 in CI, playback not yet tested in MPC-BE | the same, plus MPC Video Decoder set to D3D11 copy-back |
+| mpv, SMPlayer | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in `mpv.conf` (SMPlayer: its options), plus a VapourSynth runtime; see [mpv, SMPlayer and MPC-QT](players-mpv.md) |
+| MPC-QT | preview, manual setup | nothing ([steps](players-mpv.md#mpc-qt-by-hand)) |
+| SVP's own mpv | | left alone (SVP manages it) |
 | PotPlayer (x64) | manual setup, **untested** | nothing (see below) |
 
 PushMPC needs MPC Video Renderer in D3D11 mode after it, and a decoder before it that delivers its frames in system

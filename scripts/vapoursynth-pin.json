@@ -25,7 +25,7 @@
     }
   },
   "activation": {
-    "how": "mpv (shinchiro builds) loads VSScript.dll from the DLL search path, so the install folder goes on the user's PATH (integrations/mpv/mpv-integration.ps1 -RuntimeOnPath, undone on uninstall). An existing VapourSynth install of the user's is used instead when one is found.",
+    "how": "mpv (shinchiro builds) loads VSScript.dll from the DLL search path, so the folder holding VSScript.dll (R82: lib\\site-packages\\vapoursynth in the install folder) goes on the user's PATH (integrations/mpv/mpv-integration.ps1 -RuntimeOnPath, undone on uninstall). An existing VapourSynth install of the user's is used instead when one is found.",
     "check": "mpv --vf=help lists 'vapoursynth' (the build has the filter) and VSScript.dll exists in the runtime folder"
   },
   "portableCi": {
