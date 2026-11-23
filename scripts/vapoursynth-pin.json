@@ -1,38 +1,50 @@
 {
-  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin, players-all.md R1). Nothing is downloaded until the user approves it. Versions and hashes marked TODO must be filled in from the official release pages (and the hashes checked against the downloaded files) before the installer uses this file.",
+  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin, players-all.md R1), and the packages the vsplugin CI workflows use. Resolved and hashed on GitHub's runners by .github/workflows/pins.yml (2026-11-23). An entry whose version, URL or SHA-256 says TODO is never downloaded.",
   "installDir": "%LOCALAPPDATA%\\PushMPC\\vapoursynth",
   "python": {
-    "what": "Python embeddable package (amd64), PSF licence",
-    "version": "TODO-verify: the 3.x the VapourSynth release below supports (3.12 or 3.13)",
-    "url": "https://www.python.org/ftp/python/TODO-version/python-TODO-version-embed-amd64.zip",
-    "sha256": "TODO",
+    "what": "Python embeddable package (amd64), PSF licence; VapourSynth R82's wheel is cp312-abi3 (Python 3.12 or newer), 3.12.10 is the last 3.12 with Windows binaries",
+    "version": "3.12.10",
+    "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+    "sha256": "4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3",
     "extractTo": "."
   },
   "vapoursynth": {
-    "what": "VapourSynth portable (x64), LGPL-2.1; extracted over the Python folder as its portable instructions say",
+    "what": "VapourSynth portable (x64), LGPL-2.1; extracted over the Python folder; since R7x it carries the runtime as a wheel (wheel/*.whl), which is unpacked into the same folder",
     "repository": "vapoursynth/vapoursynth",
-    "tag": "TODO-verify (R70 or newer: API 4 and VSScript API 4)",
-    "url": "https://github.com/vapoursynth/vapoursynth/releases/download/TODO-tag/VapourSynth64-Portable-TODO-tag.zip",
-    "sha256": "TODO",
+    "tag": "R82",
+    "url": "https://github.com/vapoursynth/vapoursynth/releases/download/R82/VapourSynth64-Portable-R82.zip",
+    "sha256": "F97EA50C4C9F778EEAC4BC4E3E43F86FB3B71787371D06E584E0C47F396874CA",
     "extractTo": ".",
-    "sdkHeaders": ["sdk/include/VapourSynth4.h", "sdk/include/VSHelper4.h", "sdk/include/VSScript4.h"],
-    "portableMarker": "portable.vs"
+    "wheel": "wheel/*.whl",
+    "sdkHeaders": ["vapoursynth/include/VapourSynth4.h", "vapoursynth/include/VSHelper4.h", "vapoursynth/include/VSScript4.h", "vapoursynth/include/VSConstants4.h"],
+    "source": {
+      "what": "the source of the same tag, for the LGPL licence text that goes with the headers",
+      "url": "https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R82.tar.gz",
+      "sha256": "8994FBCFA2FCAA5DC94109E547060521F60829A0899747E98E351BED72BD9611"
+    }
   },
   "activation": {
     "how": "mpv (shinchiro builds) loads VSScript.dll from the DLL search path, so the install folder goes on the user's PATH (integrations/mpv/mpv-integration.ps1 -RuntimeOnPath, undone on uninstall). An existing VapourSynth install of the user's is used instead when one is found.",
-    "check": "mpv --vf=help lists 'vapoursynth' (the build has the filter) and %LOCALAPPDATA%\\PushMPC\\vapoursynth\\VSScript.dll exists"
+    "check": "mpv --vf=help lists 'vapoursynth' (the build has the filter) and VSScript.dll exists in the runtime folder"
   },
   "portableCi": {
-    "what": "VapourSynth (API 4) with its SDK headers and vspipe for the vsplugin-portable CI workflow on Linux and macOS (R3); never installed on the user's machine. Until these are pinned the workflow builds and runs the unit tests only.",
-    "linux": { "how": "TODO-verify: a pinned VapourSynth source tarball (vapoursynth/vapoursynth, R70+) built on the runner, or a pinned distro package", "url": "TODO", "sha256": "TODO" },
-    "macos": { "how": "TODO-verify: the same source tarball built on the runner, or a pinned Homebrew bottle", "url": "TODO", "sha256": "TODO" },
-    "headersFromWindowsPin": "the SDK headers are the same files as vapoursynth.sdkHeaders above (VapourSynth4.h, VSHelper4.h)"
+    "what": "VapourSynth R82 wheels from PyPI (self-contained: libvapoursynth, vspipe, the SDK headers) for the vsplugin-portable CI workflow on Linux and macOS (R3); never installed on a user's machine. Python 3.12+.",
+    "linux": {
+      "how": "pip wheel (manylinux x86_64)",
+      "url": "https://files.pythonhosted.org/packages/3c/30/55b464fe29960af3e8e8254eb236f5e3164c28a6ce66f9706f5d5567ddd4/vapoursynth-82-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "9BD85641D3655C06FF90C73042204FBCF6DB7BD26F8AE9D60A7EE17ACF534F2E"
+    },
+    "macos": {
+      "how": "pip wheel (macOS 13+ arm64)",
+      "url": "https://files.pythonhosted.org/packages/04/d7/c87d07e85746747a7ce4669b0d491b9dfea9a9c4f7295f43a4f2c5a5003f/vapoursynth-82-cp312-abi3-macosx_13_0_arm64.whl",
+      "sha256": "E6F0854E7DE85B42426CB0889066C712455B6F1AFDE8D7328ADDFB2320BC3E80"
+    }
   },
   "mpvForCi": {
-    "what": "shinchiro mpv (x86_64) for the vsplugin CI workflow only; never installed on the user's machine",
+    "what": "shinchiro mpv (x86_64) for the vsplugin CI workflow only; never installed on a user's machine",
     "repository": "shinchiro/mpv-winbuild-cmake",
-    "tag": "TODO-verify",
-    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/TODO-tag/mpv-x86_64-TODO-date-git-TODO.7z",
-    "sha256": "TODO"
+    "tag": "20261111",
+    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z",
+    "sha256": "F259B5FD4B5C395617C948A4FADCDF55BBA1C5282FB7C13E88626B3F71072BAF"
   }
 }

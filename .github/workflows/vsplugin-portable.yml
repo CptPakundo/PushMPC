@@ -4,7 +4,8 @@
 #     backend selection, the CPU budget, settings.ini and folders, the engine on synthetic frames (a moving box, a hard
 #     cut, a seek), the calibration;
 #   - Linux and macOS: the mpv.conf integration's fake-HOME tests (POSIX sh and dash);
-#   - vspipe with the portable backend once scripts/vapoursynth-pin.json has the CI VapourSynth pinned (TODO-pin guard:
+#   - Linux and macOS: pushmpc_vs.so / .dylib built with the headers of the pinned VapourSynth wheel, then the portable
+#     backend through the Python API and vspipe (TODO-pin guard:
 #     until then the step says so and is skipped, it never downloads an unpinned file).
 # The Windows nvidia path (stub pushcore, D3D11 on WARP, mpv) stays in vsplugin.yml.
 name: vsplugin-portable
@@ -49,20 +50,66 @@ jobs:
             dash integrations/mpv/tests/_dash.sh
           fi
 
-      - name: vspipe with the portable backend (needs the pinned CI VapourSynth)
+      - uses: actions/setup-python@v5
+        if: runner.os != 'Windows'
+        with: { python-version: '3.12' }
+
+      - name: Pinned VapourSynth wheel, then pushmpc_vs (.so / .dylib) with its SDK headers
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
           key=$([ "$RUNNER_OS" = macOS ] && echo macos || echo linux)
-          url=$(python3 -c "import json,sys; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['url'])")
-          sha=$(python3 -c "import json,sys; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['sha256'])")
+          url=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['url'])")
+          sha=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['sha256'])")
           case "$url$sha" in *TODO*)
-            echo "::notice::scripts/vapoursynth-pin.json: portableCi.$key is not pinned yet (TODO): vspipe tests skipped"
-            exit 0 ;;
+            echo "::notice::scripts/vapoursynth-pin.json: portableCi.$key is not pinned yet (TODO): plugin build and vspipe tests skipped"
+            echo "VS_PINNED=0" >> "$GITHUB_ENV"; exit 0 ;;
           esac
-          # TODO-pin: fetch "$url", check "$sha" (sha256sum / shasum -a 256), build or unpack VapourSynth, copy
-          # VapourSynth4.h and VSHelper4.h into vsplugin/third_party/vapoursynth, rebuild (pushmpc_vs.so / .dylib), then:
-          #   PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_TEST_K=$K vspipe --info vsplugin/tests/ci/portable_clip.vpy
-          #   expect Frames: 48*K and FPS: 24000*K/1001; vspipe vsplugin/tests/ci/portable_clip.vpy -- must succeed.
-          echo "::error::portableCi.$key is pinned but the fetch-and-build step is not written yet"
-          exit 1
+          whl="$RUNNER_TEMP/$(basename "$url")"
+          curl -fsSL --retry 3 -o "$whl" "$url"
+          got=$(python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest().upper())" "$whl")
+          [ "$got" = "$(echo "$sha" | tr a-f A-F)" ] || { echo "::error::SHA-256 mismatch for $url: $got"; exit 1; }
+          python -m pip install --no-deps "$whl"
+          pkg=$(python -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
+          echo "VapourSynth package: $pkg"; ls -la "$pkg" | head -30
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+          cmake -S vsplugin -B build-portable -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-portable --config Release --target pushmpc_vs --parallel
+          ls -la vsplugin/bin
+          plug=$(ls vsplugin/bin/pushmpc_vs.* | head -1)
+          vsp=$(command -v vspipe || true); [ -n "$vsp" ] || vsp="$pkg/vspipe"
+          echo "VS_PINNED=1" >> "$GITHUB_ENV"; echo "PUSHMPC_VS_PLUGIN=$PWD/$plug" >> "$GITHUB_ENV"; echo "VSPIPE=$vsp" >> "$GITHUB_ENV"
+
+      - name: The portable backend through VapourSynth (Python API and vspipe)
+        if: runner.os != 'Windows' && env.VS_PINNED == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PUSHMPC_TEST_K=$K
+          python - <<'PY'
+          import os, runpy, vapoursynth as vs
+          k = int(os.environ["K"])
+          runpy.run_path("vsplugin/tests/ci/portable_clip.vpy")
+          clip = vs.get_output(0)
+          clip = clip.clip if hasattr(clip, "clip") else clip
+          print("frames", clip.num_frames, "fps", clip.fps)
+          assert clip.num_frames == 48 * k, clip.num_frames
+          assert clip.fps.numerator == 24000 * k and clip.fps.denominator == 1001, clip.fps
+          for i in range(clip.num_frames):
+              f = clip.get_frame(i)
+              assert "_DurationNum" in f.props and "_DurationDen" in f.props, (i, dict(f.props))
+          print("python API: all", clip.num_frames, "frames rendered with durations")
+          PY
+          echo "vspipe: $VSPIPE"
+          info=$("$VSPIPE" --info vsplugin/tests/ci/portable_clip.vpy 2>&1); echo "$info"
+          echo "$info" | grep -Eq "Frames:[[:space:]]+$((48 * K))\b" || { echo "::error::vspipe: expected $((48 * K)) frames"; exit 1; }
+          echo "$info" | grep -Eq "FPS:[[:space:]]+$((24000 * K))/1001" || { echo "::error::vspipe: expected $((24000 * K))/1001 fps"; exit 1; }
+          "$VSPIPE" vsplugin/tests/ci/portable_clip.vpy -- > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows' && env.VS_PINNED == '1'
+        with:
+          name: pushmpc_vs-${{ runner.os }}
+          path: vsplugin/bin/pushmpc_vs.*

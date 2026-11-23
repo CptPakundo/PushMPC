@@ -38,10 +38,28 @@ jobs:
           }
           Fetch $pin.python "$env:RUNNER_TEMP\python.zip"; Expand-Archive "$env:RUNNER_TEMP\python.zip" $vs -Force
           Fetch $pin.vapoursynth "$env:RUNNER_TEMP\vs.zip"; Expand-Archive "$env:RUNNER_TEMP\vs.zip" $vs -Force
+          # R7x+ portable: the runtime is a wheel inside the zip; unpack it into the same folder (the embeddable
+          # Python's ._pth has "." on sys.path, so "import vapoursynth" finds it there)
+          if ($pin.vapoursynth.wheel) { foreach ($w in Get-ChildItem (Join-Path $vs $pin.vapoursynth.wheel)) { Write-Host "wheel $($w.Name)"; tar -xf $w.FullName -C $vs; if ($LASTEXITCODE) { throw "unpack $($w.Name)" } } }
           Fetch $pin.mpvForCi "$env:RUNNER_TEMP\mpv.7z"; 7z x "$env:RUNNER_TEMP\mpv.7z" "-o$mpv" -y | Out-Null
+          Write-Host '--- runtime layout'; Get-ChildItem $vs -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.bat', '.pyd', '.h', '._pth' } | ForEach-Object { Write-Host "  $($_.FullName.Substring($vs.Length + 1))" }
+          foreach ($b in Get-ChildItem $vs -Filter *.bat) { Write-Host "--- $($b.Name)"; Get-Content $b.FullName | Write-Host }
+          Get-ChildItem $vs -Filter *._pth | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_.FullName | Write-Host }
+          # SDK headers from the pinned package, the LGPL text from the pinned source of the same tag
           $sdk = 'vsplugin/third_party/vapoursynth'; New-Item -ItemType Directory $sdk -Force | Out-Null
           foreach ($h in $pin.vapoursynth.sdkHeaders) { Copy-Item (Join-Path $vs $h) $sdk }
+          Fetch $pin.vapoursynth.source "$env:RUNNER_TEMP\vs-src.tar.gz"
+          $src = Join-Path $env:RUNNER_TEMP 'vs-src'; New-Item -ItemType Directory $src -Force | Out-Null; tar -xzf "$env:RUNNER_TEMP\vs-src.tar.gz" -C $src
+          $lic = Get-ChildItem $src -Recurse -File | Where-Object { $_.Name -match '^COPYING.*LGPL|^LICENSE.*LGPL' } | Select-Object -First 1
+          if (-not $lic) { Get-ChildItem $src -Depth 1 | ForEach-Object { Write-Host "  src: $($_.Name)" }; throw 'no LGPL licence file in the VapourSynth source' }
+          Copy-Item $lic.FullName $sdk
+          @("VapourSynth SDK headers from VapourSynth $($pin.vapoursynth.tag) (github.com/vapoursynth/vapoursynth), LGPL-2.1-or-later;",
+            "see $($lic.Name). Fetched by .github/workflows/vsplugin.yml from the packages pinned in scripts/vapoursynth-pin.json.") | Set-Content "$sdk/README.txt"
+          Get-ChildItem $sdk | ForEach-Object { Write-Host "sdk: $($_.Name) $($_.Length)" }
+          $vss = Get-ChildItem $vs -Recurse -Filter VSScript.dll | Select-Object -First 1
+          if (-not $vss) { throw 'VSScript.dll not found in the runtime' }
           "$vs" | Out-File -Append $env:GITHUB_PATH
+          if ($vss.DirectoryName -ne $vs) { $vss.DirectoryName | Out-File -Append $env:GITHUB_PATH }
           "VSDIR=$vs" | Out-File -Append $env:GITHUB_ENV
           "MPVDIR=$mpv" | Out-File -Append $env:GITHUB_ENV
 
@@ -104,3 +122,19 @@ jobs:
           path: |
             ${{ runner.temp }}/logs-*
             ${{ runner.temp }}/mpvtest/mpv.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pushmpc_vs-windows-x64
+          path: |
+            vsplugin/bin/pushmpc_vs.dll
+            vsplugin/bin/pushmpc_vs.pdb
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vapoursynth-sdk
+          path: vsplugin/third_party/vapoursynth
+          if-no-files-found: warn

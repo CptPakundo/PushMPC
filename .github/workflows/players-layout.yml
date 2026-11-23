@@ -1,0 +1,122 @@
+# MPC-BE and PotPlayer on a hosted Windows runner (no GPU): install both from their official sources, start each once
+# and close it so it writes its settings, dump the settings layout (HKCU registry and ini files) and check PushMPC's
+# MPC-BE step against the real registry: pushmpc-install.ps1 mpcbe-apply, verify the External Filters entry and
+# HwDecoder, then mpcbe-remove. The dumps are uploaded as the artifact "players-layout" (for later PotPlayer automation).
+name: players-layout
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  layout:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OUT: ${{ github.workspace }}\dumps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Helpers
+        run: |
+          New-Item -ItemType Directory $env:OUT -Force | Out-Null
+          @'
+          function Start-Once([string]$exe, [string]$tag, [int]$wait = 12) {
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds $wait
+            $p.Refresh()
+            $alive = -not $p.HasExited
+            "$tag started: alive after ${wait}s = $alive, main window '$($p.MainWindowTitle)' handle $($p.MainWindowHandle)" | Tee-Object -Append "$env:OUT\run.txt"
+            if ($alive) { [void]$p.CloseMainWindow(); if (-not $p.WaitForExit(15000)) { "$tag did not close on WM_CLOSE: killed" | Tee-Object -Append "$env:OUT\run.txt"; $p.Kill() } else { "$tag closed, exit $($p.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt" } }
+            else { "$tag exited early, exit $($p.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt" }
+          }
+          function Dump-Reg([string]$key, [string]$name) {
+            reg export $key "$env:OUT\$name.reg" /y 2>&1 | Out-Null
+            if (Test-Path "$env:OUT\$name.reg") { "$key -> $name.reg ($((Get-Item "$env:OUT\$name.reg").Length) bytes)" } else { "$key: not present" }
+          }
+          '@ | Set-Content "$env:RUNNER_TEMP\helpers.ps1"
+
+      - name: MPC-BE (portable zip, official GitHub release)
+        run: |
+          . "$env:RUNNER_TEMP\helpers.ps1"
+          $rel = gh api repos/Aleksoid1978/MPC-BE/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match 'x64\.(zip|7z)$' -and $_.name -notmatch 'installer|pdb' } | Select-Object -First 1
+          if (-not $a) { $rel.assets.name; throw 'no x64 portable archive' }
+          $f = "$env:RUNNER_TEMP\$($a.name)"; Invoke-WebRequest $a.browser_download_url -OutFile $f
+          "MPC-BE $($rel.tag_name) $($a.name) sha256 $((Get-FileHash $f).Hash)" | Tee-Object -Append "$env:OUT\run.txt"
+          $d = "$env:RUNNER_TEMP\mpcbe"; 7z x $f "-o$d" -y | Out-Null
+          $exe = Get-ChildItem $d -Recurse -Filter mpc-be64.exe | Select-Object -First 1
+          if (-not $exe) { throw 'mpc-be64.exe not found' }
+          "MPCBE_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          Get-ChildItem $exe.DirectoryName -Filter *.ini | ForEach-Object { "MPC-BE ini next to exe before run: $($_.Name)" | Tee-Object -Append "$env:OUT\run.txt" }
+          Start-Once $exe.FullName 'MPC-BE'
+          Dump-Reg 'HKCU\Software\MPC-BE' 'mpcbe-hkcu' | Tee-Object -Append "$env:OUT\run.txt"
+          foreach ($ini in @(Get-ChildItem $exe.DirectoryName -Filter *.ini) + @(Get-ChildItem "$env:APPDATA\MPC-BE" -Filter *.ini -ErrorAction SilentlyContinue)) { Copy-Item $ini.FullName "$env:OUT\mpcbe-$($ini.Name)"; "MPC-BE ini: $($ini.FullName)" | Tee-Object -Append "$env:OUT\run.txt" }
+
+      - name: PushMPC mpcbe-apply / mpcbe-remove against the real registry
+        run: |
+          $clsid = (Select-String -Path scripts/pushmpc-install.ps1 -Pattern '^\$FilterClsid\s*=\s*''([^'']+)''' | Select-Object -First 1).Matches[0].Groups[1].Value
+          Write-Host "filter CLSID $clsid"
+          $state = "$env:RUNNER_TEMP\pmstate"
+          $fails = 0
+          function Check($name, $ok) { if ($ok) { Write-Host "PASS $name" } else { Write-Host "FAIL $name"; $script:fails++ } }
+          $before = (Get-ItemProperty 'HKCU:\Software\MPC-BE\Filters\MPC Video Decoder' -Name HwDecoder -ErrorAction SilentlyContinue).HwDecoder
+          ./scripts/pushmpc-install.ps1 mpcbe-apply -InstallDir $state -MpcBeExe $env:MPCBE_EXE 2>&1 | Tee-Object "$env:OUT\mpcbe-apply.txt"
+          reg export 'HKCU\Software\MPC-BE' "$env:OUT\mpcbe-hkcu-after-apply.reg" /y | Out-Null
+          $ours = Get-ChildItem 'HKCU:\Software\MPC-BE\ExternalFilters' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq $clsid }
+          Check 'External Filters entry with our CLSID' ($null -ne $ours)
+          if ($ours) { $p = Get-ItemProperty $ours.PSPath; Check 'entry Name/Enabled/LoadType Prefer' ($p.Name -eq 'PushMPC Filter' -and $p.Enabled -eq 1 -and $p.LoadType -eq 0) }
+          Check 'HwDecoder = 2 (D3D11 copy-back)' ((Get-ItemProperty 'HKCU:\Software\MPC-BE\Filters\MPC Video Decoder' -Name HwDecoder -ErrorAction SilentlyContinue).HwDecoder -eq 2)
+          ./scripts/pushmpc-install.ps1 mpcbe-remove -InstallDir $state 2>&1 | Tee-Object "$env:OUT\mpcbe-remove.txt"
+          $left = Get-ChildItem 'HKCU:\Software\MPC-BE\ExternalFilters' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq $clsid }
+          Check 'entry removed' ($null -eq $left)
+          $after = (Get-ItemProperty 'HKCU:\Software\MPC-BE\Filters\MPC Video Decoder' -Name HwDecoder -ErrorAction SilentlyContinue).HwDecoder
+          Check "HwDecoder restored ($before -> $after)" ("$before" -eq "$after")
+          Check 'backup key removed' (-not (Test-Path 'HKCU:\Software\PushMPC\MpcBeBackup'))
+          "mpcbe-apply/remove failures: $fails" | Tee-Object -Append "$env:OUT\run.txt"
+          exit $fails
+
+      - name: PotPlayer (official installer, silent)
+        if: always()
+        run: |
+          . "$env:RUNNER_TEMP\helpers.ps1"
+          $f = "$env:RUNNER_TEMP\PotPlayerSetup64.exe"
+          Invoke-WebRequest 'https://t1.daumcdn.net/potplayer/PotPlayer/Version/Latest/PotPlayerSetup64.exe' -OutFile $f
+          $sig = Get-AuthenticodeSignature $f
+          "PotPlayer installer sha256 $((Get-FileHash $f).Hash), signature $($sig.Status) $($sig.SignerCertificate.Subject)" | Tee-Object -Append "$env:OUT\run.txt"
+          $p = Start-Process $f -ArgumentList '/S' -PassThru; if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'installer timed out' }
+          "installer exit $($p.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt"
+          $exe = @("$env:ProgramFiles\DAUM\PotPlayer\PotPlayerMini64.exe", "${env:ProgramFiles(x86)}\DAUM\PotPlayer\PotPlayerMini64.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) { $exe = (Get-ChildItem "$env:ProgramFiles", "${env:ProgramFiles(x86)}" -Recurse -Filter 'PotPlayerMini64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName }
+          if (-not $exe) { throw 'PotPlayerMini64.exe not found after install' }
+          "PotPlayer at $exe, version $((Get-Item $exe).VersionInfo.FileVersion)" | Tee-Object -Append "$env:OUT\run.txt"
+          Dump-Reg 'HKCU\Software\DAUM' 'potplayer-hkcu-before-run' | Tee-Object -Append "$env:OUT\run.txt"
+          Start-Once $exe 'PotPlayer' 20
+          Get-Process | Where-Object Name -match 'Pot' | Stop-Process -Force -ErrorAction SilentlyContinue
+          Dump-Reg 'HKCU\Software\DAUM' 'potplayer-hkcu' | Tee-Object -Append "$env:OUT\run.txt"
+          Dump-Reg 'HKLM\SOFTWARE\DAUM' 'potplayer-hklm' | Tee-Object -Append "$env:OUT\run.txt"
+          $dir = Split-Path $exe
+          foreach ($ini in @(Get-ChildItem $dir -Filter *.ini -ErrorAction SilentlyContinue) + @(Get-ChildItem "$env:APPDATA\PotPlayerMini64" -Filter *.ini -ErrorAction SilentlyContinue)) { Copy-Item $ini.FullName "$env:OUT\potplayer-$($ini.Name)"; "PotPlayer ini: $($ini.FullName)" | Tee-Object -Append "$env:OUT\run.txt" }
+          Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Set-Content "$env:OUT\potplayer-folder.txt"
+          # the filter-priority layout: every value or line that mentions filters / priority
+          $hits = @()
+          foreach ($f in Get-ChildItem $env:OUT -Filter 'potplayer-*') { $hits += Get-Content $f.FullName | Select-String -Pattern 'filter|priorit|prefer|block' | ForEach-Object { "$($f.Name):$($_.LineNumber): $($_.Line.Trim())" } }
+          $hits | Set-Content "$env:OUT\potplayer-filter-lines.txt"
+          "PotPlayer filter/priority lines: $($hits.Count)" | Tee-Object -Append "$env:OUT\run.txt"
+
+      - name: Summary
+        if: always()
+        run: |
+          @('## players-layout', '', '```') + (Get-Content "$env:OUT\run.txt" -ErrorAction SilentlyContinue) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: players-layout
+          path: dumps
