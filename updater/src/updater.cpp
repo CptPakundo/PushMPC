@@ -212,6 +212,20 @@ bool Check(Plan& plan) {
         int cmp = CompareVersions(c->version, m.get("version"));
         if (cmp < 0) older = true;
         if (cmp > 0) plan.changes.push_back(*c);
+        if (cmp == 0) {
+            // RC2 F3: the same version built again (other files: another filter build, key or core) is not current. The
+            // release names the SHA-256 of each component's manifest.txt; the installed one must match it, and the
+            // installed files their manifest (sizes; the swap checks the hashes). An older feed compares versions only.
+            const std::wstring dir = Dir(Widen(name).c_str());
+            std::string have;
+            const bool sameBuild = c->manifestSha256.empty() || (Sha256File(JoinPath(dir, L"manifest.txt"), have) && _stricmp(have.c_str(), c->manifestSha256.c_str()) == 0);
+            const std::wstring bad = CheckManifestFiles(dir, m, false);
+            if (!sameBuild || !bad.empty()) {
+                Log::Write(Widen(name) + L" " + Widen(c->version) + (sameBuild ? L": installed files do not match their manifest (" + bad + L"): reinstalled"
+                                                                              : std::wstring(L": same version, another build in the release: replaced")));
+                plan.changes.push_back(*c);
+            }
+        }
     }
     if (const ReleaseComponent* rt = plan.rel.find("runtime", in.vendor)) {
         if (rt->format != "veyra-package" || !ReleaseRuntimeUrlOk(Widen(rt->url))) {
@@ -312,7 +326,9 @@ bool Download(Plan& plan) {
         const std::wstring target = JoinPath(st, name + L"-" + ver);
         if (c.name == "runtime") continue;   // below, after the zips (it may need the new filter's script)
         Manifest have = ReadManifest(target);
-        if (have.valid && have.get("version") == c.version && CheckManifestFiles(target, have, true).empty()) {
+        std::string haveSha;
+        const bool stagedBuild = c.manifestSha256.empty() || (Sha256File(JoinPath(target, L"manifest.txt"), haveSha) && _stricmp(haveSha.c_str(), c.manifestSha256.c_str()) == 0);
+        if (have.valid && have.get("version") == c.version && stagedBuild && CheckManifestFiles(target, have, true).empty()) {
             Say(L"Already staged: " + name + L" " + ver);
             pend.push_back({ c.name, c.version, Narrow(target), plan.rel.release });
             continue;
@@ -328,6 +344,9 @@ bool Download(Plan& plan) {
         if (!Extract(zip, tmp, err)) { SetStatus(L"Error", err); return false; }
         Manifest m = ReadManifest(tmp);
         std::wstring bad = CheckManifestFiles(tmp, m, true);
+        std::string gotSha;
+        if (bad.empty() && !c.manifestSha256.empty() && (!Sha256File(JoinPath(tmp, L"manifest.txt"), gotSha) || _stricmp(gotSha.c_str(), c.manifestSha256.c_str()) != 0))
+            bad = L"manifest.txt does not match manifestSha256 in the release manifest";
         if (!m.valid || m.get("component") != c.name || m.get("version") != c.version || !bad.empty()) {
             RemoveTree(tmp);
             SetStatus(L"Error", L"The " + name + L" package does not match its manifest: " + (bad.empty() ? L"wrong component or version" : bad)); return false;

@@ -11,7 +11,9 @@
 #
 # Secrets (Settings > Secrets and variables > Actions):
 #   PUSHMPC_SIGNING_KEY  the RSA private key XML that signs release.json (scripts/new-signing-key.ps1); required to publish
-#   NVOF_SDK_HEADERS     optional, as in PushFPS's own CI: base64 of a zip with NVIDIA's Optical Flow SDK headers
+#   NVOF_SDK_HEADERS     required for a release, as in PushFPS's own CI: base64 of a zip with NVIDIA's Optical Flow SDK
+#                        headers (nvOpticalFlowCommon.h, nvOpticalFlowD3D12.h). Without it the core has no NVIDIA optical
+#                        flow and NVIDIA VFG cannot start: a release run fails; a dry run builds on with a loud warning.
 #   CODESIGN_PFX_BASE64, CODESIGN_PFX_PASSWORD   optional Authenticode certificate for the exes (see docs/release-model.md)
 # Variables:
 #   PUSHMPC_GPU_RUNNER = true   run the GPU smoke test on a self-hosted runner labelled "gpu" (docs/building.md)
@@ -226,13 +228,21 @@ jobs:
           path: ${{ env.DEPS }}/vcpkg-binary
           key: pushmpc-vcpkg-${{ env.VCPKG_COMMIT }}-${{ github.run_id }}
 
-      # Optional, as in PushFPS's CI: the headers stay on the runner; nothing uploads or packages them.
-      - name: NVIDIA Optical Flow headers (optional)
+      # As in PushFPS's CI: the headers stay on the runner; nothing uploads or packages them. Required for a release
+      # (RC2 F1: a core without them cannot run NVIDIA VFG); a dry run goes on without them and says so loudly.
+      - name: NVIDIA Optical Flow headers
         timeout-minutes: 2
         env:
           NVOF_SDK_HEADERS: ${{ secrets.NVOF_SDK_HEADERS }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if (-not $env:NVOF_SDK_HEADERS) { Write-Host 'No NVOF_SDK_HEADERS secret: NVIDIA optical flow stays unavailable (FidelityFX optical flow is used)'; exit 0 }
+          if (-not $env:NVOF_SDK_HEADERS) {
+            $msg = 'No NVOF_SDK_HEADERS secret: this core has NO NVIDIA optical flow, so NVIDIA VFG cannot start (Auto falls back to DLSS-G).'
+            if ($env:DRY_RUN -ne 'true') { Write-Host "::error::$msg A release needs the secret: not building."; exit 1 }
+            Write-Host "::warning::$msg Dry run: building on; this artifact must not be released."
+            @('## :warning: No NVIDIA optical flow in this build', '', $msg, '', 'Dry run only: add the repository secret `NVOF_SDK_HEADERS` before a release (a release run fails without it).') -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
           $root = "$env:RUNNER_TEMP\nvof-sdk"; $dir = "$root\NvOFInterface"
           New-Item -ItemType Directory -Force $dir | Out-Null
           $zip = "$env:RUNNER_TEMP\nvof-headers.zip"
@@ -396,8 +406,18 @@ jobs:
         run: |
           $rel = "$env:RUNNER_TEMP\release"
           $pre = @{}; if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @{ Prerelease = $true } }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe"
+          # RC2 F1: a core without NVIDIA optical flow is never packaged silently: stage refuses it (-RequireNvof) unless dry run
+          $nvofReq = @{}; if ('${{ inputs.dry_run }}' -ne 'true') { $nvofReq = @{ RequireNvof = $true } }
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
+          if ($nvof -ne '1') {
+            Write-Host '::warning::The staged core has NO NVIDIA optical flow (core manifest nvof=0): NVIDIA VFG cannot start with it.'
+            @('## :warning: Staged core without NVIDIA optical flow', '', 'The core `manifest.txt` says `nvof=0`: this artifact must not be released (a release run refuses it).') -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            Write-Host 'Staged core: NVIDIA optical flow built in (nvof=1)'
+            'Staged core: NVIDIA optical flow built in (`nvof=1`).' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
           ./repo/scripts/pushmpc-install.ps1 package -ReleaseDir $rel -ReleaseVersion '${{ steps.version.outputs.version }}' @pre
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ('${{ steps.version.outputs.tag }}' -and '${{ inputs.dry_run }}' -ne 'true' -and -not (Test-Path "$rel\release.json.sig")) { Write-Host '::error::release.json is not signed (secret PUSHMPC_SIGNING_KEY missing): not publishing'; exit 1 }

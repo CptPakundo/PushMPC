@@ -323,7 +323,11 @@ function Invoke-PmMpvIntegration {
             $addedPath = $false
             if ($RuntimeOnPath) {
                 $cur = Get-PmUserPath $E
-                if (-not ($cur.Split(';') -contains $runtime) -and $PSCmdlet.ShouldProcess('user PATH', "add $runtime")) { Set-PmUserPath $E ($(if ($cur) { $cur.TrimEnd(';') + ';' } else { '' }) + $runtime); $addedPath = $true }
+                # appended; but in front when another VapourSynth (SVP's mpv64 folder, RC2 F5) is on the user PATH, which mpv
+                # would otherwise load first (VSScript.dll is found through the PATH). SVP's own mpv loads its copy from its folder.
+                $other = @($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime -and (Test-Path -LiteralPath (Join-Path $_.Trim() 'VSScript.dll')) })
+                $new = if ($other.Count) { $runtime + $(if ($cur) { ';' + $cur.TrimStart(';') } else { '' }) } else { $(if ($cur) { $cur.TrimEnd(';') + ';' } else { '' }) + $runtime }
+                if (-not ($cur.Split(';') -contains $runtime) -and $PSCmdlet.ShouldProcess('user PATH', "add $runtime")) { Set-PmUserPath $E $new; $addedPath = $true }
             }
             if ($PSCmdlet.ShouldProcess($state, 'record the installed targets')) {
                 New-Item -ItemType Directory -Path (Split-Path -Parent $state) -Force | Out-Null

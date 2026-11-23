@@ -134,6 +134,7 @@ std::string JsonEscape(const std::string& s);
 // ------------------------------------------------------------------ release manifest (release.json, schema 2 and 3)
 struct ReleaseComponent {
     std::string name, version, url, sha256, vendor, format, asset, subset, repository, tag, pushfps;
+    std::string manifestSha256;   // SHA-256 of the component's manifest.txt (since 0.6.0): a same-version rebuild differs
 };
 struct Release {
     int schema = 0;

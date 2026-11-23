@@ -29,6 +29,7 @@
 #include <KnownFolders.h>
 #include <mmsystem.h>
 #include <avrt.h>
+#include <tlhelp32.h>
 #include <atomic>
 #include <algorithm>
 #include <condition_variable>
@@ -152,7 +153,7 @@ static void LogW(const std::wstring& s) { Log(Narrow(s)); }
 using ExitMarkFn = void (*)(const char*);
 static std::atomic<ExitMarkFn> g_exitMark = nullptr;
 static std::mutex g_exitLock;   // the helper is unloaded and loaded again here: ExitMark takes it too
-static void ArmExitHelper()
+static void ArmExitHelper(const char* why = "loaded after pushcore and NGX")
 {
     std::lock_guard<std::mutex> lk(g_exitLock);
     g_exitMark = nullptr;
@@ -167,13 +168,106 @@ static void ArmExitHelper()
     if (auto f = reinterpret_cast<SetLogFn>(GetProcAddress(h, "PushMpcExit_SetLog")))
         f((LogDir() + std::format(L"\\filter-exit-{}.log", GetCurrentProcessId())).c_str());
     g_exitMark.store(reinterpret_cast<ExitMarkFn>(GetProcAddress(h, "PushMpcExit_Mark")));
-    Log("exit helper armed (loaded after pushcore and NGX)");
+    Log(std::format("exit helper armed ({})", why));
 }
+static bool ExitHelperArmed() { std::lock_guard<std::mutex> lk(g_exitLock); return g_exitMark.load() != nullptr; }
 // the exit helper's timeline (F7): the last teardown step it is told about goes into its exit line ("N ms after ...")
 static void ExitMark(const char* what)
 {
     std::lock_guard<std::mutex> lk(g_exitLock);
     if (auto f = g_exitMark.load()) f(what);
+}
+
+// RC2 F2: slow closes with the DLSS-G fallback (one 10.3-s close ended by MPC-HC's 0xDEADBEEF watchdog with no line after
+// "pushcore closed"; one 6.8-s close with 4.35 s between "filter members released" and the exit helper). Neither
+// reproduced in 15 later closes, so a stuck close now explains itself: a watchdog thread, started when the input pin
+// disconnects, samples the stack of the thread doing the teardown when it is not done after 3, 6 and 9 s, and, when
+// the player window is gone 2.5 s after the teardown but the process still lives (a slow exit before the exit helper),
+// the stack of the player's UI thread. Sampling: suspend, walk with the x64 unwind data (RtlVirtualUnwind; no
+// allocation or lock while suspended), resume, then name the frames (module + offset) and log them.
+static int WalkStackNoAlloc(HANDLE th, DWORD64* pcs, int max)
+{
+    int n = 0;
+    __try {
+        CONTEXT c = {}; c.ContextFlags = CONTEXT_FULL;
+        if (!GetThreadContext(th, &c)) return 0;
+        for (; n < max && c.Rip; ++n) {
+            pcs[n] = c.Rip;
+            DWORD64 base = 0;
+            PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(c.Rip, &base, nullptr);
+            if (!rf) { if (!c.Rsp) { ++n; break; } c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp); c.Rsp += 8; continue; }   // leaf
+            PVOID hd = nullptr; DWORD64 ef = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, rf, &c, &hd, &ef, nullptr);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+static std::string SampleThreadStack(DWORD tid)
+{
+    HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!th) return std::format("(thread {} not opened: error {})", tid, GetLastError());
+    DWORD64 pcs[40] = {};
+    int n = 0;
+    if (SuspendThread(th) != DWORD(-1)) { n = WalkStackNoAlloc(th, pcs, 40); ResumeThread(th); }
+    CloseHandle(th);
+    std::string out;
+    for (int i = 0; i < n; ++i) {
+        HMODULE m = nullptr; wchar_t path[MAX_PATH] = {};
+        std::string name = "?";
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(pcs[i]), &m) && m
+            && GetModuleFileNameW(m, path, MAX_PATH)) {
+            std::wstring w = path; w = w.substr(w.find_last_of(L'\\') + 1); name = Narrow(w);
+        }
+        out += std::format("{}{}+0x{:X}", i ? " < " : "", name, m ? pcs[i] - reinterpret_cast<DWORD64>(m) : pcs[i]);
+    }
+    return out.empty() ? std::string("(no frames)") : out;
+}
+struct TeardownWatch { HANDLE done = nullptr; DWORD tid = 0; HMODULE self = nullptr; };
+static HANDLE StartTeardownWatch()
+{
+    auto* w = new TeardownWatch;
+    w->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    w->tid = GetCurrentThreadId();
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&StartTeardownWatch), &w->self);   // the .ax stays loaded while it runs
+    HANDLE mine = nullptr;
+    DuplicateHandle(GetCurrentProcess(), w->done, GetCurrentProcess(), &mine, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    HANDLE th = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+        auto* w = static_cast<TeardownWatch*>(p);
+        const int64_t q0 = Qpc();
+        bool done = false;
+        for (int i = 1; i <= 3 && !done; ++i) {
+            done = WaitForSingleObject(w->done, 3000) == WAIT_OBJECT_0;
+            if (!done) Log(std::format("teardown watchdog: not done {:.0f} ms after the input disconnect; teardown thread {} at {}", QpcMs(Qpc() - q0), w->tid, SampleThreadStack(w->tid)));
+        }
+        if (done && WaitForSingleObject(w->done, 0) == WAIT_OBJECT_0) {
+            Sleep(2500);
+            HWND wnd = pm::PlayerWindow();
+            if (!wnd || !IsWindowVisible(wnd)) {
+                // the player is closing (its window gone or hidden) but the process still runs: where its threads are
+                DWORD ui = wnd ? GetWindowThreadProcessId(wnd, nullptr) : 0;
+                if (!ui) {   // the window is destroyed: the process's first thread (the UI thread of MFC players)
+                    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); THREADENTRY32 te = { sizeof(te) };
+                    FILETIME best = { 0xFFFFFFFF, 0x7FFFFFFF };
+                    for (BOOL ok = snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+                        HANDLE t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID); FILETIME c, e, k, u;
+                        if (t && GetThreadTimes(t, &c, &e, &k, &u) && CompareFileTime(&c, &best) < 0) { best = c; ui = te.th32ThreadID; }
+                        if (t) CloseHandle(t);
+                    }
+                    if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+                }
+                if (ui) Log(std::format("exit watchdog: the player window is {} 2.5 s after the teardown and the process still runs; UI thread {} at {}",
+                                        wnd ? "hidden" : "gone", ui, SampleThreadStack(ui)));
+            }
+        }
+        CloseHandle(w->done);
+        HMODULE self = w->self; delete w;
+        if (self) FreeLibraryAndExitThread(self, 0);
+        return 0;
+    }, w, 0, nullptr);
+    if (th) CloseHandle(th);
+    else { if (w->self) FreeLibrary(w->self); CloseHandle(w->done); delete w; if (mine) CloseHandle(mine); return nullptr; }
+    return mine;
 }
 
 // status for the property page (one process, one DLL): the latest filter's state, refreshed about once a second
@@ -1515,7 +1609,20 @@ public:
     }
     bool InputHdr() const { DXVA2_ExtendedFormat ex; ex.value = m_inCtrl; return (m_inCtrl & AMCONTROL_COLORINFO_PRESENT) && (ex.VideoTransferFunction == kTransPQ || ex.VideoTransferFunction == kTransHLG); }
     // declared first, so destroyed last: how long releasing the members (D3D11 device, textures, shaders) took
-    struct TeardownTail { int64_t q = 0; ~TeardownTail() { if (q) { Log(std::format("filter members released in {:.1f} ms", QpcMs(Qpc() - q))); ExitMark("filter members released"); } } } m_teardownTail;
+    struct TeardownTail {
+        int64_t q = 0; HANDLE watch = nullptr;
+        ~TeardownTail()
+        {
+            if (q) {
+                Log(std::format("filter members released in {:.1f} ms", QpcMs(Qpc() - q)));
+                // RC2 F2: re-armed here, so that every DLL loaded since the last open (an Auto rebuild, a method switch, the
+                // property page) is initialised before the helper and its detach runs after the helper's at process exit
+                if (ExitHelperArmed()) ArmExitHelper("re-armed at the end of the teardown");
+                ExitMark("filter members released");
+            }
+            if (watch) { SetEvent(watch); CloseHandle(watch); }
+        }
+    } m_teardownTail;
     // --- Dolby Vision profile 5 (pushcore converts it; see DvP5)
     bool m_dvP5 = false;          // the stream is a profile 5 base layer, converted per frame
     DvP5 m_dvCur;                 // the conversion of the latest source frame (the warm-up shaders use it)
@@ -1861,6 +1968,7 @@ public:
     // --- connection: the D3D11 handshake with MPC-VR (processed types), or pass-through
     HRESULT CompleteConnect(PIN_DIRECTION dir, IPin* pReceivePin) override
     {
+        if (dir == PINDIR_INPUT && m_teardownTail.watch) { SetEvent(m_teardownTail.watch); CloseHandle(m_teardownTail.watch); m_teardownTail.watch = nullptr; }
         if (dir != PINDIR_OUTPUT) return S_OK;
         const CMediaType& mt = m_pOutput->CurrentMediaType();
         if (IsPassType(&mt)) {
@@ -1907,7 +2015,10 @@ public:
     }
     HRESULT BreakConnect(PIN_DIRECTION dir) override
     {
-        if (dir == PINDIR_INPUT) { StopThreads(); StopWatcher(); StopAuto(); CloseCore(); m_openStarted = false; m_openDeferred = false; m_mode = Mode::None; m_bitrateProbed = false; }
+        if (dir == PINDIR_INPUT) {
+            if (!m_teardownTail.watch && m_openStarted) m_teardownTail.watch = StartTeardownWatch();   // RC2 F2: a stuck close explains itself
+            StopThreads(); StopWatcher(); StopAuto(); CloseCore(); m_openStarted = false; m_openDeferred = false; m_mode = Mode::None; m_bitrateProbed = false;
+        }
         if (dir == PINDIR_OUTPUT) { Out()->ours = nullptr; m_down.Reset(); }
         return S_OK;
     }

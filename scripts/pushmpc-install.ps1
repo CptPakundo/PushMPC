@@ -23,7 +23,8 @@
     VapourSynth runtime pinned in vapoursynth-pin.json (skipped while the pins say TODO) and runs
     mpv-integration.ps1 -Action Install -RuntimeOnPath, only when mpv or SMPlayer is found; uninstall reverses it.
   For building releases (from a source checkout):
-    pushmpc-install.ps1 stage     [-StageDir <dir>] [-WithRuntime -PackageCache <dir> | -RuntimePackage <zip>]
+    pushmpc-install.ps1 stage     [-StageDir <dir>] [-WithRuntime -PackageCache <dir> | -RuntimePackage <zip>] [-RequireNvof]
+                                  (-RequireNvof: fail when pushcore.dll is built without NVIDIA optical flow; release.yml)
     pushmpc-install.ps1 package   [-StageDir <dir>] [-ReleaseDir <dir>]
 
   Release model: PushMPC never ships NVIDIA's files. A PushMPC release holds the filter, the core and this installer.
@@ -91,6 +92,7 @@ param(
     [string]$FilterBin = '',
     [string]$CoreDll = '',
     [string]$ShaderDir = '',
+    [switch]$RequireNvof,
     # machine-readable output for PushMPC-Setup.exe / PushMpcUpdater.exe
     [switch]$Machine,
     [switch]$NoRegister,
@@ -1033,6 +1035,27 @@ function Test-ComponentFiles([string]$dir, [switch]$Hash) {
     if ($bad.Count) { return ($bad -join ', ') }
     return ''
 }
+# RC2 F3: a repair / update compares the FILES, not only the version: an installed component counts as current only when
+# its manifest lists the same files (SHA-256, size, path) as the payload's and every installed file matches its hash.
+# A rebuilt same-version release (another filter build, another key, another core) is then replaced.
+function Get-ManifestFileSet($m) { if (-not $m) { return '' }; return (@($m.files | ForEach-Object { "$($_.Sha.ToUpperInvariant()) $($_.Size) $($_.Rel.ToLowerInvariant())" } | Sort-Object) -join "`n") }
+function Get-ComponentDifference([string]$installedDir, [string]$payloadDir) {
+    $cur = Read-Manifest $installedDir; $new = Read-Manifest $payloadDir
+    if (-not $cur) { return 'not installed' }
+    if (-not $new) { return '' }
+    if ($cur.kv['version'] -ne $new.kv['version']) { return "version $($cur.kv['version']) -> $($new.kv['version'])" }
+    if ((Get-ManifestFileSet $cur) -ne (Get-ManifestFileSet $new)) {
+        $a = @{}; foreach ($f in $cur.files) { $a[$f.Rel.ToLowerInvariant()] = $f.Sha.ToUpperInvariant() }
+        $newRels = @($new.files | ForEach-Object { $_.Rel.ToLowerInvariant() })
+        $list = @(foreach ($f in $new.files) { if ($a[$f.Rel.ToLowerInvariant()] -ne $f.Sha.ToUpperInvariant()) { $f.Rel } })
+        $list += @($cur.files | Where-Object { $newRels -notcontains $_.Rel.ToLowerInvariant() } | ForEach-Object { "$($_.Rel) (not in this setup)" })
+        $more = if ($list.Count -gt 4) { " and $($list.Count - 4) more" } else { '' }
+        return "same version $($new.kv['version']), but the files differ from this setup's: $((@($list | Select-Object -First 4)) -join ', ')$more"
+    }
+    $bad = Test-ComponentFiles $installedDir -Hash
+    if ($bad) { return "the installed files do not match their manifest: $bad" }
+    return ''
+}
 function Component-Summary([string]$dir) {
     $m = Read-Manifest $dir
     if (-not $m) { return 'not installed' }
@@ -1385,6 +1408,18 @@ function Get-SigningKeyXml {
 }
 
 # ------------------------------------------------------------------------------------------------ stage (build the components)
+function Test-CoreNvof([string]$dll) {
+    $t = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($dll))
+    return $t.IndexOf('NvOFAPICreateInstanceD3D12', [StringComparison]::Ordinal) -ge 0
+}
+# the "PushCoreFeatures" value of pushcore.dll's version resource (cores built since 0.6.0 RC2: "nvof" or "no-nvof"), or ''
+function Get-CoreFeatures([string]$dll) {
+    $b = [IO.File]::ReadAllBytes($dll)
+    $u = [Text.Encoding]::Unicode.GetString($b)
+    $m = [regex]::Match($u, 'PushCoreFeatures\x00+([a-z0-9,\-]+)')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
 function Invoke-Stage {
     $build = $env:PUSHMPC_BUILD_DIR
     if (-not $build) { $build = Join-Path $repo 'build' }
@@ -1416,8 +1451,20 @@ function Invoke-Stage {
     if (Test-Path (Join-Path $ShaderDir 'dis')) { Copy-Item (Join-Path $ShaderDir 'dis') (Join-Path $c 'shaders') -Recurse -Force }
     Get-ChildItem (Join-Path $c 'shaders') -Recurse -File | Where-Object { $_.Extension -ne '.dxil' } | Remove-Item -Force
     Invoke-CodeSign @(Get-ChildItem $c -File -Include *.dll, *.exe -Recurse | ForEach-Object FullName)
+    # RC2 F1: NVIDIA optical flow (VFG's flow source) is built in only with the NVOF SDK headers; without them pushcore links
+    # PushFPS's "unavailable" session, VFG fails with "failed backend 2" and Auto falls back to DLSS-G. The real session
+    # resolves NvOFAPICreateInstanceD3D12 by name, so the name is in the DLL exactly when NVOF is built in. Recorded as
+    # nvof=1|0 in the core manifest (and release.json); -RequireNvof (release.yml) refuses a core without it.
+    $nvof = Test-CoreNvof $CoreDll
+    $feat = Get-CoreFeatures $CoreDll
+    if ($nvof) { Info "pushcore.dll: NVIDIA optical flow built in$(if ($feat) { " (features: $feat)" })" }
+    elseif ($RequireNvof) { Fail "pushcore.dll was built WITHOUT NVIDIA optical flow (no NVOF SDK headers): NVIDIA VFG would not start. Not staged (-RequireNvof)." }
+    else { Warn "pushcore.dll was built WITHOUT NVIDIA optical flow (no NVOF SDK headers): NVIDIA VFG will not start, Auto falls back to DLSS-G." }
+    # RC2 F6: the core is the same for every GPU: both runtime packages are named (the install picks one by vendor)
     Write-Manifest $c @{ component = 'core'; version = "$filterVersion+pushfps$pushfps"; pushfps = $pushfps; 'requires-runtime' = ($Packages.NVIDIA.Version + '|' + $Packages.AMD.Version)
-                         'runtime-package' = $Runtime.Url; 'runtime-sha256' = $Runtime.Sha256; 'runtime-subset' = $Runtime.Subset; abi = '3' }
+                         'runtime-package-nvidia' = $Packages.NVIDIA.Url; 'runtime-sha256-nvidia' = $Packages.NVIDIA.Sha256
+                         'runtime-package-amd' = $Packages.AMD.Url; 'runtime-sha256-amd' = $Packages.AMD.Sha256
+                         'runtime-subset' = $Runtime.Subset; abi = '3'; nvof = $(if ($nvof) { '1' } else { '0' }) }
     # The runtime is never part of a release. -WithRuntime stages it too, for a developer's local install from a
     # package already on disk (-PackageCache / -RuntimePackage); "package" leaves it out either way.
     if ($WithRuntime) {
@@ -1488,7 +1535,7 @@ function Invoke-Package {
         $zipPath = Join-Path $ReleaseDir "PushMPC-$n-$v.zip"
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
         [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $out $n), $zipPath)
-        $zips[$n] = @{ version = $v; file = (Split-Path $zipPath -Leaf); sha = (Get-Sha256 $zipPath) }
+        $zips[$n] = @{ version = $v; file = (Split-Path $zipPath -Leaf); sha = (Get-Sha256 $zipPath); msha = (Get-Sha256 (Join-Path (Join-Path $out $n) 'manifest.txt')) }
     }
     $all = Join-Path $ReleaseDir "PushMPC-$fv.zip"
     if (Test-Path $all) { Remove-Item $all -Force }
@@ -1507,9 +1554,9 @@ function Invoke-Package {
         repository = $PushMpcRepo
         channel = $(if ($Prerelease) { 'beta' } else { 'stable' })
         components = @(
-            [ordered]@{ name = 'filter'; version = $zips.filter.version; url = $zips.filter.file; sha256 = $zips.filter.sha },
-            [ordered]@{ name = 'core'; version = $zips.core.version; pushfps = $cm.kv['pushfps']; requiresRuntime = ($Packages.NVIDIA.Version + '|' + $Packages.AMD.Version); url = $zips.core.file; sha256 = $zips.core.sha }
-        ) + @(if ($zips.vsplugin) { [ordered]@{ name = 'vsplugin'; version = $zips.vsplugin.version; optional = $true; url = $zips.vsplugin.file; sha256 = $zips.vsplugin.sha } }) + $runtimes
+            [ordered]@{ name = 'filter'; version = $zips.filter.version; url = $zips.filter.file; sha256 = $zips.filter.sha; manifestSha256 = $zips.filter.msha },
+            [ordered]@{ name = 'core'; version = $zips.core.version; pushfps = $cm.kv['pushfps']; nvof = $cm.kv['nvof']; requiresRuntime = ($Packages.NVIDIA.Version + '|' + $Packages.AMD.Version); url = $zips.core.file; sha256 = $zips.core.sha; manifestSha256 = $zips.core.msha }
+        ) + @(if ($zips.vsplugin) { [ordered]@{ name = 'vsplugin'; version = $zips.vsplugin.version; optional = $true; url = $zips.vsplugin.file; sha256 = $zips.vsplugin.sha; manifestSha256 = $zips.vsplugin.msha } }) + $runtimes
         note = 'Component URLs are relative to this release (https://github.com/CptPakundo/PushMPC/releases/download/<tag>/). The runtime is a reference to Veyra''s package on Veyra''s GitHub release; PushMPC hosts no NVIDIA file.'
         signature = 'release.json.sig next to this file: base64 RSA-SHA256 over the file bytes, checked with release-key.xml'
     }
@@ -1861,12 +1908,30 @@ function Get-VsScriptDir([string]$root) {
     foreach ($d in @($root, (Join-Path $root 'lib\site-packages\vapoursynth'))) { if (Test-Path -LiteralPath (Join-Path $d 'VSScript.dll')) { return $d } }
     return ''
 }
+# RC2 F5: SVP puts its mpv64 folder (with SVP's own VSScript.dll and Python) on the user PATH. That VapourSynth belongs
+# to SVP (its version, its plugins, updated by SVP): it never counts as the user's own; PushMPC fetches its own runtime.
+function Test-InSvpFolder([string]$dir) {
+    $d = $dir.Trim().Trim('"').TrimEnd('\')
+    if (-not $d) { return $false }
+    $roots = if ($MpvRoot) { @("$MpvRoot\Program Files\SVP 4", "$MpvRoot\Program Files (x86)\SVP 4") } else { @("$env:ProgramFiles\SVP 4", "${env:ProgramFiles(x86)}\SVP 4") }
+    foreach ($r in $roots) { if ($r -and ($d -ieq $r -or $d.StartsWith("$r\", [StringComparison]::OrdinalIgnoreCase))) { return $true } }
+    return $d -match '\\SVP ?4(\\|$)'
+}
+# the PATH searched for a VapourSynth of the user's own: the process PATH; with -MpvRoot (tests) the fake root's
+# user-path.txt, as mpv-integration.ps1 keeps it
+function Get-VsSearchPath {
+    if (-not $MpvRoot) { return @($env:PATH -split ';' | Where-Object { $_ }) }
+    $f = Join-Path $MpvRoot 'user-path.txt'
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    return @([IO.File]::ReadAllText($f) -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
 function Get-VapourSynthRuntime {
     if (Get-VsScriptDir $VsRuntimeDir) { Info "VapourSynth runtime: $VsRuntimeDir"; return 'ours' }
-    if (-not $MpvRoot) {
-        foreach ($d in @($env:PATH -split ';' | Where-Object { $_ })) {
-            if (Test-Path -LiteralPath (Join-Path $d 'VSScript.dll')) { Info "VapourSynth runtime: your own installation ($d)"; return 'user' }
-        }
+    foreach ($d in (Get-VsSearchPath)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $d 'VSScript.dll'))) { continue }
+        if ((Join-Path $d '.').TrimEnd('.\') -ieq $VsRuntimeDir.TrimEnd('\')) { continue }
+        if (Test-InSvpFolder $d) { Info "VapourSynth on the PATH in $d belongs to SVP (left alone): PushMPC uses its own runtime"; continue }
+        Info "VapourSynth runtime: your own installation ($d)"; return 'user'
     }
     $pinPath = @($VsPinFile, (Join-Path $InstallDir 'vsplugin\vapoursynth-pin.json'), $(if ($StageDir) { Join-Path $StageDir 'vsplugin\vapoursynth-pin.json' }), (Join-Path $here 'vapoursynth-pin.json')) |
         Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
@@ -1921,8 +1986,9 @@ function Install-MpvRoute($state) {
     $players = @(Invoke-MpvIntegration 'Detect')
     foreach ($p in $players) { Info ("{0}: {1} ({2})" -f $p.Player, $p.Exe, $p.Note) }
     if (-not @($players | Where-Object { $_.Managed }).Count) { Info 'mpv route: no mpv or SMPlayer found, nothing changed (run setup again after installing one)'; return }
-    $cur = Read-Manifest (Join-Path $InstallDir 'vsplugin'); $new = Read-Manifest $src
-    if ($cur -and $cur.kv['version'] -eq $new.kv['version'] -and -not (Test-ComponentFiles (Join-Path $InstallDir 'vsplugin'))) { Info "vsplugin $($new.kv['version']) is already installed" }
+    $new = Read-Manifest $src
+    $diff = Get-ComponentDifference (Join-Path $InstallDir 'vsplugin') $src
+    if (-not $diff) { Info "vsplugin $($new.kv['version']) is already installed (every file matches this setup's)" }
     elseif (Swap-Component 'vsplugin' $src) { Info "vsplugin $($new.kv['version']) installed" }
     else { Warn 'vsplugin is in use (close mpv / SMPlayer): the mpv route is not updated'; return }
     $rt = Get-VapourSynthRuntime
@@ -1965,9 +2031,15 @@ function Swap-Component([string]$name, [string]$src) {
     }
     New-Item -ItemType Directory -Force $dst | Out-Null
     & robocopy $src $dst /E /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { Fail "Copying $name failed (robocopy exit $LASTEXITCODE)." }
-    $bad = Test-ComponentFiles $dst
-    if ($bad) { Fail "$name copy check failed: $bad" }
+    $why = ''
+    if ($LASTEXITCODE -ge 8) { $why = "copying failed (robocopy exit $LASTEXITCODE)" }
+    else { $b = Test-ComponentFiles $dst -Hash; if ($b) { $why = "copy check failed: $b" } }
+    if ($why) {
+        # rollback, as the native updater does: the previous files come back, then the failure is reported
+        Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $prev) { Move-Item $prev $dst; Warn "$name : $why; the previous version was restored" }
+        Fail "$name : $why."
+    }
     return $true
 }
 
@@ -2023,11 +2095,12 @@ switch ($Action) {
         }
         Progress 88 'Installing the filter and the core'
         foreach ($n in @('filter', 'core')) {
-            $cur = Read-Manifest (Join-Path $InstallDir $n); $new = Read-Manifest (Join-Path $StageDir $n)
-            $same = $cur -and $cur.kv['version'] -eq $new.kv['version'] -and -not (Test-ComponentFiles (Join-Path $InstallDir $n))
-            if ($same) { Info "$n $($new.kv['version']) is already installed"; continue }
+            $new = Read-Manifest (Join-Path $StageDir $n)
+            $diff = Get-ComponentDifference (Join-Path $InstallDir $n) (Join-Path $StageDir $n)
+            if (-not $diff) { Info "$n $($new.kv['version']) is already installed (every file matches this setup's)"; continue }
+            Info "$n : $diff"
             if (-not (Swap-Component $n (Join-Path $StageDir $n))) { Fail "$n is in use: close MPC-HC first." }
-            Info "$n $($new.kv['version']) installed"
+            Info "$n $($new.kv['version']) installed (previous kept for rollback)"
         }
         Progress 92 'Registering the filter'
         Step 'Registering the filter (per user)'
@@ -2103,8 +2176,14 @@ switch ($Action) {
                 else { $pending += [pscustomobject]@{ name = 'runtime'; version = $c.version; staging = $src } }
                 continue
             }
-            if ($curVer -eq $c.version) { Info "$($c.name) $curVer is current"; continue }
-            Info "$($c.name): $curVer -> $($c.version)"
+            if ($curVer -eq $c.version) {
+                # RC2 F3: the same version built again (other files) is not current. release.json carries the SHA-256 of
+                # each component's manifest.txt (manifestSha256, since 0.6.0); an older feed compares versions only.
+                $have = Join-Path $InstallDir "$($c.name)\manifest.txt"
+                $same = -not $c.manifestSha256 -or ((Test-Path $have) -and (Get-Sha256 $have) -ieq $c.manifestSha256)
+                if ($same -and -not (Test-ComponentFiles (Join-Path $InstallDir $c.name) -Hash)) { Info "$($c.name) $curVer is current"; continue }
+                Info "$($c.name) $curVer : the installed files differ from the release's, replaced"
+            } else { Info "$($c.name): $curVer -> $($c.version)" }
             $staging = Join-Path $InstallDir "staging\$($c.name)-$($c.version)"
             if ($DryRun) { Dry "would fetch $($c.url), verify SHA-256 $($c.sha256), unpack to $staging and swap"; continue }
             if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
@@ -2119,8 +2198,9 @@ switch ($Action) {
             } elseif (-not [IO.Path]::IsPathRooted($src)) { $src = Join-Path (Split-Path $rmPath) $src }
             if ((Get-Sha256 $src) -ine $c.sha256) { Fail "$src does not match its SHA-256 in the release manifest." }
             Expand-Archive -Path $src -DestinationPath $staging -Force
-            $bad = Test-ComponentFiles $staging
+            $bad = Test-ComponentFiles $staging -Hash
             if ($bad) { Fail "$($c.name) package check failed: $bad" }
+            if ($c.manifestSha256 -and (Get-Sha256 (Join-Path $staging 'manifest.txt')) -ine $c.manifestSha256) { Fail "$($c.name) package: its manifest.txt does not match manifestSha256 in the release manifest." }
             if (Swap-Component $c.name $staging) { Remove-Item $staging -Recurse -Force; Info "$($c.name) $($c.version) installed (previous kept for rollback)" }
             else { $pending += [pscustomobject]@{ name = $c.name; version = $c.version; staging = $staging } }
         }

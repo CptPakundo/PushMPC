@@ -13,8 +13,10 @@
 // process with the exit code given to ExitProcess. The OS reclaims memory, handles and GPU allocations. A FreeLibrary
 // (lpReserved == NULL) does nothing.
 #include <windows.h>
+#include <winternl.h>
 
 static wchar_t g_log[MAX_PATH] = {};
+static HMODULE g_self = nullptr;
 // the last teardown step the filter reported (PushMpcExit_Mark) and when: the exit line says how long after it the
 // process reached its DLL detach (RC1 F7: 1.8 s between "filter destroyed" and this line in one 9.2-s close)
 static char g_mark[96] = {};
@@ -53,12 +55,33 @@ static void LogLine(DWORD code)
         sinceMark, g_mark[0] ? g_mark : "no teardown step reported", sinceFirst, handles, (unsigned long)(k.QuadPart / 10000), (unsigned long)(u.QuadPart / 10000));
     DWORD w = 0;
     WriteFile(f, b, DWORD(n), &w, nullptr);
+    // RC2 F2: the DLLs loaded after this helper (their detach ran before this one; a slow exit before this line points at
+    // them). The loader lock is held here, so the module list is stable. Load order (InMemoryOrderModuleList).
+    char ml[1024]; int mk = wsprintfA(ml, "  loaded after the helper:");
+    bool after = false; int count = 0;
+    const PEB* peb = NtCurrentTeb()->ProcessEnvironmentBlock;
+    if (peb && peb->Ldr) {
+        const LIST_ENTRY* head = &peb->Ldr->InMemoryOrderModuleList;
+        for (const LIST_ENTRY* e = head->Flink; e && e != head; e = e->Flink) {
+            const LDR_DATA_TABLE_ENTRY* d = CONTAINING_RECORD(e, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+            if (d->DllBase == g_self) { after = true; continue; }
+            if (!after || !d->FullDllName.Buffer) continue;
+            const wchar_t* name = d->FullDllName.Buffer; const int len = d->FullDllName.Length / 2;
+            int start = 0; for (int i = 0; i < len; ++i) if (name[i] == L'\\') start = i + 1;
+            char nb[80]; int nn = WideCharToMultiByte(CP_UTF8, 0, name + start, len - start, nb, sizeof(nb) - 1, nullptr, nullptr); nb[nn > 0 ? nn : 0] = 0;
+            if (mk < int(sizeof(ml)) - 100) mk += wsprintfA(ml + mk, " %s", nb);
+            ++count;
+        }
+    }
+    if (!count) mk += wsprintfA(ml + mk, " none");
+    mk += wsprintfA(ml + mk, "\r\n");
+    WriteFile(f, ml, DWORD(mk), &w, nullptr);
     CloseHandle(f);
 }
 
 BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved)
 {
-    if (reason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(h);
+    if (reason == DLL_PROCESS_ATTACH) { g_self = h; DisableThreadLibraryCalls(h); }
     if (reason == DLL_PROCESS_DETACH && reserved) {
         DWORD code = 0;
         if (!GetExitCodeProcess(GetCurrentProcess(), &code) || code == STILL_ACTIVE) code = 0;

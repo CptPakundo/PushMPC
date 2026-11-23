@@ -24,6 +24,13 @@ if(NOT PUSHMPC_PUSHFPS_VERSION)
 endif()
 string(REPLACE "." "," PUSHMPC_VER_COMMA "${PUSHMPC_PUSHFPS_VERSION},0")
 set(PUSHMPC_ABI 3)
+# what this core is built with (version resource "PushCoreFeatures"): "nvof" when the NVIDIA Optical Flow SDK headers were
+# found (the same test as PushFPS's veyra_nvof target), else "no-nvof" (NVIDIA VFG cannot start; release.yml refuses it)
+if(VEYRA_NVOF_SDK_ROOT AND EXISTS "${VEYRA_NVOF_SDK_ROOT}/NvOFInterface/nvOpticalFlowCommon.h")
+  set(PUSHMPC_FEATURES "nvof")
+else()
+  set(PUSHMPC_FEATURES "no-nvof")
+endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)

@@ -175,6 +175,8 @@ bool ParseRelease(const std::string& json, Release& out, std::string& err) {
         rc.name = c.str("name"); rc.version = c.str("version"); rc.url = c.str("url"); rc.sha256 = c.str("sha256");
         rc.vendor = c.str("vendor"); rc.format = c.str("format"); rc.asset = c.str("asset"); rc.subset = c.str("subset");
         rc.repository = c.str("repository"); rc.tag = c.str("tag"); rc.pushfps = c.str("pushfps");
+        rc.manifestSha256 = c.str("manifestSha256");
+        if (!rc.manifestSha256.empty() && rc.manifestSha256.size() != 64) { err = "bad manifestSha256 of " + rc.name; return false; }
         if (rc.name.empty() || rc.version.empty() || rc.url.empty() || rc.sha256.size() != 64) { err = "incomplete component " + rc.name; return false; }
         out.components.push_back(rc);
     }

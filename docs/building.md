@@ -51,7 +51,7 @@ Beta channel) and publishes it; `pushfps-watch.yml` follows PushFPS's releases d
 | Kind | Name | What |
 |---|---|---|
 | secret | `PUSHMPC_SIGNING_KEY` | the private release key (XML), required to publish |
-| secret | `NVOF_SDK_HEADERS` | optional, as in PushFPS's CI: base64 of a zip with NVIDIA's Optical Flow SDK 5 headers |
+| secret | `NVOF_SDK_HEADERS` | required for a release, as in PushFPS's CI: base64 of a zip with NVIDIA's Optical Flow SDK 5 headers. Without it the core has no NVIDIA optical flow and NVIDIA VFG cannot start: a release run fails, a dry run warns in its summary (core manifest `nvof=0`) |
 | secret | `CODESIGN_PFX_BASE64`, `CODESIGN_PFX_PASSWORD` | optional Authenticode certificate |
 | variable | `PUSHMPC_GPU_RUNNER` | `true` runs the GPU smoke test on a self-hosted runner labelled `gpu` |
 | variable | `PUSHFPS_WATCH_BETA` | `true` publishes a passing PushFPS bump as a beta release |
@@ -78,10 +78,12 @@ repository's workflows: keep it for this repository only and do not enable it fo
 A release never contains the runtime; see [release model](release-model.md). On a developer machine that already has
 Veyra's zip: `stage -WithRuntime -PackageCache <folder>` (or `install -PackageCache <folder>`).
 
-Optional, developer builds only: NVIDIA's Optical Flow SDK interface headers (`NvOFInterface\nvOpticalFlowCommon.h`,
-`nvOpticalFlowD3D12.h`, version 5.0.7 as PushFPS expects; from NVIDIA's developer site) in `deps\nvof-sdk` or
-`PUSHMPC_NVOF_SDK` build PushFPS's hardware optical flow in, for comparisons with DLSS-G. PushMPC itself does not use
-them and never publishes them.
+NVIDIA's Optical Flow SDK interface headers (`NvOFInterface\nvOpticalFlowCommon.h`, `nvOpticalFlowD3D12.h`, version
+5.0.7 as PushFPS expects; from NVIDIA's developer site) in `deps\nvof-sdk` or `PUSHMPC_NVOF_SDK` build PushFPS's
+hardware optical flow in. NVIDIA VFG needs it: without it VFG fails with "failed backend 2" and Auto falls back to
+DLSS-G. `pushmpc-install.ps1 stage` records it in the core manifest (`nvof=1` or `nvof=0`; `pushcore.dll`'s version
+resource has `PushCoreFeatures` = `nvof` or `no-nvof`), and `stage -RequireNvof` refuses a core without it. The
+headers are never published.
 
 Environment overrides: `PUSHMPC_DEPS`, `PUSHMPC_PUSHFPS_SRC`, `PUSHMPC_BUILD_DIR`. `filter\build\auto_test.exe` prints
 the Auto decisions for a few sources and displays (no GPU needed).

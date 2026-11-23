@@ -98,6 +98,46 @@ try {
     $o = Run 'uninstall' $off
     Check 'uninstall dry run reaches the end' ($o -match 'Removed')
     Check 'dry runs change nothing' ($null -eq (Compare-Object $before (Snapshot)))
+
+    Write-Host "SVP's VapourSynth on the (fake) user PATH (RC2 F5)"
+    Remove-Item $rtDir -Recurse -Force
+    $svp = Join-Path $root 'Program Files\SVP 4\mpv64'
+    New-Item -ItemType Directory -Force $svp | Out-Null; [IO.File]::WriteAllText("$svp\VSScript.dll", 'fake SVP'); [IO.File]::WriteAllText("$svp\mpv.exe", 'fake SVP mpv')
+    [IO.File]::WriteAllText($userPath, "C:\Windows;$svp")
+    $o = Run 'mpv-apply'
+    Check "SVP's VSScript.dll is not taken as the user's own" ($o -match 'belongs to SVP' -and $o -notmatch 'your own installation')
+    Check 'PushMPC wants its own runtime (TODO pins: skipped), mpv.conf untouched' ($o -match 'not filled in yet' -and (Hash $conf) -eq $confHash)
+    Check "SVP's mpv is detected and left alone" ($o -match "SVP's mpv" -and $o -match 'left alone')
+    $own = Join-Path $root 'VapourSynth'
+    New-Item -ItemType Directory -Force $own | Out-Null; [IO.File]::WriteAllText("$own\VSScript.dll", 'fake own')
+    [IO.File]::WriteAllText($userPath, "C:\Windows;$svp;$own")
+    $o = Run 'mpv-apply'
+    Check 'a VapourSynth outside SVP still counts as the user''s own' ($o -match [regex]::Escape("your own installation ($own)"))
+    Run 'mpv-remove' | Out-Null
+    Check 'mpv.conf restored after the own-runtime apply' ((Hash $conf) -eq $confHash)
+    New-Item -ItemType Directory -Force $rtDir | Out-Null; [IO.File]::WriteAllText("$rtDir\VSScript.dll", 'fake')
+    [IO.File]::WriteAllText($userPath, "C:\Windows;$svp")
+    Run 'mpv-apply' | Out-Null
+    $parts = @((Get-Content $userPath -Raw).Split(';') | ForEach-Object Trim | Where-Object { $_ })
+    Check 'our runtime goes in front of SVP''s folder on the user PATH' ($parts[0] -eq $rtDir -and $parts -contains $svp)
+    Run 'mpv-remove' | Out-Null
+    $parts = @((Get-Content $userPath -Raw).Split(';') | ForEach-Object Trim | Where-Object { $_ })
+    Check 'remove takes only our entry off the user PATH' (($parts -join ';') -eq "C:\Windows;$svp")
+
+    Write-Host 'repair with a same-version component whose files differ (RC2 F3), dry run'
+    foreach ($n in 'filter', 'core') { & robocopy "$stage\$n" "$inst\$n" /E /NFL /NDL /NJH /NJS /NP | Out-Null }
+    $o = Run 'install' $off
+    Check 'identical components: already installed' ($o -match 'filter \S+ is already installed \(every file matches' -and $o -match 'core \S+ is already installed \(every file matches')
+    $ax = "$inst\filter\PushMpcFilter.ax"; [IO.File]::AppendAllText($ax, 'x')
+    $mf = "$inst\filter\manifest.txt"; $fi = Get-Item $ax
+    $lines = @(Get-Content $mf | ForEach-Object { if ($_ -match '^file \S+ \d+ PushMpcFilter\.ax$') { "file $(Hash $ax) $($fi.Length) PushMpcFilter.ax" } else { $_ } })
+    [IO.File]::WriteAllLines($mf, $lines)
+    $o = Run 'install' $off
+    Check 'same version, other files: the filter is replaced' ($o -match 'filter : same version \S+, but the files differ from this setup''s: PushMpcFilter\.ax' -and $o -match 'would move .*\\filter')
+    Check 'the core still counts as installed' ($o -match 'core \S+ is already installed')
+    [IO.File]::AppendAllText("$inst\core\pushcore.dll", 'x')
+    $o = Run 'install' $off
+    Check 'an installed file that does not match its own manifest is repaired too' ($o -match 'core : the installed files do not match their manifest: pushcore\.dll')
 } finally {
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 }

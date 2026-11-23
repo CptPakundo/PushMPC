@@ -25,6 +25,7 @@ BEGIN
             VALUE "PushFPSVersion", "@PUSHMPC_PUSHFPS_VERSION@"
             VALUE "PushFPSCommit", "@PUSHMPC_PUSHFPS_COMMIT@"
             VALUE "PushCoreAbi", "@PUSHMPC_ABI@"
+            VALUE "PushCoreFeatures", "@PUSHMPC_FEATURES@"
         END
     END
     BLOCK "VarFileInfo"
