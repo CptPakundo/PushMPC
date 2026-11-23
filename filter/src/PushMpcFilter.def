@@ -1,0 +1,8 @@
+LIBRARY PushMpcFilter.ax
+EXPORTS
+    DllCanUnloadNow     = PushMpc_DllCanUnloadNow PRIVATE
+    DllGetClassObject   = PushMpc_DllGetClassObject PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE
+    RestoreNvProfile
+    ApplyNvProfile

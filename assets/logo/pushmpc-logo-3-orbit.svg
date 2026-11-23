@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>PushMPC logo, concept 3: Orbit</title>
+  <defs>
+    <linearGradient id="arc" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFB21A" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#FF6A13"/>
+      <stop offset="1" stop-color="#8EF02E"/>
+    </linearGradient>
+  </defs>
+  <circle cx="256" cy="256" r="244" fill="#11161D" stroke="#2B3542" stroke-width="8"/>
+  <!-- three frame bars (the 3-2-1 countdown, as frames) -->
+  <rect x="104" y="196" width="22" height="120" rx="11" fill="#F2552C"/>
+  <rect x="146" y="176" width="22" height="160" rx="11" fill="#2F86F0"/>
+  <rect x="188" y="156" width="22" height="200" rx="11" fill="#3DBE4A"/>
+  <!-- play triangle -->
+  <path d="M236 150 Q236 134 250 142 L410 244 Q424 256 410 268 L250 370 Q236 378 236 362 Z" fill="#FFFFFF"/>
+  <!-- swoosh orbit -->
+  <path d="M70 380 C 150 470, 380 470, 450 330 C 490 250, 470 140, 400 96" fill="none" stroke="url(#arc)" stroke-width="28" stroke-linecap="round"/>
+</svg>

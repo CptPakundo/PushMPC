@@ -1,0 +1,163 @@
+# Watches DosukaSOL/PushFPS for a new release. When its latest release is newer than our pin (scripts/pushfps-pin.json):
+#   1. port: apply our patch to the new tag (git apply --3way); on success commit the moved pin and the regenerated
+#      patch to the branch bot/pushfps-<tag>;
+#   2. build: the whole release build (release.yml) from that branch, published as a beta (pre-release) when the
+#      repository variable PUSHFPS_WATCH_BETA is "true", so Beta-channel users get it;
+#   3. on success a pull request moves the pin on main; on any failure an issue says where it stopped.
+# Runs daily; "Run workflow" by hand works too (optionally for a given tag).
+name: pushfps-watch
+
+on:
+  # schedule off until the repository is public and the release pipeline is green (enable by uncommenting):
+  # schedule:
+  #   - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'PushFPS tag to try (empty: its latest release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pushfps-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      newer: ${{ steps.cmp.outputs.newer }}
+      tag: ${{ steps.cmp.outputs.tag }}
+      pinned: ${{ steps.cmp.outputs.pinned }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare PushFPS's latest release with our pin
+        id: cmp
+        env:
+          WANT: ${{ inputs.tag }}
+        run: |
+          set -e
+          repo=$(jq -r .pushfps.repository scripts/pushfps-pin.json)
+          pinned=$(jq -r .pushfps.tag scripts/pushfps-pin.json)
+          latest="${WANT:-$(gh release view -R "$repo" --json tagName -q .tagName)}"
+          echo "pinned $pinned, latest $latest"
+          newer=false
+          if [ "$latest" != "$pinned" ] && [ "$(printf '%s\n%s\n' "${pinned#v}" "${latest#v}" | sort -V | tail -1)" = "${latest#v}" ]; then newer=true; fi
+          # an open pull request or branch for this tag means it was handled already
+          if [ "$newer" = true ] && git ls-remote --exit-code --heads "https://github.com/$GITHUB_REPOSITORY.git" "bot/pushfps-$latest" >/dev/null 2>&1; then
+            echo "branch bot/pushfps-$latest exists: already handled"; newer=false
+          fi
+          { echo "newer=$newer"; echo "tag=$latest"; echo "pinned=$pinned"; } >> "$GITHUB_OUTPUT"
+
+  port:
+    needs: check
+    if: ${{ needs.check.outputs.newer == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.commit.outputs.branch }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply our patch to the new PushFPS tag
+        id: apply
+        run: |
+          set -e
+          repo=$(jq -r .pushfps.repository scripts/pushfps-pin.json)
+          patch=$(jq -r .pushfps.patch scripts/pushfps-pin.json)
+          git clone -q --filter=blob:none "https://github.com/$repo.git" "$RUNNER_TEMP/PushFPS"
+          cd "$RUNNER_TEMP/PushFPS"
+          git -c advice.detachedHead=false checkout -q "$TAG"
+          git config user.name 'pushmpc-bot'; git config user.email 'pushmpc-bot@users.noreply.github.com'
+          if ! git apply --3way --index --whitespace=nowarn "$GITHUB_WORKSPACE/$patch" > "$RUNNER_TEMP/apply.log" 2>&1; then
+            cat "$RUNNER_TEMP/apply.log"
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --cached --name-only --diff-filter=U | grep -q .; then
+            echo "conflicts:" >> "$RUNNER_TEMP/apply.log"; git diff --cached --name-only --diff-filter=U >> "$RUNNER_TEMP/apply.log"
+            echo "applied=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git diff --cached --binary > "$RUNNER_TEMP/new.patch"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+      - name: Commit the moved pin and the regenerated patch
+        id: commit
+        if: ${{ steps.apply.outputs.applied == 'true' }}
+        env:
+          COMMIT: ${{ steps.apply.outputs.commit }}
+        run: |
+          set -e
+          v="${TAG#v}"
+          new="patches/pushfps-$v-pushmpc.patch"
+          cp "$RUNNER_TEMP/new.patch" "$new"
+          jq --arg t "$TAG" --arg c "$COMMIT" --arg p "$new" --arg d "$v-pushmpc" \
+            '.pushfps.tag=$t | .pushfps.commit=$c | .pushfps.patch=$p | .pushfps.displayVersion=$d' scripts/pushfps-pin.json > pin.tmp
+          mv pin.tmp scripts/pushfps-pin.json
+          sed -i "s/^set PUSHFPS_DISPLAY_VERSION=.*/set PUSHFPS_DISPLAY_VERSION=$v-pushmpc\r/" scripts/build-pushfps.cmd
+          branch="bot/pushfps-$TAG"
+          git config user.name 'pushmpc-bot'; git config user.email 'pushmpc-bot@users.noreply.github.com'
+          git checkout -q -b "$branch"
+          git add -A scripts/pushfps-pin.json scripts/build-pushfps.cmd "$new"
+          git commit -q -m "PushFPS $TAG: move the pin, regenerate the patch" -m "Automatic port by pushfps-watch; the previous patch applied with git apply --3way."
+          git push -q origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Report a patch that no longer applies
+        if: ${{ steps.apply.outputs.applied != 'true' }}
+        run: |
+          title="PushFPS $TAG: our patch does not apply"
+          if gh issue list --state open --search "\"$title\" in:title" --json number -q '.[0].number' | grep -q .; then echo "issue exists"; exit 1; fi
+          { echo "pushfps-watch could not apply \`$(jq -r .pushfps.patch scripts/pushfps-pin.json)\` to PushFPS $TAG (pinned: ${{ needs.check.outputs.pinned }})."; echo; echo '```'; tail -n 80 "$RUNNER_TEMP/apply.log"; echo '```'; echo; echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"; } > body.md
+          gh issue create --title "$title" --body-file body.md
+          exit 1
+
+  build:
+    needs: [check, port]
+    if: ${{ needs.port.outputs.branch != '' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      source_ref: ${{ needs.port.outputs.branch }}
+      beta: ${{ vars.PUSHFPS_WATCH_BETA == 'true' }}
+    secrets: inherit
+
+  pull-request:
+    needs: [check, port, build]
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Open the pull request
+        run: |
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "${{ needs.port.outputs.branch }}" \
+            --title "PushFPS ${{ needs.check.outputs.tag }}" \
+            --body "PushFPS ${{ needs.check.outputs.tag }} is out (pinned: ${{ needs.check.outputs.pinned }}). Our patch applied and the release build passed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Review the regenerated patch, then merge and tag a release."
+
+  build-failed:
+    needs: [check, port, build]
+    if: ${{ always() && needs.port.outputs.branch != '' && needs.build.result == 'failure' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Open an issue
+        run: |
+          title="PushFPS ${{ needs.check.outputs.tag }}: the patched build fails"
+          if gh issue list --state open --search "\"$title\" in:title" --json number -q '.[0].number' | grep -q .; then echo "issue exists"; exit 0; fi
+          gh issue create --title "$title" --body "The patch applied (branch ${{ needs.port.outputs.branch }}), but the release build failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

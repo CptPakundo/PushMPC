@@ -1,0 +1,38 @@
+{
+  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin, players-all.md R1). Nothing is downloaded until the user approves it. Versions and hashes marked TODO must be filled in from the official release pages (and the hashes checked against the downloaded files) before the installer uses this file.",
+  "installDir": "%LOCALAPPDATA%\\PushMPC\\vapoursynth",
+  "python": {
+    "what": "Python embeddable package (amd64), PSF licence",
+    "version": "TODO-verify: the 3.x the VapourSynth release below supports (3.12 or 3.13)",
+    "url": "https://www.python.org/ftp/python/TODO-version/python-TODO-version-embed-amd64.zip",
+    "sha256": "TODO",
+    "extractTo": "."
+  },
+  "vapoursynth": {
+    "what": "VapourSynth portable (x64), LGPL-2.1; extracted over the Python folder as its portable instructions say",
+    "repository": "vapoursynth/vapoursynth",
+    "tag": "TODO-verify (R70 or newer: API 4 and VSScript API 4)",
+    "url": "https://github.com/vapoursynth/vapoursynth/releases/download/TODO-tag/VapourSynth64-Portable-TODO-tag.zip",
+    "sha256": "TODO",
+    "extractTo": ".",
+    "sdkHeaders": ["sdk/include/VapourSynth4.h", "sdk/include/VSHelper4.h", "sdk/include/VSScript4.h"],
+    "portableMarker": "portable.vs"
+  },
+  "activation": {
+    "how": "mpv (shinchiro builds) loads VSScript.dll from the DLL search path, so the install folder goes on the user's PATH (integrations/mpv/mpv-integration.ps1 -RuntimeOnPath, undone on uninstall). An existing VapourSynth install of the user's is used instead when one is found.",
+    "check": "mpv --vf=help lists 'vapoursynth' (the build has the filter) and %LOCALAPPDATA%\\PushMPC\\vapoursynth\\VSScript.dll exists"
+  },
+  "portableCi": {
+    "what": "VapourSynth (API 4) with its SDK headers and vspipe for the vsplugin-portable CI workflow on Linux and macOS (R3); never installed on the user's machine. Until these are pinned the workflow builds and runs the unit tests only.",
+    "linux": { "how": "TODO-verify: a pinned VapourSynth source tarball (vapoursynth/vapoursynth, R70+) built on the runner, or a pinned distro package", "url": "TODO", "sha256": "TODO" },
+    "macos": { "how": "TODO-verify: the same source tarball built on the runner, or a pinned Homebrew bottle", "url": "TODO", "sha256": "TODO" },
+    "headersFromWindowsPin": "the SDK headers are the same files as vapoursynth.sdkHeaders above (VapourSynth4.h, VSHelper4.h)"
+  },
+  "mpvForCi": {
+    "what": "shinchiro mpv (x86_64) for the vsplugin CI workflow only; never installed on the user's machine",
+    "repository": "shinchiro/mpv-winbuild-cmake",
+    "tag": "TODO-verify",
+    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/TODO-tag/mpv-x86_64-TODO-date-git-TODO.7z",
+    "sha256": "TODO"
+  }
+}

@@ -1,0 +1,22 @@
+# local-only files: never published
+*.local
+*.local.txt
+stage/
+build/
+deps/
+run/
+backup/
+harness-*/
+filter/build/
+filter/bin/
+*.pdb
+*.obj
+*.exe
+release/
+updater/build/
+updater/bin/
+installer/build/
+installer/bin/
+setup-payload.bin
+vsplugin/bin/
+build-portable/

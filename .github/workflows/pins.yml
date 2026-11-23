@@ -1,0 +1,125 @@
+# Resolves concrete versions for scripts/vapoursynth-pin.json on the runners (nothing is downloaded on a user's machine):
+#   - Windows: VapourSynth portable (official GitHub release), the Python embeddable package from python.org that this
+#     VapourSynth release is built for, shinchiro's mpv (x86_64) for CI;
+#   - Linux / macOS: the VapourSynth wheel of the same release from PyPI (for the portable CI's vspipe test).
+# It downloads them, prints URL + SHA-256 as the job summary and uploads pins-*.json as an artifact. A maintainer copies
+# the values into scripts/vapoursynth-pin.json; this workflow never changes the repository.
+name: pins
+
+on:
+  workflow_dispatch:
+    inputs:
+      vapoursynth_tag: { description: 'VapourSynth tag (empty = latest release)', required: false, default: '' }
+      mpv_tag: { description: 'shinchiro mpv tag (empty = latest release)', required: false, default: '' }
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    outputs:
+      vstag: ${{ steps.r.outputs.vstag }}
+    steps:
+      - id: r
+        name: Resolve, download and hash
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = Join-Path $env:RUNNER_TEMP 'pins'; New-Item -ItemType Directory $d -Force | Out-Null
+          function Rel($repo, $tag) { if ($tag) { gh api "repos/$repo/releases/tags/$tag" | ConvertFrom-Json } else { gh api "repos/$repo/releases/latest" | ConvertFrom-Json } }
+          function Get($url, $file) { Invoke-WebRequest -Uri $url -OutFile $file; (Get-FileHash $file -Algorithm SHA256).Hash }
+          $vs = Rel 'vapoursynth/vapoursynth' '${{ inputs.vapoursynth_tag }}'
+          Write-Host "VapourSynth $($vs.tag_name) assets:"; $vs.assets | ForEach-Object { Write-Host "  $($_.name)" }
+          $a = $vs.assets | Where-Object { $_.name -match '^VapourSynth64-Portable-.*\.zip$' } | Select-Object -First 1
+          if (-not $a) { throw 'no VapourSynth64-Portable zip in the release' }
+          $vsZip = "$d\vs.zip"; $vsSha = Get $a.browser_download_url $vsZip
+          Expand-Archive $vsZip "$d\vs" -Force
+          Write-Host 'Portable zip (top level, sdk, pyd):'
+          Get-ChildItem "$d\vs" | ForEach-Object { Write-Host "  $($_.Name)" }
+          Get-ChildItem "$d\vs" -Recurse -File | Where-Object { $_.FullName -match '\\sdk\\|\.pyd$|python3\d*\.dll$' } | ForEach-Object { Write-Host "  $($_.FullName.Substring($d.Length + 4))" }
+          # the Python minor version this build wants: the .pyd's cp tag, else the portable install script
+          $minor = $null
+          $pyd = Get-ChildItem "$d\vs" -Recurse -Filter 'vapoursynth*.pyd' | Select-Object -First 1
+          if ($pyd -and $pyd.Name -match 'cp3(\d+)') { $minor = $Matches[1] }
+          $exact = $null
+          $inst = $vs.assets | Where-Object { $_.name -match '^Install-Portable-VapourSynth.*\.ps1$' } | Select-Object -First 1
+          if ($inst) {
+            Invoke-WebRequest $inst.browser_download_url -OutFile "$d\install.ps1"
+            $t = Get-Content "$d\install.ps1" -Raw
+            ($t -split "`n") | Where-Object { $_ -match 'python' } | Select-Object -First 15 | ForEach-Object { Write-Host "  script: $($_.Trim())" }
+            if ($t -match 'python-(3\.(\d+)\.\d+)-embed-amd64\.zip') { $exact = $Matches[1]; if (-not $minor) { $minor = $Matches[2] } }
+          }
+          if (-not $minor) { $minor = '12'; Write-Host '::warning::Python minor not detected, using 3.12' }
+          if (-not $exact) {
+            for ($p = 30; $p -ge 0; $p--) {
+              $u = "https://www.python.org/ftp/python/3.$minor.$p/python-3.$minor.$p-embed-amd64.zip"
+              try { Invoke-WebRequest -Method Head $u | Out-Null; $exact = "3.$minor.$p"; break } catch {}
+            }
+          }
+          $pyUrl = "https://www.python.org/ftp/python/$exact/python-$exact-embed-amd64.zip"
+          $pySha = Get $pyUrl "$d\python.zip"
+          $mpv = Rel 'shinchiro/mpv-winbuild-cmake' '${{ inputs.mpv_tag }}'
+          $m = $mpv.assets | Where-Object { $_.name -match '^mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
+          if (-not $m) { throw 'no mpv-x86_64 7z in the shinchiro release' }
+          $mpvSha = Get $m.browser_download_url "$d\mpv.7z"
+          $vsSrcUrl = "https://github.com/vapoursynth/vapoursynth/archive/refs/tags/$($vs.tag_name).tar.gz"
+          $srcSha = Get $vsSrcUrl "$d\vs-src.tar.gz"
+          $out = [ordered]@{
+            vapoursynth = @{ tag = $vs.tag_name; url = $a.browser_download_url; sha256 = $vsSha }
+            python = @{ version = $exact; url = $pyUrl; sha256 = $pySha }
+            mpvForCi = @{ tag = $mpv.tag_name; url = $m.browser_download_url; sha256 = $mpvSha }
+            vapoursynthSource = @{ url = $vsSrcUrl; sha256 = $srcSha }
+          }
+          $out | ConvertTo-Json -Depth 4 | Set-Content "$d\pins-windows.json"
+          "vstag=$($vs.tag_name)" >> $env:GITHUB_OUTPUT
+          @('## Windows pins', '', '| item | version | sha256 | url |', '|---|---|---|---|',
+            "| VapourSynth portable | $($vs.tag_name) | ``$vsSha`` | $($a.browser_download_url) |",
+            "| Python embeddable | $exact | ``$pySha`` | $pyUrl |",
+            "| shinchiro mpv | $($mpv.tag_name) | ``$mpvSha`` | $($m.browser_download_url) |",
+            "| VapourSynth source | $($vs.tag_name) | ``$srcSha`` | $vsSrcUrl |") -join "`n" >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pins-windows
+          path: ${{ runner.temp }}/pins/pins-windows.json
+
+  wheels:
+    needs: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Wheel of the same VapourSynth release
+        shell: bash
+        run: |
+          set -u
+          tag='${{ needs.windows.outputs.vstag }}'; ver="${tag#R}"
+          key=$([ "$RUNNER_OS" = macOS ] && echo macos || echo linux)
+          mkdir -p w
+          python -m pip download "vapoursynth==$ver" --only-binary :all: --no-deps -d w 2>&1 | tail -5 || true
+          f=$(ls w/*.whl 2>/dev/null | head -1 || true)
+          brewv=""; [ "$RUNNER_OS" = macOS ] && brewv=$(brew info --json=v2 vapoursynth 2>/dev/null | python -c "import json,sys; print(json.load(sys.stdin)['formulae'][0]['versions']['stable'])" || true)
+          if [ -n "$f" ]; then
+            sha=$(python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest().upper())" "$f")
+            name=$(basename "$f")
+            python - "$ver" "$name" > url.txt <<'EOF'
+          import json, sys, urllib.request
+          ver, name = sys.argv[1], sys.argv[2]
+          d = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/vapoursynth/{ver}/json"))
+          print(next(u["url"] for u in d["urls"] if u["filename"] == name))
+          EOF
+            url=$(cat url.txt); unzip -l "$f" | grep -iE 'vspipe|\.so|\.dylib|include' | head -20 || true
+          else sha=""; url=""; fi
+          printf '{"%s":{"tag":"%s","wheel":"%s","url":"%s","sha256":"%s","brew":"%s"}}\n' "$key" "$tag" "${name:-}" "$url" "$sha" "$brewv" > pins-$key.json
+          cat pins-$key.json
+          { echo "## $key"; echo; echo "wheel: ${name:-none} sha256 \`$sha\`"; echo; echo "$url"; echo; echo "brew vapoursynth: ${brewv:-n/a}"; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pins-${{ runner.os }}
+          path: pins-*.json

@@ -1,0 +1,68 @@
+# The portable side of the VapourSynth route (R3: pushmpc.Enhance's "portable" backend, PushFPS's portable core on the
+# CPU) on hosted runners with no GPU, on Windows, Linux and macOS:
+#   - builds the portable engine (a static library) and portable_test with CMake (MSVC, gcc, Apple clang) and runs it:
+#     backend selection, the CPU budget, settings.ini and folders, the engine on synthetic frames (a moving box, a hard
+#     cut, a seek), the calibration;
+#   - Linux and macOS: the mpv.conf integration's fake-HOME tests (POSIX sh and dash);
+#   - vspipe with the portable backend once scripts/vapoursynth-pin.json has the CI VapourSynth pinned (TODO-pin guard:
+#     until then the step says so and is skipped, it never downloads an unpinned file).
+# The Windows nvidia path (stub pushcore, D3D11 on WARP, mpv) stays in vsplugin.yml.
+name: vsplugin-portable
+
+on:
+  push:
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json', '.github/workflows/vsplugin-portable.yml']
+  pull_request:
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json']
+  workflow_dispatch:
+
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      K: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build (portable engine and unit tests)
+        shell: bash
+        run: |
+          cmake -S vsplugin -B build-portable -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-portable --config Release --target portable_test --parallel
+
+      - name: Unit tests
+        shell: bash
+        run: ctest --test-dir build-portable -C Release -R portable_test --output-on-failure
+
+      - name: mpv.conf integration (fake HOME)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh integrations/mpv/tests/mpv-integration.tests.sh
+          if command -v dash >/dev/null; then
+            sed 's|sh "$tool"|dash "$tool"|g' integrations/mpv/tests/mpv-integration.tests.sh > integrations/mpv/tests/_dash.sh
+            dash integrations/mpv/tests/_dash.sh
+          fi
+
+      - name: vspipe with the portable backend (needs the pinned CI VapourSynth)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          key=$([ "$RUNNER_OS" = macOS ] && echo macos || echo linux)
+          url=$(python3 -c "import json,sys; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['url'])")
+          sha=$(python3 -c "import json,sys; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['$key']['sha256'])")
+          case "$url$sha" in *TODO*)
+            echo "::notice::scripts/vapoursynth-pin.json: portableCi.$key is not pinned yet (TODO): vspipe tests skipped"
+            exit 0 ;;
+          esac
+          # TODO-pin: fetch "$url", check "$sha" (sha256sum / shasum -a 256), build or unpack VapourSynth, copy
+          # VapourSynth4.h and VSHelper4.h into vsplugin/third_party/vapoursynth, rebuild (pushmpc_vs.so / .dylib), then:
+          #   PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_TEST_K=$K vspipe --info vsplugin/tests/ci/portable_clip.vpy
+          #   expect Frames: 48*K and FPS: 24000*K/1001; vspipe vsplugin/tests/ci/portable_clip.vpy -- must succeed.
+          echo "::error::portableCi.$key is pinned but the fetch-and-build step is not written yet"
+          exit 1

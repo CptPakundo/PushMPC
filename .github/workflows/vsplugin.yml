@@ -1,0 +1,106 @@
+# The VapourSynth route (vsplugin: pushmpc.Enhance for mpv, SMPlayer, MPC-QT) on a hosted Windows runner, no GPU:
+#   - builds pushmpc_vs.dll, the stub pushcore.dll and the tests, and runs sched_test and core_test (D3D11 on WARP);
+#   - vspipe: the stub clip through Enhance gives source frames x k at k x the rate, every frame with _DurationNum/Den;
+#     vs_harness evaluates the script three times in one process: the reloads must reuse the warm core;
+#   - mpv --vo=null plays a clip through pushmpc.vpy, seeks twice (mpv reloads the script on each seek) and must run at
+#     about k x the source rate with the warm core reused;
+#   - the mpv.conf integration's fake-root tests.
+# The VapourSynth runtime and mpv come from scripts/vapoursynth-pin.json (pinned URLs, SHA-256 checked).
+name: vsplugin
+
+on:
+  push:
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json', '.github/workflows/vsplugin.yml']
+  pull_request:
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json']
+  workflow_dispatch:
+
+jobs:
+  vsplugin:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      K: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned VapourSynth runtime and mpv
+        shell: pwsh
+        run: |
+          $pin = Get-Content scripts/vapoursynth-pin.json -Raw | ConvertFrom-Json
+          $vs = Join-Path $env:RUNNER_TEMP 'vs'; $mpv = Join-Path $env:RUNNER_TEMP 'mpv'
+          New-Item -ItemType Directory $vs, $mpv -Force | Out-Null
+          function Fetch($entry, $file) {
+            if ($entry.sha256 -match 'TODO' -or $entry.url -match 'TODO') { throw "scripts/vapoursynth-pin.json: $($entry.what) is not pinned yet (TODO)" }
+            Invoke-WebRequest -Uri $entry.url -OutFile $file
+            $h = (Get-FileHash $file -Algorithm SHA256).Hash
+            if ($h -ne $entry.sha256.ToUpperInvariant()) { throw "SHA-256 mismatch for $($entry.url): $h" }
+          }
+          Fetch $pin.python "$env:RUNNER_TEMP\python.zip"; Expand-Archive "$env:RUNNER_TEMP\python.zip" $vs -Force
+          Fetch $pin.vapoursynth "$env:RUNNER_TEMP\vs.zip"; Expand-Archive "$env:RUNNER_TEMP\vs.zip" $vs -Force
+          Fetch $pin.mpvForCi "$env:RUNNER_TEMP\mpv.7z"; 7z x "$env:RUNNER_TEMP\mpv.7z" "-o$mpv" -y | Out-Null
+          $sdk = 'vsplugin/third_party/vapoursynth'; New-Item -ItemType Directory $sdk -Force | Out-Null
+          foreach ($h in $pin.vapoursynth.sdkHeaders) { Copy-Item (Join-Path $vs $h) $sdk }
+          "$vs" | Out-File -Append $env:GITHUB_PATH
+          "VSDIR=$vs" | Out-File -Append $env:GITHUB_ENV
+          "MPVDIR=$mpv" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build and unit tests (stub core on WARP)
+        shell: cmd
+        run: vsplugin\build.cmd
+
+      - name: vspipe against the stub core
+        shell: pwsh
+        run: |
+          $env:PUSHMPC_VS_PLUGIN = "$PWD\vsplugin\bin\pushmpc_vs.dll"
+          $env:PUSHMPC_STUB_DIR = "$PWD\vsplugin\bin\stub"
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-vspipe"
+          $env:PUSHMPC_TEST_K = $env:K
+          $info = vspipe --info vsplugin/tests/ci/stub_clip.vpy 2>&1 | Out-String
+          Write-Host $info
+          $frames = 48 * [int]$env:K
+          if ($info -notmatch "Frames:\s+$frames\b") { throw "expected $frames frames" }
+          if ($info -notmatch "FPS:\s+$(24000 * [int]$env:K)/1001") { throw "expected $(24000 * [int]$env:K)/1001 fps" }
+          vspipe vsplugin/tests/ci/stub_clip.vpy -- ; if ($LASTEXITCODE) { throw 'vspipe failed' }
+          foreach ($bits in 8, 10) {
+            foreach ($chroma in 'auto', '420') {
+              $env:PUSHMPC_TEST_BITS = "$bits"; $env:PUSHMPC_TEST_CHROMA = $chroma
+              vsplugin\build\vs_harness.exe vsplugin/tests/ci/stub_clip.vpy $env:K 48 --seek 100 --reload 2
+              if ($LASTEXITCODE) { throw "vs_harness failed ($bits-bit, chroma $chroma)" }
+            }
+          }
+          $log = Get-Content "$env:RUNNER_TEMP\logs-vspipe\vsplugin-*.log" -Raw
+          if ($log -notmatch 'flush \(warm core reused\)') { throw 'the script reloads did not reuse the warm core' }
+
+      - name: mpv --vo=null with seeks (script reloads)
+        shell: pwsh
+        run: |
+          $t = Join-Path $env:RUNNER_TEMP 'mpvtest'; New-Item -ItemType Directory $t -Force | Out-Null
+          Copy-Item vsplugin\scripts\pushmpc.vpy, vsplugin\bin\pushmpc_vs.dll $t
+          vspipe -c y4m vsplugin/tests/ci/source_clip.vpy "$t\clip.y4m"; if ($LASTEXITCODE) { throw 'test clip' }
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-mpv"
+          $stub = "$PWD\vsplugin\bin\stub".Replace('\', '/')
+          $vpy = "$t\pushmpc.vpy".Replace('\', '/')
+          & "$env:MPVDIR\mpv.com" --no-config --vo=null --ao=null --hwdec=no --hr-seek-framedrop=no --interpolation=no `
+            "--vf=vapoursynth=file=[$vpy]:buffered-frames=4:concurrent-frames=2:user-data=[adapter=warp,core_dir=$stub,smoother=$env:K,sharper=off]" `
+            "--script=$PWD\vsplugin\tests\ci\seek.lua" --msg-level=all=v "$t\clip.y4m" 2>&1 | Tee-Object "$t\mpv.log" | Select-String 'vapoursynth|pushmpc-ci|Error' | Select-Object -Last 40
+          $mlog = Get-Content "$t\mpv.log" -Raw
+          if ($mlog -notmatch 'pushmpc-ci: estimated-vf-fps=([\d.]+)') { throw 'mpv did not report the filter rate' }
+          $fps = [double]$Matches[1]; Write-Host "estimated-vf-fps $fps"
+          if ($fps -lt 0.8 * 23.976 * [int]$env:K) { throw "output rate $fps, expected about $(23.976 * [int]$env:K)" }
+          $log = Get-Content "$env:RUNNER_TEMP\logs-mpv\vsplugin-*.log" -Raw
+          $reuse = ([regex]::Matches($log, 'flush \(warm core reused\)')).Count
+          if ($reuse -lt 1) { throw 'the seek reloads did not reuse the warm core' }
+          Write-Host "warm core reused on $reuse reloads"
+
+      - name: mpv.conf integration (fake roots)
+        shell: pwsh
+        run: pwsh -File integrations/mpv/tests/mpv-integration.tests.ps1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vsplugin-logs
+          path: |
+            ${{ runner.temp }}/logs-*
+            ${{ runner.temp }}/mpvtest/mpv.log

@@ -1,0 +1,63 @@
+# PushMPC: PushFPS's enhancement graph as a library for an MPC-HC filter.
+# Built inside PushFPS's CMake tree (it needs veyra_engine): configure PushFPS with
+#   -DPUSHMPC_SOURCE_DIR=<this folder>
+add_library(pushcore STATIC src/PushCore.cpp include/pushmpc/PushCore.h)
+target_compile_features(pushcore PUBLIC cxx_std_20)
+target_compile_options(pushcore PRIVATE /utf-8)
+target_include_directories(pushcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushcore PUBLIC veyra_engine)
+
+add_executable(pushcore_harness tools/pushcore_harness.cpp)
+target_compile_features(pushcore_harness PRIVATE cxx_std_20)
+target_compile_options(pushcore_harness PRIVATE /utf-8)
+target_include_directories(pushcore_harness PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushcore_harness PRIVATE pushcore ${FFMPEG_LIBRARIES})
+target_link_options(pushcore_harness PRIVATE /STACK:8388608)
+
+# pushcore.dll: GPU-in, GPU-out core behind the C ABI (include/pushmpc/pushcore_abi.h).
+# Static CRT (/MT) like the rest of the tree; loaded by full path from the PushFPS folder.
+# The PushFPS version this core is built against goes into the DLL's version resource ("PushFPSVersion");
+# the renderer compares it with the installed PushFPS.exe before loading anything (version skew guard).
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" PUSHMPC_PUSHFPS_VERSION "${VEYRA_DISPLAY_VERSION}")
+if(NOT PUSHMPC_PUSHFPS_VERSION)
+  set(PUSHMPC_PUSHFPS_VERSION "0.0.0")
+endif()
+string(REPLACE "." "," PUSHMPC_VER_COMMA "${PUSHMPC_PUSHFPS_VERSION},0")
+set(PUSHMPC_ABI 3)
+execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
+target_compile_features(pushcore_dll PRIVATE cxx_std_20)
+target_compile_options(pushcore_dll PRIVATE /utf-8)
+target_include_directories(pushcore_dll PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
+# d3dcompiler: PushMPC's deband compute shader (PushCoreDeband.h) is compiled at open with the system's d3dcompiler_47.dll
+target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler)
+
+# GPU harness: loads pushcore.dll by path, decodes with D3D11VA on its own D3D11 device (as LAV does),
+# feeds the textures in and "presents" the outputs in D3D11. FFmpeg is delay-loaded so the
+# exe can run from anywhere: it resolves to the PushFPS folder's DLLs that pushcore.dll pulled in.
+add_executable(pushcore_gpu_harness tools/pushcore_gpu_harness.cpp)
+target_compile_features(pushcore_gpu_harness PRIVATE cxx_std_20)
+target_compile_options(pushcore_gpu_harness PRIVATE /utf-8)
+target_include_directories(pushcore_gpu_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushcore_gpu_harness PRIVATE ${FFMPEG_LIBRARIES} d3d11 dxgi windowscodecs ole32 delayimp)
+target_link_options(pushcore_gpu_harness PRIVATE /DELAYLOAD:avformat-63.dll /DELAYLOAD:avcodec-63.dll
+  /DELAYLOAD:avutil-61.dll /DELAYLOAD:avfilter-12.dll /DELAYLOAD:swscale-10.dll /DELAYLOAD:swresample-7.dll)
+
+# Test tool: edits a COPY of a PushFPS chain session (multiplier, SR/FG switches) the way PushFPS saves it,
+# for the renderer's live-reload test. Never point it at the user's own data folder.
+add_executable(pushcore_session_edit tools/pushcore_session_edit.cpp)
+target_compile_features(pushcore_session_edit PRIVATE cxx_std_20)
+target_compile_options(pushcore_session_edit PRIVATE /utf-8)
+target_include_directories(pushcore_session_edit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushcore_session_edit PRIVATE veyra_engine ${FFMPEG_LIBRARIES})
+
+# The AMD HIP self-test child (PushFPS's AmdHipPreflight; PushFPS.exe --amd-hip-preflight): shipped in core\ next to
+# pushcore.dll, which points AmdHipPreflight at it on AMD GPUs (RX 9000 NR, lmxxf).
+add_executable(pushcore_hip_preflight tools/pushcore_hip_preflight.cpp)
+target_compile_features(pushcore_hip_preflight PRIVATE cxx_std_20)
+target_compile_options(pushcore_hip_preflight PRIVATE /utf-8)
+target_include_directories(pushcore_hip_preflight PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushcore_hip_preflight PRIVATE veyra_engine ${FFMPEG_LIBRARIES} shell32)

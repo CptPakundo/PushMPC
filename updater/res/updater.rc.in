@@ -1,0 +1,29 @@
+#include <winres.h>
+#include "@PUSHMPC_UPDATER_SRC@/src/version.h"
+1 RT_MANIFEST "@PUSHMPC_UPDATER_SRC@/res/updater.manifest"
+RELEASEKEY RCDATA "@PUSHMPC_RELEASE_KEY@"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION PUSHMPC_UPDATER_VERSION_COMMA
+ PRODUCTVERSION PUSHMPC_UPDATER_VERSION_COMMA
+ FILEFLAGSMASK 0x3fL
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName", "PushMPC (community)"
+      VALUE "FileDescription", "PushMPC updater"
+      VALUE "FileVersion", PUSHMPC_UPDATER_VERSION_STR
+      VALUE "ProductName", "PushMPC"
+      VALUE "ProductVersion", PUSHMPC_UPDATER_VERSION_STR
+      VALUE "LegalCopyright", "GPL-3.0-or-later, https://github.com/CptPakundo/PushMPC"
+      VALUE "OriginalFilename", "PushMpcUpdater.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

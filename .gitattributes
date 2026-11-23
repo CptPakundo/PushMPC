@@ -1,0 +1,4 @@
+# Stored byte for byte (copied third-party files and the PushFPS patch must stay unmodified; .cmd keeps CRLF).
+* -text
+*.png binary
+*.ico binary
