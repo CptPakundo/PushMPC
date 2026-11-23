@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <format>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -45,7 +46,9 @@ namespace pmvs { void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, 
 #ifdef _WIN32
 namespace {
 
-struct Meta { int64_t durNum = 0, durDen = 0, sarNum = 0, sarDen = 0; };
+// per source frame: durations, SAR and a copy of all its properties (mpv's vf=vapoursynth needs its own _MP_IMAGE
+// and the rest back on the output frames)
+struct Meta { int64_t durNum = 0, durDen = 0, sarNum = 0, sarDen = 0; std::shared_ptr<VSMap> props; };
 
 struct Enhance {
     VSNode* node = nullptr;
@@ -123,6 +126,7 @@ void SetOutProps(Enhance* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     const int64_t s = n / d->k;
     auto it = d->meta.find(s);
     const Meta m = it != d->meta.end() && it->second.durNum > 0 ? it->second : d->clipMeta;
+    if (it != d->meta.end() && it->second.props) a->copyMap(it->second.props.get(), p);   // the source frame's properties first
     const Rational dur = OutputDuration(m.durNum, m.durDen, d->k);
     if (dur.num > 0) { a->mapSetInt(p, "_DurationNum", dur.num, maReplace); a->mapSetInt(p, "_DurationDen", dur.den, maReplace); }
     if (it != d->meta.end() && it->second.sarNum > 0 && it->second.sarDen > 0) { a->mapSetInt(p, "_SARNum", it->second.sarNum, maReplace); a->mapSetInt(p, "_SARDen", it->second.sarDen, maReplace); }
@@ -132,6 +136,7 @@ void SetOutProps(Enhance* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     a->mapSetInt(p, "_ColorRange", d->outRange, maReplace);          // older VapourSynth (0 full)
     a->mapSetInt(p, "_Range", d->outRange == 0 ? 1 : 0, maReplace);   // API 4.2+ (1 full)
     if (OutIs420(d->fmt)) a->mapSetInt(p, "_ChromaLocation", 1, maReplace);   // the 2x2 average: centre
+    else a->mapDeleteKey(p, "_ChromaLocation");
     a->mapSetInt(p, "PushMPCFrameKind", kind, maReplace);                       // 0 real, 1 generated, 2 repeated
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
 }
@@ -146,6 +151,7 @@ void BindHost(Enhance* d, CoreHost& h)
         Meta m;
         m.durNum = PropInt(p, d->api, "_DurationNum", 0); m.durDen = PropInt(p, d->api, "_DurationDen", 0);
         m.sarNum = PropInt(p, d->api, "_SARNum", 0); m.sarDen = PropInt(p, d->api, "_SARDen", 0);
+        { const VSAPI* api = d->api; VSMap* cp = api->createMap(); api->copyMap(p, cp); m.props = std::shared_ptr<VSMap>(cp, [api](VSMap* x) { api->freeMap(x); }); }
         d->meta[s] = m;
         while (d->meta.size() > 64) d->meta.erase(d->meta.begin());
         const VSVideoFormat* vf = d->api->getVideoFrameFormat(f);
