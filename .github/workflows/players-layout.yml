@@ -108,6 +108,18 @@ jobs:
           $hits = @()
           foreach ($f in Get-ChildItem $env:OUT -Filter 'potplayer-*') { $hits += Get-Content $f.FullName | Select-String -Pattern 'filter|priorit|prefer|block' | ForEach-Object { "$($f.Name):$($_.LineNumber): $($_.Line.Trim())" } }
           $hits | Set-Content "$env:OUT\potplayer-filter-lines.txt"
+          # PotPlayer writes only changed settings, so the default dump has no filter-priority values: list the
+          # setting names its binaries contain (UTF-16 and ASCII strings about filters, priority, CLSIDs, merit)
+          $names = @()
+          foreach ($bin in @(Get-ChildItem $dir -Filter 'PotPlayer*.dll') + @(Get-Item $exe)) {
+            $bytes = [IO.File]::ReadAllBytes($bin.FullName)
+            foreach ($enc in [Text.Encoding]::Unicode, [Text.Encoding]::ASCII) {
+              $t = $enc.GetString($bytes)
+              foreach ($m in [regex]::Matches($t, '[A-Za-z0-9_\\ .%{}-]{5,80}')) { if ($m.Value -match '(?i)filter|priorit|merit|clsid|prefer') { $names += "$($bin.Name): $($m.Value.Trim())" } }
+            }
+          }
+          $names | Sort-Object -Unique | Set-Content "$env:OUT\potplayer-strings.txt"
+          "PotPlayer binary strings about filters: $(($names | Sort-Object -Unique).Count)" | Tee-Object -Append "$env:OUT\run.txt"
           "PotPlayer filter/priority lines: $($hits.Count)" | Tee-Object -Append "$env:OUT\run.txt"
 
       - name: Summary
