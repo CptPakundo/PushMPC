@@ -20,7 +20,7 @@ matches its pinned SHA-256, else downloaded at install time.
 |---|---|---|
 | `Veyra-2.1.9-NVIDIA-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `4225ECB1...C79F362` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
 | `Veyra-2.1.9-AMD-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `F7113DB0...C2BF377` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
-| `PushFPS-4.3.1-win64.zip` (PushFPS's release v4.3.1), or an installed PushFPS | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
+| `PushFPS-4.4.0-win64.zip` (PushFPS's release v4.4.0), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
 
 ## Install
 

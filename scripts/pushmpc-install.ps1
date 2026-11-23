@@ -111,7 +111,7 @@ $ProgressPreference = 'SilentlyContinue'
 $PushMpcRepo = 'https://github.com/CptPakundo/PushMPC'
 # Future update feed (not used yet: "update" takes a local -ReleaseManifest for now).
 $UpdateFeed = "$PushMpcRepo/releases/latest/download/release.json"
-# Veyra's runtime packages that PushFPS 4.3.1 is built on, pinned like PushFPS's installer pins them (its 4.1.0 / 4.2.0
+# Veyra's runtime packages that PushFPS 4.4.0 is built on (unchanged since 4.1.0: tag v2.1.9), pinned like PushFPS's installer pins them (its 4.1.0 / 4.2.0
 # installers carry both SHA-256s for tag v2.1.9). The runtime component's version IS this package reference; Subset counts
 # the revisions of the file list below (an installed runtime from an older list is extracted again from the same package).
 # -Gpu picks the package as PushFPS's installer does (Auto: NVIDIA when a video controller's name says NVIDIA, else AMD;
@@ -927,12 +927,12 @@ $RuntimeFileHashesNvidia = @{
 }
 $RuntimeFileHashes = if ($GpuVendor -eq 'AMD') { $RuntimeFileHashesAmd } else { $RuntimeFileHashesNvidia }
 # PushFlow (PushFPS's own frame generation: ONNX Runtime + DirectML and the RIFE models). Not in Veyra's packages:
-# PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0 and 4.3.1
-# (per-file SHA-256 below). Sources, in order: an installed PushFPS, a PushFPS-<v>-win64.zip in -PackageCache or the
-# own download folder, else PushFPS's GitHub release.
+# PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0, 4.3.1
+# and 4.4.0 (per-file SHA-256 below; 4.4.0 checked on an official 4.4.0 install, all 20 files). Sources, in order: an
+# installed PushFPS, a PushFPS-<v>-win64.zip in -PackageCache or the own download folder, else PushFPS's GitHub release.
 $PushFlow = @{
-    Asset = 'PushFPS-4.3.1-win64.zip'
-    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.3.1/PushFPS-4.3.1-win64.zip'
+    Asset = 'PushFPS-4.4.0-win64.zip'
+    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.4.0/PushFPS-4.4.0-win64.zip'
     Rel   = 'runtime\experimental\pushflow'
     Files = @{
         'DirectML.dll' = '9C9E6D822561C6C41B90E6994B3E8857CF1D66DBFB1E0C4C799C7C89B4E92DA1 18527776'

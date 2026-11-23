@@ -9,6 +9,12 @@
 //
 // usage: pushcore_gpu_harness <video> <outdir> [--pushfps DIR] [--frames N] [--start S] [--paced 0|1]
 //            [--copy 0|1] [--save 0,1,2,60] [--data DIR] [--sr 0|1] [--fg 0|1] [--multiplier N] [--warmup N]
+//            [--shaders DIR]
+// --shaders: the compiled shaders pushcore uses. Default: the build tree's own (<harness folder>\..\shaders, the
+// shaders built from the patched PushFPS source) when that folder exists, else <pushfps>\shaders. A copy of an
+// installed PushFPS carries its upstream shaders, without PushMPC's (VfgFourierMellin, the patched
+// VfgShotChange and YuvToLinearRgb), so the cut guard and the DV P5 path would not be what the filter runs.
+// --start defaults to 1752 s (clip A's motion scene): a shorter clip needs --start 0, else "no first frame".
 #include "pushmpc/pushcore_abi.h"
 
 #define NOMINMAX
@@ -96,12 +102,12 @@ int wmain(int argc, wchar_t** argv) {
     bool hdrDisplay = false;   // --hdr-display 1: an HDR presenter (HDR sources stay HDR10, PQ BT.2020)
     if (argc < 3) {
         std::cout << "usage: pushcore_gpu_harness <video> <outdir> [--pushfps DIR] [--frames N] [--start S] [--paced 0|1]"
-                     " [--copy 0|1] [--save 0,1,2,60] [--data DIR] [--sr 0|1] [--fg 0|1] [--multiplier N] [--warmup N]\n";
+                     " [--copy 0|1] [--save 0,1,2,60] [--data DIR] [--sr 0|1] [--fg 0|1] [--multiplier N] [--warmup N] [--shaders DIR]\n";
         return 2;
     }
     const std::wstring input = argv[1];
     const std::filesystem::path outDir = argv[2];
-    std::wstring pushfps = L"C:\\pm\\run", data;
+    std::wstring pushfps = L"C:\\pm\\run", data, shaderDir;
     bool haveData = false;
     unsigned maxFrames = 120, warmup = 10;
     double start = 1752;
@@ -129,6 +135,7 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
         if (k == L"--pushfps") pushfps = v;
+        else if (k == L"--shaders") shaderDir = v;
         else if (k == L"--frames") maxFrames = unsigned(_wtoi(v.c_str()));
         else if (k == L"--start") start = _wtof(v.c_str());
         else if (k == L"--paced") paced = _wtoi(v.c_str()) != 0;
@@ -242,6 +249,14 @@ int wmain(int argc, wchar_t** argv) {
     PushCoreConfig cfg{};
     cfg.structSize = sizeof(cfg); cfg.abiVersion = PUSHCORE_ABI_VERSION;
     cfg.pushfpsDir = pushfps.c_str();
+    if (shaderDir.empty()) {
+        wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const auto own = std::filesystem::path(exe).parent_path().parent_path() / L"shaders";
+        std::error_code ec;
+        if (std::filesystem::exists(own / L"VfgFourierMellin.dxil", ec)) shaderDir = own.wstring();
+    }
+    if (!shaderDir.empty()) cfg.shaderDir = shaderDir.c_str();
+    std::cout << "shaders " << (shaderDir.empty() ? utf8(pushfps) + "\\shaders" : utf8(shaderDir)) << "\n";
     cfg.dataDir = haveData ? data.c_str() : nullptr;
     cfg.logFile = logFile.c_str();
     cfg.sr = sr; cfg.fg = fgOpt; cfg.multiplier = mult; cfg.vfgQuality = -1;
