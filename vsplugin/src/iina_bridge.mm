@@ -273,6 +273,7 @@ bool Feed(Bridge& b, AVFrame* f)
         else { b.mode = Bridge::Mode::Pass; Log("pass-through: %s", b.why.c_str()); return false; }
     }
     if (b.mode == Bridge::Mode::Pass) return false;
+    const int64_t inPts = f->pts;
     const bool contiguous = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE && f->pts > b.lastPts &&
                             (b.prevPts == AV_NOPTS_VALUE || f->pts - b.lastPts <= 3 * std::max<int64_t>(1, b.lastPts - b.prevPts));
     const int64_t step = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE ? f->pts - b.lastPts : 0;
@@ -310,7 +311,7 @@ bool Feed(Bridge& b, AVFrame* f)
         if (o) { g_av.frame_copy_props(o, f); g_av.frame_move_ref(o, f); o->duration = b.port->HavePair() ? dur : o->duration; b.out.push_back(o); }
     }
     b.prevPts = b.lastPts;
-    b.lastPts = f->pts;
+    b.lastPts = inPts;   // (f may have been moved into the output queue)
     b.produced = b.in;
     return true;
 }

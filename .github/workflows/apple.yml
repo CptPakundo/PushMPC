@@ -419,6 +419,8 @@ jobs:
           # mode, and this encode test takes the helper's own path
           export VSSCRIPT_PATH=$(sed -n 's/^local lib = "\(.*\)"$/\1/p' "$helper")
           echo "VSSCRIPT_PATH from the helper: $VSSCRIPT_PATH"
+          # x2 fixed: Auto's CPU budget can pick x1 on a slow 3-core VM (the portable fallback runs here)
+          mkdir -p "$HOME/.config/pushmpc"; printf 'Smoother=2\n' >> "$HOME/.config/pushmpc/settings.ini"
           MPV_HOME="$HOME/.config/mpv" mpv "$clip" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v 2>&1 | tail -40
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"

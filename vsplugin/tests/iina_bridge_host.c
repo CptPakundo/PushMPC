@@ -39,7 +39,7 @@ int main(int argc, char** argv)
     usleep(300000);
     char* st = p_mpv_get_property_string(h, "user-data/pushmpc/bridge");
     printf("bridge: %s\n", st ? st : "(not reported)");
-    const int active = st && !strcmp(st, "active");
+    const int active = st && strstr(st, "active") && !strstr(st, "off");   /* user-data strings come back JSON-quoted */
     if (st) p_mpv_free(st);
     puts("adding the marked filter and playing");
     const char* vf[] = { "vf", "add", "@pushmpc:lavfi=[null@pushmpc]", NULL };

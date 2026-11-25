@@ -40,7 +40,7 @@ async function bridge() {
     mpv.command("load-script", [path]);
     bridgeState = "loaded";
   }
-  const s = mpv.getString("user-data/pushmpc/bridge");
+  const s = (mpv.getString("user-data/pushmpc/bridge") || "").replace(/^"|"$/g, "");   // user-data comes back JSON-quoted
   if (s) bridgeState = s;
   return bridgeState;
 }
