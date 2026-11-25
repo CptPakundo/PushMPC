@@ -255,48 +255,46 @@ jobs:
           nm -D fakehw/pmnull_drv_video.so | grep vaDriverInit
           sudo chmod 666 /dev/dri/renderD128; ls -l /dev/dri
           LIBVA_DRIVERS_PATH=$PWD/fakehw LIBVA_DRIVER_NAME=pmnull vainfo --display drm --device /dev/dri/renderD128 || true
-      - name: Hardware-format cases (VA-API through VLC's DRM decoder; VDPAU under Xvfb)
+      - name: VDPAU cases (Ubuntu 24.04's VLC 3.0.20 decodes through VDPAU; it ships no VA-API decoder module)
         run: |
-          sudo chmod 666 /dev/dri/renderD128; ls -l /dev/dri/renderD128
           d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
-          export VLC=$(command -v vlc) PLUGDIR="$d" FAKEHW=$PWD/fakehw CLIP=art/clips/hwclip.mkv CLIP10=art/clips/hwclip10.mkv \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip.txt) SRC_FRAMES10=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip10.txt) \
-                 OUT=res/hw VDPAU=1 LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin), null VA-API / VDPAU drivers"
+          export VLC=$(command -v vlc) PLUGDIR="$d" FAKEHW=$PWD/fakehw CLIP=art/clips/hwclip.mkv \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip.txt) OUT=res/hw VDPAU=1 \
+                 CASES="vdp_base vdp_x4 vdp_x4_sync vdp_noput_x4 vdp_broken_x4" \
+                 LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin), null VDPAU driver"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-hw.sh
-      - name: Installer hardware self-test (passes on a working driver, keeps software decoding on a broken one)
+      - name: Installer hardware self-test through VDPAU (passes on the working driver, keeps software decoding on a broken one)
         if: always()
         run: |
           set -eu
-          sudo chmod 666 /dev/dri/renderD128
-          export LIBVA_DRIVERS_PATH=$PWD/fakehw LIBVA_DRIVER_NAME=pmnull
+          export VDPAU_DRIVER=pmnull VDPAU_DRIVER_PATH=$PWD/fakehw
           d=~/.local/share/pushmpc/vlc; st=$d/hw-selftest.txt; rc=~/.config/vlc/vlcrc
           rm -rf "$d"; mkdir -p ~/.config/vlc && printf '[core]\nvideo-filter=adjust\n[avcodec]\n#avcodec-hw=any\n' > $rc
           cp $rc /tmp/vlcrc.before
-          echo "--- install: VA-API (DRM) self-test with the working null driver"
-          sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target native --clip art/clips/hwclip.mkv
+          echo "--- install under Xvfb: the self-test passes through VDPAU"
+          xvfb-run -a sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target native --clip art/clips/hwclip.mkv
           cat $rc; cat $st
-          grep -q '^ok vaapi_drm' $st || { echo "::error::self-test did not pass"; tail -30 $d/pushmpc-selftest.log; exit 1; }
+          grep -q '^ok vdpau' $st || { echo "::error::VDPAU self-test did not pass"; tail -30 $d/pushmpc-selftest.log; exit 1; }
           ! grep -q '^avcodec-hw=none' $rc || { echo "::error::avcodec-hw=none left after a passed self-test"; exit 1; }
           echo "--- a driver that loses uploads: the self-test fails, software decoding comes back"
-          PMNULL_BROKEN=1 sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
+          PMNULL_BROKEN=1 xvfb-run -a sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
           cat $st; grep -q '^failed' $st && grep -q '^avcodec-hw=none' $rc || { echo "::error::broken driver not caught"; exit 1; }
-          echo "--- no VA-API, VDPAU under Xvfb"
-          LIBVA_DRIVER_NAME=nonexistent VDPAU_DRIVER=pmnull VDPAU_DRIVER_PATH=$PWD/fakehw xvfb-run -a \
-            sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
-          cat $st; grep -q '^ok vdpau' $st || { echo "::error::VDPAU self-test did not pass"; tail -30 $d/pushmpc-selftest.log; exit 1; }
-          echo "--- no clip: skipped, nothing changed"
+          echo "--- no X (no VDPAU) and no VA-API decoder: nothing proven, software decoding stays"
+          sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
+          cat $st; grep -q '^failed' $st && grep -q '^avcodec-hw=none' $rc || { echo "::error::no-decoder case changed settings"; exit 1; }
+          echo "--- no clip: skipped"
           sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip /nonexistent.mkv
           sh vlcplugin/install/pushmpc-vlc.sh uninstall --target native
           cat $rc
           diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' $rc | grep .) && echo "vlcrc restored (active settings)"
           [ ! -e $st ] && echo "state removed"
-      - name: Other distros' VLC with the null VA-API driver (Debian 12 3.0.21, Debian 13 t64, Ubuntu 22.04 3.0.16)
+      - name: VA-API in distro VLCs with a VA-API decoder (Debian 12 3.0.21 all cases + the installer self-test; Debian 13, Ubuntu 22.04 3.0.16)
         if: always()
         run: |
           set -u; bad=0; sudo chmod 666 /dev/dri/renderD128
           for img in debian:12 debian:13 ubuntu:22.04; do
-            l=$(echo "$img" | tr -d ':.')
-            docker run --rm --device /dev/dri/renderD128 -v "$PWD":/w -w /w "$img" bash vlcplugin/tests/run-hw-distro.sh "$l" || bad=1
+            l=$(echo "$img" | tr -d ':.'); mode=subset; [ "$img" = debian:12 ] && mode=full
+            docker run --rm --device /dev/dri/renderD128 -v "$PWD":/w -w /w "$img" bash vlcplugin/tests/run-hw-distro.sh "$l" $mode || bad=1
             cat res/hw-$l/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           done
           exit $bad

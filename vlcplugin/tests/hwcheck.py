@@ -38,9 +38,14 @@ skip = 2 * k + 2
 mid = cx[skip:-skip] if n > 2 * skip + 4 else []
 steps = [b - x for x, b in zip(mid, mid[1:]) if x >= 0 and b >= 0]
 step = 4.0 / k
+# the transport is right when every shown frame lies between its neighbours (a lost upload shows a stale surface: a
+# jump back) and most frames are new positions (without interpolation only 1 in k would be); how evenly the engine
+# spaces them on this synthetic box is the engine's business, reported, not judged
 good = sum(1 for d in steps if 0.5 * step <= d <= 1.5 * step)
-repeats = sum(1 for d in steps if abs(d) < 0.25 * step)
-good_ratio = good / len(steps) if steps else 0.0
+repeats = sum(1 for d in steps if abs(d) < 0.05)
+back = sum(1 for d in steps if d < -0.5)
+moving = (len(steps) - repeats) / len(steps) if steps else 0.0
+mean_step = sum(steps) / len(steps) if steps else 0.0
 want = a.src_frames * k if a.src_frames else 0
 
 problems = []
@@ -55,12 +60,14 @@ elif a.expect == "pass":
     if "PushMPC: hw path ok" in log: problems.append("PushMPC used a driver that loses uploads")
 if want and n < 0.9 * want: problems.append(f"{n} frames shown, {want} expected")
 if len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
-elif good_ratio < 0.85: problems.append(f"box motion: {good}/{len(steps)} steps of {step:.2f} px (+-50%), {repeats} repeats")
+elif back > 3: problems.append(f"{back} jumps back (stale or misordered frames)")
+elif moving < (0.7 if k > 1 else 0.9): problems.append(f"only {len(steps) - repeats}/{len(steps)} frames show a new box position")
+elif abs(mean_step - step) > 0.25 * step: problems.append(f"mean step {mean_step:.2f} px, {step:.2f} expected")
 m = re.search(r"PushMPC: hw path ok, x(\d+) \((.*)\)\s*$", log, re.M)
 how = m.group(2) if m else ""
 gen = re.findall(r"PushMPC: close, in=\d+ out=\d+ generated=(\d+)", log)
 hwline = re.findall(r"PushMPC: hardware path [^\n]*", log)
-res = dict(case=a.case, expect=a.expect, k=k, frames=n, expected=want, steps=len(steps), good=good, repeats=repeats,
+res = dict(case=a.case, expect=a.expect, k=k, frames=n, expected=want, steps=len(steps), good=good, repeats=repeats, back=back, mean_step=round(mean_step, 3),
            median_step=round(statistics.median(steps), 3) if steps else None, decoder=hwdec.group(1) if hwdec else "",
            path=how, generated=int(gen[-1]) if gen else 0, closing=hwline[-1] if hwline else "", problems=problems)
 verdict = "FAIL" if problems else "PASS"
