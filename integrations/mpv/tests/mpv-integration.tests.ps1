@@ -34,7 +34,11 @@ Run 'Install' $r | Out-Null
 $t = Read-PmText $conf
 Check $t.Bom 'BOM kept'
 Check ($t.Text.StartsWith($script:PmBegin)) 'block at the very top (global section)'
-Check ($t.Text.Contains("vf-append=@pushmpc:vapoursynth=file=[$($r.Replace('\','/'))/AppData/Local/PushMPC/vsplugin/pushmpc.vpy]:buffered-frames=4:concurrent-frames=2`r`n")) 'vf-append line with the bracket-quoted path, CRLF'
+$vpyP = "$($r.Replace('\','/'))/AppData/Local/PushMPC/vsplugin/pushmpc.vpy"; $luaP = $vpyP.Replace('pushmpc.vpy', 'pushmpc.lua')
+Check ($t.Text.Contains("scripts-append=$(Get-PmQuoted $luaP)`r`n")) 'scripts-append names pushmpc.lua next to pushmpc.vpy (%n% quoted), CRLF'
+Check ($t.Text.Contains("script-opts-append=pushmpc-vpy=$(Get-PmQuoted $vpyP)`r`n")) 'script-opts carry the pushmpc.vpy path'
+Check ($t.Text.Contains("script-opts-append=pushmpc-buffered=4`r`n") -and $t.Text.Contains("script-opts-append=pushmpc-concurrent=2`r`n")) 'script-opts carry the frame counts'
+Check (-not $t.Text.Contains('vf-append=')) 'no vf= line in mpv.conf (a filter that cannot start would stop all playback)'
 foreach ($l in 'hwdec=auto-copy', 'hr-seek-framedrop=no', 'interpolation=no') { Check ($t.Text.Contains("$l`r`n")) "block has $l" }
 Check ($t.Text.EndsWith($orig)) 'original content follows unchanged'
 Check (Test-Path "$conf.pushmpc-backup") 'backup written'
@@ -103,7 +107,7 @@ Check (-not ($rows | Where-Object Player -eq "SVP's mpv").Managed) "SVP's mpv de
 Check (-not ($rows | Where-Object { $_.Player -like 'mpv*' -and $_.Exe -like '*SMPlayer*' })) "SMPlayer's own mpv is not a separate mpv.conf target"
 Run 'Install' $r @{ RuntimeOnPath = $true } | Out-Null
 $line = (Get-Content $ini | Where-Object { $_ -like 'mplayer_additional_options=*' })
-Check ($line -like 'mplayer_additional_options=--volume-max=150 --vf-append=@pushmpc:vapoursynth=file=*--hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no') 'SMPlayer options appended after the user''s'
+Check ($line -like 'mplayer_additional_options=--volume-max=150 --scripts-append=*pushmpc.lua --script-opts-append=pushmpc-vpy=*--hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no') 'SMPlayer options appended after the user''s'
 Check ([IO.File]::ReadAllText("$r\user-path.txt") -eq "C:\Tools;$r\AppData\Local\PushMPC\vapoursynth") 'runtime folder added to the user PATH'
 Check (-not (Test-Path "$r\Program Files (x86)\SVP 4\mpv64\portable_config")) "SVP's mpv untouched"
 Run 'Uninstall' $r | Out-Null
@@ -112,7 +116,7 @@ Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'SMPlayer ini and PATH 
 [IO.File]::WriteAllText($ini, "[advanced]`r`nother=1`r`n")
 $before = Snapshot $r
 Run 'Install' $r | Out-Null
-Check ((Get-Content $ini) -contains 'other=1' -and ((Get-Content $ini) | Where-Object { $_ -like 'mplayer_additional_options=--vf-append*' })) 'key added to an existing [advanced]'
+Check ((Get-Content $ini) -contains 'other=1' -and ((Get-Content $ini) | Where-Object { $_ -like 'mplayer_additional_options=--scripts-append*' })) 'key added to an existing [advanced]'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'key removed again exactly'
 
@@ -125,7 +129,8 @@ Invoke-PmMpvIntegration -Action Install -Root $r -WhatIf | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) '-WhatIf changes nothing'
 Check (-not (Test-Path "$r\AppData\Local\PushMPC\mpv-integration.json")) '-WhatIf writes no state file'
 
-# 7. a script path with ']' uses mpv's %n% quoting
+# 7. a script path with ']' uses mpv's %n% quoting; config values with spaces are %n% quoted too
+Check ((Get-PmQuoted 'C:/My Videos/x.lua') -eq '%18%C:/My Videos/x.lua' -and (Get-PmQuoted 'C:/a/b.lua') -eq 'C:/a/b.lua') 'config values: plain when simple, %n% quoted otherwise'
 Check ((Get-PmVfOption 'C:\a]b\pushmpc.vpy' 4 2) -eq '@pushmpc:vapoursynth=file=%18%C:/a]b/pushmpc.vpy:buffered-frames=4:concurrent-frames=2') "a ']' in the path is length-quoted"
 
 # 8. mpv.net: installed (user config folder) and portable (portable_config next to mpvnet.exe)
@@ -192,7 +197,7 @@ $before = Snapshot $r
 Run 'Install' $r | Out-Null
 $j = Get-Content "$r\AppData\Roaming\jellyfin-mpv-shim\conf.json" -Raw | ConvertFrom-Json
 Check ($j.mpv_ext -eq $true -and $j.mpv_ext_path -eq "$r\Program Files\mpv\mpv.exe" -and $j.player_name -eq 'htpc') 'Jellyfin shim: external mpv set, other values kept'
-Check ((Read-PmText "$r\AppData\Roaming\jellyfin-mpv-shim\mpv.conf").Text -match 'vf-append=@pushmpc') 'Jellyfin shim mpv.conf has the block'
+Check ((Read-PmText "$r\AppData\Roaming\jellyfin-mpv-shim\mpv.conf").Text -match 'scripts-append=.*pushmpc\.lua') 'Jellyfin shim mpv.conf has the block'
 Check ((Get-Content "$r\AppData\Roaming\plex-mpv-shim\conf.json" -Raw | ConvertFrom-Json).mpv_ext -eq $true) 'Plex shim: external mpv set'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'shims restored byte for byte'
@@ -263,11 +268,51 @@ Check (($rows | Where-Object Player -eq 'Kodi').Result -eq 'skipped') 'failing V
 Check (-not (Test-Path "$r\AppData\Roaming\mpv\mpv.conf")) 'failing VapourSynth: no mpv.conf written'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'failing VapourSynth: nothing left behind'
+# 16. Plex for Windows / Plex HTPC tier A: gate on the libmpv's strings and the GPU; block = pushmpc.lua in vsr mode
+$r = New-Root; $roots += $r
+New-Item -ItemType Directory "$r\Program Files\Plex\Plex", "$r\Program Files\Plex\Plex HTPC", "$r\AppData\Local\Plex" -Force | Out-Null
+[IO.File]::WriteAllText("$r\Program Files\Plex\Plex\libmpv-2.dll", 'MZ ... d3d11vpp ... scaling-mode ... mp.options ...')
+[IO.File]::WriteAllText("$r\Program Files\Plex\Plex HTPC\libmpv-2.dll", 'MZ ... old libmpv ...')
+[IO.File]::WriteAllText("$r\AppData\Local\Plex\mpv.conf", "glsl-shaders-append=C:/x.glsl`r`n")
+$env:PUSHMPC_GPU_VENDOR = 'NVIDIA GeForce RTX 5090'
+$before = Snapshot $r
+$rows = Run 'Install' $r
+$pc = "$r\AppData\Local\Plex\mpv.conf"; $pt = (Read-PmText $pc).Text
+Check (($rows | Where-Object Player -eq 'Plex for Windows').Result -eq 'installed') 'Plex for Windows (new libmpv, NVIDIA): installed'
+Check ($pt -match 'script-opts-append=pushmpc-mode=vsr' -and $pt -match 'pushmpc-scaling=nvidia' -and $pt -match 'scripts-append=.*pushmpc\.lua' -and $pt -notmatch 'vf-append' -and $pt.EndsWith("glsl-shaders-append=C:/x.glsl`r`n")) 'Plex: VSR through pushmpc.lua, the user''s lines kept'
+Check (($rows | Where-Object Player -eq 'Plex HTPC').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'Plex HTPC').Note -match 'scaling-mode') 'Plex HTPC with an old libmpv: not changed, says why'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Plex: restored byte for byte'
+$env:PUSHMPC_GPU_VENDOR = 'AMD Radeon RX 9070'
+$rows = Run 'Status' $r
+Check (-not ($rows | Where-Object Player -eq 'Plex for Windows').Managed) 'Plex with an AMD GPU: not changed (no d3d11vpp super resolution)'
+$env:PUSHMPC_GPU_VENDOR = ''
 # 12. Stremio detected, not changed
 $r = New-Root; $roots += $r
 New-Item -ItemType Directory "$r\AppData\Local\Programs\Stremio" -Force | Out-Null; [IO.File]::WriteAllText("$r\AppData\Local\Programs\Stremio\stremio-shell-ng.exe", 'fake')
+$sx = "$r\AppData\Local\Programs\Stremio\stremio-shell-ng.exe"
+[IO.File]::WriteAllText("$sx.version.txt", '5.0.27')
 $rows = Run 'Status' $r
-Check ((($rows | Where-Object Player -eq 'Stremio').Managed -eq $false) -and (($rows | Where-Object Player -eq 'Stremio').Note -match 'external player')) 'Stremio detected and explained, not changed'
+Check ((($rows | Where-Object Player -eq 'Stremio').Managed -eq $false) -and (($rows | Where-Object Player -eq 'Stremio').Note -match '5\.0\.28')) 'Stremio before 5.0.28: explained, not changed'
+# 5.0.28: no config file chosen -> PushMPC's own file, set in mpv-config.txt (no line end), restored exactly
+[IO.File]::WriteAllText("$sx.version.txt", '5.0.28')
+New-Item -ItemType Directory "$r\AppData\Roaming\Stremio" -Force | Out-Null
+$before = Snapshot $r
+$rows = Run 'Install' $r
+$txt = "$r\AppData\Roaming\Stremio\mpv-config.txt"; $own = "$r\AppData\Local\PushMPC\stremio\mpv.conf"
+Check (($rows | Where-Object Player -eq 'Stremio').Result -eq 'installed') 'Stremio 5.0.28 installed'
+Check ((Test-Path $txt) -and [IO.File]::ReadAllText($txt) -eq $own) 'mpv-config.txt names PushMPC''s own file, no line end'
+Check ((Read-PmText $own).Text -match 'scripts-append=.*pushmpc\.lua' -and (Read-PmText $own).Text -notmatch 'vf-append') 'Stremio config: the script, no vf line'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Stremio: mpv-config.txt and the own file gone again'
+# the user's own config file: the block goes there, the setting stays
+$uconf = "$r\User\stremio-mine.conf"; New-Item -ItemType Directory "$r\User" -Force | Out-Null; [IO.File]::WriteAllText($uconf, "volume=90`n")
+[IO.File]::WriteAllText($txt, $uconf)
+$before = Snapshot $r
+Run 'Install' $r | Out-Null
+Check ([IO.File]::ReadAllText($txt) -eq $uconf -and (Read-PmText $uconf).Text.StartsWith($script:PmBegin)) 'Stremio: block in the user''s config file, setting unchanged'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Stremio: user''s config file restored byte for byte'
 foreach ($x in $roots) { Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue }
 Write-Host "mpv-integration tests: $script:pass passed, $script:fail failed"
 exit $(if ($script:fail) { 1 } else { 0 })

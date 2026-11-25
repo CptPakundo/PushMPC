@@ -36,8 +36,12 @@
      search path); removed again only if this script added it.
    - Jellyfin Desktop 2.x: the block in %LOCALAPPDATA%\Jellyfin Desktop\profiles\<id>\mpv.conf (its libmpv comes from
      shinchiro's builds, with VapourSynth).
-  Detected but not changed: SVP's own mpv (SVP manages it); Stremio 5 (its mpv sets the vf property itself whenever the
-  display state changes, which drops any configured filter: use Stremio's "external player" with mpv, see
+   - Stremio 5.0.28 and newer: its official "mpv config file" setting (%APPDATA%\Stremio\mpv-config.txt holds the
+     path). Empty: PushMPC's own %LOCALAPPDATA%\PushMPC\stremio\mpv.conf (the block alone) is set there; a file the
+     user chose: the block goes into it. pushmpc.lua adds the filter again after every vf reset by Stremio and removes
+     Stremio's d3d11vpp while PushMPC's filter runs. mpv-config.txt is backed up and restored exactly.
+  Detected but not changed: SVP's own mpv (SVP manages it); Stremio before 5.0.28 (no config file setting: use mpv as
+  the external player, see
   docs\players-mpv.md).
   -Root: every folder (APPDATA, LOCALAPPDATA, Program Files, the user PATH) is taken under this fake root and PATH is
   not searched: the tests use it.
@@ -90,8 +94,25 @@ function Get-PmVfOption([string]$ScriptPath, [int]$Buffered, [int]$Concurrent) {
     $q = if ($p.Contains(']')) { '%' + $p.Length + '%' + $p } else { "[$p]" }
     return "@pushmpc:vapoursynth=file=${q}:buffered-frames=${Buffered}:concurrent-frames=${Concurrent}"
 }
-function Get-PmBlock([string]$ScriptPath, [int]$Buffered, [int]$Concurrent, [string]$Nl) {
-    $lines = @($script:PmBegin, "vf-append=$(Get-PmVfOption $ScriptPath $Buffered $Concurrent)", 'hwdec=auto-copy', 'hr-seek-framedrop=no', 'interpolation=no', $script:PmEnd)
+# a value for mpv's config files and key-value lists: plain when it is simple, else %n% (UTF-8 byte length) quoted
+function Get-PmQuoted([string]$v) {
+    if ($v -match '^[A-Za-z0-9_./:\-]+$') { return $v }
+    return '%' + [Text.Encoding]::UTF8.GetByteCount($v) + '%' + $v
+}
+# pushmpc.lua sits next to pushmpc.vpy (the vsplugin component installs both)
+function Get-PmLuaPath([string]$ScriptPath) { (Join-Path (Split-Path -Parent $ScriptPath) 'pushmpc.lua').Replace('\', '/') }
+# The block names pushmpc.lua, which adds the filter with "vf append" once video runs: a filter that cannot start then
+# only logs a warning, where a vf= line would stop all playback (for every player that reads this mpv.conf, legacy
+# Emby Theater included), and hosts that reset vf (Stremio) get it back. -Direct: the vf line itself, for hosts that
+# take options after start-up and load no scripts then (MPC-QT's options file).
+function Get-PmBlock([string]$ScriptPath, [int]$Buffered, [int]$Concurrent, [string]$Nl, [switch]$Direct) {
+    if ($Direct) { $mid = @("vf-append=$(Get-PmVfOption $ScriptPath $Buffered $Concurrent)") }
+    else {
+        $mid = @("scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath))",
+                 "script-opts-append=pushmpc-vpy=$(Get-PmQuoted $ScriptPath.Replace('\', '/'))",
+                 "script-opts-append=pushmpc-buffered=$Buffered", "script-opts-append=pushmpc-concurrent=$Concurrent")
+    }
+    $lines = @($script:PmBegin) + $mid + @('hwdec=auto-copy', 'hr-seek-framedrop=no', 'interpolation=no', $script:PmEnd)
     return ($lines -join $Nl) + $Nl
 }
 # the block's span in the text: start index and length (including its trailing newline), or $null
@@ -203,11 +224,30 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
                 Note = 'its bundled libmpv (shinchiro build) reads mpv.conf in the profile folder' }
         }
     }
+    # Plex for Windows / Plex HTPC (tier A): their libmpv has no VapourSynth, so no frame generation; RTX (or Intel)
+    # video super resolution through mpv's d3d11vpp, added by pushmpc.lua (soft failure), in their own mpv.conf
+    foreach ($pl in @(@{ Name = 'Plex for Windows'; Dir = "$($E.ProgramFiles)\Plex\Plex"; Conf = "$($E.LocalAppData)\Plex\mpv.conf" },
+                      @{ Name = 'Plex HTPC'; Dir = "$($E.ProgramFiles)\Plex\Plex HTPC"; Conf = "$($E.LocalAppData)\Plex HTPC\mpv.conf" })) {
+        $dll = "$($pl.Dir)\libmpv-2.dll"
+        if (-not (Test-Path -LiteralPath $dll)) { continue }
+        $g = Test-PmPlexLibmpv $dll
+        $vendor = Get-PmGpuScaling $E
+        $ok = $g.Ok -and $vendor
+        $found += [pscustomobject]@{ Player = $pl.Name; Exe = $dll; Kind = $(if ($ok) { 'plex' } else { 'none' }); Config = $(if ($ok) { $pl.Conf } else { '' }); Managed = [bool]$ok
+            Scaling = $vendor
+            Note = $(if ($ok) { "video super resolution ($vendor) through d3d11vpp; keep hardware decoding on in Plex. No frame generation: its libmpv has no VapourSynth" }
+                     elseif (-not $g.Ok) { "not changed: $($g.Why)" } else { 'not changed: d3d11vpp super resolution needs an NVIDIA RTX or Intel GPU' }) }
+    }
     foreach ($d in @("$($E.LocalAppData)\Programs\Stremio", "$($E.ProgramFiles)\Stremio")) {
         $exe = @('stremio-shell-ng.exe', 'stremio.exe') | ForEach-Object { "$d\$_" } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
         if (-not $exe) { continue }
-        $found += [pscustomobject]@{ Player = 'Stremio'; Exe = $exe; Kind = 'none'; Config = ''; Managed = $false
-            Note = "manual: Stremio resets mpv's video filters itself; play through mpv as the external player (docs\players-mpv.md)" }
+        # 5.0.28 added the mpv config file setting (stremio-shell-ng PR 115); older builds: by hand
+        $ver = $null
+        if ($E.Fake) { $vf = "$exe.version.txt"; if (Test-Path -LiteralPath $vf) { $ver = [version]([IO.File]::ReadAllText($vf).Trim()) } }
+        else { try { $fv = (Get-Item -LiteralPath $exe).VersionInfo; $ver = [version]("{0}.{1}.{2}" -f $fv.FileMajorPart, $fv.FileMinorPart, $fv.FileBuildPart) } catch { } }
+        $ok = $exe -like '*stremio-shell-ng.exe' -and $ver -and $ver -ge [version]'5.0.28'
+        $found += [pscustomobject]@{ Player = 'Stremio'; Exe = $exe; Kind = $(if ($ok) { 'stremio' } else { 'none' }); Config = $(if ($ok) { "$($E.AppData)\Stremio\mpv-config.txt" } else { '' }); Managed = [bool]$ok
+            Note = $(if ($ok) { "Stremio ${ver}: its mpv config file setting, with pushmpc.lua keeping the filter after Stremio's vf resets" } else { "manual: Stremio $(if ($ver) { $ver } else { '(version unknown)' }) has no mpv config file setting (5.0.28 and newer have it): update Stremio, or play through mpv as the external player (docs\players-mpv.md)" }) }
     }
     # one mpv.conf may serve several mpv installs: one target each
     $byConf = @{}
@@ -286,7 +326,7 @@ function Uninstall-PmMpvConf {
 
 # ------------------------------------------------------------------------------------------------ SMPlayer
 function Get-PmSmplayerFlags([string]$ScriptPath, [int]$Buffered, [int]$Concurrent) {
-    return "--vf-append=$(Get-PmVfOption $ScriptPath $Buffered $Concurrent) --hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no"
+    return "--scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath)) --script-opts-append=pushmpc-vpy=$(Get-PmQuoted $ScriptPath.Replace('\', '/')) --hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no"
 }
 # [advanced] mplayer_additional_options: line index and value (a missing section or key: -1)
 function Find-PmIniKey([string[]]$Lines, [string]$Section, [string]$Key) {
@@ -461,6 +501,84 @@ function Uninstall-PmMpcQt {
     $r1 = Uninstall-PmMpvConf (Get-PmMpcQtOwnFile $E)
     $r2 = Restore-PmJsonValues $Settings
     return "settings.json: $r2; options file: $r1"
+}
+
+# ------------------------------------------------------------------------------------------------ Plex (tier A)
+# The gate: Plex's libmpv-2.dll must know d3d11vpp's scaling-mode (mpv 0.38+) and carry Lua (pushmpc.lua adds the
+# filter softly; a vf= line that fails would stop playback). Read from the DLL's strings; nothing is loaded.
+function Test-PmPlexLibmpv([string]$Dll) {
+    try { $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Dll)) } catch { return [pscustomobject]@{ Ok = $false; Why = "cannot read $Dll" } }
+    if (-not $t.Contains('d3d11vpp') -or -not $t.Contains('scaling-mode')) { return [pscustomobject]@{ Ok = $false; Why = "its libmpv has no d3d11vpp scaling-mode (it came with mpv after 0.38)" } }
+    if (-not $t.Contains('mp.options')) { return [pscustomobject]@{ Ok = $false; Why = 'its libmpv has no Lua scripting' } }
+    return [pscustomobject]@{ Ok = $true; Why = '' }
+}
+# d3d11vpp's scaling-mode for this PC's GPU: nvidia (RTX VSR), intel, or '' (none). Fake roots: PUSHMPC_GPU_VENDOR.
+function Get-PmGpuScaling($E) {
+    $names = if ($E.Fake) { @("$env:PUSHMPC_GPU_VENDOR") } else { @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object Name) }
+    if ($names -match 'NVIDIA') { return 'nvidia' }
+    if ($names -match 'Intel') { return 'intel' }
+    return ''
+}
+function Get-PmPlexBlock([string]$ScriptPath, [string]$Scaling, [string]$Nl) {
+    $lines = @($script:PmBegin, "scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath))", 'script-opts-append=pushmpc-mode=vsr', "script-opts-append=pushmpc-scaling=$Scaling", $script:PmEnd)
+    return ($lines -join $Nl) + $Nl
+}
+
+# ------------------------------------------------------------------------------------------------ Stremio 5.0.28+
+function Get-PmStremioOwnFile($E) { "$($E.LocalAppData)\PushMPC\stremio\mpv.conf" }
+function Install-PmStremio {
+    [CmdletBinding(SupportsShouldProcess = $true)] param($E, [string]$Txt, [string]$Block)
+    $side = "$Txt.pushmpc-backup.json"; $backup = "$Txt.pushmpc-backup"; $absent = "$Txt.pushmpc-absent"
+    $own = Get-PmStremioOwnFile $E
+    $cur = if (Test-Path -LiteralPath $Txt) { [IO.File]::ReadAllText($Txt).Trim() } else { '' }
+    if ($cur -and $cur -ine $own) {
+        # the user's own mpv config file: the block goes into it, the setting stays
+        $w = @(Install-PmMpvConf $cur $Block)
+        if (-not (Test-Path -LiteralPath $side) -and $PSCmdlet.ShouldProcess($side, 'record the config file')) { [IO.File]::WriteAllText($side, (@{ userFile = $cur } | ConvertTo-Json)) }
+        return @($w) + "your Stremio mpv config file $cur got the block"
+    }
+    $w = @(Install-PmMpvConf $own $Block)
+    if ($cur -ine $own -and $PSCmdlet.ShouldProcess($Txt, "set Stremio's mpv config file to $own")) {
+        $dir = Split-Path -Parent $Txt
+        if (-not (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $absent)) {
+            if (Test-Path -LiteralPath $Txt) { [IO.File]::Copy($Txt, $backup, $true) }
+            elseif (Test-Path -LiteralPath $dir) { [IO.File]::WriteAllText($absent, 'file') }
+            else { New-Item -ItemType Directory -Path $dir -Force | Out-Null; [IO.File]::WriteAllText($absent, 'created-dir') }
+        }
+        # Stremio reads the whole file as the path: no line end
+        [IO.File]::WriteAllText($Txt, $own, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($side, (@{ own = $true; written = (Get-FileHash -LiteralPath $Txt -Algorithm SHA256).Hash } | ConvertTo-Json))
+    }
+    return $w
+}
+function Uninstall-PmStremio {
+    [CmdletBinding(SupportsShouldProcess = $true)] param($E, [string]$Txt)
+    $side = "$Txt.pushmpc-backup.json"; $backup = "$Txt.pushmpc-backup"; $absent = "$Txt.pushmpc-absent"
+    if (-not (Test-Path -LiteralPath $side)) { $r = Uninstall-PmMpvConf (Get-PmStremioOwnFile $E); return "own config file: $r" }
+    $s = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
+    if ($s.PSObject.Properties['userFile'] -and $s.userFile) {
+        $r = Uninstall-PmMpvConf $s.userFile
+        if ($PSCmdlet.ShouldProcess($side, 'remove')) { Remove-Item -LiteralPath $side }
+        return "your config file: $r"
+    }
+    $r = Uninstall-PmMpvConf (Get-PmStremioOwnFile $E)
+    $note = "own config file: $r"
+    if ((Test-Path -LiteralPath $Txt) -and (Get-FileHash -LiteralPath $Txt -Algorithm SHA256).Hash -eq $s.written) {
+        if (Test-Path -LiteralPath $backup) { if ($PSCmdlet.ShouldProcess($Txt, 'restore')) { [IO.File]::Copy($backup, $Txt, $true); Remove-Item -LiteralPath $backup } }
+        elseif (Test-Path -LiteralPath $absent) {
+            $how = [IO.File]::ReadAllText($absent)
+            if ($PSCmdlet.ShouldProcess($Txt, 'remove')) {
+                Remove-Item -LiteralPath $Txt; Remove-Item -LiteralPath $absent
+                $dir = Split-Path -Parent $Txt
+                if ($how -eq 'created-dir' -and -not (Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.FullName -ne $side })) { $rm = $dir }
+            }
+        }
+        $note += "; Stremio's mpv config setting put back"
+    } else { $note += "; Stremio's mpv config setting changed since: left as it is"; Remove-Item -LiteralPath $absent -ErrorAction SilentlyContinue }
+    if ($PSCmdlet.ShouldProcess($side, 'remove')) { Remove-Item -LiteralPath $side; if ((Get-Variable rm -ErrorAction SilentlyContinue) -and $rm -and -not (Get-ChildItem -LiteralPath $rm -Force)) { Remove-Item -LiteralPath $rm } }
+    $ownDir = Split-Path -Parent (Get-PmStremioOwnFile $E)
+    if ((Test-Path -LiteralPath $ownDir) -and -not (Get-ChildItem -LiteralPath $ownDir -Force)) { Remove-Item -LiteralPath $ownDir }
+    return $note
 }
 
 # ------------------------------------------------------------------------------------------------ Jellyfin / Plex MPV shims
@@ -648,8 +766,8 @@ function Invoke-PmMpvIntegration {
         'Status' {
             foreach ($p in $players) {
                 $installed = $false; $warn = @()
-                if ($p.Kind -eq 'mpvconf' -and (Test-Path -LiteralPath $p.Config)) { $txt = (Read-PmText $p.Config).Text; $installed = [bool](Find-PmBlock $txt); $warn = Get-PmConflicts $txt }
-                if ($p.Kind -in 'smplayer', 'mpcqt', 'shim') { $installed = Test-Path -LiteralPath "$($p.Config).pushmpc-backup.json" }
+                if ($p.Kind -in 'mpvconf', 'plex' -and (Test-Path -LiteralPath $p.Config)) { $txt = (Read-PmText $p.Config).Text; $installed = [bool](Find-PmBlock $txt); $warn = Get-PmConflicts $txt }
+                if ($p.Kind -in 'smplayer', 'mpcqt', 'shim', 'stremio') { $installed = Test-Path -LiteralPath "$($p.Config).pushmpc-backup.json" }
                 if ($p.Kind -eq 'kodi' -and (Test-Path -LiteralPath $p.Config)) { $installed = (Read-PmText $p.Config).Text.Contains($script:PmXmlBegin) }
                 $rows += [pscustomobject]@{ Player = $p.Player; Exe = $p.Exe; Config = $p.Config; Installed = $installed; Managed = $p.Managed
                     Backup = ($p.Config -and ((Test-Path -LiteralPath "$($p.Config).pushmpc-backup") -or (Test-Path -LiteralPath "$($p.Config).pushmpc-absent") -or (Test-Path -LiteralPath "$($p.Config).pushmpc-backup.json")))
@@ -662,7 +780,7 @@ function Invoke-PmMpvIntegration {
             $done = @()
             foreach ($p in $players) {
                 if (-not $p.Managed -or ($p.Kind -eq 'smplayer' -and $NoSmplayer)) { $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'skipped'; Note = $p.Note }; continue }
-                $procs = @{ mpcqt = 'mpc-qt'; shim = $(if ($p.Player -like 'Jellyfin*') { 'jellyfin-mpv-shim' } else { 'plex-mpv-shim' }); kodi = 'kodi' }
+                $procs = @{ stremio = 'stremio-shell-ng'; mpcqt = 'mpc-qt'; shim = $(if ($p.Player -like 'Jellyfin*') { 'jellyfin-mpv-shim' } else { 'plex-mpv-shim' }); kodi = 'kodi' }
                 if (-not $E.Fake -and $procs.ContainsKey($p.Kind) -and @(Get-Process -Name $procs[$p.Kind] -ErrorAction SilentlyContinue).Count) {
                     $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'skipped'; Note = "$($p.Player) is running (it rewrites its settings when it closes): close it and run the install again" }; continue
                 }
@@ -677,9 +795,11 @@ function Invoke-PmMpvIntegration {
                 switch ($p.Kind) {
                     'mpvconf' { $w = Install-PmMpvConf $p.Config $block }
                     'smplayer' { $w = Install-PmSmplayer $p.Config (Get-PmSmplayerFlags $ScriptPath $BufferedFrames $ConcurrentFrames) }
-                    'mpcqt' { $w = Install-PmMpcQt $E $p.Config $block }
+                    'mpcqt' { $w = Install-PmMpcQt $E $p.Config (Get-PmBlock $ScriptPath $BufferedFrames $ConcurrentFrames "`r`n" -Direct) }
                     'shim' { $w = Install-PmShim $p.Config $p.Exe $block }
                     'kodi' { $w = Install-PmKodi $p.Config $p.Exe }
+                    'stremio' { $w = Install-PmStremio $E $p.Config $block }
+                    'plex' { $w = Install-PmMpvConf $p.Config (Get-PmPlexBlock $ScriptPath $p.Scaling "`r`n") }
                 }
                 $done += [pscustomobject]@{ Kind = $p.Kind; Config = $p.Config }
                 $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'installed'; Note = (@($p.Note) + @($w)) -join '; ' }
@@ -714,6 +834,8 @@ function Invoke-PmMpvIntegration {
                     'mpcqt' { Uninstall-PmMpcQt $E $t.Config }
                     'shim' { Uninstall-PmShim $t.Config }
                     'kodi' { Uninstall-PmKodi $t.Config }
+                    'stremio' { Uninstall-PmStremio $E $t.Config }
+                    'plex' { Uninstall-PmMpvConf $t.Config }
                     default { 'unknown target kind' }
                 }
                 $rows += [pscustomobject]@{ Player = $t.Kind; Config = $t.Config; Result = $r; Note = '' }

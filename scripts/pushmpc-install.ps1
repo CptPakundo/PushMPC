@@ -1549,7 +1549,7 @@ function Stage-VsPlugin([string]$version) {
     if (Test-Path $v) { Remove-Item $v -Recurse -Force }
     if ($NoMpv) { Info 'vsplugin not staged (-NoMpv)'; return }
     $dll = if ($VsPluginDll) { $VsPluginDll } else { Join-Path $repo 'vsplugin\bin\pushmpc_vs.dll' }
-    $files = @($dll, (Join-Path $repo 'vsplugin\scripts\pushmpc.vpy'), (Join-Path $repo 'integrations\mpv\mpv-integration.ps1'), (Join-Path $here 'vapoursynth-pin.json'))
+    $files = @($dll, (Join-Path $repo 'vsplugin\scripts\pushmpc.vpy'), (Join-Path $repo 'integrations\mpv\mpv-integration.ps1'), (Join-Path $repo 'integrations\mpv\pushmpc.lua'), (Join-Path $here 'vapoursynth-pin.json'))
     $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
     if ($missing.Count) {
         Warn "vsplugin (the mpv route) not staged: missing $($missing -join ', ') (pushmpc_vs.dll is built by vsplugin\build.cmd once the VapourSynth SDK headers are in vsplugin\third_party\vapoursynth)"

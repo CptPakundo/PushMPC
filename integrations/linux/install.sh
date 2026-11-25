@@ -107,7 +107,9 @@ vf_option() {
     case $1 in *']'*) n=$(printf '%s' "$1" | wc -c | tr -d ' '); q="%$n%$1" ;; *) q="[$1]" ;; esac
     printf '@pushmpc:vapoursynth=file=%s:buffered-frames=4:concurrent-frames=2' "$q"
 }
-mpvconf() { sh "$mi" "$1" --conf "$2" --script "$3" $( [ "$dry" = 1 ] && echo --dry-run ) | sed 's/^/  /'; }
+mpvconf() { sh "$mi" "$1" --conf "$2" --script "$3" $( [ "$dry" = 1 ] && echo --dry-run ) ${4:-} | sed 's/^/  /'; }
+# a value for mpv's options: plain when simple, else %n% (byte length) quoted
+cfg_quote() { case $1 in *[!A-Za-z0-9_./:-]*) printf '%%%s%%%s' "$(printf '%s' "$1" | wc -c | tr -d ' ')" "$1" ;; *) printf '%s' "$1" ;; esac; }
 
 # ------------------------------------------------------------------------------------------------ detection
 native_mpv_vs() { have mpv && mpv --no-config --vf=help 2>/dev/null | grep -q vapoursynth; }
@@ -224,7 +226,7 @@ haruna_install() {
 haruna_revert() { haruna_strip "$1" > "$1.pushmpc-tmp" && mv "$1.pushmpc-tmp" "$1"; }
 
 # ------------------------------------------------------------------------------------------------ SMPlayer (ini)
-sm_flags() { printf -- '--vf-append=%s --hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no' "$(vf_option "$script")"; }
+sm_flags() { printf -- '--scripts-append=%s --script-opts-append=pushmpc-vpy=%s --hwdec=auto-copy --hr-seek-framedrop=no --interpolation=no' "$(cfg_quote "$plugdir/pushmpc.lua")" "$(cfg_quote "$script")"; }
 smplayer_install() {
     f=$cfg/smplayer/smplayer.ini
     [ -f "$f" ] || { say "  SMPlayer: start it once (it writes $f), then run this again"; return 0; }
@@ -253,11 +255,12 @@ mpcqt_install() {
     if [ -f "$f" ] && grep -q '"tweaksMpvOptionsFileChkBox": *true' "$f"; then
         path=$(sed -n 's/.*"tweaksMpvOptionsFilePath": *"\([^"]*\)".*/\1/p' "$f" | head -n 1)
         [ -n "$path" ] || path=$cfg/mpv/mpv.conf
-        if [ "$path" = "$qt_own" ]; then mpvconf install "$qt_own" "$script"; say "  MPC-QT: already set up"; return 0; fi
+        if [ "$path" = "$qt_own" ]; then mpvconf install "$qt_own" "$script" --direct; say "  MPC-QT: already set up"; return 0; fi
         say "  MPC-QT already reads $path: the block goes there"
-        mpvconf install "$path" "$script"; record "mpcqt-userfile|$path"; return 0
+        mpvconf install "$path" "$script" --direct; record "mpcqt-userfile|$path"; return 0
     fi
-    mpvconf install "$qt_own" "$script"; record "mpvconf|$qt_own"
+    # MPC-QT reads its options file after start-up, when no script can be loaded any more: the vf line itself
+    mpvconf install "$qt_own" "$script" --direct; record "mpvconf|$qt_own"
     backup_once "$f"
     [ "$dry" = 1 ] && { say "would: turn on MPC-QT's mpv options file ($qt_own)"; return 0; }
     if [ -f "$f" ] && grep -q '"tweaksMpvOptionsFileChkBox"' "$f"; then
@@ -360,6 +363,8 @@ copy_files() {
     for f in pushmpc_vs.so pushmpc.vpy; do [ -f "$src/vsplugin/$f" ] || { echo "install.sh: $src/vsplugin/$f is missing (run install.sh from the unpacked PushMPC folder)" >&2; exit 1; }; done
     run mkdir -p "$plugdir"
     run cp "$src/vsplugin/pushmpc_vs.so" "$src/vsplugin/pushmpc.vpy" "$plugdir/"
+    # pushmpc.lua adds the filter at run time (mpv.conf names it): next to pushmpc.vpy
+    for l in "$src/vsplugin/pushmpc.lua" "$src/pushmpc.lua" "$src/integrations/mpv/pushmpc.lua"; do [ -f "$l" ] && { run cp "$l" "$plugdir/pushmpc.lua"; break; }; done
     [ -f "$src/LICENSE" ] && run cp "$src/LICENSE" "$pm/"
     # the Linux NVIDIA backend (when this build has it): its self-test next to the plugin, its runtime fetcher in $pm
     [ -f "$src/vsplugin/pushmpc-nvvfx-selftest" ] && { run cp "$src/vsplugin/pushmpc-nvvfx-selftest" "$plugdir/"; run chmod 755 "$plugdir/pushmpc-nvvfx-selftest"; }

@@ -36,7 +36,7 @@ END_MARK='# <<< PushMPC managed'
 
 action=${1:-}
 [ $# -gt 0 ] && shift
-script=''; conf=''; buffered=4; concurrent=2; dry=0; extra=''
+script=''; conf=''; buffered=4; concurrent=2; dry=0; extra=''; direct=0
 while [ $# -gt 0 ]; do
     case $1 in
         --script) script=$2; shift 2 ;;
@@ -46,6 +46,7 @@ while [ $# -gt 0 ]; do
         --extra) extra="$extra$2
 "; shift 2 ;;
         --dry-run) dry=1; shift ;;
+        --direct) direct=1; shift ;;
         *) echo "mpv-integration.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -78,11 +79,26 @@ vf_option() {
     printf '@pushmpc:vapoursynth=file=%s:buffered-frames=%s:concurrent-frames=%s' "$q" "$buffered" "$concurrent"
 }
 # the block, with the file's line ending ($1 = crlf or lf)
+# a value for mpv's config files and key-value lists: plain when simple, else %n% (byte length) quoted
+cfg_quote() {
+    case $1 in
+        *[!A-Za-z0-9_./:-]*) printf '%%%s%%%s' "$(printf '%s' "$1" | wc -c | tr -d ' ')" "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
 block() {
     if [ "$1" = crlf ]; then nl=$(printf '\r\n_'); nl=${nl%_}; else nl='
 '; fi
     printf '%s%s' "$BEGIN_MARK" "$nl"
-    printf 'vf-append=%s%s' "$(vf_option)" "$nl"
+    if [ "$direct" = 1 ]; then
+        printf 'vf-append=%s%s' "$(vf_option)" "$nl"
+    else
+        # pushmpc.lua (next to pushmpc.vpy) adds the filter with "vf append" once video runs: a filter that cannot
+        # start only logs a warning instead of stopping all playback, and hosts that reset vf get it back
+        printf 'scripts-append=%s%s' "$(cfg_quote "$(dirname "$script")/pushmpc.lua")" "$nl"
+        printf 'script-opts-append=pushmpc-vpy=%s%s' "$(cfg_quote "$script")" "$nl"
+        printf 'script-opts-append=pushmpc-buffered=%s%sscript-opts-append=pushmpc-concurrent=%s%s' "$buffered" "$nl" "$concurrent" "$nl"
+    fi
     printf 'hwdec=auto-copy%shr-seek-framedrop=no%sinterpolation=no%s' "$nl" "$nl" "$nl"
     if [ -n "$extra" ]; then
         printf '%s' "$extra" | while IFS= read -r x; do [ -n "$x" ] && printf '%s%s' "$x" "$nl"; done

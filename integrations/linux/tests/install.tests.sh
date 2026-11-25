@@ -59,7 +59,7 @@ fresh() {
     PATH=$HOME/.stubbin:$REALPATH; export PATH
     MPV_VS=0; GS_SCHEMA=0; export MPV_VS GS_SCHEMA
     pkg=$HOME/pkg; mkdir -p "$pkg/vsplugin"
-    printf 'ELF-fake' > "$pkg/vsplugin/pushmpc_vs.so"; printf '# vpy' > "$pkg/vsplugin/pushmpc.vpy"
+    printf 'ELF-fake' > "$pkg/vsplugin/pushmpc_vs.so"; printf '# vpy' > "$pkg/vsplugin/pushmpc.vpy"; printf '%s' '-- lua' > "$pkg/vsplugin/pushmpc.lua"
     cp "$inst" "$pkg/install.sh"; cp "$mi" "$pkg/mpv-integration.sh"
     out=$HOME/out.txt
 }
@@ -86,18 +86,21 @@ check "1 plugin copied" test -f "$d/vsplugin/pushmpc_vs.so"
 check "1 vpy copied" test -f "$d/vsplugin/pushmpc.vpy"
 check "1 install.sh kept for uninstall" test -f "$d/install.sh"
 check "1 mpv.conf block on top" same "$(head -n 1 "$HOME/.config/mpv/mpv.conf")" '# >>> PushMPC managed: do not edit between these lines (PushMPC uninstall removes them)'
-check "1 mpv.conf vf line" has "vf-append=@pushmpc:vapoursynth=file=\[$d/vsplugin/pushmpc.vpy\]" "$HOME/.config/mpv/mpv.conf"
+check "1 mpv.conf names pushmpc.lua" has "^scripts-append=$d/vsplugin/pushmpc.lua" "$HOME/.config/mpv/mpv.conf"
+check "1 mpv.conf script-opts carry the vpy" has "^script-opts-append=pushmpc-vpy=$d/vsplugin/pushmpc.vpy" "$HOME/.config/mpv/mpv.conf"
+check "1 mpv.conf has no vf line" hasnot '^vf-append=' "$HOME/.config/mpv/mpv.conf"
+check "1 pushmpc.lua next to the vpy" test -f "$d/vsplugin/pushmpc.lua"
 check "1 Celluloid enabled" same "$(gsettings get io.github.celluloid-player.Celluloid mpv-config-enable)" true
 check "1 Celluloid file URI" same "$(gsettings get io.github.celluloid-player.Celluloid mpv-config-file)" "'file://$HOME/.config/mpv/mpv.conf'"
 check "1 Haruna vf command" has "^Command=vf append @pushmpc:vapoursynth=file=\[$d/vsplugin/pushmpc.vpy\]" "$HOME/.config/haruna/custom-commands.conf"
 check "1 Haruna user command kept" has '^Command=cycle pause' "$HOME/.config/haruna/custom-commands.conf"
 check "1 Haruna startup type" has '^Type=startup' "$HOME/.config/haruna/custom-commands.conf"
-check "1 SMPlayer flags appended" has '^mplayer_additional_options=--volume-max=150 --vf-append=@pushmpc' "$HOME/.config/smplayer/smplayer.ini"
+check "1 SMPlayer flags appended" has '^mplayer_additional_options=--volume-max=150 --scripts-append=.*pushmpc.lua --script-opts-append=pushmpc-vpy=' "$HOME/.config/smplayer/smplayer.ini"
 check "1 MPC-QT options file on" has '"tweaksMpvOptionsFileChkBox": true' "$HOME/.config/mpc-qt/settings.json"
 check "1 MPC-QT path = own file" has "\"tweaksMpvOptionsFilePath\": \"$d/mpc-qt-mpv.conf\"" "$HOME/.config/mpc-qt/settings.json"
 check "1 MPC-QT own file has the block" has 'vf-append=@pushmpc' "$d/mpc-qt-mpv.conf"
-check "1 Jellyfin shim mpv.conf" has 'vf-append=@pushmpc' "$HOME/.config/jellyfin-mpv-shim/mpv.conf"
-check "1 Jellyfin Desktop profile mpv.conf" has 'vf-append=@pushmpc' "$HOME/.local/share/jellyfin-desktop/profiles/p1/mpv.conf"
+check "1 Jellyfin shim mpv.conf" has 'scripts-append=.*pushmpc.lua' "$HOME/.config/jellyfin-mpv-shim/mpv.conf"
+check "1 Jellyfin Desktop profile mpv.conf" has 'scripts-append=.*pushmpc.lua' "$HOME/.local/share/jellyfin-desktop/profiles/p1/mpv.conf"
 check "1 Kodi player added" has '<player name="PushMPC mpv"' "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi uses mpv" has "<filename>$HOME/.stubbin/mpv</filename>" "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi VLC kept" has '<player name="VLC"' "$HOME/.kodi/userdata/playercorefactory.xml"
@@ -122,7 +125,7 @@ runi install; check "2 install exits 0" same $? 0
 check "2 native mpv reported without VapourSynth" has 'has no VapourSynth' "$out"
 check "2 native mpv.conf not created" test ! -e "$HOME/.config/mpv/mpv.conf"
 fc=$HOME/.var/app/io.mpv.Mpv/config/mpv/mpv.conf
-check "2 Flatpak mpv.conf has the block" has 'vf-append=@pushmpc' "$fc"
+check "2 Flatpak mpv.conf has the block" has 'scripts-append=.*pushmpc.lua' "$fc"
 check "2 Flatpak override for the plugin folder" has "filesystems=$HOME/.local/share/pushmpc:ro;" "$HOME/.local/share/flatpak/overrides/io.mpv.Mpv"
 check "2 Haruna untouched (system libmpv lacks VapourSynth)" same "$(cat "$HOME/.config/haruna/custom-commands.conf")" 'x=1'
 runi uninstall; check "2 uninstall exits 0" same $? 0
@@ -145,7 +148,7 @@ before=$(snap)
 runi install --flatpak yes; check "4 install exits 0" same $? 0
 check "4 Flathub remote added" test -f "$HOME/.fp-remote"
 check "4 Flathub mpv installed" test -f "$HOME/.fp-installed"
-check "4 Flatpak mpv.conf written" has 'vf-append=@pushmpc' "$HOME/.var/app/io.mpv.Mpv/config/mpv/mpv.conf"
+check "4 Flatpak mpv.conf written" has 'scripts-append=.*pushmpc.lua' "$HOME/.var/app/io.mpv.Mpv/config/mpv/mpv.conf"
 runi uninstall; check "4 uninstall exits 0" same $? 0
 check "4 Flathub mpv removed" test ! -e "$HOME/.fp-installed"
 check "4 Flathub remote removed" test ! -e "$HOME/.fp-remote"
