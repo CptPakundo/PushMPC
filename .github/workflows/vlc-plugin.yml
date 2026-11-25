@@ -327,13 +327,25 @@ jobs:
           d="$LOCALAPPDATA/PushMPC/vlc"
           export VLC_PLUGIN_PATH="$(cygpath -w "$d")"
           mkdir -p res/windows-d3d11fork
-          for mode in auto nis linear; do
-            timeout 60 "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio --play-and-exit --file-logging \
-              --logfile=res/windows-d3d11fork/$mode.log --log-verbose=2 --vout=pushmpc_d3d11 --pushmpc-d3d11-upscale=$mode \
-              --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 art/clips/clip720.mkv; echo "$mode: exit $?"
-            grep -hE "using vout display module|PushMPC NIS|Using .* scaler|upscale|Failed|error" res/windows-d3d11fork/$mode.log | sort | uniq -c | head -8
+          # WARP has no video decoder: d3d11va falls back after the output opened (a path real GPUs do not take), so these
+          # runs decode in software; the same runs with VLC's own direct3d11 output are the reference
+          for vout in pushmpc_d3d11:auto pushmpc_d3d11:nis pushmpc_d3d11:linear direct3d11:-; do
+            v=${vout%%:*}; mode=${vout#*:}; tag=$v-$mode
+            extra=""; [ "$mode" != - ] && extra="--pushmpc-d3d11-upscale=$mode"
+            for flt in none pp; do
+              fargs=""; [ $flt = pp ] && fargs="--video-filter=postproc:pushmpc_out --pushmpc-smoother=2"
+              timeout 60 "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio --play-and-exit --avcodec-hw=none \
+                --file-logging --logfile=res/windows-d3d11fork/$tag-$flt.log --log-verbose=2 --vout=$v $extra $fargs \
+                art/clips/clip720.mkv && rc=0 || rc=$?
+              echo "== $tag $flt: exit $rc"; echo "$tag-$flt $rc" >> res/windows-d3d11fork/rc.txt
+              grep -hE "using vout display module|PushMPC NIS|Using .* scaler|generated=" res/windows-d3d11fork/$tag-$flt.log | sort | uniq -c | head -5
+            done
           done
-          grep -q 'using vout display module "pushmpc_d3d11"' res/windows-d3d11fork/auto.log || { echo "::error::the fork did not open"; exit 1; }
+          cat res/windows-d3d11fork/rc.txt
+          grep -q 'using vout display module "pushmpc_d3d11"' res/windows-d3d11fork/pushmpc_d3d11-auto-none.log || { echo "::error::the fork did not open"; exit 1; }
+          ref=$(sed -n 's/^direct3d11---none //p' res/windows-d3d11fork/rc.txt); bad=""
+          while read -r t r; do case $t in pushmpc_d3d11-*) [ "$r" = 0 ] || [ "$r" = "$ref" ] || { echo "::error::$t exit $r (reference $ref)"; bad=1; } ;; esac; done < res/windows-d3d11fork/rc.txt
+          [ -z "$bad" ]
       - name: pushcore through pm_pushcore.dll (the stub core on WARP; 720p)
         run: |
           set -u
