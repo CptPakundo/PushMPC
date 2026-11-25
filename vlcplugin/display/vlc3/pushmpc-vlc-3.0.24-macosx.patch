@@ -34,3 +34,24 @@
  vlc_module_end ()
  
  /**
+@@ -501,6 +512,20 @@
+ 
+     NSOpenGLPixelFormat *fmt = [[NSOpenGLPixelFormat alloc] initWithAttributes:attribs];
+ 
++    /* PushMPC: no accelerated renderer (virtual machines): Apple's software renderer rather than no picture */
++    if (!fmt) {
++        NSOpenGLPixelFormatAttribute any[] =
++        {
++            NSOpenGLPFADoubleBuffer,
++            NSOpenGLPFAColorSize, 24,
++            NSOpenGLPFAAlphaSize, 8,
++            NSOpenGLPFADepthSize, 24,
++            NSOpenGLPFAAllowOfflineRenderers,
++            0
++        };
++        fmt = [[NSOpenGLPixelFormat alloc] initWithAttributes:any];
++    }
++
+     if (!fmt)
+         return nil;
+ 
