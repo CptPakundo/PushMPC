@@ -26,6 +26,11 @@
  * picture into a display-pool picture (one memcpy) and passes everything else through. The installer writes
  * video-filter=postproc:pushmpc_out; without pushmpc_out the multiplier is capped at x4.
  *
+ * Hardware-decoded video on Linux (VA-API, VDPAU): the filter keeps the hardware format on both sides, so VLC never
+ * has to convert back after the static chain (it cannot, for a filter that adds pictures). Real frames pass untouched;
+ * the engine reads a download of each source surface, and generated frames are uploaded into PushMPC's own surface
+ * pool on the decoder's device (pm_hw.c, with a round-trip check of the driver first; pass-through if it fails).
+ *
  * Licence: GPL-3.0-or-later.
  */
 #include <stdint.h>
@@ -40,6 +45,7 @@
 
 #include "pm_engine.h"
 #include "engine_pushcore.h"
+#include "pm_hw.h"
 
 double pm_display_hz(void);
 
@@ -98,9 +104,11 @@ typedef struct pm_job {
     int n;                      /* pictures to generate */
     int done;                   /* filled so far, in order */
     bool finished, cancel, contiguous;
+    bool failed[16];            /* hardware formats: the upload failed, show the real frame instead */
     picture_t *src;             /* the newest source frame (pushed to the engine by the worker) */
     picture_t *real;            /* the real frame shown before them (the fallback) */
     picture_t *outs[16];
+    picture_t *stage[16];       /* hardware formats: the CPU picture the engine writes, uploaded into outs[i] */
     float t[16];
 } pm_job;
 
@@ -120,7 +128,10 @@ static void JobRelease(pm_job *j)
     const int left = --j->refs;
     vlc_mutex_unlock(&j->lock);
     if (left) return;
-    for (int i = 0; i < j->n; i++) if (j->outs[i]) picture_Release(j->outs[i]);
+    for (int i = 0; i < j->n; i++) {
+        if (j->outs[i]) picture_Release(j->outs[i]);
+        if (j->stage[i]) picture_Release(j->stage[i]);
+    }
     if (j->src) picture_Release(j->src);
     if (j->real) picture_Release(j->real);
     vlc_cond_destroy(&j->cond);
@@ -163,6 +174,8 @@ static const int engine_values[] = { 0, 1, 2, 3 };
 static const char *const engine_texts[] = { "Auto", "Portable on the CPU", "pushcore (Windows)", "Portable on the GPU (Vulkan)" };
 static const int alloc_values[] = { 0, 1, 2 };
 static const char *const alloc_texts[] = { "Auto (VLC's allocator)", "Pool only (at most x4)", "Heap (unsafe with some displays)" };
+static const int hw_values[] = { 0, 1 };
+static const char *const hw_texts[] = { "Auto (keep the hardware format)", "Convert (VLC's converter)" };
 
 vlc_module_begin()
     set_shortname("PushMPC")
@@ -191,6 +204,11 @@ vlc_module_begin()
              "has until its display time (needs pushmpc_out after postproc).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
+    add_integer(CFG "hw", 0, "Hardware-decoded video (Linux)", "Auto keeps VA-API / VDPAU pictures on the GPU: real frames "
+                "pass untouched, generated frames go into PushMPC's own surfaces on the decoder's device, after a "
+                "round-trip check of the driver (pass-through if it fails). Convert hands them to VLC's converter "
+                "instead (VLC then often cannot show them).", true)
+        change_integer_list(hw_values, hw_texts)
 
     add_submodule()
     /* the submodule's first shortcut is its name: "postproc", the name VLC 3 puts into the static chain */
@@ -208,6 +226,9 @@ vlc_module_end()
 
 struct filter_sys_t {
     filter_chain_t *download;  /* hardware pictures (DX11, CVPX, ...) -> I420 / I0AL with VLC's own converters */
+    pm_hw *hw;                 /* Linux VA-API / VDPAU: the hardware format kept on both sides (pm_hw.h) */
+    bool hw_ready, hw_failed;
+    uint64_t hw_down_fail, hw_up_fail, hw_no_surface;
     pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
     uint64_t pc_errors, pc_routed, pc_unrouted;
     char pc_err[240];
@@ -234,6 +255,16 @@ struct filter_sys_t {
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
 static void PlanesIn(const picture_t *p, const video_format_t *f, int bps, pm_yuv *y);
 static void PlanesOut(picture_t *p, const video_format_t *f, int bps, pm_yuv_out *y);
+/* where generated picture i is written (hardware formats: a CPU picture, then uploaded into the job's surface) */
+static picture_t *JobDst(pm_job *j, int i) { return j->stage[i] ? j->stage[i] : j->outs[i]; }
+static void JobUpload(struct filter_sys_t *sys, pm_job *j, int i)
+{
+    if (!j->stage[i] || pm_hw_upload(sys->hw, j->stage[i], j->outs[i]) == 0) return;
+    sys->hw_up_fail++;
+    vlc_mutex_lock(&j->lock);
+    j->failed[i] = true;
+    vlc_mutex_unlock(&j->lock);
+}
 /* pushcore hands out generated frames by pts: route each into the job's picture with that time, in display order */
 typedef struct { struct filter_sys_t *sys; pm_job *j; bool filled[16]; pm_pc_out dst; } pc_route;
 static int RouteIndex(pc_route *r, int64_t pts100ns)
@@ -256,7 +287,7 @@ static const pm_pc_out *RouteDest(void *user, int64_t pts100ns)
     }
     r->sys->pc_routed++;
     pm_yuv_out o;
-    PlanesOut(r->j->outs[i], &r->sys->wfmt, r->sys->bps_w, &o);
+    PlanesOut(JobDst(r->j, i), &r->sys->wfmt, r->sys->bps_w, &o);
     for (int p = 0; p < 3; p++) { r->dst.data[p] = o.data[p]; r->dst.stride[p] = o.stride[p]; }
     return &r->dst;
 }
@@ -266,6 +297,7 @@ static void RouteDone(void *user, int64_t pts100ns)
     const int i = RouteIndex(r, pts100ns);
     if (i < 0) return;
     r->filled[i] = true;
+    JobUpload(r->sys, r->j, i);
     int run = 0;
     while (run < r->j->n && r->filled[run]) run++;
     vlc_mutex_lock(&r->j->lock);
@@ -313,8 +345,9 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
             vlc_mutex_unlock(&j->lock);
             if (stop || !pair) break;
             pm_yuv_out dst;
-            PlanesOut(j->outs[i], &sys->wfmt, sys->bps_w, &dst);
+            PlanesOut(JobDst(j, i), &sys->wfmt, sys->bps_w, &dst);
             pm_engine_generate(sys->eng, j->t[i], &dst);
+            JobUpload(sys, j, i);
             vlc_mutex_lock(&j->lock);
             j->done = i + 1;
             vlc_cond_broadcast(&j->cond);
@@ -414,11 +447,43 @@ static void PlanesOut(picture_t *p, const video_format_t *f, int bps, pm_yuv_out
 
 static picture_t *NewOut(filter_t *f, struct filter_sys_t *sys)
 {
+    /* hardware formats: a surface of PushMPC's own pool on the decoder's device */
+    if (sys->hw) {
+        picture_t *p = pm_hw_new_picture(sys->hw);
+        if (!p) { sys->hw_no_surface++; sys->alloc_fail++; }
+        return p;
+    }
     /* filter_NewPicture: the vout's private pool, or the heap once an interactive filter (pushmpc_out) follows */
     picture_t *p = sys->alloc == 2 ? picture_NewFromFormat(&f->fmt_out.video) : filter_NewPicture(f);
     if (!p) { sys->alloc_fail++; return NULL; }
     if (sys->alloc == 2) sys->heap_out++; else sys->pool_out++;
     return p;
+}
+
+/* hardware formats: the CPU copy of cur the engine reads (NULL: none; hw_failed says whether for good) */
+static picture_t *HwIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
+{
+    if (!sys->hw_ready) {
+        if (sys->hw_failed) return NULL;
+        char why[300] = "";
+        if (pm_hw_bind(sys->hw, cur, why, sizeof(why)) != 0) {
+            msg_Warn(f, "PushMPC: hardware path unavailable (%s): pass-through x1", why);
+            sys->hw_failed = true;
+            return NULL;
+        }
+        sys->wfmt = *pm_hw_work_format(sys->hw);
+        sys->hw_ready = true;
+        msg_Info(f, "PushMPC: hw path ok, x%d (%s)", sys->k, pm_hw_describe(sys->hw));
+    }
+    pm_hw_anchor(sys->hw, cur);
+    picture_t *c = pm_hw_cpu_picture(sys->hw);
+    if (!c || pm_hw_download(sys->hw, cur, c) != 0) {
+        if (c) picture_Release(c);
+        if (!sys->hw_down_fail++) msg_Warn(f, "PushMPC: a hardware surface could not be read");
+        return NULL;
+    }
+    picture_CopyProperties(c, cur);
+    return c;
 }
 
 static picture_t *Filter(filter_t *f, picture_t *cur)
@@ -431,6 +496,26 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     }
     if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
 
+    /* what the engine reads: cur itself, or for hardware formats a CPU copy of its surface */
+    picture_t *work = cur;
+    if (sys->hw) {
+        work = HwIn(f, sys, cur);
+        if (!work) {
+            WorkerIdle(sys, false);
+            if (sys->hw_failed) {   /* for good: pass-through (decided on the first picture, so nothing is held) */
+                sys->out++;
+                return cur;
+            }
+            /* this surface could not be read: show the real frame held so far, then start the pair over */
+            picture_t *p = sys->prev;
+            sys->prev = cur;
+            if (sys->eng) pm_engine_forget(sys->eng);
+            sys->restarts++;
+            if (p) { p->p_next = NULL; sys->out++; }
+            return p;
+        }
+    }
+
     const bool async = sys->worker_on && OutStages() > 0;
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
@@ -441,8 +526,12 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         const mtime_t dt = prev ? cur->date - prev->date : 0;
         const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
         pm_job *j = JobNew();
-        if (!j) { if (prev) { sys->out++; prev->p_next = NULL; } return prev; }
-        j->src = picture_Hold(cur);
+        if (!j) {
+            if (work != cur) picture_Release(work);
+            if (prev) { sys->out++; prev->p_next = NULL; }
+            return prev;
+        }
+        j->src = work == cur ? picture_Hold(cur) : work;
         j->contiguous = contiguous;
         picture_t *head = prev, *tail = prev;
         if (prev && contiguous) {
@@ -451,11 +540,14 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             for (int i = 0; i < sys->k - 1 && i < 16; i++) {
                 picture_t *o = NewOut(f, sys);
                 if (!o) break;
+                picture_t *st = NULL;
+                if (sys->hw && !(st = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
                 picture_CopyProperties(o, prev);
                 o->date = prev->date + dt * (i + 1) / sys->k;
                 o->b_force = false;
                 o->p_next = NULL;
                 j->outs[i] = picture_Hold(o);       /* the worker writes into it */
+                j->stage[i] = st;
                 j->t[i] = (float)(i + 1) / (float)sys->k;
                 j->n = i + 1;
                 if (async) {                        /* pushmpc_out waits for j->done >= i + 1 */
@@ -471,7 +563,21 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             prev->p_next = NULL;
         }
         if (async) Submit(sys, j);
-        else { RunJob(sys, j); JobRelease(j); }
+        else {
+            RunJob(sys, j);
+            /* inline: a hardware picture whose upload failed is taken out of the list */
+            for (int i = 0; i < j->n && sys->hw; i++) {
+                if (!j->failed[i]) continue;
+                for (picture_t *p = head; p && p->p_next; p = p->p_next)
+                    if (p->p_next == j->outs[i]) {
+                        p->p_next = j->outs[i]->p_next;
+                        j->outs[i]->p_next = NULL;
+                        picture_Release(j->outs[i]);   /* the list's reference; the job keeps its own */
+                        break;
+                    }
+            }
+            JobRelease(j);
+        }
         if (!prev) return NULL;
         for (picture_t *p = head; p; p = p->p_next) sys->out++;
         return head;
@@ -479,14 +585,16 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     WorkerIdle(sys, false);     /* synchronous mode below; the engine must not be shared */
 
     pm_yuv src;
-    PlanesIn(cur, &f->fmt_out.video, sys->bps, &src);
+    PlanesIn(work, &sys->wfmt, sys->bps, &src);
 
     picture_t *prev = sys->prev;
     sys->prev = cur;
     mtime_t dt = prev ? cur->date - prev->date : 0;
     const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
     char err[160] = "";
-    if (pm_engine_push(sys->eng, &src, contiguous, err, sizeof(err)) != 0) {
+    const int pushed = pm_engine_push(sys->eng, &src, contiguous, err, sizeof(err));
+    if (work != cur) picture_Release(work);        /* the engine keeps its own copy */
+    if (pushed != 0) {
         msg_Warn(f, "engine: %s", err);
         pm_engine_forget(sys->eng);
     }
@@ -504,10 +612,17 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         for (int j = 1; j < sys->k; j++) {
             picture_t *o = NewOut(f, sys);
             if (!o) break;
+            picture_t *dstpic = o;
+            if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
             picture_CopyProperties(o, prev);
             pm_yuv_out dst;
-            PlanesOut(o, &f->fmt_out.video, sys->bps, &dst);
+            PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
             pm_engine_generate(sys->eng, (float)j / (float)sys->k, &dst);
+            if (dstpic != o) {
+                const int up = pm_hw_upload(sys->hw, dstpic, o);
+                picture_Release(dstpic);
+                if (up != 0) { sys->hw_up_fail++; picture_Release(o); continue; }
+            }
             o->date = prev->date + dt * j / sys->k;
             o->b_force = false;
             o->p_next = NULL;
@@ -576,7 +691,12 @@ static int Open(vlc_object_t *obj)
     if (!sys) return VLC_ENOMEM;
     f->fmt_out.video = f->fmt_in.video;
     f->fmt_out.i_codec = f->fmt_in.i_codec;
-    if (!Supported(v->i_chroma, &bits)) {
+    /* Linux VA-API / VDPAU pictures: kept as they are on both sides (pm_hw.h); the converter route is the fallback */
+    if (pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
+        sys->hw = pm_hw_new(obj, v, 8);
+    if (sys->hw) {
+        msg_Dbg(f, "PushMPC: %4.4s kept as it is (generated frames go into PushMPC's own surfaces)", (const char *)&v->i_chroma);
+    } else if (!Supported(v->i_chroma, &bits)) {
         /* NV12 and hardware surfaces: convert in front of the engine with VLC's own converters (SetupDownload) */
         if (!SetupDownload(f, sys, &bits)) {
             msg_Dbg(f, "PushMPC: no converter from %4.4s", (const char *)&v->i_chroma);
@@ -600,10 +720,10 @@ static int Open(vlc_object_t *obj)
     sys->nominal_dt = fps > 0 ? (mtime_t)(CLOCK_FREQ / fps) : CLOCK_FREQ / 24;
     const int w = (int)v->i_visible_width, h = (int)v->i_visible_height;
 
-    sys->wfmt = f->fmt_out.video;
+    sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;
     sys->bps_w = sys->bps;
     const int engine = (int)OptInt(f, CFG "engine", 0);
-    if (engine == 0 || engine == 2) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
+    if (!sys->hw && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         memset(&pcc, 0, sizeof(pcc));
         pcc.abi = PM_PC_ABI;
@@ -652,9 +772,13 @@ static int Open(vlc_object_t *obj)
         snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
 
+    if (sys->hw) {
+        if (sys->k > 1) pm_hw_set_pool_size(sys->hw, 3 * sys->k + 4);   /* the job's pictures, those queued for display, a spare */
+        else { pm_hw_release(sys->hw); sys->hw = NULL; }
+    }
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
-    sys->wfmt = f->fmt_out.video;
+    sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;
     if ((sys->eng || sys->pc) && sys->k > 1 && OptInt(f, CFG "worker", 1)) {
         vlc_mutex_init(&sys->wlock);
         vlc_cond_init(&sys->wcond);
@@ -698,12 +822,18 @@ static void Close(vlc_object_t *obj)
                  sys->pc_errors, sys->pc_errors ? ", first: " : "", sys->pc_err);
         pmx_close(sys->pc);
     }
+    if (sys->hw) {
+        msg_Info(f, "PushMPC: hardware path %s: %s; surface read failures %" PRIu64 ", upload failures %" PRIu64
+                 ", no free surface %" PRIu64, sys->hw_ready ? "used" : sys->hw_failed ? "unavailable" : "not started",
+                 pm_hw_describe(sys->hw), sys->hw_down_fail, sys->hw_up_fail, sys->hw_no_surface);
+        pm_hw_release(sys->hw);
+    }
     if (sys->download) filter_chain_Delete(sys->download);
     free(sys);
 }
 
 /* ---------------------------------------------------------------- pushmpc_out (interactive chain) */
-typedef struct { uint64_t copied, passed, failed, waited, late; mtime_t wait_us; } out_sys_t;
+typedef struct { uint64_t copied, passed, failed, waited, late; mtime_t wait_us; bool opaque; } out_sys_t;
 
 static picture_t *FilterOut(filter_t *f, picture_t *p)
 {
@@ -718,10 +848,18 @@ static picture_t *FilterOut(filter_t *f, picture_t *p)
         if (job->done < idx) s->waited++;
         while (job->done < idx && !job->finished)
             if (vlc_cond_timedwait(&job->cond, &job->lock, deadline)) break;
-        const bool ready = job->done >= idx;
+        const bool ready = job->done >= idx && !job->failed[idx - 1];
         vlc_mutex_unlock(&job->lock);
         s->wait_us += mdate() - t0;
-        if (!ready) { from = job->real; s->late++; }  /* not made in time: the real frame instead */
+        if (!ready) { from = job->real; s->late++; }  /* not made in time (or not uploaded): the real frame instead */
+    }
+    if (s->opaque) {                      /* hardware surfaces (our own pool): no copy; a stand-in shares the real frame's */
+        picture_t *o = p;
+        if (from != p && (o = picture_Clone(job->real)) != NULL) { picture_CopyProperties(o, p); picture_Release(p); }
+        else if (!o) o = p;
+        if (job) JobRelease(job);
+        s->copied++;
+        return o;
     }
     picture_t *o = filter_NewPicture(f);  /* the last interactive filter allocates from the vout's private pool */
     if (!o) { s->failed++; if (job) JobRelease(job); return p; }
@@ -737,11 +875,14 @@ static int OpenOut(vlc_object_t *obj)
 {
     filter_t *f = (filter_t *)obj;
     const vlc_chroma_description_t *d = vlc_fourcc_GetChromaDescription(f->fmt_in.video.i_chroma);
-    if (!d || d->plane_count == 0 || f->fmt_in.video.i_chroma != f->fmt_out.video.i_chroma)
+    int hwbits;
+    const bool opaque = pm_hw_chroma(f->fmt_in.video.i_chroma, &hwbits);   /* VA-API / VDPAU: passed on, not copied */
+    if ((!opaque && (!d || d->plane_count == 0)) || f->fmt_in.video.i_chroma != f->fmt_out.video.i_chroma)
         return VLC_EGENERIC;
     out_sys_t *s = calloc(1, sizeof(*s));
     if (!s) return VLC_ENOMEM;
     f->p_sys = (void *)s;
+    s->opaque = opaque;
     f->pf_video_filter = FilterOut;
     vlc_mutex_lock(&reg_lock); out_stages++; vlc_mutex_unlock(&reg_lock);
     msg_Dbg(f, "PushMPC output stage on %4.4s", (const char *)&f->fmt_in.video.i_chroma);

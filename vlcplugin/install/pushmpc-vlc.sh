@@ -1,7 +1,9 @@
 #!/bin/sh
 # PushMPC for VLC 3.0.x: per-user install for Linux (native VLC and the Flathub VLC) and macOS (VLC.app). No root.
-#   pushmpc-vlc.sh install   [--plugin <libpushmpc_plugin.so|.dylib>] [--target auto|native|flatpak|macos]
+#   pushmpc-vlc.sh install   [--plugin <libpushmpc_plugin.so|.dylib>] [--target auto|native|flatpak|snap|macos]
+#                            [--no-hw-selftest] [--clip <test clip>]
 #   pushmpc-vlc.sh uninstall [--target ...]
+#   pushmpc-vlc.sh selftest-hw [--target ...] [--clip <test clip>]
 #   pushmpc-vlc.sh status
 # What install does:
 #   1. copies the plugin into a per-user folder (never into VLC's own folders, so VLC updates keep it):
@@ -15,20 +17,27 @@
 #        macOS         a LaunchAgent that runs launchctl setenv at login (and once now)
 #   3. switches it on in VLC's vlcrc (a backup is kept next to it as vlcrc.pushmpc-backup):
 #        [core]     video-filter gains postproc:pushmpc_out (the static-chain slot, then the output stage)
-#        [avcodec]  avcodec-hw=none on Linux: VLC 3 cannot hand VA-API/VDPAU pictures back to the display after a CPU
-#                   filter and would drop every filter; software decoding keeps PushMPC on
+#        [avcodec]  avcodec-hw=none on Linux to start with (software decoding always keeps PushMPC on)
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
+#   4. Linux: the hardware self-test. PushMPC keeps VA-API / VDPAU pictures on the GPU (its own surfaces on the
+#      decoder's device, after a round-trip check of the driver). The installer plays a 2 s clip
+#      (pushmpc-selftest.mkv, next to this script) headless through VA-API, then VDPAU, with PushMPC on; only when
+#      PushMPC reports its hardware path working and generating there does the user's own avcodec-hw setting come back
+#      (hardware decoding with PushMPC on). Otherwise software decoding stays: the automatic off switch. The result is
+#      kept in <plugin folder>/hw-selftest.txt; "selftest-hw" runs it again (e.g. after a driver update).
 # Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so a Lua interface script (pushmpc_boot.lua, lua-intf + extraintf=luaintf)
 # loads the plugin and hands it VLC's postproc slot after checking VLC's layout (or changes nothing). Switch it off in VLC:
 # Tools > Effects and Filters > Video Effects > Advanced > Post processing, or Preferences > PushMPC > Smoother: Off.
 set -eu
 
 ACTION="${1:-status}"; [ $# -gt 0 ] && shift
-PLUGIN=""; TARGET="auto"
+PLUGIN=""; TARGET="auto"; HWTEST=1; CLIP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --plugin) PLUGIN="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
+    --no-hw-selftest) HWTEST=0; shift ;;
+    --clip) CLIP="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -148,9 +157,63 @@ EOF
   say "PushMPC for VLC installed ($tgt): plugin in $DIR, settings in $RC"
 }
 
+# selftest_hw <target>: the hardware self-test (see the header). Never fails the install.
+selftest_hw() {
+  tgt="$1"; paths_for "$tgt"
+  [ "$tgt" = macos ] && return 0
+  clip="$CLIP"; [ -n "$clip" ] || clip="$here/pushmpc-selftest.mkv"
+  state="$DIR/hw-selftest.txt"
+  if [ ! -f "$clip" ]; then
+    say "hardware self-test ($tgt): no test clip next to the installer; software decoding stays on"
+    return 0
+  fi
+  cdir="$DIR"   # inside what the (confined) VLC may read and write for all three targets
+  mkdir -p "$cdir"; cp -f "$clip" "$cdir/pushmpc-selftest.mkv"
+  log="$cdir/pushmpc-selftest.log"
+  conf="$DIR/pushmpc.conf"
+  # the snap has no registered PushMPC options (the Lua bootstrap): x2 goes through its pushmpc.conf for the test
+  if [ "$tgt" = snap ]; then cp -f "$conf" "$conf.selftest" 2>/dev/null || : > "$conf.selftest"; printf 'smoother=2\n' >> "$conf"; fi
+  result="no hardware decoder took the clip"; ok=""
+  for hw in vaapi_drm vdpau; do
+    [ "$hw" = vdpau ] && [ -z "${DISPLAY:-}" ] && continue   # VLC's VDPAU decoder needs X11
+    rm -f "$log"
+    case "$tgt" in
+      native)  set -- env VLC_PLUGIN_PATH="$DIR" "${VLC_BIN:-vlc}" --pushmpc-smoother=2 ;;
+      flatpak) set -- flatpak run "$APPID" --pushmpc-smoother=2 ;;
+      snap)    set -- snap run vlc ;;
+    esac
+    rc=0
+    timeout 45 "$@" -I dummy --no-audio --play-and-exit --no-video-title-show --vout=dummy --avcodec-hw="$hw" \
+      --video-filter=postproc:pushmpc_out --file-logging --logfile="$log" --log-verbose=2 "$cdir/pushmpc-selftest.mkv" \
+      >/dev/null 2>&1 || rc=$?
+    [ -f "$log" ] || continue
+    grep -q "for hardware decoding" "$log" || continue
+    gen="$(sed -n 's/.*PushMPC: close, in=[0-9]* out=[0-9]* generated=\([0-9]*\).*/\1/p' "$log" | tail -1)"
+    if grep -q "PushMPC: hw path ok" "$log" && ! grep -q "hardware path unavailable" "$log" && [ "$rc" = 0 ] && [ "${gen:-0}" -gt 0 ]; then
+      ok="$hw"; result="$(grep -o 'PushMPC: hw path ok.*' "$log" | head -1)"; break
+    fi
+    result="$hw: $(grep -o 'hardware path unavailable.*' "$log" | head -1)"; [ "$rc" = 0 ] || result="$result (VLC exit $rc)"
+  done
+  [ "$tgt" = snap ] && mv -f "$conf.selftest" "$conf"
+  rm -f "$cdir/pushmpc-selftest.mkv"
+  if [ -n "$ok" ]; then
+    old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
+    # the user's own setting comes back (one that was already "none" stays: their choice)
+    if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi
+    printf 'ok %s %s\n%s\n' "$ok" "$(date -u +%Y-%m-%dT%H:%MZ 2>/dev/null)" "$result" > "$state"
+    say "hardware self-test ($tgt): passed through $ok; hardware decoding is on with PushMPC ($result)"
+  else
+    vlcrc_set "$RC" avcodec avcodec-hw none
+    printf 'failed %s\n%s\n' "$(date -u +%Y-%m-%dT%H:%MZ 2>/dev/null)" "$result" > "$state"
+    say "hardware self-test ($tgt): not passed ($result); software decoding stays on"
+  fi
+  return 0
+}
+
 uninstall_one() {
   tgt="$1"; paths_for "$tgt"
-  rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib"; rmdir "$DIR" 2>/dev/null || true
+  rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log"
+  rmdir "$DIR" 2>/dev/null || true
   case "$tgt" in
     native)
       rm -f "$HOME/.config/environment.d/60-pushmpc-vlc.conf"
@@ -181,7 +244,8 @@ uninstall_one() {
 if [ "$TARGET" = auto ]; then TARGETS="$(detect_targets)"; else TARGETS="$TARGET"; fi
 case "$ACTION" in
   install)   [ -n "$TARGETS" ] || { echo "no supported VLC found (distro VLC, Flathub org.videolan.VLC, VLC.app)" >&2; exit 1; }
-             for t in $TARGETS; do install_one "$t"; done ;;
+             for t in $TARGETS; do install_one "$t"; [ "$HWTEST" = 1 ] && [ "$OS" != Darwin ] && selftest_hw "$t"; done ;;
+  selftest-hw) for t in $TARGETS; do selftest_hw "$t"; done ;;
   uninstall) for t in ${TARGETS:-native flatpak macos}; do uninstall_one "$t"; done ;;
   status)    for t in $TARGETS; do paths_for "$t"; say "$t: plugin $(ls "$DIR"/libpushmpc_plugin.* 2>/dev/null || echo missing); video-filter=$(vlcrc_get "$RC" core video-filter)"; done ;;
   *) echo "usage: $0 install|uninstall|status [--plugin file] [--target auto|native|flatpak|macos]" >&2; exit 2 ;;

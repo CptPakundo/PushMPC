@@ -311,9 +311,19 @@ static void DumpDisplay(vout_display_t *vd, picture_t *pic, subpicture_t *sub)
             for (int x = 0; x < p->i_visible_pitch; x += 7)
                 sum = sum * 31 + p->p_pixels[(size_t)y * p->i_pitch + x];
     }
-    fprintf(sys->f, "%" PRIu64 ",%" PRId64 ",%" PRId64 ",%u,%u,%4.4s,%016" PRIx64 "\n", sys->n++, (int64_t)pic->date,
+    /* cx: the x centroid of the bright luma pixels (> 128), for the moving-box clips of the hardware-format tests */
+    double cx = -1.0;
+    if (pic->i_planes > 0 && pic->p[0].p_pixels && IsCpu8(pic->format.i_chroma)) {
+        const plane_t *p = &pic->p[0];
+        double sx = 0.0, cnt = 0.0;
+        for (int y = 0; y < p->i_visible_lines; y++)
+            for (int x = 0; x < p->i_visible_pitch; x++)
+                if (p->p_pixels[(size_t)y * p->i_pitch + x] > 128) { sx += x; cnt += 1.0; }
+        if (cnt > 0) cx = sx / cnt;
+    }
+    fprintf(sys->f, "%" PRIu64 ",%" PRId64 ",%" PRId64 ",%u,%u,%4.4s,%016" PRIx64 ",%.2f\n", sys->n++, (int64_t)pic->date,
             (int64_t)now, pic->format.i_visible_width, pic->format.i_visible_height,
-            (const char *)&pic->format.i_chroma, sum);
+            (const char *)&pic->format.i_chroma, sum, cx);
     picture_Release(pic);
     if (sub) subpicture_Delete(sub);
 }
@@ -344,7 +354,7 @@ static int OpenDump(vlc_object_t *obj)
     msg_Info(vd, "pushdump: writing %s, source %4.4s %ux%u", name, (const char *)&vd->fmt.i_chroma,
              vd->fmt.i_visible_width, vd->fmt.i_visible_height);
     free(name);
-    fprintf(sys->f, "n,date,shown,w,h,chroma,sum\n");
+    fprintf(sys->f, "n,date,shown,w,h,chroma,sum,cx\n");
     if (!IsCpu8(vd->fmt.i_chroma))
         vd->fmt.i_chroma = VLC_CODEC_I420; /* a CPU format; VLC converts (hardware surfaces are copied back) */
     vd->sys = sys;
