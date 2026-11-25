@@ -207,13 +207,13 @@ jobs:
           $r = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') install -From $from -Dest $dest -Opts 'smoother=2' -Hwdec no -Json | ConvertFrom-Json
           Write-Host "install: $($r | ConvertTo-Json -Compress)"
           if ($r.state -ne 'installed') { throw 'install failed' }
-          $clip = Join-Path $env:RUNNER_TEMP 't\clip.mkv'; $out = Join-Path $env:RUNNER_TEMP 't\native-install.mkv'
-          & (Join-Path $dest 'mpv.com') -v $clip "--o=$out" --of=matroska --ovc=ffv1 --no-audio 2>&1 | Select-String 'config file|pushmpc|User filter|portable' | Select-Object -First 12
+          # playback through the installed config (encode mode ignores it): mpv must see the x2 rate
+          $clip = Join-Path $env:RUNNER_TEMP 't\clip12.mkv'
+          & (Join-Path $from 'ffmpeg.exe') -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 $clip
           Get-Content (Join-Path $dest 'portable_config/mpv.conf') | Write-Host
-          $n = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $out
-          $src = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $clip
-          Write-Host "frames through the installed config: $n (source $src)"
-          if ([int]$n -lt 2 * [int]$src - 4) { throw 'the installed config did not double the frame rate' }
+          $log = & (Join-Path $dest 'mpv.com') --vo=null --ao=null --vo-null-fps=47.952 "--script=$((Resolve-Path mpvnative/tests/sync.lua).Path)" $clip 2>&1 | Out-String
+          $log -split "`n" | Select-String 'pushmpc' | Select-Object -First 4 | Write-Host
+          if ($log -notmatch 'after-seek: estimated-vf-fps=4[78]\.') { throw 'the installed config did not double the frame rate' }
           $s = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') status -Dest $dest -Json | ConvertFrom-Json
           Write-Host "status: $($s | ConvertTo-Json -Compress)"
           & pwsh -File (Join-Path $from 'pushmpc-native.ps1') uninstall -Dest $dest -Json

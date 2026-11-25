@@ -16,9 +16,11 @@ out=$(sh "$HERE/pushmpc-native.sh" install --from "$H" --target native --opts sm
 echo "$out" | grep -q '"state":"installed"' || fails=$((fails + 1))
 echo "$out" | grep -q 'rebound avfilter_get_by_name' || fails=$((fails + 1))
 head -4 "$XDG_CONFIG_HOME/mpv/mpv.conf"
-mpv -v "$T/clip.mkv" --o="$T/installed.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/installed.log" 2>&1
-grep -iE "config file|pushmpc|script|lavfi" "$T/installed.log" | head -12
-python3 "$HERE/../tests/check_frames.py" "$T/installed.mkv" $((1 + (n - 1) * 4)) 96000/1001 --tolerance 3 || { fails=$((fails + 1)); tail -15 "$T/installed.log"; }
+# playback through the installed config (encode mode would set load-scripts=no): mpv must see the x4 rate
+ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 "$T/clip12.mkv"
+mpv --vo=null --ao=null --vo-null-fps=95.904 --script="$HERE/../tests/sync.lua" "$T/clip12.mkv" > "$T/installed.log" 2>&1
+grep -E "pushmpc_hook|pushmpc-ci" "$T/installed.log" | head -4
+grep -q "after-seek: estimated-vf-fps=9[56]." "$T/installed.log" || { fails=$((fails + 1)); tail -15 "$T/installed.log"; }
 st=$(sh "$HERE/pushmpc-native.sh" status --target native --json); echo "status: $st"
 echo "$st" | grep -q '"state":"installed"' || fails=$((fails + 1))
 un=$(sh "$HERE/pushmpc-native.sh" uninstall --target native --json); echo "uninstall: $un"
