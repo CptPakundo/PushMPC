@@ -154,6 +154,11 @@ def start1(p):
     say("play plain", json.dumps(try_rpc("Player.Open", {"item": {"file": a.clip}})))
     say("plain playback:", wait_idle(p, 60))
     time.sleep(3)
+    # the single-entry playlist is played as one item whose path is the .m3u (dynpath = the clip): play it to its end
+    # once too, so the .m3u has a row in the files table (the measurement before playback needs one)
+    say("play m3u (no measurement yet)", json.dumps(try_rpc("Player.Open", {"item": {"file": m3u}})))
+    say("m3u playback:", wait_idle(p, 60))
+    time.sleep(3)
 
 
 def start2(p):
