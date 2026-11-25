@@ -1,0 +1,13 @@
+{
+  "note": "Sources the mpv-native CI builds from (git tags, checked against these commits after the clone). FFmpeg 9.1 is the first release with fruc_vulkan; mpv 0.42.0 needs libplacebo >= 7.387.0. ffmpegDistro is the source of Ubuntu 24.04's FFmpeg (6.1.1), for the runtime hook's per-version build.",
+  "ffmpeg": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n9.1", "commit": "74e4393595cf2b5857f0da925c4e0dd74ea306e5" },
+  "ffmpegDistro": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n6.1.1", "commit": "e38092ef9395d7049f871ef4d5411eb410e283e0" },
+  "mpv": { "repo": "https://github.com/mpv-player/mpv.git", "tag": "v0.42.0", "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3" },
+  "libplacebo": { "repo": "https://code.videolan.org/videolan/libplacebo.git", "tag": "v7.387.0", "commit": "275f7dea27924cdd34ab2e6c20e448b6bc4fab65" },
+  "vulkanHeaders": { "repo": "https://github.com/KhronosGroup/Vulkan-Headers.git", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2" },
+  "clip": {
+    "what": "Big Buck Bunny (c) Blender Foundation, CC BY 3.0; a 10 s 360p H.264 sample from test-videos.co.uk",
+    "url": "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
+    "sha256": "TODO"
+  }
+}

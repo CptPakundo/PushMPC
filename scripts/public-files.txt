@@ -44,3 +44,4 @@ integrations/mpv/**
 scripts/vapoursynth-pin.json
 scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
+mpvnative/**
