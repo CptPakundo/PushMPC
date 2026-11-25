@@ -2549,7 +2549,10 @@ function Install-VlcRoute($state) {
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if ($DryRun) { Dry "would run pushmpc-vlc.ps1 -Action Install -Plugin $d\libpushmpc_plugin.dll"; return $true }
     $pd = Join-Path $InstallDir 'vlc'
-    $out = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $d 'pushmpc-vlc.ps1') -Action Install -Plugin (Join-Path $d 'libpushmpc_plugin.dll') -PluginDir $pd 2>&1
+    # Windows PowerShell 5.1 turns a child's stderr into a terminating error under Stop: the child's messages are only reported
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $out = @(& $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $d 'pushmpc-vlc.ps1') -Action Install -Plugin (Join-Path $d 'libpushmpc_plugin.dll') -PluginDir $pd 2>&1 | ForEach-Object { "$_" })
+    $ErrorActionPreference = $eap
     $rc = $LASTEXITCODE
     foreach ($l in $out) { Info "VLC: $l" }
     # its installer stays beside the plugin (uninstall)
@@ -2564,7 +2567,9 @@ function Uninstall-VlcRoute($state) {
     if (-not (Test-Path -LiteralPath $s)) { Warn 'pushmpc-vlc.ps1 not found: VLC''s settings are not put back'; return }
     if ($DryRun) { Dry 'would run pushmpc-vlc.ps1 -Action Uninstall'; return }
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    foreach ($l in (& $ps -NoProfile -ExecutionPolicy Bypass -File $s -Action Uninstall -PluginDir $d 2>&1)) { Info "VLC: $l" }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    foreach ($l in @(& $ps -NoProfile -ExecutionPolicy Bypass -File $s -Action Uninstall -PluginDir $d 2>&1 | ForEach-Object { "$_" })) { Info "VLC: $l" }
+    $ErrorActionPreference = $eap
     if ((Test-Path -LiteralPath $d) -and -not @(Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object Name -ne 'pushmpc-vlc.ps1').Count) { Remove-Item -LiteralPath $d -Recurse -Force }
     $state.PSObject.Properties.Remove('vlcRoute')
 }
@@ -2739,7 +2744,7 @@ switch ($Action) {
         Step 'mpv, SMPlayer, MPC-QT, Stremio, Plex, Jellyfin, Kodi'
         Install-MpvRoute $state
         Step 'VLC'
-        $vlcOk = Install-VlcRoute $state
+        $vlcOk = $false; try { $vlcOk = Install-VlcRoute $state } catch { Warn "VLC: not set up ($($_.Exception.Message)); capture mode covers VLC" }
         Step 'PushFlow runtime for this GPU (pmml)'
         try { Install-PmmlRuntime $state } catch { Warn "PushFlow runtime: not installed ($($_.Exception.Message)); PushFlow runs on DirectML" }
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)

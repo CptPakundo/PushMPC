@@ -46,7 +46,7 @@ $Libmpv = @{
 }
 # Plex versions this swap was tested with (CI: the libmpv loads and plays through PushMPC's block); other versions keep
 # Plex's own library and get capture mode
-$Tested = @{ 'Plex HTPC' = @('1.71.*'); 'Plex for Windows' = @('1.10*.*', '1.11*.*') }
+$Tested = @{ 'Plex HTPC' = @('1.71.*'); 'Plex for Windows' = @('1.115.*') }
 $TaskPath = '\PushMPC\'; $TaskName = 'Plex libmpv check'
 $PlexDir = Join-Path $InstallDir 'plex'
 $StateFile = Join-Path $PlexDir 'plex.json'
