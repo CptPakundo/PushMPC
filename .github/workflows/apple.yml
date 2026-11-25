@@ -316,31 +316,40 @@ jobs:
   homebrew:
     if: inputs.jobs == 'all' || contains(inputs.jobs, 'homebrew')
     runs-on: macos-15
-    timeout-minutes: 45
+    # a green run takes about 4 min (bottles 1.5, the formula's own build 1, tests 1); 25 leaves room for a cold cache
+    timeout-minutes: 25
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
       HOMEBREW_NO_ANALYTICS: '1'
       HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+      HOMEBREW_NO_ENV_HINTS: '1'
+      # bottles only for every dependency (only pushmpc itself is built, from the local tap)
+      HOMEBREW_NO_BOTTLE_SOURCE_FALLBACK: '1'
       # a public 10 s 720p H.264 clip (Big Buck Bunny, CC BY 3.0, Blender Foundation)
       CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
       CLIP_SHA256: TODO-FIRST-RUN
     steps:
       - uses: actions/checkout@v4
+      # Homebrew's downloaded bottles and resources (ArtCNN files), the test clip; keyed on the formula, falling back to
+      # the newest cache of any formula version
       - uses: actions/cache@v4
         with:
           path: |
             ~/Library/Caches/Homebrew/downloads
+            ~/Library/Caches/Homebrew/api
             ${{ runner.temp }}/clip
-          key: brew-mpv-${{ runner.os }}-v1
+          key: brew-mpv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/homebrew/pushmpc.rb') }}
+          restore-keys: brew-mpv-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Homebrew mpv (bottles) and its VapourSynth
-        timeout-minutes: 15
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
           brew --version
-          brew install mpv
+          # everything the formula needs, as bottles, before the formula itself (so its build step only builds PushMPC)
+          brew install mpv ffmpeg vapoursynth cmake pkgconf
           brew deps mpv | grep -x vapoursynth
           brew info --json=v2 vapoursynth | python3 -c "import json,sys; f=json.load(sys.stdin)['formulae'][0]; print('vapoursynth', f['versions']['stable'], 'deps', f['dependencies'])"
           mpv --version | head -2
@@ -348,7 +357,7 @@ jobs:
           "$(brew --prefix vapoursynth)/bin/vspipe" --version
 
       - name: The formula from a local tap, built from the checkout's tarball
-        timeout-minutes: 20
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
