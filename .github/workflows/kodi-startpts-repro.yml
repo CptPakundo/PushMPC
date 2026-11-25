@@ -1,6 +1,6 @@
 # Stock-only reproduction of a Kodi bug for an upstream report: SeekTime(time, backwards) with startpts == nullptr
 # forwarded to an inputstream add-on (kodi-dev-kit ADDON_DemuxSeekTime dereferences *startpts).
-# Stock Kodi (official Windows builds, portable mode, WARP), stock inputstream.ffmpegdirect (bundled), testsrc clip.
+# Stock Kodi (official Windows builds, portable mode, WARP), stock inputstream.ffmpegdirect (official repository), testsrc clip.
 #   rc2     = 22.0 RC2 release
 #   nightly = newest official master nightly (has the content geometry measurement before playback)
 name: kodi-startpts-repro
@@ -10,6 +10,7 @@ on:
   push:
     # workflow_dispatch needs the file on the default branch; this branch-only push trigger runs it from here
     branches: ['ci/kodi-startpts-repro']
+    paths: ['.github/kodi-startpts/startpts_repro.py', '.github/kodi-startpts/fetch_addon.py']
 
 jobs:
   repro:
