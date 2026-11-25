@@ -1,5 +1,5 @@
 {
-  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin, players-all.md R1), and the packages the vsplugin CI workflows use. Resolved and hashed on GitHub's runners by .github/workflows/pins.yml (2026-11-23). An entry whose version, URL or SHA-256 says TODO is never downloaded.",
+  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin), and the packages the vsplugin CI workflows use. Resolved and hashed on GitHub's runners by .github/workflows/pins.yml (2026-11-23). An entry whose version, URL or SHA-256 says TODO is never downloaded.",
   "installDir": "%LOCALAPPDATA%\\PushMPC\\vapoursynth",
   "python": {
     "what": "Python embeddable package (amd64), PSF licence; VapourSynth R82's wheel is cp312-abi3 (Python 3.12 or newer), 3.12.10 is the last 3.12 with Windows binaries",

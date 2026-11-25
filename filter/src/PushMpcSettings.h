@@ -1,5 +1,5 @@
 // PushMPC's own settings (HKCU\Software\PushMPC). No PushFPS install is needed: the values map onto the settings
-// PushFPS's simple video page sets (pushcore builds the EnhancementSettings; see settings-and-runtime.md).
+// PushFPS's simple video page sets (pushcore builds the EnhancementSettings).
 //
 // Values (REG_SZ, absent = the default; case-insensitive):
 //   Enable           DWORD 1/0                       default 1

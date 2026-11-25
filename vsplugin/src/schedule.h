@@ -247,7 +247,7 @@ inline Reuse DecideReuse(bool haveCore, const CoreKey& cur, const CoreKey& next)
 
 // ------------------------------------------------------------------------------------------------ readback bandwidth
 // 4:4:4 readback above this (GB/s, one direction; mpv's re-upload costs the same again) goes 4:2:0 on the GPU first
-// (players-all.md section 3: 4K at <= 120 fps is fine in 4:4:4, 4K HDR at 240 is not).
+// (4K at <= 120 fps is fine in 4:4:4, 4K HDR at 240 is not).
 inline constexpr double kReadbackLimitGBs = 6.0;
 enum class Chroma { Auto = 0, C444 = 1, C420 = 2 };
 inline double ReadbackGBs(uint32_t w, uint32_t h, bool tenBit, bool c444, double outFps)
