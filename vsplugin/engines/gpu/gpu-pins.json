@@ -1,7 +1,7 @@
 {
   "note": "Pins of the portable GPU engine (vsplugin/engines/gpu). Vulkan-Headers and volk are fetched by CMake at configure time when -DPMVS_FETCH_GPU_DEPS=ON (CI); glslang compiles the shaders on CI (the SPIR-V in engines/gpu/spv is what it made, checked in for builds without glslang); MoltenVK is the Vulkan driver of the macOS CI job (users get it from Homebrew's molten-vk). Licences: Apache-2.0 / MIT (Vulkan-Headers), MIT (volk, NIS, FidelityFX), Apache-2.0 (MoltenVK), BSD-3 / Apache-2.0 (glslang, a build tool only); all GPL-3.0 compatible.",
-  "vulkanHeaders": { "repository": "KhronosGroup/Vulkan-Headers", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2", "url": "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz" },
-  "volk": { "repository": "zeux/volk", "tag": "vulkan-sdk-1.4.341.0", "commit": "d979819fd03de3a7606d6e23d6ff4968942599da", "url": "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz" },
+  "vulkanHeaders": { "repository": "KhronosGroup/Vulkan-Headers", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2", "url": "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz", "sha256": "7937d8ec21785736436d9ff52564db7d55992070b5ac98324472cce6e425a7ba" },
+  "volk": { "repository": "zeux/volk", "tag": "vulkan-sdk-1.4.341.0", "commit": "d979819fd03de3a7606d6e23d6ff4968942599da", "url": "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz", "sha256": "ff6facfca90161325a1f817c08c7edb6f892bd3bf4745449b735d7e13585ec4c" },
   "glslang": {
     "version": "16.6.0",
     "linux": { "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-linux-x86_64-release.tar.gz", "sha256": "2c34071f56ecf39d16233294d3739cf43f981fd39080f2fd9dccb782101191ce" },

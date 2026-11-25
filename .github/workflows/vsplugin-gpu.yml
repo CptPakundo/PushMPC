@@ -62,14 +62,14 @@ jobs:
           for n in vulkanHeaders volk; do
             url=$(j $n url); f="$d/$n.tar.gz"
             [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$url"
-            echo "$n $(j $n commit): sha256 $(sha256sum "$f" | cut -d' ' -f1)"
+            echo "$(j $n sha256)  $f" | sha256sum -c -
             mkdir -p "$d/$n" && tar -xzf "$f" -C "$d/$n" --strip-components=1
           done
           url=$(j glslang linux url); sha=$(j glslang linux sha256); f="$d/glslang.tar.gz"
           [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$url"
           echo "$sha  $f" | sha256sum -c -
           mkdir -p "$d/glslang" && tar -xzf "$f" -C "$d/glslang"
-          g=$(find "$d/glslang" -name glslangValidator -type f | head -1); chmod +x "$g"; "$g" --version | head -1
+          g=$(find "$d/glslang" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -path "*bin/glslang" | head -1); chmod +x "$g" || true; "$g" --version | head -1
           echo "VKH=$d/vulkanHeaders" >> "$GITHUB_ENV"; echo "VOLK=$d/volk" >> "$GITHUB_ENV"; echo "GLSLANG=$g" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
@@ -221,12 +221,13 @@ jobs:
           j() { python -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
           for n in vulkanHeaders volk; do
             f="$d/$n.tar.gz"; [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$(j $n url)"
+            echo "$(j $n sha256)  $f" | sha256sum -c -
             mkdir -p "$d/$n" && tar -xzf "$f" -C "$d/$n" --strip-components=1
           done
           f="$d/glslang.zip"; [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$(j glslang windows url)"
           echo "$(j glslang windows sha256)  $f" | sha256sum -c -
           mkdir -p "$d/glslang" && (cd "$d/glslang" && unzip -qo "$f")
-          g=$(find "$d/glslang" -name glslangValidator.exe | head -1)
+          g=$(find "$d/glslang" -name glslangValidator.exe | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -name glslang.exe | head -1)
           echo "VKH=$(cygpath -m "$d/vulkanHeaders")" >> "$GITHUB_ENV"; echo "VOLK=$(cygpath -m "$d/volk")" >> "$GITHUB_ENV"; echo "GLSLANG=$(cygpath -m "$g")" >> "$GITHUB_ENV"
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
@@ -261,13 +262,13 @@ jobs:
           set -euo pipefail
           d=$RUNNER_TEMP/deps; mkdir -p "$d"
           j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
-          for n in vulkanHeaders volk; do curl -fsSL --retry 3 -o "$d/$n.tar.gz" "$(j $n url)"; mkdir -p "$d/$n"; tar -xzf "$d/$n.tar.gz" -C "$d/$n" --strip-components=1; done
+          for n in vulkanHeaders volk; do curl -fsSL --retry 3 -o "$d/$n.tar.gz" "$(j $n url)"; echo "$(j $n sha256)  $d/$n.tar.gz" | shasum -a 256 -c -; mkdir -p "$d/$n"; tar -xzf "$d/$n.tar.gz" -C "$d/$n" --strip-components=1; done
           curl -fsSL --retry 3 -o "$d/glslang.tar.gz" "$(j glslang macos url)"; echo "$(j glslang macos sha256)  $d/glslang.tar.gz" | shasum -a 256 -c -
           mkdir -p "$d/glslang" && tar -xzf "$d/glslang.tar.gz" -C "$d/glslang"
           curl -fsSL --retry 3 -o "$d/mvk.tar" "$(j moltenvk url)"; echo "$(j moltenvk sha256)  $d/mvk.tar" | shasum -a 256 -c -
           mkdir -p "$d/mvk" && tar -xf "$d/mvk.tar" -C "$d/mvk"
           lib=$(find "$d/mvk" -name libMoltenVK.dylib | head -1); echo "MoltenVK: $lib"
-          g=$(find "$d/glslang" -name glslangValidator -type f | head -1); chmod +x "$g"
+          g=$(find "$d/glslang" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -path "*bin/glslang" | head -1); chmod +x "$g" || true
           echo "VKH=$d/vulkanHeaders" >> "$GITHUB_ENV"; echo "VOLK=$d/volk" >> "$GITHUB_ENV"; echo "GLSLANG=$g" >> "$GITHUB_ENV"; echo "PUSHMPC_VULKAN_LIBRARY=$lib" >> "$GITHUB_ENV"
       - name: Build
         timeout-minutes: 12
