@@ -45,7 +45,8 @@ typedef void (*pm_pc_done_fn)(void *user, int64_t pts100ns);
 /* NULL on failure (reason in err). *k = outputs per source frame pushcore will produce (1 = no frame generation) */
 __declspec(dllexport) pm_pc *pm_pc_open(const pm_pc_cfg *cfg, int *k, char *err, size_t errsize);
 __declspec(dllexport) int pm_pc_push(pm_pc *pc, const pm_pc_planes *src, int64_t pts100ns, int discontinuity, char *err, size_t errsize);
-/* hands out what pushcore has finished, waiting up to timeout_ms for the first frame; returns frames handed out or < 0 */
+/* hands out what pushcore has finished, waiting up to timeout_ms for the first frame; returns the number of frames
+ * polled (real and generated; real ones are returned to pushcore at once) or < 0 */
 __declspec(dllexport) int pm_pc_poll(pm_pc *pc, uint32_t timeout_ms, pm_pc_dest_fn dest, pm_pc_done_fn done, void *user, char *err, size_t errsize);
 __declspec(dllexport) int pm_pc_flush(pm_pc *pc);
 __declspec(dllexport) void pm_pc_close(pm_pc *pc);

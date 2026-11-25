@@ -262,11 +262,12 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
         for (int p = 0; p < 3; p++) { pl.data[p] = src.data[p]; pl.stride[p] = src.stride[p]; }
         if (pmx_push(sys->pc, &pl, (int64_t)j->src->date * 10, !j->contiguous, err, sizeof(err)) != 0) {
             if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "push: %s", err);
-        } else if (j->n > 0) {
-            /* collect until every picture is filled or the last one's display time has passed */
+        } else {
+            /* collect until every picture is filled or the last one's display time has passed, then take whatever else
+             * pushcore has finished (its real frames above all: they hold its queue until they are returned) */
             pc_route r = { .sys = sys, .j = j };
-            const mtime_t deadline = j->outs[j->n - 1]->date;
-            for (;;) {
+            const mtime_t deadline = j->n > 0 ? j->outs[j->n - 1]->date : 0;
+            while (j->n > 0) {
                 vlc_mutex_lock(&j->lock);
                 const bool stop = j->cancel || j->done >= j->n;
                 vlc_mutex_unlock(&j->lock);
@@ -276,6 +277,8 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
                     break;
                 }
             }
+            for (int guard = 0; guard < 64; guard++)
+                if (pmx_poll(sys->pc, 0, RouteDest, RouteDone, &r, err, sizeof(err)) <= 0) break;
         }
     } else {
         if (pm_engine_push(sys->eng, &src, j->contiguous, err, sizeof(err)) != 0)

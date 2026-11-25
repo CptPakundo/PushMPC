@@ -167,7 +167,7 @@ extern "C" int pm_pc_poll(pm_pc* pc, uint32_t timeout_ms, pm_pc_dest_fn dest, pm
     const bool ok = host.Poll(timeout_ms, out, e);
     pc->dest = nullptr; pc->done = nullptr; pc->user = nullptr;
     if (!ok) { SetErr(err, errsize, e); return -1; }
-    return pc->handed;
+    return int(out.size());   // every frame polled (real ones are returned to pushcore at once)
 }
 
 extern "C" int pm_pc_flush(pm_pc* pc)
