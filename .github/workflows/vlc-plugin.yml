@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3']
+    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   workflow_dispatch:
     inputs:
@@ -14,9 +14,13 @@ on:
         description: 'Also run the macOS job (10x minutes while the repo is private)'
         type: boolean
         default: false
+      macos_fsr:
+        description: 'macOS FSR output fork: on-screen pixel test in the runner GUI session (dispatch only)'
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -464,3 +468,42 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-macos, path: res, retention-days: 7 }
+
+  # dispatch only: PushMPC's macOS OpenGL output fork (pushmpc_macosx, FSR 1) against VLC's macosx output on the screen of
+  # the runner's logged-in GUI session
+  macos-fsr:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_fsr
+    runs-on: macos-15   # macos-14 is retired ("not supported")
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-src, key: vlc-src-3.0.24 }
+      - name: VLC.app (cask), the VLC 3 plugin headers (official SDK) and the VLC 3.0.24 sources (tarball, SHA-256 checked)
+        run: |
+          set -eu
+          brew install --cask vlc >/dev/null
+          brew install p7zip ninja >/dev/null 2>&1 || true
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64/$f"
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk/include" >/dev/null
+          cd "$GITHUB_WORKSPACE" && sh vlcplugin/display/vlc3/fetch-vlc-sources.sh ~/vlc-src
+      - name: Build pushmpc_macosx
+        run: |
+          set -eux
+          inc="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins"
+          cmake -S vlcplugin -B build -G Ninja -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DVLC_PLUGIN_INCLUDE="$inc"
+          cmake --build build --target pushmpc_macosx_plugin
+          mkdir -p out/mac && cp build/libpushmpc_macosx_plugin.dylib out/mac/ && codesign -s - -f out/mac/*.dylib
+          lipo -info out/mac/libpushmpc_macosx_plugin.dylib; file /Applications/VLC.app/Contents/MacOS/VLC
+      - name: On-screen pixel test (pushmpc_macosx off / FSR against VLC's macosx output)
+        run: |
+          d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
+          system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Resolution|Display Type" || true
+          VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" OUT=res/mac-pixel bash vlcplugin/display/tests/mac_pixel_test.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-macos-fsr, path: res, retention-days: 7 }

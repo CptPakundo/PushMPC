@@ -191,3 +191,23 @@ if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modul
     target_link_libraries(pushmpc_gl_plugin PRIVATE "${VLC_CORE_LIB}")
   endif()
 endif()
+
+# ---- macOS: PushMPC's fork of VLC 3.0.24's macOS OpenGL output (macosx.m + the same vout_helper patch as pushmpc_gl):
+# libpushmpc_macosx_plugin.dylib (vout=pushmpc_macosx), FSR 1 upscaling. It takes its window from VLC's macosx interface
+# (or a drawable-nsobject), like VLC's own macosx output.
+if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/macosx.m")
+  enable_language(OBJC)
+  set(MVO "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output")
+  add_library(pushmpc_macosx_plugin SHARED ${MVO}/macosx.m ${MVO}/opengl/vout_helper.c ${MVO}/opengl/fragment_shaders.c
+              ${MVO}/opengl/converter_sw.c ${MVO}/opengl/pm_glscale.c ${MVO}/opengl/pm_compat.c)
+  set_target_properties(pushmpc_macosx_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_macosx_plugin")
+  target_include_directories(pushmpc_macosx_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${MVO}" "${MVO}/opengl" "${MVO}/../../include")
+  # VLCOpenGLVideoView renamed: VLC's own macosx output defines the same Objective-C class in the same process
+  target_compile_definitions(pushmpc_macosx_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_macosx" HAVE_GL_CORE_SYMBOLS
+                             VLCOpenGLVideoView=PushMPCOpenGLVideoView
+                             GL_SILENCE_DEPRECATION "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
+  # strverscmp / sincosf: VLC takes them from its compat layer, which plugins built outside its tree do not have
+  target_compile_options(pushmpc_macosx_plugin PRIVATE -Wno-deprecated-declarations "SHELL:-include ${MVO}/opengl/pm_compat.h")
+  target_link_options(pushmpc_macosx_plugin PRIVATE -undefined dynamic_lookup)
+  target_link_libraries(pushmpc_macosx_plugin PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework QuartzCore")
+endif()
