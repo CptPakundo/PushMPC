@@ -435,7 +435,9 @@ static int VaUpload(pm_hw *h, const picture_t *src, pmVAGenericID surf)
     void *p = NULL;
     if (img.format.fourcc == h->va_fourcc && va.MapBuffer(h->dpy, img.buf, &p) == 0 && p) {
         const int w = (int)(img.width < h->wfmt.i_width ? img.width : h->wfmt.i_width);
-        const int hh = (int)(img.height < h->wfmt.i_height ? img.height : h->wfmt.i_height);
+        /* the picture's visible rows only: the surface's padding rows keep what they had (the CPU picture holds nothing there) */
+        const unsigned vis = h->fmt.i_y_offset + h->fmt.i_visible_height;
+        const int hh = (int)(img.height < vis ? img.height : vis);
         PToSp(src, (uint8_t *)p + img.offsets[0], img.pitches[0], (uint8_t *)p + img.offsets[1], img.pitches[1], w, hh, h->bits);
         r = va.UnmapBuffer(h->dpy, img.buf) == 0 ? 0 : -1;
         if (r == 0 && !h->up_derive)
@@ -498,7 +500,7 @@ void pm_hw_anchor(pm_hw *h, picture_t *src)
 static void Pattern(picture_t *p, const video_format_t *f, int bits, int seed)
 {
     for (int pl = 0; pl < 3; pl++) {
-        const int w = pl ? ((int)f->i_width + 1) / 2 : (int)f->i_width, hgt = pl ? ((int)f->i_height + 1) / 2 : (int)f->i_height;
+        const int w = pl ? ((int)f->i_width + 1) / 2 : (int)f->i_width, hgt = pl ? ((int)(f->i_y_offset + f->i_visible_height) + 1) / 2 : (int)(f->i_y_offset + f->i_visible_height);
         for (int y = 0; y < hgt; y++) {
             uint8_t *row = p->p[pl].p_pixels + (size_t)y * p->p[pl].i_pitch;
             for (int x = 0; x < w; x++) {
@@ -513,7 +515,7 @@ static bool Same(const picture_t *a, const picture_t *b, const video_format_t *f
 {
     const int bps = bits > 8 ? 2 : 1;
     for (int pl = 0; pl < 3; pl++) {
-        const int w = pl ? ((int)f->i_width + 1) / 2 : (int)f->i_width, hgt = pl ? ((int)f->i_height + 1) / 2 : (int)f->i_height;
+        const int w = pl ? ((int)f->i_width + 1) / 2 : (int)f->i_width, hgt = pl ? ((int)(f->i_y_offset + f->i_visible_height) + 1) / 2 : (int)(f->i_y_offset + f->i_visible_height);
         for (int y = 0; y < hgt; y++)
             if (memcmp(a->p[pl].p_pixels + (size_t)y * a->p[pl].i_pitch, b->p[pl].p_pixels + (size_t)y * b->p[pl].i_pitch, (size_t)w * bps))
                 return false;
