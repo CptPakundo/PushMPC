@@ -66,6 +66,11 @@ param(
     [string]$ExperimentalExtras = 'Yes',   # unlocks and community ports are on by default (No leaves them out)
     [ValidateSet('Auto', 'NVIDIA', 'AMD')]
     [string]$Gpu = 'Auto',
+    # where the seven NVIDIA Video Effects files (runtime\nvidia-vfg) come from: Package = Veyra's runtime package (default;
+    # byte-identical to NVIDIA's wheel, no extra download), Wheel = NVIDIA's PyPI wheel (scripts\nvidia-vfx-fetch.ps1,
+    # pinned). The package's own copy missing: the wheel is used either way.
+    [ValidateSet('Package', 'Wheel')]
+    [string]$VfxSource = 'Package',
     # reuse an existing PushFPS / Veyra install's files as hard links (same volume) instead of copies
     [switch]$LinkExisting,
     # never reuse an existing install's files (always the package)
@@ -1269,6 +1274,21 @@ function Expand-RuntimeSubset([string]$zip, [string]$dest) {
             New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
             [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $out, $true)
             $got[$rel] = $true
+        }
+        # NVIDIA's Video Effects files from NVIDIA's own wheel (pinned, the same SHA-256 as $RuntimeFileHashes): when asked
+        # for (-VfxSource Wheel) or when the package does not carry them
+        $vfx = @($RuntimeFiles | Where-Object { $_ -like 'runtime\nvidia-vfg\*' })
+        $vfxMissing = @($vfx | Where-Object { -not $got.ContainsKey($_) })
+        if ($vfx.Count -and ($VfxSource -eq 'Wheel' -or $vfxMissing.Count)) {
+            $fetch = Join-Path $PSScriptRoot 'nvidia-vfx-fetch.ps1'
+            if (-not (Test-Path $fetch)) { Fail "The runtime package lacks $($vfxMissing -join ', ') and nvidia-vfx-fetch.ps1 is not next to the installer." }
+            Step "NVIDIA Video Effects files from NVIDIA's PyPI wheel (pinned SHA-256)"
+            $names = @($vfx | ForEach-Object { Split-Path $_ -Leaf })
+            $cache = if ($PackageCache) { $PackageCache } else { Join-Path $InstallDir 'download' }
+            & $fetch -Dest (Join-Path $dest 'runtime\nvidia-vfg') -Cache $cache -Only $names -AcceptNvidiaLicense
+            if ($LASTEXITCODE -ne 0) { Fail "nvidia-vfx-fetch.ps1 failed (exit $LASTEXITCODE)." }
+            foreach ($r in $vfx) { $got[$r] = $true }
+            $script:RuntimeSource = "$($Runtime.Asset) + nvidia-vfx $VfxSource"
         }
         foreach ($r in $RuntimeFiles) { if (-not $got.ContainsKey($r)) { Fail "The runtime package lacks $r." } }
         foreach ($r in $got.Keys) { if ($RuntimeFileHashes.ContainsKey($r) -and -not (Test-PinnedFile (Join-Path $dest $r) $RuntimeFileHashes[$r])) { Fail "$r does not match its pinned SHA-256." } }

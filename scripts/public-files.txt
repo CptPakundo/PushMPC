@@ -45,3 +45,5 @@ scripts/vapoursynth-pin.json
 scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
 tests/**
+scripts/nvidia-vfx-pin.json
+scripts/nvidia-vfx-fetch.ps1

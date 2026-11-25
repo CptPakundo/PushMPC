@@ -20,6 +20,10 @@ env:
   # libxess_fg.dll inside that SDK; the MFG unlock byte tables are audited for exactly this build.
   XEFG_DLL_SHA256: EC5E0C65E075570C6EDE72618BB666D0BE0C2E10B2EA9762C0FE8CB8E375AB27
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   warp:
     runs-on: windows-2025

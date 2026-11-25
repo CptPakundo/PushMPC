@@ -23,6 +23,10 @@ env:
   FFMPEG_VERSION: 7.1.1
   FFMPEG_SHA256: 04861D3339C5EBE38B56C19A15CF2C0CC97F5DE4FA8910E4D47E5E6404E4A2D4
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   probe:
     runs-on: windows-latest
@@ -110,7 +114,6 @@ jobs:
         with:
           name: vpl-ai-probe
           path: |
-            build-probe/Release/vpl_ai_probe.exe
             probe-out/vpl_ai_probe.json
             probe-out/summary.txt
             tests/intel-vpl-manual.ps1
