@@ -841,9 +841,10 @@ private:
         const pmk::Slot& s = q.slot;
         const int bytes = m_bits > 8 ? 2 : 1;
         const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
-        // Kodi 22 takes P010 from add-ons: 10-bit pictures go out in the same layout as Kodi's own decoders give its
-        // renderers (Kodi 21 only has planar formats); the engine works planar, so they are packed at the end
-#if PM_KODI22
+#if PM_KODI22 && defined(_WIN32)
+        // P010 on Windows (the DXVA renderer's native layout, as Kodi's own decoders hand it over); planar 10-bit elsewhere:
+        // Kodi 22's GL/GLES renderer stops on system-memory P010 (CI, Flathub Kodi 22) and takes planar 10-bit as from
+        // its own software decoder
         const bool p010 = m_bits > 8;
         picture.videoFormat = p010 ? VIDEOCODEC_FORMAT_P010 : VIDEOCODEC_FORMAT_I420;
 #else
