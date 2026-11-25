@@ -106,7 +106,11 @@ jobs:
         run: |
           set -o pipefail
           ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 | tee "$RUNNER_TEMP/bridge.txt"; r=$?
-          cat "$HOME/Library/Logs/PushMPC/iina-bridge.log" || true
+          echo "--- bridge log"; cat "$HOME/Library/Logs/PushMPC/iina-bridge.log" || true
+          if [ "$r" -ge 128 ]; then
+            echo "--- crashed (exit $r): backtrace"
+            lldb --batch -o run -o "bt all" -o "register read" -k "bt all" -k quit -- ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 2>&1 | tail -120
+          fi
           echo "::notice title=IINA bridge::$(grep -h 'bridge:\|IINA_BRIDGE_RESULT' "$RUNNER_TEMP/bridge.txt" | tr '\n' ' ')"
           exit $r
       - uses: actions/upload-artifact@v4

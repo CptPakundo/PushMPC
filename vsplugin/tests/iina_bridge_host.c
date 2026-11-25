@@ -17,6 +17,7 @@
 
 int main(int argc, char** argv)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 4) { fprintf(stderr, "usage: iina_bridge_host <libmpv.2.dylib> <pushmpc-iina.so> <seconds>\n"); return 2; }
     void* lib = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
     if (!lib) { fprintf(stderr, "dlopen %s: %s\n", argv[1], dlerror()); return 2; }
@@ -32,6 +33,7 @@ int main(int argc, char** argv)
     p_mpv_set_option_string(h, "msg-level", "all=warn,lavfi=v,ffmpeg=warn");
     p_mpv_set_option_string(h, "idle", "yes");
     if (p_mpv_initialize(h) < 0) { fprintf(stderr, "mpv_initialize failed\n"); return 2; }
+    puts("libmpv initialised; loading the bridge");
     const char* load[] = { "load-script", argv[2], NULL };
     if (p_mpv_command(h, load) < 0) { fprintf(stderr, "load-script failed\n"); return 1; }
     usleep(300000);
@@ -39,6 +41,7 @@ int main(int argc, char** argv)
     printf("bridge: %s\n", st ? st : "(not reported)");
     const int active = st && !strcmp(st, "active");
     if (st) p_mpv_free(st);
+    puts("adding the marked filter and playing");
     const char* vf[] = { "vf", "add", "@pushmpc:lavfi=[null@pushmpc]", NULL };
     p_mpv_command(h, vf);
     const char* play[] = { "loadfile", "av://lavfi:testsrc2=size=640x360:rate=24000/1001:duration=8,format=yuv420p", NULL };

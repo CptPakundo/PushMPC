@@ -99,19 +99,18 @@ class Pushmpc < Formula
       end
       resource("artcnn-#{m.downcase}-glsl").stage { (pkgshare/"shaders").install "ArtCNN_#{m}.glsl" }
     end
-    # the mpv profile: ArtCNN in mpv's own renderer (gpu-next; Vulkan for compute shaders: MoltenVK on macOS). It only
-    # runs when mpv upscales luma by more than 1.3x, so it never doubles our own super resolution.
+    # the mpv profile: ArtCNN in mpv's own renderer (gpu-next, mpv's default vo since 0.41; Vulkan for compute shaders:
+    # MoltenVK on macOS). It only runs when mpv upscales luma by more than 1.3x, so it never doubles our own super
+    # resolution. It sets no vo, so encode mode (--o) keeps working.
     api = OS.mac? ? "gpu-api=vulkan\ngpu-context=macvk\n" : ""
     (pkgshare/"mpv").mkpath
     (pkgshare/"mpv/pushmpc-artcnn.conf").write <<~CONF
       # PushMPC: ArtCNN luma doubler in mpv's gpu-next renderer (included from the PushMPC block in mpv.conf)
       [pushmpc-artcnn]
       profile-desc=PushMPC: ArtCNN C4F16 luma doubler (gpu-next, Vulkan compute)
-      vo=gpu-next
       #{api}glsl-shaders-append=#{opt_pkgshare}/shaders/ArtCNN_C4F16.glsl
       [pushmpc-artcnn32]
       profile-desc=PushMPC: ArtCNN C4F32 luma doubler (stronger GPUs)
-      vo=gpu-next
       #{api}glsl-shaders-append=#{opt_pkgshare}/shaders/ArtCNN_C4F32.glsl
       [default]
       profile=pushmpc-artcnn
