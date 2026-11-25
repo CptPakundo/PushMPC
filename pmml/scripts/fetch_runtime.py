@@ -120,6 +120,18 @@ def list_archive(archive: Path) -> None:
     a.close()
 
 
+def soname_links(dest: Path, files: list[str]) -> list[str]:
+    """Wheels ship libfoo.so.13.4.36 without the libfoo.so.13 name their users load: copy it under that name."""
+    import re
+    added = []
+    for f in files:
+        m = re.match(r"^(.*\.so\.\d+)\.\d+(\.\d+)*$", f)
+        if m and not (dest / m.group(1)).exists():
+            shutil.copy2(dest / f, dest / m.group(1))
+            added.append(m.group(1))
+    return added
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pin", required=True)
@@ -192,6 +204,7 @@ def main() -> int:
             list_archive(arc)
         dest = out / "eps" / ep
         files = extract(arc, spec.get("extract", entry["extract"]), dest)
+        files += soname_links(dest, files)
         lib = next((f for f in files for pat in entry["library"] if fnmatch.fnmatch(f.lower(), pat.lower()) and
                     f.lower().endswith((".dll", ".so", ".dylib"))), None)
         if not lib:

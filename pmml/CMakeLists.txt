@@ -8,9 +8,8 @@ project(pmml CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")   # /MT, like pushcore.dll, the vsplugin and ncnn's static package
-endif()
+# MSVC runtime: the parent's choice (the vsplugin builds /MT). ncnn's Windows release package is /MD, so the ncnn
+# backend links only into a /MD build (pmml_cli on its own); the vsplugin on Windows uses ONNX Runtime only.
 
 set(PMML_ORT_INCLUDE "" CACHE STRING "ONNX Runtime C API headers (;-list)")
 set(PMML_NCNN_DIR "" CACHE PATH "ncnn release package")
