@@ -111,6 +111,7 @@ jobs:
             ${{ runner.temp }}/appimage
             ${{ runner.temp }}/t/*.log
             ${{ runner.temp }}/t/*.txt
+            ${{ runner.temp }}/t/*.png
           retention-days: 7
 
   windows:

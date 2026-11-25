@@ -43,12 +43,12 @@ done
 "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=2" -vf "setparams=color_trc=smpte2084:color_primaries=bt2020:colorspace=bt2020nc:range=tv" -pix_fmt yuv420p10le -c:v ffv1 "$T/clip10.mkv"
 "$FP" -v error -show_entries stream=color_transfer,color_primaries -of csv=p=0 "$T/clip10.mkv" | sed "s/^/10-bit source tags: /"
 if "$FF" -v info -y -i "$T/clip10.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$T/ff-10.mkv" > "$T/ff-10.log" 2>&1 && check "$T/ff-10.mkv" $((1 + (48 - 1) * 2)) 48 2 \
-   && "$FP" -v error -show_entries stream=color_transfer,color_primaries -of csv=p=0 "$T/ff-10.mkv" | tee /dev/stderr | grep -q "smpte2084"; then
+   && "$FP" -v error -show_entries stream=color_transfer,color_primaries -of csv=p=0 "$T/ff-10.mkv" | tee "$T/ff-10-tags.txt" | grep -q "smpte2084"; then
     result ffmpeg-10bit-hdr-tags PASS; else tail -5 "$T/ff-10.log"; result ffmpeg-10bit-hdr-tags FAIL; fi
 
 # 3. engine missing -> pass-through (the video keeps playing)
 if PUSHMPC_ENGINE=/nonexistent "$FF" -v info -y -i "$T/clip.mkv" -vf "pushmpc=engine=/nonexistent/x" -c:v ffv1 "$T/ff-pass.mkv" > "$T/ff-pass.log" 2>&1 \
-   && [ "$(count "$T/ff-pass.mkv")" = "$N" ]; then result passthrough-without-engine PASS; else result passthrough-without-engine FAIL; fi
+   && [ "$(count "$T/ff-pass.mkv")" = "$N" ]; then result passthrough-without-engine PASS; else echo "pass-through: $(count "$T/ff-pass.mkv" 2>&1) frames of $N"; tail -8 "$T/ff-pass.log"; result passthrough-without-engine FAIL; fi
 grep -i "passes through" "$T/ff-pass.log" | head -2
 
 # 4. Vulkan frames (lavapipe on Linux): hwupload -> pushmpc -> hwdownload; the module has no Vulkan engine yet, so this
@@ -59,6 +59,13 @@ if [ "$OS" = linux ]; then
         grep -i "pushmpc\|lavapipe\|llvmpipe" "$T/ff-vk.log" | head -4
         check "$T/ff-vk.mkv" $((1 + (N - 1) * 2)) 48000/1001 2 && result ffmpeg-vulkan-x2 PASS || result ffmpeg-vulkan-x2 FAIL
         if grep -q "portable-vulkan.*(zero copy)" "$T/ff-vk.log"; then result ffmpeg-vulkan-zero-copy PASS; else grep -iE "engine|fallback" "$T/ff-vk.log" | head -5; result ffmpeg-vulkan-zero-copy FAIL; fi
+        # import + export alone (x1: every output is a real frame) must be lossless; PSNR per plane for the log
+        "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 24 \
+            -vf "format=nv12,hwupload,pushmpc=smoother=1,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk1.mkv" > "$T/ff-vk1.log" 2>&1
+        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 vs source: /"
+        for f in clip ff-vk1; do "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 100 + 300)) -N 16 | sed "s/^/$f Y row 100: /"; "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 360 + 640 * 50 + 300)) -N 16 | sed "s/^/$f UV row 50: /"; done
+        "$FF" -v error -y -i "$T/ff-vk1.mkv" -frames:v 1 "$T/vk1-frame0.png"; "$FF" -v error -y -i "$T/clip.mkv" -frames:v 1 "$T/src-frame0.png"
+        "$FF" -v error -y -i "$T/ff-vk.mkv" -vf "select='lt(n,4)'" -vsync 0 "$T/vk2-%d.png"
         # the real frames (every 2nd output) must come back unchanged through import, engine and export
         "$FF" -v info -i "$T/ff-vk.mkv" -i "$T/clip.mkv" -lavfi "[0]select='not(mod(n,2))',setpts=N/(FRAME_RATE*TB),format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - > "$T/ff-vk-psnr.log" 2>&1
         ps=$(grep -o "average:[a-z0-9.]*" "$T/ff-vk-psnr.log" | tail -1); echo "vulkan real frames vs source: $ps"
