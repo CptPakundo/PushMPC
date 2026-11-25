@@ -210,7 +210,7 @@ jobs:
           export PUSHMPC_VS_PLUGIN=$(ls $PWD/vsplugin/bin/pushmpc_vs.so) PMML_RUNTIME=$PWD/rt PMML_TEST_CLIP=$PWD/data/pmml-clips/ducks_take_off.y4m PUSHMPC_TEST_K=4
           vsp=$(command -v vspipe || echo "$pkg/vspipe")
           info=$("$vsp" --info vsplugin/tests/ci/ml_clip.vpy 2>&1); echo "$info"
-          echo "$info" | grep -Eq "Frames:[[:space:]]+36" || { echo "::error::expected 36 frames (9 x 4)"; exit 1; }
+          echo "$info" | grep -Eq "Frames:[[:space:]]+36" || { echo "::error::expected 36 frames (9 x 4)"; exit 1; }
           "$vsp" vsplugin/tests/ci/ml_clip.vpy -- > /dev/null
           find ~ -name 'pushmpc*.log' -newer "$whl" 2>/dev/null | head -3 | xargs -r tail -n 20
       - run: grep PMML_RUN run.log | sed 's/^PMML_RUN //' >> $GITHUB_STEP_SUMMARY || true
