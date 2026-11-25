@@ -8,6 +8,10 @@
 name: vlc-spike
 
 on:
+  # push on the track branch only (a dispatch needs the file on main first); "[macos]" in the commit message adds macOS
+  push:
+    branches: ['track/vlc']
+    paths: ['vlcplugin/**', '.github/workflows/vlc-spike.yml']
   workflow_dispatch:
     inputs:
       macos:
@@ -104,7 +108,7 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           bash vlcplugin/spike/run-cases.sh
       - name: Flathub VLC (org.videolan.VLC) with the same plugin through VLC_PLUGIN_PATH
-        if: ${{ inputs.flatpak }}
+        if: ${{ github.event_name == 'push' || inputs.flatpak }}
         timeout-minutes: 20
         run: |
           set -u
@@ -172,7 +176,7 @@ jobs:
         with: { name: results-windows, path: res, retention-days: 7 }
 
   macos:
-    if: ${{ inputs.macos }}
+    if: ${{ inputs.macos || contains(github.event.head_commit.message, '[macos]') }}
     needs: [clip, build]
     runs-on: macos-15
     timeout-minutes: 30
