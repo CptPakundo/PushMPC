@@ -20,7 +20,7 @@
     pushmpc-install.ps1 potplayer-apply|potplayer-remove -InstallDir <scratch> -PotRegRoot <HKCU:\...> -PotPlayerExe <fake PotPlayerMini64.exe> [-DryRun]
     -NoMpv (no mpv / SMPlayer change); the mpv route alone against a fake root (mpv-integration.ps1 -Root):
     pushmpc-install.ps1 mpv-apply|mpv-remove -StageDir <stage> -InstallDir <root>\AppData\Local\PushMPC -MpvRoot <root> [-DryRun]
-  mpv route (players-all.md R1/R3, preview): the optional "vsplugin" component (pushmpc_vs.dll, pushmpc.vpy,
+  mpv route (internal research notes R1/R3, preview): the optional "vsplugin" component (pushmpc_vs.dll, pushmpc.vpy,
     mpv-integration.ps1, vapoursynth-pin.json) is staged only when pushmpc_vs.dll is built. Install adds it, fetches the
     VapourSynth runtime pinned in vapoursynth-pin.json (skipped while the pins say TODO) and runs
     mpv-integration.ps1 -Action Install -RuntimeOnPath, only when mpv or SMPlayer is found; uninstall reverses it.
@@ -159,7 +159,7 @@ function Resolve-GpuVendor {
 }
 $GpuVendor = Resolve-GpuVendor
 $Runtime = $Packages[$GpuVendor]
-# What pushcore loads from the runtime root (see settings-and-runtime.md, "Runtime files"). Paths relative to the
+# What pushcore loads from the runtime root (see internal research notes, "Runtime files"). Paths relative to the
 # package's root folder (the one holding veyra_qml_ui.exe). Required files must be in the package; the folders in
 # $RuntimeDirs are taken whole when the package has them.
 $RuntimeFilesByVendor = @{
