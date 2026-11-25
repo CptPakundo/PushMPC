@@ -41,7 +41,9 @@ struct CutGuard {
     // <= 0.045 and a large change but under 10 % unexplained blocks (same-palette cuts), so the unexplained condition
     // went and the agreement limit tightened to 0.15.
     float maxAgreement = 0.15f, minChange = 8.0f, minUnexplained = 0.0f;
-    float vetoAgreement = 0.50f, vetoMoving = 0.20f;
+    // (the film set: no labelled cut had agreement above 0.28; 33 of Big Buck Bunny's calm-shot negatives were cut by the
+    // rule while few blocks moved, so the veto no longer asks for moving blocks)
+    float vetoAgreement = 0.50f, vetoMoving = 0.0f;
     bool enabled = true;
     // returns 0 no cut, 1 PushFPS's rule, 2 the guard
     int Decide(const PairStats& st)
