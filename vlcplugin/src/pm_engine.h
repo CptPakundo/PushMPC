@@ -2,11 +2,11 @@
  * pm_engine: the thin C interface between PushMPC's VLC module and a frame generation engine.
  *
  * Kept deliberately small so the engine behind it can change without touching the VLC side:
- *   - today: vsplugin's portable engine (PushFPS's portable core on the CPU: block-matching motion both ways, motion-
- *     compensated interpolation, PushFPS's scene-cut rule), engine_portable.cpp;
- *   - next: the Vulkan GPU port of the portable engine implements the same calls;
- *   - Windows RTX: pushcore (D3D11 in, D3D11 out) is a separate path in pushmpc_vlc.c, not behind this interface,
- *     because its frames never touch the CPU.
+ *   - vsplugin's portable GPU engine (engines/gpu: Vulkan 1.2 compute, MoltenVK on macOS) when a Vulkan device answers,
+ *     else its CPU engine (engines/portable): PushFPS's portable core (block-matching motion both ways, motion-
+ *     compensated interpolation, the scene-cut rule; the GPU engine adds PushMPC's cut guard), engine_portable.cpp;
+ *   - Windows: pushcore (pm_pushcore.dll) is a separate path in pushmpc_vlc.c, not behind this interface, because it
+ *     runs its own multiplier and timing.
  * Pictures are planar YUV 4:2:0, 8 bits (1 byte per sample) or 9..16 bits (2 bytes, little endian), as VLC's
  * I420 / J420 / YV12 / I0AL hold them.
  */
@@ -23,8 +23,12 @@ typedef struct pm_engine pm_engine;
 typedef struct pm_engine_cfg {
     int width, height, bits; /* visible size; bits 8..16 */
     int threads;             /* 0 = hardware threads (at most 16) */
-    int quality;             /* 0 fast, 1 balanced */
+    int quality;             /* CPU engine: 0 fast, 1 balanced (the GPU engine always uses full-size vectors) */
+    int engine;              /* PM_ENGINE_AUTO: the GPU engine (Vulkan) when a device answers, else the CPU engine */
 } pm_engine_cfg;
+#define PM_ENGINE_AUTO 0
+#define PM_ENGINE_CPU 1
+#define PM_ENGINE_GPU 2
 
 typedef struct pm_yuv {      /* read-only source planes */
     const uint8_t *data[3];
@@ -57,6 +61,10 @@ int pm_engine_threads(const pm_engine *e);
 /* Auto: the multiplier for this source on this display within the CPU budget (vsplugin's DecidePortableK rule).
  * smoother: 0 Auto, 1 off, 2..8 fixed. display_hz <= 0: unknown. Measures the engine once at this size (cached per
  * size). why: a one-line explanation for the log. */
+/* Auto for an open engine: its own measured costs (the GPU engine has no x2 cap above 1080p) */
+int pm_engine_decide(pm_engine *e, int smoother, double src_fps, double display_hz, char *why, size_t whysize);
+const char *pm_engine_name(const pm_engine *e);
+
 int pm_engine_decide_k(int smoother, double src_fps, double display_hz, int width, int height, int bits, int threads,
                        int quality, char *why, size_t whysize);
 

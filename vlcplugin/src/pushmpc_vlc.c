@@ -136,8 +136,8 @@ static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8" };
 static const int quality_values[] = { 0, 1 };
 static const char *const quality_texts[] = { "Fast", "Balanced" };
-static const int engine_values[] = { 0, 1, 2 };
-static const char *const engine_texts[] = { "Auto", "Portable (CPU)", "pushcore (Windows)" };
+static const int engine_values[] = { 0, 1, 2, 3 };
+static const char *const engine_texts[] = { "Auto", "Portable on the CPU", "pushcore (Windows)", "Portable on the GPU (Vulkan)" };
 static const int alloc_values[] = { 0, 1, 2 };
 static const char *const alloc_texts[] = { "Auto (VLC's allocator)", "Pool only (at most x4)", "Heap (unsafe with some displays)" };
 
@@ -160,7 +160,7 @@ vlc_module_begin()
     add_integer_with_range(CFG "threads", 0, 0, 64, "Engine threads", "0 = all hardware threads (at most 16)", true)
     add_integer(CFG "engine", 0, "Engine", "Auto: pushcore on Windows when PushMPC's core is installed (NVIDIA VFG, "
                 "DLSS-G, PushFlow, FSR FG, AMD FRC, with the scene-cut guard; HD and UHD sources), else the portable "
-                "engine (CPU).", true)
+                "engine on the GPU (Vulkan; MoltenVK on macOS), else on the CPU.", true)
         change_integer_list(engine_values, engine_texts)
     add_bool(CFG "warp", false, "pushcore on WARP (tests)", NULL, true)
         change_private()
@@ -566,7 +566,7 @@ static int Open(vlc_object_t *obj)
     sys->wfmt = f->fmt_out.video;
     sys->bps_w = sys->bps;
     const int engine = (int)var_InheritInteger(f, CFG "engine");
-    if (engine != 1) {          /* pushcore first (Windows, PushMPC's core installed); else the portable engine */
+    if (engine == 0 || engine == 2) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         memset(&pcc, 0, sizeof(pcc));
         pcc.abi = PM_PC_ABI;
@@ -594,16 +594,25 @@ static int Open(vlc_object_t *obj)
             msg_Dbg(f, "PushMPC: pushcore not used (%s): portable engine", err);
         }
     }
-    if (!sys->pc)
-        sys->k = pm_engine_decide_k(smoother, fps, hz, w, h, bits, threads, quality, sys->why, sizeof(sys->why));
-    if (!sys->pc && sys->k > 1) {
-        pm_engine_cfg c = { w, h, bits, threads, quality };
+    if (!sys->pc && smoother != 1) {
+        /* the portable engines: the GPU one (Vulkan) when a device answers, else the CPU one; Auto then measures the
+         * engine that runs */
+        pm_engine_cfg c = { w, h, bits, threads, quality, engine == 1 ? PM_ENGINE_CPU : engine == 3 ? PM_ENGINE_GPU : PM_ENGINE_AUTO };
         char err[200] = "";
         sys->eng = pm_engine_open(&c, err, sizeof(err));
+        if (err[0]) msg_Dbg(f, "PushMPC: %s", err);
         if (!sys->eng) {
             msg_Warn(f, "PushMPC: engine unavailable (%s): pass-through", err);
             sys->k = 1;
+        } else {
+            char why[256] = "";
+            sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
+            snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
+            if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
         }
+    } else if (!sys->pc) {
+        sys->k = 1;
+        snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
 
     if (f->fmt_out.video.i_frame_rate)

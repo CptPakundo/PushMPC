@@ -62,7 +62,7 @@ jobs:
           if grep -q '3_0_0ft64' vlcinc/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
           docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc "
             gcc --version | head -1
-            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt
+            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON
             cmake --build build -j4
             gcc -std=gnu11 -O2 -fPIC -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='\"pushdump\"' -DPM_ALT_ENTRY=$alt \
               -I/w/vlcinc vlcplugin/spike/pushspike.c -o build/libpushdump_plugin.so
@@ -108,7 +108,7 @@ jobs:
           cmake -S vlcplugin -B build -G Ninja -DCMAKE_SYSTEM_NAME=Windows \
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
             -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
-            -DVLC_PLUGIN_INCLUDE="$sdk/include/vlc/plugins" -DVLC_CORE_LIB="$lib"
+            -DVLC_PLUGIN_INCLUDE="$sdk/include/vlc/plugins" -DVLC_CORE_LIB="$lib" -DPM_FETCH_GPU_DEPS=ON
           cmake --build build
           mkdir -p out/win64
           cp build/libpushmpc_plugin.dll build/pm_engine_test.exe out/win64/
@@ -137,6 +137,16 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: The portable GPU engine (Vulkan) on Mesa's lavapipe
+        run: |
+          set -u
+          sudo apt-get -qq install -y --no-install-recommends mesa-vulkan-drivers >/dev/null
+          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushmpc/vlc CLIP=art/clips/clip.mkv CLIP720=art/clips/clip720.mkv \
+                 OUT=res/linux-gpu SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) PUSHMPC_VK_ALLOW_CPU=1 GPU_TEST=1 \
+                 CASES="gpu_x4 gpu_x2_720" LABEL="Linux, GPU engine on lavapipe"
+          bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC 0" res/linux-gpu/gpu_x4.log | head -1
+          grep -q "GPU engine (Vulkan)" res/linux-gpu/gpu_x4.log || { echo "::error::the GPU engine did not run"; exit 1; }
       - name: Installer round trip (native target; then a run with no arguments, from its vlcrc; then uninstall)
         run: |
           set -eu
@@ -346,7 +356,7 @@ jobs:
         run: |
           set -eux
           inc="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins"
-          cmake -S vlcplugin -B build -G Ninja -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DVLC_PLUGIN_INCLUDE="$inc"
+          cmake -S vlcplugin -B build -G Ninja -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DVLC_PLUGIN_INCLUDE="$inc" -DPM_FETCH_GPU_DEPS=ON
           cmake --build build
           ./build/pm_engine_test
           mkdir -p out/mac && cp build/libpushmpc_plugin.dylib out/mac/

@@ -33,6 +33,49 @@ add_library(pm_engine_portable STATIC "${VS}/engines/portable/portable_engine.cp
 target_include_directories(pm_engine_portable PUBLIC "${VS}/engines/portable" "${VS}/src" src)
 target_link_libraries(pm_engine_portable PUBLIC pm_pushfps_portable Threads::Threads)
 
+# the portable GPU engine (vsplugin/engines/gpu: Vulkan 1.2 compute, the Vulkan library loaded at run time through volk;
+# MoltenVK on macOS). Vulkan-Headers and volk at the commits engines/gpu/gpu-pins.json pins (-DPM_FETCH_GPU_DEPS=ON, CI),
+# shaders from the checked-in SPIR-V. Without them: the CPU engine only. At run time the module falls back to the CPU
+# engine when there is no usable Vulkan device.
+option(PM_GPU "build the portable GPU engine" ON)
+option(PM_FETCH_GPU_DEPS "download the pinned Vulkan-Headers and volk" OFF)
+set(PM_VULKAN_HEADERS_DIR "" CACHE PATH "Vulkan-Headers checkout")
+set(PM_VOLK_DIR "" CACHE PATH "volk checkout")
+if(PM_GPU)
+  if(PM_FETCH_GPU_DEPS AND (NOT PM_VULKAN_HEADERS_DIR OR NOT PM_VOLK_DIR))
+    file(READ "${VS}/engines/gpu/gpu-pins.json" _pins)
+    include(FetchContent)
+    string(JSON _vh_url GET "${_pins}" vulkanHeaders url)
+    string(JSON _vh_sha GET "${_pins}" vulkanHeaders sha256)
+    string(JSON _volk_url GET "${_pins}" volk url)
+    string(JSON _volk_sha GET "${_pins}" volk sha256)
+    FetchContent_Declare(pm_vkh URL "${_vh_url}" URL_HASH SHA256=${_vh_sha} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_Declare(pm_volk URL "${_volk_url}" URL_HASH SHA256=${_volk_sha} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_GetProperties(pm_vkh)
+    if(NOT pm_vkh_POPULATED)
+      FetchContent_Populate(pm_vkh)
+    endif()
+    FetchContent_GetProperties(pm_volk)
+    if(NOT pm_volk_POPULATED)
+      FetchContent_Populate(pm_volk)
+    endif()
+    set(PM_VULKAN_HEADERS_DIR "${pm_vkh_SOURCE_DIR}" CACHE PATH "" FORCE)
+    set(PM_VOLK_DIR "${pm_volk_SOURCE_DIR}" CACHE PATH "" FORCE)
+  endif()
+  if(EXISTS "${PM_VULKAN_HEADERS_DIR}/include/vulkan/vulkan_core.h" AND EXISTS "${PM_VOLK_DIR}/volk.c")
+    add_library(pm_engine_gpu STATIC "${VS}/engines/gpu/vk_context.cpp" "${VS}/engines/gpu/gpu_engine.cpp"
+      "${VS}/engines/gpu/subtitle_hold.cpp" "${VS}/third_party/pushfps-portable/src/CrosshairHold.cpp" "${PM_VOLK_DIR}/volk.c")
+    target_include_directories(pm_engine_gpu PUBLIC "${VS}/engines/gpu" "${PM_VULKAN_HEADERS_DIR}/include" "${PM_VOLK_DIR}"
+      "${VS}/third_party/nis" PRIVATE "${VS}/engines/gpu/spv")
+    target_compile_definitions(pm_engine_gpu PUBLIC PMVS_GPU VK_NO_PROTOTYPES)
+    target_link_libraries(pm_engine_gpu PUBLIC pm_engine_portable ${CMAKE_DL_LIBS})
+    target_link_libraries(pm_engine_portable PUBLIC pm_engine_gpu)   # engine_portable.cpp picks the GPU first
+    message(STATUS "PushMPC VLC: portable GPU engine (Vulkan) included")
+  else()
+    message(STATUS "PushMPC VLC: Vulkan-Headers / volk not found: CPU engine only")
+  endif()
+endif()
+
 add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
 target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
