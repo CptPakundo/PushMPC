@@ -29,7 +29,7 @@ run() { # name mult expect_size -- vlc args...
   # shellcheck disable=SC2086
   timeout 90 "${cmd[@]}" -I dummy --no-audio --play-and-exit --no-video-title-show --no-osd \
     --file-logging --logfile="$log" --log-verbose=2 \
-    --vout=pushdump --pushdump-file="$csv" ${EXTRA:-} "$@" "$CLIP" >"$OUT/$name.stdout" 2>&1
+    --vout=pushdump --pushdump-file="$csv" ${HWARGS---avcodec-hw=none} ${EXTRA:-} "$@" "$CLIP" >"$OUT/$name.stdout" 2>&1
   local rc=$?
   echo "== $name: vlc exit $rc in $(( $(date +%s) - t0 )) s"
   [ -s "$log" ] || cp "$OUT/$name.stdout" "$log" 2>/dev/null
@@ -57,4 +57,11 @@ want plusi_m8    && run plusi_m8    8 "$S" -- "--video-filter=postproc{mult=8}:p
 want named_m2    && run named_m2    2 "$S" -- --video-filter=pushspike --pushspike-mult=2
 want scale2      && run scale2      1 ""   -- --video-filter=postproc --pushspike-mult=1 --pushspike-scale=2
 want scale2_m2   && run scale2_m2   2 ""   -- --video-filter=postproc --pushspike-mult=2 --pushspike-scale=2
+# Windows: the d3d11va decoder hands the static chain D3D11 textures ('DX11'); the filter logs texture + slice and
+# outputs mult-1 clones sharing the texture; VLC copies back to the CPU display after the chain.
+if [ "${D3D11:-0}" = 1 ]; then
+  want d3d11_m2 && run d3d11_m2 2 "$S" -- --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=2
+  want d3d11_m4 && run d3d11_m4 4 "$S" -- --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=4
+  want d3d11_m8 && run d3d11_m8 8 "$S" -- --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=8
+fi
 exit 0

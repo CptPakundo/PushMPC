@@ -89,9 +89,15 @@ static const struct spike_d3d11_picsys *SpikeActivePicSys(const picture_t *p)
 }
 static bool IsD3D11Opaque(vlc_fourcc_t c)
 {
-    return c == VLC_FOURCC('d','v','1','1') || c == VLC_FOURCC('d','v','1','0') ||
-           c == VLC_FOURCC('d','a','g','r') || c == VLC_FOURCC('d','a','r','g') ||
-           c == VLC_FOURCC('d','x','1','0'); /* VLC_CODEC_D3D11_OPAQUE(_10B/_RGBA/_BGRA), D3D9 'dx10'? logged only */
+    return c == VLC_CODEC_D3D11_OPAQUE || c == VLC_CODEC_D3D11_OPAQUE_10B; /* 'DX11', 'DX10' (VLC 3.0.x) */
+}
+static bool IsCpu8(vlc_fourcc_t c)
+{
+    const vlc_chroma_description_t *d = vlc_fourcc_GetChromaDescription(c);
+    return d && d->plane_count > 0 && d->pixel_size == 1 && !IsD3D11Opaque(c) &&
+           c != VLC_CODEC_VAAPI_420 && c != VLC_CODEC_VAAPI_420_10BPP && c != VLC_CODEC_VDPAU_VIDEO_420 &&
+           c != VLC_CODEC_D3D9_OPAQUE && c != VLC_CODEC_D3D9_OPAQUE_10B && c != VLC_CODEC_CVPX_NV12 &&
+           c != VLC_CODEC_CVPX_I420 && c != VLC_CODEC_CVPX_P010;
 }
 
 /* ---------------------------------------------------------------- filter */
@@ -209,7 +215,8 @@ static int OpenFilter(vlc_object_t *obj)
              f->fmt_in.video.i_width, f->fmt_in.video.i_height, f->fmt_in.video.i_visible_width,
              f->fmt_in.video.i_visible_height, f->fmt_in.video.i_frame_rate, f->fmt_in.video.i_frame_rate_base);
 
-    if (!opaque && (!d || d->plane_count == 0 || d->pixel_size != 1)) {
+    (void)d;
+    if (!opaque && !IsCpu8(chroma)) {
         msg_Warn(f, "pushspike: unsupported chroma %4.4s", (const char *)&chroma);
         return VLC_EGENERIC;
     }
@@ -316,8 +323,8 @@ static int OpenDump(vlc_object_t *obj)
              vd->fmt.i_visible_width, vd->fmt.i_visible_height);
     free(name);
     fprintf(sys->f, "n,date,shown,w,h,chroma,sum\n");
-    if (IsD3D11Opaque(vd->fmt.i_chroma) || !vlc_fourcc_GetChromaDescription(vd->fmt.i_chroma))
-        vd->fmt.i_chroma = VLC_CODEC_I420; /* a CPU format; VLC converts */
+    if (!IsCpu8(vd->fmt.i_chroma))
+        vd->fmt.i_chroma = VLC_CODEC_I420; /* a CPU format; VLC converts (hardware surfaces are copied back) */
     vd->sys = sys;
     vd->pool = DumpPool;
     vd->prepare = NULL;

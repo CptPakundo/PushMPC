@@ -118,6 +118,12 @@ jobs:
           flatpak info --user org.videolan.VLC | head -12
           d=~/.var/app/org.videolan.VLC/pushspike; mkdir -p "$d" && cp art/plugins/linux/libpushspike_plugin.so "$d/"
           cp art/clip/clip.mkv ~/.var/app/org.videolan.VLC/clip.mkv
+          echo "--- does the sandboxed VLC see the plugin? (VLC_PLUGIN_PATH=$d)"
+          flatpak run --user --env=VLC_PLUGIN_PATH="$d" --command=sh org.videolan.VLC -c \
+            'echo "env: $VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; ldd "$VLC_PLUGIN_PATH"/libpushspike_plugin.so; ls /app/lib/vlc/plugins | head; ldd --version | head -1' || true
+          flatpak run --user --env=VLC_PLUGIN_PATH="$d" org.videolan.VLC -I dummy -vv --list 2>&1 | grep -iE "pushspike|pushdump|browsing|cannot load|plugins.dat|error" | head -20 || true
+          echo "--- extension point: the same plugin through /app/lib/vlc/plugins/extra (org.videolan.VLC.Plugin)"
+          flatpak run --user --command=sh org.videolan.VLC -c 'ls -la /app/lib/vlc/plugins/extra /app/share/vlc/extra 2>&1 | head' || true
           # the app's command is vlc, so VLC stays empty and the wrapper is the whole command
           export VLC="" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv OUT=res/flatpak \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Flathub VLC" \
@@ -158,19 +164,16 @@ jobs:
           d="$LOCALAPPDATA/pushspike"; mkdir -p "$d" && cp art/plugins/win64/libpushspike_plugin.dll "$d/"
           export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clip/clip.mkv \
                  OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt | tr -d '\r') PY=python \
-                 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
+                 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64" D3D11=1
           bash vlcplugin/spike/run-cases.sh
-      - name: D3D11 path (direct3d11 vout, d3d11va requested; WARP has no video decoder, so this shows the fallback)
+          grep -hE "D3D11 opaque picture|d3d11va|D3D11VA" res/windows/d3d11_m4.log | head -12 || true
+      - name: direct3d11 display (real vout on the runner's WARP adapter) with d3d11va and the static filter
         run: |
-          d="$LOCALAPPDATA/pushspike"
-          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clip/clip.mkv \
-                 OUT=res/windows-d3d11 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt | tr -d '\r') PY=python \
-                 LABEL="Windows, direct3d11 + d3d11va request" CASES="pp_m2" EXTRA="--avcodec-hw=d3d11va"
-          # pushdump replaces the vout in run-cases; run one direct3d11 case by hand for the decoder/chroma evidence
-          timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --file-logging --logfile=d3d11.log --log-verbose=2 \
-            --vout=direct3d11 --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=2 "$CLIP" || true
-          grep -iE "pushspike|d3d11va|direct3d11|decoder|chroma|as static|dxva|Using" d3d11.log | head -60 || true
-          mkdir -p res && cp d3d11.log res/ || true
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" VLC_PLUGIN_PATH="$(cygpath -w "$LOCALAPPDATA/pushspike")"
+          mkdir -p res
+          timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --file-logging --logfile=res/direct3d11.log --log-verbose=2 \
+            --vout=direct3d11 --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=4 art/clip/clip.mkv || true
+          grep -iE "pushspike|d3d11va|direct3d11|as static|Using D3D11|adapter|late|lost" res/direct3d11.log | head -40 || true
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-windows, path: res, retention-days: 7 }
