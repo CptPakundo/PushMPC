@@ -121,6 +121,7 @@ jobs:
             "KMPlayer: stand-in executable (Chocolatey package not installed)" | Tee-Object -Append $log
             Write-Host '::warning title=KMPlayer::the Chocolatey package did not install; a stand-in executable is used for the capture-mode check'
           }
+          exit 0   # a failed optional package (exit code of the last choco) is handled above
       - name: Snapshot before Setup
         run: |
           $s = "$env:RUNNER_TEMP\snap"; New-Item -ItemType Directory $s -Force | Out-Null
