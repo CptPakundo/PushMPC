@@ -154,7 +154,7 @@ jobs:
             }
             if ($dll) { "  $($dll.Name) SHA-256 $((Get-FileHash $dll.FullName).Hash)" | Tee-Object -Append $log }
           }
-          Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { "$($_.DisplayName)" -like 'Plex*' } | ForEach-Object { "Apps entry: $($_.DisplayName) $($_.DisplayVersion) ($($_.InstallLocation))" } | Tee-Object -Append $log
+          Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { "$($_.DisplayName)" -like 'Plex*' } | ForEach-Object { "Apps entry: $($_.DisplayName) $($_.DisplayVersion) [$(([int[]][char[]]"$($_.DisplayVersion)") -join ",")] ($($_.InstallLocation)) icon $($_.DisplayIcon)" } | Tee-Object -Append $log
           pwsh -NoProfile -File scripts/pushmpc-plex.ps1 status -InstallDir "$env:RUNNER_TEMP\plex-probe" 2>&1 | Tee-Object -Append $log
           @('## Plex on the runner', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           exit 0

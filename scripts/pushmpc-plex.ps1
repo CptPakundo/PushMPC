@@ -76,6 +76,8 @@ function Get-Plex {
         if (-not $dll) { continue }
         $exe = Join-Path $a.Dir $a.Exe
         $ver = Get-PlexVersion $a.Dir $exe
+        # the version number alone (an Apps entry can carry invisible characters or a suffix)
+        $m = [regex]::Match("$ver", '\d+(\.\d+)+'); if ($m.Success) { $ver = $m.Value }
         $tested = [bool](@($Tested[$a.Name] | Where-Object { $ver -like $_ }).Count)
         $out += [pscustomobject]@{ Name = $a.Name; Dir = $a.Dir; Dll = $dll; Version = "$ver"; Tested = $tested; Sha = (Get-Sha256 $dll) }
     }
