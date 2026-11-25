@@ -228,7 +228,11 @@ public:
         m_settings = Settings::Read();
         const std::string url = props.GetURL();
         Log(ADDON_LOG_INFO, "%s, Kodi API %s: opening %s", PM_ADDON_VERSION, PM_KODI22 ? "22" : "21", url.c_str());
-        if (!m_io.file.OpenFile(url, ADDON_READ_AUDIO_VIDEO)) {
+        // as Kodi's own file input opens files: Kodi's read cache only for network sources. Kodi also opens add-on inputs on its
+        // GUI thread (stream-detail probes), where a cached seek can wait on the cache thread for good.
+        const bool local = url.find("://") == std::string::npos || url.rfind("file://", 0) == 0 || url.rfind("special://", 0) == 0;
+        const unsigned flags = ADDON_READ_TRUNCATED | ADDON_READ_BITRATE | ADDON_READ_CHUNKED | (local ? ADDON_READ_NO_CACHE : ADDON_READ_AUDIO_VIDEO);
+        if (!m_io.file.OpenFile(url, flags)) {
             Log(ADDON_LOG_ERROR, "cannot open %s", url.c_str());
             return false;
         }

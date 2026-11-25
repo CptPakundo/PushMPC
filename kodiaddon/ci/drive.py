@@ -76,6 +76,11 @@ while time.time() < deadline:
 else:
     print("DRIVE: no active player"); sys.exit(0)
 print("DRIVE: playing")
+# the clock starts when Kodi shows the first picture (libass font setup can take seconds on a runner)
+for _ in range(60):
+    if ms(props().get("time", {})) > 300:
+        break
+    time.sleep(0.5)
 time.sleep(min(4.0, secs))
 p0 = props(); print("DRIVE props0", json.dumps(p0))
 if case == "seek":
