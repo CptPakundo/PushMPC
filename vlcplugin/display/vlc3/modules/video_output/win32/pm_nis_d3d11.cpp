@@ -104,6 +104,9 @@ struct pm_nis {
     ComPtr<ID3D11ShaderResourceView> midSRV;
     ComPtr<ID3D11UnorderedAccessView> midUAV;
     unsigned midW = 0, midH = 0;
+    ComPtr<ID3D11Texture2D> nisOut;         // NIS's own output, placement size
+    ComPtr<ID3D11UnorderedAccessView> nisUAV;
+    unsigned nisW = 0, nisH = 0;
     ComPtr<ID3D11Texture2D> out;            // the window-size output
     ComPtr<ID3D11ShaderResourceView> outSRV;
     ComPtr<ID3D11UnorderedAccessView> outUAV;
@@ -255,9 +258,23 @@ int PM_NisProcess(vlc_object_t *o, pm_nis *n, d3d11_device_t *d, ID3D11ShaderRes
     c.dstSize[0] = (float)mw; c.dstSize[1] = (float)mh;
     c.planes = (uint32_t)count;
 
+    // NIS writes whole blocks (32 x 24), past its output viewport: it draws into a placement-size texture, which is then
+    // copied into the window texture at the placement, so the letterbox bars stay untouched
+    if (!n->nisOut || n->nisW != place->width || n->nisH != place->height) {
+        n->nisOut.Reset(); n->nisUAV.Reset();
+        D3D11_TEXTURE2D_DESC t = {};
+        t.Width = place->width; t.Height = place->height; t.MipLevels = 1; t.ArraySize = 1;
+        t.Format = DXGI_FORMAT_R8G8B8A8_UNORM; t.SampleDesc.Count = 1; t.Usage = D3D11_USAGE_DEFAULT;
+        t.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        if (FAILED(dev->CreateTexture2D(&t, nullptr, n->nisOut.GetAddressOf())) ||
+            FAILED(dev->CreateUnorderedAccessView(n->nisOut.Get(), nullptr, n->nisUAV.GetAddressOf())))
+            return VLC_EGENERIC;
+        n->nisW = place->width; n->nisH = place->height;
+    }
+    if (place->x + place->width > n->outW || place->y + place->height > n->outH) return VLC_EGENERIC;
     NISConfig cfg = {};
-    if (!NVScalerUpdateConfig(cfg, sharpness, 0, 0, mw, mh, mw, mh, place->x, place->y, place->width, place->height,
-                              n->outW, n->outH, NISHDRMode::None))
+    if (!NVScalerUpdateConfig(cfg, sharpness, 0, 0, mw, mh, mw, mh, 0, 0, place->width, place->height,
+                              place->width, place->height, NISHDRMode::None))
         return VLC_EGENERIC;
 
     d3d11_device_lock(d);
@@ -287,11 +304,13 @@ int PM_NisProcess(vlc_object_t *o, pm_nis *n, d3d11_device_t *d, ID3D11ShaderRes
     ctx->CSSetShader(n->nis.Get(), nullptr, 0);
     ctx->CSSetConstantBuffers(0, 1, n->nisCB.GetAddressOf());
     ctx->CSSetShaderResources(0, 3, nisIn);
-    ctx->CSSetUnorderedAccessViews(0, 1, n->outUAV.GetAddressOf(), nullptr);
+    ctx->CSSetUnorderedAccessViews(0, 1, n->nisUAV.GetAddressOf(), nullptr);
     ctx->Dispatch((place->width + 31) / 32, (place->height + 23) / 24, 1);
     ctx->CSSetShaderResources(0, 3, nullSRV);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
     ctx->CSSetShader(nullptr, nullptr, 0);
+    const D3D11_BOX box = { 0, 0, 0, place->width, place->height, 1 };
+    ctx->CopySubresourceRegion(n->out.Get(), 0, place->x, place->y, 0, n->nisOut.Get(), 0, &box);
     d3d11_device_unlock(d);
     (void)o;
     return VLC_SUCCESS;
