@@ -76,7 +76,7 @@ if(PM_GPU)
   endif()
 endif()
 
-add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c)
+add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
 target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
 target_compile_definitions(pushmpc_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc" _FILE_OFFSET_BITS=64 _REENTRANT _THREAD_SAFE)
@@ -130,10 +130,10 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
     ${D3}/video_chroma/d3d11_fmt.c ${D3}/video_chroma/dxgi_fmt.c ${D3}/video_chroma/copy.c)
   add_library(pushmpc_d3d11_plugin SHARED ${D3D11_FORK_SOURCES})
   set_target_properties(pushmpc_d3d11_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_d3d11_plugin")
-  target_include_directories(pushmpc_d3d11_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/video_output" "${D3}/video_output/win32"
+  target_include_directories(pushmpc_d3d11_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/../include" "${D3}/video_output" "${D3}/video_output/win32"
                              "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
   target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
-                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS)
+                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "N_(s)=s" "_(s)=vlc_gettext(s)")
   target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations)
   if(VLC_CORE_LIB)
     target_link_libraries(pushmpc_d3d11_plugin PRIVATE "${VLC_CORE_LIB}")

@@ -15,6 +15,7 @@ want=$(curl -fsSL --retry 3 "$base/vlc-$ver.tar.xz.sha256" | cut -d' ' -f1)
 got=$( (sha256sum "$tar" 2>/dev/null || shasum -a 256 "$tar") | cut -d' ' -f1)
 [ "$want" = "$got" ] || { echo "SHA-256 mismatch for vlc-$ver.tar.xz: $got" >&2; exit 1; }
 files="COPYING.LIB
+include/vlc_vout_wrapper.h
 modules/codec/avcodec/va_surface.h
 modules/video_chroma/copy.c
 modules/video_chroma/copy.h

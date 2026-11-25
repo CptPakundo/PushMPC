@@ -214,9 +214,9 @@ jobs:
             VLC=/usr/bin/vlc PLUGDIR=\$d CLIP=art/clips/clip.mkv OUT=res/distro SRC_FRAMES=\$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
             LABEL='${{ matrix.image }} distro VLC' CASES='base x2 x4 x8' bash vlcplugin/tests/run-module.sh" | tee distro.txt
           grep -q '^PASS {"case": "x4"' distro.txt || { echo "::error::x4 failed in ${{ matrix.image }}"; exit 1; }
-
-  # Snap VLC: the wrapper leaves VLC_PLUGIN_PATH alone and runs vlc --config=$SNAP_USER_COMMON/vlcrc;
-  # does the confined VLC load a plugin from ~/snap/vlc/common (AppArmor: mmap-exec allowed there?)
+  # Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so the plugin bank never sees PushMPC. Route: a Lua interface script in
+  # the snap's user Lua folder loads our .so with package.loadlib; its bootstrap checks VLC's module layout against the
+  # exported getters and hands the postproc slot (and one rarely used filter, for pushmpc_out) to PushMPC, or does nothing.
   snap-spike:
     needs: [clips, build-linux]
     runs-on: ubuntu-24.04
@@ -225,25 +225,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: art }
-      - name: snap install vlc, plugin in ~/snap/vlc/common, settings in its vlcrc
+      - name: Snap VLC with the Lua bootstrap (VLC's own yuv output counts the frames)
         run: |
           set -u
-          sudo snap install vlc || { echo "::warning::snap install failed"; exit 0; }
-          snap info vlc | grep -E 'installed|base' || true
-          snap run --shell vlc -c 'echo base=$SNAP_NAME rev=$SNAP_REVISION; cat /etc/os-release | head -2; ldd --version | head -1' || true
-          c=~/snap/vlc/common; d=$c/pushmpc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
+          sudo snap install vlc >/dev/null || { echo "::warning::snap install failed"; exit 0; }
+          snap list vlc
+          c=~/snap/vlc/common; mkdir -p $c/pushmpc && cp art/plugin-linux/libpushmpc_plugin.so $c/pushmpc/
+          lua=~/snap/vlc/current/.local/share/vlc/lua/intf; mkdir -p $lua && cp vlcplugin/install/snap/pushmpc_boot.lua $lua/
+          printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
           cp art/clips/clip.mkv $c/clip.mkv
-          printf '[core]\nvideo-filter=postproc:pushmpc_out\n[pushmpc]\npushmpc-smoother=4\n' > $c/vlcrc
-          echo "--- inside the snap: environment, wrapper, plugin scan"
-          VLC_PLUGIN_PATH="$d" snap run --shell vlc -c 'echo "VLC_PLUGIN_PATH=$VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; command -v vlc; head -40 "$SNAP/bin/vlc-snap-wrapper.sh" 2>/dev/null || ls $SNAP/bin' || true
-          VLC_PLUGIN_PATH="$d" timeout 60 snap run vlc -I dummy -vv --list 2>&1 | grep -iE "pushmpc|pushdump|browsing|cannot load|plugins.dat|entry point|VLC_PLUGIN" | head -20 || true
-          sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -10 || true
-          export VLC=/snap/bin/vlc PLUGDIR="$d" CLIP=$c/clip.mkv OUT=$c/res SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
-                 LABEL="Snap VLC (VLC_PLUGIN_PATH=~/snap/vlc/common/pushmpc)" CASES="base x2 x4 installed" INSTALLED_MULT=4
-          bash vlcplugin/tests/run-module.sh | tee snap.txt
-          grep -hiE "pushmpc|cannot load|denied|apparmor|plugins.dat|browsing" $c/res/x4.log | head -20 || true
-          sudo journalctl -k --no-pager 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -10 || true
-          mkdir -p res && cp -r $c/res res/snap || true
+          mkdir -p res/snap
+          run() { # name, then the vlcrc's [core] lines
+            name=$1; shift
+            printf '[core]\n%s\n' "$@" > $c/vlcrc
+            rm -f $c/$name.y4m
+            timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --avcodec-hw=none --vout=yuv --yuv-yuv4mpeg2 \
+              --yuv-file=$c/$name.y4m $c/clip.mkv > res/snap/$name.log 2>&1; rc=$?
+            frames=$(grep -c '^FRAME' $c/$name.y4m 2>/dev/null || echo 0)
+            echo "== $name: exit $rc frames=$frames"
+            grep -hE "PushMPC|pushmpc|lua|luaintf|postproc|Failed|denied" res/snap/$name.log | sort | uniq -c | head -15
+          }
+          run base 'extraintf='
+          run boot 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
+          PUSHMPC_SNAP_BOOT=0 run boot_off 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
+          sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -5 || true
+          b=$(grep -c '^FRAME' $c/base.y4m 2>/dev/null || echo 0); x=$(grep -c '^FRAME' $c/boot.y4m 2>/dev/null || echo 0)
+          echo "base $b frames, with the bootstrap $x frames"
+          [ "$x" -ge $((b * 3)) ] && echo "::notice::Snap VLC runs PushMPC (x$((x / (b > 0 ? b : 1))))" || echo "::warning::Snap bootstrap did not multiply frames"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-snap, path: res, retention-days: 7 }

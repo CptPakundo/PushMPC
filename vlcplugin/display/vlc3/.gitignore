@@ -5,3 +5,4 @@
 !/modules/video_output/
 !/modules/video_output/win32/
 !/modules/video_output/win32/pm_nis_d3d11.*
+/include/

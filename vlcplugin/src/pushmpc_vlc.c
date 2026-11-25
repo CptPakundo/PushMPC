@@ -62,6 +62,29 @@ static void Close(vlc_object_t *);
 static int  OpenOut(vlc_object_t *);
 static void CloseOut(vlc_object_t *);
 
+/* Options: when the plugin was loaded through VLC's plugin bank they are registered config items; when it was brought
+ * in by the Snap bootstrap (pm_snap_boot.c) they are not, and the values come from pushmpc.conf (or the defaults). */
+const char *pm_snap_conf(const char *key);   /* pm_snap_boot.c; NULL when not in snap mode or unset */
+static int64_t OptInt(vlc_object_t *o, const char *name, int64_t def)
+{
+    if (config_GetType(name)) return var_InheritInteger(o, name);
+    const char *v = pm_snap_conf(name + sizeof(CFG) - 1);
+    return v ? strtoll(v, NULL, 10) : def;
+}
+static double OptFloat(vlc_object_t *o, const char *name, double def)
+{
+    if (config_GetType(name)) return var_InheritFloat(o, name);
+    const char *v = pm_snap_conf(name + sizeof(CFG) - 1);
+    return v ? strtod(v, NULL) : def;
+}
+#define OptInt(o, n, d) OptInt(VLC_OBJECT(o), n, d)
+#define OptFloat(o, n, d) OptFloat(VLC_OBJECT(o), n, d)
+/* the filter callbacks, for the Snap bootstrap */
+int pm_filter_open(vlc_object_t *o) { return Open(o); }
+void pm_filter_close(vlc_object_t *o) { Close(o); }
+int pm_out_open(vlc_object_t *o) { return OpenOut(o); }
+void pm_out_close(vlc_object_t *o) { CloseOut(o); }
+
 /* ---- the worker (generation off VLC's video output thread)
  * With pushmpc_out in the interactive chain, the static filter returns the real frame plus k - 1 still-empty
  * pictures at once; a worker thread fills them in display order, and pushmpc_out, which runs for each picture just
@@ -567,11 +590,11 @@ static int Open(vlc_object_t *obj)
     }
     sys->bits = bits;
     sys->bps = bits > 8 ? 2 : 1;
-    sys->alloc = (int)var_InheritInteger(f, CFG "alloc");
-    const int smoother = (int)var_InheritInteger(f, CFG "smoother");
-    const int quality = (int)var_InheritInteger(f, CFG "quality");
-    const int threads = (int)var_InheritInteger(f, CFG "threads");
-    double hz = var_InheritFloat(f, CFG "display-hz");
+    sys->alloc = (int)OptInt(f, CFG "alloc", 0);
+    const int smoother = (int)OptInt(f, CFG "smoother", 0);
+    const int quality = (int)OptInt(f, CFG "quality", 1);
+    const int threads = (int)OptInt(f, CFG "threads", 0);
+    double hz = OptFloat(f, CFG "display-hz", 0.0);
     if (hz <= 0) hz = pm_display_hz();
     const double fps = (v->i_frame_rate && v->i_frame_rate_base) ? (double)v->i_frame_rate / v->i_frame_rate_base : 0.0;
     sys->nominal_dt = fps > 0 ? (mtime_t)(CLOCK_FREQ / fps) : CLOCK_FREQ / 24;
@@ -579,7 +602,7 @@ static int Open(vlc_object_t *obj)
 
     sys->wfmt = f->fmt_out.video;
     sys->bps_w = sys->bps;
-    const int engine = (int)var_InheritInteger(f, CFG "engine");
+    const int engine = (int)OptInt(f, CFG "engine", 0);
     if (engine == 0 || engine == 2) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         memset(&pcc, 0, sizeof(pcc));
@@ -594,7 +617,7 @@ static int Open(vlc_object_t *obj)
         pcc.range = v->b_color_range_full ? 2 : 1;
         pcc.smoother = smoother;
         pcc.display_hz = hz;
-        pcc.warp = var_InheritBool(f, CFG "warp") ? 1 : 0;
+        pcc.warp = OptInt(f, CFG "warp", 0) ? 1 : 0;
         int pk = 1;
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
@@ -632,7 +655,7 @@ static int Open(vlc_object_t *obj)
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
     sys->wfmt = f->fmt_out.video;
-    if ((sys->eng || sys->pc) && sys->k > 1 && var_InheritBool(f, CFG "worker")) {
+    if ((sys->eng || sys->pc) && sys->k > 1 && OptInt(f, CFG "worker", 1)) {
         vlc_mutex_init(&sys->wlock);
         vlc_cond_init(&sys->wcond);
         if (vlc_clone(&sys->worker, Worker, sys, VLC_THREAD_PRIORITY_VIDEO) == 0) sys->worker_on = true;
