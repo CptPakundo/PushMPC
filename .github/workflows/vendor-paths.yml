@@ -8,7 +8,7 @@
 name: vendor-paths
 on:
   push:
-    paths: ['pushmpc/tools/vsr_gate_probe*', 'pushmpc/include/pushmpc/unlocks.h', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp', 'tests/gtx16-vsr-manual.ps1', 'tests/zluda-vsr-manual.ps1', 'scripts/nvidia-vfx-fetch.ps1', 'scripts/nvidia-vfx-pin.json', '.github/workflows/vendor-paths.yml']
+    paths: ['pushmpc/tools/vsr_gate_probe*', 'pushmpc/include/pushmpc/unlocks.h', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp', 'tests/gtx16-vsr-manual.ps1', 'tests/zluda-vsr-manual.ps1', 'scripts/nvidia-vfx-fetch.ps1', 'scripts/nvidia-vfx-pin.json', 'scripts/fidelityfx-fetch.ps1', 'scripts/pushmpc-install.ps1', 'pushmpc/src/PushCoreGpu.cpp', 'filter/src/PushMpcSettings.h', '.github/workflows/vendor-paths.yml']
   workflow_dispatch:
 
 concurrency:
@@ -92,6 +92,18 @@ jobs:
             }
             Remove-Item $d -Recurse -Force
           }
+      - uses: actions/checkout@v4
+        with: { path: repo }
+      - name: fidelityfx-fetch.ps1 (the installer's FSR SDK 2.4.0 step) - pins, versions, AMD signature
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          ./repo/scripts/fidelityfx-fetch.ps1 -Dest "$env:RUNNER_TEMP\ffx240" -Cache "$env:RUNNER_TEMP\ffx240-cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem "$env:RUNNER_TEMP\ffx240" | ForEach-Object { "{0} {1} {2}" -f $_.Name, $_.VersionInfo.FileVersion, $_.Length }
+          Remove-Item "$env:RUNNER_TEMP\ffx240", "$env:RUNNER_TEMP\ffx240-cache" -Recurse -Force
+          ./repo/scripts/pushmpc-install.ps1 install -DryRun -Gpu AMD -NoMpv 2>&1 | Select-String 'FSR SDK|fidelityfx' | ForEach-Object { $_.Line }
+          exit 0
 
   vfx-wheel:
     runs-on: windows-latest

@@ -34,6 +34,7 @@
 #include "veyra/pushflow/PushFlowBackend.h"
 #include "veyra/gfx/AmfFrcBackend.h"
 #include "veyra/ngx/DlssgLite.h"
+#include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -186,6 +187,7 @@ const char* fgName(uint32_t b) {
     case PUSHCORE_FG_PUSHFLOW: return "PushFlow";
     case PUSHCORE_FG_FSR: return "FSR FG";
     case PUSHCORE_FG_AMDFRC: return "AMD FRC";
+    case PUSHCORE_FG_NVOF: return "NVOF FG";
     default: return "none";
     }
 }
@@ -284,6 +286,16 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         std::snprintf(c.reason[bit], sizeof(c.reason[bit]), "%s", !hardware ? needHw : needFiles);
     };
     const std::wstring rt = runtimeDir.wstring();
+    // T5b: NVOF frame generation (FSR 3.1 interpolation on NVIDIA's optical-flow hardware): NVOFA on the card (every Turing
+    // but TU117, Ampere and later), a core built with the Optical Flow SDK, the FidelityFX files; off switch NvofWarp
+    {
+        const bool nvofa = pmu::HasNvofa(v, d.DeviceId, rtx, name);
+        const bool offSwitch = pmu::ReadUnlockMode(pmu::Unlock::NvofWarp) == pmu::UnlockMode::Off;
+        const bool ffx = fsrLoader && fileExists(fsr / L"amd_fidelityfx_framegeneration_dx12.dll");
+        set(PUSHCORE_CAP_NVOF_FG, nvofa && !offSwitch, ffx && veyra::ngx::NvOfSession::builtWithSdk(),
+            offSwitch ? "switched off (PUSHMPC_DISABLE_NVOFWARP / Unlocks NvofWarp = 0)" : "needs NVIDIA's optical-flow hardware (Turing except GTX 1650 / TU117, or newer)",
+            !ffx ? "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)" : "this pushcore was built without NVIDIA Optical Flow support");
+    }
     set(PUSHCORE_CAP_VFG, vfgHw, veyra::pipeline::VfgBackend::runtimeAvailable(rt), "needs an NVIDIA RTX 30, 40 or 50 card",
         "the VFG files are not installed (runtime\\nvidia-vfg)");
     set(PUSHCORE_CAP_DLSSG, nvidia && rtx && fam != PUSHCORE_FAMILY_RTX20, fileExists(runtimeDir / L"nvngx_dlssg.dll"),
@@ -559,6 +571,14 @@ struct PushCore {
             s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
             cap = 4;
             break;
+        case PUSHCORE_FG_NVOF:
+            // NVIDIA's optical-flow hardware as the motion, FSR 3.1's interpolation and warp (T5b, unlock NvofWarp): the
+            // flow runs on the NVOFA engine, the refined vectors feed FidelityFX frame interpolation; 2x
+            s.frameGenerationBackend = FrameGenerationBackend::Fsr;
+            s.opticalFlowBackend = OpticalFlowBackend::Nvidia;
+            s.fgMotionRefine = true;
+            cap = 2;
+            break;
         case PUSHCORE_FG_FSR:
             // FSR 4 ML frame generation on RX 9000 (PushFPS's default there), FSR 3.1 elsewhere; FidelityFX flow
             s.frameGenerationBackend = family == PUSHCORE_FAMILY_RDNA4 ? FrameGenerationBackend::Fsr4 : FrameGenerationBackend::Fsr;
@@ -741,7 +761,7 @@ struct PushCore {
         if (m < 2) { c.push_back({settings.fgBackend, 8}); return c; }
         const bool nvidia = ctx.adapter().vendorId == 0x10DE, amd = ctx.adapter().vendorId == 0x1002;
         auto add = [&](uint32_t b, uint32_t cap) {
-            if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG) && !nvidia) return;
+            if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
             if (b == PUSHCORE_FG_DLSSG && family == PUSHCORE_FAMILY_RTX20) return;
             for (const auto& e : c) if (e.first == b && e.second == cap) return;
             c.push_back({b, cap});
@@ -751,6 +771,7 @@ struct PushCore {
         case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
+        case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
         default: add(PUSHCORE_FG_VFG, 8); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
@@ -1540,7 +1561,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

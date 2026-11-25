@@ -28,6 +28,7 @@ static Gpu Family(uint32_t f, const wchar_t* name)
     for (auto& r : g.reason) r = L"not on this GPU";
     return g;
 }
+static uint32_t CoreFgFor(FgMethod m) { return uint32_t(int(m) - 1); }   // the filter's / vsplugin's mapping onto PUSHCORE_FG_*
 int main()
 {
     Display d4k{ L"4K 240", 239.96, 3840, 2160, false };
@@ -233,6 +234,20 @@ int main()
             RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\PushMPC-auto_test");
             RegBase() = L"Software\\PushMPC";
             check(a.known && a.passed && !b.known, L"self-test cache: same key read back, another driver is stale");
+        }
+        {   // NVOF FG (T5b item 6): GTX 16 with NVOFA picks it over FSR FG; a GTX 1650 (no NVOFA cap) keeps FSR FG; RTX 20 after PushFlow
+            Gpu g1660 = Family(kGtx, L"NVIDIA GeForce GTX 1660 Ti"); g1660.available |= 1u << kCapNvofFg;
+            const Choice n1 = Decide({}, film, d60, cold, g1660);
+            check(n1.fgMethod == FgMethod::Nvof && n1.multiplier == 2, L"GTX 1660 Ti cold start: NVOF FG 2x (NVIDIA flow hardware + FSR interpolation)", n1.smootherNote);
+            const Choice n2 = Decide({}, film, d60, cold, Family(kGtx, L"NVIDIA GeForce GTX 1650"));
+            check(n2.fgMethod == FgMethod::Fsr, L"GTX 1650 (no NVOFA): FSR FG", n2.smootherNote);
+            Gpu g2060 = Family(kRtx20, L"NVIDIA GeForce RTX 2060"); g2060.available |= 1u << kCapNvofFg;
+            Costs slow2060 = cold; slow2060.card = 8.0; slow2060.pfBenched = true; for (int t = 0; t < 3; ++t) { slow2060.pfFirst[t] = 70 + 10 * t; slow2060.pfNext[t] = 60 + 10 * t; }
+            const Choice n3 = Decide({}, film, d60, slow2060, g2060);
+            check(n3.fgMethod == FgMethod::Nvof, L"RTX 2060, PushFlow measured too slow: NVOF FG (before FSR FG)", n3.smootherNote + L" | " + n3.stoppedAt);
+            Settings fm; fm.fgMethod = FgMethod::Nvof;
+            check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
+            (void)fm;
         }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;

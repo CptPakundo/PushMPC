@@ -152,6 +152,9 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_FG_PUSHFLOW 2u    /* PushFlow (RIFE on DirectML), any DirectX 12 GPU, up to 4x */
 #define PUSHCORE_FG_FSR 3u         /* AMD FSR 3.1 frame generation (any DirectX 12 GPU; FSR 4 ML on RX 9000), 2x */
 #define PUSHCORE_FG_AMDFRC 4u      /* AMD AMF frame rate conversion (AMD driver), 2x */
+#define PUSHCORE_FG_NVOF 5u        /* PUSHCORE_FEATURE_NVOF_FG: NVIDIA's optical-flow hardware (NVOFA: Turing except TU117, and
+                                      later) as the motion of FSR 3.1's frame interpolation and warp, 2x: the flow costs no
+                                      shader time (GTX 16 / RTX 20 where VFG does not run and PushFlow is too slow) */
 #define PUSHCORE_FG_NONE 255u      /* (reported only) no frame generation could start */
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
@@ -307,6 +310,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_HDR_PEAK 64u   /* PushCoreSettings.videoHdrPeak */
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
+#define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
@@ -340,7 +344,8 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_RTX_HDR 10u     /* RTX Video HDR */
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
-#define PUSHCORE_CAP_COUNT 13u
+#define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
+#define PUSHCORE_CAP_COUNT 14u
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;

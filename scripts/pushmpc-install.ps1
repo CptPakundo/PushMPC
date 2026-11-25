@@ -73,6 +73,11 @@ param(
     # pinned). The package's own copy missing: the wheel is used either way.
     [ValidateSet('Package', 'Wheel')]
     [string]$VfxSource = 'Package',
+    # AMD's FidelityFX DLLs: Package = the runtime package's SDK 2.3.0 set, Sdk240 = AMD FSR SDK 2.4.0 (upscaler 4.1.2: FSR 4.1 on
+    # RX 6000 too; scripts\fidelityfx-fetch.ps1, pinned, AMD-signed), Auto = Sdk240 on an AMD GPU unless the unlock Fsr4Int8 is
+    # switched off (PUSHMPC_DISABLE_FSR4INT8=1 or HKCU\Software\PushMPC\Unlocks Fsr4Int8 = 0)
+    [ValidateSet('Auto', 'Package', 'Sdk240')]
+    [string]$FidelityFx = 'Auto',
     # reuse an existing PushFPS / Veyra install's files as hard links (same volume) instead of copies
     [switch]$LinkExisting,
     # never reuse an existing install's files (always the package)
@@ -1335,9 +1340,30 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     Get-ChildItem $dest -Recurse -Directory | Sort-Object FullName -Descending | Where-Object { -not (Get-ChildItem $_.FullName -Force) } | Remove-Item -Force
     $extraNote = 'none'
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
+    Add-FidelityFxSdk $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
+}
+# AMD FSR SDK 2.4.0's signed DLLs over the package's 2.3.0 set (unlock Fsr4Int8; the self-test is the fetch script's pin,
+# version and AMD-signature check, recorded in HKCU\Software\PushMPC\SelfTest\Fsr4Int8). A failure keeps the package's set.
+function Add-FidelityFxSdk([string]$dest) {
+    $want = $FidelityFx
+    if ($want -eq 'Auto') {
+        $off = $env:PUSHMPC_DISABLE_FSR4INT8 -match '^(1|true|yes|on)$'
+        try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name Fsr4Int8 -ErrorAction Stop).Fsr4Int8 -eq 0) { $off = $true } } catch {}
+        $want = if ($GpuVendor -eq 'AMD' -and -not $off) { 'Sdk240' } else { 'Package' }
+        if ($GpuVendor -eq 'AMD' -and $off) { Info 'FSR SDK 2.4.0: switched off (unlock Fsr4Int8): the package''s FidelityFX 2.3.0 stays' }
+    }
+    if ($want -ne 'Sdk240') { return }
+    $fetch = Join-Path $PSScriptRoot 'fidelityfx-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'fidelityfx-fetch.ps1 is not next to the installer: the package''s FidelityFX 2.3.0 stays'; return }
+    if ($DryRun) { Dry "would replace runtime_local\amd\fidelityfx with AMD FSR SDK 2.4.0's signed DLLs (fidelityfx-fetch.ps1)"; return }
+    Step 'AMD FSR SDK 2.4.0 (FSR 4.1 upscaling on RX 6000 / 7000 / 9000), from AMD''s repository, pinned'
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'fidelityfx-v2.4.0' } else { Join-Path $InstallDir 'download\fidelityfx-v2.4.0' }
+    & $fetch -Dest (Join-Path $dest 'runtime_local\amd\fidelityfx') -Cache $cache -Record
+    if ($LASTEXITCODE -ne 0) { Warn "FSR SDK 2.4.0 not installed (fidelityfx-fetch.ps1 exit $LASTEXITCODE): the package's FidelityFX 2.3.0 stays" }
+    else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + FidelityFX SDK 2.4.0" }
 }
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
@@ -1363,6 +1389,7 @@ function Prepare-Runtime($pkg = $Runtime) {
     # an existing PushFPS / Veyra install with the pinned files first (no download), else the package
     if (Get-ExistingRuntime $dest $pkg) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
+        Add-FidelityFxSdk $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }

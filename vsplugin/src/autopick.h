@@ -30,7 +30,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     if (key == L"fg_quality") { s.fgQuality = is(L"High") ? pm::FgQuality::High : is(L"Low") ? pm::FgQuality::Low : is(L"Medium") ? pm::FgQuality::Medium : pm::FgQuality::Auto; return true; }
     if (key == L"fg_method") {
         s.fgMethod = is(L"VFG") ? pm::FgMethod::Vfg : (is(L"DLSSG") || is(L"DLSS-G")) ? pm::FgMethod::Dlssg : is(L"PushFlow") ? pm::FgMethod::PushFlow
-                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : pm::FgMethod::Auto;
+                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : is(L"NVOF") ? pm::FgMethod::Nvof : pm::FgMethod::Auto;
         return true;
     }
     if (key == L"vrr") { s.vrr = is(L"On") ? pm::VrrMode::On : is(L"Off") ? pm::VrrMode::Off : pm::VrrMode::Auto; return true; }
