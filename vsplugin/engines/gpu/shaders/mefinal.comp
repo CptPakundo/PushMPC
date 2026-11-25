@@ -1,0 +1,48 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: the finest level's grid to a motion field (Motion.cpp's last step): vectors in full-size
+// pixels with their sub-pixel part, a 3x3 vector median per component, the matched error per pixel, and the scene-cut
+// counts (blocks whose matched error stays above the floor and above `ratio` of their zero-motion error).
+layout(local_size_x = 8, local_size_y = 8) in;
+struct Cell { ivec2 v; int cost; int zero; vec2 sub; };
+layout(binding = 0, std430) readonly buffer Grid { Cell g[]; };
+layout(binding = 1, std430) writeonly buffer Field { vec2 field[]; };
+layout(binding = 2, std430) writeonly buffer Cost { float cost[]; };
+layout(binding = 3, std430) buffer Stats { uint unexplained; uint costSum256; uint blocks; uint pad; } st;
+layout(push_constant) uniform PC { int bx, by; float scale, cutFloor, cutRatio; } pc;
+
+float wv[9];
+float med9()
+{
+    // a sorting network for the median of 9 (Paeth / Devillard)
+#define S2(a, b) { float lo_ = min(wv[a], wv[b]); wv[b] = max(wv[a], wv[b]); wv[a] = lo_; }
+    S2(1, 2) S2(4, 5) S2(7, 8) S2(0, 1) S2(3, 4) S2(6, 7) S2(1, 2) S2(4, 5) S2(7, 8)
+    S2(0, 3) S2(5, 8) S2(4, 7) S2(3, 6) S2(1, 4) S2(2, 5) S2(4, 7) S2(4, 2) S2(6, 4) S2(4, 2)
+#undef S2
+    return wv[4];
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.bx || p.y >= pc.by) return;
+    vec2 r;
+    for (int comp = 0; comp < 2; ++comp) {
+        int m = 0;
+        for (int dj = -1; dj <= 1; ++dj)
+            for (int di = -1; di <= 1; ++di) {
+                int ii = clamp(p.x + di, 0, pc.bx - 1), jj = clamp(p.y + dj, 0, pc.by - 1);
+                Cell c = g[jj * pc.bx + ii];
+                wv[m++] = comp == 0 ? (float(c.v.x) + c.sub.x) * pc.scale : (float(c.v.y) + c.sub.y) * pc.scale;
+            }
+        r[comp] = med9();
+    }
+    int idx = p.y * pc.bx + p.x;
+    field[idx] = r;
+    Cell own = g[idx];
+    float c = float(own.cost) / 64.0, z = float(own.zero) / 64.0;
+    cost[idx] = c;
+    if (c > pc.cutFloor && c > pc.cutRatio * z) atomicAdd(st.unexplained, 1u);
+    atomicAdd(st.costSum256, uint(c * 256.0 + 0.5));
+    atomicAdd(st.blocks, 1u);
+}

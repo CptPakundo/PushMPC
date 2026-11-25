@@ -18,6 +18,7 @@
 #include "backend.h"
 #include "platform.h"
 #include "portable_backend.h"
+#include "cadence.h"
 #include "veyra/portable/Interpolate.h"
 
 using namespace pmvs;
@@ -298,6 +299,62 @@ static void TestSeekAndOrder()
     CHECK(live <= 96 + 8, "cache bounded: %zu frames live", live);
 }
 
+// ------------------------------------------------------------------------------------------------ GPU engine logic
+// cadence.h (Dedup's re-timing), the GPU K rule and the upscale decision: pure C++, no GPU
+static std::map<int64_t, pmvs::gpu::Shot> RunCadence(int k, int look, int64_t frames, const std::vector<bool>& dup)
+{
+    pmvs::gpu::Cadence c;
+    c.Configure(k, look, frames);
+    std::map<int64_t, pmvs::gpu::Shot> out;
+    for (int64_t s = 0; s < int64_t(dup.size()); ++s) {
+        c.Push(s, dup[size_t(s)]);
+        std::vector<pmvs::gpu::Settled> st;
+        c.Settle(st);
+        for (auto& x : st) out[x.n] = x.shot;
+    }
+    return out;
+}
+static void TestCadence()
+{
+    using pmvs::gpu::Shot;
+    auto approx = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
+    // no Dedup: plain interpolation, every output settled at once
+    auto m = RunCadence(4, 0, 100, std::vector<bool>(6, false));
+    CHECK(m.size() == 6 + 5 * 3, "plain: %d outputs", int(m.size()));
+    CHECK(m[4].kind == Shot::Real && m[4].src == 1, "plain real");
+    CHECK(m[5].kind == Shot::Generated && m[5].d0 == 1 && m[5].d1 == 2 && approx(m[5].t, 0.25f), "plain generated 1/4");
+    CHECK(m[7].kind == Shot::Generated && approx(m[7].t, 0.75f), "plain generated 3/4");
+    // anime on twos (A A B B C C D D), x2, lookahead 2: the duplicates' places get the midpoints
+    m = RunCadence(2, 2, 100, { false, true, false, true, false, true, false, true });
+    CHECK(m.count(1) && m[1].kind == Shot::Generated && m[1].d0 == 0 && m[1].d1 == 2 && approx(m[1].t, 0.25f), "twos: tau 0.5 -> 0.25 of A..B");
+    CHECK(m.count(2) && m[2].kind == Shot::Generated && approx(m[2].t, 0.5f), "twos: the duplicate's place is the midpoint");
+    CHECK(m.count(3) && m[3].kind == Shot::Generated && approx(m[3].t, 0.75f), "twos: tau 1.5");
+    CHECK(m.count(4) && m[4].kind == Shot::Real && m[4].src == 2, "twos: B real");
+    CHECK(!m.count(12), "twos: not settled beyond the lookahead");
+    // threes (A A A B B B), x2
+    m = RunCadence(2, 2, 100, { false, true, true, false, true, true, false });
+    CHECK(m.count(2) && m[2].kind == Shot::Generated && m[2].d0 == 0 && m[2].d1 == 3 && approx(m[2].t, 1.f / 3.f), "threes: 1/3");
+    CHECK(m.count(4) && m[4].kind == Shot::Generated && approx(m[4].t, 2.f / 3.f), "threes: 2/3");
+    // a still picture longer than the lookahead: held, only its last interval moves
+    m = RunCadence(2, 2, 100, { false, true, true, true, true, true, false, false, false });
+    CHECK(m.count(4) && m[4].kind == Shot::Hold && m[4].src == 2, "still: held");
+    CHECK(m.count(10) && m[10].kind == Shot::Hold, "still: tau 5 held");
+    CHECK(m.count(11) && m[11].kind == Shot::Generated && m[11].d0 == 0 && m[11].d1 == 6 && approx(m[11].t, 0.5f), "still: the last interval moves");
+    // the end of the clip settles everything
+    m = RunCadence(2, 2, 4, { false, false, false, false });
+    CHECK(m.count(6) && m[6].kind == Shot::Real && m[6].src == 3, "end: all settled");
+    // the GPU's K rule has no 1080p cap; the upscale decision
+    auto r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true);
+    CHECK(r.k == 8, "GPU at 4K: x8 when it fits (%d)", r.k);
+    auto u = DecideUpscale("auto", "screen", 3840, 2160, 1920, 1080);
+    CHECK(u.kind == kAutoUpscaler && u.w == 3840 && u.h == 2160, "upscale to the screen: %s", u.why.c_str());
+    u = DecideUpscale("nis", "screen", 0, 0, 1920, 1080); CHECK(u.kind == GpuUpscaler::None, "unknown screen: none");
+    u = DecideUpscale("auto", "4k", 0, 0, 1920, 800); CHECK(u.w == 3840 && u.h == 1600, "scope 4K keeps the aspect: %dx%d", u.w, u.h);
+    u = DecideUpscale("off", "4k", 0, 0, 1280, 720); CHECK(u.kind == GpuUpscaler::None, "off");
+    u = DecideUpscale("fsr", "screen", 1920, 1080, 1920, 1080); CHECK(u.kind == GpuUpscaler::None, "same size: none");
+    CHECK(ParseQuality("high", -1) == 2 && ParseQuality("Auto", 1) == -1 && ParseTri("on", -1) == 1 && ParseTri("x", 0) == 0, "words");
+}
+
 static void TestCalibrate()
 {
     const Calibration c = Calibrate(1920, 1080, 8, 0, 1);
@@ -321,6 +378,7 @@ int main()
     TestMovingBox(10);
     TestHardCut();
     TestSeekAndOrder();
+    TestCadence();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

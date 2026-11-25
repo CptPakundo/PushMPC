@@ -526,7 +526,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "fg_method:data:opt;vrr:data:opt;upscaler:data:opt;target:data:opt;vsr_style:data:opt;cleanup_strength:data:opt;on_battery:data:opt;subtitle_hold:data:opt;"
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
-        "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;",
+        "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
+        "display_w:int:opt;display_h:int:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;", "backend:data;why:data;", SelectCreate, nullptr, plugin);
 }

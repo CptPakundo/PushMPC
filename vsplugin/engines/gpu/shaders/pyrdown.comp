@@ -1,0 +1,17 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: the next pyramid level, PushFPS's halve(): 2x2 box filter, odd edges repeat the last
+// row / column, (a + b + c + d + 2) >> 2.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0, r8ui) uniform readonly uimage2D src;
+layout(binding = 1, r8ui) uniform writeonly uimage2D dst;
+layout(push_constant) uniform PC { int sw, sh, dw, dh; } pc;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dw || p.y >= pc.dh) return;
+    int x0 = 2 * p.x, y0 = 2 * p.y;
+    int x1 = x0 + 1 < pc.sw ? x0 + 1 : x0, y1 = y0 + 1 < pc.sh ? y0 + 1 : y0;
+    uint s = imageLoad(src, ivec2(x0, y0)).r + imageLoad(src, ivec2(x1, y0)).r + imageLoad(src, ivec2(x0, y1)).r + imageLoad(src, ivec2(x1, y1)).r;
+    imageStore(dst, p, uvec4((s + 2u) >> 2));
+}
