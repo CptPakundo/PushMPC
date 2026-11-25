@@ -78,8 +78,9 @@ function Get-Plex {
         $ver = Get-PlexVersion $a.Dir $exe
         # the version number alone (an Apps entry can carry invisible characters or a suffix)
         $m = [regex]::Match("$ver", '\d+(\.\d+)+'); if ($m.Success) { $ver = $m.Value }
-        $tested = [bool](@($Tested[$a.Name] | Where-Object { $ver -like $_ }).Count)
-        $out += [pscustomobject]@{ Name = $a.Name; Dir = $a.Dir; Dll = $dll; Version = "$ver"; Tested = $tested; Sha = (Get-Sha256 $dll) }
+        # (not "$tested": PowerShell names are case-insensitive, it would hide $Tested from the next Plex)
+        $isTested = [bool](@($script:Tested[$a.Name] | Where-Object { $ver -like $_ }).Count)
+        $out += [pscustomobject]@{ Name = $a.Name; Dir = $a.Dir; Dll = $dll; Version = "$ver"; Tested = $isTested; Sha = (Get-Sha256 $dll) }
     }
     return $out
 }
