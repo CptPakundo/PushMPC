@@ -40,6 +40,8 @@ public:
         Reset();
     }
     int Lookahead() const { return m_look; }
+    // the stream ends after the newest frame (when the length was not known): the next Settle gives the rest
+    void Finish() { if (m_newest >= 0) m_frames = m_newest + 1; }
     // a seek or a gap: nothing before the next pushed frame is known
     void Reset() { m_distinct.clear(); m_first = -1; m_next = -1; m_newest = -1; m_lastDistinct = -1; }
     // the next source frame in order (after a Reset, any frame); dup: it repeats the last distinct frame

@@ -29,6 +29,20 @@ struct DeviceInfo {
 // name or number it always may.
 struct DeviceRequest { std::string device; bool allowCpu = false; bool validation = false; };
 
+// a device someone else owns (FFmpeg's AVVulkanDeviceContext in mpv / libavfilter): the engine runs on it, so its
+// frames need no copy between devices. queueLock / queueUnlock guard the shared queue (FFmpeg's lock_queue); the
+// device and the instance are never destroyed here.
+struct ExternalDevice {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    PFN_vkGetInstanceProcAddr getInstanceProcAddr = nullptr;
+    uint32_t family = 0, queueIndex = 0;        // a compute-capable queue
+    void (*queueLock)(void* ctx, uint32_t family, uint32_t index) = nullptr;
+    void (*queueUnlock)(void* ctx, uint32_t family, uint32_t index) = nullptr;
+    void* lockCtx = nullptr;
+};
+
 struct Buffer { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkDeviceSize size = 0; void* map = nullptr; };
 struct Image { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE, viewRRR = VK_NULL_HANDLE; VkFormat format = VK_FORMAT_UNDEFINED; int w = 0, h = 0; };
 
@@ -37,6 +51,9 @@ public:
     // the process's device, opened on first use with this request (later requests reuse it when they match, else the
     // device is reopened once nothing uses it); null with the reason when there is none
     static std::shared_ptr<Context> Get(const DeviceRequest& req, std::string& why);
+    // the engine on an external device (see ExternalDevice); null with the reason when it lacks what the engine needs
+    static std::shared_ptr<Context> Adopt(const ExternalDevice& ext, std::string& why);
+    bool External() const { return m_external; }
     // every device Vulkan lists (for the log and tests); empty with the reason when Vulkan is missing
     static std::vector<DeviceInfo> List(std::string& why);
     ~Context();
@@ -84,6 +101,8 @@ private:
     DeviceInfo m_info;
     DeviceRequest m_req;
     std::mutex m_queueLock;
+    bool m_external = false;
+    ExternalDevice m_ext;
     bool m_dmabuf = false, m_foreign = false;
 };
 

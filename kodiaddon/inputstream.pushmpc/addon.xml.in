@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon
+  id="inputstream.pushmpc"
+  version="@ADDON_VERSION@"
+  name="PushMPC"
+  provider-name="PushMPC">
+  <requires>@ADDON_DEPENDS@
+  </requires>
+  <extension
+    point="kodi.inputstream"
+    name="pushmpc"
+    extension="mkv|mp4|m4v|mov|webm|avi|ts|m2ts|mts|mpg|mpeg|wmv|flv|ogv|3gp"
+    tags="false"
+    listitemprops=""
+    library_@ADDON_PLATFORM@="@ADDON_LIBRARY@"/>
+  <extension point="xbmc.addon.metadata">
+    <platform>@ADDON_PLATFORM@</platform>
+    <license>GPL-3.0-or-later</license>
+    <source>https://github.com/CptPakundo/PushMPC</source>
+    <summary lang="en_GB">Smoother, sharper video in Kodi: PushMPC frame generation for local video files</summary>
+    <description lang="en_GB">PushMPC plays your local video files through its own decoder and adds generated in-between frames, so motion matches your display's refresh rate. Audio, subtitles, chapters and seeking stay Kodi's. Auto picks the multiplier from the display and from what this machine can run; everything can be changed in the add-on settings.</description>
+    <disclaimer lang="en_GB">Turn it off in the add-on settings (or disable the add-on) to go back to Kodi's own player path.</disclaimer>
+  </extension>
+</addon>
