@@ -13,7 +13,7 @@ for tag in $tags; do
     if [ ! -d "$src/.git" ]; then git clone -q --depth 1 -b "$tag" https://git.ffmpeg.org/ffmpeg.git "$src"
     else git -C "$src" fetch -q --depth 1 origin tag "$tag" && git -C "$src" checkout -q -f "$tag"; fi
     [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
-    rm -f "$src/config_components.h"   # reconfigure per tag
+    rm -f "$src/config_components.h" "$src/config.h"   # reconfigure per tag
     echo "== $tag"
     bash "$here/build-hook.sh" "$src" "$out" > "$out/.build-$tag.log" 2>&1 || { tail -30 "$out/.build-$tag.log"; exit 1; }
     grep -E "^libpushmpc" "$out/.build-$tag.log" || true

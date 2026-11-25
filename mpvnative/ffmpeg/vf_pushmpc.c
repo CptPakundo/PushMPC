@@ -20,7 +20,7 @@
  *   - cut guard: a timestamp discontinuity (seek, a backward or a long jump) never makes a pair; the engines add their
  *     own content-based scene-cut guard;
  *   - when the module is missing or fails to open: pass-through (the video keeps playing), with the reason logged.
- * Builds against libavfilter 9 (FFmpeg 6.1) up to 12 (FFmpeg 9.1).
+ * Builds against libavfilter 8 (FFmpeg 5.0) up to 12 (FFmpeg 9.1).
  */
 
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
@@ -267,7 +267,9 @@ static uint32_t pmeng_fmt_of(enum AVPixelFormat f)
     case AV_PIX_FMT_P016:      return PMENG_FMT_P010;
     case AV_PIX_FMT_BGRA:      return PMENG_FMT_BGRA;
     case AV_PIX_FMT_X2BGR10:   return PMENG_FMT_X2BGR10;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 33, 101)
     case AV_PIX_FMT_RGBAF16:   return PMENG_FMT_RGBAF16;
+#endif
     default:                   return PMENG_FMT_NONE;
     }
 }
@@ -281,7 +283,9 @@ static enum AVPixelFormat av_fmt_of(uint32_t f)
     case PMENG_FMT_P010:      return AV_PIX_FMT_P010;
     case PMENG_FMT_BGRA:      return AV_PIX_FMT_BGRA;
     case PMENG_FMT_X2BGR10:   return AV_PIX_FMT_X2BGR10;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 33, 101)
     case PMENG_FMT_RGBAF16:   return AV_PIX_FMT_RGBAF16;
+#endif
     default:                  return AV_PIX_FMT_NONE;
     }
 }
@@ -735,7 +739,11 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
     if (!s->fallback && s->out.mem != PMENG_MEM_CPU && s->out.fmt != pmeng_fmt_of(s->sw_fmt)) {
         /* the engine's own colour (pushcore: RGB, HDR10 or sRGB) */
         static const enum AVFrameSideDataType dynamic[] = { AV_FRAME_DATA_DOVI_RPU_BUFFER, AV_FRAME_DATA_DOVI_METADATA,
-                                                            AV_FRAME_DATA_DYNAMIC_HDR_PLUS, AV_FRAME_DATA_DYNAMIC_HDR_VIVID };
+                                                            AV_FRAME_DATA_DYNAMIC_HDR_PLUS,
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+                                                            AV_FRAME_DATA_DYNAMIC_HDR_VIVID,
+#endif
+                                                          };
         static const enum AVFrameSideDataType stat[] = { AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
                                                          AV_FRAME_DATA_CONTENT_LIGHT_LEVEL };
         out->color_range = s->out.range;

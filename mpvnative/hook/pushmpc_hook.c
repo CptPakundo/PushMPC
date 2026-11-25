@@ -236,6 +236,8 @@ static int install(void)
     g_api.segment_free = dlsym(g_sys_handle, "avfilter_graph_segment_free");
     g_api.alloc_filter = dlsym(g_sys_handle, "avfilter_graph_alloc_filter");
     g_api.filter_free = dlsym(g_sys_handle, "avfilter_free");
+    if ((v >> 16) < 9)   /* FFmpeg 5.x: no segment API, graph strings stay unhooked */
+        g_glue_parse2 = NULL;
     if (!g_real_parse2 || !g_api.segment_parse || !g_api.segment_apply || !g_api.segment_free || !g_api.alloc_filter ||
         !g_api.filter_free)
         g_glue_parse2 = NULL;

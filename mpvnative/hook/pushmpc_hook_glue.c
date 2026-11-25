@@ -30,6 +30,10 @@ int avfilter_pushmpc_parse2(AVFilterGraph *graph, const char *filters, AVFilterI
 int avfilter_pushmpc_parse2(AVFilterGraph *graph, const char *filters, AVFilterInOut **inputs, AVFilterInOut **outputs,
                             const PushmpcSysApi *api, const AVFilter *pushmpc)
 {
+#if LIBAVFILTER_VERSION_MAJOR < 9   /* no segment API before FFmpeg 6.0: graph strings are not hooked there */
+    (void)graph; (void)filters; (void)inputs; (void)outputs; (void)api; (void)pushmpc;
+    return AVERROR(ENOSYS);
+#else
     AVFilterGraphSegment *seg = NULL;
     int ret = api->segment_parse(graph, filters, 0, &seg);
     size_t c, f, n = 0;
@@ -58,4 +62,5 @@ fail:
         av_freep(&graph->filters);
     }
     return ret;
+#endif
 }

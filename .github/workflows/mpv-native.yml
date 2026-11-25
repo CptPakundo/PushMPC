@@ -281,7 +281,7 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         # every pinned tag of the branch (point releases can bump the micro version: 7.1 is 10.4.100, 7.1.5 is 10.5.100)
-        branch: [n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
+        branch: [n5.0, n5.1, n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -350,6 +350,11 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:trixie sh -c \
             'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - name: Debian 12's mpv (FFmpeg 5.1, libavfilter 8)
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:bookworm sh -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
       - name: Arch's mpv (current FFmpeg)
         if: matrix.runner == 'ubuntu-24.04'
         timeout-minutes: 15
@@ -364,3 +369,111 @@ jobs:
             ${{ runner.temp }}/hook
             ${{ runner.temp }}/t-*/*.log
           retention-days: 7
+
+  # Plex HTPC / Plex for Windows: their libmpv-2.dll imports FFmpeg 5.x DLLs (avfilter-8.dll ...). A proxy avfilter-8.dll
+  # (exports forwarded to the renamed original) adds vf_pushmpc from a matching FFmpeg 5.x build; no libmpv swap.
+  plex-libs:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: >-
+            make git diffutils mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-tools-git
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pm-ccache-plex
+          key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
+          restore-keys: mpvnative-plexlibs-
+      - name: FFmpeg 5.0 / 5.1 builds (every pinned tag) and the proxy avfilter-8.dll
+        shell: msys2 {0}
+        timeout-minutes: 50
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pm-ccache-plex
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          bash mpvnative/plex/build-plex-libs.sh "$R/ffmpeg5" "$R/plexlibs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexlibs
+          path: ${{ runner.temp }}/plexlibs/*.dll
+          retention-days: 7
+
+  plex:
+    needs: plex-libs
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: plexlibs, path: '${{ runner.temp }}/plexlibs' }
+      - name: Engine module (MSVC) next to the proxy
+        run: |
+          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_VULKAN=OFF
+          if ($LASTEXITCODE) { throw 'configure' }
+          cmake --build build-engine --config Release --target pushmpc_engine --parallel
+          if ($LASTEXITCODE) { throw 'build' }
+          $p = "$env:RUNNER_TEMP\plexlibs"
+          Copy-Item build-engine/out/pushmpc_engine.dll, mpvnative/install/pushmpc-plex-native.ps1, mpvnative/ci/SOURCES.txt $p
+          Get-ChildItem $p | ForEach-Object { "{0,10:N0}  {1}" -f $_.Length, $_.Name }
+      - name: Plex HTPC and Plex for Windows (winget)
+        timeout-minutes: 20
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -Force -Scope CurrentUser | Out-Null
+            Install-Module Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery
+            Repair-WinGetPackageManager -AllUsers -Latest
+          }
+          foreach ($id in 'Plex.PlexHTPC', 'Plex.Plex') {
+            winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 2
+            "winget $id`: exit $LASTEXITCODE"
+          }
+          Start-Sleep -Seconds 5
+          Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Add-Type -TypeDefinition @'
+          using System; using System.Runtime.InteropServices;
+          public static class FF {
+            [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetDllDirectory(string p);
+            [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibrary(string p);
+            [DllImport("kernel32", CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr m, string n);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate uint U();
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate IntPtr S();
+          }
+          '@
+          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") {
+            if (-not (Test-Path "$d\avfilter-8.dll")) { "$d`: no avfilter-8.dll"; continue }
+            $exe = Get-ChildItem $d -Filter 'Plex*.exe' | Select-Object -First 1
+            [FF]::SetDllDirectory($d) | Out-Null
+            $m = [FF]::LoadLibrary("$d\avfilter-8.dll")
+            $v = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer([FF]::GetProcAddress($m, 'avfilter_version'), [FF+U]).Invoke()
+            $cfg = [Runtime.InteropServices.Marshal]::PtrToStringAnsi([Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer([FF]::GetProcAddress($m, 'avfilter_configuration'), [FF+S]).Invoke())
+            "== $d ($($exe.Name) $($exe.VersionInfo.ProductVersion)): libavfilter $($v -shr 16).$(($v -shr 8) -band 255).$($v -band 255); configure: $($cfg.Substring(0, [Math]::Min(300, $cfg.Length)))"
+          }
+          exit 0
+      - name: Proxy install, self-test through Plex's own libmpv, uninstall bit-exact
+        timeout-minutes: 15
+        run: |
+          $p = "$env:RUNNER_TEMP\plexlibs"
+          $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\libmpv-2.dll" }
+          if (-not $dirs) { Write-Host '::error::no Plex app installed on the runner'; exit 1 }
+          $confs = "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf"
+          function Snap { foreach ($d in $dirs) { Get-ChildItem $d -Recurse -File | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }; foreach ($c in $confs) { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" } }
+          $before = Snap
+          $env:PUSHMPC_PROXY_LOG = "$env:RUNNER_TEMP\proxy.log"
+          $out = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" install -From $p -Opts 'smoother=2' -Json; $rc = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host "install: $_" }
+          if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 6 | ForEach-Object { Write-Host "  $_" } }
+          $st = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" status -From $p -Json; $st | ForEach-Object { Write-Host "status: $_" }
+          $un = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json; $un | ForEach-Object { Write-Host "uninstall: $_" }
+          $after = Snap
+          $diff = Compare-Object $before $after
+          if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host '::error::uninstall did not restore the Plex folders and configs bit for bit'; exit 1 }
+          Write-Host 'uninstall: Plex folders and mpv.conf files restored bit for bit'
+          $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' }).Count
+          if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; exit 1 }
