@@ -40,7 +40,7 @@ jobs:
         run: python3 integrations/iina/build.py validate
       - name: Fetch, verify, lint the shaders and pack the plugin
         timeout-minutes: 5
-        run: python3 integrations/iina/build.py build --cache "$RUNNER_TEMP/iina-shaders" --out "$RUNNER_TEMP/iina" --allow-unpinned
+        run: python3 integrations/iina/build.py build --cache "$RUNNER_TEMP/iina-shaders" --out "$RUNNER_TEMP/iina"
       - uses: actions/upload-artifact@v4
         with:
           name: iina-plugin
@@ -71,6 +71,8 @@ jobs:
           xcodebuild -version; echo "SDK $(xcrun --sdk macosx --show-sdk-version) at $(xcrun --sdk macosx --show-sdk-path)"
           ls -d /Applications/Xcode*.app | tr '\n' ' '; echo
           system_profiler SPDisplaysDataType | sed -n 1,20p || true
+          echo "--- VTFrameProcessor error codes in this SDK"
+          grep -rhE "kVTFrameProcessor[A-Za-z]*Err[A-Za-z]* *= *-?[0-9]+" "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers/" | sed 's/^ *//' | head -30 || true
 
       - name: Build (VideoToolbox engine, unit tests)
         timeout-minutes: 8

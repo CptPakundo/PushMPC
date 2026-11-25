@@ -131,6 +131,7 @@ constexpr uint32_t k420v = FourCC('4', '2', '0', 'v');   // 8-bit 4:2:0 bi-plana
 constexpr uint32_t k420f = FourCC('4', '2', '0', 'f');   // 8-bit, full range
 constexpr uint32_t kx420 = FourCC('x', '4', '2', '0');   // 10-bit (high bits of 16), video range
 constexpr uint32_t kxf20 = FourCC('x', 'f', '2', '0');   // 10-bit, full range
+constexpr uint32_t kRGhA = FourCC('R', 'G', 'h', 'A');   // 64-bit RGBA half float (what frame-rate conversion lists)
 inline std::string FourCCText(uint32_t f)
 {
     std::string s;

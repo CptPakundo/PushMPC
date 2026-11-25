@@ -171,7 +171,9 @@ def build(cache, out, allow_unpinned):
         probe = ("const module = {}; " + open(os.path.join(stage, "shaders.js"), encoding="utf-8").read() +
                  "\nconst b = module.exports; for (const q in b.presets) for (const c of ['live','anime']) for (const n of b.presets[q][c]) if (!b.files[n]) throw new Error(n);"
                  "\nconsole.log('shaders.js: ' + Object.keys(b.files).length + ' shaders, presets ' + Object.keys(b.presets).join(','));")
-        r = subprocess.run([node, "-e", probe], capture_output=True, text=True)
+        probe_js = os.path.join(out, "stage", "probe.js")
+        open(probe_js, "w", encoding="utf-8").write(probe)
+        r = subprocess.run([node, probe_js], capture_output=True, text=True)
         if r.returncode:
             err("shaders.js does not load as a module: " + r.stderr.strip())
         else:

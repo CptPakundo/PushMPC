@@ -34,7 +34,7 @@
       "licence": "GPL-3.0",
       "source": "https://github.com/igv/FSRCNN-TensorFlow",
       "url": "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/FSRCNNX_x2_8-0-4-1.glsl",
-      "sha256": "TODO-FIRST-RUN",
+      "sha256": "E800DBC5C1C95185CC82216C597724533FF5F2880179F256EEF600F03E8DC2AE",
       "size": 71296
     },
     {
@@ -43,7 +43,7 @@
       "licence": "GPL-3.0",
       "source": "https://github.com/igv/FSRCNN-TensorFlow",
       "url": "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/FSRCNNX_x2_16-0-4-1.glsl",
-      "sha256": "TODO-FIRST-RUN",
+      "sha256": "D5A24A271E5D9A3F7F7A053B150C460A44C25B3CF7F770857D57CC3A2E1C9965",
       "size": 246868
     }
   ],

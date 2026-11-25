@@ -3,8 +3,11 @@
 //
 // What runs, per machine (Probe() decides at run time; nothing is assumed from the OS version alone):
 //   interpolation   VTLowLatencyFrameInterpolation (macOS 26+; "for real-time processing"): k - 1 frames per source
-//                   pair from one call, on its 2^x phase grid (apple_convert.h MakePlan). Else VTFrameRateConversion
-//                   (macOS 15.4+; any phase, editing grade, quality "normal" so it has a chance to keep up).
+//                   pair from one call, on its 2^x phase grid (apple_convert.h MakePlan); it lists '420v' only. Else
+//                   VTFrameRateConversion (macOS 15.4+; any phase, editing grade, quality "normal" so it has a chance
+//                   to keep up); it lists RGhA only, so frames go YUV -> RGhA -> YUV through VTPixelTransferSession.
+//   self-test       Configure runs each effect once on synthetic frames: a Mac (or VM) that lists an effect but cannot
+//                   run it makes Configure fail, and the plugin falls back to the portable backend.
 //   super res.      VTLowLatencySuperResolutionScaler (macOS 26+), factor 2 (or 4 when asked), applied to every output
 //                   frame after interpolation (interpolating at the source size is cheaper, and the low-latency
 //                   interpolator's size limit is the tighter one).
@@ -52,7 +55,7 @@ struct Config {
     double srcFps = 23.976;
     Colour colour;                 // a guess until the first frame says otherwise
 };
-struct Stats { uint64_t pairs = 0, cuts = 0, generated = 0, vtCalls = 0, vtErrors = 0; double pairMs = 0; int ladder = 0; };
+struct Stats { uint64_t pairs = 0, cuts = 0, generated = 0, vtCalls = 0, vtErrors = 0, fiErrors = 0, srErrors = 0; double pairMs = 0; int ladder = 0; };
 
 class Engine {
 public:

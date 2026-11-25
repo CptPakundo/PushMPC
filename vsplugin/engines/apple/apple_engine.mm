@@ -206,7 +206,8 @@ const Caps& Probe()
             c.frameProcessor = NSClassFromString(@"VTFrameProcessor") != nil;
             const int ll = ClassBool("VTLowLatencyFrameInterpolationConfiguration", "isSupported");
             const int sr = ClassBool("VTLowLatencySuperResolutionScalerConfiguration", "isSupported");
-            const int frc = ClassBool("VTFrameRateConversionConfiguration", "isSupported");
+            int frc = ClassBool("VTFrameRateConversionConfiguration", "isSupported");
+            if (frc == -2) frc = ClassBool("VTFrameRateConversionConfiguration", "processorSupported");   // the macOS 15.x name
             const int fsr = ClassBool("VTSuperResolutionScalerConfiguration", "isSupported");
             const int tnf = ClassBool("VTTemporalNoiseFilterConfiguration", "isSupported");
 #ifdef PMVS_VT_LL
@@ -281,7 +282,9 @@ struct Engine::Impl {
     int exponent = 0;          // the low-latency grid (configured)
     int srFactor = 0;
     int outW = 0, outH = 0;
-    uint32_t fmt = 0;
+    uint32_t fmt = 0;          // our YUV 4:2:0 format (uploads, real frames, super resolution, outputs)
+    uint32_t vtFmt = 0;        // what the interpolator takes: fmt, or RGhA (frame-rate conversion lists only that)
+    bool rgb = false;          // vtFmt is RGhA: YUV <-> RGB through VTPixelTransferSession, tagged both ways
     bool fmtLossy = false;
     std::vector<uint32_t> fiFormats, srFormats;
     Colour colour; bool colourSet = false;
@@ -294,11 +297,12 @@ struct Engine::Impl {
     id fiProc = nil;           // VTFrameProcessor (macOS 15.4+)
     id srProc = nil;
     NSDictionary* fiSrcAttrs = nil; NSDictionary* fiDstAttrs = nil; NSDictionary* srSrcAttrs = nil; NSDictionary* srDstAttrs = nil;
-    Pool srcPool, fiDstPool, srDstPool;
-    VTPixelTransferSessionRef scaler = nullptr;
+    Pool srcPool, vtSrcPool, fiDstPool, srDstPool;
+    VTPixelTransferSessionRef scaler = nullptr, xfer = nullptr;
 
     // the pair
-    Buf prev, cur;             // source size
+    Buf prev, cur;             // source size, fmt
+    Buf prevVt, curVt;         // the interpolator's copies (the same buffers unless rgb)
     Buf prevOut, curOut;       // output size (super resolution / scale of prev, cur); empty without super resolution
     int64_t prevPts = 0, curPts = 0;
     Thumb prevThumb, curThumb;
@@ -308,6 +312,7 @@ struct Engine::Impl {
     ~Impl()
     {
         if (scaler) { VTPixelTransferSessionInvalidate(scaler); CFRelease(scaler); }
+        if (xfer) { VTPixelTransferSessionInvalidate(xfer); CFRelease(xfer); }
         if (@available(macOS 15.4, *)) { if (fiProc) [fiProc endSession]; if (srProc) [srProc endSession]; }
     }
     void Log(const std::function<void(const std::string&)>& log, const std::string& s) const { if (log) log(s); }
@@ -315,28 +320,111 @@ struct Engine::Impl {
     bool MakePools(std::string& err)
     {
         const int w = cfg.width, h = cfg.height;
-        NSDictionary* srcBase = fi != Fi::None ? fiSrcAttrs : srSrcAttrs;
+        NSDictionary* srcBase = fi != Fi::None && !rgb ? fiSrcAttrs : srSrcAttrs;
         if (!srcPool.Make(srcBase, w, h, fmt, err)) return false;
-        if (fi != Fi::None && !fiDstPool.Make(fiDstAttrs, w, h, fmt, err)) return false;
+        if (rgb && !vtSrcPool.Make(fiSrcAttrs, w, h, vtFmt, err)) return false;
+        if (fi != Fi::None && !fiDstPool.Make(fiDstAttrs, w, h, vtFmt, err)) return false;
         if (srFactor && !srDstPool.Make(srDstAttrs, outW, outH, fmt, err)) return false;
         return true;
     }
+    void ResetPair() { prev = cur = prevVt = curVt = prevOut = curOut = Buf(); havePrev = haveCur = false; freshPair = true; }
     // the first frame's range differs from the guess: the other range tag, if every processor lists it
     void FollowRange(bool fullRange, const std::function<void(const std::string&)>& log)
     {
         const uint32_t want = FormatBits(fmt) == 10 ? (fullRange ? kxf20 : kx420) : (fullRange ? k420f : k420v);
         if (want == fmt) return;
         auto listed = [&](const std::vector<uint32_t>& l) { return l.empty() || std::find(l.begin(), l.end(), want) != l.end(); };
-        if (!listed(fiFormats) || !listed(srFormats)) return;   // the values pass unchanged either way; only the tag differs
+        if ((!rgb && fi != Fi::None && !listed(fiFormats)) || (srFactor && !listed(srFormats))) return;   // values pass unchanged either way; only the tag differs
         const uint32_t old = fmt;
         fmt = want;
+        if (!rgb) vtFmt = want;
         std::string err;
-        if (!MakePools(err)) { fmt = old; MakePools(err); Log(log, "apple: could not switch to " + FourCCText(want) + ": " + err); return; }
-        prev = Buf(); cur = Buf(); prevOut = Buf(); curOut = Buf(); havePrev = haveCur = false;
+        if (!MakePools(err)) { fmt = old; if (!rgb) vtFmt = old; MakePools(err); Log(log, "apple: could not switch to " + FourCCText(want) + ": " + err); return; }
+        ResetPair();
         Log(log, "apple: the stream is " + std::string(fullRange ? "full" : "limited") + " range: pixel format " + FourCCText(want));
     }
+    // a format conversion (YUV <-> RGhA) into a buffer of pool
+    Buf Convert(const Buf& src, Pool& pool, std::string& err)
+    {
+        Buf dst = pool.Get();
+        if (!dst) { err = "no conversion buffer"; return Buf(); }
+        Tag(dst.ref, colour);
+        if (!xfer && VTPixelTransferSessionCreate(kCFAllocatorDefault, &xfer) != noErr) { err = "VTPixelTransferSessionCreate failed"; return Buf(); }
+        const OSStatus st = VTPixelTransferSessionTransferImage(xfer, src.ref, dst.ref);
+        if (st != noErr) { err = Fmt("pixel transfer %s -> %s failed (%d)", FourCCText(CVPixelBufferGetPixelFormatType(src.ref)).c_str(), FourCCText(pool.fmt).c_str(), int(st)); return Buf(); }
+        return dst;
+    }
+    void FillGrey(const Buf& b, int shade)
+    {
+        Locked l(b.ref, false);
+        if (!l.Ok()) return;
+        for (int p = 0; p < 2; ++p) {
+            const int rows = p ? ChromaH(l.v.height) : l.v.height, n = (p ? 2 * ChromaW(l.v.width) : l.v.width);
+            for (int y = 0; y < rows; ++y) {
+                uint8_t* r = l.v.data[p] + y * l.v.stride[p];
+                for (int x = 0; x < n; ++x) {
+                    const int v8 = p ? 128 : shade + (x * 32) / std::max(1, n);
+                    if (l.v.bytes == 1) r[x] = uint8_t(v8); else { const uint16_t u = uint16_t(v8 << 8); std::memcpy(r + 2 * x, &u, 2); }
+                }
+            }
+        }
+    }
 
-    // src (source size) -> output size: super resolution, or the plain scale once the ladder dropped it
+    // one super-resolution call (no fallback)
+    bool RunSr(const Buf& src, const Buf& dst, int64_t pts, NSError* __autoreleasing* e)
+    {
+#ifdef PMVS_VT_LL
+        if (@available(macOS 26.0, *)) {
+            VTFrameProcessorFrame* s = [[VTFrameProcessorFrame alloc] initWithBuffer:src.ref presentationTimeStamp:Pts(pts)];
+            VTFrameProcessorFrame* d = [[VTFrameProcessorFrame alloc] initWithBuffer:dst.ref presentationTimeStamp:Pts(pts)];
+            if (!s || !d) return false;
+            VTLowLatencySuperResolutionScalerParameters* p = [[VTLowLatencySuperResolutionScalerParameters alloc] initWithSourceFrame:s destinationFrame:d];
+            ++stats.vtCalls;
+            if (p && [srProc processWithParameters:p error:e]) return true;
+            ++stats.vtErrors; ++stats.srErrors;
+        }
+#endif
+        return false;
+    }
+    // one interpolation call: the frames at phases (vtFmt buffers from fiDstPool, one per phase)
+    bool RunFi(const Buf& p0, const Buf& c0, int64_t pp, int64_t cp, const std::vector<float>& phases, std::vector<Buf>& dst, bool sequential, NSError* __autoreleasing* e)
+    {
+        dst.clear();
+        if (@available(macOS 15.4, *)) {
+            NSMutableArray<NSNumber*>* ph = [NSMutableArray array];
+            NSMutableArray* frames = [NSMutableArray array];
+            for (float t : phases) {
+                Buf d = fiDstPool.Get();
+                if (!d) return false;
+                Tag(d.ref, colour);
+                VTFrameProcessorFrame* f = [[VTFrameProcessorFrame alloc] initWithBuffer:d.ref presentationTimeStamp:Pts(pp + int64_t(std::llround(double(cp - pp) * double(t))))];
+                if (!f) return false;
+                [ph addObject:@(t)];
+                [frames addObject:f];
+                dst.push_back(d);
+            }
+            VTFrameProcessorFrame* ps = [[VTFrameProcessorFrame alloc] initWithBuffer:p0.ref presentationTimeStamp:Pts(pp)];
+            VTFrameProcessorFrame* cs = [[VTFrameProcessorFrame alloc] initWithBuffer:c0.ref presentationTimeStamp:Pts(cp)];
+            id<VTFrameProcessorParameters> params = nil;
+#ifdef PMVS_VT_LL
+            if (fi == Fi::LowLatency) {
+                if (@available(macOS 26.0, *))
+                    params = [[VTLowLatencyFrameInterpolationParameters alloc] initWithSourceFrame:cs previousFrame:ps interpolationPhase:ph destinationFrames:frames];
+            }
+#endif
+            if (fi == Fi::Frc)
+                params = [[VTFrameRateConversionParameters alloc] initWithSourceFrame:ps nextFrame:cs opticalFlow:nil interpolationPhase:ph
+                    submissionMode:(sequential ? VTFrameRateConversionParametersSubmissionModeSequential : VTFrameRateConversionParametersSubmissionModeRandom)
+                    destinationFrames:frames];
+            ++stats.vtCalls;
+            if (ps && cs && params && [fiProc processWithParameters:params error:e]) return true;
+            ++stats.vtErrors; ++stats.fiErrors;
+        }
+        dst.clear();
+        return false;
+    }
+
+    // src (source size, fmt) -> output size: super resolution, or the plain scale once the ladder dropped it
     Buf Upscale(const Buf& src, int64_t pts, std::string& err, const std::function<void(const std::string&)>& log)
     {
         if (!srFactor) return src;
@@ -344,18 +432,9 @@ struct Engine::Impl {
         if (!dst) { err = "no super-resolution output buffer"; return Buf(); }
         Tag(dst.ref, colour);
         if (ladder.SrActive()) {
-#ifdef PMVS_VT_LL
-            if (@available(macOS 26.0, *)) {
-                VTFrameProcessorFrame* s = [[VTFrameProcessorFrame alloc] initWithBuffer:src.ref presentationTimeStamp:Pts(pts)];
-                VTFrameProcessorFrame* d = [[VTFrameProcessorFrame alloc] initWithBuffer:dst.ref presentationTimeStamp:Pts(pts)];
-                VTLowLatencySuperResolutionScalerParameters* p = [[VTLowLatencySuperResolutionScalerParameters alloc] initWithSourceFrame:s destinationFrame:d];
-                NSError* e = nil;
-                ++stats.vtCalls;
-                if (s && d && p && [srProc processWithParameters:p error:&e]) return dst;
-                ++stats.vtErrors;
-                Log(log, "apple: super resolution failed: " + ErrText(e) + "; scaling this frame instead");
-            }
-#endif
+            NSError* e = nil;
+            if (RunSr(src, dst, pts, &e)) return dst;
+            if (stats.srErrors <= 3 || stats.srErrors % 240 == 0) Log(log, "apple: super resolution failed: " + ErrText(e) + "; scaling this frame instead");
         }
         if (!scaler) {
             if (VTPixelTransferSessionCreate(kCFAllocatorDefault, &scaler) != noErr) { err = "VTPixelTransferSessionCreate failed"; return Buf(); }
@@ -374,58 +453,29 @@ struct Engine::Impl {
         return true;
     }
 
-    // the k - 1 generated buffers of the pair (output size), by the plan; false only on a hard error
-    bool Interpolate(bool contiguous, std::vector<Buf>& out, std::string& err, const std::function<void(const std::string&)>& log)
+    // the k - 1 generated buffers of the pair (output size, fmt), by the plan; false only on a hard error
+    bool Interpolate(bool sequential, std::vector<Buf>& out, std::string& err, const std::function<void(const std::string&)>& log)
     {
         const int k = cfg.k;
         PhasePlan plan;
         if (lastCut || fi == Fi::None) plan = MakePlan(k, 0);
         else if (fi == Fi::Frc && ladder.Level() < 2) plan = MakePlan(k, 0, true);
         else plan = MakePlan(k, ladder.Exponent());
-        std::vector<Buf> vt;   // source size, one per plan phase
+        std::vector<Buf> vt;   // source size, fmt, one per plan phase
         if (!plan.phases.empty()) {
-            NSMutableArray<NSNumber*>* phases = [NSMutableArray array];
-            NSMutableArray* dsts = [NSMutableArray array];
-            bool ok = true;
-            for (float t : plan.phases) {
-                Buf d = fiDstPool.Get();
-                if (!d) { ok = false; break; }
-                Tag(d.ref, colour);
-                const int64_t pts = prevPts + int64_t(std::llround(double(curPts - prevPts) * double(t)));
-                VTFrameProcessorFrame* f = nil;
-                if (@available(macOS 15.4, *)) f = [[VTFrameProcessorFrame alloc] initWithBuffer:d.ref presentationTimeStamp:Pts(pts)];
-                if (!f) { ok = false; break; }
-                [phases addObject:@(t)];
-                [dsts addObject:f];
-                vt.push_back(d);
-            }
             NSError* e = nil;
-            bool done = false;
-            if (ok) {
-                ++stats.vtCalls;
-                if (@available(macOS 15.4, *)) {
-                    VTFrameProcessorFrame* ps = [[VTFrameProcessorFrame alloc] initWithBuffer:prev.ref presentationTimeStamp:Pts(prevPts)];
-                    VTFrameProcessorFrame* cs = [[VTFrameProcessorFrame alloc] initWithBuffer:cur.ref presentationTimeStamp:Pts(curPts)];
-                    id<VTFrameProcessorParameters> params = nil;
-#ifdef PMVS_VT_LL
-                    if (fi == Fi::LowLatency) {
-                        if (@available(macOS 26.0, *))
-                            params = [[VTLowLatencyFrameInterpolationParameters alloc] initWithSourceFrame:cs previousFrame:ps interpolationPhase:phases destinationFrames:dsts];
-                    }
-#endif
-#ifdef PMVS_VT_FRC
-                    if (fi == Fi::Frc)
-                        params = [[VTFrameRateConversionParameters alloc] initWithSourceFrame:ps nextFrame:cs opticalFlow:nil interpolationPhase:phases
-                            submissionMode:(contiguous ? VTFrameRateConversionParametersSubmissionModeSequential : VTFrameRateConversionParametersSubmissionModeRandom)
-                            destinationFrames:dsts];
-#endif
-                    if (ps && cs && params) done = [fiProc processWithParameters:params error:&e];
+            std::vector<Buf> raw;
+            bool ok = RunFi(prevVt, curVt, prevPts, curPts, plan.phases, raw, sequential, &e);
+            std::string cerr;
+            if (ok)
+                for (const Buf& r : raw) {
+                    Buf y = rgb ? Convert(r, srcPool, cerr) : r;
+                    if (!y) { ok = false; break; }
+                    vt.push_back(y);
                 }
-            }
-            if (!done) {
-                ++stats.vtErrors;
+            if (!ok) {
                 if (++consecutiveErrors <= 3 || consecutiveErrors % 240 == 0)
-                    Log(log, Fmt("apple: interpolation failed (%d in a row): %s; this pair repeats the nearer real frame", consecutiveErrors, ErrText(e).c_str()));
+                    Log(log, Fmt("apple: interpolation failed (%d in a row): %s; this pair repeats the nearer real frame", consecutiveErrors, cerr.empty() ? ErrText(e).c_str() : cerr.c_str()));
                 plan = MakePlan(k, 0);
                 vt.clear();
             } else consecutiveErrors = 0;
@@ -443,6 +493,32 @@ struct Engine::Impl {
                 ++stats.generated;
             }
         }
+        return true;
+    }
+
+    // the effects really run here (a VM can list them and still fail every call): one call each on synthetic frames
+    bool SelfTestSr(std::string& err)
+    {
+        Buf s = srcPool.Get(), d = srDstPool.Get();
+        if (!s || !d) { err = "no buffers"; return false; }
+        Tag(s.ref, colour); Tag(d.ref, colour);
+        FillGrey(s, 60);
+        NSError* e = nil;
+        if (!RunSr(s, d, 0, &e)) { err = ErrText(e); return false; }
+        return true;
+    }
+    bool SelfTestFi(std::string& err)
+    {
+        Buf a = srcPool.Get(), b = srcPool.Get();
+        if (!a || !b) { err = "no buffers"; return false; }
+        Tag(a.ref, colour); Tag(b.ref, colour);
+        FillGrey(a, 60); FillGrey(b, 80);
+        Buf av = a, bv = b;
+        if (rgb) { av = Convert(a, vtSrcPool, err); bv = Convert(b, vtSrcPool, err); if (!av || !bv) return false; }
+        NSError* e = nil;
+        std::vector<Buf> out;
+        if (!RunFi(av, bv, 0, 417083, { 0.5f }, out, false, &e)) { err = ErrText(e); return false; }
+        if (rgb && !Convert(out[0], srcPool, err)) return false;
         return true;
     }
 };
@@ -470,6 +546,8 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
         std::string fiMode = c.fi;
         for (auto& ch : fiMode) ch = char(std::tolower(static_cast<unsigned char>(ch)));
         std::vector<std::string> notes;
+        auto joined = [&] { std::string n; for (auto& s : notes) if (!s.empty()) n += (n.empty() ? "" : "; ") + s; return n; };
+        auto has = [](const std::vector<uint32_t>& l, uint32_t f) { return std::find(l.begin(), l.end(), f) != l.end(); };
 
         // ---- interpolation
         if (d.cfg.k >= 2) {
@@ -488,31 +566,27 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
                         d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes;
                     }
                 }
-            } else if (wantLL) notes.push_back(caps.lowLatencyFI ? "" : "low-latency interpolation not supported here");
+            } else if (wantLL) notes.push_back("low-latency interpolation not supported here");
 #endif
-#ifdef PMVS_VT_FRC
             if (d.fi == Fi::None && wantFrc && caps.frc) {
-              if (@available(macOS 15.4, *)) {
-                VTFrameRateConversionConfiguration* fc = [[VTFrameRateConversionConfiguration alloc] initWithFrameWidth:w frameHeight:h usePrecomputedFlow:NO
-                    qualityPrioritization:VTFrameRateConversionConfigurationQualityPrioritizationNormal revision:VTFrameRateConversionConfiguration.defaultRevision];
-                if (!fc) notes.push_back(Fmt("frame-rate conversion: not offered for %dx%d", w, h));
-                else {
-                    VTFrameProcessor* p = [[VTFrameProcessor alloc] init];
-                    NSError* e = nil;
-                    if (![p startSessionWithConfiguration:fc error:&e]) notes.push_back("frame-rate conversion: startSession failed: " + ErrText(e));
+                if (@available(macOS 15.4, *)) {
+                    VTFrameRateConversionConfiguration* fc = [[VTFrameRateConversionConfiguration alloc] initWithFrameWidth:w frameHeight:h usePrecomputedFlow:NO
+                        qualityPrioritization:VTFrameRateConversionConfigurationQualityPrioritizationNormal revision:VTFrameRateConversionConfiguration.defaultRevision];
+                    if (!fc) notes.push_back(Fmt("frame-rate conversion: not offered for %dx%d", w, h));
                     else {
-                        d.fiProc = p; d.fi = Fi::Frc; d.exponent = ExponentFor(d.cfg.k);
-                        d.fiFormats = Formats(fc.frameSupportedPixelFormats);
-                        d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes;
+                        VTFrameProcessor* p = [[VTFrameProcessor alloc] init];
+                        NSError* e = nil;
+                        if (![p startSessionWithConfiguration:fc error:&e]) notes.push_back("frame-rate conversion: startSession failed: " + ErrText(e));
+                        else {
+                            d.fiProc = p; d.fi = Fi::Frc; d.exponent = ExponentFor(d.cfg.k);
+                            d.fiFormats = Formats(fc.frameSupportedPixelFormats);
+                            d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes;
+                        }
                     }
                 }
-              }
             } else if (d.fi == Fi::None && wantFrc) notes.push_back("frame-rate conversion not supported here");
-#endif
             if (d.fi == Fi::None) {
-                std::string n;
-                for (auto& s : notes) if (!s.empty()) n += (n.empty() ? "" : "; ") + s;
-                err = "no VideoToolbox interpolator for " + std::to_string(w) + "x" + std::to_string(h) + (n.empty() ? std::string() : ": " + n) + " (" + caps.detail + ")";
+                err = "no VideoToolbox interpolator for " + std::to_string(w) + "x" + std::to_string(h) + (notes.empty() ? std::string() : ": " + joined()) + " (" + caps.detail + ")";
                 return false;
             }
         }
@@ -552,21 +626,45 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
         }
 #endif
         if (d.fi == Fi::None && !d.srFactor) { err = "nothing for VideoToolbox to do (x1 and no super resolution): " + src.why; return false; }
+        auto dropSr = [&](const std::string& why) {
+            notes.push_back(why);
+            if (@available(macOS 15.4, *)) { if (d.srProc) [d.srProc endSession]; }
+            d.srProc = nil; d.srFactor = 0;
+        };
 
-        // ---- one pixel format for the whole chain
-        std::vector<uint32_t> common;
-        if (d.fi != Fi::None && d.srFactor) { for (uint32_t f : d.fiFormats) if (std::find(d.srFormats.begin(), d.srFormats.end(), f) != d.srFormats.end()) common.push_back(f); }
-        else common = d.fi != Fi::None ? d.fiFormats : d.srFormats;
-        d.fmt = PickFormat(common, c.bits, c.colour.fullRange, &d.fmtLossy);
-        if (!d.fmt && d.srFactor && d.fi != Fi::None) {
-            notes.push_back("super resolution shares no 4:2:0 format with the interpolator (" + FormatList(d.srFormats) + "): off");
-            if (@available(macOS 15.4, *)) { [d.srProc endSession]; d.srProc = nil; }
-            d.srFactor = 0;
-            d.fmt = PickFormat(d.fiFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
+        // ---- pixel formats: the interpolator's own 4:2:0 format, else RGhA with our YUV format around it
+        const uint32_t yuvPref = c.bits > 8 ? (c.colour.fullRange ? kxf20 : kx420) : (c.colour.fullRange ? k420f : k420v);
+        if (d.fi != Fi::None) {
+            const uint32_t f = PickFormat(d.fiFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
+            if (f) d.fmt = d.vtFmt = f;
+            else if (has(d.fiFormats, kRGhA)) { d.rgb = true; d.vtFmt = kRGhA; d.fmt = yuvPref; d.fmtLossy = false; }
+            else { err = "the VideoToolbox interpolator lists no format we can feed (" + FormatList(d.fiFormats) + ")"; return false; }
+            if (d.srFactor && !has(d.srFormats, d.fmt)) {
+                const uint32_t sf = d.rgb ? PickFormat(d.srFormats, c.bits, c.colour.fullRange) : 0;
+                if (sf) d.fmt = sf;
+                else dropSr("super resolution shares no format with the interpolator (" + FormatList(d.srFormats) + "): off");
+            }
+        } else {
+            d.fmt = d.vtFmt = PickFormat(d.srFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
+            if (!d.fmt) { err = "VideoToolbox super resolution lists no 4:2:0 format we can feed (" + FormatList(d.srFormats) + ")"; return false; }
         }
-        if (!d.fmt) { err = "VideoToolbox lists no 4:2:0 bi-planar format we can feed (" + FormatList(d.fi != Fi::None ? d.fiFormats : d.srFormats) + ")"; return false; }
         d.outW = w * std::max(1, d.srFactor); d.outH = h * std::max(1, d.srFactor);
         if (!d.MakePools(err)) return false;
+
+        // ---- the effects must really run (a VM lists them and fails every call)
+        std::string terr;
+        if (d.srFactor && !d.SelfTestSr(terr)) {
+            dropSr("super resolution self-test failed (" + terr + "): off");
+            if (d.fi == Fi::None) { err = "VideoToolbox super resolution does not run here: " + terr; return false; }
+            d.outW = w; d.outH = h;
+            if (!d.MakePools(err)) return false;
+        }
+        if (d.fi != Fi::None && !d.SelfTestFi(terr)) {
+            err = std::string(d.fi == Fi::LowLatency ? "low-latency interpolation" : "frame-rate conversion") + " is listed but does not run here (self-test: " + terr + ")" +
+                  (notes.empty() ? std::string() : "; " + joined()) + " (" + caps.detail + ")";
+            return false;
+        }
+        d.stats = Stats();
         d.ladder.Init(c.srcFps, d.srFactor > 0, d.fi == Fi::LowLatency ? d.exponent : d.fi == Fi::Frc ? 2 : 0);
 
         const PhasePlan plan = d.fi == Fi::LowLatency ? MakePlan(d.cfg.k, d.exponent) : MakePlan(d.cfg.k, 0, true);
@@ -576,20 +674,14 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
                 : d.fi == Fi::Frc ? Fmt("frame-rate conversion x%d (phases %s)", d.cfg.k, phases.c_str())
                 : std::string("no interpolation");
         if (d.srFactor) d.chain += Fmt(" + low-latency super resolution x%d (%dx%d -> %dx%d)", d.srFactor, w, h, d.outW, d.outH);
-        d.chain += Fmt(", pixel format %s%s", FourCCText(d.fmt).c_str(), d.fmtLossy ? " (fewer bits than the source)" : "");
+        d.chain += Fmt(", pixel format %s%s%s", FourCCText(d.fmt).c_str(), d.rgb ? (" via " + FourCCText(d.vtFmt)).c_str() : "", d.fmtLossy ? " (fewer bits than the source)" : "");
         info = d.chain;
-        std::string n;
-        for (auto& s : notes) if (!s.empty()) n += (n.empty() ? "" : "; ") + s;
-        if (!n.empty()) info += " [" + n + "]";
+        if (!notes.empty()) info += " [" + joined() + "]";
         return true;
     }
 }
 
-void Engine::Forget()
-{
-    m->prev = Buf(); m->cur = Buf(); m->prevOut = Buf(); m->curOut = Buf();
-    m->havePrev = m->haveCur = false; m->lastCut = false; m->freshPair = true;
-}
+void Engine::Forget() { m->ResetPair(); m->lastCut = false; }
 
 bool Engine::Process(const PlanarView& v, const Colour& colour, int64_t pts, bool contiguous, const std::vector<PlanarOut>& gen, const PlanarOut& curOut,
                      bool& havePair, std::string& err)
@@ -599,9 +691,9 @@ bool Engine::Process(const PlanarView& v, const Colour& colour, int64_t pts, boo
         havePair = false;
         if (!d.colourSet) { d.colourSet = true; if (colour.fullRange != d.colour.fullRange) { d.colour = colour; d.FollowRange(colour.fullRange, log); } }
         d.colour = colour;
-        if (!contiguous) { d.prev = Buf(); d.prevOut = Buf(); d.havePrev = d.haveCur = false; d.freshPair = true; }
+        if (!contiguous) d.ResetPair();
         // shift the pair, upload the new frame
-        if (d.haveCur) { d.prev = d.cur; d.prevOut = d.curOut; d.prevPts = d.curPts; d.prevThumb = d.curThumb; d.havePrev = true; }
+        if (d.haveCur) { d.prev = d.cur; d.prevVt = d.curVt; d.prevOut = d.curOut; d.prevPts = d.curPts; d.prevThumb = d.curThumb; d.havePrev = true; }
         Buf b = d.srcPool.Get();
         if (!b) { err = "no source buffer from the pool"; return false; }
         Tag(b.ref, colour);
@@ -611,6 +703,8 @@ bool Engine::Process(const PlanarView& v, const Colour& colour, int64_t pts, boo
             PlanarToBi(v, l.v);
         }
         d.cur = b;
+        d.curVt = b;
+        if (d.rgb && d.fi != Fi::None && d.cfg.k >= 2) { d.curVt = d.Convert(b, d.vtSrcPool, err); if (!d.curVt) return false; }
         d.curPts = pts;
         d.curThumb = MakeThumb(v);
         d.haveCur = true;

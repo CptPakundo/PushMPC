@@ -21,7 +21,7 @@
 
 using namespace pmvs::apple;
 
-static int g_pass = 0, g_fail = 0;
+static int g_pass = 0, g_fail = 0, g_configured = 0, g_unavailable = 0;
 #define CHECK(cond, ...) do { if (cond) ++g_pass; else { ++g_fail; std::printf("FAIL %s:%d: %s | ", __FILE__, __LINE__, #cond); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
 
 struct Pic {
