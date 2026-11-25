@@ -48,7 +48,7 @@ if(PMVS_NVIDIA_LINUX)
     COMMAND "${PMVS_NVCC}" -fatbin -O3 -std=c++17 -I "${NVL}" ${PMVS_CUDA_GENCODE} -o "${NVL_FATBIN}" "${NVL}/nvl_kernels.cu"
     DEPENDS "${NVL}/nvl_kernels.cu" "${NVL}/nvl_colour.h" VERBATIM COMMAND_EXPAND_LISTS)
   add_custom_command(OUTPUT "${NVL_FATBIN_CPP}"
-    COMMAND "${CMAKE_COMMAND}" -DIN="${NVL_FATBIN}" -DOUT="${NVL_FATBIN_CPP}" -P "${NVL}/bin2cpp.cmake"
+    COMMAND "${CMAKE_COMMAND}" -DIN=${NVL_FATBIN} -DOUT=${NVL_FATBIN_CPP} -P "${NVL}/bin2cpp.cmake"
     DEPENDS "${NVL_FATBIN}" "${NVL}/bin2cpp.cmake" VERBATIM)
 
   add_library(pmvs_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp" "${NVL_FATBIN_CPP}")

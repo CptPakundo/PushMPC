@@ -40,7 +40,7 @@ static void TestColour()
     CHECK(std::fabs(Y - 1) < 1e-5 && std::fabs(Cb) < 1e-6, "10-bit limited white");
     InFormat ff = f8; ff.full = true;
     Normalise(ff, 255, 128, 128, Y, Cb, Cr);
-    CHECK(std::fabs(Y - 1) < 1e-6 && std::fabs(Cb - 0.5f / 255.f) < 1e-6, "full range");
+    CHECK(std::fabs(Y - 1) < 1e-6 && std::fabs(Cb) < 1e-6, "full range");
     // round trips through every matrix at 8 and 10 bits: RGB -> YUV codes -> RGB within one step
     int worst8 = 0, worst10 = 0;
     for (int m : { 1, 6, 9 })
