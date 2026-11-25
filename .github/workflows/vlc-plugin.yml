@@ -242,7 +242,7 @@ jobs:
             printf '[core]\n%s\n' "$@" > $c/vlcrc
             rm -f $c/$name.y4m
             timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --avcodec-hw=none --vout=yuv --yuv-yuv4mpeg2 \
-              --yuv-file=$c/$name.y4m $c/clip.mkv > res/snap/$name.log 2>&1; rc=$?
+              --yuv-file=$c/$name.y4m $c/clip.mkv > res/snap/$name.log 2>&1 && rc=0 || rc=$?
             frames=$(grep -a -o FRAME $c/$name.y4m 2>/dev/null | wc -l)
             echo "== $name: exit $rc frames=$frames"
             grep -hE "PushMPC|pushmpc|lua|luaintf|postproc|Failed|denied" res/snap/$name.log | sort | uniq -c | head -15

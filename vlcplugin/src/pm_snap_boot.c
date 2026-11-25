@@ -115,11 +115,13 @@ static bool Plausible(module_t *mod, const char *want_cap)
     return found && m->plugin->modules_count >= 1 && m->plugin->modules_count <= 1024;
 }
 
-static const char *slot_shortcuts[] = { "postproc" };
-static const char *out_shortcuts[] = { "pushmpc_out" };
-
-static void TakeOver(pm_module *m, const char **shortcuts, void *open, void *close)
+static void TakeOver(pm_module *m, const char *name, void *open, void *close)
 {
+    /* VLC frees the shortcut array when it tears the module bank down (not the strings), so it must be heap memory;
+     * the module's old array is left alone (a few bytes) */
+    const char **shortcuts = malloc(sizeof(*shortcuts));
+    if (!shortcuts) return;
+    shortcuts[0] = name;
     m->pf_activate = open;
     m->pf_deactivate = close;
     m->activate_name = NULL;
@@ -158,8 +160,8 @@ __attribute__((visibility("default"))) int luaopen_pushmpc_boot(void *L)
     snap_mode = true;
     LoadConf();
     const char *slot_name = slot->pp_shortcuts[0], *out_name = out->pp_shortcuts[0];
-    TakeOver(slot, slot_shortcuts, (void *)pm_filter_open, (void *)pm_filter_close);
-    TakeOver(out, out_shortcuts, (void *)pm_out_open, (void *)pm_out_close);
+    TakeOver(slot, "postproc", (void *)pm_filter_open, (void *)pm_filter_close);
+    TakeOver(out, "pushmpc_out", (void *)pm_out_open, (void *)pm_out_close);
     fprintf(stderr, "PushMPC snap boot: slot taken (postproc <- %s, pushmpc_out <- %s)\n", slot_name, out_name);
     return 0;
 }
