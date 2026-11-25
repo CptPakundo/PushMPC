@@ -1348,7 +1348,10 @@ private:
                                                            : "system memory (Kodi's renderer cannot take dma-bufs from add-ons)");
         if (m_dmaOk) return;
         VIDEOCODEC_PICTURE d{};
-        d.videoFormat = real.videoFormat;
+        // always 8-bit I420, a format the dma-buf pool knows (DRM_FORMAT_YUV420): a 10-bit request may translate to no
+        // fourcc there, which leaves the pool unconfigured (and Kodi stalls or crashes on its buffers)
+        d.videoFormat = VIDEOCODEC_FORMAT_I420;
+        (void)real;
         d.width = 16; d.height = 16;
         d.stride[0] = 32; d.stride[1] = d.stride[2] = 16;
         d.planeOffsets[0] = 0; d.planeOffsets[1] = 512; d.planeOffsets[2] = 768;
