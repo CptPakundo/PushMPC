@@ -11,10 +11,16 @@
         "win-x64": "runtimes/win-x64/native/*",
         "win-arm64": "runtimes/win-arm64/native/*",
         "linux-x64": "runtimes/linux-x64/native/*",
-        "linux-arm64": "runtimes/linux-arm64/native/*"
+        "linux-arm64": "runtimes/linux-arm64/native/*",
+        "osx-arm64": {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz",
+          "sha256": "TODO",
+          "extract": "onnxruntime-osx-arm64-1.30.0/lib/libonnxruntime*.dylib",
+          "headers": "onnxruntime-osx-arm64-1.30.0/include/*.h"
+        }
       },
       "headers": "build/native/include/*.h",
-      "macosNote": "The NuGet package has no osx-arm64 natives (checked by CI run 45603367125). macOS needs ONNX Runtime's own release archive (onnxruntime-osx-arm64-1.30.0.tgz from the microsoft/onnxruntime GitHub release, CoreML EP inside): to pin on a runner; until then the macOS job has no ORT."
+      "macosNote": "The NuGet package has no osx natives, so macOS takes ONNX Runtime's own release archive (CoreML EP inside); its hash is resolved on a Linux runner by the pmml workflow's pin step."
     },
     "directml": {
       "what": "ONNX Runtime with the DirectML EP (any D3D12 GPU; zero-copy with D3D12 resources). 1.24.4 is the last DirectML build Microsoft published (DirectML is 'legacy' in Windows ML); it still has the plugin-EP ABI v24. MIT.",
@@ -173,7 +179,7 @@
     "pnnx": {
       "what": "the ONNX -> ncnn converter (CI only)",
       "version": "20261020",
-      "status": "pnnx 20261020 made no ncnn param for any PushFlow model (CI run 45603367125, models job): the ncnn backend has no models yet; see track-ml-runtime.md"
+      "status": "pnnx 20261020 made no ncnn param for any PushFlow model (CI run 45603367125, models job): the ncnn backend has no models yet"
     }
   },
   "models": {

@@ -33,8 +33,8 @@ struct ProbeResult {
 };
 
 // Quality rank of a candidate (higher is better): the tier first (quality > balanced > fast), then per t over flow
-// once. Flow once is ranked below per t of the same tier until the CI quality harness shows it costs nothing
-// (track-ml-runtime.md has the measurement).
+// once: on public clips at 4x flow once cost 0.3 to 1.6 dB against per t (one clip +0.1 dB), so it is ranked below
+// per t of the same tier and used where it lets a higher multiplier fit.
 int qualityRank(const Candidate& c);
 
 struct Choice {

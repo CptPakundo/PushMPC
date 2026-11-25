@@ -2,7 +2,7 @@
 // pmml's ncnn backend: the same PushFlow models (converted by pnnx, pmml/scripts/ncnn_models.py, one per padded network
 // size) on ncnn's Vulkan compute (any Vulkan 1.1 GPU: RADV, ANV, NVK, NVIDIA, MoltenVK) or its CPU path.
 // The network runs on the GPU; the colour conversion, the downscale and the full-size rebuild (synthCpu) run on the
-// CPU here, multithreaded. A Vulkan rebuild sharing ncnn's VkDevice is the next step (track-ml-runtime.md).
+// CPU here, multithreaded. A Vulkan rebuild sharing ncnn's VkDevice is the next step.
 #include "internal.h"
 
 #if __has_include(<ncnn/net.h>)

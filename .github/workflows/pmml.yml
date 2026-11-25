@@ -47,17 +47,20 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
+      # models, graphs, clips and the reference live in one cache (built here from pinned sources, restored by the
+      # other jobs); nothing third-party is uploaded as an artifact
       - uses: actions/cache@v4
-        id: models-cache
+        id: data
         with:
-          path: ~/pmml-models
-          key: pmml-models-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json') }}
+          path: pmml-data
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/*.py') }}
+          enableCrossOsArchive: true
       - name: Python packages (PushFPS's model preparation pins)
         timeout-minutes: 5
         run: |
           python -m venv ~/pf && ~/pf/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 onnxconverter-common==1.14.0 onnxruntime==1.20.1 numpy==1.26.4
       - name: PushFlow models (PushFPS's prepare_runtime.py at the pinned tag)
-        if: steps.models-cache.outputs.cache-hit != 'true'
+        if: steps.data.outputs.cache-hit != 'true'
         timeout-minutes: 20
         run: |
           set -euo pipefail
@@ -66,71 +69,69 @@ jobs:
           [ "$(git -C "$RUNNER_TEMP/PushFPS" rev-parse HEAD)" = "$commit" ] || { echo "::error::PushFPS $tag is not $commit"; exit 1; }
           ~/pf/bin/python -I "$RUNNER_TEMP/PushFPS/scripts/pushflow/prepare_runtime.py" --out "$RUNNER_TEMP/pf" > "$RUNNER_TEMP/prepare.log" 2>&1 || { tail -50 "$RUNNER_TEMP/prepare.log"; exit 1; }
           grep -E '^(sha256|check|exposed|fp16|split) ' "$RUNNER_TEMP/prepare.log" | head -40
-          mkdir -p ~/pmml-models
-          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/models/." ~/pmml-models/
-          cp "$RUNNER_TEMP/pf/runtime/pushflow/models.json" ~/pmml-models/
-          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/licenses" ~/pmml-models/
+          mkdir -p pmml-data/models
+          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/models/." pmml-data/models/
+          cp "$RUNNER_TEMP/pf/runtime/pushflow/models.json" pmml-data/models/
+          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/licenses" pmml-data/models/
       - name: Models match the pins
         run: |
           set -euo pipefail
           for role in fast quality; do
             want=$(jq -r ".models.pushflow.$role.sha256" "$PIN"); file=$(jq -r ".models.pushflow.$role.file" "$PIN")
-            got=$(sha256sum ~/pmml-models/$file | cut -d' ' -f1)
+            got=$(sha256sum pmml-data/models/$file | cut -d' ' -f1)
             echo "$file $got"; [ "$got" = "$want" ] || { echo "::error::$file SHA-256 $got, pinned $want"; exit 1; }
           done
-          ls -la ~/pmml-models
+          ls -la pmml-data/models
       - name: pmml graphs
-        run: ~/pf/bin/python -I pmml/scripts/make_graphs.py --out ~/pmml-graphs
-      - uses: actions/cache@v4
-        with:
-          path: ~/pmml-clips
-          key: pmml-clips-v1-${{ env.FRAMES }}
+        if: steps.data.outputs.cache-hit != 'true'
+        run: ~/pf/bin/python -I pmml/scripts/make_graphs.py --out pmml-data/graphs
       - name: Public clips (Xiph derf 720p50, the first frames by an HTTP range)
+        if: steps.data.outputs.cache-hit != 'true'
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          mkdir -p ~/pmml-clips
+          mkdir -p pmml-data/clips
           for n in $(jq -r '.clips.names[]' "$PIN"); do
-            f=~/pmml-clips/$n.y4m
+            f=pmml-data/clips/$n.y4m
             [ -s "$f" ] || curl -fsSL --retry 3 -r 0-$((FRAMES * 1382406 + 200)) -o "$f" "https://media.xiph.org/video/derf/y4m/${n}_420_720p50.y4m"
             echo "$(sha256sum "$f")"
           done
       - name: CPU reference and quality (per t / flow once)
+        if: steps.data.outputs.cache-hit != 'true'
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          mkdir -p ~/pmml-ref
+          mkdir -p pmml-data/ref
           for n in $(jq -r '.clips.names[]' "$PIN"); do
             for tier in fast balanced; do
-              ~/pf/bin/python -I pmml/scripts/reference.py --models ~/pmml-models --graphs ~/pmml-graphs --clip ~/pmml-clips/$n.y4m --frames "$FRAMES" --tier $tier \
-                --dump ~/pmml-ref/$n-$tier --json ~/pmml-ref/$n-$tier.json | tee -a ~/pmml-ref/quality.log
+              ~/pf/bin/python -I pmml/scripts/reference.py --models pmml-data/models --graphs pmml-data/graphs --clip pmml-data/clips/$n.y4m --frames "$FRAMES" --tier $tier \
+                --dump pmml-data/ref/$n-$tier --json pmml-data/ref/$n-$tier.json | tee -a pmml-data/ref/quality.log
             done
           done
           echo '| clip | tier | network | 2x per t | 4x per t | 4x flow once | 4x blend | 4x repeat |' >> $GITHUB_STEP_SUMMARY
           echo '|---|---|---|---|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
-          for j in ~/pmml-ref/*.json; do jq -r '.clip | "| \(.name) | \(.tier) | \(.network[0])x\(.network[1]) | \(.["2x_per_t"]) | \(.["4x_per_t"]) | \(.["4x_flow_once"]) | \(.["4x_blend"]) | \(.["4x_repeat"]) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
+          for j in pmml-data/ref/*.json; do jq -r '.clip | "| \(.name) | \(.tier) | \(.network[0])x\(.network[1]) | \(.["2x_per_t"]) | \(.["4x_per_t"]) | \(.["4x_flow_once"]) | \(.["4x_blend"]) | \(.["4x_repeat"]) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
       - name: ncnn models (pnnx from the same PushFlow ONNX models, fixed shapes)
+        if: steps.data.outputs.cache-hit != 'true'
         timeout-minutes: 15
         continue-on-error: true
         run: |
           set -euo pipefail
           ~/pf/bin/python -m pip install --disable-pip-version-check -q "pnnx==$(jq -r .ncnn.pnnx.version "$PIN")" "ncnn==1.0.$(jq -r .ncnn.version "$PIN")"
-          ~/pf/bin/python -I pmml/scripts/ncnn_models.py --models ~/pmml-models --out ~/pmml-ncnn --sizes 640x384,1280x768 2>&1 | tail -40
+          ~/pf/bin/python -I pmml/scripts/ncnn_models.py --models pmml-data/models --out pmml-data/ncnn --sizes 640x384,1280x768 2>&1 | tail -40
+      - name: Hashes of pins still marked TODO (printed for the pin file; nothing fetched here is used)
+        timeout-minutes: 8
+        run: |
+          if grep -q '"TODO"' "$PIN"; then
+            python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out "$RUNNER_TEMP/pins" --flavors core --ncnn --headers --list --allow-unpinned || echo "::warning::a TODO pin could not be resolved"
+          fi
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: pmml-models
-          path: |
-            ~/pmml-models
-          retention-days: 3
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pmml-test-data
-          path: |
-            ~/pmml-graphs
-            ~/pmml-clips
-            ~/pmml-ref
-            ~/pmml-ncnn
-          retention-days: 3
+          name: pnnx-logs
+          path: pmml-data/ncnn/*.pnnx.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   linux:
     needs: models
@@ -139,10 +140,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-models, path: data/models }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-test-data, path: data }
+      - uses: actions/cache/restore@v4
+        with:
+          path: pmml-data
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/*.py') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - name: Packages (Mesa lavapipe, ninja)
         timeout-minutes: 8
         run: |
@@ -161,7 +164,7 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          ncnn=""; [ -f pmml/src/ncnn_backend.cpp ] && ncnn=$(dirname "$(find "$PWD/rt/ncnn" -name ncnnConfig.cmake | head -1)" 2>/dev/null || true)
+          ncnn=""; [ -f pmml/src/ncnn_backend.cpp ] && ncnn=$(dirname "$(find "$PWD/rt/ncnn" -name ncnnConfig.cmake | grep -v -i 'arm\|x86/\|shared' | head -1)" 2>/dev/null || true)
           cmake -S pmml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$PWD/rt/ort/core/include" -DPMML_NCNN_DIR="$ncnn"
           cmake --build build --parallel
       - name: Unit tests
@@ -176,20 +179,20 @@ jobs:
           for n in $(jq -r '.clips.names[]' "$PIN"); do
             for tier in fast balanced; do
               for once in "" --flow-once; do
-                build/pmml_cli run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:core:cpu:0 --tier $tier --clip data/pmml-clips/$n.y4m \
-                  --frames "$FRAMES" --mult 4 $once --compare data/pmml-ref/$n-$tier --min-db 45 | tee -a run.log
+                build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:core:cpu:0 --tier $tier --clip pmml-data/clips/$n.y4m \
+                  --frames "$FRAMES" --mult 4 $once --compare pmml-data/ref/$n-$tier --min-db 45 | tee -a run.log
               done
             done
           done
       - name: ncnn on lavapipe against the reference
-        if: hashFiles('data/pmml-ncnn/**') != '' && hashFiles('pmml/src/ncnn_backend.cpp') != ''
+        if: hashFiles('pmml-data/ncnn/**') != '' && hashFiles('pmml/src/ncnn_backend.cpp') != ''
         env: { PMML_VK_ALLOW_CPU: '1' }
         run: |
           set -euo pipefail
-          ls data/pmml-ncnn
+          ls pmml-data/ncnn
           for n in $(jq -r '.clips.names[]' "$PIN"); do
-            build/pmml_cli run --runtime rt --models data/models --graphs data/pmml-graphs --ncnn-models data/pmml-ncnn --backend ncnn --tier fast \
-              --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 --compare data/pmml-ref/$n-fast --min-db 35 | tee -a run.log
+            build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --ncnn-models pmml-data/ncnn --backend ncnn --tier fast \
+              --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --compare pmml-data/ref/$n-fast --min-db 35 | tee -a run.log
           done
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
@@ -206,8 +209,8 @@ jobs:
           cmake -S vsplugin -B build-vs -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$PWD/rt/ort/core/include"
           cmake --build build-vs --parallel --target pushmpc_vs portable_test
           build-vs/portable_test
-          ln -s "$PWD/data/models" rt/models; ln -s "$PWD/data/pmml-graphs" rt/graphs
-          export PUSHMPC_VS_PLUGIN=$(ls $PWD/vsplugin/bin/pushmpc_vs.so) PMML_RUNTIME=$PWD/rt PMML_TEST_CLIP=$PWD/data/pmml-clips/ducks_take_off.y4m PUSHMPC_TEST_K=4
+          ln -s "$PWD/pmml-data/models" rt/models; ln -s "$PWD/pmml-data/graphs" rt/graphs
+          export PUSHMPC_VS_PLUGIN=$(ls $PWD/vsplugin/bin/pushmpc_vs.so) PMML_RUNTIME=$PWD/rt PMML_TEST_CLIP=$PWD/pmml-data/clips/ducks_take_off.y4m PUSHMPC_TEST_K=4
           vsp=$(command -v vspipe || echo "$pkg/vspipe")
           info=$("$vsp" --info vsplugin/tests/ci/ml_clip.vpy 2>&1); echo "$info"
           echo "$info" | grep -Eq "Frames:[[:space:]]+36" || { echo "::error::expected 36 frames (9 x 4)"; exit 1; }
@@ -222,10 +225,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-models, path: data/models }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-test-data, path: data }
+      - uses: actions/cache/restore@v4
+        with:
+          path: pmml-data
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/*.py') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - uses: actions/cache@v4
         with:
           path: ~/pmml-dl
@@ -243,7 +248,7 @@ jobs:
       - name: CPU EP against the reference
         run: |
           n=$(jq -r '.clips.names[0]' "$PIN")
-          build/pmml_cli run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:core:cpu:0 --tier fast --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 --compare data/pmml-ref/$n-fast --min-db 45
+          build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:core:cpu:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --compare pmml-data/ref/$n-fast --min-db 45
 
   windows:
     needs: models
@@ -253,10 +258,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-models, path: data/models }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-test-data, path: data }
+      - uses: actions/cache/restore@v4
+        with:
+          path: pmml-data
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/*.py') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - uses: actions/cache@v4
         with:
           path: ~/pmml-dl
@@ -270,7 +277,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
         run: |
-          ncnn=""; [ -f pmml/src/ncnn_backend.cpp ] && ncnn=$(dirname "$(find "$PWD/rt/ncnn" -name ncnnConfig.cmake | head -1)" 2>/dev/null || true)
+          ncnn=""; [ -f pmml/src/ncnn_backend.cpp ] && ncnn=$(dirname "$(find "$PWD/rt/ncnn" -name ncnnConfig.cmake | grep -v -i 'arm\|x86/\|shared' | head -1)" 2>/dev/null || true)
           cmake -S pmml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$PWD/rt/ort/core/include" -DPMML_NCNN_DIR="$ncnn"
           cmake --build build --parallel
       - name: Unit tests
@@ -287,16 +294,16 @@ jobs:
           n=$(python -c "import json; print(json.load(open('$PIN'))['clips']['names'][0])")
           for tier in fast balanced; do
             for once in "" --flow-once; do
-              build/pmml_cli.exe run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:core:cpu:0 --tier $tier --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 $once --compare data/pmml-ref/$n-$tier --min-db 45 | tee -a run.log
-              build/pmml_cli.exe run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:directml:dml:0 --tier $tier --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 $once --compare data/pmml-ref/$n-$tier --min-db 40 | tee -a run.log
+              build/pmml_cli.exe run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:core:cpu:0 --tier $tier --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 $once --compare pmml-data/ref/$n-$tier --min-db 45 | tee -a run.log
+              build/pmml_cli.exe run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:directml:dml:0 --tier $tier --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 $once --compare pmml-data/ref/$n-$tier --min-db 40 | tee -a run.log
             done
           done
-          build/pmml_cli.exe run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:directml:dml:0 --tier fast --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 --host-intermediates --compare data/pmml-ref/$n-fast --min-db 40 | tee -a run.log
+          build/pmml_cli.exe run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:directml:dml:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --host-intermediates --compare pmml-data/ref/$n-fast --min-db 40 | tee -a run.log
       - name: Auto end to end on WARP (each probe in its own process)
         env: { PMML_DML_WARP: '1' }
         timeout-minutes: 15
         run: |
-          build/pmml_cli.exe auto --runtime rt --models data/models --graphs data/pmml-graphs --size 640x360 --fps 25 --mult 2 --pairs 3 --cache "$RUNNER_TEMP" | tee auto.log || true
+          build/pmml_cli.exe auto --runtime rt --models pmml-data/models --graphs pmml-data/graphs --size 640x360 --fps 25 --mult 2 --pairs 3 --cache "$RUNNER_TEMP" | tee auto.log || true
           grep -q PMML_CHOICE auto.log
           cat "$RUNNER_TEMP/pmml-autobench.json" | head -40
       - run: grep PMML_RUN run.log | sed 's/^PMML_RUN //' >> $GITHUB_STEP_SUMMARY || true
@@ -316,10 +323,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-models, path: data/models }
-      - uses: actions/download-artifact@v4
-        with: { name: pmml-test-data, path: data }
+      - uses: actions/cache/restore@v4
+        with:
+          path: pmml-data
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/*.py') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - name: Runtimes (ORT core osx-arm64 with CoreML)
         run: python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out rt --flavors core --headers
       - name: Build, unit tests, CPU and CoreML against the reference
@@ -329,5 +338,5 @@ jobs:
           build/pmml_unit
           build/pmml_cli list --runtime rt --flavor core
           n=$(jq -r '.clips.names[0]' "$PIN")
-          build/pmml_cli run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:core:cpu:0 --tier fast --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 --compare data/pmml-ref/$n-fast --min-db 45
-          build/pmml_cli run --runtime rt --models data/models --graphs data/pmml-graphs --backend ort:core:coreml:0 --tier fast --clip data/pmml-clips/$n.y4m --frames 9 --mult 4 --compare data/pmml-ref/$n-fast --min-db 35
+          build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:core:cpu:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --compare pmml-data/ref/$n-fast --min-db 45
+          build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:core:coreml:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --compare pmml-data/ref/$n-fast --min-db 35

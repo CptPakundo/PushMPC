@@ -23,6 +23,7 @@ import hashlib
 import json
 import shutil
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -58,49 +59,65 @@ def download(url: str, want: str | None, cache: Path, allow_unpinned: bool) -> t
     return target, digest
 
 
-def safe_members(z: zipfile.ZipFile):
-    for info in z.infolist():
-        p = PurePosixPath(info.filename)
-        if p.is_absolute() or ".." in p.parts:
-            raise SystemExit(f"::error::unsafe entry {info.filename}")
-        yield info
+class Archive:
+    """A zip (nupkg, whl) or a tar.gz (tgz) read the same way; unsafe member names are refused."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.tar = path.name.endswith((".tgz", ".tar.gz"))
+        self.handle = tarfile.open(path, "r:gz") if self.tar else zipfile.ZipFile(path)
+        self.members = []
+        for m in (self.handle.getmembers() if self.tar else self.handle.infolist()):
+            name = m.name if self.tar else m.filename
+            p = PurePosixPath(name)
+            if p.is_absolute() or ".." in p.parts:
+                raise SystemExit(f"::error::unsafe entry {name} in {path.name}")
+            is_file = m.isfile() if self.tar else not m.is_dir()
+            if is_file:
+                self.members.append((name, m, m.size if self.tar else m.file_size))
+
+    def open(self, member):
+        return self.handle.extractfile(member) if self.tar else self.handle.open(member)
+
+    def close(self):
+        self.handle.close()
 
 
 def extract(archive: Path, patterns: list[str], dest: Path, flatten: bool = True, strip: str | None = None) -> list[str]:
     dest.mkdir(parents=True, exist_ok=True)
     got = []
-    with zipfile.ZipFile(archive) as z:
-        for info in safe_members(z):
-            if info.is_dir():
-                continue
-            name = info.filename
-            if not any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(name, pat.replace("**/", "")) for pat in patterns):
-                continue
-            rel = PurePosixPath(name).name if flatten else (name[len(strip):] if strip and name.startswith(strip) else name)
-            out = dest / rel
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(info) as src, out.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            got.append(rel)
+    a = Archive(archive)
+    for name, member, _ in a.members:
+        if not any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(name, pat.replace("**/", "")) for pat in patterns):
+            continue
+        rel = PurePosixPath(name).name if flatten else (name[len(strip):] if strip and name.startswith(strip) else name)
+        out = dest / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with a.open(member) as src, out.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        got.append(rel)
+    a.close()
     return got
 
 
 def licence_files(archive: Path, dest: Path) -> None:
-    with zipfile.ZipFile(archive) as z:
-        for info in safe_members(z):
-            base = PurePosixPath(info.filename).name.lower()
-            if not info.is_dir() and (base.startswith("license") or "thirdpartynotices" in base or base.startswith("notice")):
-                (dest / "licenses").mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, (dest / "licenses" / f"{archive.stem[:40]}-{PurePosixPath(info.filename).name}").open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+    a = Archive(archive)
+    for name, member, _ in a.members:
+        base = PurePosixPath(name).name.lower()
+        if base.startswith("license") or "thirdpartynotices" in base or base.startswith("notice"):
+            (dest / "licenses").mkdir(parents=True, exist_ok=True)
+            with a.open(member) as src, (dest / "licenses" / f"{archive.stem[:40]}-{PurePosixPath(name).name}").open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+    a.close()
 
 
 def list_archive(archive: Path) -> None:
-    with zipfile.ZipFile(archive) as z:
-        for info in z.infolist():
-            low = info.filename.lower()
-            if low.endswith((".dll", ".so", ".dylib", ".h", ".json", ".xml")) or ".so." in low or "license" in low:
-                print(f"    {info.file_size:>11}  {info.filename}")
+    a = Archive(archive)
+    for name, _, size in a.members:
+        low = name.lower()
+        if low.endswith((".dll", ".so", ".dylib", ".h", ".json", ".xml")) or ".so." in low or "license" in low:
+            print(f"    {size:>11}  {name}")
+    a.close()
 
 
 def main() -> int:
@@ -144,11 +161,14 @@ def main() -> int:
         licence_files(arc, dest)
         # a versioned library name (wheels: libonnxruntime.so.1.27.1) also under the plain name pmml loads
         for f in list(files):
-            if f.startswith("libonnxruntime.so.") and not (dest / "libonnxruntime.so").exists():
-                shutil.copy2(dest / f, dest / "libonnxruntime.so")
-                files.append("libonnxruntime.so")
-        if a.headers and entry.get("headers"):
-            extract(arc, [entry["headers"]], dest / "include")
+            for plain, versioned in (("libonnxruntime.so", f.startswith("libonnxruntime.so.")),
+                                     ("libonnxruntime.dylib", f.startswith("libonnxruntime.") and f.endswith(".dylib") and f != "libonnxruntime.dylib")):
+                if versioned and not (dest / plain).exists():
+                    shutil.copy2(dest / f, dest / plain)
+                    files.append(plain)
+        headers = spec.get("headers") if isinstance(spec, dict) else entry.get("headers")
+        if a.headers and headers:
+            extract(arc, [headers], dest / "include")
         if flavor == "directml":
             rt = pin["onnxruntime"]["directmlRuntime"]
             rarc, rdig = download(rt["url"], rt["sha256"], cache, a.allow_unpinned)
@@ -189,9 +209,8 @@ def main() -> int:
             arc, digest = download(spec["url"], spec["sha256"], cache, a.allow_unpinned)
             dest = out / "ncnn"
             shutil.rmtree(dest, ignore_errors=True)
+            Archive(arc).close()   # refuses unsafe member names
             with zipfile.ZipFile(arc) as z:
-                for info in safe_members(z):
-                    pass
                 z.extractall(dest)
             record["ncnn"] = {"version": pin["ncnn"]["version"], "sha256": digest}
             print(f"ok      ncnn {pin['ncnn']['version']} -> {dest}")
