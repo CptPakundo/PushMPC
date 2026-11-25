@@ -1,0 +1,30 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC engine module: a finished output of the GPU engine (its packed buffer: rows of 4 x 8-bit or 2 x 16-bit
+// samples per 32-bit word, planar Y, U, V) into an FFmpeg Vulkan frame of the filter's pool (separate plane images:
+// NV12 / P010 Y + interleaved UV, or three planes). P010: the 10 bits go to the top of each word (shift 6).
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer Src { uint words[]; } src;
+layout(binding = 1) uniform writeonly image2D outY;
+layout(binding = 2) uniform writeonly image2D outC1;   // two-plane: UV (RG); three-plane: U
+layout(binding = 3) uniform writeonly image2D outC2;   // three-plane: V (two-plane: bound to outC1, unused)
+layout(push_constant) uniform PC { uint offY, offU, offV, pitchY, pitchC; int w, h, cw, ch, bps, twoPlane, shift; float outScale; } pc;
+uint sampleAt(uint byteOff)
+{
+    uint word = src.words[byteOff >> 2];
+    if (pc.bps == 1) return (word >> (8u * (byteOff & 3u))) & 255u;
+    return (word >> (16u * ((byteOff >> 1) & 1u))) & 65535u;
+}
+float outv(uint code) { return float(code << uint(pc.shift)) / pc.outScale; }
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint bps = uint(pc.bps);
+    if (p.x < pc.w && p.y < pc.h) imageStore(outY, p, vec4(outv(sampleAt(pc.offY + uint(p.y) * pc.pitchY + uint(p.x) * bps))));
+    if (p.x < pc.cw && p.y < pc.ch) {
+        uint u = sampleAt(pc.offU + uint(p.y) * pc.pitchC + uint(p.x) * bps);
+        uint v = sampleAt(pc.offV + uint(p.y) * pc.pitchC + uint(p.x) * bps);
+        if (pc.twoPlane != 0) imageStore(outC1, p, vec4(outv(u), outv(v), 0.0, 1.0));
+        else { imageStore(outC1, p, vec4(outv(u))); imageStore(outC2, p, vec4(outv(v))); }
+    }
+}
