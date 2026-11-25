@@ -300,7 +300,9 @@ do_kodi_addon() {
     say "Kodi add-on:"
     if [ "$dry" = 1 ]; then say "  would: sh kodi/install.sh install"; return 0; fi
     mkdir -p "$pm/kodi-installer"; cp -R "$here/kodi/." "$pm/kodi-installer/"
-    if sh "$pm/kodi-installer/install.sh" install | sed 's/^/  /'; then record kodi-addon; else say "  the Kodi add-on's installer failed: Kodi keeps mpv as its external player"; fi
+    out=$(PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" install 2>&1); rc=$?
+    printf '%s\n' "$out" | sed 's/^/  /'
+    if [ "$rc" = 0 ]; then record kodi-addon; else say "  the Kodi add-on's installer did not install it (exit $rc): Kodi keeps mpv as its external player"; fi
 }
 do_mac() {
     if have pushmpc-setup; then say "mpv / IINA (Homebrew's pushmpc-setup):"; [ "$dry" = 1 ] && say "  would: pushmpc-setup install" || { pushmpc-setup install | sed 's/^/  /'; record brew-setup; }
@@ -322,12 +324,14 @@ case $action in
         else
             [ -f "$here/install.sh" ] || { echo "setup.sh: install.sh is missing (run setup.sh from the unpacked PushMPC folder)" >&2; exit 1; }
             do_native
+            # the Kodi add-on first: install.sh leaves a Kodi that has it alone
+            do_kodi_addon
             # shellcheck disable=SC2086
             PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }
         fi
         do_vlc
-        do_kodi_addon
+        [ "$os" = Darwin ] && do_kodi_addon
         do_pmml
         # the plan again: NVIDIA's files may have arrived in the meantime
         make_plan; write_plan
@@ -340,7 +344,7 @@ case $action in
         if recorded native && [ -f "$pm/mpvnative-installer/pushmpc-native.sh" ]; then say "mpv (native hook):"; sh "$pm/mpvnative-installer/pushmpc-native.sh" uninstall --target native 2>&1 | sed 's/^/  /'; fi
         [ "$dry" = 1 ] || rm -rf "$pm/mpvnative-installer"
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
-        if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; sh "$pm/kodi-installer/install.sh" uninstall | sed 's/^/  /'; fi
+        if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
         if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi

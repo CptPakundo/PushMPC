@@ -8,7 +8,7 @@
     - it cannot capture DRM-protected video (Netflix-style streaming apps and browsers show a black picture);
     - a native integration (MPC-HC, MPC-BE, PotPlayer, the mpv family, VLC, Kodi, Stremio) always gives a better picture.
   PushMPC's Setup turns it on only when it finds a player without a native integration, as the Start menu entry
-  "PushMPC Capture (fallback)".
+  "PushMPC Capture".
 
   Usage:
     pushmpc-capture.ps1 launch   [-Player <process name>] [-Yes]   start PushFPS's window capture (installs capture
@@ -59,7 +59,7 @@ $AppDir = Join-Path $CaptureDir 'PushFPS'
 $StateFile = Join-Path $CaptureDir 'capture.json'
 $DataDir = Join-Path $CaptureDir 'data'
 $TempDir = Join-Path $CaptureDir 'temp'
-$Shortcut = Join-Path $StartMenu 'PushMPC Capture (fallback).lnk'
+$Shortcut = Join-Path $StartMenu 'PushMPC Capture.lnk'
 
 function M([string]$t) { [Console]::Out.WriteLine("@@$t"); [Console]::Out.Flush() }
 function Info([string]$t) { if ($Machine) { M "info|$t" } else { Write-Host "    $t" } }
@@ -201,12 +201,12 @@ switch ($Action) {
             $sh.Save()
         }
         Write-CaptureState $s
-        Info "Capture mode (fallback) is on for: $(if ($Players.Count) { $Players -join ', ' } else { 'any player' }). Start menu: PushMPC Capture (fallback)"
+        Info "Capture mode (fallback) is on for: $(if ($Players.Count) { $Players -join ', ' } else { 'any player' }). Start menu: PushMPC Capture"
     }
     'disable' {
         if ($DryRun) { Info "[dry run] would remove $Shortcut and $CaptureDir (capture mode's PushFPS with it)"; break }
         if (Get-OwnProcesses) { Warn "Capture mode's PushFPS is running: close it, then remove capture mode again ($CaptureDir is kept)" }
-        if (Test-Path -LiteralPath $Shortcut) { Remove-Item -LiteralPath $Shortcut -Force; Info 'Start menu entry PushMPC Capture (fallback) removed' }
+        if (Test-Path -LiteralPath $Shortcut) { Remove-Item -LiteralPath $Shortcut -Force; Info 'Start menu entry PushMPC Capture removed' }
         if ((Test-Path -LiteralPath $StartMenu) -and -not @(Get-ChildItem -LiteralPath $StartMenu -Force).Count) { Remove-Item -LiteralPath $StartMenu -Force }
         # capture mode's own folder only: PushFPS's -Uninstall is not used (it also deletes PushFPS's Start menu and
         # desktop shortcuts, which belong to a PushFPS the user may have installed)

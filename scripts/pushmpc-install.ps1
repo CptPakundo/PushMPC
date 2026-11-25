@@ -115,6 +115,10 @@ param(
     # VLC: skip it; stage: the VLC module build (libpushmpc_plugin.dll; staged as vlc\ with pushmpc-vlc.ps1)
     [switch]$NoVlc,
     [string]$VlcPlugin = '',
+    # stage: the Kodi add-on package (kodi-addon.yml's artifact: kodi21\inputstream.pushmpc, kodi22\inputstream.pushmpc),
+    # staged as kodi\ with kodiaddon\install\install.ps1; install: -NoKodi skips it
+    [string]$KodiPackage = '',
+    [switch]$NoKodi,
     # capture mode, the fallback for players without a native route: Auto = on only when such a player is found
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$Capture = 'Auto',
@@ -1564,6 +1568,7 @@ function Invoke-Stage {
     } elseif (Test-Path $r) { Remove-Item $r -Recurse -Force }
     Stage-VsPlugin $filterVersion
     Stage-Vlc $filterVersion
+    Stage-Kodi $filterVersion
     Step 'Staged'
     foreach ($n in $Components) {
         if ($n -eq 'runtime' -and -not $WithRuntime) { Info ("{0,-8} not staged: a release never contains it (Veyra's package at install time)" -f $n); continue }
@@ -1571,6 +1576,17 @@ function Invoke-Stage {
     }
     $vsm = Join-Path $StageDir 'vsplugin'
     if (Read-Manifest $vsm) { Info ("{0,-8} {1}" -f 'vsplugin', (Component-Summary $vsm)) } else { Info ("{0,-8} not staged (optional: the mpv route)" -f 'vsplugin') }
+}
+# The optional Kodi component: the PushMPC Kodi add-on (inputstream.pushmpc for Kodi 21 and 22) and its installer
+function Stage-Kodi([string]$version) {
+    $v = Join-Path $StageDir 'kodi'
+    if (Test-Path $v) { Remove-Item $v -Recurse -Force }
+    $inst = Join-Path $repo 'kodiaddon\install\install.ps1'
+    if (-not $KodiPackage -or -not (Test-Path -LiteralPath $KodiPackage) -or -not (Test-Path -LiteralPath $inst)) { Info 'kodi not staged (no -KodiPackage): Kodi plays through mpv as its external player'; return }
+    New-Item -ItemType Directory -Force $v | Out-Null
+    Copy-Item -Path (Join-Path $KodiPackage '*') -Destination $v -Recurse -Force
+    Copy-Item -LiteralPath $inst $v -Force
+    Write-Manifest $v @{ component = 'kodi'; version = $version; 'kodi-api' = '21|22' }
 }
 # The optional VLC component: the VLC 3 module (-VlcPlugin <libpushmpc_plugin.dll>, built by vlc-plugin.yml) and its
 # installer pushmpc-vlc.ps1. Skipped when no plugin build is given.
@@ -1628,6 +1644,7 @@ function Invoke-Package {
         if ($bad) { Warn "vsplugin left out of the release: the stage is not complete ($bad)" } else { $relNames += 'vsplugin' }
     } else { Info 'vsplugin (the mpv route) is not staged: the release has the MPC-HC / MPC-BE filter only' }
     if ((Read-Manifest (Join-Path $StageDir 'vlc')) -and -not (Test-ComponentFiles (Join-Path $StageDir 'vlc'))) { $relNames += 'vlc' }
+    if ((Read-Manifest (Join-Path $StageDir 'kodi')) -and -not (Test-ComponentFiles (Join-Path $StageDir 'kodi'))) { $relNames += 'kodi' }
     Step "Packaging PushMPC $fv into $ReleaseDir"
     if ($DryRun) { Dry "would write $out (installer, filter\, core\), PushMPC-$fv.zip, the component zips and release.json"; return }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -1714,7 +1731,7 @@ function Invoke-Package {
 # (filter\..., core\..., payload.txt), uint64 size, the bytes. Uncompressed (about 5 MB).
 function Write-SetupPayload([string]$releaseFolder, [string]$dest, [string]$version) {
     $root = (Resolve-Path $releaseFolder).Path.TrimEnd('\')
-    $dirs = @('filter', 'core', 'vsplugin', 'vlc') | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path $_ }
+    $dirs = @('filter', 'core', 'vsplugin', 'vlc', 'kodi') | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path $_ }
     $files = @(Get-ChildItem $dirs -Recurse -File | Sort-Object FullName)
     $info = [Text.Encoding]::UTF8.GetBytes("release=$version`r`nfilter=$((Read-Manifest (Join-Path $root 'filter')).kv['version'])`r`ncore=$((Read-Manifest (Join-Path $root 'core')).kv['version'])`r`n")
     $fs = [IO.File]::Create($dest)
@@ -2599,6 +2616,43 @@ function Uninstall-PlexRoute($state) {
     if ($state.PSObject.Properties['plexSwap']) { $state.PSObject.Properties.Remove('plexSwap') }
 }
 
+# ------------------------------------------------------------------------------------------------ Kodi (add-on)
+# The PushMPC Kodi add-on plays inside Kodi 21 / 22 itself; its installer (kodiaddon\install\install.ps1) writes the
+# marker %APPDATA%\PushMPC\kodi-addon.installed that mpv-integration reads (that Kodi then gets no mpv external player).
+function Invoke-KodiInstaller([string]$dir, [string]$verb) {
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $keep = $env:PUSHMPC_KODI_DIR; $env:PUSHMPC_KODI_DIR = $dir
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = @(& $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'install.ps1') $verb 2>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $eap; $env:PUSHMPC_KODI_DIR = $keep }
+    foreach ($l in $out) { if ($l.Trim()) { Info "Kodi: $l" } }
+    return $rc
+}
+function Install-KodiRoute($state) {
+    if ($NoKodi) { Info 'Kodi add-on skipped (-NoKodi)'; return }
+    $src = Join-Path $StageDir 'kodi'
+    if (-not (Test-Path -LiteralPath (Join-Path $src 'install.ps1'))) { return }
+    $dst = Join-Path $InstallDir 'kodi'
+    if ($DryRun) { Dry "would copy the Kodi add-on to $dst and run its install.ps1 install"; return }
+    if ((Resolve-Path $src).Path -ne (Join-Path (Resolve-Path $InstallDir).Path 'kodi')) {
+        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
+        Copy-Item -LiteralPath $src $dst -Recurse -Force
+    }
+    $rc = Invoke-KodiInstaller $dst 'install'
+    if ($rc -eq 0) { Set-StateValue $state 'kodiAddon' (Get-Date).ToString('s') }
+    elseif ($rc -eq 2) { Info 'Kodi add-on: no Kodi 21 / 22 found'; Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue }
+    else { Warn "Kodi add-on: its installer returned $rc (Kodi keeps mpv as its external player)" }
+}
+function Uninstall-KodiRoute($state) {
+    $dst = Join-Path $InstallDir 'kodi'
+    if (-not (Get-StateValue $state 'kodiAddon') -and -not (Test-Path -LiteralPath $dst)) { return }
+    if ($NoKodi) { Info 'Kodi left as it is (-NoKodi)'; return }
+    if ($DryRun) { Dry 'would run the Kodi add-on installer''s uninstall'; return }
+    if (Test-Path -LiteralPath (Join-Path $dst 'install.ps1')) { [void](Invoke-KodiInstaller $dst 'uninstall') }
+    Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
+    if ($state.PSObject.Properties['kodiAddon']) { $state.PSObject.Properties.Remove('kodiAddon') }
+}
+
 # ------------------------------------------------------------------------------------------------ capture mode (fallback)
 # Players with no PushMPC frame generation route: capture mode (pushmpc-capture.ps1, PushFPS's window capture) is
 # switched on for them, and only for them. -Capture Auto (default) | On | Off.
@@ -2739,6 +2793,8 @@ switch ($Action) {
         Set-MpcBeEntry $state
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
+        Step 'Kodi (the PushMPC add-on)'
+        try { Install-KodiRoute $state } catch { Warn "Kodi add-on: not installed ($($_.Exception.Message))" }
         Step 'Plex (frame generation through a VapourSynth-enabled libmpv)'
         try { Install-PlexRoute $state } catch { Warn "Plex: not changed ($($_.Exception.Message))" }
         Step 'mpv, SMPlayer, MPC-QT, Stremio, Plex, Jellyfin, Kodi'
@@ -2899,6 +2955,7 @@ switch ($Action) {
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
+        try { Uninstall-KodiRoute $state } catch { Warn "Kodi add-on: not removed ($($_.Exception.Message))" }
         try { Uninstall-PlexRoute $state } catch { Warn "Plex: its own libmpv was not put back ($($_.Exception.Message)); the backup is in $InstallDir\plex\backup" }
         Uninstall-MpvRoute $state
         Uninstall-VlcRoute $state

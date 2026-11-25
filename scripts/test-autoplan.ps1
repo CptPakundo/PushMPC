@@ -88,7 +88,7 @@ Test-That ($p['pmmlBackend'] -eq 'ort:core:amdgpu:0' -and (Get-Content $txt -Raw
 $sm = Join-Path $Scratch 'startmenu'
 $ci = Join-Path $Scratch 'capinstall'
 & $cap enable -InstallDir $ci -StartMenu $sm -Players @('KMPlayer 64X', 'Plex for Windows (native upscaling only)')
-Test-That (Test-Path (Join-Path $sm 'PushMPC Capture (fallback).lnk')) 'capture enable: Start menu entry'
+Test-That (Test-Path (Join-Path $sm 'PushMPC Capture.lnk')) 'capture enable: Start menu entry'
 $st = Get-Content (Join-Path $ci 'capture\capture.json') -Raw | ConvertFrom-Json
 Test-That ($st.enabled -and @($st.players).Count -eq 2) "capture state: $(@($st.players) -join ', ')"
 $o = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $cap launch -InstallDir $ci -DryRun -Machine -PushFpsDir (Join-Path $Scratch 'no-pushfps'))

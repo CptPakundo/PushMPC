@@ -461,7 +461,12 @@ do_install() {
     for a in io.github.celluloid_player.Celluloid org.kde.haruna io.github.mpc_qt.mpc-qt com.github.iwalton3.jellyfin-mpv-shim org.jellyfin.JellyfinDesktop; do
         [ -d "$fpdata/$a" ] && say "Flatpak $a: its own mpv build, not changed (no VapourSynth plugin slot)"
     done
-    if [ -d "$HOME/.kodi" ] || have kodi; then
+    # the PushMPC Kodi add-on (kodiaddon/install/install.sh) plays inside Kodi itself: its marker lists each Kodi it is in,
+    # and that Kodi then keeps its own player (no mpv external-player rule)
+    kmark=$cfg/pushmpc/kodi-addon.installed
+    if { [ -d "$HOME/.kodi" ] || have kodi; } && [ -f "$kmark" ] && cut -f1 "$kmark" | grep -q -x -F "$HOME/.kodi"; then
+        say "Kodi: the PushMPC add-on is installed in it: mpv is not set as its external player"
+    elif [ -d "$HOME/.kodi" ] || have kodi; then
         say "Kodi:"
         if [ "$nat" = 1 ] || [ "$hook" = 1 ]; then kodi_install "$(command -v mpv)" ''
         elif [ "$fp" = 1 ]; then kodi_install "$(command -v flatpak || echo /usr/bin/flatpak)" "run $FLATPAK_MPV "

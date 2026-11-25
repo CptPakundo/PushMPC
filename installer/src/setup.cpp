@@ -218,17 +218,17 @@ std::vector<OtherPlayer> DetectOtherPlayers(bool vlcModule) {
     if (pf.empty()) pf = env(L"ProgramFiles");
     std::vector<OtherPlayer> out;
     auto first = [&](std::initializer_list<std::wstring> c) { for (auto& p : c) if (!p.empty() && FileExists(p)) return p; return std::wstring(); };
-    const wchar_t* cap = L"capture mode (fallback: about 50-60 ms delay, no DRM-protected video)";
+    const wchar_t* cap = L"capture mode (works with any player; slightly delayed, copy-protected video stays black)";
     std::wstring vlc;
     for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) { std::wstring d = RegGetStr(root, L"Software\\VideoLAN\\VLC", L"InstallDir"); if (!d.empty() && FileExists(JoinPath(d, L"vlc.exe"))) { vlc = JoinPath(d, L"vlc.exe"); break; } }
     if (vlc.empty()) vlc = first({ JoinPath(pf, L"VideoLAN\\VLC\\vlc.exe"), JoinPath(pf86, L"VideoLAN\\VLC\\vlc.exe") });
-    if (!vlc.empty()) out.push_back({ L"VLC", vlc, !vlcModule, vlcModule ? L"the PushMPC module for VLC 3" : cap });
+    if (!vlc.empty()) out.push_back({ L"VLC", vlc, !vlcModule, vlcModule ? L"the PushMPC add-on for VLC" : cap });
     std::wstring st = first({ JoinPath(la, L"Programs\\Stremio\\stremio-shell-ng.exe"), JoinPath(pf, L"Stremio\\stremio-shell-ng.exe"), JoinPath(la, L"Programs\\Stremio\\stremio.exe"), JoinPath(pf, L"Stremio\\stremio.exe") });
-    if (!st.empty()) out.push_back({ L"Stremio", st, false, L"through its mpv config file (Stremio 5.0.28 and newer; older versions: capture mode)" });
+    if (!st.empty()) out.push_back({ L"Stremio", st, false, L"set up automatically (Stremio 5.0.28 and newer; older versions: capture mode)" });
     for (auto& d : { JoinPath(pf, L"Plex\\Plex"), JoinPath(pf, L"Plex\\Plex HTPC") })
         if (FileExists(JoinPath(d, L"libmpv-2.dll")) || FileExists(JoinPath(d, L"mpv-2.dll")))
             out.push_back({ d.find(L"HTPC") != std::wstring::npos ? L"Plex HTPC" : L"Plex", d, false,
-                            L"frame generation through a VapourSynth-enabled mpv library in Plex (tested Plex versions; others: capture mode)" });
+                            L"smoother motion inside Plex (tested Plex versions; others: capture mode)" });
     struct P { const wchar_t* name; std::vector<const wchar_t*> rel; };
     const std::vector<P> probes = { P{ L"KMPlayer 64X", { L"KMPlayer 64X\\KMPlayer64.exe" } }, P{ L"GOM Player", { L"GRETECH\\GomPlayer\\GOM.exe", L"GRETECH\\GOMPlayer\\GOM.exe" } },
                                     P{ L"Emby Theater", { L"Emby Theater\\Emby.Theater.exe", L"Emby-Theater\\Emby.Theater.exe" } } };
@@ -454,8 +454,8 @@ Result DoInstall(Op op, bool autoUpdates) {
         res.message = L"PushMPC " + Widen(v) + L" is installed.";
         // capture mode (pushmpc-capture.ps1 enable) was switched on for players without a native route
         if (FileExists(JoinPath(g_installDir, L"capture\\capture.json")))
-            res.message += L"\r\nFor players PushMPC cannot plug into, capture mode is ready: Start menu > PushMPC Capture (fallback). It adds about "
-                           L"50-60 ms of delay and cannot show DRM-protected video.";
+            res.message += L"\r\nFor your other players, open PushMPC Capture from the Start menu. It is slightly delayed "
+                           L"and copy-protected video stays black.";
     } else res.message = L"Dry run finished: nothing was changed.";
     RemoveTree(stage);
     UiProgress(100, L"Done");
@@ -586,8 +586,8 @@ bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.
 // the pinned archives': ONNX Runtime 149 MB plus the EP), or empty when PushFlow stays on DirectML
 std::wstring PmmlOffer() {
     std::wstring n = g_gpu; for (auto& c : n) c = wchar_t(towupper(c));
-    if (n.find(L"NVIDIA") != std::wstring::npos && n.find(L"RTX") != std::wstring::npos) return L"TensorRT-RTX, about 255 MB";
-    if (n.find(L"INTEL") != std::wstring::npos) return L"OpenVINO, about 220 MB";
+    if (n.find(L"NVIDIA") != std::wstring::npos && n.find(L"RTX") != std::wstring::npos) return L"about 255 MB";
+    if (n.find(L"INTEL") != std::wstring::npos) return L"about 220 MB";
     return L"";
 }
 bool PlexFound() { for (auto& o : g_others) if (o.player.rfind(L"Plex", 0) == 0) return true; return false; }
@@ -642,13 +642,13 @@ void ShowPage(Page p) {
         SetText(IDC_TITLE, L"Welcome to PushMPC setup");
         SetText(IDC_SUBTITLE, L"PushMPC " + ver + L" for your video players");
         std::wstring body =
-            L"PushMPC brings PushFPS's video processing into your player: frame generation, RTX Video Super Resolution, AI picture "
-            L"enhancement and SDR to HDR, on the graphics card. Setup finds your players and graphics card, picks the best engine and "
-            L"sets everything up, with no questions; Auto keeps adjusting while you watch.\r\n\r\n"
-            L"Supported players: MPC-HC, MPC-BE, PotPlayer, mpv, mpv.net, SMPlayer, MPC-QT, VLC, Kodi, Stremio, Plex, Jellyfin. "
-            L"Any other player: capture mode (fallback).\r\n\r\n"
-            L"For your Windows account only, no administrator rights, into " + g_installDir + L". Veyra's runtime package (about 750 MB) "
-            L"is downloaded unless PushFPS or Veyra already has the same files.\r\n\r\n"
+            L"PushMPC makes video in your player smoother and sharper: more frames for fluid motion, AI upscaling to your screen, "
+            L"cleaner low-quality video and SDR to HDR, all on your graphics card. Setup finds your players and your graphics card "
+            L"and sets everything up for you.\r\n\r\n"
+            L"Works with MPC-HC, MPC-BE, PotPlayer, mpv, mpv.net, SMPlayer, MPC-QT, VLC, Kodi, Stremio, Plex and Jellyfin. "
+            L"Other players: capture mode.\r\n\r\n"
+            L"Installs for your Windows account only (no administrator rights needed) into " + g_installDir + L". The first install "
+            L"downloads about 750 MB for your graphics card, unless PushFPS is already installed.\r\n\r\n"
             L"Graphics card: " + (g_gpu.empty() ? L"not detected" : g_gpu);
         SetText(IDC_BODY, body); Show(IDC_BODY, true);
         if (NoPlayerFound()) {
@@ -671,7 +671,7 @@ void ShowPage(Page p) {
         Show(IDC_WARN, true);
         Show(IDC_AUTOUPD, true);
         Show(IDC_FSRSDK, FsrSdkGpu());
-        if (!PmmlOffer().empty()) SetText(IDC_PMML, L"Download PushFlow's faster runtime for this graphics card (" + PmmlOffer() + L", from nuget.org / pypi.org, checked by SHA-256)");
+        if (!PmmlOffer().empty()) SetText(IDC_PMML, L"Download faster AI frame generation for this graphics card (" + PmmlOffer() + L")");
         Show(IDC_PMML, !PmmlOffer().empty());
         Show(IDC_PLEX, PlexFound());
         SetText(IDC_NEXT, L"Next");
@@ -819,9 +819,9 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         HWND lic = mk(L"EDIT", kLicence, ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_TABSTOP, IDC_LICENCE, WS_EX_CLIENTEDGE);
         (void)lic;
         mk(L"BUTTON", L"I accept the licence terms", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_ACCEPT);
-        Button_SetCheck(mk(L"BUTTON", L"Fetch AMD FSR SDK 2.4 for FSR 4.1 upscaling on this Radeon (AMD's signed files, checked by SHA-256)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
-        Button_SetCheck(mk(L"BUTTON", L"Download PushFlow's faster runtime for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
-        Button_SetCheck(mk(L"BUTTON", L"Plex: frame generation through a VapourSynth-enabled mpv library (Plex's own is kept and put back; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Download AMD's newest FSR upscaling (FSR 4.1) for this Radeon", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Download faster AI frame generation for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Give Plex smoother motion (replaces one Plex file, puts it back on uninstall; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UNINSTALL);

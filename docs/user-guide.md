@@ -8,23 +8,13 @@ progress bar. The welcome page lists the supported players and the ones it found
 PotPlayer is running, setup offers to close it (they save their settings when they close).
 
 Setup asks nothing else. It:
-- sets up every player it finds (table below);
-- picks the engine Auto starts with for your graphics card and writes it to the log and to `auto-plan.json` (the same
-  rules as the players' Auto; `pushmpc-install.ps1 autoplan` shows it again, `autoplan -Apply` redoes it after a GPU
-  change);
-- installs PushFlow's faster runtime for your graphics card into `%LOCALAPPDATA%\PushMPC\pmml` (on by default; the
-  welcome page shows the download size): ONNX Runtime with TensorRT-RTX on an NVIDIA RTX card (about 255 MB) or
-  OpenVINO on Intel (about 220 MB), from nuget.org / pypi.org, each file checked against its pinned SHA-256
-  (`-Pmml No` declines it in a script install). Radeon, GeForce GTX and Snapdragon keep PushFlow on DirectML, which
-  needs nothing extra;
-- chooses that execution provider for PushFlow (`runtime\runtime\experimental\pushflow\pmml.txt`): the provider pmml's
-  benchmark measured fastest on this card when there is a measurement, else TensorRT-RTX on RTX and OpenVINO on Intel;
-  if it ever fails to start, PushFlow goes back to DirectML by itself;
-- gives Plex HTPC and Plex for Windows frame generation (see [Plex](#plex)), when Plex is installed;
-- on a Radeon RX 6000 / 7000 / 9000 fetches AMD FSR SDK 2.4 (FSR 4.1 INT8 upscaling; AMD's signed files, pinned). The
-  welcome page offers it with a checkbox that is on by default; `-FidelityFx Package` declines it in a script install;
-- turns on [capture mode](#capture-mode-fallback) only when it finds a player PushMPC cannot plug into.
-
+- sets up every player it finds (see the table below);
+- picks the best settings for your graphics card (Auto keeps adjusting them while you watch);
+- downloads a faster version of PushFlow, PushMPC's AI frame generation, for NVIDIA RTX and Intel graphics cards
+  (about 220-255 MB; you can untick it on the first page);
+- downloads AMD's newest FSR upscaling for Radeon RX 6000, 7000 and 9000 cards (you can untick it too);
+- gives Plex smoother motion if you have Plex (see [Plex](#plex));
+- turns on [capture mode](#capture-mode-fallback) only if you have a player PushMPC can't plug into.
 Setup is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC" the first time: click
 **More info**, then **Run anyway**. The download of Veyra's runtime package (about 750 MB) shows its progress, can be
 cancelled, and continues where it stopped when you run setup again; it is checked against its pinned SHA-256.
@@ -74,8 +64,8 @@ leaves them out).
 | Jellyfin Desktop | preview | the VapourSynth filter in each profile's `mpv.conf` |
 | Kodi, Jellyfin MPV Shim, Plex-MPV-Shim | preview, when mpv is installed | they play through mpv (Kodi's external player; the shims' external mpv) |
 | Stremio 5.0.28 and newer | automatic | its "mpv config file" setting; [details](players-mpv.md#stremio) |
-| Plex for Windows, Plex HTPC | preview: frame generation on tested Plex versions | a VapourSynth-enabled mpv library in Plex's folder and PushMPC's block in Plex's `mpv.conf` ([details](#plex)); other versions: capture mode |
-| VLC 3 | preview | PushMPC's VLC module, when the download includes it; otherwise capture mode |
+| Plex for Windows, Plex HTPC | preview | smoother motion on tested Plex versions ([details](#plex)); other versions: capture mode |
+| VLC 3 | preview | adds PushMPC to VLC |
 | KMPlayer, GOM Player, Emby Theater, other players | fallback | [capture mode](#capture-mode-fallback) |
 | Zoom Player | by hand, untested | nothing ([steps](#zoom-player-by-hand)) |
 | SVP's own mpv | | left alone (SVP manages it) |
@@ -147,53 +137,44 @@ Remove the filter there again when you uninstall PushMPC.
 
 ### Plex
 
-Plex plays video with its own mpv library, which has no VapourSynth, so PushMPC cannot plug into it as it is. Setup
-offers (checked by default) to put a VapourSynth-enabled mpv library into Plex's folder: shinchiro's mpv build, the one
-community Plex setups use, pinned by SHA-256 from its GitHub release. It runs a self-test first, keeps an exact copy of
-Plex's own library, and adds PushMPC's block plus `tls-ca-file=<Plex>\resources\cacert.pem` (for Plex's plex.direct
-streams) to Plex's `mpv.conf`. Plex lives in Program Files, so this step asks for administrator permission once.
+Plex for Windows and Plex HTPC get smoother motion too. To make that work, Setup replaces one file in Plex's folder with
+a version that PushMPC can work with. It keeps Plex's own file and puts it back when you uninstall PushMPC. Because
+Plex is installed for all users, Windows asks for administrator permission once.
 
-- Only Plex versions it was tested with are changed; any other version keeps its own library and gets capture mode.
-- A Plex update replaces the library: a logon check (Task Scheduler, `\PushMPC\Plex libmpv check`) puts PushMPC's back
-  when the new Plex version is a tested one.
-- Uninstall (or `pushmpc-plex.ps1 restore`) puts Plex's own library back; `pushmpc-plex.ps1 status` shows the state.
-- `-PlexSwap No` (script install) or unticking the box on the welcome page keeps Plex as it is.
+- This is only done for Plex versions we have tested. With any other version, Plex keeps its own file and you can use
+  [capture mode](#capture-mode-fallback) instead.
+- When Plex updates itself, PushMPC checks at your next sign-in and sets it up again if the new version is a tested one.
+- Don't want this? Untick the Plex box on Setup's first page.
 
 ### Capture mode (fallback)
 
-For a player PushMPC cannot plug into, capture mode runs PushFPS's own window capture on the player's window: frame
-generation and super resolution for any player. Setup turns it on only when it finds such a player, as the Start menu
-entry **PushMPC Capture (fallback)**. Start the player, then the entry: PushFPS opens its window capture straight on the
-player's window (when no player is running, or with a PushFPS version this was not tested with, PushFPS's own window
-picker opens instead).
+Capture mode is for players PushMPC can't plug into, such as KMPlayer, GOM Player or Emby Theater. Setup turns it on
+only if you have one of those players.
 
-- It is a fallback: about 50-60 ms between the player and the screen, and a second window over the player. A native
-  route always looks better.
-- **Lip sync:** the sound stays in the player, so it comes about 60-100 ms early. Set the player's audio delay to about
-  +80 ms: KMPlayer and GOM have it in their audio settings, VLC under Tools > Track Synchronization. For Plex with its
-  own library, capture mode adds `audio-delay=+0.080` to Plex's `mpv.conf` while it runs (from the next video) and
-  removes it when PushFPS closes. PushFPS's own audio offset moves only PushFPS's sound, not the player's.
-- DRM-protected video (streaming apps, browsers playing protected streams) shows a black picture.
-- It uses a PushFPS of its own in `%LOCALAPPDATA%\PushMPC\capture\PushFPS`, installed on first use after asking
-  (PushFPS 4.5.3 from its GitHub release, checked by SHA-256, by PushFPS's own installer). A PushFPS you installed is
-  never started, read or changed: PushFPS keeps its logs, caches and settings next to its program, and capture mode
-  also gives it its own settings folder, Qt cache and temp folder. Uninstalling PushMPC removes that folder.
-- `pushmpc-capture.ps1 status | launch | enable | disable` in `%LOCALAPPDATA%\PushMPC\filter` does the same by hand;
-  `pushmpc-install.ps1 install -Capture On|Off` overrides Setup's choice.
-- Windows only: PushFPS's Linux and macOS builds read capture cards and cameras, not windows (see below).
+1. Start your player and play a video.
+2. Open **PushMPC Capture** from the Start menu.
+3. A second window shows the video with smoother motion. Put it fullscreen.
 
+Good to know:
+- The first time, PushMPC Capture asks to download PushFPS (about 130 MB), which does the capturing. It goes into
+  PushMPC's own folder; if you already have PushFPS, yours is not touched.
+- The picture comes about 1/20 of a second later than the player's sound. If the sound seems early, set your player's
+  audio delay to about +80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). For Plex,
+  PushMPC does this for you while capture mode runs.
+- Copy-protected video (Netflix and similar) stays black.
+- A player PushMPC plugs into directly (MPC-HC, mpv, VLC, Kodi, ...) always looks better than capture mode.
 ### Capture on Linux and macOS (workaround)
 
-PushFPS's Linux and macOS app takes any camera, so a virtual camera that shows the player's window feeds it. This is a
-workaround with basic quality (PushFPS's portable engine, 8-bit, a few frames of extra delay); a capture host of
-PushMPC's own is planned after the first release.
+On Linux and Mac, PushFPS can't capture a window, but it can show a camera. OBS Studio can turn your player's window into
+a virtual camera. The picture is a bit simpler than on Windows; a built-in way is planned.
 
 1. Install OBS Studio. Linux: also `v4l2loopback` (OBS's virtual camera needs it; your distribution's package, e.g.
    `v4l2loopback-dkms`). macOS 13 and newer: allow OBS's camera extension when OBS asks.
 2. In OBS, add a source for the player: *Window Capture (PipeWire)* or *Screen Capture (PipeWire)* on Linux, *macOS
    Screen Capture* (window) on macOS. Set the canvas to the video's size and frame rate.
 3. Click *Start Virtual Camera*.
-4. In PushFPS: Home > capture card, choose *OBS Virtual Camera*, then turn on frame generation.
+4. Install PushFPS (github.com/DosukaSOL/PushFPS), choose *OBS Virtual Camera* as the capture card, and turn on frame
+   generation.
 
 ## GPUs
 

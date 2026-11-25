@@ -226,7 +226,14 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
     $kodiUser = @()
     foreach ($d in $kodiDirs) { if (Test-Path -LiteralPath "$d\portable_data" -PathType Container) { $kodiUser += "$d\portable_data\userdata" } }
     if ((Test-Path -LiteralPath "$($E.AppData)\Kodi" -PathType Container) -or $kodiDirs) { $kodiUser += "$($E.AppData)\Kodi\userdata" }
+    # the PushMPC Kodi add-on (kodiaddon/install/install.ps1) lists each Kodi it is in: that Kodi keeps its own player
+    $kodiMarker = "$($E.AppData)\PushMPC\kodi-addon.installed"
+    $kodiAddon = @(if (Test-Path -LiteralPath $kodiMarker) { Get-Content -LiteralPath $kodiMarker | ForEach-Object { ($_ -split "`t")[0].TrimEnd('\') } })
     foreach ($u in ($kodiUser | Select-Object -Unique)) {
+        if ($kodiAddon -contains (Split-Path -Parent $u).TrimEnd('\')) {
+            $found += [pscustomobject]@{ Player = 'Kodi'; Exe = ''; Kind = 'none'; Config = ''; Managed = $false; Note = 'the PushMPC add-on plays inside Kodi: mpv is not set as its external player' }
+            continue
+        }
         $found += [pscustomobject]@{ Player = 'Kodi'; Exe = $hostExe; Kind = 'kodi'; Config = "$u\playercorefactory.xml"; Managed = [bool]$hostExe
             Note = $(if ($hostExe) { "videos play in mpv ($hostExe) as Kodi's external player" } else { 'not changed: Kodi needs mpv (shinchiro build) as its external player; install mpv, then run PushMPC Setup again' }) }
     }

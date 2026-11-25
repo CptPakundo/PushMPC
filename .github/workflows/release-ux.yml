@@ -195,7 +195,7 @@ jobs:
           $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
           $pmml = [string](Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue)
           $cap = Get-Content "$env:LOCALAPPDATA\PushMPC\capture\capture.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-          $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk"
+          $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture.lnk"
           $mpc = [bool](Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' })
           "auto-plan.json: family $($plan.family); directshow: $($plan.directshow)" | Tee-Object -Append $log
           "pmml.txt: $(($pmml -split "`r?`n" | Where-Object { $_ -match '^(runtime|backend)=' }) -join ' | ')" | Tee-Object -Append $log
