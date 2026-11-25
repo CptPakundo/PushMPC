@@ -2631,7 +2631,7 @@ index 94591579..e58d9d72 100644
              if(p.outputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.outputSemaphore),"destroy output semaphore");
              if(p.inputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.inputSemaphore),"destroy input semaphore");
 diff --git a/src/pushflow/PushFlowBackend.cpp b/src/pushflow/PushFlowBackend.cpp
-index f0e52b55..22c5f898 100644
+index f0e52b55..70bcd10c 100644
 --- a/src/pushflow/PushFlowBackend.cpp
 +++ b/src/pushflow/PushFlowBackend.cpp
 @@ -29,6 +29,9 @@
@@ -2814,16 +2814,18 @@ index f0e52b55..22c5f898 100644
      const auto makeBuffer = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out) {
          D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
          D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = (bytes + 255) / 256 * 256; bd.Height = 1;
-@@ -927,6 +1045,8 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -927,6 +1045,10 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
              accepted ? "fp16" : "fp32 (half precision does not match on this GPU)"));
      }
  
 +    }   // !altActive (PushMPC: pmml opened the network above)
++    // the tensor buffers' recipe again for what follows (Guard, Predict): it was local to the block above
++    const auto makeBuffer = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out) { return p.makeTensorBuffer(bytes, out); };
 +
      // Shaders, descriptors and the output picture.
      std::vector<uint8_t> cs;
      if (!p.packPass.loadShader("PushFlowPack.dxil", cs) || !p.packPass.create(device, cs, 1 + 2 * kSrvRing, 2, 1, 12)) return false;
-@@ -998,7 +1118,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -998,7 +1120,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
      // The rebuild is what keeps the Fast tier sharp; at full size the network's own picture is used.
      p.status.rebuild = p.haveGrids && (p.status.modelW != width || p.status.modelH != height);
      p.status.grids = p.haveGrids; p.status.alignCorners = p.facts.alignCorners; p.status.maskForFirst = p.facts.maskForFirst;
@@ -2832,7 +2834,7 @@ index f0e52b55..22c5f898 100644
      {
          D3D12_QUERY_HEAP_DESC qd{}; qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = 2 * Impl::kTimeRing;
          UINT64 frequency = 0;
-@@ -1110,7 +1230,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -1110,7 +1232,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
          if (!p.status.split) veyra::log::warn("pushflow", "the encoder cache was asked for and is not used: " + p.status.splitState);
      }
      // Queued inference (see Impl::runOptions); a failure here only keeps the waits.
@@ -2841,7 +2843,7 @@ index f0e52b55..22c5f898 100644
          if (p.ok(p.api->CreateRunOptions(&p.runOptions), "CreateRunOptions") &&
              p.ok(p.api->AddRunConfigEntry(p.runOptions, "disable_synchronize_execution_providers", "1"), "run option")) p.queued = true;
      }
-@@ -1124,7 +1244,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -1124,7 +1246,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
                                            : std::string("inference waits for the GPU each frame"));
      p.status.ready = true;
      veyra::log::info("pushflow", std::format("ready runtime={} model={} precision={} tier={} size={}x{} model={}x{} padded={}x{} channels={} "
