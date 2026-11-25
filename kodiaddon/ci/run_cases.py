@@ -39,7 +39,7 @@ CASES = [
     ("upscale2", "h264.mp4", {"smoother": 2, "upscale": 2}, 2, True, "1280x720", "play"),
     ("hevc_x2", "hevc.mkv", {"smoother": 2}, 2, True, "640x360", "play"),
     ("mpeg2_x2", "mpeg2.ts", {"smoother": 2}, 2, True, "640x360", "play"),
-    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22, "640x360", "play"),
+    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22 and os.name != "nt", "640x360", "play"),
     ("hdr10_kodi", "hdr10.mkv", {"enabled": "false"}, 1, False, "640x360", "play"),   # the same file through Kodi alone
     ("seek", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "seek"),
     ("chapter", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "chapter"),

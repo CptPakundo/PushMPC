@@ -557,6 +557,12 @@ private:
         else if (HasDolbyVision(st)) why = "Dolby Vision: Kodi's own decoder keeps it";
         else if (IsHdrTransfer(trc) && (!PM_KODI22 || !m_settings.hdr))
             why = PM_KODI22 ? "HDR is off in the add-on settings" : "HDR: Kodi 21 cannot take HDR pictures from an add-on";
+#if defined(_WIN32) && PM_KODI22
+        // Kodi 22 probes HDR10 files for stream details by creating the add-on's decoder on its GUI thread
+        // (DVDFileInfo GetDetailsFromFrame); on Windows that probe stalls the GUI thread in the add-on's demuxer (CI, open
+        // issue). Until that is fixed, Kodi plays HDR files itself on Windows.
+        else if (IsHdrTransfer(trc)) why = "HDR on Windows with Kodi 22: Kodi's own decoder for now (open issue)";
+#endif
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         else if (bits > 10) why = "more than 10 bits per sample";
