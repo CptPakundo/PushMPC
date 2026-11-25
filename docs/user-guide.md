@@ -130,7 +130,7 @@ Advanced:
 |---|---|---|
 | FG quality | Auto, Low, Medium, High | Auto: Medium for the multiplier, High only where it fits at the same multiplier with 3 ms to spare. For PushFlow Low / Medium / High are Fast / Balanced / Quality. |
 | FG method | Auto, NVIDIA VFG, DLSS-G, PushFlow, FSR, AMD FRC | the frame generation method; a method this GPU cannot run is marked and the note says why |
-| Refresh (VRR) | Auto, Assume VRR, Assume fixed | Auto predicts G-SYNC / VRR for MPC-HC's window from the NVIDIA driver profile (G-SYNC selected for the player and its windowed / fullscreen mode); the driver's display-wide "running" flag only confirms it. Without an answer it assumes a fixed refresh and says so |
+| Refresh (VRR) | Auto, Assume VRR, Assume fixed | Auto predicts G-SYNC / VRR for MPC-HC's window from the NVIDIA driver profile (G-SYNC selected for the player and its windowed / fullscreen mode); the driver's display-wide "running" flag only confirms it. On AMD it reads FreeSync from the AMD driver: FreeSync switched on in AMD Software and the player fullscreen counts as VRR. Without an answer it assumes a fixed refresh and says so |
 | Upscaler | Auto, RTX VSR, FSR, NIS | Auto: RTX VSR on NVIDIA RTX, else FSR |
 | HDR method | Auto (PushMPC curve), RTX Video HDR | the SDR to HDR method; RTX Video HDR needs NVIDIA RTX, and HDR boost then sets its peak (500 / 700 / 1000 cd/m2) |
 | Limit brightness on bright scenes | on / off | on (default): when a scene is bright over large areas, the highlight expansion is reduced slowly so the frame average stays within what the display holds over its full area (with RTX Video HDR, the light above paper white of its output is scaled the same way); off: the full expansion always |
@@ -140,6 +140,7 @@ Advanced:
 | Clean-up strength | Subtle, Balanced, Strong | the AI enhancement look |
 | Deband | Auto, Off, On | PushMPC's own deband pass on 8-bit video, before the upscaler |
 | Deband strength | Low, Medium, High | how wide and how strong the smoothing is |
+| Subtitle hold | Auto (off), Off, On | PushFPS's Subtitle Hold for subtitles burned into the picture: text that stands still near the bottom while the picture moves is kept out of frame generation and laid back over the generated frames, so it does not warp or ghost. Only for burned-in text; subtitles the player draws (soft subtitles) are added after PushMPC and never need it. Off under Auto: it costs about 0.5 ms per frame at 4K |
 
 | On-screen status | Brief at start, Always, Off | shows what PushMPC is doing (for example "5x Medium · VSR 4 · 120 fps") in the top-left corner. Brief at start (default): for 3 seconds when playback starts or settings change; Always: kept on; Off: hidden. While it is visible it also appears in MPC-HC's Save Image screenshots. |
 | On battery | Light, Same as plugged in | Light (default) uses a lighter profile on laptop battery: frame generation up to 2x, VSR up to level 2, clean up and deband off, SDR to HDR boost Low. Same as plugged in keeps the full profile. |

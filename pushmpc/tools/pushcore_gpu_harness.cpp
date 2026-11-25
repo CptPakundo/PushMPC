@@ -9,7 +9,8 @@
 //
 // usage: pushcore_gpu_harness <video> <outdir> [--pushfps DIR] [--frames N] [--start S] [--paced 0|1]
 //            [--copy 0|1] [--save 0,1,2,60] [--data DIR] [--sr 0|1] [--fg 0|1] [--multiplier N] [--warmup N]
-//            [--shaders DIR]
+//            [--shaders DIR] [--subtitles 0|1]
+// --subtitles 1: PushFPS's Subtitle Hold (PushCoreSettings.subtitleHold; implies the PushMPC settings route)
 // --shaders: the compiled shaders pushcore uses. Default: the build tree's own (<harness folder>\..\shaders, the
 // shaders built from the patched PushFPS source) when that folder exists, else <pushfps>\shaders. A copy of an
 // installed PushFPS carries its upstream shaders, without PushMPC's (VfgFourierMellin, the patched
@@ -134,6 +135,7 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX; continue; }
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
+        if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
         if (k == L"--pushfps") pushfps = v;
         else if (k == L"--shaders") shaderDir = v;
         else if (k == L"--frames") maxFrames = unsigned(_wtoi(v.c_str()));
@@ -264,8 +266,8 @@ int wmain(int argc, wchar_t** argv) {
     if (useSettings) {
         if (mult >= 1) ps.multiplier = uint32_t(mult);
         cfg.settings = &ps; cfg.dataDir = L""; cfg.sr = cfg.fg = cfg.multiplier = -1;
-        std::cout << std::format("settings: backend {} x{} quality/tier {} SR {} (method {}, level {}) cut guard {}\n", ps.fgBackend, ps.multiplier,
-                                 ps.vfgQuality, ps.sr, ps.srMethod, ps.srQuality, ps.cutGuard);
+        std::cout << std::format("settings: backend {} x{} quality/tier {} SR {} (method {}, level {}) cut guard {} subtitle hold {}\n", ps.fgBackend, ps.multiplier,
+                                 ps.vfgQuality, ps.sr, ps.srMethod, ps.srQuality, ps.cutGuard, ps.subtitleHold);
     }
     char err[1024]{};
     const auto openStart = Clock::now();
@@ -303,6 +305,7 @@ int wmain(int argc, wchar_t** argv) {
     const double outIntervalMs = si.fpsNum > 0 ? 1000.0 * si.fpsDen / si.fpsNum / m : 10;
     std::ofstream csv(outDir / L"outputs.csv");
     csv << "output,source,kind,subframe,pts100ns,presentMs,latenessMs\n";
+    uint32_t subtitleMax = 0; uint64_t subtitleSamples = 0;   // Subtitle Hold pixels seen in the stats during the run
     const auto runStart = Clock::now();
     Clock::time_point steadyStart{}; uint64_t steadyBase = 0; bool steady = false;
     const uint64_t lastSave = save.empty() ? 0 : *save.rbegin();
@@ -399,6 +402,7 @@ int wmain(int argc, wchar_t** argv) {
             queue.pop_front();
         }
         PushCoreStats s{}; s.structSize = sizeof(s); api->stats(core, &s);
+        subtitleMax = std::max(subtitleMax, s.subtitleHoldPixels); subtitleSamples += s.subtitleHoldPixels > 0 ? 1 : 0;
         if (!moreToSubmit && queue.empty() && s.pendingFrames == 0 && s.leasesOut == 0) break;
         if (msBetween(runStart, Clock::now()) > 600000) { std::cout << "TIMEOUT\n"; failed = true; break; }
     }
@@ -429,6 +433,8 @@ int wmain(int argc, wchar_t** argv) {
         "RESULT source={} outputs={} real={} generated={} skippedGenerated={} expectedOutputs={} countMismatches={} orderErrors={} ptsErrors={} sizeErrors={} pngs={} pngFailures={}\n",
         submitted, presentedCount, real, generated, s.skippedGenerated, expected, countMismatch, orderErrors, ptsErrors, sizeErrors, pngs, pngFail);
     std::cout << std::format("CUTS held by the cut guard (pushcore stats, read back): {}\n", s.cutGuardCuts);
+    std::cout << std::format("SUBTITLE HOLD state {} (0 off, 1 running, 2 unavailable, 3 not in this graph); pixels held: last {}, max {}; loop samples with pixels {}\n",
+                             s.subtitleHoldState, s.subtitleHoldPixels, subtitleMax, subtitleSamples);
     std::cout << std::format(
         "TIMING gpu (D3D12 timestamps, source frames > {}): VSR mean {:.2f} median {:.2f} p95 {:.2f} ms (n={}); VFG batch mean {:.2f} median {:.2f} p95 {:.2f} ms (n={}); graph span median {:.2f} p95 {:.2f} ms\n",
         warmup, srA.mean, srA.median, srA.p95, srA.n, fgA.mean, fgA.median, fgA.p95, fgA.n, grA.median, grA.p95);

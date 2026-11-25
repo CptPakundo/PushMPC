@@ -4,7 +4,7 @@
 
 // Plain Win32 controls only (no owner draw, no own colours): MPC-HC hosts COM property pages in its
 // CMPCThemeComPropertyPage, which subclasses standard controls for its dark theme, as it does for LAV's pages.
-IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 404
+IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 422
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
@@ -26,7 +26,7 @@ BEGIN
     LTEXT           "Status", -1, 7, 108, 100, 8
     EDITTEXT        IDC_PM_STATUS, 7, 118, 286, 64, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_HSCROLL | ES_AUTOHSCROLL
     PUSHBUTTON      "Show advanced settings", IDC_PM_ADVANCED, 7, 188, 110, 14
-    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 286, 194
+    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 286, 212
     LTEXT           "FG quality", IDC_PM_FGQ_LBL, 15, 220, 62, 8
     COMBOBOX        IDC_PM_FGQ, 78, 218, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Upscale style", IDC_PM_STYLE_LBL, 152, 220, 62, 8
@@ -61,6 +61,9 @@ BEGIN
     COMBOBOX        IDC_PM_BATTERY, 216, 374, 70, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON      "Turn on G-SYNC for MPC-HC (windowed and full screen)", IDC_PM_GSYNC, 15, 389, 180, 13
     LTEXT           "", IDC_PM_GSYNC_NOTE, 200, 391, 90, 8, SS_ENDELLIPSIS
+    LTEXT           "Subtitle hold", IDC_PM_SUBHOLD_LBL, 15, 406, 62, 8
+    COMBOBOX        IDC_PM_SUBHOLD, 78, 404, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Keeps burned-in subtitles steady in generated frames", IDC_PM_SUBHOLD_NOTE, 152, 406, 138, 8, SS_ENDELLIPSIS
 END
 
 IDD_PUSHMPC_ABOUT DIALOGEX 0, 0, 300, 352

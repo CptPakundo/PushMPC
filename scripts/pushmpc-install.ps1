@@ -113,28 +113,32 @@ $ProgressPreference = 'SilentlyContinue'
 $PushMpcRepo = 'https://github.com/CptPakundo/PushMPC'
 # Future update feed (not used yet: "update" takes a local -ReleaseManifest for now).
 $UpdateFeed = "$PushMpcRepo/releases/latest/download/release.json"
-# Veyra's runtime packages that PushFPS 4.4.0 is built on (unchanged since 4.1.0: tag v2.1.9), pinned like PushFPS's installer pins them (its 4.1.0 / 4.2.0
-# installers carry both SHA-256s for tag v2.1.9). The runtime component's version IS this package reference; Subset counts
+# Veyra's runtime packages that PushFPS 4.5.3 is built on (tag v2.2.1; 4.1.0 to 4.4.0 used v2.1.9), pinned like PushFPS's
+# installer pins them (the SHA-256s are those of PushFPS 4.5.3's released Install-PushFPS.ps1). 2.2.1 has the same vendor
+# runtimes as 2.1.9 (every file PushMPC takes under runtime\ and runtime_local\ is byte-identical, checked on the NVIDIA
+# package); FFmpeg 9.0.1 was rebuilt (avutil-61.dll and swscale-10.dll differ). Since 2.2.1 the package's program sits under
+# Veyra-2.2.1-<vendor>-win64-portable\versions\2.2.1\ (a Veyra.exe launcher at the top): the root is still found by
+# veyra_qml_ui.exe, and an installed PushFPS has the program flat in its folder as before. The runtime component's version IS this package reference; Subset counts
 # the revisions of the file list below (an installed runtime from an older list is extracted again from the same package).
 # -Gpu picks the package as PushFPS's installer does (Auto: NVIDIA when a video controller's name says NVIDIA, else AMD;
 # the AMD package also serves Intel and other GPUs: FSR, PushFlow and AMD FRC need no vendor files).
 $Packages = @{
     NVIDIA = @{
-        Version = 'veyra-2.1.9-nvidia'; Vendor = 'NVIDIA'
+        Version = 'veyra-2.2.1-nvidia'; Vendor = 'NVIDIA'
         Repo    = 'Likely7/Veyra-NRVideo'
-        Tag     = 'v2.1.9'
-        Asset   = 'Veyra-2.1.9-NVIDIA-win64-portable.zip'
-        Url     = 'https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.1.9/Veyra-2.1.9-NVIDIA-win64-portable.zip'
-        Sha256  = '4225ECB11A8E96C2826B4B0B798FEB811D7AE237F3EDF0B627F3B6895C79F362'
+        Tag     = 'v2.2.1'
+        Asset   = 'Veyra-2.2.1-NVIDIA-win64-portable.zip'
+        Url     = 'https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.2.1/Veyra-2.2.1-NVIDIA-win64-portable.zip'
+        Sha256  = 'E09150D1594AA9416FA27457A42B4D50B5D814E05471216BEF95B9303544386B'
         Subset  = '3'   # 1: first list; 2: + VSR styles; 3: + DLSS-G (and its RTX 30/40 unlock files), FidelityFX, PushFlow
     }
     AMD = @{
-        Version = 'veyra-2.1.9-amd'; Vendor = 'AMD'
+        Version = 'veyra-2.2.1-amd'; Vendor = 'AMD'
         Repo    = 'Likely7/Veyra-NRVideo'
-        Tag     = 'v2.1.9'
-        Asset   = 'Veyra-2.1.9-AMD-win64-portable.zip'
-        Url     = 'https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.1.9/Veyra-2.1.9-AMD-win64-portable.zip'
-        Sha256  = 'F7113DB09EFF74065CFD9B7044DF8DB3C301AC5B7FF80F692DA56FEE2C2BF377'
+        Tag     = 'v2.2.1'
+        Asset   = 'Veyra-2.2.1-AMD-win64-portable.zip'
+        Url     = 'https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.2.1/Veyra-2.2.1-AMD-win64-portable.zip'
+        Sha256  = 'B6440744DEE2AE9422838F486873C84ED8D6B1BC36B6AD29222E8EDA40077BF8'
         Subset  = '3'
     }
 }
@@ -185,10 +189,12 @@ $RuntimeDirsByVendor = @{
 }
 $RuntimeFiles = $RuntimeFilesByVendor[$GpuVendor]
 $RuntimeDirs = $RuntimeDirsByVendor[$GpuVendor]
-# Per-file SHA-256 and size of each package's subset (computed from the pinned packages, AMD downloaded and verified
-# 2026-11-23): files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
+# Per-file SHA-256 and size of each package's subset (computed from the pinned packages; v2.1.9 AMD downloaded and verified
+# 2026-11-23; v2.2.1 NVIDIA read from the official package 2026-11-25: only avutil-61.dll / swscale-10.dll changed. The v2.2.1
+# AMD values are the v2.1.9 AMD ones with those two files from v2.2.1 NVIDIA: in v2.1.9 both packages had byte-identical root
+# FFmpeg files, and upstream reports 2.2.1's runtime\ unchanged. NOT yet checked on the AMD 2.2.1 package itself (CI): files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
 $RuntimeFileHashesAmd = @{
-    'avutil-61.dll' = 'A04D6AA8F39092BD5AB21731E2E34E6E59BC1A0EF8E3A1DFC08CF9A8CCF538F8 1223680'
+    'avutil-61.dll' = '4504BCCF90872875B21445D0AC121FF984D65F74CFCDAF61D1E333AABD9D4699 1224192'
     'msvcp140.dll' = '0F885B509A685D2BBFA652FED26B5FB31D88FBDAB0A978C641D1C7B8AA460AA9 557728'
     'runtime\amd-nr\assets\block0-attention.f32' = '2863026814BAD0F2475F6EC03D35E7F5CD5FF9EA30355F3DAD37145B509E9004 32900'
     'runtime\amd-nr\assets\block0-ffn.f16' = '4A7F02E41DA6AD46DDA1947B2DA7820F0766865D209BA60E013CE799CC8F6CED 17472'
@@ -869,12 +875,12 @@ $RuntimeFileHashesAmd = @{
     'runtime_local\amd\fidelityfx\amd_fidelityfx_framegeneration_dx12.dll' = '02297BEEDD285E822D3A64F314CF00FAF378DCEC0EDC47FF0C4DD71B3A8C2F18 40085776'
     'runtime_local\amd\fidelityfx\amd_fidelityfx_loader_dx12.dll' = 'E2D85AA05A9BD9ED8B38935FDF5199372CCA6F74C12015143BB6F945EE1608AA 26376'
     'runtime_local\amd\fidelityfx\amd_fidelityfx_upscaler_dx12.dll' = 'D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46 28761864'
-    'swscale-10.dll' = '174B563F6FBD6B1C3A806FEB84E96F214AD0C25E0FE9B985F0474AA5EDCABC1D 1602560'
+    'swscale-10.dll' = '9682D04936DBFBF5BC6DC6DE0076E4006A7C291DB9A160ED5AEA01B66989154B 1603072'
     'vcruntime140.dll' = 'D5E4D9A3E835FA679450145D6A7D94E36573A509317111904D9B3712C30D9066 124544'
     'vcruntime140_1.dll' = '1F2D41C4AA5DB0BC33EBF7B66D72943A817D7CE6CBE880502A9403823633093F 49792'
 }
 $RuntimeFileHashesNvidia = @{
-    'avutil-61.dll' = 'A04D6AA8F39092BD5AB21731E2E34E6E59BC1A0EF8E3A1DFC08CF9A8CCF538F8 1223680'
+    'avutil-61.dll' = '4504BCCF90872875B21445D0AC121FF984D65F74CFCDAF61D1E333AABD9D4699 1224192'
     'msvcp140.dll' = '0F885B509A685D2BBFA652FED26B5FB31D88FBDAB0A978C641D1C7B8AA460AA9 557728'
     'runtime\config\ngx-local.json' = 'A768D74B16AEDF98DA1C85BA2696C5085AEFA1499566AD6641028CC91091D54D 151'
     'runtime\experimental\dlssg-kernels\k4000.ptx' = 'A58AD1C5F8AB5E82EFD2E15AAEB178113C1720C3EBD8164CA10474B50E1D342A 71483'
@@ -923,18 +929,18 @@ $RuntimeFileHashesNvidia = @{
     'runtime_local\amd\fidelityfx\amd_fidelityfx_framegeneration_dx12.dll' = '02297BEEDD285E822D3A64F314CF00FAF378DCEC0EDC47FF0C4DD71B3A8C2F18 40085776'
     'runtime_local\amd\fidelityfx\amd_fidelityfx_loader_dx12.dll' = 'E2D85AA05A9BD9ED8B38935FDF5199372CCA6F74C12015143BB6F945EE1608AA 26376'
     'runtime_local\amd\fidelityfx\amd_fidelityfx_upscaler_dx12.dll' = 'D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46 28761864'
-    'swscale-10.dll' = '174B563F6FBD6B1C3A806FEB84E96F214AD0C25E0FE9B985F0474AA5EDCABC1D 1602560'
+    'swscale-10.dll' = '9682D04936DBFBF5BC6DC6DE0076E4006A7C291DB9A160ED5AEA01B66989154B 1603072'
     'vcruntime140.dll' = 'D5E4D9A3E835FA679450145D6A7D94E36573A509317111904D9B3712C30D9066 124544'
     'vcruntime140_1.dll' = '1F2D41C4AA5DB0BC33EBF7B66D72943A817D7CE6CBE880502A9403823633093F 49792'
 }
 $RuntimeFileHashes = if ($GpuVendor -eq 'AMD') { $RuntimeFileHashesAmd } else { $RuntimeFileHashesNvidia }
 # PushFlow (PushFPS's own frame generation: ONNX Runtime + DirectML and the RIFE models). Not in Veyra's packages:
-# PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0, 4.3.1
-# and 4.4.0 (per-file SHA-256 below; 4.4.0 checked on an official 4.4.0 install, all 20 files). Sources, in order: an
+# PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0, 4.3.1,
+# 4.4.0 and 4.5.3 (per-file SHA-256 below; 4.5.3 checked on an official 4.5.3 install and in its release zip, all 20 files). Sources, in order: an
 # installed PushFPS, a PushFPS-<v>-win64.zip in -PackageCache or the own download folder, else PushFPS's GitHub release.
 $PushFlow = @{
-    Asset = 'PushFPS-4.4.0-win64.zip'
-    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.4.0/PushFPS-4.4.0-win64.zip'
+    Asset = 'PushFPS-4.5.3-win64.zip'
+    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip'
     Rel   = 'runtime\experimental\pushflow'
     Files = @{
         'DirectML.dll' = '9C9E6D822561C6C41B90E6994B3E8857CF1D66DBFB1E0C4C799C7C89B4E92DA1 18527776'

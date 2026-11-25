@@ -134,6 +134,13 @@ typedef struct PushCoreSettings {
     int32_t fgLite;            /* 1 = DLSS-G performance mode (NVIDIA's "FG Lite" runtime, RTX 50) when DLSS-G runs */
     /* Appended (PUSHCORE_FEATURE_HDR_PEAK): RTX Video HDR's peak luminance, cd/m2 (400..2000; 0 = PushFPS's 1000) */
     uint32_t videoHdrPeak;
+    /* Appended (PUSHCORE_FEATURE_SUBTITLE_HOLD, PushFPS 4.5): PushFPS's Subtitle Hold. Text that stands still in the
+       bottom subtitle band (the middle 62.5 % of the width, 400/2160 of the height, 4 % above the bottom edge) while the
+       picture round it moves is taken out of what frame generation is given and laid back over what it makes, so
+       burned-in subtitles do not warp or ghost. Only thin, contrasting bars that have stood still for several moving
+       frames are masked, never the whole band. Soft subtitles are drawn by the player after the filter and never reach
+       it. 1 = on; default 0 (a smaller struct). Runs with VFG, DLSS-G, PushFlow (not Predict), FSR FG and AMD FRC. */
+    int32_t subtitleHold;
 } PushCoreSettings;
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
@@ -233,6 +240,11 @@ typedef struct PushCoreStats {
     /* Appended (PUSHCORE_FEATURE_CUT_COUNT): scene cuts the guard held since open, cumulative over reloads; read back
        from the GPU a few frames after the decision (a caller watching it for changes sees a cut late, not never) */
     uint64_t cutGuardCuts;
+    /* Appended (PUSHCORE_FEATURE_SUBTITLE_HOLD): PushFPS's EnhanceGraph::subtitleHoldState(): 0 not asked for, 1 running,
+       2 asked for and unavailable (failed to start), 3 asked for and not part of this graph (no frame generation, or a
+       method without it); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
+    uint32_t subtitleHoldState;
+    uint32_t subtitleHoldPixels;
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -291,6 +303,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_CUT_COUNT 32u  /* PushCoreStats.cutGuardCuts */
 #define PUSHCORE_FEATURE_HDR_PEAK 64u   /* PushCoreSettings.videoHdrPeak */
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
+#define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */

@@ -331,7 +331,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
 
     // settings: HKCU\Software\PushMPC, then the plugin arguments
     pm::Settings s = pm::LoadSettings();
-    static const char* keys[] = { "enable", "smoother", "sharper", "cleanup", "sdr_to_hdr", "deband", "fg_quality", "fg_method", "vrr", "upscaler", "target", "vsr_style", "cleanup_strength", "on_battery" };
+    static const char* keys[] = { "enable", "smoother", "sharper", "cleanup", "sdr_to_hdr", "deband", "fg_quality", "fg_method", "vrr", "upscaler", "target", "vsr_style", "cleanup_strength", "on_battery", "subtitle_hold" };
     std::string overrides;
     for (const char* key : keys) {
         const std::wstring v = ArgStr(in, a, key);
@@ -523,7 +523,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                          VS_MAKE_VERSION(1, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
     vspapi->registerFunction("Enhance",
         "clip:vnode;enable:data:opt;smoother:data:opt;sharper:data:opt;cleanup:data:opt;sdr_to_hdr:data:opt;deband:data:opt;fg_quality:data:opt;"
-        "fg_method:data:opt;vrr:data:opt;upscaler:data:opt;target:data:opt;vsr_style:data:opt;cleanup_strength:data:opt;on_battery:data:opt;"
+        "fg_method:data:opt;vrr:data:opt;upscaler:data:opt;target:data:opt;vsr_style:data:opt;cleanup_strength:data:opt;on_battery:data:opt;subtitle_hold:data:opt;"
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;",

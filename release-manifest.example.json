@@ -6,16 +6,16 @@
   "channel": "stable",
   "components": [
     { "name": "filter", "version": "0.6.0", "url": "PushMPC-filter-0.6.0.zip", "sha256": "<sha256 of the zip>" },
-    { "name": "core", "version": "0.6.0+pushfps4.4.0", "pushfps": "4.4.0", "requiresRuntime": "veyra-2.1.9-nvidia|veyra-2.1.9-amd",
-      "url": "PushMPC-core-0.6.0+pushfps4.4.0.zip", "sha256": "<sha256 of the zip>" },
-    { "name": "runtime", "vendor": "NVIDIA", "format": "veyra-package", "version": "veyra-2.1.9-nvidia", "subset": "3",
-      "asset": "Veyra-2.1.9-NVIDIA-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo", "tag": "v2.1.9",
-      "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.1.9/Veyra-2.1.9-NVIDIA-win64-portable.zip",
-      "sha256": "4225ECB11A8E96C2826B4B0B798FEB811D7AE237F3EDF0B627F3B6895C79F362" },
-    { "name": "runtime", "vendor": "AMD", "format": "veyra-package", "version": "veyra-2.1.9-amd", "subset": "3",
-      "asset": "Veyra-2.1.9-AMD-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo", "tag": "v2.1.9",
-      "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.1.9/Veyra-2.1.9-AMD-win64-portable.zip",
-      "sha256": "F7113DB09EFF74065CFD9B7044DF8DB3C301AC5B7FF80F692DA56FEE2C2BF377" }
+    { "name": "core", "version": "0.6.0+pushfps4.5.3", "pushfps": "4.5.3", "requiresRuntime": "veyra-2.2.1-nvidia|veyra-2.2.1-amd",
+      "url": "PushMPC-core-0.6.0+pushfps4.5.3.zip", "sha256": "<sha256 of the zip>" },
+    { "name": "runtime", "vendor": "NVIDIA", "format": "veyra-package", "version": "veyra-2.2.1-nvidia", "subset": "3",
+      "asset": "Veyra-2.2.1-NVIDIA-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo", "tag": "v2.2.1",
+      "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.2.1/Veyra-2.2.1-NVIDIA-win64-portable.zip",
+      "sha256": "E09150D1594AA9416FA27457A42B4D50B5D814E05471216BEF95B9303544386B" },
+    { "name": "runtime", "vendor": "AMD", "format": "veyra-package", "version": "veyra-2.2.1-amd", "subset": "3",
+      "asset": "Veyra-2.2.1-AMD-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo", "tag": "v2.2.1",
+      "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.2.1/Veyra-2.2.1-AMD-win64-portable.zip",
+      "sha256": "B6440744DEE2AE9422838F486873C84ED8D6B1BC36B6AD29222E8EDA40077BF8" }
   ],
   "note": "Component URLs are relative to this release (https://github.com/CptPakundo/PushMPC/releases/download/<tag>/). The runtime is a reference to Veyra's package on Veyra's GitHub release; PushMPC hosts no NVIDIA file.",
   "signature": "release.json.sig next to this file: base64 RSA-SHA256 over the file bytes, checked with release-key.xml"

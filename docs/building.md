@@ -2,7 +2,7 @@
 
 Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools break on spaces). Layout:
 
-    <repo>\PushFPS            PushFPS 4.4.0 source (tag v4.4.0) with patches\pushfps-4.4.0-pushmpc.patch applied
+    <repo>\PushFPS            PushFPS 4.5.3 source (tag v4.5.3) with patches\pushfps-4.5.3-pushmpc.patch applied
     <repo>\MpcVideoRenderer   MPC Video Renderer source (DirectShow base classes and interfaces)
     <repo>\pushmpc            pushcore (C ABI, built inside PushFPS's CMake tree)
     <repo>\filter             the DirectShow filter
@@ -13,7 +13,7 @@ Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools 
 
 Tools: Visual Studio 2022 or newer with C++ (found with vswhere; `PUSHMPC_VS` overrides), CMake and Ninja (bundled with VS).
 
-    git -C PushFPS apply ..\patches\pushfps-4.4.0-pushmpc.patch
+    git -C PushFPS apply ..\patches\pushfps-4.5.3-pushmpc.patch
     scripts\build-pushfps.cmd                 (once: configures and builds PushFPS, which also builds the shaders)
     scripts\build-pushmpc.cmd pushcore_dll
     filter\build.cmd                          (PushMpcFilter.ax, PushMpcExit.dll, auto_test.exe)

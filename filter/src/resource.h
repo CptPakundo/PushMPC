@@ -50,6 +50,9 @@
 #define IDC_PM_BATTERY       1054
 #define IDC_PM_GSYNC         1055
 #define IDC_PM_GSYNC_NOTE    1056
+#define IDC_PM_SUBHOLD_LBL   1057
+#define IDC_PM_SUBHOLD       1058
+#define IDC_PM_SUBHOLD_NOTE  1059
 #define IDC_AB_DIAG          1106
 #define IDC_AB_DIAG_NOTE     1107
 #define IDC_AB_UPDATE        1108

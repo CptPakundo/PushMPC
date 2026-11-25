@@ -38,6 +38,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     if (key == L"vsr_style") { s.vsrStyle = is(L"HighBitrate") ? pm::VsrStyle::HighBitrate : is(L"Streaming") ? pm::VsrStyle::Streaming : is(L"Standard") ? pm::VsrStyle::Standard : pm::VsrStyle::Auto; return true; }
     if (key == L"cleanup_strength") { s.strength = is(L"Subtle") ? pm::CleanStrength::Subtle : is(L"Balanced") ? pm::CleanStrength::Balanced : pm::CleanStrength::Strong; return true; }
     if (key == L"on_battery") { s.onBattery = is(L"Same") ? pm::BatteryMode::Same : pm::BatteryMode::Light; return true; }
+    if (key == L"subtitle_hold") { s.subtitleHold = pm::ParseOnOff(v, s.subtitleHold); return true; }   // PushFPS 4.5 Subtitle Hold (Auto = off)
     return false;
 }
 
@@ -101,6 +102,7 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     if (note && c.hdr && c.hdrItm) *note = L"SDR to HDR: PushMPC's own curve is part of the MPC-HC filter, not of the VapourSynth route: off here (RTX Video HDR works)";
     p.cutGuard = c.guardFlow ? 3 : 1;
     p.videoHdrPeak = uint32_t(c.rtxHdrPeak);
+    p.subtitleHold = p.multiplier > 1 && pm::SubtitleHoldWanted(s) ? 1 : 0;   // burned-in subtitles only (mpv draws soft ones after the filter)
     return p;
 }
 
