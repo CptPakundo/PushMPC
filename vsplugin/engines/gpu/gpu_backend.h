@@ -153,6 +153,8 @@ public:
         else {
             m_slotOf[s] = slot;
             m_lastDistinctSlot = slot;
+            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s, err)) return false;
+            m_prevDistinct = s;
             if (subtitleHold) {
                 // the rule runs over the distinct frames in order, on a worker (the frame stays kept until it is used)
                 std::shared_future<std::shared_ptr<const HoldFrameYuv>> prev = m_holdChain;
@@ -191,7 +193,7 @@ public:
 
 private:
     struct Kept { void* keep = nullptr; YuvView v; };
-    struct PairInfo { int id = -1; int cut = 0; };
+    struct PairInfo { int id = -1; int cut = 0; bool pending = false; };
     struct Pending { uint64_t ticket = 0; int out = -1; Out<Frame> o; };
 
     void Unkeep(void* k) { if (k && unkeep) unkeep(k); }
@@ -216,6 +218,7 @@ private:
         for (auto& [s, slot] : m_slotOf) engine.ReleaseSlot(slot);
         m_slotOf.clear();
         m_lastDistinctSlot = -1;
+        m_prevDistinct = -1;
         cadence.Reset();
         guard.Reset();
         m_last = -1000000;
@@ -253,13 +256,11 @@ private:
     {
         const auto key = std::make_pair(d0, d1);
         auto it = m_pairs.find(key);
-        if (it != m_pairs.end()) { out = it->second; return true; }
-        const int sa = m_slotOf.count(d0) ? m_slotOf[d0] : -1, sb = m_slotOf.count(d1) ? m_slotOf[d1] : -1;
-        if (sa < 0 || sb < 0) { err = "GPU engine: a picture of the pair is gone"; return false; }
+        if (it == m_pairs.end()) { if (!StartPair(d0, d1, err)) return false; it = m_pairs.find(key); }
+        if (!it->second.pending) { out = it->second; return true; }
         PairStats st;
-        const int prev = m_lastPairKey.second == d0 ? m_lastPair : -1;
-        const int id = engine.Estimate(sa, sb, prev, st, err);
-        if (id < 0) return false;
+        const int id = it->second.id;
+        if (!engine.EstimateEnd(id, st, err)) return false;
         PairInfo pi; pi.id = id; pi.cut = guard.Decide(st);
         stats.pairs++; stats.meMs += st.ms;
         if (pi.cut) { stats.cuts++; if (pi.cut == 2) stats.guardCuts++; }
@@ -274,9 +275,23 @@ private:
                 }
             }
         }
+        it->second = pi;
+        out = pi;
+        return true;
+    }
+    // the motion of a pair, submitted now and read when its outputs are due (the GPU works on it meanwhile)
+    bool StartPair(int64_t d0, int64_t d1, std::string& err)
+    {
+        const auto key = std::make_pair(d0, d1);
+        if (m_pairs.count(key)) return true;
+        const int sa = m_slotOf.count(d0) ? m_slotOf[d0] : -1, sb = m_slotOf.count(d1) ? m_slotOf[d1] : -1;
+        if (sa < 0 || sb < 0) { err = "GPU engine: a picture of the pair is gone"; return false; }
+        const int prev = m_lastPairKey.second == d0 ? m_lastPair : -1;
+        const int id = engine.EstimateBegin(sa, sb, prev, err);
+        if (id < 0) return false;
+        PairInfo pi; pi.id = id; pi.pending = true;
         m_pairs[key] = pi;
         m_lastPair = id; m_lastPairKey = key;
-        out = pi;
         return true;
     }
     bool NeedOut(std::string& err)
@@ -379,6 +394,7 @@ private:
 
     int64_t m_last = -1000000;
     int m_lastDistinctSlot = -1;
+    int64_t m_prevDistinct = -1;
     std::map<int64_t, Kept> m_kept;
     std::map<int64_t, int> m_slotOf;
     std::map<std::pair<int64_t, int64_t>, PairInfo> m_pairs;

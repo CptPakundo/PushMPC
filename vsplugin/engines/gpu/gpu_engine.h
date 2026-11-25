@@ -121,6 +121,10 @@ public:
     // motion between two uploaded pictures, both directions (waits for the GPU: the cut decision needs its measures);
     // prevPair: the pair before (its fields are the temporal predictors), or -1. The pair's index, or -1.
     int Estimate(int slotA, int slotB, int prevPair, PairStats& st, std::string& err);
+    // the same in two steps: Begin submits the work and returns the pair at once, End waits for it and gives the measures
+    // (the backend starts a pair when its second frame arrives and ends it when its outputs are due)
+    int EstimateBegin(int slotA, int slotB, int prevPair, std::string& err);
+    bool EstimateEnd(int pair, PairStats& st, std::string& err);
     void ReleasePair(int pair);
     bool SetHold(int pair, const HoldPairYuv* hold, std::string& err);
 

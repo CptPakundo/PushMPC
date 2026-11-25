@@ -71,7 +71,7 @@ struct Engine::Impl {
 
     struct Slot { Image y, u, v; std::vector<Image> pyr; Image ofLuma; bool used = false; uint64_t lastUse = 0; };
     std::vector<Slot> slots;
-    struct Pair { bool used = false; int a = -1, b = -1; Buffer fieldF, fieldK, costF, costK, stats, hold; bool holdOn = false; int zx = 0, zy = 0, zw = 0, zh = 0; uint64_t lastUse = 0; };
+    struct Pair { bool used = false; int a = -1, b = -1; Buffer fieldF, fieldK, costF, costK, stats, hold; bool holdOn = false; int zx = 0, zy = 0, zw = 0, zh = 0; uint64_t lastUse = 0, meTicket = 0; double t0 = 0; };
     std::vector<Pair> pairs;
     std::vector<Buffer> sweep1, sweep2;   // per level
     Buffer staging[2]; uint64_t stagingUse[2] = { 0, 0 }; int nextStaging = 0;
@@ -87,6 +87,7 @@ struct Engine::Impl {
     Image ofA, ofB, ofFlowF, ofFlowB;
     Buffer ofBufF, ofBufB;
     int ofGrid = 4, ofGw = 0, ofGh = 0;
+    uint64_t ofLast = 0;
     VkCommandPool ofPool = VK_NULL_HANDLE;
     VkCommandBuffer ofCb = VK_NULL_HANDLE;
 
@@ -493,7 +494,13 @@ bool Engine::Configure(const Config& c, const DeviceRequest& req, std::string& e
 
 int Engine::FreeSlots() const { int n = 0; for (auto& s : m->slots) n += s.used ? 0 : 1; return n; }
 void Engine::ReleaseSlot(int slot) { if (slot >= 0 && slot < int(m->slots.size())) m->slots[size_t(slot)].used = false; }
-void Engine::ReleasePair(int pair) { if (pair >= 0 && pair < int(m->pairs.size())) m->pairs[size_t(pair)].used = false; }
+void Engine::ReleasePair(int pair)
+{
+    if (pair < 0 || pair >= int(m->pairs.size())) return;
+    std::string e;
+    m->WaitValue(m->pairs[size_t(pair)].meTicket, e);   // its stats buffer is rewritten by the host when reused
+    m->pairs[size_t(pair)].used = false;
+}
 int Engine::FreeOuts() const { int n = 0; for (bool u : m->outUsed) n += u ? 0 : 1; return n; }
 void Engine::ReleaseOut(int out) { if (out >= 0 && out < int(m->outUsed.size())) m->outUsed[size_t(out)] = false; }
 
@@ -612,6 +619,7 @@ bool Engine::Impl::MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forw
 
 bool Engine::Impl::MotionOf(int sa, int sb, Pair& pr, std::string& err)
 {
+    if (!WaitValue(ofLast, err)) return false;   // the session's images and command buffer are shared by every pair
     // 1: the two luma pictures into the session's input images (compute queue)
     bool ok = true;
     Job& j1 = Begin(err, ok);
@@ -659,13 +667,21 @@ bool Engine::Impl::MotionOf(int sa, int sb, Pair& pr, std::string& err)
     struct { int bx, by, bs; } pb{ fbx, fby, fbs };
     if (!Bind(*this, j3, PFb).Buf(0, pr.fieldF).Buf(1, pr.fieldK).Buf(2, pr.stats, 768, 256).Run(&pb, uint32_t((fbx + 7) / 8), uint32_t((fby + 7) / 8), err)) return false;
     const uint64_t v3 = Submit(j3, err, v2);
-    return v3 && WaitValue(v3, err);
+    pr.meTicket = v3;
+    ofLast = v3;
+    return v3 != 0;
 }
 
 int Engine::Estimate(int slotA, int slotB, int prevPair, PairStats& st, std::string& err)
 {
+    const int p = EstimateBegin(slotA, slotB, prevPair, err);
+    if (p < 0 || !EstimateEnd(p, st, err)) return -1;
+    return p;
+}
+
+int Engine::EstimateBegin(int slotA, int slotB, int prevPair, std::string& err)
+{
     Impl& I = *m;
-    st = {};
     int pi = -1;
     for (size_t i = 0; i < I.pairs.size(); ++i) if (!I.pairs[i].used) { pi = int(i); break; }
     if (pi < 0) { err = "GPU engine: no free pair"; return -1; }
@@ -686,9 +702,20 @@ int Engine::Estimate(int slotA, int slotB, int prevPair, PairStats& st, std::str
                  .Run(&pm, uint32_t((pm.w + 15) / 16), uint32_t((pm.h + 15) / 16), err)) return -1;
         struct { int bx, by, bs; } pb{ I.fbx, I.fby, I.fbs };
         if (!Impl::Bind(I, j, PFb).Buf(0, pr.fieldF).Buf(1, pr.fieldK).Buf(2, pr.stats, 768, 256).Run(&pb, uint32_t((I.fbx + 7) / 8), uint32_t((I.fby + 7) / 8), err)) return -1;
-        const uint64_t v = I.Submit(j, err);
-        if (!v || !I.WaitValue(v, err)) return -1;
+        pr.meTicket = I.Submit(j, err);
+        if (!pr.meTicket) return -1;
     }
+    pr.t0 = t0;
+    pr.used = true; pr.a = slotA; pr.b = slotB;
+    return pi;
+}
+
+bool Engine::EstimateEnd(int pair, PairStats& st, std::string& err)
+{
+    Impl& I = *m;
+    st = {};
+    Impl::Pair& pr = I.pairs[size_t(pair)];
+    if (!I.WaitValue(pr.meTicket, err)) return false;
     const uint32_t* s = static_cast<const uint32_t*>(pr.stats.map);
     const double n = std::max(1u, s[2]);
     st.blocks = int(s[2]);
@@ -697,11 +724,10 @@ int Engine::Estimate(int slotA, int slotB, int prevPair, PairStats& st, std::str
     st.zeroCost = float(double(s[128]) / (double(I.lw[size_t(I.finest)]) * double(I.lh[size_t(I.finest)])));
     st.consistent = float(s[192] / n); st.moving = float(s[193] / n);
     st.cutRule = double(s[0]) > n * 0.5 || double(s[64]) > std::max(1.0, double(s[66])) * 0.5;
-    st.ms = NowMs() - t0;
-    pr.used = true; pr.a = slotA; pr.b = slotB;
+    st.ms = NowMs() - pr.t0;
     I.times.pairs++;
     I.times.meMs += st.ms;
-    return pi;
+    return true;
 }
 
 bool Engine::SetHold(int pair, const HoldPairYuv* hold, std::string& err)
