@@ -64,7 +64,11 @@ struct VfxApi {
     NvCV_Status (*ImageInit)(void*, unsigned, unsigned, int, void*, int, int, unsigned, unsigned) = nullptr;
     const char* (*ErrorString)(NvCV_Status) = nullptr;
 
+#ifdef _WIN32
+    static std::string LibDir(const std::string& root) { return root + "\\nvvfx\\libs"; }
+#else
     static std::string LibDir(const std::string& root) { return root + "/nvvfx/libs"; }
+#endif
     // dlopen the core libraries of `root` (RTLD_NOW | RTLD_GLOBAL, absolute paths) and bind the API
     bool Load(const std::string& root, std::string& why);
     // dlopen one more library of the runtime (an effect's, to have it resident before the effect is created)

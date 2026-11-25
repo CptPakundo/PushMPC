@@ -3,6 +3,7 @@
 // Hook_cuModuleLoadData. Linux changes: GOT slots of the one library instead of PE imports; mprotect instead of
 // VirtualProtect; no SEH (the fatbin is read from the caller's image as CUDA itself would).
 #include "nvl_ampere.h"
+#ifndef _WIN32   // Linux: the GOT hooks; Windows on Arm (RTX Spark, SM 12.1) never needs them (stubs at the end)
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
@@ -203,3 +204,14 @@ unsigned AmpereCompat::AttributeSpoofs() { return g_spoofs.load(); }
 unsigned AmpereCompat::RejectedLoads() { return g_rejected.load(); }
 
 } // namespace pmvs::nvl
+
+#else
+namespace pmvs::nvl {
+bool FindGotSlots(void*, const std::vector<std::string>&, std::vector<GotSlot>&, std::string& why) { why = "Linux only"; return false; }
+bool AmpereCompat::Install(void*, const std::string&, void*, int, std::string& why, bool) { why = "the RTX 30 compatibility is Linux only here (Windows x64 uses pushcore's)"; return false; }
+bool AmpereCompat::Restore() { return true; }
+unsigned AmpereCompat::PatchedLoads() { return 0; }
+unsigned AmpereCompat::AttributeSpoofs() { return 0; }
+unsigned AmpereCompat::RejectedLoads() { return 0; }
+} // namespace pmvs::nvl
+#endif

@@ -11,7 +11,9 @@
 //   6. the RTX 30 compatibility on the real VFG library: identity (SHA-256 + size = the pin), its two GOT slots, the
 //      hooks installed and restored; every fatbin in the library retargets (the census must equal the pin's 62);
 //   7. the self-test refuses to run without a GPU.
-#include <dlfcn.h>
+// Windows on Arm (the win_arm64 wheel, CI windows-11-arm): the same, with no driver at all (nvcuda.dll absent), the
+// DLLs' machine type ARM64, and without 6 (the RTX 30 compatibility is Linux-only; RTX Spark is SM 12.1).
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -21,6 +23,7 @@
 #include "nvl_ampere.h"
 #include "nvl_engine.h"
 #include "nvl_fatbin.h"
+#include "nvl_os.h"
 #include "nvl_selftest.h"
 #include "nvl_sha256.h"
 #include "nvl_vfx.h"
@@ -37,24 +40,36 @@ int main(int argc, char** argv)
 {
     if (argc < 2) { std::printf("usage: nvl_struct_test <runtime-dir>\n"); return 2; }
     const std::string root = argv[1], libs = VfxApi::LibDir(root);
+#ifdef _WIN32
+    _putenv_s("PUSHMPC_NVVFX_DIR", root.c_str());
+#else
     setenv("PUSHMPC_NVVFX_DIR", root.c_str(), 1);
+#endif
 
     // 1. the loader against the stub driver
     const GpuInfo g = ProbeGpu(0, root);
     std::printf("probe: driver %d, runtime %d, why: %s\n", g.driver, g.runtime, g.why.c_str());
+#ifdef _WIN32
+    CHECK(!g.driver && g.why.find("nvcuda.dll") != std::string::npos, "no driver reported: %s", g.why.c_str());
+#else
     CHECK(!g.driver && g.why.find("cuInit") != std::string::npos, "no GPU reported through cuInit: %s", g.why.c_str());
+#endif
     CHECK(g.runtime, "runtime found in %s: %s", root.c_str(), g.runtimeWhy.c_str());
 
     // 2. every library resolves (after the loader preloaded the runtime in dependency order, as the engine does)
     VfxApi vfx; std::string why;
     CHECK(vfx.Load(root, why), "VfxApi::Load: %s", why.c_str());
+#ifdef _WIN32
+    const char* all[] = { "NVCVImage.dll", "NVVideoEffects.dll", "nvVFXVideoSuperRes.dll", "nvVFXTrueHDR.dll", "nvVFXVideoFrameGeneration.dll", "nvngx_vsr.dll", "nvngx_truehdr.dll",
+                          "nvngxruntime.dll", "cudart64_13.dll" };
+#else
     const char* all[] = { "libNVCVImage.so", "libVideoFX.so", "libVideoFXLocal.so", "libnvVFXVideoSuperRes.so", "libnvVFXTrueHDR.so", "libnvVFXVideoFrameGeneration.so",
                           "libnvidia-ngx-vsr.so.1.8.3", "libnvidia-ngx-truehdr.so.1.2.3", "libnvngxruntime.so" };
-    std::vector<void*> handles;
+#endif
     for (const char* f : all) {
-        void* h = dlopen((libs + "/" + f).c_str(), RTLD_NOW | RTLD_GLOBAL);
-        CHECK(h != nullptr, "dlopen %s: %s", f, h ? "" : dlerror());
-        handles.push_back(h);
+        std::string e;
+        void* h = os::Open(libs + os::kSep + f, e);
+        CHECK(h != nullptr, "load %s: %s", f, e.c_str());
     }
 
     // 3. the API
@@ -109,6 +124,7 @@ int main(int argc, char** argv)
         vfx.DestroyEffect(h);
     }
 
+#ifndef _WIN32
     // 6. the RTX 30 compatibility on the real VFG library
     const std::string vfgPath = libs + "/libnvVFXVideoFrameGeneration.so";
     std::string hex; uint64_t size = 0;
@@ -137,6 +153,7 @@ int main(int argc, char** argv)
     }
     std::printf("VFG fatbins: %u, SM89 containers retargeted: %u, rejected: %u\n", fatbins, changed, rejected);
     CHECK(fatbins == 62 && changed == 62 && rejected == 0, "census 62 / 62 / 0");
+#endif
 
     // 7. the self-test refuses without a GPU
     std::string report;

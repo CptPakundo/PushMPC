@@ -42,7 +42,7 @@
 using namespace pmvs;
 
 namespace pmvs { void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why); }
-#ifdef PMVS_NVIDIA_LINUX
+#ifdef PMVS_NVIDIA_VFX
 namespace pmvs {
 void NvLinuxProbe(const VSMap* in, const VSAPI* a, BackendProbe& p);
 void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
@@ -475,10 +475,10 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
     if (req.empty()) req = "auto";
     BackendProbe p;
     const std::string lreq = LowerAscii(req);
-#ifdef _WIN32
-    if (lreq == "auto" || lreq == "nvidia") ProbeNvidia(in, a, p);
-#elif defined(PMVS_NVIDIA_LINUX)
+#if defined(PMVS_NVIDIA_VFX)   // Linux x86-64, Windows on Arm: CUDA + the Video Effects runtime (engines/nvidia-linux)
     if (lreq == "auto" || lreq == "nvidia") NvLinuxProbe(in, a, p);
+#elif defined(_WIN32)           // Windows x64: pushcore
+    if (lreq == "auto" || lreq == "nvidia") ProbeNvidia(in, a, p);
 #endif
     // Enhance itself cannot run rife (a script preset): only SelectBackend reports it
     if (forScript) {
@@ -504,11 +504,11 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);
     if (c.kind == BackendKind::Rife) { a->freeNode(node); return fail("rife is a script preset: use pushmpc.vpy (it chains core.rife)"); }
-#ifdef _WIN32
+#if defined(PMVS_NVIDIA_VFX)
+    NvLinuxCreate(in, out, core, a, node, c.why);
+#elif defined(_WIN32)
     Log("backend: " + c.why);
     NvidiaCreate(in, out, core, a, node);
-#elif defined(PMVS_NVIDIA_LINUX)
-    NvLinuxCreate(in, out, core, a, node, c.why);
 #else
     a->freeNode(node);
     fail(c.why);

@@ -1,10 +1,13 @@
-// Run-time loading of the CUDA driver and the Video Effects runtime (nvl_cuda.h, nvl_vfx.h). Linux only.
+// Run-time loading of the CUDA driver and the Video Effects runtime (nvl_cuda.h, nvl_vfx.h): Linux x86-64 and Windows on
+// Arm (nvl_os.h).
+#ifndef _WIN32
 #include <dirent.h>
-#include <dlfcn.h>
+#endif
 #include <cstring>
 #include <cstdlib>
 #include <string>
 #include "nvl_cuda.h"
+#include "nvl_os.h"
 #include "nvl_vfx.h"
 
 namespace pmvs::nvl {
@@ -12,7 +15,7 @@ namespace pmvs::nvl {
 namespace {
 template <class T> bool Bind(void* lib, const char* name, T& fn, std::string& why)
 {
-    fn = reinterpret_cast<T>(dlsym(lib, name));
+    fn = reinterpret_cast<T>(os::Sym(lib, name));
     if (!fn) { why = std::string("missing ") + name; return false; }
     return true;
 }
@@ -21,8 +24,9 @@ template <class T> bool Bind(void* lib, const char* name, T& fn, std::string& wh
 bool CudaApi::Load(std::string& why, const char* path)
 {
     if (lib) return true;
-    lib = dlopen(path ? path : "libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
-    if (!lib) { const char* e = dlerror(); why = std::string("the NVIDIA driver's libcuda.so.1 is not loadable") + (e ? std::string(" (") + e + ")" : std::string()); return false; }
+    std::string e;
+    lib = os::Open(path ? path : os::kDriver, e);
+    if (!lib) { why = std::string("the NVIDIA driver's ") + os::kDriver + " is not loadable (" + e + ")"; return false; }
     bool ok = Bind(lib, "cuInit", cuInit, why) && Bind(lib, "cuDriverGetVersion", cuDriverGetVersion, why) && Bind(lib, "cuDeviceGetCount", cuDeviceGetCount, why)
         && Bind(lib, "cuDeviceGet", cuDeviceGet, why) && Bind(lib, "cuDeviceGetName", cuDeviceGetName, why) && Bind(lib, "cuDeviceGetAttribute", cuDeviceGetAttribute, why)
         && Bind(lib, "cuDeviceTotalMem_v2", cuDeviceTotalMem, why) && Bind(lib, "cuDevicePrimaryCtxRetain", cuDevicePrimaryCtxRetain, why)
@@ -36,7 +40,7 @@ bool CudaApi::Load(std::string& why, const char* path)
         && Bind(lib, "cuMemcpyHtoDAsync_v2", cuMemcpyHtoDAsync, why) && Bind(lib, "cuMemcpyDtoHAsync_v2", cuMemcpyDtoHAsync, why) && Bind(lib, "cuMemcpyDtoH_v2", cuMemcpyDtoH, why)
         && Bind(lib, "cuModuleLoadData", cuModuleLoadData, why) && Bind(lib, "cuModuleGetFunction", cuModuleGetFunction, why) && Bind(lib, "cuModuleUnload", cuModuleUnload, why)
         && Bind(lib, "cuLaunchKernel", cuLaunchKernel, why) && Bind(lib, "cuGetErrorName", cuGetErrorName, why) && Bind(lib, "cuGetErrorString", cuGetErrorString, why);
-    if (!ok) { why = "libcuda.so.1: " + why; dlclose(lib); lib = nullptr; }
+    if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; }
     return ok;
 }
 
@@ -51,17 +55,21 @@ std::string CudaApi::Error(CUresult r) const
 std::string DefaultRuntimeDir()
 {
     if (const char* d = std::getenv("PUSHMPC_NVVFX_DIR"); d && *d) return d;
+#ifdef _WIN32
+    const char* l = std::getenv("LOCALAPPDATA");   // scripts/nvidia-vfx-pin.json installDir.windows
+    return l ? std::string(l) + "\\PushMPC\\runtime\\nvidia-vfx" : std::string();
+#else
     const char* x = std::getenv("XDG_DATA_HOME");
     if (x && *x == '/') return std::string(x) + "/pushmpc/nvidia-vfx";
     const char* h = std::getenv("HOME");
     return h ? std::string(h) + "/.local/share/pushmpc/nvidia-vfx" : std::string();
+#endif
 }
 
 void* VfxApi::Open(const std::string& file, std::string& why)
 {
-    const std::string p = LibDir(root) + "/" + file;
-    void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
-    if (!h) { const char* e = dlerror(); why = p + ": " + (e ? e : "dlopen failed"); return nullptr; }
+    void* h = os::Open(LibDir(root) + os::kSep + file, why);
+    if (!h) return nullptr;
     libs.push_back(h);
     return h;
 }
@@ -70,6 +78,10 @@ bool VfxApi::Load(const std::string& r, std::string& why)
 {
     if (!libs.empty()) return true;
     root = r;
+#ifdef _WIN32
+    // Windows: the DLLs find each other in their own folder once it is on the search path
+    os::AddLibraryDir(LibDir(root));
+#else
     // The wheel's libraries find each other only when already loaded: libNVCVImage.so carries a build-machine RPATH
     // (/usr/local/cuda-12.8/...) and the others only $ORIGIN/../../nvidia_vfx.libs (cudart). As NVIDIA's own Python
     // loader does, they are loaded here by absolute path in dependency order (RTLD_GLOBAL), so every later NEEDED entry
@@ -79,7 +91,8 @@ bool VfxApi::Load(const std::string& r, std::string& why)
         if (d) {
             while (dirent* e = readdir(d))
                 if (!std::strncmp(e->d_name, "libcudart", 9)) {
-                    void* h = dlopen((root + "/nvidia_vfx.libs/" + e->d_name).c_str(), RTLD_NOW | RTLD_GLOBAL);
+                    std::string ignored;
+                    void* h = os::Open(root + "/nvidia_vfx.libs/" + e->d_name, ignored);
                     if (h) libs.push_back(h);
                 }
             closedir(d);
@@ -92,13 +105,16 @@ bool VfxApi::Load(const std::string& r, std::string& why)
             why = w; Unload(); return false;   // the NPP modules libNVCVImage needs (NEEDED); the other four are optional
         }
     }
-    void* image = Open("libNVCVImage.so", why);
+#endif
+    void* image = Open(os::kNames.image, why);
     if (!image) { Unload(); return false; }
-    void* core = Open("libVideoFX.so", why);
+    void* core = Open(os::kNames.core, why);
     if (!core) { Unload(); return false; }
+#ifndef _WIN32
     std::string w;
     Open("libnvngxruntime.so", w);
     Open("libVideoFXLocal.so", w);
+#endif
     bool ok = Bind(core, "NvVFX_CreateEffect", CreateEffect, why) && Bind(core, "NvVFX_DestroyEffect", DestroyEffect, why) && Bind(core, "NvVFX_SetU32", SetU32, why)
         && Bind(core, "NvVFX_SetF32", SetF32, why) && Bind(core, "NvVFX_SetImage", SetImage, why) && Bind(core, "NvVFX_SetCudaStream", SetCudaStream, why)
         && Bind(core, "NvVFX_Load", LoadEffect, why) && Bind(core, "NvVFX_Run", Run, why) && Bind(core, "NvVFX_GetVersion", GetVersion, why)

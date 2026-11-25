@@ -1,11 +1,16 @@
 // The RTX 30 VFG gate (nvl_selftest.h).
 #include "nvl_selftest.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#else
 #include <dlfcn.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -17,7 +22,9 @@
 #include "nvl_ampere.h"
 #include "nvl_engine.h"
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 
 namespace pmvs::nvl {
 
@@ -28,10 +35,15 @@ std::string SelfTestKey(const GpuInfo& g)
 
 std::string SelfTestCachePath()
 {
+#ifdef _WIN32
+    const char* l = std::getenv("LOCALAPPDATA");
+    return l ? std::string(l) + "\\PushMPC\\cache\\nvvfx-selftest" : std::string();
+#else
     const char* x = std::getenv("XDG_CACHE_HOME");
     if (x && *x == '/') return std::string(x) + "/pushmpc/nvvfx-selftest";
     const char* h = std::getenv("HOME");
     return h ? std::string(h) + "/.cache/pushmpc/nvvfx-selftest" : std::string();
+#endif
 }
 
 int ReadSelfTest(const std::string& key)
@@ -50,13 +62,25 @@ void WriteSelfTest(const std::string& key, bool pass)
 {
     const std::string path = SelfTestCachePath();
     if (path.empty()) return;
-    std::string dir = path.substr(0, path.rfind('/'));
-    for (size_t p = 1; p != std::string::npos; p = dir.find('/', p + 1)) mkdir(dir.substr(0, p).c_str(), 0755);
-    mkdir(dir.c_str(), 0755);
+#ifdef _WIN32
+    const char sep = '\\';
+    auto makeDir = [](const std::string& d) { _mkdir(d.c_str()); };
+#else
+    const char sep = '/';
+    auto makeDir = [](const std::string& d) { mkdir(d.c_str(), 0755); };
+#endif
+    std::string dir = path.substr(0, path.rfind(sep));
+    for (size_t p = 1; p != std::string::npos; p = dir.find(sep, p + 1)) makeDir(dir.substr(0, p));
+    makeDir(dir);
     std::ofstream f(path, std::ios::app);
     f << key << '\t' << (pass ? "pass" : "fail") << '\n';
 }
 
+#ifdef _WIN32
+// Windows (on Arm): the self-test exists for the RTX 30 compatibility only, which this build never needs
+std::string SelfTestExe() { return {}; }
+int RunSelfTest(const std::string&, const std::string&, int, int, std::string& log) { log = "not needed on Windows"; return -1; }
+#else
 std::string SelfTestExe()
 {
     Dl_info info{};
@@ -90,6 +114,7 @@ int RunSelfTest(const std::string& exe, const std::string& runtimeDir, int devic
     log = WIFEXITED(status) ? "exit " + std::to_string(WEXITSTATUS(status)) : "killed by signal " + std::to_string(WTERMSIG(status));
     return pass ? 1 : 0;
 }
+#endif
 
 bool SelfTestRun(const GpuInfo& g, bool ampere, std::string& report)
 {

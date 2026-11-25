@@ -1,7 +1,6 @@
 // The CUDA engine of the Linux NVIDIA backend (nvl_engine.h).
 #include "nvl_engine.h"
-#include <dlfcn.h>
-#include <sys/stat.h>
+#include "nvl_os.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -15,7 +14,8 @@ namespace pmvs::nvl {
 
 namespace {
 CudaApi& Cuda() { static CudaApi api; return api; }
-bool FileExists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode); }
+bool FileExists(const std::string& p) { return os::FileExists(p); }
+std::string In(const std::string& dir, const char* file) { return dir + os::kSep + file; }
 size_t Align(size_t v, size_t a) { return (v + a - 1) / a * a; }
 // the VFX ImageEncodingMode of VideoSuperRes for RGB10A2 input/output (the wheel's nvvfx ImageEncoding enum)
 constexpr unsigned kEncodingRgb10a2 = 1;
@@ -36,7 +36,7 @@ GpuInfo ProbeGpu(int device, const std::string& runtimeDir)
     g.device = device;
     g.runtimeDir = runtimeDir.empty() ? DefaultRuntimeDir() : runtimeDir;
     const std::string libs = VfxApi::LibDir(g.runtimeDir);
-    g.runtime = FileExists(libs + "/libVideoFX.so") && FileExists(libs + "/libNVCVImage.so");
+    g.runtime = FileExists(In(libs, os::kNames.core)) && FileExists(In(libs, os::kNames.image));
     if (!g.runtime) g.runtimeWhy = "the NVIDIA Video Effects runtime is not installed in " + g.runtimeDir + " (scripts/nvidia-vfx-fetch.sh)";
 #if !defined(__x86_64__) && !defined(_M_X64) && !defined(_WIN32)
     g.runtime = false;   // NVIDIA ships no Linux aarch64 build of the runtime: never offered here
@@ -61,9 +61,9 @@ GpuInfo ProbeGpu(int device, const std::string& runtimeDir)
     g.cls = ClassOf(g.major, g.minor, g.name);
     g.caps.gpu = g.cls;
     const bool rt = g.runtime;
-    g.caps.vsr = rt && VsrCapable(g.cls) && FileExists(libs + "/libnvVFXVideoSuperRes.so");
-    g.caps.hdr = rt && VsrCapable(g.cls) && FileExists(libs + "/libnvVFXTrueHDR.so");
-    const bool vfgFile = rt && FileExists(libs + "/libnvVFXVideoFrameGeneration.so");
+    g.caps.vsr = rt && VsrCapable(g.cls) && FileExists(In(libs, os::kNames.vsr));
+    g.caps.hdr = rt && VsrCapable(g.cls) && FileExists(In(libs, os::kNames.hdr));
+    const bool vfgFile = rt && FileExists(In(libs, os::kNames.vfg));
     if (!vfgFile) g.caps.vfgWhy = rt ? "the VFG library is missing from the runtime" : g.runtimeWhy;
     else if (VfgNative(g.major, g.minor)) g.caps.vfg = true;
     else if (VfgAmpere(g.major, g.minor)) g.caps.vfgWhy = "RTX 30: the VFG compatibility self-test has not passed yet";
@@ -209,8 +209,8 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
     // VFG (Ampere: the compatibility first, before the library loads its kernels)
     if (p.k >= 2) {
         if (!MakeImage(m_vfgOut, ow, oh, m_enhTenBit, err)) return false;
-        const std::string vfgPath = VfxApi::LibDir(gpu.runtimeDir) + "/libnvVFXVideoFrameGeneration.so";
-        m_vfgLib = m_vfx.Open("libnvVFXVideoFrameGeneration.so", err);
+        const std::string vfgPath = In(VfxApi::LibDir(gpu.runtimeDir), os::kNames.vfg);
+        m_vfgLib = m_vfx.Open(os::kNames.vfg, err);
         if (!m_vfgLib) return false;
         if (cfg.ampere && !m_ampere.Install(m_vfgLib, vfgPath, m_cu->lib, gpu.device, err)) { err = "RTX 30 VFG compatibility: " + err; return false; }
         if (!Cv(m_vfx.CreateEffect(sel::kVfg, &m_vfg), "NvVFX_CreateEffect(VideoFrameGeneration)", err)
