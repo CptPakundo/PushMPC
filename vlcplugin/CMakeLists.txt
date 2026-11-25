@@ -33,7 +33,7 @@ add_library(pm_engine_portable STATIC "${VS}/engines/portable/portable_engine.cp
 target_include_directories(pm_engine_portable PUBLIC "${VS}/engines/portable" "${VS}/src" src)
 target_link_libraries(pm_engine_portable PUBLIC pm_pushfps_portable Threads::Threads)
 
-add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c)
+add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
 target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
 target_compile_definitions(pushmpc_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc" _FILE_OFFSET_BITS=64 _REENTRANT _THREAD_SAFE)

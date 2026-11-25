@@ -39,6 +39,7 @@
 #include <vlc_picture.h>
 
 #include "pm_engine.h"
+#include "engine_pushcore.h"
 
 double pm_display_hz(void);
 
@@ -135,6 +136,8 @@ static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8" };
 static const int quality_values[] = { 0, 1 };
 static const char *const quality_texts[] = { "Fast", "Balanced" };
+static const int engine_values[] = { 0, 1, 2 };
+static const char *const engine_texts[] = { "Auto", "Portable (CPU)", "pushcore (Windows)" };
 static const int alloc_values[] = { 0, 1, 2 };
 static const char *const alloc_texts[] = { "Auto (VLC's allocator)", "Pool only (at most x4)", "Heap (unsafe with some displays)" };
 
@@ -155,6 +158,12 @@ vlc_module_begin()
     add_float(CFG "display-hz", 0.0, "Display refresh rate (Hz)", "0 = detect (the primary display)", true)
         change_safe()
     add_integer_with_range(CFG "threads", 0, 0, 64, "Engine threads", "0 = all hardware threads (at most 16)", true)
+    add_integer(CFG "engine", 0, "Engine", "Auto: pushcore on Windows when PushMPC's core is installed (NVIDIA VFG, "
+                "DLSS-G, PushFlow, FSR FG, AMD FRC, with the scene-cut guard; HD and UHD sources), else the portable "
+                "engine (CPU).", true)
+        change_integer_list(engine_values, engine_texts)
+    add_bool(CFG "warp", false, "pushcore on WARP (tests)", NULL, true)
+        change_private()
     add_bool(CFG "worker", true, "Generate on a worker thread", "Frames are made off VLC's video thread and each one "
              "has until its display time (needs pushmpc_out after postproc).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
@@ -176,6 +185,8 @@ vlc_module_end()
 
 struct filter_sys_t {
     filter_chain_t *download;  /* hardware pictures (DX11, CVPX, ...) -> I420 / I0AL with VLC's own converters */
+    pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
+    uint64_t pc_errors;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
     int alloc;
@@ -198,21 +209,66 @@ struct filter_sys_t {
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
 static void PlanesIn(const picture_t *p, const video_format_t *f, int bps, pm_yuv *y);
 static void PlanesOut(picture_t *p, const video_format_t *f, int bps, pm_yuv_out *y);
-static void *Worker(void *data)
+/* pushcore hands out generated frames by pts: route each into the job's picture with that time, in display order */
+typedef struct { struct filter_sys_t *sys; pm_job *j; bool filled[16]; pm_pc_out dst; } pc_route;
+static int RouteIndex(pc_route *r, int64_t pts100ns)
 {
-    struct filter_sys_t *sys = data;
-    for (;;) {
-        vlc_mutex_lock(&sys->wlock);
-        while (!sys->queued && !sys->worker_exit)
-            vlc_cond_wait(&sys->wcond, &sys->wlock);
-        if (sys->worker_exit && !sys->queued) { vlc_mutex_unlock(&sys->wlock); break; }
-        pm_job *j = sys->queued;
-        sys->queued = NULL;
-        vlc_mutex_unlock(&sys->wlock);
+    pm_job *j = r->j;
+    for (int i = 0; i < j->n; i++) {
+        const int64_t want = (int64_t)j->outs[i]->date * 10;
+        const int64_t tol = j->n > 0 ? ((int64_t)(j->outs[0]->date - j->real->date) * 10) / 2 : 0;
+        if (!r->filled[i] && (want - pts100ns <= tol && pts100ns - want <= tol)) return i;
+    }
+    return -1;
+}
+static const pm_pc_out *RouteDest(void *user, int64_t pts100ns)
+{
+    pc_route *r = user;
+    const int i = RouteIndex(r, pts100ns);
+    if (i < 0) return NULL;
+    pm_yuv_out o;
+    PlanesOut(r->j->outs[i], &r->sys->wfmt, r->sys->bps_w, &o);
+    for (int p = 0; p < 3; p++) { r->dst.data[p] = o.data[p]; r->dst.stride[p] = o.stride[p]; }
+    return &r->dst;
+}
+static void RouteDone(void *user, int64_t pts100ns)
+{
+    pc_route *r = user;
+    const int i = RouteIndex(r, pts100ns);
+    if (i < 0) return;
+    r->filled[i] = true;
+    int run = 0;
+    while (run < r->j->n && r->filled[run]) run++;
+    vlc_mutex_lock(&r->j->lock);
+    r->j->done = run;
+    vlc_cond_broadcast(&r->j->cond);
+    vlc_mutex_unlock(&r->j->lock);
+}
 
-        pm_yuv src;
-        PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
-        char err[160];
+/* one job: push the newest source frame, then make the job's pictures in display order */
+static void RunJob(struct filter_sys_t *sys, pm_job *j)
+{
+    pm_yuv src;
+    PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
+    char err[200];
+    if (sys->pc) {
+        pm_pc_planes pl;
+        for (int p = 0; p < 3; p++) { pl.data[p] = src.data[p]; pl.stride[p] = src.stride[p]; }
+        if (pmx_push(sys->pc, &pl, (int64_t)j->src->date * 10, !j->contiguous, err, sizeof(err)) != 0) {
+            sys->pc_errors++;
+        } else if (j->n > 0) {
+            /* collect until every picture is filled or the last one's display time has passed */
+            pc_route r = { .sys = sys, .j = j };
+            const mtime_t deadline = j->outs[j->n - 1]->date;
+            for (;;) {
+                vlc_mutex_lock(&j->lock);
+                const bool stop = j->cancel || j->done >= j->n;
+                vlc_mutex_unlock(&j->lock);
+                if (stop || mdate() > deadline) break;
+                if (pmx_poll(sys->pc, 5, RouteDest, RouteDone, &r, err, sizeof(err)) < 0) { sys->pc_errors++; break; }
+            }
+        }
+    } else {
         if (pm_engine_push(sys->eng, &src, j->contiguous, err, sizeof(err)) != 0)
             pm_engine_forget(sys->eng);
         const bool pair = pm_engine_have_pair(sys->eng);
@@ -229,10 +285,25 @@ static void *Worker(void *data)
             vlc_cond_broadcast(&j->cond);
             vlc_mutex_unlock(&j->lock);
         }
-        vlc_mutex_lock(&j->lock);
-        j->finished = true;
-        vlc_cond_broadcast(&j->cond);
-        vlc_mutex_unlock(&j->lock);
+    }
+    vlc_mutex_lock(&j->lock);
+    j->finished = true;
+    vlc_cond_broadcast(&j->cond);
+    vlc_mutex_unlock(&j->lock);
+}
+
+static void *Worker(void *data)
+{
+    struct filter_sys_t *sys = data;
+    for (;;) {
+        vlc_mutex_lock(&sys->wlock);
+        while (!sys->queued && !sys->worker_exit)
+            vlc_cond_wait(&sys->wcond, &sys->wlock);
+        if (sys->worker_exit && !sys->queued) { vlc_mutex_unlock(&sys->wlock); break; }
+        pm_job *j = sys->queued;
+        sys->queued = NULL;
+        vlc_mutex_unlock(&sys->wlock);
+        RunJob(sys, j);
         JobRelease(j);          /* the worker's reference */
     }
     return NULL;
@@ -323,9 +394,10 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         cur = filter_chain_VideoFilter(sys->download, cur);
         if (!cur) return NULL;
     }
-    if (sys->k <= 1 || !sys->eng) { sys->out++; return cur; }
+    if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
 
-    if (sys->worker_on && OutStages() > 0) {
+    const bool async = sys->worker_on && OutStages() > 0;
+    if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
         WorkerIdle(sys, false);
@@ -361,7 +433,8 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             sys->restarts++;
             prev->p_next = NULL;
         }
-        Submit(sys, j);
+        if (async) Submit(sys, j);
+        else { RunJob(sys, j); JobRelease(j); }
         if (!prev) return NULL;
         for (picture_t *p = head; p; p = p->p_next) sys->out++;
         return head;
@@ -417,6 +490,7 @@ static void Flush(filter_t *f)
     WorkerIdle(sys, true);
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     if (sys->eng) pm_engine_forget(sys->eng);
+    if (sys->pc) pmx_flush(sys->pc);
     if (sys->download) filter_chain_VideoFlush(sys->download);
 }
 
@@ -489,8 +563,40 @@ static int Open(vlc_object_t *obj)
     sys->nominal_dt = fps > 0 ? (mtime_t)(CLOCK_FREQ / fps) : CLOCK_FREQ / 24;
     const int w = (int)v->i_visible_width, h = (int)v->i_visible_height;
 
-    sys->k = pm_engine_decide_k(smoother, fps, hz, w, h, bits, threads, quality, sys->why, sizeof(sys->why));
-    if (sys->k > 1) {
+    sys->wfmt = f->fmt_out.video;
+    sys->bps_w = sys->bps;
+    const int engine = (int)var_InheritInteger(f, CFG "engine");
+    if (engine != 1) {          /* pushcore first (Windows, PushMPC's core installed); else the portable engine */
+        pm_pc_cfg pcc;
+        memset(&pcc, 0, sizeof(pcc));
+        pcc.abi = PM_PC_ABI;
+        pcc.width = (uint32_t)w; pcc.height = (uint32_t)h; pcc.bits = bits;
+        pcc.fps_num = (int)v->i_frame_rate; pcc.fps_den = (int)v->i_frame_rate_base;
+        const bool uhd = w >= 3200 || h >= 1800;
+        pcc.matrix = v->space == COLOR_SPACE_BT2020 ? 9 : v->space == COLOR_SPACE_BT601 ? 6 :
+                     v->space == COLOR_SPACE_BT709 ? 1 : (w >= 1024 || h >= 600 ? (uhd && bits > 8 ? 9 : 1) : 6);
+        pcc.transfer = v->transfer == TRANSFER_FUNC_SMPTE_ST2084 ? 16 : v->transfer == TRANSFER_FUNC_HLG ? 18 : 1;
+        pcc.primaries = v->primaries == COLOR_PRIMARIES_BT2020 ? 9 : pcc.matrix == 9 ? 9 : 1;
+        pcc.range = v->b_color_range_full ? 2 : 1;
+        pcc.smoother = smoother;
+        pcc.display_hz = hz;
+        pcc.warp = var_InheritBool(f, CFG "warp") ? 1 : 0;
+        int pk = 1;
+        char err[300] = "";
+        sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
+        if (sys->pc) {
+            sys->k = pk < 1 ? 1 : pk > 8 ? 8 : pk;
+            snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
+            if (sys->k <= 1) { pmx_close(sys->pc); sys->pc = NULL; sys->k = 1; }
+        } else if (engine == 2) {
+            msg_Warn(f, "PushMPC: pushcore unavailable (%s)", err);
+        } else {
+            msg_Dbg(f, "PushMPC: pushcore not used (%s): portable engine", err);
+        }
+    }
+    if (!sys->pc)
+        sys->k = pm_engine_decide_k(smoother, fps, hz, w, h, bits, threads, quality, sys->why, sizeof(sys->why));
+    if (!sys->pc && sys->k > 1) {
         pm_engine_cfg c = { w, h, bits, threads, quality };
         char err[200] = "";
         sys->eng = pm_engine_open(&c, err, sizeof(err));
@@ -502,11 +608,10 @@ static int Open(vlc_object_t *obj)
 
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
-    if (sys->eng && sys->k > 1 && var_InheritBool(f, CFG "worker")) {
+    sys->wfmt = f->fmt_out.video;
+    if ((sys->eng || sys->pc) && sys->k > 1 && var_InheritBool(f, CFG "worker")) {
         vlc_mutex_init(&sys->wlock);
         vlc_cond_init(&sys->wcond);
-        sys->wfmt = f->fmt_out.video;
-        sys->bps_w = sys->bps;
         if (vlc_clone(&sys->worker, Worker, sys, VLC_THREAD_PRIORITY_VIDEO) == 0) sys->worker_on = true;
         else { vlc_cond_destroy(&sys->wcond); vlc_mutex_destroy(&sys->wlock); }
     }
@@ -515,7 +620,7 @@ static int Open(vlc_object_t *obj)
     f->pf_flush = Flush;
     msg_Info(f, "PushMPC %s: %4.4s %dx%d %d-bit %.3f fps, display %.2f Hz -> x%d (%s)%s", PUSHMPC_VLC_VERSION,
              (const char *)&v->i_chroma, w, h, bits, fps, hz, sys->k, sys->why,
-             sys->eng ? "" : " [pass-through]");
+             (sys->eng || sys->pc) ? "" : " [pass-through]");
     return VLC_SUCCESS;
 }
 
@@ -541,6 +646,10 @@ static void Close(vlc_object_t *obj)
              sys->in, sys->out, sys->generated, sys->pool_out, sys->heap_out, sys->alloc_fail, sys->restarts,
              st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
     if (sys->eng) pm_engine_close(sys->eng);
+    if (sys->pc) {
+        if (sys->pc_errors) msg_Warn(f, "PushMPC: %" PRIu64 " pushcore errors", sys->pc_errors);
+        pmx_close(sys->pc);
+    }
     if (sys->download) filter_chain_Delete(sys->download);
     free(sys);
 }

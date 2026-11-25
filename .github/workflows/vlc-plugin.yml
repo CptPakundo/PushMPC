@@ -148,7 +148,7 @@ jobs:
           d=$(sed -n 's/^VLC_PLUGIN_PATH=//p' ~/.config/environment.d/60-pushmpc-vlc.conf)
           cp art/plugin-linux/libpushdump_plugin.so "$d/"
           export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv OUT=res/installed CASES=installed INSTALLED_MULT=0 \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, after the installer (Xvfb 60 Hz: Auto x2)" HWARGS=" "
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, after the installer (Xvfb 60 Hz: Auto x2)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
           grep -h "PushMPC 0" res/installed/installed.log | head -1 | grep -q -- "-> x" || { echo "::error::the module did not run from the installer's settings"; exit 1; }
           rm -f "$d/libpushdump_plugin.so"
@@ -173,14 +173,14 @@ jobs:
         if: always()
         with: { name: results-linux, path: res, retention-days: 7 }
 
-  # the manylinux2014 binary in older distros' own VLC (Debian 11: 3.0.20 without the t64 suffix; Debian 12: 3.0.21;
+  # the manylinux2014 binary in other distros' own VLC (Debian 12: 3.0.21; Debian 13: t64 build;
   # Ubuntu 22.04: 3.0.16): it must load (entry name, glibc) and multiply frames
   test-distros:
     needs: [clips, build-linux]
     strategy:
       fail-fast: false
       matrix:
-        image: ['debian:11', 'debian:12', 'ubuntu:22.04']
+        image: ['debian:12', 'debian:13', 'ubuntu:22.04']
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container: { image: '${{ matrix.image }}' }
@@ -220,6 +220,10 @@ jobs:
           c=~/snap/vlc/common; d=$c/pushmpc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
           cp art/clips/clip.mkv $c/clip.mkv
           printf '[core]\nvideo-filter=postproc:pushmpc_out\n[pushmpc]\npushmpc-smoother=4\n' > $c/vlcrc
+          echo "--- inside the snap: environment, wrapper, plugin scan"
+          VLC_PLUGIN_PATH="$d" snap run --shell vlc -c 'echo "VLC_PLUGIN_PATH=$VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; command -v vlc; head -40 "$SNAP/bin/vlc-snap-wrapper.sh" 2>/dev/null || ls $SNAP/bin' || true
+          VLC_PLUGIN_PATH="$d" timeout 60 snap run vlc -I dummy -vv --list 2>&1 | grep -iE "pushmpc|pushdump|browsing|cannot load|plugins.dat|entry point|VLC_PLUGIN" | head -20 || true
+          sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -10 || true
           export VLC=/snap/bin/vlc PLUGDIR="$d" CLIP=$c/clip.mkv OUT=$c/res SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
                  LABEL="Snap VLC (VLC_PLUGIN_PATH=~/snap/vlc/common/pushmpc)" CASES="base x2 x4 installed" INSTALLED_MULT=4
           bash vlcplugin/tests/run-module.sh | tee snap.txt
@@ -230,8 +234,29 @@ jobs:
         if: always()
         with: { name: results-snap, path: res, retention-days: 7 }
 
+  # pm_pushcore.dll (MSVC: vsplugin's pushcore host + the filter's Auto) and the stub pushcore.dll for the tests
+  build-bridge:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pm_pushcore.dll and the stub core
+        shell: bash
+        run: |
+          set -eux
+          cmake -S vlcplugin/pushcore_bridge -B bb -A x64
+          cmake --build bb --config Release
+          cmake -S vsplugin -B bs -A x64
+          cmake --build bs --config Release --target pushcore_stub
+          mkdir -p out/stub
+          cp "$(find bb -name pm_pushcore.dll | head -1)" out/
+          cp "$(find bs vsplugin/bin -name pushcore.dll 2>/dev/null | head -1)" out/stub/
+          ls -la out out/stub
+      - uses: actions/upload-artifact@v4
+        with: { name: bridge-win64, path: out, retention-days: 7 }
+
   test-windows:
-    needs: [clips, build-windows]
+    needs: [clips, build-windows, build-bridge]
     runs-on: windows-latest
     timeout-minutes: 30
     defaults: { run: { shell: bash } }
@@ -259,6 +284,17 @@ jobs:
                  CLIP10=art/clips/clip10.mkv CLIP720=art/clips/clip720.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
                  PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
           bash vlcplugin/tests/run-module.sh
+      - name: pushcore through pm_pushcore.dll (the stub core on WARP; 720p)
+        run: |
+          set -u
+          d="$LOCALAPPDATA/PushMPC/vlc"; cp art/bridge-win64/pm_pushcore.dll "$d/"
+          mkdir -p "$LOCALAPPDATA/PushMPC/core" && cp art/bridge-win64/stub/pushcore.dll "$LOCALAPPDATA/PushMPC/core/"
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clips/clip.mkv \
+                 CLIP720=art/clips/clip720.mkv OUT=res/windows-pushcore SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
+                 PY=python PUSHCORE=1 CASES="pc_x4_720 pc_x4_720_inline" LABEL="Windows, pushcore (stub core, WARP)"
+          bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC 0\|pushcore\|PushMPC: close\|output stage:" res/windows-pushcore/*.log | sort | uniq -c | head -20
+          rm -f "$d/pm_pushcore.dll"; rm -rf "$LOCALAPPDATA/PushMPC/core"
       - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; a run with no arguments; uninstall)
         run: |
           set -eu
