@@ -5,8 +5,13 @@
 // CPU here, multithreaded. A Vulkan rebuild sharing ncnn's VkDevice is the next step (track-ml-runtime.md).
 #include "internal.h"
 
+#if __has_include(<ncnn/net.h>)
 #include <ncnn/gpu.h>
 #include <ncnn/net.h>
+#else   // the release package's CMake config puts include/ncnn itself on the path
+#include <gpu.h>
+#include <net.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>

@@ -58,6 +58,20 @@ std::basic_string<ORTCHAR_T> ortPath(const std::string& s) {
 
 std::string envStr(const char* name) { const char* v = std::getenv(name); return v ? v : ""; }
 
+std::string absolutePath(const std::string& p) {
+#ifdef _WIN32
+    char buf[4096];
+    const DWORD n = GetFullPathNameA(p.c_str(), sizeof buf, buf, nullptr);
+    return n && n < sizeof buf ? std::string(buf, n) : p;
+#else
+    char* r = realpath(p.c_str(), nullptr);
+    if (!r) return p;
+    std::string s(r);
+    std::free(r);
+    return s;
+#endif
+}
+
 // --- the process-wide ONNX Runtime -------------------------------------------------------------------------------------
 struct Ort {
     Library lib;
@@ -79,8 +93,8 @@ Ort* loadOrt(const std::string& runtimeDir, const std::string& flavor, std::stri
     }
     auto o = std::make_unique<Ort>();
     o->flavor = flavor;
-    o->runtimeDir = runtimeDir;
-    o->dir = joinPath(joinPath(runtimeDir, "ort"), flavor);
+    o->runtimeDir = absolutePath(runtimeDir);   // plugin EP libraries must be given by absolute path
+    o->dir = joinPath(joinPath(o->runtimeDir, "ort"), flavor);
     const std::string override_ = envStr("PMML_ORT_LIBRARY");
     const std::string path = override_.empty() ? joinPath(o->dir, ortLibraryName()) : override_;
     if (!o->lib.open(path, err)) return nullptr;

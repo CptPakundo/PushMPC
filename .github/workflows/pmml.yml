@@ -156,7 +156,7 @@ jobs:
       - name: Runtimes by their pins (ORT core + MIGraphX flavor, TensorRT-RTX and OpenVINO plugin EPs, ncnn)
         timeout-minutes: 15
         run: |
-          python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-x64 --out rt --cache ~/pmml-dl --flavors core,migraphx --eps trt-rtx,openvino --ncnn --headers --list --allow-unpinned
+          python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-x64 --out rt --cache ~/pmml-dl --flavors core,migraphx --eps trt-rtx,openvino --ncnn --headers --list
           find rt -maxdepth 3 -type d | head -30
       - name: Build
         run: |
@@ -232,7 +232,7 @@ jobs:
           key: pmml-dl-linux-arm64-${{ hashFiles('scripts/ml-runtime-pin.json') }}
       - name: Runtimes by their pins (ORT core, TensorRT-RTX plugin EP for ARM64)
         timeout-minutes: 15
-        run: python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-arm64 --out rt --cache ~/pmml-dl --flavors core --eps trt-rtx --headers --allow-unpinned
+        run: python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-arm64 --out rt --cache ~/pmml-dl --flavors core --eps trt-rtx --headers
       - name: Build and unit tests
         run: |
           sudo apt-get install -y -qq ninja-build >/dev/null
@@ -264,7 +264,7 @@ jobs:
       - name: Runtimes by their pins (ORT core + DirectML flavor, TensorRT-RTX / OpenVINO / QNN plugin EPs, ncnn)
         timeout-minutes: 15
         run: |
-          python -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform win-x64 --out rt --cache ~/pmml-dl --flavors core,directml --eps trt-rtx,openvino,qnn --ncnn --headers --list --allow-unpinned
+          python -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform win-x64 --out rt --cache ~/pmml-dl --flavors core,directml --eps trt-rtx,openvino,qnn --ncnn --headers --list
           cp rt/ort/directml/include/dml_provider_factory.h rt/ort/directml/include/DirectML*.h rt/ort/core/include/ 2>/dev/null || true
           ls rt/ort/core/include rt/ort/directml
       - uses: ilammy/msvc-dev-cmd@v1
@@ -321,7 +321,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: pmml-test-data, path: data }
       - name: Runtimes (ORT core osx-arm64 with CoreML)
-        run: python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out rt --flavors core --headers --allow-unpinned
+        run: python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out rt --flavors core --headers
       - name: Build, unit tests, CPU and CoreML against the reference
         run: |
           cmake -S pmml -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$PWD/rt/ort/core/include"

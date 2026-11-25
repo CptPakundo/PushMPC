@@ -142,6 +142,11 @@ def main() -> int:
             list_archive(arc)
         files = extract(arc, pattern, dest)
         licence_files(arc, dest)
+        # a versioned library name (wheels: libonnxruntime.so.1.27.1) also under the plain name pmml loads
+        for f in list(files):
+            if f.startswith("libonnxruntime.so.") and not (dest / "libonnxruntime.so").exists():
+                shutil.copy2(dest / f, dest / "libonnxruntime.so")
+                files.append("libonnxruntime.so")
         if a.headers and entry.get("headers"):
             extract(arc, [entry["headers"]], dest / "include")
         if flavor == "directml":
@@ -166,7 +171,7 @@ def main() -> int:
         if a.list:
             list_archive(arc)
         dest = out / "eps" / ep
-        files = extract(arc, entry["extract"], dest)
+        files = extract(arc, spec.get("extract", entry["extract"]), dest)
         lib = next((f for f in files for pat in entry["library"] if fnmatch.fnmatch(f.lower(), pat.lower()) and
                     f.lower().endswith((".dll", ".so", ".dylib"))), None)
         if not lib:
