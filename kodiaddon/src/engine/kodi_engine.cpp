@@ -191,6 +191,8 @@ bool GpuBuilt() { return true; }
 bool GpuBuilt() { return false; }
 #endif
 
+bool NonNull(const void* p) { return p != nullptr; }
+
 std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
 {
     std::string gpuWhy;

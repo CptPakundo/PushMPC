@@ -399,7 +399,11 @@ public:
     {
         if (!m_fmt) return false;
         Log(ADDON_LOG_DEBUG, "seek to %.0f ms", timeMs);
-        if (timeMs <= 0 && m_reads == 0) { startpts = 0; return true; }   // nothing read yet: already at the start
+        // Kodi calls the seek with no startpts (CDVDDemuxClient::SeekTime from DVDFileInfo's stream-detail and thumbnail
+        // probes passes nullptr) and the dev kit binds *nullptr to this reference: never write through it then. The
+        // check lives in another translation unit so the compiler cannot assume a reference is never null.
+        double* const out = pmk::NonNull(&startpts) ? &startpts : nullptr;
+        if (timeMs <= 0 && m_reads == 0) { if (out) *out = 0; return true; }   // nothing read yet: already at the start
         const int64_t target = int64_t(timeMs * 1000.0) + m_startUs;
         const int r = av_seek_frame(m_fmt, -1, target, backwards ? AVSEEK_FLAG_BACKWARD : 0);
         if (r < 0) {
@@ -407,7 +411,7 @@ public:
             return false;
         }
         Log(ADDON_LOG_DEBUG, "seek done");
-        startpts = timeMs * 1000.0;
+        if (out) *out = timeMs * 1000.0;
         return true;
     }
 
@@ -441,7 +445,7 @@ public:
     {
         if (!m_fmt || ch < 1 || unsigned(ch) > m_fmt->nb_chapters) return false;
         double start = 0;
-        return DemuxSeekTime(double(GetChapterPos(ch)), true, start);
+        return DemuxSeekTime(double(GetChapterPos(ch)), true, start);   // a real variable: no null-reference case here
     }
 
     // for the videocodec instance (same process, same add-on)
@@ -557,12 +561,6 @@ private:
         else if (HasDolbyVision(st)) why = "Dolby Vision: Kodi's own decoder keeps it";
         else if (IsHdrTransfer(trc) && (!PM_KODI22 || !m_settings.hdr))
             why = PM_KODI22 ? "HDR is off in the add-on settings" : "HDR: Kodi 21 cannot take HDR pictures from an add-on";
-#if defined(_WIN32) && PM_KODI22
-        // Kodi 22 probes HDR10 files for stream details by creating the add-on's decoder on its GUI thread
-        // (DVDFileInfo GetDetailsFromFrame); on Windows that probe stalls the GUI thread in the add-on's demuxer (CI, open
-        // issue). Until that is fixed, Kodi plays HDR files itself on Windows.
-        else if (IsHdrTransfer(trc)) why = "HDR on Windows with Kodi 22: Kodi's own decoder for now (open issue)";
-#endif
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         else if (bits > 10) why = "more than 10 bits per sample";

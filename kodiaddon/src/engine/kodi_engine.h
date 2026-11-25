@@ -49,5 +49,7 @@ public:
 std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why);
 // does this build have the GPU engine
 bool GpuBuilt();
+// p != nullptr, compiled out of line (see CPushInputStream::DemuxSeekTime)
+bool NonNull(const void* p);
 
 } // namespace pmk
