@@ -210,7 +210,12 @@ jobs:
           foreach ($r in @($plexState)) { if ($r -and (Get-FileHash $r.Dll).Hash -ne $r.OursSha) { $bad += "Plex $($r.Name): the swapped libmpv is not in place" } }
           foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { if ((Test-Path "$d\libmpv-2.dll") -and -not @($plexState | Where-Object { $_ -and $_.Dir -eq $d }).Count) { $bad += "${d}: Plex was not given the VapourSynth-enabled libmpv (version not in the tested list, or the swap failed: see the log)" } }
           foreach ($r in @($plexState)) { if ($r) { $c = if ($r.Name -eq 'Plex HTPC') { "$env:LOCALAPPDATA\Plex HTPC\mpv.conf" } else { "$env:LOCALAPPDATA\Plex\mpv.conf" }; if (-not ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match 'tls-ca-file=.*cacert\.pem')) { $bad += "Plex $($r.Name): mpv.conf has no PushMPC block with tls-ca-file" } } }
-          if (-not $cap -or -not (@($cap.players) -match 'KMPlayer') -or -not (@($cap.players) -match '^VLC')) { $bad += 'capture mode not on for KMPlayer and VLC' }
+          # VLC: PushMPC's module (the release's vlc component) through its installer, so not in capture mode
+          $vlcrc = Get-Content "$env:APPDATA\vlc\vlcrc" -Raw -ErrorAction SilentlyContinue
+          "VLC: plugin $(Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll"); vlcrc video-filter $([regex]::Match("$vlcrc", '(?m)^video-filter=.*$').Value); VLC_PLUGIN_PATH $([Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User'))" | Tee-Object -Append $log
+          if (-not $cap -or -not (@($cap.players) -match 'KMPlayer')) { $bad += 'capture mode not on for KMPlayer' }
+          if (@($cap.players) -match '^VLC') { $bad += 'VLC went to capture mode: its PushMPC module was not installed' }
+          if (-not (Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll") -or "$vlcrc" -notmatch 'pushmpc') { $bad += 'the VLC module is not set up (plugin and vlcrc)' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }

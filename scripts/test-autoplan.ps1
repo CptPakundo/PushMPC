@@ -109,6 +109,15 @@ if ($np) { Stop-Process -Id $np.Id -Force -ErrorAction SilentlyContinue }
 & $ps -NoProfile -ExecutionPolicy Bypass -File $cap disable -InstallDir $ci -StartMenu $sm
 Test-That (-not (Test-Path $sm) -and -not (Test-Path (Join-Path $ci 'capture'))) 'capture disable: entry and folder removed'
 
+# 4. the VLC installer's version check (file versions come as "3,0,24,0" or "3.0.24.0")
+$vlcInst = Join-Path (Split-Path $here) 'vlcplugin\install\pushmpc-vlc.ps1'
+if (Test-Path $vlcInst) {
+    foreach ($c in @(@('3,0,24,0', 'VLC 3.0'), @('3.0.24.0', 'VLC 3.0'), @('3.0.21', 'VLC 3.0'), @('4.0.0', 'not VLC 3.0'), @('3,1,0,0', 'not VLC 3.0'), @('13.0.1', 'not VLC 3.0'))) {
+        $r = "$(& $ps -NoProfile -ExecutionPolicy Bypass -File $vlcInst -TestVersion $c[0])".Trim()
+        Test-That ($r -eq $c[1]) "pushmpc-vlc.ps1 version '$($c[0])': $r (want $($c[1]))"
+    }
+}
+
 Remove-Item Env:PUSHMPC_TEST_GPU -ErrorAction SilentlyContinue
 Remove-Item $Scratch -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "$($n - $fail)/$n passed"

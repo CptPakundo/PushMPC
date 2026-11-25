@@ -25,10 +25,21 @@ param(
     [string]$PluginDir = (Join-Path $env:LOCALAPPDATA 'PushMPC\vlc'),
     [string]$VlcRc = (Join-Path $env:APPDATA 'vlc\vlcrc'),
     [switch]$NoEnvironment,
-    [switch]$SkipVlcCheck
+    [switch]$SkipVlcCheck,
+    # tests: print whether a version text counts as VLC 3.0.x ("3.0.24", "3,0,24,0", "3.0.24.0") and exit
+    [string]$TestVersion = ''
 )
 $ErrorActionPreference = 'Stop'
 $stateFile = Join-Path $PluginDir 'pushmpc-vlc.state.json'
+
+# major and minor of a version text: "3.0.24", "3.0.24.0" or a file version written with commas ("3,0,24,0")
+function Get-VlcMajorMinor([string]$text) {
+    $m = [regex]::Match("$text", '(\d+)\s*[.,]\s*(\d+)')
+    if (-not $m.Success) { return $null }
+    return @([int]$m.Groups[1].Value, [int]$m.Groups[2].Value)
+}
+function Test-Vlc3([string]$text) { $mm = Get-VlcMajorMinor $text; return [bool]($mm -and $mm[0] -eq 3 -and $mm[1] -eq 0) }
+if ($TestVersion) { if (Test-Vlc3 $TestVersion) { 'VLC 3.0' } else { 'not VLC 3.0' }; exit 0 }
 
 function Find-Vlc {
     $dirs = @()
@@ -122,7 +133,7 @@ switch ($Action) {
             $v = Find-Vlc
             if (-not $v) { throw 'VLC was not found. Install VLC 3.0 (64-bit) from videolan.org first.' }
             if (-not $v.Is64) { throw "VLC $($v.Version) in $($v.Dir) is 32-bit; PushMPC needs the 64-bit VLC." }
-            if (-not $v.Version.StartsWith('3.0')) { throw "VLC $($v.Version) is not VLC 3.0; this PushMPC module is for VLC 3.0.x." }
+            if (-not (Test-Vlc3 $v.Version)) { throw "VLC $($v.Version) is not VLC 3.0; this PushMPC module is for VLC 3.0.x." }
         }
         if (-not $Plugin) { $Plugin = Join-Path $PSScriptRoot 'libpushmpc_plugin.dll' }
         if (-not (Test-Path $Plugin)) { throw "plugin not found: $Plugin" }
