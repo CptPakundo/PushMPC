@@ -60,6 +60,7 @@ param(
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
+$script:PmRoot = ''
 $script:PmBegin = '# >>> PushMPC managed: do not edit between these lines (PushMPC uninstall removes them)'
 $script:PmEnd = '# <<< PushMPC managed'
 
@@ -105,12 +106,25 @@ function Get-PmLuaPath([string]$ScriptPath) { (Join-Path (Split-Path -Parent $Sc
 # only logs a warning, where a vf= line would stop all playback (for every player that reads this mpv.conf, legacy
 # Emby Theater included), and hosts that reset vf (Stremio) get it back. -Direct: the vf line itself, for hosts that
 # take options after start-up and load no scripts then (MPC-QT's options file).
+# The ArtCNN fragment shaders (vsplugin\shaders, made by make-shaders.py) pushmpc.lua falls back to, by GPU tier:
+# C4F32 on discrete NVIDIA / AMD / Intel Arc, C4F16 on integrated or unknown GPUs. "always" where nothing better
+# upscales (no NVIDIA RTX, so no PushMPC VSR), else only when PushMPC's filter cannot start. Fake roots: PUSHMPC_GPU_VENDOR.
+function Get-PmShaderLines($E, [string]$ScriptPath) {
+    $names = if ($E.Fake) { @("$env:PUSHMPC_GPU_VENDOR") } else { @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object Name) }
+    $all = $names -join ' | '
+    $big = $all -match 'NVIDIA|Radeon RX|Radeon Pro|Arc\b|Arc\(TM\)|FirePro'
+    $when = if ($all -match 'NVIDIA.*RTX|RTX') { 'fallback' } else { 'always' }
+    $file = Join-Path (Split-Path -Parent $ScriptPath) ("shaders\ArtCNN_{0}_fragment.glsl" -f $(if ($big) { 'C4F32' } else { 'C4F16' }))
+    if (-not (Test-Path -LiteralPath $file)) { return @() }
+    return @("script-opts-append=pushmpc-shaders=$(Get-PmQuoted $file.Replace('\', '/'))", "script-opts-append=pushmpc-shaders-when=$when")
+}
 function Get-PmBlock([string]$ScriptPath, [int]$Buffered, [int]$Concurrent, [string]$Nl, [switch]$Direct) {
     if ($Direct) { $mid = @("vf-append=$(Get-PmVfOption $ScriptPath $Buffered $Concurrent)") }
     else {
         $mid = @("scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath))",
                  "script-opts-append=pushmpc-vpy=$(Get-PmQuoted $ScriptPath.Replace('\', '/'))",
-                 "script-opts-append=pushmpc-buffered=$Buffered", "script-opts-append=pushmpc-concurrent=$Concurrent")
+                 "script-opts-append=pushmpc-buffered=$Buffered", "script-opts-append=pushmpc-concurrent=$Concurrent") +
+               @(Get-PmShaderLines (Get-PmEnv $script:PmRoot) $ScriptPath)
     }
     $lines = @($script:PmBegin) + $mid + @('hwdec=auto-copy', 'hr-seek-framedrop=no', 'interpolation=no', $script:PmEnd)
     return ($lines -join $Nl) + $Nl
@@ -231,12 +245,14 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
         $dll = "$($pl.Dir)\libmpv-2.dll"
         if (-not (Test-Path -LiteralPath $dll)) { continue }
         $g = Test-PmPlexLibmpv $dll
-        $vendor = Get-PmGpuScaling $E
-        $ok = $g.Ok -and $vendor
+        $vendor = if ($g.Vsr) { Get-PmGpuScaling $E } else { '' }
+        $sh = @(Get-PmShaderLines $E "$($E.LocalAppData)\PushMPC\vsplugin\pushmpc.vpy")
+        $ok = $g.Ok -and ($vendor -or $sh.Count)
         $found += [pscustomobject]@{ Player = $pl.Name; Exe = $dll; Kind = $(if ($ok) { 'plex' } else { 'none' }); Config = $(if ($ok) { $pl.Conf } else { '' }); Managed = [bool]$ok
             Scaling = $vendor
-            Note = $(if ($ok) { "video super resolution ($vendor) through d3d11vpp; keep hardware decoding on in Plex. No frame generation: its libmpv has no VapourSynth" }
-                     elseif (-not $g.Ok) { "not changed: $($g.Why)" } else { 'not changed: d3d11vpp super resolution needs an NVIDIA RTX or Intel GPU' }) }
+            Note = $(if ($ok -and $vendor) { "video super resolution ($vendor) through d3d11vpp (ArtCNN shaders when it cannot start); keep hardware decoding on in Plex. No frame generation: its libmpv has no VapourSynth" }
+                     elseif ($ok) { "ArtCNN upscaling shaders ($(if ($g.Why) { $g.Why } else { 'no d3d11vpp super resolution on this GPU' })). No frame generation: its libmpv has no VapourSynth" }
+                     elseif (-not $g.Ok) { "not changed: $($g.Why)" } else { "not changed: $($g.Why); no shader set installed" }) }
     }
     foreach ($d in @("$($E.LocalAppData)\Programs\Stremio", "$($E.ProgramFiles)\Stremio")) {
         $exe = @('stremio-shell-ng.exe', 'stremio.exe') | ForEach-Object { "$d\$_" } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
@@ -508,9 +524,9 @@ function Uninstall-PmMpcQt {
 # filter softly; a vf= line that fails would stop playback). Read from the DLL's strings; nothing is loaded.
 function Test-PmPlexLibmpv([string]$Dll) {
     try { $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Dll)) } catch { return [pscustomobject]@{ Ok = $false; Why = "cannot read $Dll" } }
-    if (-not $t.Contains('d3d11vpp') -or -not $t.Contains('scaling-mode')) { return [pscustomobject]@{ Ok = $false; Why = "its libmpv has no d3d11vpp scaling-mode (it came with mpv after 0.38)" } }
-    if (-not $t.Contains('mp.options')) { return [pscustomobject]@{ Ok = $false; Why = 'its libmpv has no Lua scripting' } }
-    return [pscustomobject]@{ Ok = $true; Why = '' }
+    if (-not $t.Contains('mp.options')) { return [pscustomobject]@{ Ok = $false; Vsr = $false; Why = 'its libmpv has no Lua scripting' } }
+    if (-not $t.Contains('d3d11vpp') -or -not $t.Contains('scaling-mode')) { return [pscustomobject]@{ Ok = $true; Vsr = $false; Why = "its libmpv has no d3d11vpp scaling-mode (it came with mpv after 0.38)" } }
+    return [pscustomobject]@{ Ok = $true; Vsr = $true; Why = '' }
 }
 # d3d11vpp's scaling-mode for this PC's GPU: nvidia (RTX VSR), intel, or '' (none). Fake roots: PUSHMPC_GPU_VENDOR.
 function Get-PmGpuScaling($E) {
@@ -520,7 +536,8 @@ function Get-PmGpuScaling($E) {
     return ''
 }
 function Get-PmPlexBlock([string]$ScriptPath, [string]$Scaling, [string]$Nl) {
-    $lines = @($script:PmBegin, "scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath))", 'script-opts-append=pushmpc-mode=vsr', "script-opts-append=pushmpc-scaling=$Scaling", $script:PmEnd)
+    $sh = @(Get-PmShaderLines (Get-PmEnv $script:PmRoot) $ScriptPath | ForEach-Object { $_ -replace 'pushmpc-shaders-when=.*', 'pushmpc-shaders-when=fallback' })
+    $lines = @($script:PmBegin, "scripts-append=$(Get-PmQuoted (Get-PmLuaPath $ScriptPath))", 'script-opts-append=pushmpc-mode=vsr', "script-opts-append=pushmpc-scaling=$Scaling") + $sh + @($script:PmEnd)
     return ($lines -join $Nl) + $Nl
 }
 
@@ -755,6 +772,7 @@ function Invoke-PmMpvIntegration {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([string]$Action, [string]$Root, [string]$ScriptPath, [string[]]$MpvExe, [int]$BufferedFrames = 4, [int]$ConcurrentFrames = 2, [switch]$NoSmplayer, [switch]$RuntimeOnPath)
     $E = Get-PmEnv $Root
+    $script:PmRoot = $Root
     if (-not $ScriptPath) { $ScriptPath = "$($E.LocalAppData)\PushMPC\vsplugin\pushmpc.vpy" }
     $players = Find-PmPlayers $E $MpvExe
     $state = Get-PmStateFile $E

@@ -365,6 +365,8 @@ copy_files() {
     run cp "$src/vsplugin/pushmpc_vs.so" "$src/vsplugin/pushmpc.vpy" "$plugdir/"
     # pushmpc.lua adds the filter at run time (mpv.conf names it): next to pushmpc.vpy
     for l in "$src/vsplugin/pushmpc.lua" "$src/pushmpc.lua" "$src/integrations/mpv/pushmpc.lua"; do [ -f "$l" ] && { run cp "$l" "$plugdir/pushmpc.lua"; break; }; done
+    # the ArtCNN upscaling shaders pushmpc.lua falls back to
+    [ -d "$src/vsplugin/shaders" ] && { run mkdir -p "$plugdir/shaders"; run cp "$src"/vsplugin/shaders/* "$plugdir/shaders/"; }
     [ -f "$src/LICENSE" ] && run cp "$src/LICENSE" "$pm/"
     # the Linux NVIDIA backend (when this build has it): its self-test next to the plugin, its runtime fetcher in $pm
     [ -f "$src/vsplugin/pushmpc-nvvfx-selftest" ] && { run cp "$src/vsplugin/pushmpc-nvvfx-selftest" "$plugdir/"; run chmod 755 "$plugdir/pushmpc-nvvfx-selftest"; }

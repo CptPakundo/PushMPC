@@ -1558,6 +1558,14 @@ function Stage-VsPlugin([string]$version) {
     New-Item -ItemType Directory -Force $v | Out-Null
     Copy-Item -LiteralPath $files -Destination $v
     if ((Split-Path $dll -Leaf) -ne 'pushmpc_vs.dll') { Rename-Item (Join-Path $v (Split-Path $dll -Leaf)) 'pushmpc_vs.dll' }
+    # the ArtCNN upscaling shaders pushmpc.lua falls back to (generated from the pinned ONNX weights; Python 3, stdlib only)
+    $py = @('py', 'python3', 'python') | ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -First 1
+    $gen = Join-Path $repo 'integrations\mpv\make-shaders.py'
+    if ($py -and (Test-Path -LiteralPath $gen)) {
+        $pyArgs = @(); if ($py.Name -like 'py*.exe' -and $py.Name -notlike 'python*') { $pyArgs = @('-3') }
+        & $py.Source @pyArgs $gen (Join-Path $v 'shaders') | ForEach-Object { Info $_ }
+        if ($LASTEXITCODE -ne 0) { Warn 'ArtCNN shaders not generated (make-shaders.py failed): the vsplugin component goes without them'; Remove-Item (Join-Path $v 'shaders') -Recurse -Force -ErrorAction SilentlyContinue }
+    } else { Warn 'ArtCNN shaders not generated (no Python 3): the vsplugin component goes without them' }
     Invoke-CodeSign @((Join-Path $v 'pushmpc_vs.dll'))
     Write-Manifest $v @{ component = 'vsplugin'; version = $version; 'vapoursynth-api' = '4'; preview = 'yes' }
 }

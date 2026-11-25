@@ -17,18 +17,29 @@ local mp = require 'mp'
 local msg = require 'mp.msg'
 local options = require 'mp.options'
 
-local opts = { vpy = "", buffered = "4", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia", shaders = "" }
+-- Upscaling shaders (pushmpc-shaders, ";" between paths; PushMPC ships ArtCNN fragment shaders): shaders-when=always
+-- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
+-- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
+local opts = { vpy = "", buffered = "4", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
+               shaders = "", ["shaders-when"] = "fallback" }
 options.read_options(opts, "pushmpc")
 
-if opts.mode == "vsr" then
-    local shaders_on, failed_for, last = false, nil, nil
-    local function shaders()
-        if shaders_on or opts.shaders == "" then return end
-        for p in opts.shaders:gmatch("[^;]+") do mp.commandv("change-list", "glsl-shaders", "append", p) end
-        shaders_on = true
-        msg.info("upscaling shaders added (d3d11vpp unavailable)")
+local shaders_on = false
+local function shaders(why)
+    if shaders_on or opts.shaders == "" then return end
+    local have = {}
+    for _, p in ipairs(mp.get_property_native("glsl-shaders") or {}) do have[p] = true end
+    for p in opts.shaders:gmatch("[^;]+") do
+        if not have[p] then mp.commandv("change-list", "glsl-shaders", "append", p) end
     end
+    shaders_on = true
+    msg.info("upscaling shaders added (" .. why .. "): " .. opts.shaders)
+end
+
+if opts.mode == "vsr" then
+    local failed_for, last = nil, nil
     local function vsr()
+        if opts.scaling == "" then shaders("no d3d11vpp super resolution on this GPU"); return end
         local vp = mp.get_property_native("video-params")
         if vp == nil or not vp.h or vp.h <= 0 then return end
         local path = mp.get_property("path")
@@ -45,7 +56,7 @@ if opts.mode == "vsr" then
         end
         local ok, err = mp.commandv("vf", "append", spec)
         if ok then last = spec; msg.info("RTX/Intel video super resolution: " .. spec)
-        else failed_for = path; last = nil; msg.warn("d3d11vpp could not start (" .. tostring(err) .. ")"); shaders() end
+        else failed_for = path; last = nil; msg.warn("d3d11vpp could not start (" .. tostring(err) .. ")"); shaders("d3d11vpp unavailable") end
     end
     mp.register_event("file-loaded", function() failed_for = nil; last = nil end)
     mp.observe_property("video-params", "native", function() vsr() end)
@@ -84,6 +95,7 @@ local function ensure()
         if not ok then
             failed_for = path
             msg.warn("PushMPC's filter could not start (" .. tostring(err) .. "): playing without it")
+            shaders("PushMPC's filter unavailable")
             busy = false
             return
         end
@@ -102,6 +114,9 @@ local function ensure()
     busy = false
 end
 
-mp.register_event("file-loaded", function() failed_for = nil end)
+mp.register_event("file-loaded", function()
+    failed_for = nil
+    if opts["shaders-when"] == "always" then shaders("no better upscaler on this PC") end
+end)
 mp.observe_property("video-params", "native", function() ensure() end)
 mp.observe_property("vf", "native", function() ensure() end)

@@ -137,6 +137,7 @@ jobs:
           foreach ($w in Get-ChildItem (Join-Path $rt $pin.vapoursynth.wheel)) { tar -xf $w.FullName -C $sp }
           foreach ($p in Get-ChildItem $rt -Filter 'python*._pth') { Add-Content $p.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
           Copy-Item "$env:RUNNER_TEMP\vsdll\pushmpc_vs.dll" $vsp; Copy-Item vsplugin/scripts/pushmpc.vpy, integrations/mpv/pushmpc.lua $vsp
+          python integrations/mpv/make-shaders.py "$vsp\shaders"; if ($LASTEXITCODE) { throw "make-shaders.py failed" }
           $vss = (Get-ChildItem $rt -Recurse -Filter VSScript.dll | Select-Object -First 1).DirectoryName
           "VSSCRIPT_DIR=$vss" >> $env:GITHUB_ENV
           $clip = Fetch $env:CLIP_URL ''
@@ -214,7 +215,9 @@ jobs:
           $fails = 0
           foreach ($w in $want) { $r = $rows | Where-Object Player -eq $w; if (-not $r -or $r.Result -ne 'installed') { Write-Host "::error::$w not installed: $($r.Result) $($r.Note)"; $fails++ } }
           if (Test-Path "$env:ProgramFiles\Kodi\kodi.exe") { if (($rows | Where-Object Player -eq 'Kodi').Result -ne 'installed') { Write-Host '::error::Kodi not installed'; $fails++ } }
-          Get-Content "$env:APPDATA\mpv\mpv.conf"; Get-Content "$env:APPDATA\mpc-qt\settings.json"; Get-Content "$env:APPDATA\jellyfin-mpv-shim\conf.json"
+          Get-Content "$env:APPDATA\mpv\mpv.conf"; Get-Content "$env:APPDATA\mpc-qt\settings.json"
+          # no NVIDIA RTX on the runner: the ArtCNN fallback for every video (C4F16 for an unknown GPU)
+          if ((Get-Content "$env:APPDATA\mpv\mpv.conf" -Raw) -notmatch "pushmpc-shaders=.*ArtCNN_C4F16_fragment\.glsl[\s\S]*pushmpc-shaders-when=always") { Write-Host "::error::mpv.conf has no ArtCNN shader lines"; $fails++ }; Get-Content "$env:APPDATA\jellyfin-mpv-shim\conf.json"
           if (Test-Path "$env:APPDATA\Kodi\userdata\playercorefactory.xml") { Get-Content "$env:APPDATA\Kodi\userdata\playercorefactory.xml" }
           exit $fails
       - name: Play through the plugin in each player
@@ -603,7 +606,31 @@ jobs:
           snap > /tmp/after.txt
           d=$(diff /tmp/before.txt /tmp/after.txt | tr '\n' ' '); [ -z "$d" ] || { echo "::error title=arch HOME not restored::$d"; exit 1; }
           echo "HOME restored byte for byte"
-      - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
+      - name: ArtCNN shader fallback rendered by mpv (Xvfb, llvmpipe) through pushmpc.lua
+        timeout-minutes: 8
+        run: |
+          set -eu
+          python integrations/mpv/make-shaders.py /tmp/shaders
+          ls -la /tmp/shaders
+          cat > /tmp/passes.lua <<'LUA'
+          mp.register_event("playback-restart", function()
+            mp.add_timeout(2.0, function()
+              local p = mp.get_property_native("vo-passes") or {}
+              local seen = {}
+              for _, e in ipairs(p.fresh or {}) do seen[#seen + 1] = e.desc end
+              print("vo-passes: " .. table.concat(seen, " | "))
+              mp.command("quit")
+            end)
+          end)
+          LUA
+          export HOME=/tmp/home-sh; mkdir -p $HOME
+          timeout 90 xvfb-run -a -s '-screen 0 1920x1080x24' mpv --no-config --vo=gpu --gpu-api=opengl --ao=null --geometry=1920x1080 --no-border \
+            --scripts=integrations/mpv/pushmpc.lua --script=/tmp/passes.lua \
+            "--script-opts=pushmpc-vpy=/nonexistent/pushmpc.vpy,pushmpc-shaders=/tmp/shaders/ArtCNN_C4F16_fragment.glsl,pushmpc-shaders-when=always" \
+            /tmp/clip.mp4 > /tmp/shaders.txt 2>&1 || true
+          grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
+          echo "::notice title=ArtCNN fallback in mpv::$(grep -E 'upscaling shaders added|vo-passes' /tmp/shaders.txt | tr '\n' ' ' | cut -c1-700)"
+          grep -q 'ArtCNN C4F16 (fragment)' /tmp/shaders.txt || { echo "::error::mpv did not run the ArtCNN passes"; exit 1; }      - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
         timeout-minutes: 8
         run: |
           set -u
