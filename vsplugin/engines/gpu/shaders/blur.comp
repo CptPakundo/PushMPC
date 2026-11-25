@@ -1,0 +1,22 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: a 3x3 binomial prefilter of the full-size luma (1 2 1 / 2 4 2 / 1 2 1, rounded, edges
+// clamped) that the block matcher searches on at quality 2: 8x8 blocks on the unfiltered full-size picture match its
+// grain and noise; the filtered copy keeps the structure. The unfiltered level stays for the cut measures.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0, r8ui) uniform readonly uimage2D src;
+layout(binding = 1, r8ui) uniform writeonly uimage2D dst;
+layout(push_constant) uniform PC { int w, h; } pc;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.w || p.y >= pc.h) return;
+    ivec2 hi = ivec2(pc.w - 1, pc.h - 1);
+    uint s = 0u;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            uint wgt = uint((dx == 0 ? 2 : 1) * (dy == 0 ? 2 : 1));
+            s += wgt * imageLoad(src, clamp(p + ivec2(dx, dy), ivec2(0), hi)).r;
+        }
+    imageStore(dst, p, uvec4((s + 8u) >> 4));
+}

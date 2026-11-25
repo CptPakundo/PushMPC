@@ -15,7 +15,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -134,6 +136,7 @@ static double Ssim(const Pic& a, const Pic& b)
 }
 
 static std::string g_clip, g_csv, g_y4mOut, g_device;
+static int g_stride = 2;   // held-out distance: 2 (t = 1/2) or 4 (t = 1/4, 1/2, 3/4: larger motion)
 static void Row(const std::string& test, const std::string& method, double psnr, double ssim, double ms, const std::string& note = "")
 {
     std::printf("| %s | %s | %s | %.2f | %.4f | %.1f | %s |\n", g_clip.c_str(), test.c_str(), method.c_str(), psnr, ssim, ms, note.c_str());
@@ -160,20 +163,33 @@ static portable::Picture ToPicture(const Pic& f, int finest)
 // ---- interp
 static void BenchInterp(Y4m& clip)
 {
-    struct Method { std::string name; int kind; int quality; bool of; float lambda; };   // kind 0 GPU, 1 CPU, 2 blend, 3 repeat
-    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-blocks-q2-l6", 0, 2, false, 6.f }, { "gpu-blocks-q1", 0, 1, false, 3.f }, { "gpu-nvof", 0, 2, true, 3.f },
+    // kind 0 GPU, 1 CPU, 2 blend, 3 repeat; tweak: the GPU configuration (NVIDIA optical flow variants run only where the
+    // device has VK_NV_optical_flow: the 5090 tester script, never a hosted runner)
+    struct Method { std::string name; int kind; int quality; bool of; float lambda; bool refined = true; std::function<void(Config&)> tweak = nullptr; };
+    auto me3 = [](Config& c) { c.prefilter = c.lambdaScale = c.equiangular = c.merge = c.globalCandidate = false; };
+    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-q2-no-me-fixes", 0, 2, false, 3.f, true, me3 }, { "gpu-classic-q2", 0, 2, false, 3.f, false, me3 },
+                                    { "gpu-blocks-q1", 0, 1, false, 3.f },
+                                    { "gpu-nvof", 0, 2, true, 3.f }, { "gpu-nvof-slow", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 0; } },
+                                    { "gpu-nvof-fast", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 2; } },
+                                    { "gpu-nvof-full-input", 0, 2, true, 3.f, true, [](Config& c) { c.nvofInput = 1; } },
+                                    { "gpu-nvof-half-input", 0, 2, true, 3.f, true, [](Config& c) { c.nvofInput = 2; } },
+                                    { "gpu-nvof-averaged", 0, 2, true, 3.f, true, [](Config& c) { c.nvofDense = false; } },
+                                    { "gpu-nvof-no-cost", 0, 2, true, 3.f, true, [](Config& c) { c.nvofCost = false; } },
+                                    { "gpu-hybrid", 0, 2, true, 3.f, true, [](Config& c) { c.nvofHybrid = true; } },
                                     { "cpu", 1, 1, false, 3.f }, { "blend", 2, 0, false, 0.f }, { "repeat", 3, 0, false, 0.f } };
     std::ofstream ref;
     if (!g_y4mOut.empty()) {
         ref.open(g_y4mOut + "/" + g_clip + "_ref.y4m", std::ios::binary);
         ref << clip.header << '\n';
-        for (size_t i = 1; i + 1 < clip.frames.size(); i += 2) WriteY4m(ref, clip.frames[i]);
+        for (size_t i = 0; i + size_t(g_stride) < clip.frames.size(); i += size_t(g_stride))
+            for (int ph = 1; ph < g_stride; ++ph) WriteY4m(ref, clip.frames[i + size_t(ph)]);
     }
     for (const Method& m : methods) {
         Engine e;
         std::string err;
         if (m.kind == 0) {
-            Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.quality = m.quality; c.blockMatcherOnly = !m.of; c.smoothness = m.lambda;
+            Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.quality = m.quality; c.blockMatcherOnly = !m.of; c.smoothness = m.lambda; c.refined = m.refined;
+            if (m.tweak) m.tweak(c);
             if (!MakeEngine(e, c, err)) { std::printf("| %s | interp | %s | - | - | - | %s |\n", g_clip.c_str(), m.name.c_str(), err.c_str()); continue; }
             if (m.of && !e.OpticalFlowActive()) { std::printf("| %s | interp | %s | - | - | - | no VK_NV_optical_flow on this device |\n", g_clip.c_str(), m.name.c_str()); continue; }
         }
@@ -184,46 +200,56 @@ static void BenchInterp(Y4m& clip)
         int prevPair = -1, prevSlotA = -1;
         int slotPrev = -1;
         veyra::portable::MotionField lastF, lastK;
-        for (size_t i = 0; i + 2 < clip.frames.size(); i += 2) {
-            Pic& a = clip.frames[i]; Pic& b = clip.frames[i + 2];
-            Pic g; g.Alloc(clip.w, clip.h, clip.bits);
+        for (size_t i = 0; i + size_t(g_stride) < clip.frames.size(); i += size_t(g_stride)) {
+            Pic& a = clip.frames[i]; Pic& b = clip.frames[i + size_t(g_stride)];
             const double t0 = Now();
+            // motion once per pair, then every held-out phase from it ("flow once, synthesize many")
+            int pr = -1, cut = 0;
+            veyra::portable::MotionField f, k;
+            portable::Picture pa, pb;
             if (m.kind == 0) {
                 const int sa = slotPrev >= 0 ? slotPrev : e.Upload(a.View(), err);
                 const int sb = e.Upload(b.View(), err);
                 PairStats st;
-                const int pr = e.Estimate(sa, sb, prevPair, st, err);
+                pr = e.Estimate(sa, sb, prevPair, st, err);
                 if (pr < 0) { std::printf("estimate: %s\n", err.c_str()); break; }
-                const int cut = guard.Decide(st);   // the backend's decision (PushFPS's rule + the guard)
+                cut = guard.Decide(st);   // the backend's decision (PushFPS's rule + the guard)
                 cuts += cut ? 1 : 0;
-                YuvOut o = g.Out();
-                int out = -1; uint64_t ticket = 0;
-                if (!e.Generate(pr, 0.5f, cut ? 1 : 0, out, ticket, err) || !e.Wait(ticket, err)) { std::printf("generate: %s\n", err.c_str()); break; }
-                e.Read(out, o);
-                g.FromBytes();
                 if (prevPair >= 0) e.ReleasePair(prevPair);
                 if (prevSlotA >= 0) e.ReleaseSlot(prevSlotA);
                 prevPair = pr; prevSlotA = sa; slotPrev = sb;
             } else if (m.kind == 1) {
-                const portable::Picture pa = ToPicture(a, 1), pb = ToPicture(b, 1);
+                pa = ToPicture(a, 1); pb = ToPicture(b, 1);
                 veyra::portable::MotionSettings mset; mset.finestLevel = 1;
                 const veyra::portable::MotionEstimator est(mset);
-                const auto f = est.estimate(*pa.pyramid, *pb.pyramid, lastF.empty() ? nullptr : &lastF), k = est.estimate(*pb.pyramid, *pa.pyramid, lastK.empty() ? nullptr : &lastK);
+                f = est.estimate(*pa.pyramid, *pb.pyramid, lastF.empty() ? nullptr : &lastF); k = est.estimate(*pb.pyramid, *pa.pyramid, lastK.empty() ? nullptr : &lastK);
                 lastF = f; lastK = k;
                 cuts += f.sceneCut || k.sceneCut ? 1 : 0;
-                portable::Picture r;
-                portable::InterpolatePlanes(pa, pb, f, k, 0.5f, (1 << clip.bits) - 1, r, 0);
-                for (int p = 0; p < 3; ++p) g.p[p] = r.p[p].px;
-            } else if (m.kind == 2) {
-                for (int p = 0; p < 3; ++p) for (size_t q = 0; q < g.p[p].size(); ++q) g.p[p][q] = uint16_t((a.p[p][q] + b.p[p][q] + 1) / 2);
-            } else {
-                for (int p = 0; p < 3; ++p) g.p[p] = a.p[p];
+            }
+            for (int ph = 1; ph < g_stride; ++ph) {
+                const float t = float(ph) / float(g_stride);
+                Pic g; g.Alloc(clip.w, clip.h, clip.bits);
+                if (m.kind == 0) {
+                    YuvOut o = g.Out();
+                    int out = -1; uint64_t ticket = 0;
+                    if (!e.Generate(pr, t, cut ? (t < 0.5f ? 1 : 2) : 0, out, ticket, err) || !e.Wait(ticket, err)) { std::printf("generate: %s\n", err.c_str()); break; }
+                    e.Read(out, o);
+                    g.FromBytes();
+                } else if (m.kind == 1) {
+                    portable::Picture r;
+                    portable::InterpolatePlanes(pa, pb, f, k, t, (1 << clip.bits) - 1, r, 0);
+                    for (int p = 0; p < 3; ++p) g.p[p] = r.p[p].px;
+                } else if (m.kind == 2) {
+                    for (int p = 0; p < 3; ++p) for (size_t q = 0; q < g.p[p].size(); ++q) g.p[p][q] = uint16_t(std::lround(a.p[p][q] + (double(b.p[p][q]) - a.p[p][q]) * t));
+                } else {
+                    for (int p = 0; p < 3; ++p) g.p[p] = (t < 0.5f ? a : b).p[p];
+                }
+                ps += Psnr(g, clip.frames[i + size_t(ph)]); ss += Ssim(g, clip.frames[i + size_t(ph)]); ++n;
+                if (y4m) WriteY4m(y4m, g);
             }
             ms += Now() - t0;
-            ps += Psnr(g, clip.frames[i + 1]); ss += Ssim(g, clip.frames[i + 1]); ++n;
-            if (y4m) WriteY4m(y4m, g);
         }
-        if (n) Row("interp", m.name, ps / n, ss / n, ms / n, cuts ? std::to_string(cuts) + " pairs held as cuts" : "");
+        if (n) Row(g_stride == 2 ? std::string("interp") : "interp-d" + std::to_string(g_stride), m.name, ps / n, ss / n, ms / std::max(1, n), cuts ? std::to_string(cuts) + " pairs held as cuts" : "");
     }
 }
 
@@ -264,6 +290,164 @@ static void BenchTwos(Y4m& clip)
             ps += Psnr(g, clip.frames[j]); ss += Ssim(g, clip.frames[j]); ++n;
         }
         if (n) Row("twos", dedup ? "gpu-dedup" : "gpu-no-dedup", ps / n, ss / n, (Now() - t0) / n, dedup ? std::to_string(be.stats.duplicates) + " duplicates found" : "");
+    }
+}
+
+// ---- transitions: constructed events with exact truth. Two 50 fps clips; the source is their even frames, the truth
+// the odd ones, the event applied to both by its formula: a hard cut (A to B), a jump cut (A to A 3 s later: the same
+// palette), a 12-frame dissolve, a fade out to black and in to B, a one-frame flash (x2 brightness on a source frame).
+// The backend runs at x2 with Dedup's lookahead; scored: cuts and jump cuts must show no blend inside the cut pair,
+// dissolves and fades are scored against the truth (PSNR over the event), the flash must stay one frame (the outputs
+// next to it are real frames, not a glow).
+static Pic Mix(const Pic& a, const Pic& b, double alpha, double gain = 1.0)
+{
+    Pic o; o.Alloc(a.w, a.h, a.bits);
+    const double mx = double((1 << a.bits) - 1), mid = double(1 << (a.bits - 1));
+    for (int p = 0; p < 3; ++p)
+        for (size_t q = 0; q < o.p[p].size(); ++q) {
+            double v = double(a.p[p][q]) * (1 - alpha) + double(b.p[p][q]) * alpha;
+            v = p == 0 ? v * gain : mid + (v - mid) * gain;
+            o.p[p][q] = uint16_t(std::clamp(std::lround(v), 0L, long(mx)));
+        }
+    return o;
+}
+static void BenchTransitions(Y4m& a, Y4m& b)
+{
+    const int N = std::min<int>(int(std::min(a.frames.size(), b.frames.size())) & ~1, 48);
+    if (N < 40) { std::printf("transitions: need 40+ frames of both clips\n"); return; }
+    auto at = [&](Y4m& c, int i) -> const Pic& { return c.frames[size_t(std::clamp(i, 0, int(c.frames.size()) - 1))]; };
+    struct Ev { const char* name; std::function<Pic(int)> full; int from, to; int kind; };   // kind 0 cut, 1 gradual, 2 flash
+    const int E = 20;   // the event at full-rate frame 20 (source frame 10)
+    std::vector<Ev> evs = {
+        { "hard cut", [&](int i) { return i < E ? at(a, i) : at(b, i); }, E - 2, E + 2, 0 },
+        { "jump cut (same palette)", [&](int i) { return i < E ? at(a, i) : at(a, std::min(i + 16, int(a.frames.size()) - 1)); }, E - 2, E + 2, 0 },
+        { "dissolve 12", [&](int i) { const double al = std::clamp((i - E + 0.5) / 12.0, 0.0, 1.0); return Mix(at(a, i), at(b, i), al); }, E, E + 12, 1 },
+        { "fade out/in", [&](int i) {
+              if (i < E) return at(a, i);
+              if (i < E + 8) return Mix(at(a, i), at(a, i), 0, 1.0 - (i - E + 1) / 8.0);
+              if (i < E + 16) return Mix(at(b, i), at(b, i), 0, (i - E - 8 + 1) / 8.0);
+              return at(b, i); }, E, E + 16, 1 },
+        { "flash", [&](int i) { return i == E ? Mix(at(a, i), at(a, i), 0, 2.0) : at(a, i); }, E - 2, E + 2, 2 },
+    };
+    for (const Ev& ev : evs) {
+        std::vector<Pic> full;
+        for (int i = 0; i < N; ++i) full.push_back(ev.full(i));
+        std::vector<Pic> src;
+        for (int i = 0; i < N; i += 2) src.push_back(full[size_t(i)]);
+        const int K = 2;
+        Pipeline<int> pipe;
+        GpuBackend<int> be;
+        std::map<int, Pic> outs;
+        int next = 1;
+        Config c; c.width = a.w; c.height = a.h; c.bits = a.bits;
+        std::string err;
+        if (!MakeEngine(be.engine, c, err)) { std::printf("transitions: %s\n", err.c_str()); return; }
+        be.dedup = true; be.subtitleHold = false;
+        be.cadence.Configure(K, 2, int64_t(src.size()));
+        pipe.Init(K, int64_t(src.size()), SrcDur100ns(25, 1));
+        pipe.SetLookahead(be.Lookahead());
+        pipe.Reset();
+        be.grid = pipe.GridOf();
+        be.source = [&](int64_t s, YuvView& v, void*& keep) { if (s < 0 || s >= int64_t(src.size())) return false; v = src[size_t(s)].View(); keep = nullptr; return true; };
+        be.unkeep = [](void*) {};
+        be.alloc = [&](YuvOut& o, int& f, void*) { f = next++; Pic& p = outs[f]; p.Alloc(a.w, a.h, a.bits); o = p.Out(); return true; };
+        be.release = [&](int f) { outs.erase(f); };
+        double ps = 0; int n = 0, blends = 0, outsIn = 0;
+        for (int i = ev.from; i <= ev.to && i + 6 < N; ++i) {
+            // output index i at x2 is the full-rate frame i
+            int64_t from, to;
+            pipe.Requests(i, from, to);
+            auto r = pipe.Produce(i, from, be, 10000);
+            if (!r.ok) { std::printf("transitions: %s\n", r.err.c_str()); break; }
+            Pic& g = outs[r.frame];
+            g.FromBytes();
+            if (i % 2 == 1) {
+                ++outsIn;
+                bool real = false;
+                for (int q = i - 1; q <= i + 1; q += 2) real = real || g.p[0] == full[size_t(q)].p[0];
+                blends += real ? 0 : 1;
+                ps += Psnr(g, full[size_t(i)]); ++n;
+            }
+        }
+        std::string note;
+        if (ev.kind == 0) note = blends == 0 ? "held (no blend in the cut pair)" : std::to_string(blends) + " of " + std::to_string(outsIn) + " outputs blended across the cut";
+        else if (ev.kind == 2) note = blends == 0 ? "held as one frame" : std::to_string(blends) + " outputs glow (the flash spread)";
+        else note = std::to_string(be.stats.linearBlends) + " pairs blended as a transition, " + std::to_string(be.stats.cuts) + " cuts";
+        Row("transition", ev.name, n ? ps / n : 0, 0, 0, note);
+    }
+}
+
+// ---- labelled windows (vsplugin/tests/ci/cutset.py: 7-frame windows of CC-BY films, the boundary between offsets 3 and
+// 4, labels from TransNetV2 + PySceneDetect): the decision on each window's pair (3, 4) with the thumbnails of 2..5
+static void BenchWindows(Y4m& clip, const std::string& labelsPath)
+{
+    std::ifstream lf(labelsPath);
+    std::vector<std::string> labels;
+    for (std::string l; std::getline(lf, l);) if (!l.empty()) labels.push_back(l.substr(0, l.find_first_of(" \t\r")));
+    const size_t windows = std::min(labels.size(), clip.frames.size() / 7);
+    Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits;
+    Engine e;
+    std::string err;
+    if (!MakeEngine(e, c, err)) { std::printf("windows: %s\n", err.c_str()); return; }
+    CutGuard guard;
+    TransitionRules rules;
+    std::map<std::string, std::array<int, 6>> tally;   // per label: windows, interpolated, rule cut, guard cut, flash hold, blend
+    for (size_t w = 0; w < windows; ++w) {
+        Pic* f = &clip.frames[w * 7];
+        const int sa = e.Upload(f[3].View(), err), sb = e.Upload(f[4].View(), err);
+        PairStats st;
+        const int p = sa >= 0 && sb >= 0 ? e.Estimate(sa, sb, -1, st, err) : -1;
+        if (p < 0) { std::printf("windows: %s\n", err.c_str()); return; }
+        const Thumb t2 = Thumb::Of(f[2].View()), t3 = Thumb::Of(f[3].View()), t4 = Thumb::Of(f[4].View()), t5 = Thumb::Of(f[5].View());
+        const int d = DecidePair(guard, st, rules, &t2, &t3, &t4, &t5);
+        auto& t = tally[labels[w]];
+        t[0]++; t[size_t(1 + std::clamp(d, 0, 4))]++;
+        e.ReleasePair(p); e.ReleaseSlot(sa); e.ReleaseSlot(sb);
+    }
+    for (auto& [label, t] : tally) {
+        char note[256];
+        std::snprintf(note, sizeof(note), "%d windows: %d interpolated, %d cut (rule), %d cut (guard), %d held (flash), %d blended (transition)", t[0], t[1], t[2], t[3], t[4], t[5]);
+        Row("cutset", label, 0, 0, 0, note);
+    }
+}
+
+// ---- throughput: the real backend at x4 (Dedup's lookahead, pipelined motion and outputs), every output in order;
+// outputs per second and the mean per source frame, for each motion source the device has
+static void BenchThroughput(Y4m& clip)
+{
+    struct T { const char* name; bool of; bool hybrid; };
+    for (const T& m : { T{ "gpu-blocks-q2", false, false }, T{ "gpu-nvof", true, false }, T{ "gpu-hybrid", true, true } }) {
+        const int K = 4;
+        Pipeline<int> pipe;
+        GpuBackend<int> be;
+        std::map<int, Pic> outs;
+        int next = 1;
+        Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.blockMatcherOnly = !m.of; c.nvofHybrid = m.hybrid;
+        std::string err;
+        if (!MakeEngine(be.engine, c, err)) { std::printf("throughput: %s\n", err.c_str()); return; }
+        if (m.of && !be.engine.OpticalFlowActive()) continue;
+        be.subtitleHold = false;
+        be.cadence.Configure(K, 2, int64_t(clip.frames.size()));
+        pipe.Init(K, int64_t(clip.frames.size()), SrcDur100ns(24000, 1001));
+        pipe.SetLookahead(be.Lookahead());
+        pipe.Reset();
+        be.grid = pipe.GridOf();
+        be.source = [&](int64_t s, YuvView& v, void*& keep) { if (s < 0 || s >= int64_t(clip.frames.size())) return false; v = clip.frames[size_t(s)].View(); keep = nullptr; return true; };
+        be.unkeep = [](void*) {};
+        be.alloc = [&](YuvOut& o, int& f, void*) { f = next++; Pic& p = outs[f]; p.Alloc(clip.w, clip.h, clip.bits); o = p.Out(); return true; };
+        be.release = [&](int f) { outs.erase(f); };
+        const int64_t total = int64_t(clip.frames.size() - 3) * K;
+        const double t0 = Now();
+        int64_t n = 0;
+        for (; n < total; ++n) {
+            int64_t from, to;
+            pipe.Requests(n, from, to);
+            if (!pipe.Produce(n, from, be, 10000).ok) break;
+        }
+        const double ms = Now() - t0;
+        char note[160];
+        std::snprintf(note, sizeof(note), "%.0f outputs/s at x%d (%.1f ms a source frame), %lld outputs", double(n) * 1000.0 / ms, K, ms / (double(n) / K), (long long)n);
+        Row("throughput", m.name, 0, 0, ms / double(std::max<int64_t>(1, n)), note);
     }
 }
 
@@ -408,7 +592,7 @@ static void Synthetic(int W, int H, int frames, Y4m& out)
 
 int main(int argc, char** argv)
 {
-    std::string file, test = "interp", cutWith;
+    std::string file, test = "interp", cutWith, labelsPath;
     int frames = 40, skip = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -421,6 +605,8 @@ int main(int argc, char** argv)
         else if (a == "--y4m-out") g_y4mOut = next();
         else if (a == "--device") g_device = next();
         else if (a == "--cut-with") cutWith = next();
+        else if (a == "--labels") labelsPath = next();
+        else if (a == "--stride") g_stride = std::clamp(std::atoi(next().c_str()), 2, 8);
         else file = a;
     }
     if (file.empty()) { std::printf("usage: gpu_bench clip.y4m [--clip name] [--test interp|twos|upscale|cuts] [--frames N] [--skip N] [--csv f] [--y4m-out dir] [--cut-with other.y4m] [--device d]\n"); return 2; }
@@ -428,11 +614,20 @@ int main(int argc, char** argv)
     Y4m clip;
     std::string err;
     if (file == "synthetic") Synthetic(1280, 720, frames, clip);
+    else if (file == "synthetic1080") Synthetic(1920, 1080, frames, clip);
+    else if (file == "synthetic2160") Synthetic(3840, 2160, frames, clip);
     else if (!ReadY4m(file, frames, skip, clip, err)) { std::printf("gpu_bench: %s\n", err.c_str()); return 1; }
     std::printf("gpu_bench: %s, %dx%d %d-bit, %zu frames, test %s\n", g_clip.c_str(), clip.w, clip.h, clip.bits, clip.frames.size(), test.c_str());
     if (test == "interp") BenchInterp(clip);
     else if (test == "twos") BenchTwos(clip);
     else if (test == "upscale") BenchUpscale(clip, std::min(frames, 8));
+    else if (test == "transitions") {
+        Y4m other;
+        if (cutWith.empty() || !ReadY4m(cutWith, frames, 0, other, err)) { std::printf("transitions: --cut-with clip needed (%s)\n", err.c_str()); return 1; }
+        BenchTransitions(clip, other);
+    }
+    else if (test == "windows") BenchWindows(clip, labelsPath);
+    else if (test == "throughput") BenchThroughput(clip);
     else if (test == "cuts") {
         Y4m other;
         Y4m* o = nullptr;

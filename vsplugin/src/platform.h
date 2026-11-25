@@ -95,7 +95,7 @@ struct PortableSettings {
     std::string target = "screen";   // UpscaleTarget: screen | 1440p | 4k | 5k
     int dedup = -1;       // Dedup: -1 Auto (on), 0 off, 1 on
     int subtitleHold = -1;   // SubtitleHold: -1 Auto (on in the portable engine), 0 off, 1 on
-    std::string motion = "auto";     // PortableMotion: auto (the GPU block matcher) | blocks | nvof (NVIDIA optical flow, opt-in)
+    std::string motion = "auto";     // PortableMotion: auto (the GPU block matcher) | blocks | nvof | hybrid (NVIDIA optical flow, opt-in)
 };
 inline int ParseQuality(const std::string& v, int def)
 {

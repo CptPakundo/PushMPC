@@ -303,7 +303,10 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     c.outWidth = up.w; c.outHeight = up.h;
     c.sharpness = float(std::clamp(PArgF(in, a, "sharpness", up.kind == GpuUpscaler::Nis ? kDefaultSharpnessNis : kDefaultSharpnessFsr), 0.0, 1.0));
     c.sourceSlots = 8; c.outSlots = 10;
-    c.blockMatcherOnly = s.motion != "nvof";   // the block matcher unless asked (motion=nvof / PortableMotion=nvof)
+    // the block matcher unless asked: motion=nvof (NVIDIA optical flow as the field) or motion=hybrid (the flow as one more
+    // block-matcher candidate); PortableMotion the same
+    c.blockMatcherOnly = s.motion != "nvof" && s.motion != "hybrid";
+    c.nvofHybrid = s.motion == "hybrid";
     if (!d->be.engine.Configure(c, req, why)) { delete d; return false; }
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);

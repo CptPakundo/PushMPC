@@ -128,10 +128,10 @@ static bool MakeEngine(Engine& e, Config c, std::string& err)
     return e.Configure(c, r, err);
 }
 
-static void TestInterpParity(int bits)
+static void TestInterpParity(int bits, bool refined)
 {
     const int W = 350, H = 238;
-    Config c; c.width = W; c.height = H; c.bits = bits; c.quality = 1; c.blockMatcherOnly = true;
+    Config c; c.width = W; c.height = H; c.bits = bits; c.quality = 1; c.blockMatcherOnly = true; c.refined = refined;
     Engine e;
     std::string err;
     if (!MakeEngine(e, c, err)) { CHECK(false, "configure: %s", err.c_str()); return; }
@@ -146,7 +146,8 @@ static void TestInterpParity(int bits)
     if (pair < 0 || !e.InjectFields(pair, f, k, err)) { CHECK(false, "pair: %s", err.c_str()); return; }
     for (float t : { 0.25f, 0.5f, 0.75f }) {
         portable::Picture ref;
-        portable::InterpolatePlanes(pa, pb, f, k, t, (1 << bits) - 1, ref, 1);
+        if (refined) portable::InterpolatePlanesRefined(pa, pb, f, k, t, (1 << bits) - 1, ref, 1);
+        else portable::InterpolatePlanes(pa, pb, f, k, t, (1 << bits) - 1, ref, 1);
         Pic g(W, H, bits);
         YuvOut o = g.Out();
         int out = -1; uint64_t ticket = 0;
@@ -159,7 +160,7 @@ static void TestInterpParity(int bits)
                 const int d = std::abs(int(g.p[i][q]) - int(ref.p[i].px[q]));
                 worst = std::max(worst, d); diff += d ? 1 : 0; ++n;
             }
-        CHECK(worst <= 1 && double(diff) <= 0.02 * double(n), "parity %d-bit t=%.2f: worst %d, %zu of %zu samples differ", bits, t, worst, diff, n);
+        CHECK(worst <= 1 && double(diff) <= 0.02 * double(n), "parity %s %d-bit t=%.2f: worst %d, %zu of %zu samples differ", refined ? "refined" : "classic", bits, t, worst, diff, n);
     }
 }
 
@@ -501,8 +502,10 @@ int main(int argc, char** argv)
         return g_require ? 1 : 0;
     }
     std::printf("gpu_test on %s%s\n", ctx->Info().Describe().c_str(), ctx->OpticalFlow() ? " (VK_NV_optical_flow)" : "");
-    TestInterpParity(8);
-    TestInterpParity(10);
+    TestInterpParity(8, false);
+    TestInterpParity(10, false);
+    TestInterpParity(8, true);
+    TestInterpParity(10, true);
     TestMotion(1);
     TestMotion(2);
     TestBackendBox(8);

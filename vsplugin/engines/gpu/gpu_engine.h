@@ -49,6 +49,20 @@ struct Config {
                                         // default: on an RTX 5090 it was slower (4K: 17.0 vs 6.8 ms a pair) and not better
                                         // (synthetic zoom: 37.85 vs 38.06 dB) than the block matcher at quality 2
     float errorLow = 24.f, errorHigh = 48.f;
+    bool refined = true;                // InterpolatePlanesRefined's rule (portable_engine.h); false: PushFPS's own
+    float boundaryPx = 1.0f;
+    // the block matcher at quality 2 (8 px blocks on the full-size picture): search on a 3x3 binomial-filtered copy; double
+    // the smoothness penalty at the full-size level; the equiangular sub-pixel fit; the quadtree merge to 16 px where
+    // the finer detail is noise (mefinal.comp); the previous pair's global affine motion as one more candidate
+    bool prefilter = true, lambdaScale = true, equiangular = true, merge = true, globalCandidate = true;
+    float mergeSpread = 0.75f, mergeGain = 1.0f;
+    // NVIDIA optical flow (when not blockMatcherOnly): preset 0 slow, 1 medium, 2 fast; input 0 Auto (half size above 1440
+    // lines), 1 full, 2 half; dense: the field at the flow's own 4x4-cell resolution; cost: cells above nvofMaxCost are
+    // replaced by their neighbours' median; hybrid: the flow becomes one more candidate of the block matcher instead of
+    // the field (the block matcher's SAD picks)
+    int nvofPreset = 1, nvofInput = 0;
+    bool nvofDense = true, nvofCost = true, nvofHybrid = false;
+    float nvofMaxCost = 64.f;
 };
 
 struct PairStats {

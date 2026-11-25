@@ -24,6 +24,7 @@
 #include "gpu_engine.h"
 #include "schedule.h"
 #include "subtitle_hold.h"
+#include "transitions.h"
 
 namespace pmvs::gpu {
 
@@ -50,6 +51,17 @@ struct CutGuard {
     }
     void Reset() {}
 };
+
+// the decision for a pair of real frames (d0, d1), with the thumbnails of d0 - 1, d0, d1, d1 + 1 (any may be null):
+// 0 interpolate, 1 cut by PushFPS's rule, 2 cut by the guard, 3 a flash on either side (hold), 4 a dissolve or fade that
+// a cut rule fired on (the plain blend instead of a jump). transitions.h says why.
+inline int DecidePair(CutGuard& guard, const PairStats& st, const TransitionRules& r, const Thumb* t0m, const Thumb* t0, const Thumb* t1, const Thumb* t1p)
+{
+    int cut = guard.Decide(st);
+    if (cut && ((t0m && t0 && t1 && LinearTransition(*t0m, *t0, *t1, r)) || (t0 && t1 && t1p && LinearTransition(*t0, *t1, *t1p, r)))) cut = 4;
+    if ((t0m && t0 && t1 && Flash(*t0m, *t0, *t1, r)) || (t0 && t1 && t1p && Flash(*t0, *t1, *t1p, r))) cut = 3;
+    return cut;
+}
 
 // Auto's budget on the GPU: one source frame's cost (upload, the duplicate test, motion both ways) and one output's
 // (generation, upscaling, the wait and the copy out), measured on a synthetic moving picture at the real size with a
@@ -123,7 +135,9 @@ public:
     Grid grid;
     CutGuard guard;
     bool dedup = true, subtitleHold = true;
-    struct Stats { uint64_t pushed = 0, duplicates = 0, pairs = 0, cuts = 0, guardCuts = 0, generated = 0, holds = 0, heldPairs = 0, heldPixels = 0; double meMs = 0, waitMs = 0; };
+    struct Stats { uint64_t pushed = 0, duplicates = 0, pairs = 0, cuts = 0, guardCuts = 0, generated = 0, holds = 0, heldPairs = 0, heldPixels = 0, flashes = 0, linearBlends = 0; double meMs = 0, waitMs = 0; };
+    TransitionRules transitions;
+    bool transitionRules = true;   // dissolves and fades blended instead of held, flashes held (transitions.h)
     Stats stats;
 
     // the lookahead the Pipeline must request (schedule.h SetLookahead)
@@ -139,6 +153,7 @@ public:
         if (!contiguous) { if (!Drop(err)) { Unkeep(keep); return false; } }
         m_last = s;
         m_kept[s] = { keep, v };
+        if (transitionRules) m_thumbs[s] = Thumb::Of(v);
         const int slot = engine.Upload(v, err);
         if (slot < 0) return false;
         bool dup = false;
@@ -211,6 +226,7 @@ private:
         m_hold.Reset();
         for (auto& [s, k] : m_kept) Unkeep(k.keep);
         m_kept.clear();
+        m_thumbs.clear();
         for (auto& [key, p] : m_pairs) engine.ReleasePair(p.id);
         m_pairs.clear();
         m_lastPair = -1; m_lastPairKey = { -1, -1 };
@@ -260,9 +276,12 @@ private:
         PairStats st;
         const int id = it->second.id;
         if (!engine.EstimateEnd(id, st, err)) return false;
-        PairInfo pi; pi.id = id; pi.cut = guard.Decide(st);
+        PairInfo pi; pi.id = id;
+        pi.cut = transitionRules ? DecidePair(guard, st, transitions, ThumbAt(d0 - 1), ThumbAt(d0), ThumbAt(d1), ThumbAt(d1 + 1)) : guard.Decide(st);
+        if (pi.cut == 4) stats.linearBlends++;
+        if (pi.cut == 3) stats.flashes++;
         stats.pairs++; stats.meMs += st.ms;
-        if (pi.cut) { stats.cuts++; if (pi.cut == 2) stats.guardCuts++; }
+        if (pi.cut == 1 || pi.cut == 2) { stats.cuts++; if (pi.cut == 2) stats.guardCuts++; }
         if (subtitleHold && !pi.cut) {
             auto ha = m_holdOf.find(d0), hb = m_holdOf.find(d1);
             if (ha != m_holdOf.end() && hb != m_holdOf.end()) {
@@ -336,11 +355,12 @@ private:
         YuvOut o;
         if (!alloc(o, f, k->keep)) { err = "GPU engine: could not allocate an output frame"; return false; }
         Pending p; p.o = { pts, (st.n % grid.k) != 0, f };   // a source position's own output counts as its real frame for the Pipeline
-        const int mode = pi.cut ? (sh.t < 0.5f ? 1 : 2) : 0;
+        // cut: 1 PushFPS's rule, 2 the guard, 3 a flash: the nearer real frame; 4 a dissolve or fade: the plain blend
+        const int mode = pi.cut == 4 ? 3 : pi.cut ? (sh.t < 0.5f ? 1 : 2) : 0;
         if (!engine.Generate(pi.id, sh.t, mode, p.out, p.ticket, err)) { Release(f); return false; }
         m_outPlanes[f] = o;
         stats.generated++;
-        if (tag) tag(pts, pi.cut ? 2 : 1, f);
+        if (tag) tag(pts, pi.cut && pi.cut != 4 ? 2 : 1, f);
         m_pending.push_back(p);
         return true;
     }
@@ -385,6 +405,7 @@ private:
                 // a frame still feeding Subtitle Hold's worker stays until that is done
                 auto h = m_holdOf.find(it->first);
                 if (h != m_holdOf.end()) { h->second.wait(); m_holdOf.erase(h); }
+                m_thumbs.erase(it->first);
                 Unkeep(it->second.keep); it = m_kept.erase(it);
             } else ++it;
         }
@@ -395,6 +416,8 @@ private:
     int m_lastDistinctSlot = -1;
     int64_t m_prevDistinct = -1;
     std::map<int64_t, Kept> m_kept;
+    std::map<int64_t, Thumb> m_thumbs;
+    const Thumb* ThumbAt(int64_t s) const { auto it = m_thumbs.find(s); return it == m_thumbs.end() ? nullptr : &it->second; }
     std::map<int64_t, int> m_slotOf;
     std::map<std::pair<int64_t, int64_t>, PairInfo> m_pairs;
     int m_lastPair = -1;

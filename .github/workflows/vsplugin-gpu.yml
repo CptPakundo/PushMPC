@@ -24,6 +24,10 @@ on:
       bench_frames:
         description: 'frames per clip in the benchmark'
         default: '30'
+      cutset:
+        description: 'also build the cut-guard test set from CC-BY films (TransNetV2 + PySceneDetect) and score the guard on it'
+        type: boolean
+        default: false
 
 concurrency:
   group: vsplugin-gpu-${{ github.ref }}
@@ -35,7 +39,7 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -175,7 +179,7 @@ jobs:
 
       - name: Quality benchmark
         if: ${{ !cancelled() }}
-        timeout-minutes: 35
+        timeout-minutes: 55
         env: { PUSHMPC_VK_ALLOW_CPU: '1' }
         run: |
           set -uo pipefail
@@ -188,9 +192,13 @@ jobs:
           for n in park_joy ducks_take_off in_to_tree old_town_cross bbb60; do [ -s "$c/$n.y4m" ] && clips="$clips $n"; done
           for n in $clips; do run "$c/$n.y4m" --clip $n --test interp --frames $N --y4m-out $o/y4m; done
           run synthetic --clip synthetic-zoom --test interp --frames $N --y4m-out $o/y4m
+          for n in park_joy in_to_tree bbb60; do [ -s "$c/$n.y4m" ] && run "$c/$n.y4m" --clip $n --test interp --stride 4 --frames $N; done
+          run synthetic --clip synthetic-zoom-throughput --test throughput --frames 24
           [ -s "$c/bbb60.y4m" ] && run "$c/bbb60.y4m" --clip bbb60 --test twos --frames 48
           run synthetic --clip synthetic-zoom --test twos --frames 40
           for n in park_joy bbb60; do [ -s "$c/$n.y4m" ] && run "$c/$n.y4m" --clip $n --test upscale --frames 4; done
+          # constructed transitions with exact truth: hard cut, same-palette jump cut, dissolve, fade, flash
+          for p in "park_joy old_town_cross" "in_to_tree ducks_take_off" "old_town_cross in_to_tree"; do set -- $p; [ -s "$c/$1.y4m" ] && [ -s "$c/$2.y4m" ] && run "$c/$1.y4m" --clip "$1+$2" --test transitions --frames 48 --cut-with "$c/$2.y4m"; done
           # cuts: every clip's own pairs, and its junction to the first frame of every other clip
           for a in $clips; do for b in $clips; do [ "$a" = "$b" ] && continue; run "$c/$a.y4m" --clip "$a>$b" --test cuts --frames 16 --cut-with "$c/$b.y4m"; done; done
           grep '^STAT' $o/log.txt > $o/cutstats.txt || true
@@ -255,12 +263,34 @@ jobs:
         run: |
           cmake -S vsplugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_VULKAN_HEADERS_DIR="$VKH" -DPMVS_VOLK_DIR="$VOLK" -DPMVS_GLSLANG="$GLSLANG"
           cmake --build build --target portable_test gpu_test gpu_bench pushmpc_vs --parallel
-      - name: Tests (no Vulkan driver on the runner)
+      - name: Tests without a Vulkan driver (the CPU fallback path)
         timeout-minutes: 10
         shell: bash
         run: |
           build/portable_test.exe
           build/gpu_test.exe --no-timings
+      - name: Mesa lavapipe for Windows (pinned) as the runner's Vulkan driver
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $pin = (Get-Content $env:PINS -Raw | ConvertFrom-Json).mesaWindows
+          $f = Join-Path $env:RUNNER_TEMP 'mesa.7z'
+          Invoke-WebRequest -Uri $pin.url -OutFile $f
+          $h = (Get-FileHash $f -Algorithm SHA256).Hash
+          if ($h -ne $pin.sha256.ToUpperInvariant()) { throw "SHA-256 mismatch for $($pin.url): $h" }
+          $d = Join-Path $env:RUNNER_TEMP 'mesa'; 7z x $f "-o$d" -y | Out-Null
+          $json = Get-ChildItem $d -Recurse -Filter 'lvp_icd.x86_64.json' | Where-Object { $_.FullName -match '\x64\' } | Select-Object -First 1
+          if (-not $json) { Get-ChildItem $d -Recurse -Filter '*.json' | ForEach-Object { Write-Host $_.FullName }; throw 'no lvp_icd.x86_64.json' }
+          Get-Content $json.FullName | Write-Host
+          # the loader ignores VK_ICD_FILENAMES / VK_DRIVER_FILES on an elevated runner: register the ICD in the
+          # runner VM's HKLM (an ephemeral machine)
+          reg add 'HKLM\SOFTWARE\Khronos\Vulkan\Drivers' /v $json.FullName /t REG_DWORD /d 0 /f
+          if (-not (Test-Path "$env:WINDIR\System32\vulkan-1.dll")) { Write-Host '::warning::no vulkan-1.dll on the runner' }
+      - name: gpu_test on lavapipe (Windows, MSVC build of the GPU engine)
+        timeout-minutes: 25
+        shell: bash
+        env: { PUSHMPC_VK_ALLOW_CPU: '1' }
+        run: build/gpu_test.exe --require --no-timings
       - uses: actions/upload-artifact@v4
         with:
           name: gpu-windows
@@ -268,6 +298,75 @@ jobs:
             build/gpu_test.exe
             build/gpu_bench.exe
             vsplugin/bin/pushmpc_vs.dll
+
+  cutset:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.cutset == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: TransNetV2 (pinned commit, weights through Git LFS)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: soCzech/TransNetV2
+          ref: 85cef72af9a916bdfd7cc94a670c9cdfbf12d1ed
+          path: transnetv2
+          lfs: true
+      - name: Packages, pinned Python tools, deps
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mesa-vulkan-drivers ffmpeg ninja-build >/dev/null
+          python3 -m pip install -q $(python3 -c "import json; print(json.load(open('$PINS'))['cutset']['pip'])")
+          d=$RUNNER_TEMP/deps; mkdir -p "$d"
+          j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          for n in vulkanHeaders volk; do curl -fsSL --retry 3 -o "$d/$n.tar.gz" "$(j $n url)"; echo "$(j $n sha256)  $d/$n.tar.gz" | sha256sum -c -; mkdir -p "$d/$n"; tar -xzf "$d/$n.tar.gz" -C "$d/$n" --strip-components=1; done
+          cmake -S vsplugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_VULKAN_HEADERS_DIR="$d/vulkanHeaders" -DPMVS_VOLK_DIR="$d/volk"
+          cmake --build build --target gpu_bench --parallel
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pm-films
+          key: cutset-films-v1-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Films (CC-BY), labels, windows
+        timeout-minutes: 50
+        run: |
+          set -euo pipefail
+          c=~/.cache/pm-films; mkdir -p "$c"
+          args=""
+          for n in tos sintel bbb; do
+            url=$(python3 -c "import json; print(json.load(open('$PINS'))['cutset']['films']['$n']['url'])")
+            f="$c/$n.${url##*.}"
+            [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$url" || { echo "::warning::$n not fetched"; rm -f "$f"; continue; }
+            echo "$n: $(stat -c %s "$f") bytes, sha256 $(sha256sum "$f" | cut -d' ' -f1)"
+            args="$args --film $n=$f"
+          done
+          tn=""; [ -f transnetv2/inference/transnetv2-weights/saved_model.pb ] && [ $(stat -c %s transnetv2/inference/transnetv2-weights/saved_model.pb) -gt 1000 ] && tn="--transnet $PWD/transnetv2"
+          [ -n "$tn" ] || echo "::warning::TransNetV2 weights missing (LFS): PySceneDetect alone"
+          python3 vsplugin/tests/ci/cutset.py $args --out $RUNNER_TEMP/cutset --negatives 300 $tn
+      - name: The guard on the labelled windows
+        timeout-minutes: 20
+        env: { PUSHMPC_VK_ALLOW_CPU: '1' }
+        run: |
+          set -uo pipefail
+          o=$RUNNER_TEMP/cutset
+          echo "| clip | test | label | - | - | - | decisions |" > $o/table.md; echo "|---|---|---|---|---|---|---|" >> $o/table.md
+          for l in $o/*.labels; do
+            n=$(basename "$l" .labels)
+            build/gpu_bench "$o/$n.y4m" --clip $n --test windows --labels "$l" --frames 100000 | grep '^|' >> $o/table.md
+          done
+          cat $o/summary.json
+          cat $o/table.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cutset
+          path: |
+            ${{ runner.temp }}/cutset/*.json
+            ${{ runner.temp }}/cutset/*.labels
+            ${{ runner.temp }}/cutset/*.jpg
+            ${{ runner.temp }}/cutset/table.md
 
   macos:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'true'
