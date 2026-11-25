@@ -208,7 +208,8 @@ jobs:
           Write-Host "install: $($r | ConvertTo-Json -Compress)"
           if ($r.state -ne 'installed') { throw 'install failed' }
           $clip = Join-Path $env:RUNNER_TEMP 't\clip.mkv'; $out = Join-Path $env:RUNNER_TEMP 't\native-install.mkv'
-          & (Join-Path $dest 'mpv.com') -v $clip "--o=$out" --of=matroska --ovc=ffv1 --no-audio 2>&1 | Select-String 'config|pushmpc|filter|vf' | Select-Object -First 12
+          & (Join-Path $dest 'mpv.com') -v $clip "--o=$out" --of=matroska --ovc=ffv1 --no-audio 2>&1 | Select-String 'config file|pushmpc|User filter|portable' | Select-Object -First 12
+          Get-Content (Join-Path $dest 'portable_config/mpv.conf') | Write-Host
           $n = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $out
           $src = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $clip
           Write-Host "frames through the installed config: $n (source $src)"

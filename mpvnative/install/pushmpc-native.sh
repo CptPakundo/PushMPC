@@ -18,7 +18,7 @@
 # What install does, per target, with an exact undo (uninstall):
 #   - copies the files to <dest> (~/.local/share/pushmpc/mpvnative, or ~/.var/app/io.mpv.Mpv/data/pushmpc/mpvnative);
 #   - puts a marked block at the top of mpv.conf (before any [profile]):
-#       script=<dest>/pushmpc_hook.so            (loads the hook; it appends @pushmpc:pushmpc to vf)
+#       scripts-append=<dest>/pushmpc_hook.so    (loads the hook; it appends @pushmpc:pushmpc to vf)
 #       script-opts-append=pushmpc-vf=<opts>     (only with --opts)
 #       hwdec=auto-safe / video-sync=display-resample / interpolation=no / hr-seek-framedrop=no
 #     the original file is kept as mpv.conf.pushmpc-native-backup (or .pushmpc-native-absent);
@@ -70,7 +70,7 @@ block() {
     if [ "$2" = crlf ]; then nl=$(printf '\r\n_'); nl=${nl%_}; else nl='
 '; fi
     printf '%s%s' "$BEGIN_MARK" "$nl"
-    printf 'script=%s/pushmpc_hook.so%s' "$1" "$nl"
+    printf 'scripts-append=%s/pushmpc_hook.so%s' "$1" "$nl"
     [ -n "$opts" ] && printf 'script-opts-append=pushmpc-vf=%s%s' "$opts" "$nl"
     printf 'hwdec=auto-safe%svideo-sync=display-resample%sinterpolation=no%shr-seek-framedrop=no%s' "$nl" "$nl" "$nl" "$nl"
     printf '%s%s' "$END_MARK" "$nl"
