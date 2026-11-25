@@ -12,6 +12,14 @@
   Used by PushMPC-Setup.exe and PushMpcUpdater.exe (-Machine: "@@kind|text" lines instead of coloured text):
     pushmpc-install.ps1 plan            [-ReleaseManifest <json>]   what install/update needs from the network (no change)
     pushmpc-install.ps1 prepare-runtime -ReleaseManifest <json> [-PackageCache <dir>]   stage the release's runtime
+    pushmpc-install.ps1 autoplan [-Apply]  Auto's engine choice for this PC per player route (-Apply: write auto-plan.json
+                                        and pmml.txt as install does, e.g. after a GPU change)
+  What install does on its own, with no questions: every player it finds gets PushMPC's native route (MPC-HC, MPC-BE,
+    PotPlayer; the mpv family through mpv-integration.ps1, Stremio and Plex included; VLC when the build has the VLC
+    module), Auto's engine choice is logged and saved as auto-plan.json, PushFlow's pmml.txt is written from it, AMD
+    FSR SDK 2.4 is fetched on Radeon RX 6000 / 7000 / 9000 (-FidelityFx Package declines it), and capture mode
+    (pushmpc-capture.ps1, PushFPS's window capture) is switched on only for players without a native route
+    (-Capture Auto|On|Off). -NoVlc skips VLC. Tests: PUSHMPC_TEST_GPU="<vendor>:<device>:<name>" stands in for the GPU.
   Test switches: -NoMpcHc (no MPC-HC, MPC-VR or NVIDIA profile change), -NoRegister (no regsvr32), -NoTask (no logon task),
     -NoMpcBe (no MPC-BE change); MPC-BE steps alone against a fake root:
     pushmpc-install.ps1 mpcbe-apply|mpcbe-remove -InstallDir <scratch> -MpcBeRegRoot <HKCU:\...> -MpcBeExe <fake mpc-be64.exe>
@@ -54,7 +62,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'potplayer-apply', 'potplayer-remove', 'mpv-apply', 'mpv-remove')]
+    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'potplayer-apply', 'potplayer-remove', 'mpv-apply', 'mpv-remove', 'autoplan')]
     [string]$Action,
     [string]$StageDir = '',
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'PushMPC'),
@@ -102,6 +110,16 @@ param(
     [string]$MpvRoot = '',
     [string]$VsPluginDll = '',
     [string]$VsPinFile = '',
+    # VLC: skip it; stage: the VLC module build (libpushmpc_plugin.dll; staged as vlc\ with pushmpc-vlc.ps1)
+    [switch]$NoVlc,
+    [string]$VlcPlugin = '',
+    # capture mode, the fallback for players without a native route: Auto = on only when such a player is found
+    [ValidateSet('Auto', 'On', 'Off')]
+    [string]$Capture = 'Auto',
+    [string]$CaptureStartMenu = '',
+    # the pmml runtime folder (PushFlow on other ONNX Runtime EPs); default: PMML_RUNTIME, HKCU MlRuntime, <InstallDir>\pmml
+    [string]$PmmlRuntime = '',
+    [switch]$Apply,
     [switch]$KeepSettings,
     [switch]$Verify,
     # build outputs for "stage" (default: this repository's build folders; PUSHMPC_BUILD_DIR overrides the build tree)
@@ -1496,7 +1514,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1534,6 +1552,7 @@ function Invoke-Stage {
         else { Info 'Runtime not staged (dry run without a package).' }
     } elseif (Test-Path $r) { Remove-Item $r -Recurse -Force }
     Stage-VsPlugin $filterVersion
+    Stage-Vlc $filterVersion
     Step 'Staged'
     foreach ($n in $Components) {
         if ($n -eq 'runtime' -and -not $WithRuntime) { Info ("{0,-8} not staged: a release never contains it (Veyra's package at install time)" -f $n); continue }
@@ -1542,7 +1561,19 @@ function Invoke-Stage {
     $vsm = Join-Path $StageDir 'vsplugin'
     if (Read-Manifest $vsm) { Info ("{0,-8} {1}" -f 'vsplugin', (Component-Summary $vsm)) } else { Info ("{0,-8} not staged (optional: the mpv route)" -f 'vsplugin') }
 }
-# The optional vsplugin component (the mpv route): pushmpc_vs.dll, pushmpc.vpy, mpv-integration.ps1 and the
+# The optional VLC component: the VLC 3 module (-VlcPlugin <libpushmpc_plugin.dll>, built by vlc-plugin.yml) and its
+# installer pushmpc-vlc.ps1. Skipped when no plugin build is given.
+function Stage-Vlc([string]$version) {
+    $v = Join-Path $StageDir 'vlc'
+    if (Test-Path $v) { Remove-Item $v -Recurse -Force }
+    $inst = Join-Path $repo 'vlcplugin\install\pushmpc-vlc.ps1'
+    if (-not $VlcPlugin -or -not (Test-Path -LiteralPath $VlcPlugin) -or -not (Test-Path -LiteralPath $inst)) { Info 'vlc not staged (no -VlcPlugin build): VLC is covered by capture mode'; return }
+    New-Item -ItemType Directory -Force $v | Out-Null
+    Copy-Item -LiteralPath $VlcPlugin (Join-Path $v 'libpushmpc_plugin.dll')
+    Copy-Item -LiteralPath $inst $v
+    Invoke-CodeSign @((Join-Path $v 'libpushmpc_plugin.dll'))
+    Write-Manifest $v @{ component = 'vlc'; version = $version; 'vlc-api' = '3.0' }
+}# The optional vsplugin component (the mpv route): pushmpc_vs.dll, pushmpc.vpy, mpv-integration.ps1 and the
 # VapourSynth runtime pins. Skipped with a warning while pushmpc_vs.dll is not built (it needs the VapourSynth SDK headers).
 function Stage-VsPlugin([string]$version) {
     $v = Join-Path $StageDir 'vsplugin'
@@ -1585,6 +1616,7 @@ function Invoke-Package {
         $bad = Test-ComponentFiles $vsStage
         if ($bad) { Warn "vsplugin left out of the release: the stage is not complete ($bad)" } else { $relNames += 'vsplugin' }
     } else { Info 'vsplugin (the mpv route) is not staged: the release has the MPC-HC / MPC-BE filter only' }
+    if ((Read-Manifest (Join-Path $StageDir 'vlc')) -and -not (Test-ComponentFiles (Join-Path $StageDir 'vlc'))) { $relNames += 'vlc' }
     Step "Packaging PushMPC $fv into $ReleaseDir"
     if ($DryRun) { Dry "would write $out (installer, filter\, core\), PushMPC-$fv.zip, the component zips and release.json"; return }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -1671,7 +1703,7 @@ function Invoke-Package {
 # (filter\..., core\..., payload.txt), uint64 size, the bytes. Uncompressed (about 5 MB).
 function Write-SetupPayload([string]$releaseFolder, [string]$dest, [string]$version) {
     $root = (Resolve-Path $releaseFolder).Path.TrimEnd('\')
-    $dirs = @('filter', 'core', 'vsplugin') | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path $_ }
+    $dirs = @('filter', 'core', 'vsplugin', 'vlc') | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path $_ }
     $files = @(Get-ChildItem $dirs -Recurse -File | Sort-Object FullName)
     $info = [Text.Encoding]::UTF8.GetBytes("release=$version`r`nfilter=$((Read-Manifest (Join-Path $root 'filter')).kv['version'])`r`ncore=$((Read-Manifest (Join-Path $root 'core')).kv['version'])`r`n")
     $fs = [IO.File]::Create($dest)
@@ -2272,6 +2304,248 @@ function Uninstall-MpvRoute($state) {
     if ($state.PSObject.Properties['mpvRoute']) { $state.PSObject.Properties.Remove('mpvRoute') }
 }
 
+# ------------------------------------------------------------------------------------------------ Auto plan (Setup's engine choice)
+# What Auto starts with on this PC, per player route, by the same rules the players' Auto uses: pushcore's GPU family
+# (PushCoreGpu.cpp familyOf), the filter's frame generation order (PushMpcAuto.h FgOrder), the unlocks (unlocks.h) and
+# the mpv route's engine (vsplugin backend.h SelectBackend). Setup logs it, writes <InstallDir>\auto-plan.json, and
+# writes PushFlow's pmml.txt from it. During playback Auto still measures this GPU and steps down where a method does
+# not fit; nothing here is a fixed setting.
+# Tests: PUSHMPC_TEST_GPU="<vendor hex>:<device hex>:<adapter name>" stands in for the video controllers (CI has no GPU).
+function Get-GpuInfo {
+    $t = $env:PUSHMPC_TEST_GPU
+    if ($t) {
+        $p = $t.Split(':', 3)
+        return [pscustomobject]@{ Name = $p[2]; Vendor = [Convert]::ToUInt32($p[0], 16); Device = [Convert]::ToUInt32($p[1], 16); Driver = 'test'; Source = 'PUSHMPC_TEST_GPU' }
+    }
+    $list = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object {
+        $v = 0; $d = 0
+        if ("$($_.PNPDeviceID)" -match 'VEN_([0-9A-Fa-f]{4})&DEV_([0-9A-Fa-f]{4})') { $v = [Convert]::ToUInt32($Matches[1], 16); $d = [Convert]::ToUInt32($Matches[2], 16) }
+        [pscustomobject]@{ Name = "$($_.Name)".Trim(); Vendor = $v; Device = $d; Driver = "$($_.DriverVersion)"; Source = 'Win32_VideoController' } })
+    # the adapter pushcore takes is DXGI's high-performance one: the discrete GPU of a laptop with two
+    $rank = @{ 0x10DE = 0; 0x1002 = 1; 0x8086 = 2; 0x5143 = 3 }
+    $hw = @($list | Where-Object { $_.Vendor -and $_.Vendor -ne 0x1414 } | Sort-Object { if ($rank.ContainsKey([int]$_.Vendor)) { $rank[[int]$_.Vendor] } else { 9 } })
+    if ($hw.Count) { return $hw[0] }
+    if ($list.Count) { return $list[0] }   # e.g. Microsoft Basic Display Adapter (a runner, a VM)
+    return [pscustomobject]@{ Name = ''; Vendor = 0; Device = 0; Driver = ''; Source = 'none' }
+}
+function Get-GpuFamily($g) {
+    $n = "$($g.Name)"
+    switch ([int]$g.Vendor) {
+        0x10DE {
+            if ($n -match 'RTX 50|Blackwell|RTX PRO') { return 'RTX 50' }
+            if ($n -match 'RTX 40|Ada') { return 'RTX 40' }
+            if ($n -match 'RTX 30|RTX A') { return 'RTX 30' }
+            if ($n -match 'RTX 20|TITAN RTX|Quadro RTX') { return 'RTX 20' }
+            if ($n -match 'RTX') { return 'RTX 40' }   # an unknown RTX name: a newer card (pushcore's rule)
+            return 'GTX'
+        }
+        0x1002 {
+            foreach ($m in [regex]::Matches($n, '(?i)rx\s*(\d)')) { switch ($m.Groups[1].Value) { '9' { return 'RX 9000' } '7' { return 'RX 7000' } '6' { return 'RX 6000' } '5' { return 'RX 5000' } } }
+            return 'Radeon'
+        }
+        0x8086 { return 'Intel' }
+        0 { return 'none' }
+        0x1414 { return 'none' }   # Microsoft Basic Display Adapter / WARP: no hardware GPU
+        default { return 'other' }
+    }
+}
+function Test-Gtx16($g) { $g.Vendor -eq 0x10DE -and (($g.Device -ge 0x2180 -and $g.Device -le 0x21DF) -or ($g.Device -ge 0x1F80 -and $g.Device -le 0x1FBF) -or "$($g.Name)" -match 'GTX ?16|MX[45]50') }
+function Test-Nvofa($g, [string]$fam) {
+    if ($g.Vendor -ne 0x10DE) { return $false }
+    if ($fam -like 'RTX*') { return $true }
+    if ($g.Device -ge 0x1F80 -and $g.Device -le 0x1FBF) { return $false }   # TU117 has no optical-flow unit
+    return ($g.Device -ge 0x2180 -and $g.Device -le 0x21DF) -or "$($g.Name)" -match 'GTX 1660|1650 SUPER'
+}
+# the pmml runtime (PushFlow on other ONNX Runtime EPs; optional): -PmmlRuntime, PMML_RUNTIME, HKCU MlRuntime, <InstallDir>\pmml
+function Find-PmmlRuntime {
+    $c = @($PmmlRuntime, $env:PMML_RUNTIME, (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime, (Join-Path $InstallDir 'pmml'))
+    foreach ($d in $c) { if ($d -and (Test-Path -LiteralPath (Join-Path $d 'graphs\synth-yuv.onnx'))) { return $d } }
+    return ''
+}
+# PushFlow's EP for pushcore: the pmml Auto benchmark's measurement when this card has one (pmml-autobench.json: the
+# backend with the fastest network among the candidates that ran), else pmml's order without a measurement (trt-rtx,
+# then dml, ...): TensorRT-RTX on an NVIDIA RTX card when its EP is installed. DirectML is pushcore's own default (no
+# pmml.txt then).
+function Get-PmmlChoice([string]$rt, [string]$fam, $g) {
+    if (-not $rt) { return @{ backend = ''; why = 'no pmml runtime installed: PushFlow on DirectML (pushcore''s own session)' } }
+    $cache = Join-Path $rt 'pmml-autobench.json'
+    if (Test-Path -LiteralPath $cache) {
+        try {
+            $j = Get-Content -LiteralPath $cache -Raw | ConvertFrom-Json
+            $entries = @($j.entries.PSObject.Properties | Where-Object { -not $g.Name -or $_.Name -like "*$($g.Name)*" })
+            $best = $null
+            foreach ($e in $entries) { foreach ($r in $e.Value.results.PSObject.Properties) { $v = $r.Value; if ($v.ok -and $v.netMs -gt 0 -and (-not $best -or $v.netMs -lt $best.netMs)) { $best = $v } } }
+            if ($best) {
+                $b = ($best.candidate -split '\|')[0]
+                return @{ backend = $(if ($b -match ':dml:') { '' } else { $b }); why = "pmml's measurement on this card: $($best.candidate) ($([math]::Round($best.netMs, 1)) ms per network run)" }
+            }
+        } catch { }
+    }
+    if ($fam -like 'RTX*' -and (Test-Path -LiteralPath (Join-Path $rt 'eps\trt-rtx\ep.json'))) { return @{ backend = 'ort:core:trt-rtx:0'; why = 'NVIDIA RTX with the TensorRT-RTX EP installed (pmml''s order without a measurement: trt-rtx before dml)' } }
+    return @{ backend = ''; why = 'pmml''s order without a measurement keeps DirectML on this GPU' }
+}
+# The plan: one row per route, plus what Setup offers (FSR SDK 2.4) and pmml.txt
+function Get-AutoPlan {
+    $g = Get-GpuInfo
+    $fam = Get-GpuFamily $g
+    $rtx = $fam -like 'RTX*'
+    $nvofa = Test-Nvofa $g $fam
+    $fg = switch ($fam) {
+        'RTX 50' { 'NVIDIA VFG (Medium, High when it fits; up to 8x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'RTX 40' { 'NVIDIA VFG (Medium, High when it fits; up to 8x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'RTX 30' { 'NVIDIA VFG (RTX 30 port, on by default), then DLSS-G (unlocked), PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'RTX 20' { 'DLSS-G, then PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'GTX' { if ($nvofa) { 'PushFlow, then NVIDIA optical flow + warp, FSR 3.1 FG (a slower card starts with the optical flow / FSR until PushFlow''s speed test has run)' } else { 'PushFlow, then FSR 3.1 FG (a slower card starts with FSR until PushFlow''s speed test has run)' } }
+        'RX 9000' { 'PushFlow, then FSR 3.1 / FSR 4 frame generation, AMD FRC' }
+        { $_ -in 'RX 7000', 'RX 6000', 'RX 5000', 'Radeon' } { 'PushFlow, then FSR 3.1 FG, AMD FRC' }
+        'Intel' { 'PushFlow, then FSR 3.1 FG (XeSS-FG and Intel VPL interpolation after their self-tests)' }
+        'other' { 'PushFlow, then FSR 3.1 FG' }
+        default { '' }
+    }
+    $sr = switch ($fam) {
+        { $_ -like 'RTX*' } { 'RTX Video Super Resolution (and RTX Video HDR for SDR video on an HDR display)' }
+        'GTX' { if (Test-Gtx16 $g) { 'RTX Video Super Resolution on GTX 16 (unlock, after its self-test), else NIS' } else { 'NIS' } }
+        'RX 9000' { 'FSR 4.1 (RTX VSR through ZLUDA after its self-test)' }
+        'RX 7000' { 'FSR 4.1 INT8 (RTX VSR through ZLUDA after its self-test)' }
+        'RX 6000' { 'FSR 4.1 INT8 through AMD FSR SDK 2.4 (offered by Setup), else FSR' }
+        { $_ -in 'RX 5000', 'Radeon' } { 'FSR' }
+        'Intel' { 'NIS (Intel VPL super resolution after its self-test)' }
+        'other' { 'NIS' }
+        default { '' }
+    }
+    $pushflow = Test-Path -LiteralPath (Join-Path $InstallDir 'runtime\experimental\pushflow')
+    $rt = Find-PmmlRuntime
+    $pm = Get-PmmlChoice $rt $fam $g
+    $hwGpu = $fam -ne 'none'
+    # pushcore on this GPU (backend.h PushcoreUsable: RTX, or any DirectX 12 hardware GPU with a GPU frame generation method)
+    $dshow = if ($hwGpu) { "pushcore: $fg; upscaling: $sr" } else { 'pushcore needs a DirectX 12 hardware GPU: none found (the filter passes video through)' }
+    $mpv = if ($hwGpu) { "pushcore through VapourSynth (the same Auto as the filter): $fg; upscaling: $sr" }
+           elseif ($rt) { 'ml: PushFlow through pmml' }
+           else { 'portable: the GPU engine on a Vulkan device, else the CPU engine (about 2x at 1080p)' }
+    $fsrOffer = $fam -in 'RX 6000', 'RX 7000', 'RX 9000'
+    return [pscustomobject][ordered]@{
+        gpu = $(if ($g.Name) { $g.Name } else { 'none' }); gpuVendor = ('{0:X4}' -f [int]$g.Vendor); gpuDevice = ('{0:X4}' -f [int]$g.Device); gpuDriver = $g.Driver; gpuSource = $g.Source
+        family = $fam; runtimePackage = $GpuVendor
+        directshow = $dshow; mpv = $mpv
+        vlc = $(if ($hwGpu) { 'the VLC module on pushcore (frame generation; VLC''s own RTX / Intel super resolution)' } else { 'the VLC module on the portable engine' })
+        pushflow = $(if ($pushflow) { 'installed' } else { 'not installed' })
+        pmmlRuntime = $rt; pmmlBackend = $pm.backend; pmmlWhy = $pm.why
+        fsrSdk240 = $(if ($fsrOffer) { if ($FidelityFx -eq 'Package') { 'offered, declined (the package''s FSR SDK 2.3 set)' } else { 'on: AMD FSR SDK 2.4.0 (FSR 4.1 INT8 upscaling)' } } else { 'not for this GPU' })
+    }
+}
+function Show-AutoPlan($p) {
+    Info "GPU: $($p.gpu) [$($p.gpuVendor):$($p.gpuDevice)] (family $($p.family); from $($p.gpuSource))"
+    Info "Engine for MPC-HC / MPC-BE / PotPlayer: $($p.directshow)"
+    Info "Engine for mpv and mpv-based players: $($p.mpv)"
+    Info "PushFlow's ONNX Runtime EP: $(if ($p.pmmlBackend) { $p.pmmlBackend } else { 'DirectML' }) ($($p.pmmlWhy))"
+    Info "AMD FSR SDK 2.4: $($p.fsrSdk240)"
+}
+# pmml.txt beside PushFlow's models (runtime\experimental\pushflow): pushcore reads runtime= and backend= from it
+# (patches/pushfps-4.5.3-pushmpc.patch, pmmlChoice); without it, or with dml, PushFlow runs on its own DirectML session.
+function Write-PmmlChoice($p, $state) {
+    $dir = Join-Path $InstallDir 'runtime\experimental\pushflow'
+    $file = Join-Path $dir 'pmml.txt'
+    if (-not $p.pmmlBackend) {
+        if (Test-Path -LiteralPath $file) { if ($DryRun) { Dry "would remove $file" } else { Remove-Item -LiteralPath $file -Force; Info 'pmml.txt removed (DirectML is the choice now)' } }
+        Info "pmml.txt: not written ($($p.pmmlWhy))"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $dir)) { Info "pmml.txt: not written (PushFlow is not installed in $dir)"; return }
+    $text = "# written by PushMPC Setup from Auto's choice: $($p.pmmlWhy)`r`nruntime=$($p.pmmlRuntime)`r`nbackend=$($p.pmmlBackend)`r`n"
+    if ($DryRun) { Dry "would write $file (backend=$($p.pmmlBackend))"; return }
+    [IO.File]::WriteAllText($file, $text, (New-Object System.Text.UTF8Encoding($false)))
+    Info "pmml.txt written: backend=$($p.pmmlBackend), runtime=$($p.pmmlRuntime)"
+    # the mpv route's ml backend finds the same runtime (vsplugin ReadSetting MlRuntime)
+    if (-not $NoRegister) {
+        $cur = (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime
+        if (-not $cur) { New-Item 'HKCU:\Software\PushMPC' -Force | Out-Null; Set-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -Value $p.pmmlRuntime; Set-StateValue $state 'mlRuntimeSet' $p.pmmlRuntime }
+    }
+}
+function Save-AutoPlan($p) {
+    if ($DryRun) { return }
+    $p | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstallDir 'auto-plan.json') -Encoding UTF8
+}
+
+# ------------------------------------------------------------------------------------------------ VLC (optional component)
+# The VLC 3 module (vlcplugin\, staged as vlc\ with libpushmpc_plugin.dll and pushmpc-vlc.ps1) is installed by its own
+# installer when VLC is found; when this build has no VLC component, VLC is handed to capture mode.
+function Find-VlcExe {
+    foreach ($k in 'HKLM:\SOFTWARE\VideoLAN\VLC', 'HKCU:\SOFTWARE\VideoLAN\VLC') { try { $d = (Get-ItemProperty -Path $k -ErrorAction Stop).InstallDir; if ($d -and (Test-Path -LiteralPath (Join-Path $d 'vlc.exe'))) { return (Join-Path $d 'vlc.exe') } } catch { } }
+    foreach ($d in @((Join-Path "$env:ProgramFiles" 'VideoLAN\VLC'), $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'VideoLAN\VLC' }))) { if ($d -and (Test-Path -LiteralPath (Join-Path $d 'vlc.exe'))) { return (Join-Path $d 'vlc.exe') } }
+    return ''
+}
+function Get-VlcInstaller { foreach ($d in @((Join-Path $InstallDir 'vlc'), (Join-Path $StageDir 'vlc'))) { $s = Join-Path $d 'pushmpc-vlc.ps1'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath (Join-Path $d 'libpushmpc_plugin.dll'))) { return $d } }; return '' }
+function Install-VlcRoute($state) {
+    if ($NoVlc) { Info 'VLC skipped (-NoVlc)'; return $true }
+    $exe = Find-VlcExe
+    if (-not $exe) { return $true }
+    $d = Get-VlcInstaller
+    if (-not $d) { Info "VLC found ($exe): this build has no VLC module (capture mode covers it)"; return $false }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if ($DryRun) { Dry "would run pushmpc-vlc.ps1 -Action Install -Plugin $d\libpushmpc_plugin.dll"; return $true }
+    $pd = Join-Path $InstallDir 'vlc'
+    $out = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $d 'pushmpc-vlc.ps1') -Action Install -Plugin (Join-Path $d 'libpushmpc_plugin.dll') -PluginDir $pd 2>&1
+    $rc = $LASTEXITCODE
+    foreach ($l in $out) { Info "VLC: $l" }
+    # its installer stays beside the plugin (uninstall)
+    if ($rc -eq 0) { Copy-Item -LiteralPath (Join-Path $d 'pushmpc-vlc.ps1') $pd -Force -ErrorAction SilentlyContinue; Set-StateValue $state 'vlcRoute' $pd; return $true }
+    Warn "VLC: its installer returned $rc (capture mode covers VLC)"; return $false
+}
+function Uninstall-VlcRoute($state) {
+    $d = Get-StateValue $state 'vlcRoute'
+    if (-not $d -or $NoVlc) { return }
+    $s = Join-Path $d 'pushmpc-vlc.ps1'
+    if (-not (Test-Path -LiteralPath $s)) { $s = Join-Path $StageDir 'vlc\pushmpc-vlc.ps1' }
+    if (-not (Test-Path -LiteralPath $s)) { Warn 'pushmpc-vlc.ps1 not found: VLC''s settings are not put back'; return }
+    if ($DryRun) { Dry 'would run pushmpc-vlc.ps1 -Action Uninstall'; return }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    foreach ($l in (& $ps -NoProfile -ExecutionPolicy Bypass -File $s -Action Uninstall -PluginDir $d 2>&1)) { Info "VLC: $l" }
+    if ((Test-Path -LiteralPath $d) -and -not @(Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object Name -ne 'pushmpc-vlc.ps1').Count) { Remove-Item -LiteralPath $d -Recurse -Force }
+    $state.PSObject.Properties.Remove('vlcRoute')
+}
+
+# ------------------------------------------------------------------------------------------------ capture mode (fallback)
+# Players with no PushMPC frame generation route: capture mode (pushmpc-capture.ps1, PushFPS's window capture) is
+# switched on for them, and only for them. -Capture Auto (default) | On | Off.
+function Find-CaptureOnlyPlayers([object[]]$mpvRows) {
+    $out = @()
+    $pf = @("$env:ProgramFiles", ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ }
+    $probe = [ordered]@{
+        'KMPlayer 64X' = @('KMPlayer 64X\KMPlayer64.exe'); 'KMPlayer' = @('KMPlayer\KMPlayer.exe')
+        'GOM Player' = @('GRETECH\GomPlayer\GOM.exe', 'GRETECH\GOMPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe')
+        'Emby Theater' = @('Emby Theater\Emby.Theater.exe', 'Emby-Theater\Emby.Theater.exe', 'emby-theater\electron\Emby Theater.exe')
+    }
+    foreach ($k in $probe.Keys) { foreach ($rel in $probe[$k]) { foreach ($root in $pf) { if (Test-Path -LiteralPath (Join-Path $root $rel)) { $out += $k; break } }; if ($out -contains $k) { break } } }
+    if (Get-AppxPackage -Name 'Microsoft.ZuneMusic' -ErrorAction SilentlyContinue) { $out += 'Media Player (Windows)' }
+    # mpv-integration's rows: a player it found but cannot give frame generation (Plex: upscaling only; Stremio before
+    # 5.0.28: no config setting)
+    foreach ($r in @($mpvRows)) {
+        if ($r.Player -match '^(Plex|Stremio)' -and ($r.Kind -in 'plex', 'none')) { $out += "$($r.Player) ($(if ($r.Kind -eq 'plex') { 'native upscaling only' } else { 'no native route' }))" }
+        elseif ($r.Kind -in 'kodi', 'shim' -and -not $r.Managed) { $out += "$($r.Player) (needs mpv for the native route)" }
+    }
+    return @($out | Select-Object -Unique)
+}
+function Get-CaptureScript { foreach ($p in @((Join-Path $InstallDir 'filter\pushmpc-capture.ps1'), (Join-Path $StageDir 'filter\pushmpc-capture.ps1'), (Join-Path $here 'pushmpc-capture.ps1'))) { if ($p -and (Test-Path -LiteralPath $p)) { return $p } }; return '' }
+function Invoke-Capture([string]$act, [string[]]$players) {
+    $s = Get-CaptureScript
+    if (-not $s) { Warn 'pushmpc-capture.ps1 not found: capture mode not changed'; return }
+    $a = @{ InstallDir = $InstallDir; Machine = $Machine; DryRun = $DryRun }
+    if ($players) { $a.Players = $players }
+    if ($CaptureStartMenu) { $a.StartMenu = $CaptureStartMenu }
+    $out = & $s $act @a
+    foreach ($l in @($out)) { if ($l) { [Console]::Out.WriteLine($l) } }
+}
+function Install-CaptureRoute($state, [string[]]$players) {
+    if ($Capture -eq 'Off' -or ($Capture -eq 'Auto' -and -not $players.Count)) {
+        if (Get-StateValue $state 'capture') { Invoke-Capture 'disable'; $state.PSObject.Properties.Remove('capture') }
+        Info $(if ($Capture -eq 'Off') { 'Capture mode: off (-Capture Off)' } else { 'Capture mode: off (every player found has a native PushMPC route)' })
+        return
+    }
+    Info "Players without a native PushMPC route: $(if ($players.Count) { $players -join ', ' } else { 'none (-Capture On)' })"
+    Invoke-Capture 'enable' $players
+    if (-not $DryRun) { Set-StateValue $state 'capture' ($players -join ', ') }
+}
+
 # ------------------------------------------------------------------------------------------------ swap (shared by install and update)
 # Replaces $InstallDir\<name> with $src; the old one goes to previous\<name> (rollback). False = held by MPC-HC.
 function Swap-Component([string]$name, [string]$src) {
@@ -2370,8 +2644,23 @@ switch ($Action) {
         Set-MpcBeEntry $state
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
-        Step 'mpv, SMPlayer, MPC-QT (preview)'
+        Step 'mpv, SMPlayer, MPC-QT, Stremio, Plex, Jellyfin, Kodi'
         Install-MpvRoute $state
+        Step 'VLC'
+        $vlcOk = Install-VlcRoute $state
+        # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
+        Step 'Auto: the engine for this PC'
+        Progress 96 'Choosing the engine'
+        $plan = Get-AutoPlan
+        Show-AutoPlan $plan
+        Write-PmmlChoice $plan $state
+        Save-AutoPlan $plan
+        # capture mode only for players without a native route
+        Step 'Capture mode (fallback for other players)'
+        $mpvRows = @(if (-not $NoMpv -and (Get-MpvIntegrationScript)) { Invoke-MpvIntegration 'Detect' })
+        $cap = @(Find-CaptureOnlyPlayers $mpvRows)
+        if (-not $vlcOk) { $cap += 'VLC (no VLC module in this build)' }
+        Install-CaptureRoute $state $cap
         # the updater: <InstallDir>\PushMpcUpdater.exe (the filter starts "--auto" at most once a day) and the logon
         # task \PushMPC\Apply pending update (installs a downloaded update when MPC-HC is not running)
         $upd = Join-Path $InstallDir 'filter\PushMpcUpdater.exe'
@@ -2511,6 +2800,11 @@ switch ($Action) {
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
         Uninstall-MpvRoute $state
+        Uninstall-VlcRoute $state
+        if ((Get-StateValue $state 'capture') -or (Test-Path (Join-Path $InstallDir 'capture'))) { Invoke-Capture 'disable' }
+        # the pmml runtime path Setup gave the mpv route (only when Setup set it)
+        $ml = Get-StateValue $state 'mlRuntimeSet'
+        if ($ml -and -not $DryRun -and (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime -eq $ml) { Remove-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue }
         # the updater and its logon task
         Progress 40 'Removing the updater'
         $rootUpd = Join-Path $InstallDir 'PushMpcUpdater.exe'
@@ -2539,9 +2833,17 @@ switch ($Action) {
             $p = Join-Path $InstallDir $d
             if (Test-Path $p) { if ($DryRun) { Dry "would remove $p" } else { Remove-Item $p -Recurse -Force } }
         }
-        foreach ($f in @('state.json', 'pending.json')) { $p = Join-Path $InstallDir $f; if ((Test-Path $p) -and -not $DryRun) { Remove-Item $p -Force } }
+        foreach ($f in @('state.json', 'pending.json', 'auto-plan.json')) { $p = Join-Path $InstallDir $f; if ((Test-Path $p) -and -not $DryRun) { Remove-Item $p -Force } }
         Progress 100 'Removed'
         Info "Removed (logs are kept in $InstallDir\logs)."
+    }
+
+    'autoplan' {
+        # Auto's engine choice for this PC (nothing is changed); with -Machine "@@plan|key=value" lines
+        $p = Get-AutoPlan
+        if ($Machine) { foreach ($pr in $p.PSObject.Properties) { M "plan|$($pr.Name)=$($pr.Value)" } } else { Show-AutoPlan $p }
+        # -Apply: what install does with it (auto-plan.json, pmml.txt), e.g. after a GPU change
+        if ($Apply) { $state = Read-State; Write-PmmlChoice $p $state; Save-AutoPlan $p; Write-State $state }
     }
 
     'plan' {
@@ -2566,6 +2868,8 @@ switch ($Action) {
             $out['pushflow-url'] = $PushFlow.Url
             $out['pushflow-file'] = (Join-Path $InstallDir "download\$($PushFlow.Asset)")
         }
+        $ap = Get-AutoPlan
+        $out['gpu'] = $ap.gpu; $out['gpu-family'] = $ap.family; $out['engine'] = $ap.directshow; $out['fsr-sdk240'] = $ap.fsrSdk240
         foreach ($k in $out.Keys) { if ($Machine) { M "plan|$k=$($out[$k])" } else { Info ("{0,-18} {1}" -f $k, $out[$k]) } }
     }
 

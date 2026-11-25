@@ -60,6 +60,8 @@ scripts/nvidia-vfx-wheel.py
 scripts/nvidia-vfx-fetch.sh
 scripts/slang-pin.json
 scripts/fidelityfx-fetch.ps1
+scripts/pushmpc-capture.ps1
+scripts/test-autoplan.ps1
 vlcplugin/**
 pmml/CMakeLists.txt
 pmml/build.cmd

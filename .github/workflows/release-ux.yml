@@ -1,0 +1,248 @@
+# The one-step Setup per OS on hosted runners (no GPU):
+#   autoplan      Setup's Auto plan and capture mode against simulated GPUs (scripts/test-autoplan.ps1), Windows
+#                 PowerShell 5.1 and PowerShell 7; setup.sh's plan per GPU under sh and dash
+#   release       (dispatch with build_release) the release.yml build of this commit, which makes PushMPC-Setup.exe
+#   win-setup     PushMPC-Setup.exe /S on windows-2025 with players installed from their packages (MPC-HC, VLC, KMPlayer):
+#                 detection, the engine choice in the log, auto-plan.json, pmml.txt from a simulated RTX 4090 with the
+#                 TensorRT-RTX EP, capture mode for the players without a native route, then the uninstall leaves
+#                 nothing behind (registry, Start menu, files) and the players' settings as they were
+#   linux-setup   setup.sh in Arch with mpv, VLC, Kodi, Celluloid, SMPlayer from pacman: the plugin built from this
+#                 commit, detection, the engine choice, auto-plan.txt, mpv playing through the installed block, then
+#                 the uninstall restores HOME byte for byte
+name: release-ux
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_release:
+        description: 'Build PushMPC-Setup.exe from this commit (release.yml, about 25 min) for the Windows Setup run'
+        type: boolean
+        default: true
+      release_run:
+        description: 'Or: the run id of an earlier release.yml / release-ux run of this branch with the pushmpc-release artifact'
+        default: ''
+  push:
+    branches: ['track/release-ux']
+    paths:
+      - 'scripts/pushmpc-install.ps1'
+      - 'scripts/pushmpc-capture.ps1'
+      - 'scripts/test-autoplan.ps1'
+      - 'integrations/linux/setup.sh'
+      - 'integrations/linux/tests/setup.tests.sh'
+      - '.github/workflows/release-ux.yml'
+
+concurrency:
+  group: release-ux-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
+
+jobs:
+  autoplan:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Auto plan and capture mode (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-autoplan.ps1
+      - name: Auto plan and capture mode (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-autoplan.ps1
+      - name: The runner's own adapter
+        shell: pwsh
+        run: |
+          $d = "$env:RUNNER_TEMP\ap"; New-Item -ItemType Directory $d -Force | Out-Null
+          pwsh -NoProfile -File scripts/pushmpc-install.ps1 autoplan -InstallDir $d | Tee-Object "$env:RUNNER_TEMP\ap.txt"
+          @('## autoplan (runner adapter)', '', '```') + (Get-Content "$env:RUNNER_TEMP\ap.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+  setup-sh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -qq dash >/dev/null
+      - name: setup.sh plan per GPU (sh and dash)
+        run: |
+          sh integrations/linux/tests/setup.tests.sh
+          sed 's|^SH=sh$|SH=dash|' integrations/linux/tests/setup.tests.sh > /tmp/setup-dash.sh && grep -q '^SH=dash$' /tmp/setup-dash.sh && dash /tmp/setup-dash.sh
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_release && inputs.release_run == ''
+    uses: ./.github/workflows/release.yml
+    with:
+      source_ref: ${{ github.sha }}
+    secrets: inherit
+    permissions:
+      contents: write
+
+  win-setup:
+    needs: [autoplan, release]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.autoplan.result == 'success' && (needs.release.result == 'success' || inputs.release_run != '')
+    runs-on: windows-2025
+    timeout-minutes: 50
+    defaults: { run: { shell: pwsh } }
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pushmpc-release
+          path: '${{ runner.temp }}/release'
+          run-id: '${{ inputs.release_run || github.run_id }}'
+          github-token: '${{ github.token }}'
+      - name: Players from their packages (MPC-HC's installer, VLC and KMPlayer from Chocolatey)
+        timeout-minutes: 15
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"
+          $rel = gh api repos/clsid2/mpc-hc/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match '\.x64\.exe$' } | Select-Object -First 1
+          $f = "$env:RUNNER_TEMP\$($a.name)"; Invoke-WebRequest $a.browser_download_url -OutFile $f
+          $p = Start-Process $f -ArgumentList '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES' -PassThru; $p.WaitForExit(300000) | Out-Null
+          "MPC-HC $($rel.tag_name): installer exit $($p.ExitCode)" | Tee-Object -Append $log
+          New-Item 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Force | Out-Null
+          Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name UpdaterAutoCheck -Value 0 -Type DWord
+          $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          choco install vlc -y --no-progress --limit-output | Select-Object -Last 3
+          "VLC (Chocolatey): exit $LASTEXITCODE; vlc.exe $(Test-Path "$env:ProgramFiles\VideoLAN\VLC\vlc.exe")" | Tee-Object -Append $log
+          choco install kmplayer -y --no-progress --limit-output | Select-Object -Last 3
+          $km = @("$env:ProgramFiles\KMPlayer 64X\KMPlayer64.exe", "${env:ProgramFiles(x86)}\KMPlayer\KMPlayer.exe") | Where-Object { Test-Path $_ }
+          "KMPlayer (Chocolatey): exit $LASTEXITCODE; $(if ($km) { $km -join ', ' } else { 'not found' })" | Tee-Object -Append $log
+          if (-not $km) {
+            # the package can lag the vendor's download; a stand-in executable keeps the capture-mode check meaningful
+            New-Item -ItemType Directory "$env:ProgramFiles\KMPlayer 64X" -Force | Out-Null
+            Copy-Item "$env:SystemRoot\System32\notepad.exe" "$env:ProgramFiles\KMPlayer 64X\KMPlayer64.exe"
+            "KMPlayer: stand-in executable (Chocolatey package not installed)" | Tee-Object -Append $log
+            Write-Host '::warning title=KMPlayer::the Chocolatey package did not install; a stand-in executable is used for the capture-mode check'
+          }
+      - name: Snapshot before Setup
+        run: |
+          $s = "$env:RUNNER_TEMP\snap"; New-Item -ItemType Directory $s -Force | Out-Null
+          foreach ($k in 'MPC-HC', 'VideoLAN') { reg export "HKCU\Software\$k" "$s\before-$k.reg" /y 2>$null | Out-Null }
+          (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\before-env.txt"
+          Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\before-vlc.txt"
+          "PushMPC folder before: $(Test-Path "$env:LOCALAPPDATA\PushMPC"); Start menu PushMPC: $(Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC")" | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
+      - name: PushMPC-Setup.exe /S (simulated RTX 4090; a pmml runtime with the TensorRT-RTX EP)
+        timeout-minutes: 25
+        env:
+          PUSHMPC_TEST_GPU: '10DE:2684:NVIDIA GeForce RTX 4090'
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"
+          $rt = "$env:RUNNER_TEMP\pmml"; New-Item -ItemType Directory "$rt\graphs", "$rt\eps\trt-rtx" -Force | Out-Null
+          Set-Content "$rt\graphs\synth-yuv.onnx" 'stub'; Set-Content "$rt\eps\trt-rtx\ep.json" '{"name": "trt-rtx"}'
+          $env:PMML_RUNTIME = $rt
+          $wps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; Remove-Item Env:PSModulePath
+          $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"
+          if (-not $p.WaitForExit(1400000)) { $p.Kill(); throw 'Setup timed out' }
+          "Setup exit $($p.ExitCode)" | Tee-Object -Append $log
+          $sl = Get-ChildItem "$env:LOCALAPPDATA\PushMPC\logs" -Filter 'setup*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+          $text = Get-Content $sl.FullName -Raw
+          ($text -split "`r?`n" | Select-String -Pattern 'GPU:|Engine for|PushFlow''s ONNX|pmml.txt|AMD FSR SDK|found|Capture mode|Players without|VLC|KMPlayer|MPC-HC|Auto''s starting' | ForEach-Object Line) | Tee-Object -Append $log
+          $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
+          $pmml = Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue
+          $cap = Get-Content "$env:LOCALAPPDATA\PushMPC\capture\capture.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+          $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk"
+          $mpc = [bool](Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' })
+          "auto-plan.json: family $($plan.family); directshow: $($plan.directshow)" | Tee-Object -Append $log
+          "pmml.txt: $(($pmml -split "`r?`n" | Where-Object { $_ -match '^(runtime|backend)=' }) -join ' | ')" | Tee-Object -Append $log
+          "capture mode: $(if ($cap) { 'on for ' + (@($cap.players) -join ', ') } else { 'off' }); Start menu entry: $lnk; MPC-HC entry: $mpc" | Tee-Object -Append $log
+          $bad = @()
+          if ($p.ExitCode -ne 0) { $bad += "Setup exit $($p.ExitCode)" }
+          if ($text -notmatch 'Engine for MPC-HC / MPC-BE / PotPlayer: pushcore: NVIDIA VFG') { $bad += 'no engine choice in the Setup log' }
+          if ($plan.family -ne 'RTX 40') { $bad += "auto-plan.json family $($plan.family)" }
+          if ($pmml -notmatch '(?m)^backend=ort:core:trt-rtx:0') { $bad += 'pmml.txt not written with the TensorRT-RTX EP' }
+          if (-not $cap -or -not (@($cap.players) -match 'KMPlayer') -or -not (@($cap.players) -match '^VLC')) { $bad += 'capture mode not on for KMPlayer and VLC' }
+          if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
+          if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+      - name: Auto plan on the runner's own adapter (the installed script)
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-install.ps1" autoplan 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-capture.ps1" status 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
+      - name: Uninstall (Setup --uninstall --quiet), then nothing left and the players as before
+        if: always()
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"; $s = "$env:RUNNER_TEMP\snap"
+          $q = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC' -ErrorAction SilentlyContinue).QuietUninstallString
+          if ($q) { $p = Start-Process cmd.exe -ArgumentList '/c', "`"$q`"" -PassThru; $p.WaitForExit(300000) | Out-Null; "uninstall exit $($p.ExitCode)" | Tee-Object -Append $log }
+          $bad = @()
+          foreach ($k in 'MPC-HC', 'VideoLAN') {
+            reg export "HKCU\Software\$k" "$s\after-$k.reg" /y 2>$null | Out-Null
+            $b = if (Test-Path "$s\before-$k.reg") { Get-Content "$s\before-$k.reg" } else { @() }; $a = if (Test-Path "$s\after-$k.reg") { Get-Content "$s\after-$k.reg" } else { @() }
+            $d = Compare-Object $b $a; if ($d) { $bad += "HKCU\Software\$k differs: $(($d | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
+          }
+          (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\after-env.txt"
+          if (Compare-Object (Get-Content "$s\before-env.txt") (Get-Content "$s\after-env.txt")) { $bad += 'HKCU\Environment differs' }
+          Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\after-vlc.txt"
+          if (Compare-Object @(Get-Content "$s\before-vlc.txt") @(Get-Content "$s\after-vlc.txt")) { $bad += 'VLC settings differ' }
+          foreach ($k in 'HKCU:\Software\PushMPC', 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC') { if (Test-Path $k) { $bad += "left: $k" } }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
+          $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)
+          if ($left) { $bad += "left in the install folder: $($left -join ', ')" }
+          "after uninstall: $(if ($bad) { $bad -join ' / ' } else { 'nothing left; MPC-HC, VLC and the environment as before' })" | Tee-Object -Append $log
+          @('## win-setup', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: win-setup-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs\n${{ runner.temp }}/snap" }
+
+  linux-setup:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: /var/cache/pacman/pkg, key: arch-pkg-ux-v1 }
+      - name: Players and build tools from pacman (mpv requires vapoursynth on Arch)
+        timeout-minutes: 15
+        run: |
+          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python git diffutils pciutils >/dev/null
+          pacman -Q mpv vapoursynth vlc kodi celluloid smplayer | tee /tmp/versions.txt
+          curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - name: The plugin from this commit and the release tarball
+        run: |
+          set -eu
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp /usr/include/vapoursynth/VapourSynth4.h /usr/include/vapoursynth/VSHelper4.h vsplugin/third_party/vapoursynth/
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build build --target pushmpc_vs --parallel >/dev/null
+          git config --global --add safe.directory "$PWD"
+          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
+          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/setup.sh$'
+      - name: setup.sh into a fresh HOME (detection, engine choice, players), mpv through the installed block, uninstall
+        run: |
+          set -eu
+          export HOME=/tmp/home-ux; mkdir -p $HOME/.config/mpv $HOME/.kodi/userdata; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
+          snap() { (cd $HOME && find . -type f ! -path './.cache/dconf/*' | LC_ALL=C sort | xargs -r sha256sum); }
+          snap > /tmp/before.txt
+          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-0.6.0/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
+          for want in 'Graphics card:' 'Engine for mpv and mpv-based players: portable' 'Players found: mpv' 'vlc' 'kodi' 'Auto starts with:' 'Capture mode: not available on Linux'; do
+            grep -q "$want" /tmp/setup.txt || { echo "::error::setup.sh output lacks '$want'"; exit 1; }
+          done
+          cat $HOME/.local/share/pushmpc/auto-plan.txt
+          grep -q '^mpv=portable' $HOME/.local/share/pushmpc/auto-plan.txt
+          grep -q 'PushMPC managed' $HOME/.config/mpv/mpv.conf || { echo '::error::mpv.conf has no PushMPC block'; exit 1; }
+          grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
+          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ux
+          mpv /tmp/clip.mp4 --length=3 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 >/dev/null 2>&1 || true
+          grep -h 'backend: ' /tmp/vslog-ux/*.log | head -2
+          grep -q 'portable: output YUV.*(x2)' /tmp/vslog-ux/*.log || { echo '::error::mpv did not run the plugin'; exit 1; }
+          rm -r $HOME/.config/pushmpc
+          sh $HOME/.local/share/pushmpc/setup.sh uninstall | tee /tmp/uninstall.txt
+          snap > /tmp/after.txt
+          d=$(diff /tmp/before.txt /tmp/after.txt | tr '\n' ' '); [ -z "$d" ] || { echo "::error title=HOME not restored::$d"; exit 1; }
+          echo "HOME restored byte for byte"
+          { echo '## linux-setup'; echo; echo '```'; cat /tmp/versions.txt; cat /tmp/setup.txt | grep -E 'Graphics|Vulkan|Engine|Players|No PushMPC|Capture|VLC|Kodi|Auto starts'; echo 'uninstall: HOME restored byte for byte'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-setup-logs, path: "/tmp/*.txt\n/tmp/vslog-ux" }

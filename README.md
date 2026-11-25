@@ -4,7 +4,7 @@
 
 # PushMPC
 
-**PushFPS's video enhancement for MPC-HC, MPC-BE, mpv and more.**<br>
+**PushFPS's video enhancement for MPC-HC, MPC-BE, PotPlayer, mpv, VLC, Kodi, Stremio, Plex and more.**<br>
 RTX Video Super Resolution, up to 8x frame generation with a scene-cut guard, SDR to HDR and lossless HDR handling,
 set up by itself for your GPU and display. Your player stays your player.
 
@@ -12,7 +12,7 @@ set up by itself for your GPU and display. Your player stays your player.
 <a href="https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download_for_Windows-8EF02E?style=for-the-badge&logo=windows&logoColor=0D1A04&labelColor=8EF02E"></a>
 </p>
 
-<sub><a href="https://github.com/CptPakundo/PushMPC/releases/latest">All files and what's new</a> · Windows 10/11 64-bit · one Setup, no PushFPS install needed</sub>
+<sub><a href="https://github.com/CptPakundo/PushMPC/releases/latest">All files and what's new</a> · Windows 10/11 64-bit, Linux, macOS · one Setup, no PushFPS install needed</sub>
 
 <p>
 <a href="https://github.com/CptPakundo/PushMPC/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/CptPakundo/PushMPC?include_prereleases&color=444&label=release"></a>
@@ -54,51 +54,63 @@ set up by itself for your GPU and display. Your player stays your player.
 
 ## 📺 Players and GPUs
 
-| Player | Status | What Setup does |
+Setup finds your players and your graphics card, picks the engine and sets everything up, with no questions. Status:
+✅ tested with a real GPU · 🆕 automatic, checked in CI on real players (no GPU there) · 🧪 preview.
+
+| Player | Windows | Linux | macOS | How |
+|---|---|---|---|---|
+| **MPC-HC** | ✅ | | | DirectShow filter before MPC Video Renderer |
+| **MPC-BE**, **PotPlayer** | 🆕 | | | the same filter; the decoder set to copy-back (put back on uninstall) |
+| **mpv**, **mpv.net**, **SMPlayer**, **MPC-QT** | 🆕 | 🆕 | 🧪 | VapourSynth filter in the player's mpv settings |
+| **Celluloid**, **Haruna** | | 🆕 | | the same, through the system mpv |
+| **IINA** | | | 🧪 | VideoToolbox frame interpolation and super resolution, ArtCNN upscaling |
+| **VLC 3** | 🧪 | 🧪 | 🧪 | PushMPC's VLC module (Setup installs it when the download includes it) |
+| **Kodi** | 🆕 | 🆕 | | videos play in mpv as Kodi's external player |
+| **Stremio** 5.0.28+ | 🆕 | | | through its mpv config file setting |
+| **Plex** for Windows / HTPC | 🧪 | | | frame generation through capture mode; RTX / Intel video super resolution inside Plex once its mpv supports it |
+| **Jellyfin** Desktop, Jellyfin / Plex MPV Shim | 🆕 | 🆕 | | VapourSynth filter in their mpv |
+| **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 fallback | | | capture mode: PushFPS's window capture of the player |
+
+**Capture mode** is the fallback for players PushMPC cannot plug into. Setup turns it on only when it finds such a
+player (Start menu > *PushMPC Capture (fallback)*). It adds about 50-60 ms of delay, opens a second window over the
+player, and cannot show DRM-protected video. On first use it installs PushFPS, after asking. Windows only: PushFPS's
+Linux and macOS builds have no window capture.
+
+| GPU | Frame generation (Auto's order) | Upscaling |
 |---|---|---|
-| **MPC-HC** (x64) | ✅ supported, tested | everything: adds the filter, sets MPC Video Renderer's HDR options |
-| **MPC-BE** (x64) | 🆕 new: automatic, checked in CI; playback not yet tested in MPC-BE itself | the same, plus its video decoder set to D3D11 copy-back (put back on uninstall) |
-| **mpv**, **SMPlayer** | 🧪 preview, optional; not yet tested with a real GPU | when it finds one: adds a VapourSynth filter to `mpv.conf` (SMPlayer: its own settings, experimental) and sets up the VapourSynth runtime it needs (SVP's own mpv is left alone) |
-| **MPC-QT** | 🧪 preview, manual setup | nothing; steps in [mpv, SMPlayer and MPC-QT](docs/players-mpv.md#mpc-qt-by-hand) |
-| **PotPlayer** (x64) | 🧪 manual setup, untested | nothing; steps in the [user guide](docs/user-guide.md#using-pushmpc-with-potplayer-manual-setup) |
+| **GeForce RTX 50 / 40** | NVIDIA VFG up to 8x, DLSS-G, PushFlow, NVIDIA optical flow, FSR | RTX VSR (+ RTX Video HDR) |
+| **GeForce RTX 30** | NVIDIA VFG (RTX 30 port), DLSS-G (unlocked), PushFlow, FSR | RTX VSR (+ RTX Video HDR) |
+| **GeForce RTX 20** | DLSS-G, PushFlow, NVIDIA optical flow, FSR | RTX VSR (+ RTX Video HDR) |
+| **GeForce GTX 16 / 10** | PushFlow, NVIDIA optical flow (GTX 16), FSR | RTX VSR on GTX 16 (unlock), else NIS |
+| **Radeon RX 9000** | PushFlow, FSR 4, AMD FRC | FSR 4.1 |
+| **Radeon RX 6000 / 7000** | PushFlow, FSR 3.1, AMD FRC | FSR 4.1 INT8 (RX 6000: AMD FSR SDK 2.4, offered by Setup) |
+| **Intel Arc**, **Snapdragon X** | PushFlow, FSR 3.1 | NIS |
+| **Linux**: NVIDIA RTX | NVIDIA VFG (NVIDIA's Video Effects, after you accept NVIDIA's licence; RTX 20: the GPU engine) | RTX VSR |
+| **Linux**: any Vulkan GPU | PushMPC's GPU engine (motion-compensated, scene-cut guard); PushFlow where the pmml runtime is installed | NIS, ArtCNN |
+| **macOS**: Apple silicon | VideoToolbox frame interpolation (macOS 26), else the GPU engine on Metal | VideoToolbox super resolution, ArtCNN |
 
-In MPC-HC and MPC-BE, PushMPC is a DirectShow filter between LAV Video (or the player's own decoder in copy-back mode)
-and MPC Video Renderer in D3D11 mode. In the mpv family it is a VapourSynth filter running the same engine with the same
-settings and Auto rules: see [mpv, SMPlayer and MPC-QT](docs/players-mpv.md).
-
-| GPU | Frame generation | Upscaling | SDR to HDR |
-|---|---|---|---|
-| **GeForce RTX 50 / 40** | NVIDIA VFG up to 8x, DLSS-G, PushFlow, FSR | RTX VSR | ✅ (+ RTX Video HDR) |
-| **GeForce RTX 30** | NVIDIA VFG (RTX 30 port), DLSS-G (unlocked), PushFlow, FSR | RTX VSR | ✅ (+ RTX Video HDR) |
-| **GeForce RTX 20** | PushFlow, FSR | RTX VSR | ✅ (+ RTX Video HDR) |
-| **Radeon RX 9000** | PushFlow, FSR 4, AMD FRC | FSR | ✅ |
-| **Radeon RX 5000-7000** | PushFlow, FSR 3.1, AMD FRC | FSR | ✅ |
-| **GeForce GTX, Intel Arc** | PushFlow, FSR | FSR or NIS | ✅ |
-
-If your GPU can run a feature, you get it: community unlocks and ports are on by default. Details per GPU are in the
-[user guide](docs/user-guide.md#gpus).
-
-**Linux, macOS, and AMD or Intel GPUs in mpv** (🧪 preview, untested on real hardware): the VapourSynth filter also has a
-portable engine, PushFPS's motion-compensated frame generation on the CPU (about 2x at 1080p), and uses
-vs-rife-ncnn-vulkan instead when you have it installed. See
-[Other GPUs, Linux and macOS](docs/players-mpv.md#other-gpus-linux-and-macos-preview-untested-on-real-hardware).
+If your GPU can run a feature, you get it: community unlocks and ports are on by default. Auto measures your GPU while
+you watch and steps down where a method does not fit. Details: [user guide](docs/user-guide.md#gpus).
 
 ## 🚀 Install
 
-1. Download **[PushMPC-Setup.exe](https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe)**
-   and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\PushMPC`, adds
-   PushMPC to MPC-HC and MPC-BE (whichever is installed; mpv and SMPlayer as a preview), and fetches the runtime for your GPU (Veyra's package, about
-   750 MB, resumable, checked by SHA-256) unless PushFPS or Veyra is already installed with the same files. Close the
-   player first, or let Setup close it.
-2. Play a video. That's it: Auto is on.
-3. Optional: **Play > Filters > PushMPC Filter** in MPC-HC or MPC-BE for the settings and the live status.
+**Windows 10/11:** download **[PushMPC-Setup.exe](https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe)**
+and run it. It installs for your account only (no administrator rights) into `%LOCALAPPDATA%\PushMPC`, sets up every
+player it finds, and fetches the runtime for your GPU (Veyra's package, about 750 MB, resumable, checked by SHA-256)
+unless PushFPS or Veyra already has the same files. Then play a video: Auto is on. Settings in MPC-HC and MPC-BE:
+**Play > Filters > PushMPC Filter**.
 
 Setup is not code-signed yet: if SmartScreen says "Windows protected your PC", choose **More info > Run anyway**. The
-release manifest the updater reads is signed.
+release manifest the updater reads is signed. Uninstall from *Windows Settings > Apps > Installed apps > PushMPC*: every
+player setting PushMPC changed is put back. *Modify* offers Repair and Update.
 
-Uninstall from *Windows Settings > Apps > Installed apps > PushMPC*. The player settings PushMPC changed are put back:
-MPC Video Renderer's HDR options, SVP's VapourSynth entry, MPC-BE's video decoder mode and the players' NVIDIA G-SYNC
-profiles. *Modify* offers Repair and Update.
+**Linux** (x86_64, aarch64): download `pushmpc-linux-<arch>-<version>.tar.gz` from the
+[releases](https://github.com/CptPakundo/PushMPC/releases/latest), unpack it and run `sh setup.sh` as your user. It sets
+up every player it finds and offers, once each, the Flathub mpv (Ubuntu and Debian build mpv without VapourSynth) and
+NVIDIA's Video Effects. Remove it with `sh ~/.local/share/pushmpc/setup.sh uninstall`.
+
+**macOS** (Apple silicon): a Homebrew formula (`brew install pushmpc`, then `pushmpc-setup install`); its tap is not
+published yet. See [mpv and mpv-based players](docs/players-mpv.md#macos).
 
 ## 🤖 How Auto picks
 
@@ -129,8 +141,8 @@ the GPU time per source frame.
 
 <details><summary><b>Which GPUs work?</b></summary>
 
-Any DirectX 12 GPU on Windows 10/11 64-bit. NVIDIA RTX 40/50 get everything; RTX 30/20, GTX, Radeon and Intel Arc get
-what each can run (see the table above).
+Any DirectX 12 GPU on Windows 10/11 (x64; Windows on Arm through Setup's x64 emulation), any Vulkan GPU on Linux, and
+Apple silicon on macOS. NVIDIA RTX 40/50 get everything; the others get what each can run (see the table above).
 </details>
 
 <details><summary><b>Do I need an HDR display?</b></summary>
@@ -192,5 +204,5 @@ Big Buck Bunny or Tears of Steel, and crop out MPC-HC's title bar and playlist):
   assets/screenshots/status.jpg        the status panel during 4x-8x playback (fps, GPU time, method, cut guard, VRR)
   optional: assets/screenshots/cut-guard.gif  short loop of a scene cut, guard off vs on
   optional: assets/screenshots/setup.jpg      the Setup wizard's first page
-Change the MPC-BE row once it is tested with MPC-BE itself, and the mpv row once it is tested with a real GPU.
+Change a player row to ✅ once it is tested with a real GPU.
 -->

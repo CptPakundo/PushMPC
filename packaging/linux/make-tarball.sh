@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the Linux release tarball pushmpc-linux-<arch>-<version>.tar.gz (user-level install, no root):
 #   pushmpc-linux-<arch>-<version>/
+#     setup.sh                   integrations/linux/setup.sh (the one command: every player, engine plan, uninstall)
 #     install.sh                 integrations/linux/install.sh (install | uninstall | status)
 #     mpv-integration.sh         integrations/mpv/mpv-integration.sh (the mpv.conf block)
 #     vsplugin/pushmpc_vs.so     the VapourSynth plugin (portable backend)
@@ -16,7 +17,12 @@ name=pushmpc-linux-$arch-$ver
 tmp=$(mktemp -d)
 d=$tmp/$name
 mkdir -p "$d/vsplugin"
+install -m 755 integrations/linux/setup.sh "$d/setup.sh"
 install -m 755 integrations/linux/install.sh "$d/install.sh"
+# optional: the VLC module (PUSHMPC_VLC_PLUGIN=<libpushmpc_plugin.so>) and the Kodi add-on folder with its install.sh
+# (PUSHMPC_KODI_DIR), which setup.sh installs when VLC / Kodi is found
+if [ -n "${PUSHMPC_VLC_PLUGIN:-}" ] && [ -f "$PUSHMPC_VLC_PLUGIN" ]; then mkdir -p "$d/vlc"; install -m 755 "$PUSHMPC_VLC_PLUGIN" "$d/vlc/libpushmpc_plugin.so"; install -m 755 vlcplugin/install/pushmpc-vlc.sh "$d/vlc/pushmpc-vlc.sh"; fi
+if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
@@ -33,14 +39,15 @@ cat > "$d/README.txt" <<EOF
 PushMPC $ver for Linux ($arch): frame generation and the scene-cut guard for mpv and mpv-based players.
 
 Install (for your user only, no administrator password):
-    sh install.sh
+    sh setup.sh
 Remove:
-    sh ~/.local/share/pushmpc/install.sh uninstall
+    sh ~/.local/share/pushmpc/setup.sh uninstall
 
 mpv needs VapourSynth. Arch, Manjaro and EndeavourOS have it; Ubuntu, Debian and Mint build mpv without it, so the
 installer offers mpv from Flathub (io.mpv.Mpv, user install) instead. Players set up when found: mpv, mpv from
 Flathub, Celluloid, Haruna, SMPlayer, MPC-QT, Jellyfin MPV Shim, Plex-MPV-Shim and Kodi (mpv as its external player).
-Every change is backed up and undone exactly by the uninstall.
+VLC gets the PushMPC module when this download has it (vlc/). setup.sh prints the engine Auto starts with for your
+graphics card (sh setup.sh plan). Every change is backed up and undone exactly by the uninstall.
 
 Settings: ~/.config/pushmpc/settings.ini (Smoother=Auto, 2..8 or Off). Logs: ~/.local/state/pushmpc/logs.
 https://github.com/CptPakundo/PushMPC
