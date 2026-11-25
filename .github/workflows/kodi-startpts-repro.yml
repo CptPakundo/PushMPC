@@ -1,0 +1,91 @@
+# Stock-only reproduction of a Kodi bug for an upstream report: SeekTime(time, backwards) with startpts == nullptr
+# forwarded to an inputstream add-on (kodi-dev-kit ADDON_DemuxSeekTime dereferences *startpts).
+# Stock Kodi (official Windows builds, portable mode, WARP), stock inputstream.ffmpegdirect (bundled), testsrc clip.
+#   rc2     = 22.0 RC2 release
+#   nightly = newest official master nightly (has the content geometry measurement before playback)
+name: kodi-startpts-repro
+
+on:
+  workflow_dispatch:
+  push:
+    # workflow_dispatch needs the file on the default branch; this branch-only push trigger runs it from here
+    branches: ['ci/kodi-startpts-repro']
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [rc2, nightly]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Kodi (official build, unpacked; portable mode)
+        shell: bash
+        run: |
+          if [ "${{ matrix.build }}" = rc2 ]; then
+            url="https://mirrors.kodi.tv/releases/windows/win64/kodi-22.0-Piers_rc2-x64.exe"
+          else
+            idx=$(curl -fsSL --retry 3 "https://mirrors.kodi.tv/nightlies/windows/win64/master/")
+            exe=$(echo "$idx" | grep -oE 'KodiSetup-[0-9]{8}-[0-9a-f]+-master-x64\.exe' | sort -u | sort -t- -k2,2 | tail -1)
+            echo "newest nightly: $exe"
+            url="https://mirrors.kodi.tv/nightlies/windows/win64/master/$exe"
+          fi
+          echo "$url" | tee kodi-url.txt
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.exe" "$url"
+          sha256sum "$RUNNER_TEMP/kodi.exe" | tee kodi-sha256.txt
+          7z x -y -o/c/kodi "$RUNNER_TEMP/kodi.exe" > /dev/null
+          rm -rf '/c/kodi/$PLUGINSDIR' '/c/kodi/uninstall.exe'
+          mkdir -p /c/kodi/portable_data
+          ls /c/kodi/addons | grep -E '^inputstream' || true
+          cat /c/kodi/addons/inputstream.ffmpegdirect/addon.xml | head -12
+          grep -c 'videoscreen.extractcontentgeometry' /c/kodi/system/settings/settings.xml || true
+      - name: Test clip (ffmpeg testsrc)
+        shell: bash
+        run: |
+          z="ffmpeg-n8.1-latest-win64-gpl-shared-8.1"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ff.zip" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$z.zip"
+          7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ff.zip" > /dev/null
+          mkdir -p /c/clips
+          "$RUNNER_TEMP/$z/bin/ffmpeg.exe" -hide_banner -loglevel error -f lavfi -i testsrc=size=640x360:rate=24 -t 10 \
+            -c:v libx264 -pix_fmt yuv420p -g 24 C:/clips/testsrc.mkv
+          ls -l /c/clips
+      - name: Reproduce
+        shell: pwsh
+        run: |
+          $geo = @()
+          if ("${{ matrix.build }}" -eq "nightly") { $geo = @("--geometry") }
+          python kodiaddon/ci/startpts_repro.py --kodi C:\kodi\kodi.exe --home C:\kodi\portable_data `
+            --clip C:/clips/testsrc.mkv --out out @geo
+          Copy-Item kodi-url.txt, kodi-sha256.txt out/
+      - name: Crash dump stack (cdb, no Kodi symbols)
+        if: always()
+        shell: pwsh
+        run: |
+          $cdb = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $dmps = Get-ChildItem out -Filter *.dmp -ErrorAction SilentlyContinue
+          if (-not $dmps) { "no dump"; exit 0 }
+          if (-not $cdb) { "no cdb on this image"; exit 0 }
+          foreach ($d in $dmps) {
+            & $cdb.FullName -z $d.FullName -y "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols" `
+              -c ".ecxr; r; kn 40; lm m inputstream*; !analyze -v; q" | Tee-Object "out/$($d.BaseName)-cdb.txt"
+          }
+      - name: Windows application event log (faulting module)
+        if: always()
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error','Windows Error Reporting'} -MaxEvents 10 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'kodi' } | Format-List TimeCreated, Message | Out-String -Width 300 | Tee-Object out/eventlog.txt
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          { echo '```'; cat out/report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          grep -hiE 'ffmpegdirect|measuring content geometry|SeekTime|exception|crash|VideoDecodeSession' out/start2-kodi.log | tail -60 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-startpts-${{ matrix.build }}
+          path: out
