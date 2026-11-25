@@ -328,13 +328,13 @@ jobs:
           cat $rc
           diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' $rc | grep .) && echo "vlcrc restored (active settings)"
           [ ! -e $st ] && echo "state removed"
-      - name: VA-API in distro VLCs with a VA-API decoder (Debian 12 all DRM cases + headless self-test; Debian 13 GL interop + zero copy + interop self-test; Ubuntu 22.04 3.0.16)
+      - name: VA-API in distro VLCs with a VA-API decoder (Debian 12 all DRM cases + headless self-test; Debian 13 zero copy + fallback tier; Debian 13 + backports Mesa GL interop, required; Ubuntu 22.04 3.0.16)
         if: always()
         run: |
           set -u; bad=0; sudo chmod 666 /dev/dri/renderD128 /dev/udmabuf 2>/dev/null
           dev="--device /dev/dri/renderD128"; [ -e /dev/udmabuf ] && dev="$dev --device /dev/udmabuf"
-          for im in debian:12=full debian:13=desktop ubuntu:22.04=subset; do
-            img=${im%=*}; mode=${im#*=}; l=$(echo "$img" | tr -d ':.')
+          for im in debian:12=full debian:13=desktop debian:13=interop ubuntu:22.04=subset; do
+            img=${im%=*}; mode=${im#*=}; l=$(echo "$img" | tr -d ':.'); [ "$mode" = interop ] && l="$l-interop"
             docker run --rm $dev -v "$PWD":/w -w /w "$img" bash vlcplugin/tests/run-hw-distro.sh "$l" $mode || bad=1
             cat res/hw-$l/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           done

@@ -85,7 +85,7 @@ fi
 # VLC's own desktop path: the VA-API decoder on the OpenGL output's surfaces (glconv_vaapi_x11, EGL dma-buf import), with
 # PushMPC's pictures shown by the GL interop directly
 if [ "${GL:-0}" = 1 ]; then
-  NEED='--need using.hw.decoder.module."vaapi" --need using.glconv.module."glconv_vaapi_x11"'
+  NEED='--need EGL_EXT_image_dma_buf_import --need using.hw.decoder.module."vaapi" --need using.glconv.module."glconv_vaapi_x11"'
   CHECK="$NEED"          run vagl_base      vagl base 1 "$CLIP" "$S" "" --
   CHECK="$NEED"          run vagl_x2        vagl hw   2 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=2
   CHECK="$NEED --zc off" run vagl_broken_x2 vagl pass 2 "$CLIP" "$S" "PMNULL_BROKEN=1" -- $PP --pushmpc-smoother=2
