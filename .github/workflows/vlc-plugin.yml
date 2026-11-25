@@ -323,7 +323,7 @@ jobs:
           bash vlcplugin/tests/run-module.sh
       - name: The Direct3D 11 output fork in VLC (vout=pushmpc_d3d11 on WARP; software decoding keeps VLC's quad there)
         run: |
-          set -u
+          set +e -u +o pipefail
           d="$LOCALAPPDATA/PushMPC/vlc"
           export VLC_PLUGIN_PATH="$(cygpath -w "$d")"
           mkdir -p res/windows-d3d11fork
@@ -339,13 +339,14 @@ jobs:
                 art/clips/clip720.mkv && rc=0 || rc=$?
               echo "== $tag $flt: exit $rc"; echo "$tag-$flt $rc" >> res/windows-d3d11fork/rc.txt
               grep -hE "using vout display module|PushMPC NIS|Using .* scaler|generated=" res/windows-d3d11fork/$tag-$flt.log | sort | uniq -c | head -5
+              [ $rc = 0 ] || tail -4 res/windows-d3d11fork/$tag-$flt.log
             done
           done
           cat res/windows-d3d11fork/rc.txt
           grep -q 'using vout display module "pushmpc_d3d11"' res/windows-d3d11fork/pushmpc_d3d11-auto-none.log || { echo "::error::the fork did not open"; exit 1; }
           ref=$(sed -n 's/^direct3d11---none //p' res/windows-d3d11fork/rc.txt); bad=""
           while read -r t r; do case $t in pushmpc_d3d11-*) [ "$r" = 0 ] || [ "$r" = "$ref" ] || { echo "::error::$t exit $r (reference $ref)"; bad=1; } ;; esac; done < res/windows-d3d11fork/rc.txt
-          [ -z "$bad" ]
+          [ -z "$bad" ] || exit 1
       - name: pushcore through pm_pushcore.dll (the stub core on WARP; 720p)
         run: |
           set -u
