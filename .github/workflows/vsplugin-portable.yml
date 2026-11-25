@@ -22,7 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        # macOS minutes cost 10x while the repository is private: macOS only on manual runs.
+        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["windows-latest","ubuntu-latest","macos-latest"]') || fromJSON('["windows-latest","ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
