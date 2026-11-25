@@ -11,7 +11,7 @@ on:
   # push on the track branch only (a dispatch needs the file on main first); "[macos]" in the commit message adds macOS
   push:
     branches: ['track/vlc']
-    paths: ['vlcplugin/**', '.github/workflows/vlc-spike.yml']
+    paths: ['vlcplugin/spike/run-*.sh', '.github/workflows/vlc-spike.yml']
   workflow_dispatch:
     inputs:
       macos:

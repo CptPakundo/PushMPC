@@ -42,6 +42,18 @@ static void CloseDump(vlc_object_t *);
 static const char *const filter_options[] = { "mult", "scale", "alloc", NULL };
 
 vlc_module_begin()
+#ifdef PUSHSPIKE_DUMP_ONLY
+    /* the CSV display alone (libpushdump_plugin), for testing the real module next to it */
+    set_shortname("pushdump")
+    set_description("PushMPC test: CSV dump video output")
+    set_category(CAT_VIDEO)
+    set_subcategory(SUBCAT_VIDEO_VOUT)
+    set_capability("vout display", 0)
+    add_shortcut("pushdump")
+    add_string(DCFG "file", "pushdump.csv", "CSV file", NULL, false)
+    set_callbacks(OpenDump, CloseDump)
+    (void)OpenFilter; (void)CloseFilter;
+#else
     set_shortname("PushMPC spike")
     set_description("PushMPC VLC spike: frame multiplier and size change in the static chain")
     set_category(CAT_VIDEO)
@@ -61,6 +73,7 @@ vlc_module_begin()
     add_shortcut("pushdump")
     add_string(DCFG "file", "pushdump.csv", "CSV file", NULL, false)
     set_callbacks(OpenDump, CloseDump)
+#endif
 vlc_module_end()
 
 /* Debian/Ubuntu's VLC 3.0.20+ (the time64 transition build) looks up vlc_entry__3_0_0ft64; upstream, Flatpak, Windows

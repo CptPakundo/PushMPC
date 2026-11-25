@@ -54,7 +54,7 @@ def q(v, p):
 expected = a.src_frames * a.mult if a.src_frames else 0
 ratio = (n / a.src_frames) if a.src_frames else float("nan")
 markers = {
-    "active": "pushspike: active" in log,
+    "active": "pushspike: active" in log or (" -> x" in log and "PushMPC " in log),
     "static": "as static" in log,
     "interactive": "as interactive" in log,
     "dropping": log.count("dropping pictures"),
@@ -66,6 +66,9 @@ alloc_fail = 0
 for line in log.splitlines():
     if "pushspike: close" in line and "alloc_fail=" in line:
         try: alloc_fail = int(line.rsplit("alloc_fail=", 1)[1].split()[0])
+        except ValueError: pass
+    if "PushMPC: close" in line and ", failed " in line:
+        try: alloc_fail = int(line.split(", failed ", 1)[1].split(")")[0])
         except ValueError: pass
 
 res = dict(case=a.case, frames=n, unique=uniq, src_frames=a.src_frames, mult=a.mult, expected=expected,

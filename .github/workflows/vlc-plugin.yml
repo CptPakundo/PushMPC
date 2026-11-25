@@ -1,0 +1,217 @@
+# PushMPC for VLC 3.0.x (vlcplugin/): builds libpushmpc_plugin for Linux, Windows (MinGW cross build) and macOS, runs
+# the engine test, then plays synthetic clips headless in the distro VLC, the official Windows VLC, the Flathub VLC
+# and (dispatch input / "[macos]" in the commit message: 10x minutes while private) VLC.app, counting frames and
+# timestamps with a CSV display, and checks real video outputs (OpenGL and X11 under Xvfb, Direct3D on WARP, macosx).
+name: vlc-plugin
+
+on:
+  push:
+    branches: ['track/vlc']
+    paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'Also run the macOS job (10x minutes while the repo is private)'
+        type: boolean
+        default: false
+
+env:
+  VLC_WIN_VERSION: '3.0.24'
+
+jobs:
+  clips:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache@v4
+        id: c
+        with: { path: clips, key: vlc-clips-v1 }
+      - name: Synthetic clips (public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps; 8 and 10 bit)
+        if: steps.c.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg >/dev/null
+          mkdir -p clips
+          g="testsrc2=s=320x180:r=24:d=4[a];smptebars=s=320x180:r=24:d=2[b];[a][b]concat=n=2:v=1[v]"
+          ffmpeg -hide_banner -loglevel error -filter_complex "$g" -map '[v]' -c:v libx264 -pix_fmt yuv420p -g 48 clips/clip.mkv
+          ffmpeg -hide_banner -loglevel error -filter_complex "$g" -map '[v]' -c:v libx264 -profile:v high10 -pix_fmt yuv420p10le -g 48 clips/clip10.mkv
+          for c in clip clip10; do ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,pix_fmt -of default=nw=1 clips/$c.mkv > clips/$c.txt; cat clips/$c.txt; done
+      - uses: actions/upload-artifact@v4
+        with: { name: clips, path: clips, retention-days: 5 }
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (libvlccore-dev)
+        run: sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y libvlccore-dev ninja-build >/dev/null
+      - name: Build plugin, engine test and the CSV test display
+        run: |
+          set -eux
+          if grep -q '3_0_0ft64' /usr/include/vlc/plugins/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
+          cmake -S vlcplugin -B build -G Ninja -DVLC_PLUGIN_INCLUDE=/usr/include/vlc/plugins \
+            -DVLC_CORE_LIB=$(pkg-config --variable=libdir vlc-plugin)/libvlccore.so -DPM_ALT_ENTRY=$alt
+          cmake --build build
+          mkdir -p out/linux
+          cp build/libpushmpc_plugin.so out/linux/
+          gcc -std=gnu11 -O2 -fPIC -shared -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='"pushdump"' -DPM_ALT_ENTRY=$alt \
+            $(pkg-config --cflags vlc-plugin) vlcplugin/spike/pushspike.c -o out/linux/libpushdump_plugin.so $(pkg-config --libs vlc-plugin)
+          nm -D out/linux/libpushmpc_plugin.so | grep vlc_entry
+          objdump -p out/linux/libpushmpc_plugin.so | grep NEEDED
+          objdump -T out/linux/libpushmpc_plugin.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Engine test (pm_engine.h on synthetic frames)
+        run: ./build/pm_engine_test
+      - uses: actions/upload-artifact@v4
+        with: { name: plugin-linux, path: out/linux, retention-days: 7 }
+
+  build-windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
+      - name: VLC win64 SDK (official 7z, SHA-256 checked) and MinGW-w64 (posix threads)
+        run: |
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix p7zip-full ninja-build >/dev/null
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z; base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
+          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
+          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk" >/dev/null
+      - name: Cross build (plugin, engine test, CSV test display)
+        run: |
+          set -eux
+          sdk="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk"
+          ls -la "$sdk/lib"
+          lib=$(ls "$sdk"/lib/libvlccore.dll.a "$sdk"/lib/libvlccore.a "$sdk"/lib/libvlccore.lib "$sdk"/lib/vlccore.lib 2>/dev/null | head -1)
+          cmake -S vlcplugin -B build -G Ninja -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
+            -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+            -DVLC_PLUGIN_INCLUDE="$sdk/include/vlc/plugins" -DVLC_CORE_LIB="$lib"
+          cmake --build build
+          mkdir -p out/win64
+          cp build/libpushmpc_plugin.dll build/pm_engine_test.exe out/win64/
+          x86_64-w64-mingw32-gcc-posix -std=gnu11 -O2 -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='"pushdump"' \
+            -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushdump_plugin.dll -L"$sdk/lib" -lvlccore -static-libgcc
+          x86_64-w64-mingw32-objdump -p out/win64/libpushmpc_plugin.dll | grep -E "DLL Name|vlc_entry"
+      - uses: actions/upload-artifact@v4
+        with: { name: plugin-win64, path: out/win64, retention-days: 7 }
+
+  test-linux:
+    needs: [clips, build-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: VLC (Ubuntu 24.04), Xvfb, Mesa
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base vlc-plugin-video-output xvfb libgl1-mesa-dri >/dev/null
+      - name: Module cases and real displays (distro VLC; per-user plugin folder via VLC_PLUGIN_PATH)
+        run: |
+          d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
+          export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP10=art/clips/clip10.mkv OUT=res/linux \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
+                 LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: Flathub VLC with the same plugin (flatpak override --env=VLC_PLUGIN_PATH, the installer's route)
+        timeout-minutes: 20
+        run: |
+          set -u
+          sudo apt-get -qq install -y flatpak >/dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.videolan.VLC >/dev/null 2>&1 || { echo "::warning::flatpak install failed"; exit 0; }
+          d=~/.var/app/org.videolan.VLC/data/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
+          flatpak override --user --env=VLC_PLUGIN_PATH="$d" org.videolan.VLC
+          cp art/clips/clip.mkv ~/.var/app/org.videolan.VLC/clip.mkv
+          export VLC="" VLC_WRAP="flatpak run --user org.videolan.VLC" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv \
+                 OUT=res/flatpak SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, Flathub VLC" \
+                 CASES="base x2 x4 x8 vlcrc144"
+          bash vlcplugin/tests/run-module.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-linux, path: res, retention-days: 7 }
+
+  test-windows:
+    needs: [clips, build-windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults: { run: { shell: bash } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
+      - name: Engine test
+        run: art/plugin-win64/pm_engine_test.exe
+      - name: VLC ${{ env.VLC_WIN_VERSION }} (official portable 7z, SHA-256 checked)
+        run: |
+          set -eu
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z; base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
+          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
+          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" >/dev/null
+      - name: Module cases and real displays (per-user plugin folder via VLC_PLUGIN_PATH, no admin)
+        run: |
+          d="$LOCALAPPDATA/PushMPC/vlc"; mkdir -p "$d" && cp art/plugin-win64/*.dll "$d/"
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clips/clip.mkv \
+                 CLIP10=art/clips/clip10.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
+                 PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
+          bash vlcplugin/tests/run-module.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-windows, path: res, retention-days: 7 }
+
+  macos:
+    if: ${{ inputs.macos || contains(github.event.head_commit.message, '[macos]') }}
+    needs: [clips]
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: art/clips }
+      - uses: actions/cache@v4
+        with: { path: ~/Library/Caches/Homebrew/downloads, key: brew-vlc-cask-v1 }
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
+      - name: VLC.app (cask) and the VLC 3 plugin headers (from the official SDK)
+        run: |
+          set -eu
+          brew install --cask vlc >/dev/null
+          brew install p7zip ninja >/dev/null 2>&1 || true
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64/$f"
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk/include" >/dev/null
+      - name: Build (universal arm64 + x86_64)
+        run: |
+          set -eux
+          inc="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins"
+          cmake -S vlcplugin -B build -G Ninja -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DVLC_PLUGIN_INCLUDE="$inc"
+          cmake --build build
+          ./build/pm_engine_test
+          mkdir -p out/mac && cp build/libpushmpc_plugin.dylib out/mac/
+          clang -std=gnu11 -O2 -dynamiclib -undefined dynamic_lookup -arch arm64 -arch x86_64 -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY \
+            -DMODULE_STRING='"pushdump"' -I"$inc" vlcplugin/spike/pushspike.c -o out/mac/libpushdump_plugin.dylib
+          codesign -s - -f out/mac/*.dylib
+          lipo -info out/mac/libpushmpc_plugin.dylib
+      - name: Module cases and the macosx display (VLC_PLUGIN_PATH, plugin outside the signed bundle)
+        run: |
+          d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
+          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP10=art/clips/clip10.mkv \
+                 OUT=res/macos SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="macOS, VLC.app cask" \
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none" DISPLAYS="macosx"
+          bash vlcplugin/tests/run-module.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-macos, path: res, retention-days: 7 }
