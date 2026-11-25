@@ -21,7 +21,7 @@ y8 = np.round(img * 255).astype(np.uint8)
 with tempfile.TemporaryDirectory() as d:
     raw = os.path.join(d, "in.gray")
     y8.tofile(raw)
-    cmd = ["mpv", "--no-config", "--msg-level=all=warn", "--frames=1", "--demuxer=rawvideo", "--demuxer-rawvideo-format=gray",
+    cmd = ["mpv", "--no-config", "--msg-level=all=warn", "--frames=1", "--demuxer=rawvideo", "--demuxer-rawvideo-mp-format=gray",
            f"--demuxer-rawvideo-w={w}", f"--demuxer-rawvideo-h={h}", "--demuxer-rawvideo-fps=1", "--video-zoom=1", "--keepaspect=no",
            "--vo=image", "--vo-image-format=png", f"--vo-image-outdir={d}", "--gpu-api=opengl", "--video-output-levels=full",
            "--video-sync=audio", "--dither-depth=no", f"--glsl-shaders={glsl}", "--scale=bilinear", raw]
