@@ -1,0 +1,29 @@
+# temporary: what slangc makes of the cut-guard HLSL for CUDA (removed once the build step is in place)
+name: nvl-slang-probe
+on:
+  push:
+    branches: ['track/nvidia-linux']
+    paths: ['.github/workflows/nvl-slang-probe.yml']
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: slang + nvcc
+        run: |
+          set -x
+          curl -fsSL -o slang.tgz https://github.com/shader-slang/slang/releases/download/v2026.21/slang-2026.21-linux-x86_64.tar.gz
+          echo "691f9341e5bec099eec97ee30a83bcbef541cee7fe3b4de68a821d42f9506c2f  slang.tgz" | sha256sum -c
+          mkdir slang && tar -xzf slang.tgz -C slang
+          ls slang slang/bin slang/include | head -60
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-12-8 cuda-cudart-dev-12-8 >/dev/null
+          S=vsplugin/engines/nvidia-linux/shaders
+          for f in VfgShotChange VfgFourierMellin; do
+            ./slang/bin/slangc $S/$f.hlsl -entry main -stage compute -target cuda -o $f.cu -reflection-json $f.json 2>&1 | head -40
+            echo "== $f.cu: $(wc -l < $f.cu) lines"; head -60 $f.cu; grep -nE "__global__|SLANG_globalParams|struct GlobalParams|KernelContext|EntryPointParams" $f.cu | head -30
+            echo "== reflection"; head -c 4000 $f.json
+            /usr/local/cuda-12.8/bin/nvcc -fatbin -O3 -std=c++17 -I slang/include -arch=sm_86 -o $f.fatbin $f.cu 2>&1 | head -40; ls -la $f.fatbin || true
+          done
