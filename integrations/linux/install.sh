@@ -121,6 +121,20 @@ vs_config() {
     backup_once "$t"
     [ "$dry" = 1 ] && { say "would: run $c"; return 0; }
     XDG_CONFIG_HOME=$cfg $c >/dev/null 2>&1 || { say "  VapourSynth: '$c' failed; mpv may not find Python (run it yourself if mpv says so)"; }
+    # `vapoursynth config` keys its entry by the VSScript library inside the Python package; a distribution's mpv may
+    # load another copy (e.g. /usr/lib/libvapoursynth-script.so). VSScript looks up the library it was loaded from,
+    # so the same Python entry is added under that library's path too.
+    if [ -f "$t" ] && have mpv; then
+        vs_lib=$(ldd "$(command -v mpv)" 2>/dev/null | sed -n 's/^.*=> \(\/[^ ]*\(vsscript\|vapoursynth-script\)[^ ]*\) .*$/\1/p' | head -n 1)
+        if [ -n "$vs_lib" ]; then
+            key=$(readlink -f "$vs_lib" | sed 's#/lib64/#/lib/#')
+            rest=$(grep '^"' "$t" | tail -n 1 | sed 's/^"[^"]*"//')
+            if [ -n "$rest" ] && ! grep -qF "\"$key\"" "$t" && ! grep -qF "\"$vs_lib\"" "$t"; then
+                printf '"%s"%s\n' "$key" "$rest" >> "$t"
+                say "  VapourSynth: the same Python entry for mpv's VSScript ($key)"
+            fi
+        fi
+    fi
     if [ -f "$t" ] && [ "$(sha "$t")" != "$before" ]; then mark_written "$t"; record "file|vsconfig|$t"; say "  VapourSynth: Python registered for VSScript ($t)"
     else rm -f "$t.pushmpc-backup"; [ -f "$t.pushmpc-absent" ] && { how=$(cat "$t.pushmpc-absent"); rm -f "$t.pushmpc-absent"; [ "$how" = created-dir ] && rmdir "$(dirname "$t")" 2>/dev/null; }; fi
     return 0
