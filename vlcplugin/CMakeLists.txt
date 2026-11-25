@@ -124,7 +124,7 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
        "// generated from NIS_Scaler.h (NVIDIA Image Scaling 1.0.3, MIT)\nstatic const char kPmNisScalerHlsl[] = R\"PMNIS(${_nis_src})PMNIS\";\n")
   set(D3D11_FORK_SOURCES
     ${D3}/video_output/win32/direct3d11.c ${D3}/video_output/win32/common.c ${D3}/video_output/win32/events.c
-    ${D3}/video_output/win32/sensors.cpp ${D3}/video_output/win32/win32touch.c ${D3}/video_output/win32/d3d11_quad.c
+    ${D3}/video_output/win32/pm_sensors_stub.c ${D3}/video_output/win32/win32touch.c ${D3}/video_output/win32/d3d11_quad.c
     ${D3}/video_output/win32/d3d11_shaders.c ${D3}/video_output/win32/d3d11_scaler.cpp
     ${D3}/video_output/win32/d3d11_tonemap.cpp ${D3}/video_output/win32/pm_nis_d3d11.cpp
     ${D3}/video_chroma/d3d11_fmt.c ${D3}/video_chroma/dxgi_fmt.c ${D3}/video_chroma/copy.c)
@@ -133,7 +133,7 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
   target_include_directories(pushmpc_d3d11_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/../include" "${D3}/video_output" "${D3}/video_output/win32"
                              "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
   target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
-                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "N_(s)=s" "_(s)=vlc_gettext(s)")
+                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
   target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations)
   if(VLC_CORE_LIB)
     target_link_libraries(pushmpc_d3d11_plugin PRIVATE "${VLC_CORE_LIB}")

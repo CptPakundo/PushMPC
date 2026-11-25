@@ -231,7 +231,9 @@ jobs:
           sudo snap install vlc >/dev/null || { echo "::warning::snap install failed"; exit 0; }
           snap list vlc
           c=~/snap/vlc/common; mkdir -p $c/pushmpc && cp art/plugin-linux/libpushmpc_plugin.so $c/pushmpc/
-          lua=~/snap/vlc/current/.local/share/vlc/lua/intf; mkdir -p $lua && cp vlcplugin/install/snap/pushmpc_boot.lua $lua/
+          timeout 60 snap run vlc --version >/dev/null 2>&1 || true    # creates ~/snap/vlc/<revision>
+          rev=$(snap list vlc | awk 'NR==2{print $3}'); lua=~/snap/vlc/$rev/.local/share/vlc/lua/intf
+          mkdir -p $lua && cp vlcplugin/install/snap/pushmpc_boot.lua $lua/ && ls -la ~/snap/vlc/ $lua
           printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
           cp art/clips/clip.mkv $c/clip.mkv
           mkdir -p res/snap
@@ -241,7 +243,7 @@ jobs:
             rm -f $c/$name.y4m
             timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --avcodec-hw=none --vout=yuv --yuv-yuv4mpeg2 \
               --yuv-file=$c/$name.y4m $c/clip.mkv > res/snap/$name.log 2>&1; rc=$?
-            frames=$(grep -c '^FRAME' $c/$name.y4m 2>/dev/null || echo 0)
+            frames=$(grep -a -o FRAME $c/$name.y4m 2>/dev/null | wc -l)
             echo "== $name: exit $rc frames=$frames"
             grep -hE "PushMPC|pushmpc|lua|luaintf|postproc|Failed|denied" res/snap/$name.log | sort | uniq -c | head -15
           }
@@ -249,7 +251,7 @@ jobs:
           run boot 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
           PUSHMPC_SNAP_BOOT=0 run boot_off 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
           sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -5 || true
-          b=$(grep -c '^FRAME' $c/base.y4m 2>/dev/null || echo 0); x=$(grep -c '^FRAME' $c/boot.y4m 2>/dev/null || echo 0)
+          b=$(grep -a -o FRAME $c/base.y4m 2>/dev/null | wc -l); x=$(grep -a -o FRAME $c/boot.y4m 2>/dev/null | wc -l)
           echo "base $b frames, with the bootstrap $x frames"
           [ "$x" -ge $((b * 3)) ] && echo "::notice::Snap VLC runs PushMPC (x$((x / (b > 0 ? b : 1))))" || echo "::warning::Snap bootstrap did not multiply frames"
       - uses: actions/upload-artifact@v4
