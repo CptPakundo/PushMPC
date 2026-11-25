@@ -5,10 +5,10 @@
   "mpv": { "repo": "https://github.com/mpv-player/mpv.git", "tag": "v0.42.0", "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3" },
   "libplacebo": { "repo": "https://code.videolan.org/videolan/libplacebo.git", "tag": "v7.387.0", "commit": "275f7dea27924cdd34ab2e6c20e448b6bc4fab65" },
   "vulkanHeaders": { "repo": "https://github.com/KhronosGroup/Vulkan-Headers.git", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2" },
-  "appimageRuntime": { "what": "AppImage type 2 runtime (MIT), checked against the SHA-256 digest GitHub publishes for the release asset", "repo": "AppImage/type2-runtime", "tag": "20251108", "asset": "runtime-x86_64" },
+  "appimageRuntime": { "what": "AppImage type 2 runtime (MIT), checked against the SHA-256 digest GitHub publishes for the release asset", "repo": "AppImage/type2-runtime", "tag": "20251108", "asset": "runtime-x86_64", "sha256": "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d" },
   "clip": {
     "what": "Big Buck Bunny (c) Blender Foundation, CC BY 3.0; a 10 s 360p H.264 sample from test-videos.co.uk",
     "url": "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
-    "sha256": "TODO"
+    "sha256": "77145C94C11F3754207499158DF22406E1FE7635553C1C86DC5E881DFEB32016"
   }
 }

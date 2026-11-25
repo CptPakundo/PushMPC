@@ -45,17 +45,14 @@ icon=$(ls "$S"/mpv/etc/mpv-icon-8bit-128x128.png 2>/dev/null || ls "$S"/mpv/etc/
 if [ -n "$icon" ]; then cp "$icon" "$A/mpv.png"; else printf '' > "$A/mpv.png"; fi
 cp "$ROOT/mpvnative/ci/SOURCES.txt" "$A/"
 [ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$A/"
-# the runtime, checked against GitHub's published digest
-repo=$(pin appimageRuntime repo); tag=$(pin appimageRuntime tag); asset=$(pin appimageRuntime asset)
+# the runtime, checked against its pinned SHA-256 (the digest GitHub publishes for the release asset, recorded once)
+repo=$(pin appimageRuntime repo); tag=$(pin appimageRuntime tag); asset=$(pin appimageRuntime asset); want=$(pin appimageRuntime sha256)
 rt="$S/runtime-$tag"
 if [ ! -f "$rt" ]; then
     curl -fsSL --retry 3 -o "$rt" "https://github.com/$repo/releases/download/$tag/$asset"
-    want=$(curl -fsSL -H "Accept: application/vnd.github+json" ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
-        "https://api.github.com/repos/$repo/releases/tags/$tag" \
-        | python3 -c "import json,sys; a=[x for x in json.load(sys.stdin)['assets'] if x['name']==sys.argv[1]]; print(a[0].get('digest','') if a else '')" "$asset")
-    got="sha256:$(sha256sum "$rt" | cut -d' ' -f1)"
-    echo "runtime $tag: $got (published ${want:-none})"
-    [ -n "$want" ] && [ "$got" = "$want" ] || { rm -f "$rt"; echo "::error::AppImage runtime digest check failed"; exit 1; }
+    got=$(sha256sum "$rt" | cut -d' ' -f1)
+    echo "runtime $tag: sha256 $got"
+    [ "$got" = "$want" ] || { rm -f "$rt"; echo "::error::AppImage runtime SHA-256 mismatch ($got, pinned $want)"; exit 1; }
 fi
 rm -f "$S/AppDir.squashfs"
 mksquashfs "$A" "$S/AppDir.squashfs" -root-owned -noappend -comp zstd -quiet
