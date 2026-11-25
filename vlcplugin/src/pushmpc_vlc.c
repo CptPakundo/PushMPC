@@ -61,25 +61,75 @@ static void Close(vlc_object_t *);
 static int  OpenOut(vlc_object_t *);
 static void CloseOut(vlc_object_t *);
 
-/* generated pictures on their way to pushmpc_out (a small ring; a stale entry only costs one needless copy) */
+/* ---- the worker (generation off VLC's video output thread)
+ * With pushmpc_out in the interactive chain, the static filter returns the real frame plus k - 1 still-empty
+ * pictures at once; a worker thread fills them in display order, and pushmpc_out, which runs for each picture just
+ * before it is shown, waits until that picture is filled (at most until its display time; if it is not ready by
+ * then, the real frame is shown in its place). So generated frame j has j/k of the frame interval to be made, instead
+ * of everything having to be ready before VLC's video thread may go on. */
+typedef struct pm_job {
+    vlc_mutex_t lock;
+    vlc_cond_t cond;
+    int refs;
+    int n;                      /* pictures to generate */
+    int done;                   /* filled so far, in order */
+    bool finished, cancel, contiguous;
+    picture_t *src;             /* the newest source frame (pushed to the engine by the worker) */
+    picture_t *real;            /* the real frame shown before them (the fallback) */
+    picture_t *outs[16];
+    float t[16];
+} pm_job;
+
+static pm_job *JobNew(void)
+{
+    pm_job *j = calloc(1, sizeof(*j));
+    if (!j) return NULL;
+    vlc_mutex_init(&j->lock);
+    vlc_cond_init(&j->cond);
+    j->refs = 1;
+    return j;
+}
+static void JobHold(pm_job *j) { vlc_mutex_lock(&j->lock); j->refs++; vlc_mutex_unlock(&j->lock); }
+static void JobRelease(pm_job *j)
+{
+    vlc_mutex_lock(&j->lock);
+    const int left = --j->refs;
+    vlc_mutex_unlock(&j->lock);
+    if (left) return;
+    for (int i = 0; i < j->n; i++) if (j->outs[i]) picture_Release(j->outs[i]);
+    if (j->src) picture_Release(j->src);
+    if (j->real) picture_Release(j->real);
+    vlc_cond_destroy(&j->cond);
+    vlc_mutex_destroy(&j->lock);
+    free(j);
+}
+
+/* generated pictures on their way to pushmpc_out (a ring; a stale entry only costs one needless copy) */
+typedef struct { picture_t *pic; pm_job *job; int idx; } reg_entry;
 static vlc_mutex_t reg_lock = VLC_STATIC_MUTEX;
-static picture_t *reg[256];
+static reg_entry reg[512];
 static unsigned reg_next;
-static void RegAdd(picture_t *p)
+static int out_stages;          /* pushmpc_out instances alive: the worker mode needs one */
+static void RegAdd(picture_t *p, pm_job *job, int idx)
 {
     vlc_mutex_lock(&reg_lock);
-    reg[reg_next++ % (sizeof(reg) / sizeof(reg[0]))] = p;
+    reg_entry *e = &reg[reg_next++ % (sizeof(reg) / sizeof(reg[0]))];
+    pm_job *old = e->job;
+    e->pic = p; e->job = job; e->idx = idx;
     vlc_mutex_unlock(&reg_lock);
+    if (old) JobRelease(old);   /* an entry pushmpc_out never took (a seek dropped the picture) */
 }
-static bool RegTake(picture_t *p)
+static bool RegTake(picture_t *p, pm_job **job, int *idx)
 {
     bool hit = false;
+    *job = NULL;
     vlc_mutex_lock(&reg_lock);
     for (size_t i = 0; i < sizeof(reg) / sizeof(reg[0]); i++)
-        if (reg[i] == p) { reg[i] = NULL; hit = true; break; }
+        if (reg[i].pic == p) { *job = reg[i].job; *idx = reg[i].idx; reg[i].pic = NULL; reg[i].job = NULL; hit = true; break; }
     vlc_mutex_unlock(&reg_lock);
     return hit;
 }
+static int OutStages(void) { vlc_mutex_lock(&reg_lock); int n = out_stages; vlc_mutex_unlock(&reg_lock); return n; }
 
 static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8" };
@@ -105,6 +155,8 @@ vlc_module_begin()
     add_float(CFG "display-hz", 0.0, "Display refresh rate (Hz)", "0 = detect (the primary display)", true)
         change_safe()
     add_integer_with_range(CFG "threads", 0, 0, 64, "Engine threads", "0 = all hardware threads (at most 16)", true)
+    add_bool(CFG "worker", true, "Generate on a worker thread", "Frames are made off VLC's video thread and each one "
+             "has until its display time (needs pushmpc_out after postproc).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
 
@@ -130,9 +182,95 @@ struct filter_sys_t {
     int bits, bps;
     picture_t *prev;
     mtime_t nominal_dt;
-    uint64_t in, out, generated, pool_out, heap_out, alloc_fail, restarts;
+    uint64_t in, out, generated, pool_out, heap_out, alloc_fail, restarts, async_jobs, cancelled;
     char why[256];
+    /* worker */
+    bool worker_on, worker_exit;
+    vlc_thread_t worker;
+    vlc_mutex_t wlock;
+    vlc_cond_t wcond;
+    pm_job *queued;             /* handed to the worker, not yet taken */
+    pm_job *active;             /* the last job submitted (the worker may still run it) */
+    int bps_w;
+    video_format_t wfmt;
 };
+
+/* the worker thread: one job at a time, in order (the engine keeps the pair state) */
+static void PlanesIn(const picture_t *p, const video_format_t *f, int bps, pm_yuv *y);
+static void PlanesOut(picture_t *p, const video_format_t *f, int bps, pm_yuv_out *y);
+static void *Worker(void *data)
+{
+    struct filter_sys_t *sys = data;
+    for (;;) {
+        vlc_mutex_lock(&sys->wlock);
+        while (!sys->queued && !sys->worker_exit)
+            vlc_cond_wait(&sys->wcond, &sys->wlock);
+        if (sys->worker_exit && !sys->queued) { vlc_mutex_unlock(&sys->wlock); break; }
+        pm_job *j = sys->queued;
+        sys->queued = NULL;
+        vlc_mutex_unlock(&sys->wlock);
+
+        pm_yuv src;
+        PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
+        char err[160];
+        if (pm_engine_push(sys->eng, &src, j->contiguous, err, sizeof(err)) != 0)
+            pm_engine_forget(sys->eng);
+        const bool pair = pm_engine_have_pair(sys->eng);
+        for (int i = 0; i < j->n; i++) {
+            vlc_mutex_lock(&j->lock);
+            const bool stop = j->cancel;
+            vlc_mutex_unlock(&j->lock);
+            if (stop || !pair) break;
+            pm_yuv_out dst;
+            PlanesOut(j->outs[i], &sys->wfmt, sys->bps_w, &dst);
+            pm_engine_generate(sys->eng, j->t[i], &dst);
+            vlc_mutex_lock(&j->lock);
+            j->done = i + 1;
+            vlc_cond_broadcast(&j->cond);
+            vlc_mutex_unlock(&j->lock);
+        }
+        vlc_mutex_lock(&j->lock);
+        j->finished = true;
+        vlc_cond_broadcast(&j->cond);
+        vlc_mutex_unlock(&j->lock);
+        JobRelease(j);          /* the worker's reference */
+    }
+    return NULL;
+}
+
+/* wait until the worker is idle (cancelling what is left of the last job when cancel is set) */
+static void WorkerIdle(struct filter_sys_t *sys, bool cancel)
+{
+    if (!sys->worker_on) return;
+    vlc_mutex_lock(&sys->wlock);
+    pm_job *q = sys->queued;
+    sys->queued = NULL;
+    vlc_mutex_unlock(&sys->wlock);
+    if (q) {                    /* never started: finish it as empty */
+        vlc_mutex_lock(&q->lock); q->finished = true; vlc_cond_broadcast(&q->cond); vlc_mutex_unlock(&q->lock);
+        JobRelease(q);
+    }
+    pm_job *a = sys->active;
+    if (!a) return;
+    vlc_mutex_lock(&a->lock);
+    if (cancel && !a->finished) { a->cancel = true; sys->cancelled++; }
+    while (!a->finished)
+        vlc_cond_wait(&a->cond, &a->lock);
+    vlc_mutex_unlock(&a->lock);
+    JobRelease(a);
+    sys->active = NULL;
+}
+
+static void Submit(struct filter_sys_t *sys, pm_job *j)
+{
+    JobHold(j);                 /* the worker's reference */
+    sys->active = j;            /* the filter's reference (from JobNew) */
+    vlc_mutex_lock(&sys->wlock);
+    sys->queued = j;
+    vlc_cond_signal(&sys->wcond);
+    vlc_mutex_unlock(&sys->wlock);
+    sys->async_jobs++;
+}
 
 static bool Supported(vlc_fourcc_t c, int *bits)
 {
@@ -187,6 +325,49 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     }
     if (sys->k <= 1 || !sys->eng) { sys->out++; return cur; }
 
+    if (sys->worker_on && OutStages() > 0) {
+        /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
+         * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
+        WorkerIdle(sys, false);
+        picture_t *prev = sys->prev;
+        sys->prev = cur;
+        const mtime_t dt = prev ? cur->date - prev->date : 0;
+        const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+        pm_job *j = JobNew();
+        if (!j) { if (prev) { sys->out++; prev->p_next = NULL; } return prev; }
+        j->src = picture_Hold(cur);
+        j->contiguous = contiguous;
+        picture_t *head = prev, *tail = prev;
+        if (prev && contiguous) {
+            prev->p_next = NULL;
+            j->real = picture_Hold(prev);
+            for (int i = 0; i < sys->k - 1 && i < 16; i++) {
+                picture_t *o = NewOut(f, sys);
+                if (!o) break;
+                picture_CopyProperties(o, prev);
+                o->date = prev->date + dt * (i + 1) / sys->k;
+                o->b_force = false;
+                o->p_next = NULL;
+                j->outs[i] = picture_Hold(o);       /* the worker writes into it */
+                j->t[i] = (float)(i + 1) / (float)sys->k;
+                j->n = i + 1;
+                JobHold(j);
+                RegAdd(o, j, i + 1);                /* pushmpc_out waits for j->done >= i + 1 */
+                tail->p_next = o;
+                tail = o;
+                sys->generated++;
+            }
+        } else if (prev) {
+            sys->restarts++;
+            prev->p_next = NULL;
+        }
+        Submit(sys, j);
+        if (!prev) return NULL;
+        for (picture_t *p = head; p; p = p->p_next) sys->out++;
+        return head;
+    }
+    WorkerIdle(sys, false);     /* synchronous mode below; the engine must not be shared */
+
     pm_yuv src;
     PlanesIn(cur, &f->fmt_out.video, sys->bps, &src);
 
@@ -220,7 +401,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             o->date = prev->date + dt * j / sys->k;
             o->b_force = false;
             o->p_next = NULL;
-            RegAdd(o);
+            RegAdd(o, NULL, 0);
             tail->p_next = o;
             tail = o;
             sys->out++;
@@ -233,6 +414,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
 static void Flush(filter_t *f)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
+    WorkerIdle(sys, true);
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->download) filter_chain_VideoFlush(sys->download);
@@ -320,6 +502,14 @@ static int Open(vlc_object_t *obj)
 
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
+    if (sys->eng && sys->k > 1 && var_InheritBool(f, CFG "worker")) {
+        vlc_mutex_init(&sys->wlock);
+        vlc_cond_init(&sys->wcond);
+        sys->wfmt = f->fmt_out.video;
+        sys->bps_w = sys->bps;
+        if (vlc_clone(&sys->worker, Worker, sys, VLC_THREAD_PRIORITY_VIDEO) == 0) sys->worker_on = true;
+        else { vlc_cond_destroy(&sys->wcond); vlc_mutex_destroy(&sys->wlock); }
+    }
     f->p_sys = (void *)sys;
     f->pf_video_filter = Filter;
     f->pf_flush = Flush;
@@ -334,28 +524,54 @@ static void Close(vlc_object_t *obj)
     filter_t *f = (filter_t *)obj;
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
     pm_engine_stats st = { 0 };
+    Flush(f);                   /* the worker is idle after this */
     if (sys->eng) pm_engine_stats_get(sys->eng, &st);
+    if (sys->worker_on) {
+        vlc_mutex_lock(&sys->wlock);
+        sys->worker_exit = true;
+        vlc_cond_signal(&sys->wcond);
+        vlc_mutex_unlock(&sys->wlock);
+        vlc_join(sys->worker, NULL);
+        vlc_cond_destroy(&sys->wcond);
+        vlc_mutex_destroy(&sys->wlock);
+    }
     msg_Info(f, "PushMPC: close, in=%" PRIu64 " out=%" PRIu64 " generated=%" PRIu64 " (pool %" PRIu64 ", heap %" PRIu64
-             ", failed %" PRIu64 ") restarts=%" PRIu64 " cuts=%" PRIu64 " motion %.1f ms, frame %.1f ms",
+             ", failed %" PRIu64 ") restarts=%" PRIu64 " cuts=%" PRIu64 " motion %.1f ms, frame %.1f ms, worker %s "
+             "(jobs %" PRIu64 ", cut short %" PRIu64 ")",
              sys->in, sys->out, sys->generated, sys->pool_out, sys->heap_out, sys->alloc_fail, sys->restarts,
-             st.cuts, st.me_ms, st.gen_ms);
-    Flush(f);
+             st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->download) filter_chain_Delete(sys->download);
     free(sys);
 }
 
 /* ---------------------------------------------------------------- pushmpc_out (interactive chain) */
-typedef struct { uint64_t copied, passed, failed; } out_sys_t;
+typedef struct { uint64_t copied, passed, failed, waited, late; mtime_t wait_us; } out_sys_t;
 
 static picture_t *FilterOut(filter_t *f, picture_t *p)
 {
     out_sys_t *s = (out_sys_t *)f->p_sys;
-    if (!RegTake(p)) { s->passed++; return p; }
+    pm_job *job; int idx = 0;
+    if (!RegTake(p, &job, &idx)) { s->passed++; return p; }
+    const picture_t *from = p;
+    if (job) {                            /* worker mode: wait for this picture, at most until its display time */
+        const mtime_t t0 = mdate();
+        const mtime_t deadline = p->date > t0 ? p->date : t0;
+        vlc_mutex_lock(&job->lock);
+        if (job->done < idx) s->waited++;
+        while (job->done < idx && !job->finished)
+            if (vlc_cond_timedwait(&job->cond, &job->lock, deadline)) break;
+        const bool ready = job->done >= idx;
+        vlc_mutex_unlock(&job->lock);
+        s->wait_us += mdate() - t0;
+        if (!ready) { from = job->real; s->late++; }  /* not made in time: the real frame instead */
+    }
     picture_t *o = filter_NewPicture(f);  /* the last interactive filter allocates from the vout's private pool */
-    if (!o) { s->failed++; return p; }
-    picture_Copy(o, p);                   /* pixels and properties (date) */
+    if (!o) { s->failed++; if (job) JobRelease(job); return p; }
+    picture_Copy(o, from);                /* pixels and properties */
+    o->date = p->date;
     picture_Release(p);
+    if (job) JobRelease(job);
     s->copied++;
     return o;
 }
@@ -370,6 +586,7 @@ static int OpenOut(vlc_object_t *obj)
     if (!s) return VLC_ENOMEM;
     f->p_sys = (void *)s;
     f->pf_video_filter = FilterOut;
+    vlc_mutex_lock(&reg_lock); out_stages++; vlc_mutex_unlock(&reg_lock);
     msg_Dbg(f, "PushMPC output stage on %4.4s", (const char *)&f->fmt_in.video.i_chroma);
     return VLC_SUCCESS;
 }
@@ -378,6 +595,9 @@ static void CloseOut(vlc_object_t *obj)
 {
     filter_t *f = (filter_t *)obj;
     out_sys_t *s = (out_sys_t *)f->p_sys;
-    msg_Info(f, "PushMPC output stage: copied=%" PRIu64 " passed=%" PRIu64 " failed=%" PRIu64, s->copied, s->passed, s->failed);
+    vlc_mutex_lock(&reg_lock); out_stages--; vlc_mutex_unlock(&reg_lock);
+    msg_Info(f, "PushMPC output stage: copied=%" PRIu64 " passed=%" PRIu64 " failed=%" PRIu64 " waited=%" PRIu64
+             " (%.2f ms on average) not ready=%" PRIu64, s->copied, s->passed, s->failed, s->waited,
+             s->waited ? (double)s->wait_us / 1000.0 / (double)s->waited : 0.0, s->late);
     free(s);
 }

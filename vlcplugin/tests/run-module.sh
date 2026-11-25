@@ -62,6 +62,13 @@ fi
 # the platform's default decoding (hardware where VLC finds it: VideoToolbox, VA-API, D3D11VA); VLC converts the
 # hardware pictures in front of the filter and back after it, or drops the filters when it cannot
 want x4_hwdec  && HWARGS=" " run x4_hwdec 4 "$CLIP" -- $PP --pushmpc-smoother=4
+# worker thread vs VLC's video thread on a 720p clip, where a runner's CPU is near its limit: the worker mode should
+# show more frames on time (late ms) and pushmpc_out's close line reports "not ready" pictures
+if [ -n "${CLIP720:-}" ]; then
+  S720=$(sed -n 's/nb_read_frames=//p' "${CLIP720%.mkv}.txt" 2>/dev/null | tr -d '\r')
+  want x2_720      && SRC_FRAMES="${S720:-$SRC_FRAMES}" run x2_720      2 "$CLIP720" -- $PP --pushmpc-smoother=2
+  want x2_720_sync && SRC_FRAMES="${S720:-$SRC_FRAMES}" run x2_720_sync 2 "$CLIP720" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker
+fi
 if [ -n "${CLIP10:-}" ] && want x4_10bit; then
   run x4_10bit 4 "$CLIP10" -- $PP --pushmpc-smoother=4
 fi

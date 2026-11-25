@@ -52,7 +52,12 @@ elseif(APPLE)
   target_link_options(pushmpc_plugin PRIVATE -undefined dynamic_lookup)
   target_link_libraries(pushmpc_plugin PRIVATE "-framework CoreGraphics")
 else()
-  target_link_options(pushmpc_plugin PRIVATE -static-libstdc++ -static-libgcc -Wl,--no-undefined -Wl,-z,defs)
+  target_link_options(pushmpc_plugin PRIVATE -static-libstdc++ -static-libgcc)
+  if(VLC_CORE_LIB)
+    target_link_options(pushmpc_plugin PRIVATE -Wl,--no-undefined -Wl,-z,defs)
+  endif()
+  # without VLC_CORE_LIB (the manylinux2014 release build) libvlccore's symbols stay undefined and resolve from the
+  # VLC process at load, as on macOS, so one binary fits every distro's VLC 3.0.x (glibc >= 2.17)
   target_link_libraries(pushmpc_plugin PRIVATE ${CMAKE_DL_LIBS})
 endif()
 

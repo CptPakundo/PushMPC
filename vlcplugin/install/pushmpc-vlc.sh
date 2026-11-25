@@ -18,7 +18,7 @@
 #        [avcodec]  avcodec-hw=none on Linux: VLC 3 cannot hand VA-API/VDPAU pictures back to the display after a CPU
 #                   filter and would drop every filter; software decoding keeps PushMPC on
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
-# Snap VLC: not supported (strict confinement cannot load plugins from the home folder). Switch it off in VLC:
+# Snap VLC: experimental (~/snap/vlc/common/pushmpc, its own vlcrc there, a vlc_vlc.desktop override). Switch it off in VLC:
 # Tools > Effects and Filters > Video Effects > Advanced > Post processing, or Preferences > PushMPC > Smoother: Off.
 set -eu
 
@@ -71,7 +71,8 @@ detect_targets() {
   else
     if command -v vlc >/dev/null 2>&1 && ! readlink -f "$(command -v vlc)" | grep -q '/snap/'; then t="native"; fi
     if command -v flatpak >/dev/null 2>&1 && flatpak info "$APPID" >/dev/null 2>&1; then t="$t flatpak"; fi
-    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then say "note: the Snap VLC cannot load PushMPC (strict confinement); use the distro or Flathub VLC"; fi
+    # Snap VLC: experimental until the CI snap-spike confirms that the confined VLC loads from ~/snap/vlc/common
+    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then t="$t snap"; fi
   fi
   printf '%s' "$t"
 }
@@ -80,6 +81,8 @@ paths_for() { # sets DIR, RC for a target
   case "$1" in
     native)  DIR="$HOME/.local/share/pushmpc/vlc"; RC="${XDG_CONFIG_HOME:-$HOME/.config}/vlc/vlcrc" ;;
     flatpak) DIR="$HOME/.var/app/$APPID/data/pushmpc/vlc"; RC="$HOME/.var/app/$APPID/config/vlc/vlcrc" ;;
+    # the snap's wrapper runs vlc --config=$SNAP_USER_COMMON/vlcrc and leaves VLC_PLUGIN_PATH alone
+    snap)    DIR="$HOME/snap/vlc/common/pushmpc"; RC="$HOME/snap/vlc/common/vlcrc" ;;
     macos)   DIR="$HOME/Library/Application Support/PushMPC/vlc"; RC="$HOME/Library/Preferences/org.videolan.vlc/vlcrc" ;;
   esac
 }
@@ -108,6 +111,15 @@ install_one() {
       done ;;
     flatpak)
       flatpak override --user --env=VLC_PLUGIN_PATH="$DIR" "$APPID" ;;
+    snap)
+      src=/var/lib/snapd/desktop/applications/vlc_vlc.desktop
+      if [ -f "$src" ]; then
+        mkdir -p "$HOME/.local/share/applications"
+        sed "s|^Exec=|Exec=env VLC_PLUGIN_PATH=$DIR |" "$src" > "$HOME/.local/share/applications/vlc_vlc.desktop"
+        printf 'X-PushMPC=1\n' >> "$HOME/.local/share/applications/vlc_vlc.desktop"
+      fi
+      mkdir -p "$HOME/.config/environment.d"
+      printf '# PushMPC for VLC (snap)\nVLC_PLUGIN_PATH=%s\n' "$DIR" > "$HOME/.config/environment.d/61-pushmpc-vlc-snap.conf" ;;
     macos)
       la="$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; mkdir -p "$(dirname "$la")"
       cat > "$la" <<EOF
@@ -136,6 +148,9 @@ uninstall_one() {
       rm -f "$HOME/.config/environment.d/60-pushmpc-vlc.conf"
       grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc.desktop" ;;
     flatpak) flatpak override --user --unset-env=VLC_PLUGIN_PATH "$APPID" 2>/dev/null || true ;;
+    snap)
+      rm -f "$HOME/.config/environment.d/61-pushmpc-vlc-snap.conf"
+      grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc_vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc_vlc.desktop" ;;
     macos)   rm -f "$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; launchctl unsetenv VLC_PLUGIN_PATH 2>/dev/null || true ;;
   esac
   if [ -f "$RC" ]; then
