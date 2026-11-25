@@ -30,8 +30,12 @@ extern "C" __global__ void nvl_yuv16_to_packed(Planes in, int w, int h, InFormat
     ToPacked<uint16_t>(in, w, h, f, k, tenBitOut, out, outPitch);
 }
 
-extern "C" __global__ void nvl_packed_to_yuv420(const uint32_t* in, unsigned inPitch, int tenBitIn, int w, int h, Coeffs k, int bits, OutPlanes out)
+// hold: when the GPU cut guard flags this pair (holdFlag[0] != 0), the picture comes from `alt` (the pair's first real
+// frame A) instead of `in` (the generated frame): Windows' predicated copy, decided on the GPU with no host wait.
+extern "C" __global__ void nvl_packed_to_yuv420(const uint32_t* in, unsigned inPitch, int tenBitIn, int w, int h, Coeffs k, int bits, OutPlanes out,
+                                                const uint32_t* holdFlag, const uint32_t* alt, unsigned altPitch)
 {
+    if (holdFlag && alt && holdFlag[0] != 0u) { in = alt; inPitch = altPitch; }
     const int cx = blockIdx.x * blockDim.x + threadIdx.x, cy = blockIdx.y * blockDim.y + threadIdx.y;
     const int cw = (w + 1) >> 1, ch = (h + 1) >> 1;
     if (cx >= cw || cy >= ch) return;

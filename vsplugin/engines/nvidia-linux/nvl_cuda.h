@@ -66,6 +66,8 @@ struct CudaApi {
     CUresult (*cuModuleLoadData)(CUmodule*, const void*) = nullptr;
     CUresult (*cuModuleGetFunction)(CUfunction*, CUmodule, const char*) = nullptr;
     CUresult (*cuModuleUnload)(CUmodule) = nullptr;
+    CUresult (*cuModuleGetGlobal)(CUdeviceptr*, size_t*, CUmodule, const char*) = nullptr;
+    CUresult (*cuMemsetD8Async)(CUdeviceptr, unsigned char, size_t, CUstream) = nullptr;
     CUresult (*cuLaunchKernel)(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, CUstream, void**, void**) = nullptr;
     CUresult (*cuGetErrorName)(CUresult, const char**) = nullptr;
     CUresult (*cuGetErrorString)(CUresult, const char**) = nullptr;

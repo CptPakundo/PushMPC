@@ -74,7 +74,48 @@ if(PMVS_NVIDIA_VFX)
     COMMAND "${CMAKE_COMMAND}" -DIN=${NVL_FATBIN} -DOUT=${NVL_FATBIN_CPP} -P "${NVL}/bin2cpp.cmake"
     DEPENDS "${NVL_FATBIN}" "${NVL}/bin2cpp.cmake" VERBATIM)
 
-  add_library(pmvs_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp" "${NVL_FATBIN_CPP}")
+  # The GPU cut guard: Windows' HLSL (shaders/, PushFPS 4.5.3 + PushMPC's patch) through Slang to CUDA, then nvcc.
+  # slangc at build time only (CI pins it: scripts/slang-pin.json); PMVS_NVL_GUARD_DIR takes the two prebuilt fatbins
+  # instead (Windows on Arm: from the Linux job). Without either, the CPU guard (nvl_cutguard.h) runs.
+  find_program(PMVS_SLANGC slangc HINTS "$ENV{SLANG_DIR}/bin")
+  set(PMVS_NVL_GUARD_DIR "" CACHE PATH "prebuilt nvl_guard_sc.fatbin / nvl_guard_fm.fatbin (instead of slangc + nvcc)")
+  set(NVL_GUARD_SOURCES "")
+  foreach(g sc fm)
+    set(src "${NVL}/shaders/VfgShotChange.hlsl")
+    if(g STREQUAL "fm")
+      set(src "${NVL}/shaders/VfgFourierMellin.hlsl")
+    endif()
+    set(fb "${CMAKE_BINARY_DIR}/nvl_guard_${g}.fatbin")
+    if(PMVS_NVL_GUARD_DIR)
+      set(fb "${PMVS_NVL_GUARD_DIR}/nvl_guard_${g}.fatbin")
+    elseif(PMVS_SLANGC AND PMVS_NVCC)
+      get_filename_component(slang_root "${PMVS_SLANGC}" DIRECTORY)
+      add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu"
+        COMMAND "${PMVS_SLANGC}" -lang slang "${src}" -entry main -stage compute -target cuda -o "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu"
+        DEPENDS "${src}" VERBATIM)
+      add_custom_command(OUTPUT "${fb}"
+        COMMAND "${PMVS_NVCC}" -fatbin -O3 -std=c++17 -include cuda_fp16.h -I "${slang_root}/../include" ${PMVS_CUDA_GENCODE} -o "${fb}" "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu"
+        DEPENDS "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu" VERBATIM COMMAND_EXPAND_LISTS)
+    else()
+      set(fb "")
+    endif()
+    if(fb)
+      add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp"
+        COMMAND "${CMAKE_COMMAND}" -DIN=${fb} -DOUT=${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp -DNAME=nvl_guard_${g}_fatbin -P "${NVL}/bin2cpp.cmake"
+        DEPENDS "${fb}" "${NVL}/bin2cpp.cmake" VERBATIM)
+      list(APPEND NVL_GUARD_SOURCES "${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp")
+    endif()
+  endforeach()
+  list(LENGTH NVL_GUARD_SOURCES nvl_guard_n)
+
+  add_library(pmvs_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp" "${NVL}/nvl_gpuguard.cpp"
+                              "${NVL_FATBIN_CPP}" ${NVL_GUARD_SOURCES})
+  if(nvl_guard_n EQUAL 2)
+    target_compile_definitions(pmvs_nvl PRIVATE PMVS_NVL_GPU_GUARD)
+    message(STATUS "nvidia: GPU cut guard from the HLSL (Slang)")
+  else()
+    message(STATUS "nvidia: no slangc / prebuilt guard: the CPU cut guard only")
+  endif()
   target_include_directories(pmvs_nvl PUBLIC "${NVL}" src)
   target_link_libraries(pmvs_nvl PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
   set_target_properties(pmvs_nvl PROPERTIES CXX_VISIBILITY_PRESET hidden)

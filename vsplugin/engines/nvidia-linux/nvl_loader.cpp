@@ -39,6 +39,7 @@ bool CudaApi::Load(std::string& why, const char* path)
         && Bind(lib, "cuMemHostAlloc", cuMemHostAlloc, why) && Bind(lib, "cuMemFreeHost", cuMemFreeHost, why) && Bind(lib, "cuMemcpy2DAsync_v2", cuMemcpy2DAsync, why)
         && Bind(lib, "cuMemcpyHtoDAsync_v2", cuMemcpyHtoDAsync, why) && Bind(lib, "cuMemcpyDtoHAsync_v2", cuMemcpyDtoHAsync, why) && Bind(lib, "cuMemcpyDtoH_v2", cuMemcpyDtoH, why)
         && Bind(lib, "cuModuleLoadData", cuModuleLoadData, why) && Bind(lib, "cuModuleGetFunction", cuModuleGetFunction, why) && Bind(lib, "cuModuleUnload", cuModuleUnload, why)
+        && Bind(lib, "cuModuleGetGlobal_v2", cuModuleGetGlobal, why) && Bind(lib, "cuMemsetD8Async", cuMemsetD8Async, why)
         && Bind(lib, "cuLaunchKernel", cuLaunchKernel, why) && Bind(lib, "cuGetErrorName", cuGetErrorName, why) && Bind(lib, "cuGetErrorString", cuGetErrorString, why);
     if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; }
     return ok;

@@ -23,6 +23,7 @@
 #include "nvl_ampere.h"
 #include "nvl_engine.h"
 #include "nvl_fatbin.h"
+#include "nvl_gpuguard.h"
 #include "nvl_os.h"
 #include "nvl_selftest.h"
 #include "nvl_sha256.h"
@@ -157,6 +158,10 @@ int main(int argc, char** argv)
     std::printf("VFG fatbins: %u, SM89 containers retargeted: %u, rejected: %u\n", fatbins, changed, rejected);
     CHECK(fatbins == 62 && changed == 62 && rejected == 0, "census 62 / 62 / 0");
 #endif
+
+    // 8. the GPU cut guard (the HLSL through Slang) is in this build when CI expects it
+    if (const char* e = std::getenv("PUSHMPC_EXPECT_GPU_GUARD"); e && !std::strcmp(e, "1")) CHECK(GpuGuard::Built(), "the GPU cut guard is built");
+    std::printf("GPU cut guard built: %s\n", GpuGuard::Built() ? "yes" : "no");
 
     // 7. the self-test refuses without a GPU
     std::string report;

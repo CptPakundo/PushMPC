@@ -83,6 +83,7 @@ Engine::~Engine()
         for (auto& p : m_yuv) if (p) m_cu->cuMemFree(p);
         for (auto& u : m_up) { if (u.host) m_cu->cuMemFreeHost(u.host); if (u.done) m_cu->cuEventDestroy(u.done); }
         for (auto& s : m_slots) { if (s.host) m_cu->cuMemFreeHost(s.host); if (s.done) m_cu->cuEventDestroy(s.done); }
+        m_guard.Close();
         if (m_module) m_cu->cuModuleUnload(m_module);
         if (m_stream) m_cu->cuStreamDestroy(m_stream);
     }
@@ -223,6 +224,12 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
             || !Cv(m_vfx.SetImage(m_vfg, sel::kDst0, m_vfgOut.desc), "VFG DstImage0", err)
             || !Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(p.k)), "VFG FrameMultiplier", err)) return false;
         what += "VFG " + std::string(p.vfgQuality >= 2 ? "High" : p.vfgQuality <= 0 ? "Low" : "Medium") + " x" + std::to_string(p.k) + (cfg.ampere ? " (RTX 30 compatibility)" : "") + "; ";
+        // the cut guard: Windows' HLSL on the GPU when built (PUSHMPC_CUT_GUARD=cpu keeps the CPU port)
+        const char* mode = std::getenv("PUSHMPC_CUT_GUARD");
+        std::string gerr;
+        if (mode && !std::strcmp(mode, "cpu")) what += "cut guard: CPU (PUSHMPC_CUT_GUARD=cpu); ";
+        else if (m_guard.Open(*m_cu, m_stream, uint32_t(ow), uint32_t(oh), m_enhTenBit, gerr)) what += "cut guard: GPU (PushMPC's HLSL via Slang); ";
+        else what += "cut guard: CPU (" + gerr + "); ";
     }
     unsigned version = 0;
     m_vfx.GetVersion(&version);
@@ -282,7 +289,7 @@ bool Engine::Upload(const SrcView& v, int parity, std::string& err)
     return true;
 }
 
-int Engine::ToSlot(const Image& im, std::string& err)
+int Engine::ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag, const Image* alt)
 {
     int idx = -1;
     for (size_t i = 0; i < m_slots.size(); ++i) if (!m_slots[i].busy) { idx = int(i); break; }
@@ -294,7 +301,10 @@ int Engine::ToSlot(const Image& im, std::string& err)
     Coeffs k = MatrixCoeffs(m_outHdr ? 9 : 1);
     struct { uint8_t* p[3]; unsigned pitch[3]; } out = { { reinterpret_cast<uint8_t*>(m_yuv[0]), reinterpret_cast<uint8_t*>(m_yuv[1]), reinterpret_cast<uint8_t*>(m_yuv[2]) },
                                                          { unsigned(m_yuvPitch[0]), unsigned(m_yuvPitch[1]), unsigned(m_yuvPitch[2]) } };
-    void* args[] = { &in, &inPitch, &tb, &w, &h, &k, &bits, &out };
+    const uint32_t* flag = reinterpret_cast<const uint32_t*>(holdFlag);
+    const uint32_t* altPtr = alt ? reinterpret_cast<const uint32_t*>(alt->ptr) : nullptr;
+    unsigned altPitch = alt ? unsigned(alt->pitch) : 0u;
+    void* args[] = { &in, &inPitch, &tb, &w, &h, &k, &bits, &out, &flag, &altPtr, &altPitch };
     if (!Launch(m_toYuv, unsigned((w + 1) / 2), unsigned((h + 1) / 2), args, err)) return -1;
     const int obps = m_outBits > 8 ? 2 : 1, cw = (w + 1) / 2, ch = (h + 1) / 2;
     const int pw[3] = { w, cw, cw }, ph[3] = { h, ch, ch };
@@ -323,7 +333,20 @@ int Engine::Generate(int parity, int j, int k, bool newPair, std::string& err)
     }
     if (!Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(k)), "VFG FrameMultiplier", err) || !Cv(m_vfx.SetU32(m_vfg, sel::kIndex, unsigned(j)), "VFG FrameIndex", err)
         || !Cv(m_vfx.Run(m_vfg, 1), "NvVFX_Run(VideoFrameGeneration)", err)) return -1;
+    if (m_guard.Ready()) {
+        // Windows' holdOnCut: up to the pair's midpoint A on a hard or soft cut, after it A on a hard cut
+        const unsigned par = unsigned(parity);
+        return ToSlot(m_vfgOut, err, 2 * j <= k ? m_guard.AnyFlag(par) : m_guard.HardFlag(par), &m_enh[1 - parity]);
+    }
     return ToSlot(m_vfgOut, err);
+}
+
+bool Engine::Guard(int parity, bool compare, std::string& err)
+{
+    if (!m_guard.Ready()) return true;
+    Ctx c(*m_cu, m_ctx);
+    if (!c.ok) { err = "cuCtxPushCurrent failed"; return false; }
+    return m_guard.Test(m_enh[1 - parity].ptr, m_enh[parity].ptr, m_enh[parity].pitch, unsigned(parity), compare, err);
 }
 
 int Engine::Emit(int parity, std::string& err)

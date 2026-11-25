@@ -47,3 +47,4 @@ vsplugin/third_party/vapoursynth/**
 scripts/nvidia-vfx-pin.json
 scripts/nvidia-vfx-wheel.py
 scripts/nvidia-vfx-fetch.sh
+scripts/slang-pin.json

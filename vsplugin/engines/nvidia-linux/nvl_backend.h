@@ -37,16 +37,21 @@ public:
         SrcView v;
         if (!source || !source(s, v)) { err = "nvidia: source frame " + std::to_string(s) + " is not available"; return false; }
         const bool contiguous = !discontinuity && m_last == s - 1;
-        // the cut guard first (CPU, the source's luma)
-        const CutDecision cut = guard.Push([&](int x, int y) -> uint32_t {
-            const uint8_t* row = v.data[0] + v.stride[0] * y;
-            const uint32_t c = v.bits > 8 ? reinterpret_cast<const uint16_t*>(row)[x] : row[x];
-            return GuardLuma(c, v.bits, v.fmt.full);
-        }, contiguous);
+        const bool gpuGuard = engine->HasGpuGuard();
+        // the cut guard: on the GPU (Windows' HLSL, decided there, after the upload) or the CPU port (the source's luma)
+        CutDecision cut;
+        if (!gpuGuard)
+            cut = guard.Push([&](int x, int y) -> uint32_t {
+                const uint8_t* row = v.data[0] + v.stride[0] * y;
+                const uint32_t c = v.bits > 8 ? reinterpret_cast<const uint16_t*>(row)[x] : row[x];
+                return GuardLuma(c, v.bits, v.fmt.full);
+            }, contiguous);
         const int parity = int(s & 1);
         if (!engine->Upload(v, parity, err)) return false;
+        if (gpuGuard && grid.k >= 2 && !engine->Guard(parity, contiguous, err)) return false;
         if (contiguous && grid.k >= 2) {
             if (cut.cut) ++heldCuts;
+            if (gpuGuard) heldCuts = engine->GuardCuts();
             for (int j = 1; j < grid.k; ++j) {
                 const int slot = cut.cut ? engine->Emit(1 - parity, err) : engine->Generate(parity, j, grid.k, j == 1, err);
                 if (slot < 0) return false;

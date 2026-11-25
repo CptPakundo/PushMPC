@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 45
     env:
       PUSHMPC_TEST_GPU: '1'   # the struct test and self-test may load the (stub) driver here
+      PUSHMPC_EXPECT_GPU_GUARD: '1'
       NVVFX: ${{ github.workspace }}/nvvfx-runtime
     steps:
       - uses: actions/checkout@v4
@@ -65,13 +66,40 @@ jobs:
           mkdir -p vsplugin/third_party/vapoursynth
           cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
 
+      - name: Slang (pinned; build time only) and the cut guard's HLSL provenance
+        timeout-minutes: 10
+        run: |
+          set -eux
+          url=$(python -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['url'])")
+          sha=$(python -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['sha256'])")
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/slang.tgz" "$url"
+          [ "$(sha256sum "$RUNNER_TEMP/slang.tgz" | cut -d' ' -f1 | tr a-f A-F)" = "$sha" ]
+          mkdir -p "$RUNNER_TEMP/slang" && tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
+          echo "SLANG_DIR=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/slang/bin/slangc" -v || true
+          grep -nE "struct (RW)?ByteAddressBuffer" -A4 "$RUNNER_TEMP/slang/include/slang-cuda-prelude.h" | head -20
+          # one source for both platforms: the vendored HLSL must be PushFPS v4.5.3 + patches/pushfps-4.5.3-pushmpc.patch
+          tag=$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['tag'])")
+          up="$RUNNER_TEMP/upstream"; mkdir -p "$up/shaders"
+          for f in VfgShotChange.hlsl; do curl -fsSL --retry 3 -o "$up/shaders/$f" "https://raw.githubusercontent.com/DosukaSOL/PushFPS/$tag/shaders/$f"; done
+          (cd "$up" && git init -q && git apply --include='shaders/VfgShotChange.hlsl' --include='shaders/VfgFourierMellin.hlsl' "$GITHUB_WORKSPACE/patches/pushfps-4.5.3-pushmpc.patch")
+          for f in VfgShotChange.hlsl VfgFourierMellin.hlsl; do cmp "$up/shaders/$f" "vsplugin/engines/nvidia-linux/shaders/$f"; done
+          echo "vendored HLSL = PushFPS $tag + PushMPC's patch"
+
       - name: Build (plugin with the nvidia backend, self-test, tests)
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
           set -eux
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMVS_NVIDIA_LINUX=ON
           grep -E "PMVS_NVIDIA_LINUX:BOOL=ON" build/CMakeCache.txt
           cmake --build build --parallel
+          # the GPU cut guard: built, and Slang's bindings in the order the host fills them
+          ls -la build/nvl_guard_sc.fatbin build/nvl_guard_fm.fatbin
+          grep -A9 "^struct GlobalParams_0" build/nvl_guard_sc.cu | tee sc_globals.txt
+          grep -A6 "^struct GlobalParams_0" build/nvl_guard_fm.cu | tee fm_globals.txt
+          tr -d ' \n' < sc_globals.txt | grep -q "Constants_0;ByteAddressBufferpreviousFrame_0;ByteAddressBuffercurrentFrame_0;RWByteAddressBufferflags_0;ByteAddressBufferflowForward_0;ByteAddressBufferflowCost_0;ByteAddressBufferflowBackward_0;"
+          tr -d ' \n' < fm_globals.txt | grep -q "Constants_0;ByteAddressBufferpreviousFrame_0;ByteAddressBuffercurrentFrame_0;RWByteAddressBufferscratch_0;RWByteAddressBufferresults_0;"
+          grep -q "__global__ void main_0" build/nvl_guard_sc.cu && grep -q "__global__ void main_0" build/nvl_guard_fm.cu
           ls -la vsplugin/bin build/nvl_kernels.fatbin
           # the backend exports nothing (hidden); CUDA / VFX are run-time loaded (no libcuda in NEEDED)
           nm -D --defined-only vsplugin/bin/pushmpc_vs.so | grep -E " T " | tee exports.txt
@@ -166,7 +194,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nvl-kernels-fatbin
-          path: build/nvl_kernels.fatbin
+          path: |
+            build/nvl_kernels.fatbin
+            build/nvl_guard_sc.fatbin
+            build/nvl_guard_fm.fatbin
 
   # Windows on Arm + RTX (RTX Spark): the same engine, the win_arm64 wheel (CUDA 13), the kernels from the Linux job
   # (their PTX 7.5 is JIT-compiled for SM 12.1 by the driver). No GPU on the runner: build + structure only.
@@ -176,6 +207,7 @@ jobs:
     timeout-minutes: 30
     env:
       PUSHMPC_TEST_GPU: '1'   # no driver on the runner: the tests see none
+      PUSHMPC_EXPECT_GPU_GUARD: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -195,12 +227,12 @@ jobs:
         shell: bash
         run: |
           set -eux
-          cmake -S vsplugin -B build-arm64 -DPMVS_NVIDIA_WINARM64=ON -DPMVS_NVL_FATBIN="$PWD/fatbin/nvl_kernels.fatbin"
+          cmake -S vsplugin -B build-arm64 -DPMVS_NVIDIA_WINARM64=ON -DPMVS_NVL_FATBIN="$PWD/fatbin/nvl_kernels.fatbin" -DPMVS_NVL_GUARD_DIR="$PWD/fatbin"
           grep -E "PMVS_NVIDIA_WINARM64:BOOL=ON" build-arm64/CMakeCache.txt
           cmake --build build-arm64 --config Release --target nvl_test pmvs_nvl pushmpc-nvvfx-selftest nvl_struct_test --parallel
-          ./build-arm64/Release/nvl_test.exe
+          ./build-arm64/nvl_test.exe
           ./build-arm64/Release/nvl_struct_test.exe "$PWD/nvvfx-arm64"
-          set +e; ./vsplugin/bin/Release/pushmpc-nvvfx-selftest.exe --runtime "$PWD/nvvfx-arm64" || ./vsplugin/bin/pushmpc-nvvfx-selftest.exe --runtime "$PWD/nvvfx-arm64"; rc=$?; set -e
+          set +e; ./vsplugin/bin/Release/pushmpc-nvvfx-selftest.exe --runtime "$PWD/nvvfx-arm64"; rc=$?; set -e
           [ "$rc" = 2 ]
 
   pure:

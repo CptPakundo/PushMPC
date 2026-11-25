@@ -20,6 +20,7 @@
 #include "nvl_auto.h"
 #include "nvl_colour.h"
 #include "nvl_cuda.h"
+#include "nvl_gpuguard.h"
 #include "nvl_vfx.h"
 
 namespace pmvs::nvl {
@@ -83,6 +84,11 @@ public:
     void Release(int slot);
     // after a seek / reset: drain the stream, free every slot
     bool Drain(std::string& err);
+    // the GPU cut guard (nvl_gpuguard.h): on when this build has it and it opened; Guard() tests the pair ending at
+    // enhanced[parity]; generated frames then hold A on the GPU when the pair is a cut
+    bool HasGpuGuard() const { return m_guard.Ready(); }
+    bool Guard(int parity, bool compare, std::string& err);
+    uint64_t GuardCuts() const { return m_guard.Cuts(); }
 
 private:
     struct Image { CUdeviceptr ptr = 0; size_t pitch = 0; void* desc = nullptr; int w = 0, h = 0; bool tenBit = false; };
@@ -91,7 +97,8 @@ private:
     bool Cv(NvCV_Status s, const char* what, std::string& err);
     bool MakeImage(Image& im, int w, int h, bool tenBit, std::string& err);
     void FreeImage(Image& im);
-    int ToSlot(const Image& im, std::string& err);
+    // holdFlag: a device word; when non-zero at run time the slot gets `alt` instead (the GPU cut guard's hold)
+    int ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag = 0, const Image* alt = nullptr);
     bool Launch(CUfunction f, unsigned gx, unsigned gy, void** args, std::string& err);
 
     CudaApi* m_cu = nullptr;
@@ -105,6 +112,7 @@ private:
     void* m_vsr = nullptr; void* m_hdr = nullptr; void* m_vfg = nullptr;
     void* m_vfgLib = nullptr;
     AmpereCompat m_ampere;
+    GpuGuard m_guard;
     // device buffers
     CUdeviceptr m_srcPlane[3] = {}; size_t m_srcPitch[3] = {};
     Image m_packed, m_vsrOut, m_hdrOut, m_enh[2], m_vfgOut;
