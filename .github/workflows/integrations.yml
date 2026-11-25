@@ -80,7 +80,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: pushmpc_vs-windows-x64, path: '${{ runner.temp }}/vsdll', run-id: '${{ env.VSPLUGIN_RUN }}', github-token: '${{ github.token }}' }
       - uses: actions/cache@v4
-        with: { path: '${{ runner.temp }}/dl', key: win-players-dl-v1-${{ hashFiles('scripts/vapoursynth-pin.json') }} }
+        with: { path: '${{ runner.temp }}/dl', key: "win-players-dl-v1-${{ hashFiles('scripts/vapoursynth-pin.json') }}" }
       - name: Plugin, pinned VapourSynth runtime, test clip (the layout PushMPC installs)
         timeout-minutes: 10
         run: |
@@ -324,7 +324,7 @@ jobs:
           mkdir -p vsplugin/third_party/vapoursynth
           cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
           echo "VSPKG=$pkg" >> "$GITHUB_ENV"
-      - name: Build (static libstdc++ / libgcc: loads on glibc >= 2.28 hosts and in the Flatpak runtime)
+      - name: Build (static libstdc++ / libgcc, so it loads on glibc >= 2.28 hosts and in the Flatpak runtime)
         run: |
           set -eu
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
