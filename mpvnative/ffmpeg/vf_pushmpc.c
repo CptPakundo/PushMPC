@@ -43,6 +43,7 @@
 #include "libavutil/pixdesc.h"
 
 #include "config.h"
+#include "version.h"   /* LIBAVFILTER_VERSION_INT (avfilter.h only has version_major.h) */
 #include "avfilter.h"
 #include "filters.h"
 #include "formats.h"
@@ -580,7 +581,7 @@ static int config_output(AVFilterLink *outlink)
     }
 
     av_log(ctx, AV_LOG_INFO, "%s (%s) on %s frames%s: %dx%d -> %dx%d, x%d; %s\n", s->out.engine, g_api_from,
-           av_get_pix_fmt_name(s->in_fmt), s->fallback ? " through the copy fallback" : " (zero copy)",
+           av_get_pix_fmt_name(s->in_fmt), s->fallback ? " through the copy fallback" : (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN) ? " (zero copy)" : "",
            inlink->w, inlink->h, outlink->w, outlink->h, s->K, s->out.description);
     return 0;
 }

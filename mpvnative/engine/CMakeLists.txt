@@ -3,7 +3,7 @@
 # pushcore on D3D11 (Windows). Plus engine_test (CPU paths everywhere; D3D11 against the stub pushcore on WARP).
 #   cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release && cmake --build build-engine --config Release
 cmake_minimum_required(VERSION 3.21)
-project(PushMpcEngine CXX)
+project(PushMpcEngine C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
