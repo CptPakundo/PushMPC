@@ -59,6 +59,25 @@ def download(url: str, want: str | None, cache: Path, allow_unpinned: bool) -> t
     return target, digest
 
 
+def download_as(url: str, want: str | None, target: Path, allow_unpinned: bool) -> tuple[Path, str]:
+    """download() under a chosen cache name (several files share the base name flownet.bin)."""
+    if target.exists() and want and want != "TODO" and sha256(target).lower() == want.lower():
+        return target, want.lower()
+    if (not want or want == "TODO") and not allow_unpinned:
+        raise SystemExit(f"::error::{target.name} has no pinned SHA-256 (TODO); rerun with --allow-unpinned to print it")
+    req = urllib.request.Request(url, headers={"User-Agent": "pmml-fetch/1"})
+    tmp = target.with_suffix(target.suffix + ".part")
+    with urllib.request.urlopen(req, timeout=300) as r, tmp.open("wb") as f:
+        shutil.copyfileobj(r, f, 1 << 20)
+    digest = sha256(tmp)
+    if want and want != "TODO" and digest.lower() != want.lower():
+        tmp.unlink(missing_ok=True)
+        raise SystemExit(f"::error::{target.name}: SHA-256 {digest} does not match the pinned {want}")
+    tmp.replace(target)
+    print(f"sha256  {digest}  {url}" + ("   (UNPINNED)" if not want or want == "TODO" else ""))
+    return target, digest
+
+
 class Archive:
     """A zip (nupkg, whl) or a tar.gz (tgz) read the same way; unsafe member names are refused."""
 
@@ -141,6 +160,7 @@ def main() -> int:
     ap.add_argument("--flavors", default="core")
     ap.add_argument("--eps", default="")
     ap.add_argument("--ncnn", action="store_true")
+    ap.add_argument("--ncnn-models", action="store_true", help="the RIFE ncnn models of the ncnn backend")
     ap.add_argument("--headers", action="store_true")
     ap.add_argument("--list", action="store_true", help="print the native files of every archive")
     ap.add_argument("--allow-unpinned", action="store_true")
@@ -181,6 +201,9 @@ def main() -> int:
         headers = spec.get("headers") if isinstance(spec, dict) else entry.get("headers")
         if a.headers and headers:
             extract(arc, [headers], dest / "include")
+        elif a.headers and isinstance(spec, dict) and spec.get("headersFrom") == "nupkg":
+            harc, _ = download(entry["url"], entry.get("sha256"), cache, a.allow_unpinned)
+            extract(harc, [entry["headers"]], dest / "include")
         if flavor == "directml":
             rt = pin["onnxruntime"]["directmlRuntime"]
             rarc, rdig = download(rt["url"], rt["sha256"], cache, a.allow_unpinned)
@@ -229,6 +252,17 @@ def main() -> int:
             print(f"ok      ncnn {pin['ncnn']['version']} -> {dest}")
         else:
             print(f"skip    ncnn: no {plat} package")
+
+    if a.ncnn_models:
+        m = pin["ncnn"]["models"]
+        dest = out / "ncnn-models"
+        for rel, spec in m["files"].items():
+            arc, digest = download(spec["url"], spec["sha256"], cache, a.allow_unpinned) if "/" not in rel else                 download_as(spec["url"], spec["sha256"], cache / rel.replace("/", "__"), a.allow_unpinned)
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(arc, target)
+            print(f"ok      ncnn-models/{rel} {digest[:16]}")
+        record["ncnnModels"] = m["commit"]
 
     (out / "fetched.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     return 0

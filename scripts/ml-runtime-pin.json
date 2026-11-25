@@ -13,14 +13,14 @@
         "linux-x64": "runtimes/linux-x64/native/*",
         "linux-arm64": "runtimes/linux-arm64/native/*",
         "osx-arm64": {
-          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz",
+          "url": "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime/1.30.0/onnxruntime-1.30.0.jar",
           "sha256": "TODO",
-          "extract": "onnxruntime-osx-arm64-1.30.0/lib/libonnxruntime*.dylib",
-          "headers": "onnxruntime-osx-arm64-1.30.0/include/*.h"
+          "extract": "ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib",
+          "headersFrom": "nupkg"
         }
       },
       "headers": "build/native/include/*.h",
-      "macosNote": "The NuGet package has no osx natives, so macOS takes ONNX Runtime's own release archive (CoreML EP inside); its hash is resolved on a Linux runner by the pmml workflow's pin step."
+      "macosNote": "The NuGet package has no macOS natives and ONNX Runtime's GitHub release lists no osx archive for 1.30.0 (CI run 45617111165, models job). Microsoft's own Java package on Maven Central (com.microsoft.onnxruntime:onnxruntime 1.30.0) carries the C API library for macOS arm64 (with CoreML) next to its JNI glue: only libonnxruntime.dylib is extracted; the headers come from the NuGet package of the same version."
     },
     "directml": {
       "what": "ONNX Runtime with the DirectML EP (any D3D12 GPU; zero-copy with D3D12 resources). 1.24.4 is the last DirectML build Microsoft published (DirectML is 'legacy' in Windows ML); it still has the plugin-EP ABI v24. MIT.",
@@ -176,10 +176,37 @@
         "sha256": "TODO"
       }
     },
-    "pnnx": {
-      "what": "the ONNX -> ncnn converter (CI only)",
-      "version": "20261020",
-      "status": "pnnx 20261020 made no ncnn param for any PushFlow model (CI run 45603367125, models job): the ncnn backend has no models yet"
+    "models": {
+      "what": "RIFE v4.25 lite and v4.26 (the releases PushFlow's tiers use) as ncnn models with the rife.Warp layer, from VapourSynth-RIFE-ncnn-Vulkan (MIT, Copyright HolyWu; weights by hzwer, MIT) at a pinned commit. Used by pmml's ncnn backend. PushFlow's own ONNX exports do not convert with pnnx (it refuses their batch-of-two warps: 'split along batch axis 0 is not supported', CI run 45608301357); nihui's rife-ncnn-vulkan model set stops at v4.6.",
+      "repository": "styler00dollar/VapourSynth-RIFE-ncnn-Vulkan",
+      "commit": "c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f",
+      "license": "MIT",
+      "files": {
+        "rife-v4.25-lite_ensembleFalse/flownet.param": {
+          "url": "https://raw.githubusercontent.com/styler00dollar/VapourSynth-RIFE-ncnn-Vulkan/c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f/models/rife-v4.25-lite_ensembleFalse/flownet.param",
+          "sha256": "TODO",
+          "gitBlob": "95cf34dcf5cdb6f0ecc1689f4cba23245f9ff172"
+        },
+        "rife-v4.25-lite_ensembleFalse/flownet.bin": {
+          "url": "https://raw.githubusercontent.com/styler00dollar/VapourSynth-RIFE-ncnn-Vulkan/c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f/models/rife-v4.25-lite_ensembleFalse/flownet.bin",
+          "sha256": "TODO",
+          "gitBlob": "f9f37b87dc9fbd5ffa9845b912cbd5ccaeea82b1"
+        },
+        "rife-v4.26_ensembleFalse/flownet.param": {
+          "url": "https://raw.githubusercontent.com/styler00dollar/VapourSynth-RIFE-ncnn-Vulkan/c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f/models/rife-v4.26_ensembleFalse/flownet.param",
+          "sha256": "TODO",
+          "gitBlob": "a1248c145badfac089573ed226bb18f2a0f64b85"
+        },
+        "rife-v4.26_ensembleFalse/flownet.bin": {
+          "url": "https://raw.githubusercontent.com/styler00dollar/VapourSynth-RIFE-ncnn-Vulkan/c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f/models/rife-v4.26_ensembleFalse/flownet.bin",
+          "sha256": "TODO",
+          "gitBlob": "be329ea09809bd9fc6eb14f079e2fa18de97f801"
+        },
+        "LICENSE": {
+          "url": "https://raw.githubusercontent.com/styler00dollar/VapourSynth-RIFE-ncnn-Vulkan/c3ec6aabc07c8fa37a4f58d7fed9e2ad1fc1b13f/LICENSE",
+          "sha256": "TODO"
+        }
+      }
     }
   },
   "models": {

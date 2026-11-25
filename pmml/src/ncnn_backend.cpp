@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// pmml's ncnn backend: the same PushFlow models (converted by pnnx, pmml/scripts/ncnn_models.py, one per padded network
-// size) on ncnn's Vulkan compute (any Vulkan 1.1 GPU: RADV, ANV, NVK, NVIDIA, MoltenVK) or its CPU path.
+// pmml's ncnn backend: the RIFE releases PushFlow's tiers use (4.25 lite for Fast/Balanced, 4.26 for Quality) in their
+// ncnn conversions (VapourSynth-RIFE-ncnn-Vulkan's model set, MIT, pinned in scripts/ml-runtime-pin.json) with the
+// rife.Warp layer (ncnn_warp.cpp), on ncnn's Vulkan compute (any Vulkan 1.1 GPU: RADV, ANV, NVK, NVIDIA, MoltenVK) or
+// its CPU path. The network's final flows and blend mask are taken from the graph (the last two warps' flow inputs and
+// the sigmoid) and turned into PushFlow's grids, so the full-size rebuild and "flow once" are the same as with ONNX
+// Runtime. (PushFlow's own ONNX exports do not convert: pnnx refuses their batch-of-two warps.)
 // The network runs on the GPU; the colour conversion, the downscale and the full-size rebuild (synthCpu) run on the
 // CPU here, multithreaded. A Vulkan rebuild sharing ncnn's VkDevice is the next step.
 #include "internal.h"
@@ -13,8 +17,11 @@
 #include <net.h>
 #endif
 
+#include "ncnn_warp.h"
+
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <cstring>
 #include <sstream>
 #include <thread>
@@ -35,8 +42,9 @@ public:
         n_ = networkSize(o.width, o.height, o.tier, o.motionHeight, model_.pad);
         affine_ = gridAffine(o.width, o.height, n_);
         const std::string dir = o.ncnnModelsDir.empty() ? joinPath(o.runtimeDir, "ncnn-models") : o.ncnnModelsDir;
-        const std::string stem = joinPath(dir, "pushflow-" + modelRole(o.tier) + "-" + std::to_string(n_.padW) + "x" + std::to_string(n_.padH));
-        if (!fileExists(stem + ".ncnn.param")) { if (err) *err = "no ncnn model " + stem + ".ncnn.param (pnnx converts one per padded network size)"; return false; }
+        const std::string stem = joinPath(joinPath(dir, modelRole(o.tier) == "quality" ? "rife-v4.26_ensembleFalse" : "rife-v4.25-lite_ensembleFalse"), "flownet");
+        if (!fileExists(stem + ".param")) { if (err) *err = "no ncnn model " + stem + ".param"; return false; }
+        if (!findBlobs(stem + ".param", err)) return false;
         const bool vulkan = o.backend.ep != "cpu";
         net_.opt.use_vulkan_compute = vulkan;
         net_.opt.num_threads = threadsHint();
@@ -48,7 +56,8 @@ public:
             net_.set_vulkan_device(o.backend.device);
             device_ = ncnn::get_gpu_info(o.backend.device).device_name();
         }
-        if (net_.load_param((stem + ".ncnn.param").c_str()) != 0 || net_.load_model((stem + ".ncnn.bin").c_str()) != 0) { if (err) *err = "ncnn cannot load " + stem; return false; }
+        net_.register_custom_layer("rife.Warp", RifeWarpCreator);
+        if (net_.load_param((stem + ".param").c_str()) != 0 || net_.load_model((stem + ".bin").c_str()) != 0) { if (err) *err = "ncnn cannot load " + stem; return false; }
         rgbA_.resize(size_t(3) * o.width * o.height);
         rgbB_.resize(rgbA_.size());
         out_.resize(rgbA_.size());
@@ -84,28 +93,36 @@ public:
         const float tn = once ? o_.tRef : t;
         if (netT_ != tn) {
             const double t0 = nowMs();
-            ncnn::Mat in(n_.padW, n_.padH, 7);
-            for (int c = 0; c < 7; ++c) {
-                float* p = in.channel(c);
-                if (c < 6) std::memcpy(p, &small_[size_t(c) * n_.padW * n_.padH], size_t(n_.padW) * n_.padH * 4);
-                else std::fill(p, p + size_t(n_.padW) * n_.padH, tn);
-            }
-            ncnn::Extractor ex = net_.create_extractor();
-            ex.input("in0", in);
-            ncnn::Mat g0, g1, m;
-            if (ex.extract("out1", g0) != 0 || ex.extract("out2", g1) != 0 || ex.extract("out3", m) != 0) { if (err) *err = "ncnn extract failed"; return false; }
-            // grids [1, ph, pw, 2] arrive as (w = 2, h = pw, c = ph); the mask [1, 1, ph, pw] as (w = pw, h = ph, c = 1)
-            auto flat = [&](const ncnn::Mat& mat, std::vector<float>* dst, size_t want) -> bool {
-                dst->resize(want);
-                const size_t per = size_t(mat.w) * mat.h * (mat.dims == 4 ? mat.d : 1);
-                if (size_t(mat.c) * per != want) return false;
-                for (int c = 0; c < mat.c; ++c) std::memcpy(dst->data() + size_t(c) * per, mat.channel(c), per * 4);
-                return true;
-            };
             const size_t cells = size_t(n_.padW) * n_.padH;
-            if (!flat(g0, &g0_, cells * 2) || !flat(g1, &g1_, cells * 2) || !flat(m, &mask_, cells)) {
-                if (err) *err = "unexpected ncnn output shapes (" + std::to_string(g0.w) + "x" + std::to_string(g0.h) + "x" + std::to_string(g0.c) + ")";
+            ncnn::Mat in0(n_.padW, n_.padH, 3), in1(n_.padW, n_.padH, 3), in2(n_.padW, n_.padH, 1);
+            for (int c = 0; c < 3; ++c) {
+                std::memcpy(in0.channel(c), &small_[size_t(c) * cells], cells * 4);
+                std::memcpy(in1.channel(c), &small_[size_t(c + 3) * cells], cells * 4);
+            }
+            in2.fill(tn);
+            ncnn::Extractor ex = net_.create_extractor();
+            ex.input("in0", in0);
+            ex.input("in1", in1);
+            ex.input("in2", in2);
+            ncnn::Mat f0, f1, m;
+            if (ex.extract(flow0_.c_str(), f0) != 0 || ex.extract(flow1_.c_str(), f1) != 0 || ex.extract(mask_name_.c_str(), m) != 0) { if (err) *err = "ncnn extract failed"; return false; }
+            if (f0.w != n_.padW || f0.h != n_.padH || f0.c < 2 || m.w != n_.padW || m.h != n_.padH) {
+                if (err) *err = "unexpected ncnn output shapes (" + std::to_string(f0.w) + "x" + std::to_string(f0.h) + "x" + std::to_string(f0.c) + ")";
                 return false;
+            }
+            // flows (pixels at the padded network size) -> PushFlow's grids (normalised, align_corners = 1) and the mask
+            g0_.resize(cells * 2); g1_.resize(cells * 2); mask_.resize(cells);
+            const float sx = 2.f / float(std::max(n_.padW - 1, 1)), sy = 2.f / float(std::max(n_.padH - 1, 1));
+            for (int y = 0; y < n_.padH; ++y) {
+                const float* ax = f0.channel(0).row(y); const float* ay = f0.channel(1).row(y);
+                const float* bx = f1.channel(0).row(y); const float* by = f1.channel(1).row(y);
+                const float* mm = m.channel(0).row(y);
+                for (int x = 0; x < n_.padW; ++x) {
+                    const size_t i = size_t(y) * n_.padW + x;
+                    g0_[i * 2] = (float(x) + ax[x]) * sx - 1.f; g0_[i * 2 + 1] = (float(y) + ay[x]) * sy - 1.f;
+                    g1_[i * 2] = (float(x) + bx[x]) * sx - 1.f; g1_[i * 2 + 1] = (float(y) + by[x]) * sy - 1.f;
+                    mask_[i] = mm[x];
+                }
             }
             stats_.netMs = nowMs() - t0;
             ++stats_.networkRuns;
@@ -128,6 +145,33 @@ public:
     std::string describe() const override { return describe_; }
 
 private:
+    // the blobs PushFlow's rebuild needs, read from the param text: the flow inputs of the last two rife.Warp layers
+    // (frame 0, frame 1) and the Sigmoid's output (the blend weight of frame 0)
+    bool findBlobs(const std::string& param, std::string* err) {
+        std::ifstream f(param);
+        std::string line, warpA, warpB;
+        std::vector<std::pair<std::string, std::string>> warps;   // (image input, flow input)
+        while (std::getline(f, line)) {
+            std::istringstream ss(line);
+            std::string type, name;
+            int nin = 0, nout = 0;
+            if (!(ss >> type >> name >> nin >> nout)) continue;
+            std::vector<std::string> ins(size_t(std::max(nin, 0))), outs(size_t(std::max(nout, 0)));
+            for (auto& b : ins) ss >> b;
+            for (auto& b : outs) ss >> b;
+            if (type == "rife.Warp" && ins.size() == 2) warps.push_back({ins[0], ins[1]});
+            if (type == "Sigmoid" && !outs.empty()) mask_name_ = outs[0];
+        }
+        if (warps.size() < 2 || mask_name_.empty()) { if (err) *err = "not a RIFE v4 ncnn model (no final warps / sigmoid): " + param; return false; }
+        const auto& a = warps[warps.size() - 2];
+        const auto& b = warps[warps.size() - 1];
+        if (a.first.rfind("in0", 0) != 0 || b.first.rfind("in1", 0) != 0) { if (err) *err = "unexpected final warps in " + param; return false; }
+        flow0_ = a.second;
+        flow1_ = b.second;
+        return true;
+    }
+
+    std::string flow0_, flow1_, mask_name_;
     Options o_;
     ModelFiles model_;
     NetworkSize n_;

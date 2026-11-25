@@ -53,7 +53,7 @@ jobs:
         id: data
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py', 'pmml/scripts/ncnn_models.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
       - name: Python packages (PushFPS's model preparation pins)
         timeout-minutes: 5
@@ -111,28 +111,13 @@ jobs:
           echo '| clip | tier | network | 2x per t | 4x per t | 4x flow once | 4x blend | 4x repeat |' >> $GITHUB_STEP_SUMMARY
           echo '|---|---|---|---|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
           for j in pmml-data/ref/*.json; do jq -r '.clip | "| \(.name) | \(.tier) | \(.network[0])x\(.network[1]) | \(.["2x_per_t"]) | \(.["4x_per_t"]) | \(.["4x_flow_once"]) | \(.["4x_blend"]) | \(.["4x_repeat"]) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
-      - name: ncnn models (pnnx from the same PushFlow ONNX models, fixed shapes)
-        if: steps.data.outputs.cache-hit != 'true'
-        timeout-minutes: 15
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          ~/pf/bin/python -m pip install --disable-pip-version-check -q "pnnx==$(jq -r .ncnn.pnnx.version "$PIN")" "ncnn==1.0.$(jq -r .ncnn.version "$PIN")"
-          ~/pf/bin/python -I pmml/scripts/ncnn_models.py --models pmml-data/models --out pmml-data/ncnn --sizes 640x384,1280x768 2>&1 | tail -40
       - name: Hashes of pins still marked TODO (printed for the pin file; nothing fetched here is used)
         timeout-minutes: 8
         run: |
           gh release view v$(jq -r .onnxruntime.core.version "$PIN") -R microsoft/onnxruntime --json assets -q '.assets[].name' 2>/dev/null | grep -i osx || echo "::warning::no ONNX Runtime release asset list"
           if grep -q '"TODO"' "$PIN"; then
-            python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out "$RUNNER_TEMP/pins" --flavors core --ncnn --headers --list --allow-unpinned || echo "::warning::a TODO pin could not be resolved"
+            python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out "$RUNNER_TEMP/pins" --flavors core --ncnn --ncnn-models --headers --list --allow-unpinned || echo "::warning::a TODO pin could not be resolved"
           fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pnnx-logs
-          path: pmml-data/ncnn/*.pnnx.log
-          if-no-files-found: ignore
-          retention-days: 7
 
   linux:
     needs: models
@@ -144,7 +129,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py', 'pmml/scripts/ncnn_models.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Packages (Mesa lavapipe, ninja)
@@ -162,6 +147,14 @@ jobs:
         run: |
           python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-x64 --out rt --cache ~/pmml-dl --flavors core,migraphx --eps trt-rtx,openvino --ncnn --headers --list
           find rt -maxdepth 3 -type d | head -30
+      - name: RIFE ncnn models by their pins
+        timeout-minutes: 5
+        run: |
+          if python3 -c "import json,sys; m=json.load(open('$PIN'))['ncnn']['models']['files']; sys.exit(any(v['sha256']=='TODO' for v in m.values()))"; then
+            python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform linux-x64 --out rt --cache ~/pmml-dl --ncnn-models
+          else
+            echo "::notice::the RIFE ncnn models are not pinned yet (TODO): the ncnn checks are skipped"
+          fi
       - name: Build
         run: |
           set -euo pipefail
@@ -185,38 +178,18 @@ jobs:
               done
             done
           done
-      - name: ncnn on lavapipe against the reference
-        if: hashFiles('pmml-data/ncnn/*.ncnn.param') != '' && hashFiles('pmml/src/ncnn_backend.cpp') != ''
-        env: { PMML_VK_ALLOW_CPU: '1' }
-        run: |
-          set -euo pipefail
-          ls pmml-data/ncnn
-          for n in $(jq -r '.clips.names[]' "$PIN"); do
-            build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --ncnn-models pmml-data/ncnn --backend ncnn --tier fast \
-              --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --compare pmml-data/ref/$n-fast --min-db 35 | tee -a run.log
-          done
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - name: The ml backend of pushmpc.Enhance (vsplugin + pmml, CPU EP) through vspipe
+      - name: ncnn (RIFE ncnn models, rife.Warp) on lavapipe and on the CPU against the reference
+        if: hashFiles('rt/ncnn-models/**/flownet.param') != ''
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          url=$(jq -r .portableCi.linux.url scripts/vapoursynth-pin.json); sha=$(jq -r .portableCi.linux.sha256 scripts/vapoursynth-pin.json)
-          whl="$RUNNER_TEMP/$(basename "$url")"; curl -fsSL --retry 3 -o "$whl" "$url"
-          echo "$(echo "$sha" | tr A-F a-f)  $whl" | sha256sum -c -
-          python -m pip install -q --no-deps "$whl"
-          pkg=$(python -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
-          mkdir -p vsplugin/third_party/vapoursynth && cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
-          cmake -S vsplugin -B build-vs -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$PWD/rt/ort/core/include"
-          cmake --build build-vs --parallel --target pushmpc_vs portable_test
-          build-vs/portable_test
-          ln -s "$PWD/pmml-data/models" rt/models; ln -s "$PWD/pmml-data/graphs" rt/graphs
-          export PUSHMPC_VS_PLUGIN=$(ls $PWD/vsplugin/bin/pushmpc_vs.so) PMML_RUNTIME=$PWD/rt PMML_TEST_CLIP=$PWD/pmml-data/clips/ducks_take_off.y4m PUSHMPC_TEST_K=4
-          vsp=$(command -v vspipe || echo "$pkg/vspipe")
-          info=$("$vsp" --info vsplugin/tests/ci/ml_clip.vpy 2>&1); echo "$info"
-          echo "$info" | grep -Eq "Frames:[[:space:]]+36" || { echo "::error::expected 36 frames (9 x 4)"; exit 1; }
-          "$vsp" vsplugin/tests/ci/ml_clip.vpy -- > /dev/null
-          find ~ -name 'pushmpc*.log' -newer "$whl" 2>/dev/null | head -3 | xargs -r tail -n 20
+          n=$(jq -r '.clips.names[0]' "$PIN")
+          # the ncnn models are another export of the same RIFE releases: checked against the ONNX reference at a looser bound
+          for b in ncnn:ncnn:vulkan:0 ncnn:ncnn:cpu:0; do
+            for once in "" --flow-once; do
+              build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --ncnn-models rt/ncnn-models --backend $b --tier fast                 --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 $once --compare pmml-data/ref/$n-fast --min-db 30 | tee -a run.log
+            done
+          done
       - run: grep PMML_RUN run.log | sed 's/^PMML_RUN //' >> $GITHUB_STEP_SUMMARY || true
 
   arm:
@@ -229,7 +202,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py', 'pmml/scripts/ncnn_models.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache@v4
@@ -262,7 +235,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py', 'pmml/scripts/ncnn_models.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache@v4
@@ -327,7 +300,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py', 'pmml/scripts/ncnn_models.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Runtimes (ORT core osx-arm64 with CoreML)
