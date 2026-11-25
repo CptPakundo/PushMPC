@@ -22,7 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS minutes cost 10x while the repository is private: macOS only on manual runs.
+        # macOS minutes cost 10x while the repo is private: macOS only on a manual run (the apple workflow covers the
+        # VideoToolbox backend there)
         os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["windows-latest","ubuntu-latest","macos-latest"]') || fromJSON('["windows-latest","ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -35,11 +36,11 @@ jobs:
         shell: bash
         run: |
           cmake -S vsplugin -B build-portable -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-portable --config Release --target portable_test --parallel
+          cmake --build build-portable --config Release --target portable_test apple_test --parallel
 
       - name: Unit tests
         shell: bash
-        run: ctest --test-dir build-portable -C Release -R portable_test --output-on-failure
+        run: ctest --test-dir build-portable -C Release -R "portable_test|apple_test" --output-on-failure
 
       - name: mpv.conf integration (fake HOME)
         if: runner.os != 'Windows'

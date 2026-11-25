@@ -929,7 +929,7 @@ cbuffer C : register(b1) { uint2 outSize; uint2 pad; };
 // t); itm1 = (shoulder power p, per-channel share, dither on, unused)
 // itm2 = (RTX Video HDR limiter on, its gain g on the light above paper white, paper white cd/m2, unused)
 cbuffer S : register(b2) { uint2 srcSize; float codeScale; float sdrIn; float srcSdr; float dvP5; float dvNorm; float itmOn; float4 itm0; float4 itm1; float4 itm2; };
-// PushMPC's SDR to HDR curve (internal research notes 4.1 / 5.2): a display-referred, hue-preserving highlight shoulder.
+// PushMPC's SDR to HDR curve: a display-referred, hue-preserving highlight shoulder.
 // Pumbo's AutoHDR form (github.com/Filoppi/PumboAutoHDR; Luma's PumboAutoHDR()): the extra light k * pow((x - t) / (1 - t), p)
 // above the shoulder start t, nothing below it (the low range stays at plain SDR levels, as ITU-R BT.2446 method B's
 // protected range); paper white per ITU-R BT.2408 (203 cd/m2 unless the display is dim). Decode: a pure power (2.2; never
@@ -2266,7 +2266,7 @@ private:
         if (!changed.empty()) Log("MPC Video Renderer HDR settings written: " + changed);
         ApplyMpcVrLive(nits);
     }
-    // PushMPC's SDR to HDR curve for this choice (internal research notes 4.3): the peak from the display (clamped to
+    // PushMPC's SDR to HDR curve for this choice: the peak from the display (clamped to
     // 300-1500; not reported: 600), paper white min(203, 0.45 x peak), M = High min(5, peak / paper white), Medium 3.2,
     // Low 2.0 (never above peak / paper white), Off 1; the limiter's frame-average target 0.6 x the full-frame luminance
     // (not reported: 0.5 x peak). Logged when it changes; the HDR10 static metadata of the output follows it.
@@ -2814,7 +2814,7 @@ HRESULT CPushMpcFilter::EnsureScratch(P010Scratch& s, UINT w, UINT h)
     s.w = w; s.h = h;
     return S_OK;
 }
-// The Auto limiter of PushMPC's SDR to HDR curve (internal research notes 5.3): a global, slow cap on the expansion
+// The Auto limiter of PushMPC's SDR to HDR curve: a global, slow cap on the expansion
 // term only. Each real frame's statistics (CS_ItmStats on pushcore's SDR RGB8) are read back a few frames later; from
 // them k_lim = (target / paper white - mean Y) / mean(Y E(s) / s), clamped to 0..k, so the frame-average light stays at
 // the target; k follows k_lim with attack 0.15 s (down) and release 1.5 s (up), and snaps at a scene cut (the cut guard's

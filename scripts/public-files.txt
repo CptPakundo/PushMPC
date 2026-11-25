@@ -49,3 +49,7 @@ vsplugin/third_party/vapoursynth/**
 integrations/linux/**
 packaging/**
 scripts/test-potplayer-install.ps1
+packaging/homebrew/**
+integrations/iina/**
+vsplugin/tools/**
+vsplugin/models/**

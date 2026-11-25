@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px -apple-system, system-ui, sans-serif; margin: 12px; }
+  .row { margin: 0 0 14px; }
+  label.title { display: block; font-weight: 600; margin-bottom: 4px; }
+  p.help { color: #888; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <label class="title" for="quality">Upscaling</label>
+    <select id="quality" data-pref-key="quality">
+      <option value="auto">Auto (by chip)</option>
+      <option value="off">Off</option>
+      <option value="light">Light: FSR 1</option>
+      <option value="balanced">Balanced: RAVU-Lite r3</option>
+      <option value="high">High: FSRCNNX 8 / ArtCNN C4F16 (anime)</option>
+      <option value="ultra">Ultra: FSRCNNX 16 / ArtCNN C4F32 (anime)</option>
+    </select>
+    <p class="help">Auto: base M1/M2 Light, base M3 and newer Balanced, Pro High, Max/Ultra and M4-or-newer Pro Ultra. Shaders run only when the video is drawn larger than its own size.</p>
+  </div>
+  <div class="row">
+    <label class="title" for="content">Content</label>
+    <select id="content" data-pref-key="content">
+      <option value="live">Live action</option>
+      <option value="anime">Anime</option>
+    </select>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" data-pref-key="framegen" data-type="bool"> Frame generation and super resolution (PushMPC engine inside IINA)</label>
+    <p class="help">Needs PushMPC from Homebrew (brew install pushmpc), which installs the pushmpc-iina bridge: Apple's VideoToolbox interpolation and super resolution (or ArtCNN on Metal) run inside IINA's own player, without changing IINA.app. Off, or when the bridge is not installed: the shader and smooth-motion settings below apply.</p>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" data-pref-key="motion" data-type="bool"> Smooth motion (video-sync=display-resample + interpolation)</label>
+    <p class="help">Shows every frame for its exact share of display refreshes: no judder on 60, 120 or ProMotion displays. Real frame generation needs the PushMPC filter in mpv (brew install pushmpc).</p>
+  </div>
+  <div class="row">
+    <label class="title" for="tscale">Frame blending filter</label>
+    <select id="tscale" data-pref-key="tscale">
+      <option value="oversample">oversample (sharpest, recommended)</option>
+      <option value="linear">linear (softer, smoother)</option>
+      <option value="sphinx">sphinx (smoothest, slightly soft)</option>
+    </select>
+  </div>
+</body>
+</html>

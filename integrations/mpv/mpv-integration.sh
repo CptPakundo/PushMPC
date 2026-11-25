@@ -3,7 +3,9 @@
 # macOS and takes it out again exactly. The POSIX counterpart of mpv-integration.ps1 (same block, same backups).
 #
 #   mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered 4]
-#                      [--concurrent 2] [--dry-run]
+#                      [--concurrent 2] [--extra <mpv.conf line>]... [--dry-run]
+#   --extra adds a line inside the managed block (global options only, e.g. include="<file>"; the Homebrew formula's
+#   pushmpc-setup adds the ArtCNN gpu-next profile this way). Uninstall removes it with the block.
 #
 # What it changes (install), with a backup and an exact restore (uninstall):
 #   ${XDG_CONFIG_HOME:-~/.config}/mpv/mpv.conf (mpv on Linux and macOS; Celluloid and IINA can read the same file, see
@@ -22,7 +24,8 @@
 #              key names to verify on a real install).
 #   Haruna     has no documented switch for ~/.config/mpv/mpv.conf; to verify on a real install (its own settings are
 #              ~/.config/haruna/haruna.conf).
-#   IINA       reads the folder above only with Settings > Advanced > "Use config directory" on (~/.config/mpv).
+#   IINA       reads the folder above only with Settings > Advanced > "Use config directory" on (~/.config/mpv), but
+#              its own libmpv is built without VapourSynth: the PushMPC IINA plugin (integrations/iina) is its route.
 #   Flatpak / Snap players have their own config folder and may lack VapourSynth: reported, not changed.
 # Environment for tests: HOME and XDG_CONFIG_HOME as usual; PUSHMPC_OS=linux|darwin overrides uname; PUSHMPC_NO_PATH=1
 # skips the PATH search for players.
@@ -33,13 +36,15 @@ END_MARK='# <<< PushMPC managed'
 
 action=${1:-}
 [ $# -gt 0 ] && shift
-script=''; conf=''; buffered=4; concurrent=2; dry=0
+script=''; conf=''; buffered=4; concurrent=2; dry=0; extra=''
 while [ $# -gt 0 ]; do
     case $1 in
         --script) script=$2; shift 2 ;;
         --conf) conf=$2; shift 2 ;;
         --buffered) buffered=$2; shift 2 ;;
         --concurrent) concurrent=$2; shift 2 ;;
+        --extra) extra="$extra$2
+"; shift 2 ;;
         --dry-run) dry=1; shift ;;
         *) echo "mpv-integration.sh: unknown option $1" >&2; exit 2 ;;
     esac
@@ -79,6 +84,9 @@ block() {
     printf '%s%s' "$BEGIN_MARK" "$nl"
     printf 'vf-append=%s%s' "$(vf_option)" "$nl"
     printf 'hwdec=auto-copy%shr-seek-framedrop=no%sinterpolation=no%s' "$nl" "$nl" "$nl"
+    if [ -n "$extra" ]; then
+        printf '%s' "$extra" | while IFS= read -r x; do [ -n "$x" ] && printf '%s%s' "$x" "$nl"; done
+    fi
     printf '%s%s' "$END_MARK" "$nl"
 }
 line_ending() { if [ -f "$1" ] && [ "$(tr -dc '\r' < "$1" | wc -c | tr -d ' ')" != 0 ]; then echo crlf; else echo lf; fi; }
@@ -196,7 +204,7 @@ players() {
     [ -d "$HOME/snap/mpv" ] && say "player: Snap mpv: its own config folder, may lack VapourSynth (not changed)"
     if [ "$os" = darwin ]; then
         if [ -d /Applications/IINA.app ] || [ -d "$HOME/Applications/IINA.app" ]; then
-            say "player: IINA: turn on Settings > Advanced > 'Use config directory' (it reads $(dirname "$conf"))"
+            say "player: IINA: its own libmpv has no VapourSynth, so it cannot run this filter; use the PushMPC IINA plugin (shaders + smooth motion) instead"
         else
             say "note: IINA reads $(dirname "$conf") only with Settings > Advanced > 'Use config directory' on"
         fi
@@ -222,5 +230,5 @@ case $action in
     install) install_conf; players ;;
     uninstall) uninstall_conf ;;
     status) status ;;
-    *) echo "usage: mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered N] [--concurrent N] [--dry-run]" >&2; exit 2 ;;
+    *) echo "usage: mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered N] [--concurrent N] [--extra LINE]... [--dry-run]" >&2; exit 2 ;;
 esac
