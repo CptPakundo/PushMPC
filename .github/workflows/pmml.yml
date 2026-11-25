@@ -122,6 +122,7 @@ jobs:
       - name: Hashes of pins still marked TODO (printed for the pin file; nothing fetched here is used)
         timeout-minutes: 8
         run: |
+          gh release view v$(jq -r .onnxruntime.core.version "$PIN") -R microsoft/onnxruntime --json assets -q '.assets[].name' 2>/dev/null | grep -i osx || echo "::warning::no ONNX Runtime release asset list"
           if grep -q '"TODO"' "$PIN"; then
             python3 -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform osx-arm64 --out "$RUNNER_TEMP/pins" --flavors core --ncnn --headers --list --allow-unpinned || echo "::warning::a TODO pin could not be resolved"
           fi

@@ -17,8 +17,8 @@ blank = core.std.BlankClip(format=vs.YUV420P8, width=w, height=h, length=1, fpsn
 for i in range(n):
     off = start + i * (size + 6) + 6
     buf = data[off:off + size]
-    def fill(fr, buf=buf):   # noqa: E306
-        out = fr.copy()
+    def fill(n, f, buf=buf):   # noqa: E306  (ModifyFrame calls selector(n, f))
+        out = f.copy()
         for p, (o, s) in enumerate(((0, w * h), (w * h, w * h // 4), (w * h * 5 // 4, w * h // 4))):
             pw = w if p == 0 else w // 2
             arr = memoryview(out[p]).cast("B")
