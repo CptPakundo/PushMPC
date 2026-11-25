@@ -435,8 +435,10 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
                 j->outs[i] = picture_Hold(o);       /* the worker writes into it */
                 j->t[i] = (float)(i + 1) / (float)sys->k;
                 j->n = i + 1;
-                JobHold(j);
-                RegAdd(o, j, i + 1);                /* pushmpc_out waits for j->done >= i + 1 */
+                if (async) {                        /* pushmpc_out waits for j->done >= i + 1 */
+                    JobHold(j);
+                    RegAdd(o, j, i + 1);
+                }                                   /* inline: nobody takes the entry, so none (it would hold the pool) */
                 tail->p_next = o;
                 tail = o;
                 sys->generated++;
