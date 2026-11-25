@@ -590,6 +590,48 @@ function Set-PmUserPath($E, [string]$Value) {
 }
 function Get-PmStateFile($E) { "$($E.LocalAppData)\PushMPC\mpv-integration.json" }
 
+# ------------------------------------------------------------------------------------------------ VapourSynth self-test
+# A vf=vapoursynth that cannot start (no VSScript.dll found, a broken Python) makes mpv refuse to play every file
+# ("Errors when loading file"). Before an mpv.conf is changed, that mpv runs the filter on a generated picture, with the
+# runtime folder in front of PATH as it will be after the install. 0 = it runs, 1 = it cannot start, 2 = not known
+# (no runnable mpv: mpv.net, libmpv hosts; the install goes ahead). Fake roots: PUSHMPC_VSTEST_RESULT (default 2).
+$script:PmVsTests = @{}
+function Test-PmVapourSynth($E, [string]$Exe, [string]$RuntimeDir) {
+    if ($E.Fake) { $r = [int]$(if ($env:PUSHMPC_VSTEST_RESULT) { $env:PUSHMPC_VSTEST_RESULT } else { 2 }); return [pscustomobject]@{ Result = $r; Message = $(if ($r -eq 1) { 'Failed to initialize VapourSynth (test)' } else { '' }) } }
+    $mpv = ''
+    foreach ($e in @($Exe -split '; ')) {
+        if (-not $e) { continue }
+        $d = Split-Path -Parent $e; $leaf = Split-Path -Leaf $e
+        if ($leaf -ieq 'smplayer.exe') { $d = Join-Path $d 'mpv' }
+        elseif ($leaf -inotmatch '^mpv\.(exe|com)$') { continue }
+        foreach ($c in @((Join-Path $d 'mpv.com'), (Join-Path $d 'mpv.exe'))) { if (Test-Path -LiteralPath $c) { $mpv = $c; break } }
+        if ($mpv) { break }
+    }
+    if (-not $mpv) { return [pscustomobject]@{ Result = 2; Message = 'no runnable mpv to test with' } }
+    if ($script:PmVsTests.ContainsKey($mpv.ToLowerInvariant())) { return $script:PmVsTests[$mpv.ToLowerInvariant()] }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('pushmpc-vstest-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    [IO.File]::WriteAllText("$tmp\t.vpy", "video_in.set_output()`n")
+    $log = "$tmp\mpv.log"
+    $oldPath = $env:PATH
+    try {
+        if ($RuntimeDir -and (Test-Path -LiteralPath (Join-Path $RuntimeDir 'VSScript.dll'))) { $env:PATH = "$RuntimeDir;$oldPath" }
+        $vpy = "$tmp\t.vpy".Replace('\', '/')
+        $margs = @('--no-config', '--vo=null', '--ao=null', '--frames=2', "--log-file=`"$log`"", "--vf=vapoursynth=file=[$vpy]", 'av://lavfi:testsrc=size=160x120:rate=24')
+        $pr = Start-Process -FilePath $mpv -ArgumentList $margs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
+        if (-not $pr.WaitForExit(30000)) { $pr.Kill(); $res = [pscustomobject]@{ Result = 2; Message = 'the test did not finish in 30 s' } }
+        else {
+            $text = (@($log, "$tmp\out.txt", "$tmp\err.txt") | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { [IO.File]::ReadAllText($_) }) -join "`n"
+            $msg = ($text -split "`r?`n" | Where-Object { $_ -match 'vapoursynth\]' -and $_ -notmatch 'concurrent requests' } | Select-Object -First 1)
+            if ($pr.ExitCode -eq 0) { $res = [pscustomobject]@{ Result = 0; Message = '' } }
+            elseif ($text -match 'Failed to initialize VapourSynth|Creating filter .vapoursynth. failed|could not load VSScript|VSScript') { $res = [pscustomobject]@{ Result = 1; Message = "$msg".Trim() } }
+            else { $res = [pscustomobject]@{ Result = 2; Message = "mpv exit $($pr.ExitCode)" } }
+        }
+    } finally { $env:PATH = $oldPath; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    $script:PmVsTests[$mpv.ToLowerInvariant()] = $res
+    return $res
+}
+
 # ------------------------------------------------------------------------------------------------ actions
 function Invoke-PmMpvIntegration {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -623,6 +665,13 @@ function Invoke-PmMpvIntegration {
                 $procs = @{ mpcqt = 'mpc-qt'; shim = $(if ($p.Player -like 'Jellyfin*') { 'jellyfin-mpv-shim' } else { 'plex-mpv-shim' }); kodi = 'kodi' }
                 if (-not $E.Fake -and $procs.ContainsKey($p.Kind) -and @(Get-Process -Name $procs[$p.Kind] -ErrorAction SilentlyContinue).Count) {
                     $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'skipped'; Note = "$($p.Player) is running (it rewrites its settings when it closes): close it and run the install again" }; continue
+                }
+                # mpv itself (and the mpv Kodi / the shims start, SMPlayer's bundled mpv): the filter must start first
+                if ($p.Kind -in 'mpvconf', 'kodi', 'shim', 'smplayer') {
+                    $t = Test-PmVapourSynth $E $p.Exe $runtime
+                    if ($t.Result -eq 1) {
+                        $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'skipped'; Note = "this mpv cannot start VapourSynth ($($t.Message)): its settings are left alone, because mpv would then refuse to play anything" }; continue
+                    }
                 }
                 $block = Get-PmBlock $ScriptPath $BufferedFrames $ConcurrentFrames "`r`n"
                 switch ($p.Kind) {

@@ -56,6 +56,10 @@ again after installing one):
    Your `mpv.conf` is first copied to `mpv.conf.pushmpc-backup`. Uninstalling removes the block. If you did not change
    the file since, it is then byte-identical to the backup.
 
+Before it changes an mpv's settings, the installer runs that mpv once with the filter on a generated picture. If the
+filter cannot start (for example VSScript.dll is not found), mpv would refuse to play every file, so that mpv (and Kodi or
+a shim that would start it) is left unchanged and setup says why.
+
 To switch the filter off for one session, use `mpv --vf-remove=@pushmpc`, or bind a key in `input.conf`:
 `P vf toggle @pushmpc`.
 

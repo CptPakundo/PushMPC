@@ -249,6 +249,20 @@ Check (@($rows | Where-Object { $_.Player -like 'Jellyfin Desktop*' -and $_.Resu
 Check ((Read-PmText "$jp\abc123\mpv.conf").Text.StartsWith($script:PmBegin) -and (Read-PmText "$jp\def456\mpv.conf").Text.EndsWith("sub-auto=fuzzy`r`n")) 'Jellyfin Desktop: block on top of each profile mpv.conf'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Jellyfin Desktop restored byte for byte'
+# 15. mpv cannot start VapourSynth (self-test fails): nothing is written for it, nor for Kodi which would start it
+$r = New-Root; $roots += $r
+Fake-Mpv "$r\Program Files\mpv" -Shinchiro
+New-Item -ItemType Directory "$r\Program Files\Kodi" -Force | Out-Null; [IO.File]::WriteAllText("$r\Program Files\Kodi\kodi.exe", 'fake')
+[IO.File]::WriteAllText("$r\user-path.txt", 'C:\Tools')
+$env:PUSHMPC_VSTEST_RESULT = '1'
+$before = Snapshot $r
+$rows = Run 'Install' $r
+$env:PUSHMPC_VSTEST_RESULT = ''
+Check (($rows | Where-Object Player -eq 'mpv (shinchiro build)').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'mpv (shinchiro build)').Note -match 'refuse to play') 'failing VapourSynth: mpv skipped with the reason'
+Check (($rows | Where-Object Player -eq 'Kodi').Result -eq 'skipped') 'failing VapourSynth: Kodi (which starts that mpv) skipped'
+Check (-not (Test-Path "$r\AppData\Roaming\mpv\mpv.conf")) 'failing VapourSynth: no mpv.conf written'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'failing VapourSynth: nothing left behind'
 # 12. Stremio detected, not changed
 $r = New-Root; $roots += $r
 New-Item -ItemType Directory "$r\AppData\Local\Programs\Stremio" -Force | Out-Null; [IO.File]::WriteAllText("$r\AppData\Local\Programs\Stremio\stremio-shell-ng.exe", 'fake')

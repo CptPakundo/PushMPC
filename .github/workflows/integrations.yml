@@ -23,11 +23,8 @@ on:
   workflow_dispatch:
     inputs:
       release_run:
-        description: 'run id of a release.yml dry run (artifact pushmpc-release)'
-        default: '45233609124'
-      vsplugin_run:
-        description: 'run id of a vsplugin.yml run (artifact pushmpc_vs-windows-x64)'
-        default: '45233589154'
+        description: 'run id of a release.yml dry run (artifact pushmpc-release); empty = the newest one that still has it'
+        default: ''
   push:
     branches: ['track/integrations']
     paths:
@@ -46,12 +43,56 @@ permissions:
   actions: read
 
 env:
-  RELEASE_RUN: ${{ inputs.release_run || '45233609124' }}
-  VSPLUGIN_RUN: ${{ inputs.vsplugin_run || '45233589154' }}
+
   CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
 
 jobs:
   # ---------------------------------------------------------------------------------------------------- Windows
+  # the filter and the VapourSynth plugin from this commit (the SDK headers are in the repository; MPC-VR's base
+  # classes at the commit pinned in scripts/pushfps-pin.json), for the player jobs
+  win-build:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Filter (PushMpcFilter.ax, PushMpcExit.dll) and pushmpc_vs.dll
+        timeout-minutes: 20
+        run: |
+          $pin = Get-Content scripts/pushfps-pin.json -Raw | ConvertFrom-Json
+          git init -q MpcVideoRenderer
+          git -C MpcVideoRenderer remote add origin "https://github.com/$($pin.mpcvr.repository).git"
+          git -C MpcVideoRenderer fetch -q --depth 1 origin $pin.mpcvr.commit
+          git -C MpcVideoRenderer checkout -q FETCH_HEAD
+          git -C MpcVideoRenderer submodule update -q --init --depth 1 external/BaseClasses
+          cmake -S filter -B "$env:RUNNER_TEMP\fb" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$PWD\MpcVideoRenderer"; if ($LASTEXITCODE) { exit 1 }
+          cmake --build "$env:RUNNER_TEMP\fb" --parallel; if ($LASTEXITCODE) { exit 1 }
+          cmake -S vsplugin -B "$env:RUNNER_TEMP\vb" -G Ninja -DCMAKE_BUILD_TYPE=Release; if ($LASTEXITCODE) { exit 1 }
+          cmake --build "$env:RUNNER_TEMP\vb" --target pushmpc_vs --parallel; if ($LASTEXITCODE) { exit 1 }
+          $o = "$env:RUNNER_TEMP\bits"; New-Item -ItemType Directory $o | Out-Null
+          Copy-Item filter/bin/PushMpcFilter.ax, filter/bin/PushMpcExit.dll, vsplugin/bin/pushmpc_vs.dll $o
+          Get-ChildItem $o | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with: { name: t4-windows-bits, path: '${{ runner.temp }}/bits' }
+
+  # the newest release.yml dry run that still has its artifact (Setup and the release zips), or the given run
+  release-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.r.outputs.run }}
+    steps:
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIVEN: ${{ inputs.release_run }}
+        run: |
+          run=$GIVEN
+          [ -n "$run" ] || run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=pushmpc-release&per_page=20" --jq '[.artifacts[] | select(.expired == false)][0].workflow_run.id // empty')
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ -n "$run" ]; then echo "release artifact from run $run"; else echo "::notice title=no release artifact::no release.yml run with the pushmpc-release artifact: the Setup jobs are skipped (dispatch release.yml with dry_run)"; fi
+
   win-writers:
     runs-on: windows-2025
     timeout-minutes: 15
@@ -69,6 +110,7 @@ jobs:
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-potplayer-install.ps1; exit $LASTEXITCODE
 
   win-players:
+    needs: win-build
     runs-on: windows-2025
     timeout-minutes: 40
     defaults: { run: { shell: pwsh } }
@@ -77,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: pushmpc_vs-windows-x64, path: '${{ runner.temp }}/vsdll', run-id: '${{ env.VSPLUGIN_RUN }}', github-token: '${{ github.token }}' }
+        with: { name: t4-windows-bits, path: '${{ runner.temp }}/vsdll' }
       - uses: actions/cache@v4
         with: { path: '${{ runner.temp }}/dl', key: "win-players-dl-v1-${{ hashFiles('scripts/vapoursynth-pin.json') }}" }
       - name: Plugin, pinned VapourSynth runtime, test clip (the layout PushMPC installs)
@@ -151,7 +193,17 @@ jobs:
           $snap += "PATH=" + [Environment]::GetEnvironmentVariable('Path', 'User')
           $snap | Set-Content "$env:RUNNER_TEMP\before.txt"
           $files -join "`n" | Set-Content "$env:RUNNER_TEMP\files.txt"
-      - name: Install (mpv-integration.ps1, real profile of the runner)
+      - name: VapourSynth self-test against the real mpv (with and without the runtime)
+        run: |
+          . ./integrations/mpv/mpv-integration.ps1
+          $E = Get-PmEnv ''
+          $mpv = "$env:LOCALAPPDATA\Programs\mpv\mpv.exe"
+          $bad = Test-PmVapourSynth $E $mpv ''
+          $script:PmVsTests.Clear()
+          $good = Test-PmVapourSynth $E $mpv $env:VSSCRIPT_DIR
+          "without the runtime: $($bad.Result) ($($bad.Message)); with it: $($good.Result) ($($good.Message))" | Tee-Object -Append "$env:RUNNER_TEMP\players.txt"
+          Write-Host "::notice title=Windows VapourSynth self-test::without the runtime $($bad.Result) ($($bad.Message)); with it $($good.Result)"
+          if ($good.Result -ne 0 -or $bad.Result -ne 1) { Write-Host '::error::self-test: expected 1 without the runtime and 0 with it'; exit 1 }      - name: Install (mpv-integration.ps1, real profile of the runner)
         run: |
           . ./integrations/mpv/mpv-integration.ps1
           $rows = Invoke-PmMpvIntegration -Action Install -RuntimeOnPath
@@ -211,6 +263,7 @@ jobs:
         with: { name: win-players-logs, path: "${{ runner.temp }}/vslog-*\n${{ runner.temp }}/*.txt" }
 
   potplayer:
+    needs: win-build
     runs-on: windows-2025
     timeout-minutes: 30
     defaults: { run: { shell: pwsh } }
@@ -219,7 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+        with: { name: t4-windows-bits, path: '${{ runner.temp }}/bits' }
       - uses: actions/cache@v4
         with: { path: '${{ runner.temp }}/dl', key: potplayer-dl-v1 }
       - name: PotPlayer (official installer, silent), the filter (CI release), test clip
@@ -240,8 +293,9 @@ jobs:
           $p = Start-Process $lf -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru; $p.WaitForExit(300000) | Out-Null
           "LAV Filters $($lr.tag_name): installer exit $($p.ExitCode), LAV Video at $((Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\CLSID\{EE30215D-164F-4A92-A4EB-9D4C13390F9F}\InprocServer32' -ErrorAction SilentlyContinue).'(default)')" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
           # the filter where PushMPC installs it, registered per user like Setup does
-          $fz = Get-ChildItem "$env:RUNNER_TEMP\release" -Filter 'PushMPC-filter-*.zip' | Select-Object -First 1
-          $fd = "$env:LOCALAPPDATA\PushMPC\filter"; New-Item -ItemType Directory $fd -Force | Out-Null; Expand-Archive $fz.FullName $fd -Force
+          $fd = "$env:LOCALAPPDATA\PushMPC\filter"; New-Item -ItemType Directory $fd -Force | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\bits\PushMpcFilter.ax", "$env:RUNNER_TEMP\bits\PushMpcExit.dll" $fd
+          $fz = Get-Item "$fd\PushMpcFilter.ax"
           $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$fd\PushMpcFilter.ax`"" -Wait -PassThru
           "filter $($fz.Name) registered: exit $($r.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
           $c = "$dl\clip.mp4"; if (-not (Test-Path $c)) { Invoke-WebRequest $env:CLIP_URL -OutFile $c }; "CLIP=$c" >> $env:GITHUB_ENV
@@ -625,7 +679,7 @@ jobs:
           pacman -S --noconfirm --needed ffmpeg >/dev/null
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
-          PUSHMPC_VS_LOG_DIR=/tmp/vslog-aur mpv /tmp/clip.mp4 --length=2 --no-audio --o=/tmp/aur.mkv --of=matroska --ovc=ffv1 2>&1 | tail -5
+          PUSHMPC_VS_LOG_DIR=/tmp/vslog-aur mpv /tmp/clip.mp4 --length=2 --vo=null --ao=null 2>&1 | tail -5
           grep -h 'portable: output' /tmp/vslog-aur/*.log | tee -a /tmp/aur.txt
           grep -q 'portable: output' /tmp/vslog-aur/*.log
           pushmpc-setup uninstall; test ! -e $HOME/.config/mpv/mpv.conf
@@ -633,13 +687,15 @@ jobs:
 
   # ---------------------------------------------------------------------------------------------------- packaging, ARM64
   win-packaging:
+    needs: release-artifact
+    if: needs.release-artifact.outputs.run != ''
     runs-on: windows-2025
     timeout-minutes: 30
     defaults: { run: { shell: pwsh } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ needs.release-artifact.outputs.run }}', github-token: '${{ github.token }}' }
       - name: winget validate (Setup's SHA-256 from the CI release)
         timeout-minutes: 10
         run: |
@@ -686,6 +742,8 @@ jobs:
 
   # the x64 Setup silently on x64 (baseline) and on ARM64 under Prism, then MPC-HC x64 with MPC Video Renderer on WARP
   setup-graph:
+    needs: release-artifact
+    if: needs.release-artifact.outputs.run != ''
     strategy:
       fail-fast: false
       matrix:
@@ -698,7 +756,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ needs.release-artifact.outputs.run }}', github-token: '${{ github.token }}' }
       - name: MPC-HC x64 (official installer, silent) for the graph check
         timeout-minutes: 10
         run: |
