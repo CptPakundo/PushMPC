@@ -61,3 +61,11 @@ scripts/nvidia-vfx-fetch.sh
 scripts/slang-pin.json
 scripts/fidelityfx-fetch.ps1
 vlcplugin/**
+pmml/CMakeLists.txt
+pmml/build.cmd
+pmml/include/**
+pmml/src/**
+pmml/tools/**
+pmml/tests/**
+pmml/scripts/**
+scripts/ml-runtime-pin.json

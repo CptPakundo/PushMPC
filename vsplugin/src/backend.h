@@ -8,12 +8,15 @@
 //   portable  PushFPS's portable core on the CPU (engines/portable): any GPU, Windows, Linux, macOS.
 //   apple     Apple's VideoToolbox ML frame interpolation and super resolution (macOS on Apple silicon; engines/apple),
 //             when this Mac offers an interpolator; else portable.
+//   ml        PushFlow (RIFE) on the GPU through pmml (ONNX Runtime with the card's EP, or ncnn-Vulkan): any GPU, every
+//             OS, when the pmml runtime is installed (ml_vs.cpp).
 //   rife      a script preset: pushmpc.vpy chains vs-rife-ncnn-vulkan (core.rife) when the user has it installed. The
 //             plugin never downloads it; it only reports whether the script found it.
 //
 // Auto: pushcore present and the GPU an NVIDIA RTX -> nvidia; pushcore present on any other DirectX 12 hardware GPU
 // with at least one GPU frame generation method installed (PushFlow, FSR FG, AMD FRC) -> nvidia (pushcore) as well;
-// otherwise apple when this Mac offers it; otherwise rife when available; otherwise portable. Off switch for the
+// otherwise apple when this Mac offers it; otherwise ml when the pmml runtime is installed;
+// otherwise rife when available; otherwise portable. Off switch for the
 // non-RTX part: PUSHMPC_DISABLE_ANYGPUCORE=1 (BackendProbe.anyGpuDisabled), then such GPUs go on down the list.
 #pragma once
 #include <algorithm>
@@ -25,8 +28,8 @@
 
 namespace pmvs {
 
-enum class BackendKind { Nvidia, Portable, Rife, Apple };
-inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : k == BackendKind::Apple ? "apple" : "portable"; }
+enum class BackendKind { Nvidia, Portable, Rife, Apple, Ml };
+inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : k == BackendKind::Apple ? "apple" : k == BackendKind::Ml ? "ml" : "portable"; }
 
 // what the probe found. gpuFamily: pushcore_capabilities' family (PushMpcAuto.h GpuFamily: 1 RTX 50, 2 RTX 40,
 // 3 RTX 30, 4 RTX 20, 5 GTX, 6.. AMD / Intel / other; 0 unknown)
@@ -38,6 +41,8 @@ struct BackendProbe {
     bool appleBuilt = false;      // this build has the VideoToolbox backend (macOS)
     bool appleAvailable = false;  // ... and this Mac offers a VideoToolbox interpolator (apple::Probe)
     std::string appleWhy;         // what the probe found
+    bool mlBuilt = false;         // this build has the ml backend (pmml)
+    bool mlAvailable = false;     // the pmml runtime is installed (ml_vs.cpp MlRuntimePresent)
     std::string gpuName;
     bool nvidiaNoFg = false;      // the nvidia backend runs but cannot generate frames here (Linux: RTX 20, or RTX 30 before
                                   // its self-test): it upscales, and interpolation comes from rife / portable before it
@@ -80,12 +85,17 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         else { r.kind = BackendKind::Portable; r.why = std::string("apple asked for, but ") + (p.appleBuilt ? "this Mac offers no VideoToolbox interpolator (" + p.appleWhy + ")" : "this build has no VideoToolbox backend (macOS only)") + ": portable"; }
         return r;
     }
+    if (requested == "ml") {
+        if (p.mlBuilt && p.mlAvailable) { r.kind = BackendKind::Ml; r.why = "ml (your setting)"; }
+        else { r.kind = BackendKind::Portable; r.why = std::string("ml asked for, but ") + (p.mlBuilt ? "the pmml runtime is not installed" : "this build has no ml backend") + ": portable"; }
+        return r;
+    }
     if (requested == "rife") {
         if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "rife (your setting)"; }
         else { r.kind = BackendKind::Portable; r.why = "rife asked for, but vs-rife-ncnn-vulkan (core.rife) is not installed: portable"; }
         return r;
     }
-    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia (pushcore), apple, portable or rife (got '" + requested + "')"; return r; }
+    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia (pushcore), apple, ml, portable or rife (got '" + requested + "')"; return r; }
     if (nvidiaOk) {
         r.kind = BackendKind::Nvidia;
         r.why = IsRtxFamily(p.gpuFamily) ? "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia"
@@ -98,6 +108,7 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
                        : p.anyGpuDisabled ? gpu + " is not an NVIDIA RTX GPU (pushcore on other GPUs is switched off: PUSHMPC_DISABLE_ANYGPUCORE)"
                        : gpu + " has no GPU frame generation method installed for pushcore (PushFlow, FSR FG, AMD FRC)";
     if (p.appleAvailable) { r.kind = BackendKind::Apple; r.why = "Auto: " + not_nv + "; this Mac offers " + p.appleWhy + ": apple"; return r; }
+    if (p.mlBuilt && p.mlAvailable) { r.kind = BackendKind::Ml; r.why = "Auto: " + not_nv + "; the pmml runtime is installed: ml (PushFlow on the GPU)"; return r; }
     if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is installed: rife"; return r; }
     r.kind = BackendKind::Portable;
     r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is not installed: portable (the GPU engine on a Vulkan device, else the CPU)";

@@ -51,6 +51,13 @@ void NvLinuxProbe(const VSMap* in, const VSAPI* a, BackendProbe& p);
 void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
 }
 #endif
+#if PMVS_HAVE_PMML
+namespace pmvs {
+void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
+bool MlRuntimePresent(const std::string& dir);
+std::string MlRuntimeDir(const VSMap* in, const VSAPI* a);
+}
+#endif
 
 #ifdef _WIN32
 namespace {
@@ -490,6 +497,10 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
     p.appleBuilt = true;
     if (lreq == "auto" || lreq == "apple") p.appleAvailable = AppleAvailable(p.appleWhy);
 #endif
+#if PMVS_HAVE_PMML
+    p.mlBuilt = true;
+    if (lreq == "auto" || lreq == "ml") p.mlAvailable = MlRuntimePresent(MlRuntimeDir(forScript ? nullptr : in, a));
+#endif
     // Enhance itself cannot run rife (a script preset): only SelectBackend reports it
     if (forScript) {
         int err = 0;
@@ -515,6 +526,9 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);
 #ifdef PUSHMPC_APPLE
     if (c.kind == BackendKind::Apple) return AppleCreate(in, out, core, a, node, c.why);
+#endif
+#if PMVS_HAVE_PMML
+    if (c.kind == BackendKind::Ml) return MlCreate(in, out, core, a, node, c.why);
 #endif
     if (c.kind == BackendKind::Rife) { a->freeNode(node); return fail("rife is a script preset: use pushmpc.vpy (it chains core.rife)"); }
 #if defined(PMVS_NVIDIA_VFX)
@@ -551,7 +565,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
-        "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;",
+        "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
+        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }

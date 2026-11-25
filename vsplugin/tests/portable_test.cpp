@@ -172,6 +172,16 @@ static void TestSelect()
     c = SelectBackend("nvidia", lin); CHECK(!c.ok && c.kind == BackendKind::Nvidia, "nvidia asked on a build without it");
     c = SelectBackend("nvidia", p); CHECK(c.ok && c.kind == BackendKind::Nvidia, "nvidia asked: kept even without pushcore (its own error)");
     c = SelectBackend("rife", lin); CHECK(c.kind == BackendKind::Portable, "rife asked, absent -> portable");
+    {   // the ml backend (pmml): after nvidia, before rife; only with its runtime installed
+        BackendProbe m; m.mlBuilt = true; m.mlAvailable = true; m.rifeAvailable = true;
+        c = SelectBackend("auto", m); CHECK(c.kind == BackendKind::Ml && c.why.find("pmml") != std::string::npos, "ml before rife: %s", c.why.c_str());
+        m.nvidiaBuilt = true; m.pushcoreLoaded = true; m.gpuFamily = 2;
+        c = SelectBackend("auto", m); CHECK(c.kind == BackendKind::Nvidia, "RTX wins over ml: %s", c.why.c_str());
+        c = SelectBackend("ML", m); CHECK(c.kind == BackendKind::Ml, "ml asked: %s", c.why.c_str());
+        m.mlAvailable = false;
+        c = SelectBackend("ml", m); CHECK(c.kind == BackendKind::Portable && c.why.find("not installed") != std::string::npos, "%s", c.why.c_str());
+        CHECK(std::string(BackendName(BackendKind::Ml)) == "ml", "name");
+    }
     lin.rifeAvailable = true;
     c = SelectBackend("RIFE", lin); CHECK(c.kind == BackendKind::Rife, "rife asked");
     c = SelectBackend("portable", p); CHECK(c.kind == BackendKind::Portable, "portable asked on RTX");
