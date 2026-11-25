@@ -203,6 +203,36 @@ std::shared_ptr<Context> Context::Get(const DeviceRequest& req, std::string& why
     return c;
 }
 
+std::shared_ptr<Context> Context::Adopt(const ExternalDevice& ext, std::string& why)
+{
+    std::lock_guard<std::mutex> lk(g_ctxLock);
+    if (!ext.instance || !ext.phys || !ext.device || !ext.getInstanceProcAddr) { why = "external Vulkan device: missing handles"; return nullptr; }
+    if (auto c = g_ctx.lock()) {
+        if (c->m_external && c->m_dev == ext.device && c->m_family == ext.family && c->m_ext.queueIndex == ext.queueIndex) return c;
+        if (!c->m_external) { why = "the engine already runs on its own Vulkan device in this process"; return nullptr; }
+    }
+    // the function pointers come from the owner's loader and instance (volk keeps one set per process)
+    volkInitializeCustom(ext.getInstanceProcAddr);
+    volkLoadInstanceOnly(ext.instance);
+    volkLoadDevice(ext.device);
+    std::shared_ptr<Context> c(new Context());
+    c->m_external = true; c->m_ext = ext;
+    c->m_inst = ext.instance; c->m_phys = ext.phys; c->m_dev = ext.device; c->m_family = ext.family;
+    c->m_info = InfoOf(ext.phys);
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(ext.phys, &props);
+    c->m_limits = props.limits;
+    vkGetPhysicalDeviceMemoryProperties(ext.phys, &c->m_mem);
+    if (VK_API_VERSION_MAJOR(props.apiVersion) == 1 && VK_API_VERSION_MINOR(props.apiVersion) < 2) { why = c->m_info.name + ": Vulkan < 1.2"; return nullptr; }
+    // the storage formats the engine writes (pyramid R8_UINT, planes R8 / R16, intermediates R16)
+    for (VkFormat f : { VK_FORMAT_R8_UINT, VK_FORMAT_R8_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R16G16_UNORM })
+        if (!c->FormatOk(f, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { why = c->m_info.name + ": no storage support for a plane format the engine writes"; return nullptr; }
+    vkGetDeviceQueue(ext.device, ext.family, ext.queueIndex, &c->m_queue);
+    if (!c->m_queue) { why = "external Vulkan device: no queue " + std::to_string(ext.family) + "/" + std::to_string(ext.queueIndex); return nullptr; }
+    g_ctx = c;
+    return c;
+}
+
 bool Context::Open(const DeviceRequest& req, std::string& err)
 {
     m_req = req;
@@ -339,6 +369,7 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
 
 Context::~Context()
 {
+    if (m_external) return;   // the owner's device: never destroyed here (the engine waited for its own work)
     if (m_dev) { vkDeviceWaitIdle(m_dev); vkDestroyDevice(m_dev, nullptr); }
     if (m_messenger && vkDestroyDebugUtilsMessengerEXT) vkDestroyDebugUtilsMessengerEXT(m_inst, m_messenger, nullptr);
     // the instance stays for the process (Context::List and the next device use it)
@@ -349,7 +380,10 @@ uint64_t Context::ValidationErrors() const { return g_validationErrors.load(); }
 VkResult Context::Submit(const VkSubmitInfo& si, VkFence fence)
 {
     std::lock_guard<std::mutex> lk(m_queueLock);
-    return vkQueueSubmit(m_queue, 1, &si, fence);
+    if (m_external && m_ext.queueLock) m_ext.queueLock(m_ext.lockCtx, m_family, m_ext.queueIndex);
+    const VkResult r = vkQueueSubmit(m_queue, 1, &si, fence);
+    if (m_external && m_ext.queueUnlock) m_ext.queueUnlock(m_ext.lockCtx, m_family, m_ext.queueIndex);
+    return r;
 }
 VkResult Context::SubmitOf(const VkSubmitInfo& si)
 {
@@ -359,7 +393,10 @@ VkResult Context::SubmitOf(const VkSubmitInfo& si)
 VkResult Context::WaitIdle()
 {
     std::lock_guard<std::mutex> lk(m_queueLock);
-    return vkQueueWaitIdle(m_queue);
+    if (m_external && m_ext.queueLock) m_ext.queueLock(m_ext.lockCtx, m_family, m_ext.queueIndex);
+    const VkResult r = vkQueueWaitIdle(m_queue);
+    if (m_external && m_ext.queueUnlock) m_ext.queueUnlock(m_ext.lockCtx, m_family, m_ext.queueIndex);
+    return r;
 }
 
 int Context::MemoryType(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) const

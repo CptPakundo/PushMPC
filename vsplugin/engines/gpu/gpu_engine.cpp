@@ -134,6 +134,7 @@ struct Engine::Impl {
     // an imported output (a player's dma-buf frame buffer) replacing the readback slot for one Generate / Real
     const Buffer* extOut = nullptr;
     std::map<int, Buffer> imports; int nextImport = 1;
+    Buffer rectBuf;   // ReadRect's host buffer (grown on demand)
     std::vector<bool> outUsed;
     Buffer dedupStats; int nextDedup = 0;
     Buffer dummy;
@@ -172,6 +173,7 @@ struct Engine::Impl {
     bool MakePipes(std::string& err);
     Job& Begin(std::string& err, bool& ok);
     uint64_t Submit(Job& j, std::string& err, uint64_t waitValue = 0);
+    uint64_t SubmitEx(Job& j, const ExternalSync& s, std::string& err);   // also waits for / signals the owner's semaphores
     bool WaitValue(uint64_t v, std::string& err) const;
     void Barrier(VkCommandBuffer cb) const;
     void ToGeneral(VkCommandBuffer cb, VkImage img) const;
@@ -247,7 +249,8 @@ void Engine::Impl::Free()
 {
     if (!ctx) return;
     const VkDevice d = ctx->Dev();
-    vkDeviceWaitIdle(d);
+    if (ctx->External()) { std::string e; if (timeline) WaitValue(value, e); }   // a shared device: wait for our own work only
+    else vkDeviceWaitIdle(d);
     for (auto& s : slots) { ctx->Destroy(s.y); ctx->Destroy(s.u); ctx->Destroy(s.v); for (auto& i : s.pyr) ctx->Destroy(i); ctx->Destroy(s.pyrF); ctx->Destroy(s.ofLuma); }
     slots.clear();
     for (auto& p : pairs) { ctx->Destroy(p.fieldF); ctx->Destroy(p.fieldK); ctx->Destroy(p.costF); ctx->Destroy(p.costK); ctx->Destroy(p.consF); ctx->Destroy(p.consK); ctx->Destroy(p.hostF); ctx->Destroy(p.hostK); ctx->Destroy(p.stats); ctx->Destroy(p.hold); }
@@ -258,6 +261,7 @@ void Engine::Impl::Free()
     for (auto& b : staging) ctx->Destroy(b);
     for (auto& kv : imports) ctx->Destroy(kv.second);
     imports.clear();
+    ctx->Destroy(rectBuf);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
     for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
     FreeOf();
@@ -417,8 +421,16 @@ bool Engine::Configure(const Config& c, const DeviceRequest& req, std::string& e
 {
     m->Free();
     if (c.width < 64 || c.height < 64 || c.bits < 8 || c.bits > 16) { err = "GPU engine: the picture must be at least 64x64, 8..16 bits"; return false; }
-    m->ctx = Context::Get(req, err);
-    if (!m->ctx) return false;
+    std::shared_ptr<Context> ctx = Context::Get(req, err);
+    if (!ctx) return false;
+    return Configure(c, ctx, err);
+}
+bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::string& err)
+{
+    m->Free();
+    if (c.width < 64 || c.height < 64 || c.bits < 8 || c.bits > 16) { err = "GPU engine: the picture must be at least 64x64, 8..16 bits"; return false; }
+    if (!ctx) { err = "GPU engine: no Vulkan context"; return false; }
+    m->ctx = std::move(ctx);
     Impl& I = *m;
     I.cfg = c;
     I.outW = c.outWidth > 0 ? c.outWidth : c.width; I.outH = c.outHeight > 0 ? c.outHeight : c.height;
@@ -460,7 +472,7 @@ bool Engine::Configure(const Config& c, const DeviceRequest& req, std::string& e
     I.nextJob = 0;
 
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
@@ -498,7 +510,7 @@ bool Engine::Configure(const Config& c, const DeviceRequest& req, std::string& e
     I.offU = Align(VkDeviceSize(I.pitchY) * VkDeviceSize(I.outH), align); I.offV = Align(I.offU + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outStride = Align(I.offV + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outUsed.assign(size_t(std::max(2, c.outSlots)), false);
-    if (!host(I.outStride * I.outUsed.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.readback)) return false;
+    if (c.deviceReadback ? !dev(I.outStride * I.outUsed.size(), I.readback) : !host(I.outStride * I.outUsed.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.readback)) return false;
     if (!host(256 * 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.dedupStats)) return false;
     if (!dev(256, I.dummy)) return false;
     // intermediates for the upscaler (1x1 placeholders without one: interp.comp binds them either way)
@@ -1065,6 +1077,7 @@ bool Engine::RealInto(int slot, int output, uint64_t& ticket, std::string& err)
 void Engine::Read(int out, const YuvOut& o)
 {
     Impl& I = *m;
+    if (!I.readback.map) { I.outUsed[size_t(out)] = false; return; }   // deviceReadback: Export, not Read
     const uint8_t* base = static_cast<const uint8_t*>(I.readback.map) + I.outStride * VkDeviceSize(out);
     for (int p = 0; p < 3; ++p) {
         const int w = p ? I.ocw : I.outW, h = p ? I.och : I.outH, pitch = p ? I.pitchC : I.pitchY;
@@ -1126,6 +1139,125 @@ bool Engine::ReadFields(int pair, veyra::portable::MotionField& f, veyra::portab
     }
     I.ctx->Destroy(st);
     return ok;
+}
+
+
+// ---- frames of an external device -----------------------------------------------------------------------------------
+uint64_t Engine::Impl::SubmitEx(Job& j, const ExternalSync& s, std::string& err)
+{
+    Barrier(j.cb);
+    vkEndCommandBuffer(j.cb);
+    const uint64_t v = ++value;
+    std::vector<VkSemaphore> sig = { timeline };
+    std::vector<uint64_t> sigVal = { v };
+    for (size_t i = 0; i < s.signal.size(); ++i) { sig.push_back(s.signal[i]); sigVal.push_back(i < s.signalValue.size() ? s.signalValue[i] : 0); }
+    std::vector<VkPipelineStageFlags> stages(s.wait.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    VkTimelineSemaphoreSubmitInfo ts{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    ts.signalSemaphoreValueCount = uint32_t(sigVal.size()); ts.pSignalSemaphoreValues = sigVal.data();
+    ts.waitSemaphoreValueCount = uint32_t(s.waitValue.size()); ts.pWaitSemaphoreValues = s.waitValue.data();
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.pNext = &ts;
+    si.commandBufferCount = 1; si.pCommandBuffers = &j.cb;
+    si.signalSemaphoreCount = uint32_t(sig.size()); si.pSignalSemaphores = sig.data();
+    si.waitSemaphoreCount = uint32_t(s.wait.size()); si.pWaitSemaphores = s.wait.data(); si.pWaitDstStageMask = stages.data();
+    if (s.wait.size() != s.waitValue.size()) { err = "GPU engine: wait semaphores and values differ in count"; return 0; }
+    const VkResult r = ctx->Submit(si, VK_NULL_HANDLE);
+    if (r != VK_SUCCESS) { err = "vkQueueSubmit failed (" + std::to_string(int(r)) + ")"; return 0; }
+    j.value = v;
+    return v;
+}
+
+int Engine::Import(const ImportRecorder& rec, const ExternalSync& sync, std::string& err, uint64_t* ticket)
+{
+    Impl& I = *m;
+    if (!I.cfg.deviceReadback) { err = "GPU engine: Import needs Config::deviceReadback"; return -1; }
+    int slot = -1;
+    for (size_t i = 0; i < I.slots.size(); ++i) if (!I.slots[i].used) { slot = int(i); break; }
+    if (slot < 0) { err = "GPU engine: no free picture slot"; return -1; }
+    const double t0 = NowMs();
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return -1;
+    Impl::Slot& s = I.slots[size_t(slot)];
+    SlotTarget t;
+    t.y = s.y.img; t.u = s.u.img; t.v = s.v.img; t.yv = s.y.view; t.uv = s.u.view; t.vv = s.v.view;
+    t.w = I.cfg.width; t.h = I.cfg.height; t.cw = I.cw; t.ch = I.ch; t.bits = I.cfg.bits;
+    if (!rec(j.cb, t, err)) { vkEndCommandBuffer(j.cb); return -1; }
+    I.Barrier(j.cb);
+    struct { int w, h, shift; float kRaw; } p0{ I.cfg.width, I.cfg.height, std::max(0, I.cfg.bits - 8), I.kRaw };
+    if (!Impl::Bind(I, j, PPyr0).Img(0, s.y.view).Img(1, s.pyr[0].view).Run(&p0, uint32_t((I.cfg.width + 15) / 16), uint32_t((I.cfg.height + 7) / 8), err)) return -1;
+    for (int l = 1; l < I.levels; ++l) {
+        I.Barrier(j.cb);
+        struct { int sw, sh, dw, dh; } pd{ I.lw[size_t(l - 1)], I.lh[size_t(l - 1)], I.lw[size_t(l)], I.lh[size_t(l)] };
+        if (!Impl::Bind(I, j, PPyrDown).Img(0, s.pyr[size_t(l - 1)].view).Img(1, s.pyr[size_t(l)].view).Run(&pd, uint32_t((pd.dw + 15) / 16), uint32_t((pd.dh + 7) / 8), err)) return -1;
+    }
+    if (s.pyrF.img) {   // as Upload: the prefiltered full-size luma the block matcher searches on at quality 2
+        struct { int w, h; } pb{ I.cfg.width, I.cfg.height };
+        if (!Impl::Bind(I, j, PBlur).Img(0, s.pyr[0].view).Img(1, s.pyrF.view).Run(&pb, uint32_t((pb.w + 15) / 16), uint32_t((pb.h + 7) / 8), err)) return -1;
+    }
+    const uint64_t val = I.SubmitEx(j, sync, err);
+    if (!val) return -1;
+    if (ticket) *ticket = val;
+    s.used = true; s.lastUse = val;
+    I.times.uploads++;
+    I.times.uploadMs += NowMs() - t0;
+    return slot;
+}
+
+bool Engine::Export(int out, const ExportRecorder& rec, const ExternalSync& sync, uint64_t& ticket, std::string& err)
+{
+    Impl& I = *m;
+    if (out < 0 || out >= int(I.outUsed.size()) || !I.outUsed[size_t(out)]) { err = "GPU engine: Export of a free readback slot"; return false; }
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);   // its barrier orders the copy after the job that made the output
+    if (!ok) return false;
+    OutSource s;
+    s.buffer = I.readback.buf; s.offset = I.outStride * VkDeviceSize(out); s.offU = I.offU; s.offV = I.offV;
+    s.pitchY = I.pitchY; s.pitchC = I.pitchC; s.w = I.outW; s.h = I.outH; s.cw = I.ocw; s.ch = I.och; s.bits = I.cfg.bits;
+    if (!rec(j.cb, s, err)) { vkEndCommandBuffer(j.cb); return false; }
+    ticket = I.SubmitEx(j, sync, err);
+    if (!ticket) return false;
+    // the slot is rewritten only by a later job, which the queue orders after this one
+    I.outUsed[size_t(out)] = false;
+    return true;
+}
+
+
+bool Engine::ReadRect(int slot, int x, int y, int w, int h, std::vector<uint8_t> (&planes)[3], std::string& err)
+{
+    Impl& I = *m;
+    if (slot < 0 || slot >= int(I.slots.size()) || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > I.cfg.width || y + h > I.cfg.height) {
+        err = "GPU engine: ReadRect outside the picture"; return false;
+    }
+    const int bps = I.cfg.bits > 8 ? 2 : 1, cx = x / 2, cy = y / 2, cw = w / 2, ch = h / 2;
+    const VkDeviceSize ySz = VkDeviceSize(w) * VkDeviceSize(h) * VkDeviceSize(bps), cSz = VkDeviceSize(cw) * VkDeviceSize(ch) * VkDeviceSize(bps);
+    const VkDeviceSize offU = Align(ySz, 256), offV = Align(offU + cSz, 256), need = offV + cSz;
+    if (I.rectBuf.size < need) {
+        I.ctx->Destroy(I.rectBuf);
+        if (!I.ctx->CreateBuffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, I.rectBuf, err)) return false;
+    }
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return false;
+    const Impl::Slot& s = I.slots[size_t(slot)];
+    const VkImage img[3] = { s.y.img, s.u.img, s.v.img };
+    const VkDeviceSize off[3] = { 0, offU, offV };
+    for (int p = 0; p < 3; ++p) {
+        VkBufferImageCopy r{};
+        r.bufferOffset = off[p];
+        r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        r.imageOffset = { p ? cx : x, p ? cy : y, 0 };
+        r.imageExtent = { uint32_t(p ? cw : w), uint32_t(p ? ch : h), 1 };
+        vkCmdCopyImageToBuffer(j.cb, img[p], VK_IMAGE_LAYOUT_GENERAL, I.rectBuf.buf, 1, &r);
+    }
+    const uint64_t v = I.Submit(j, err);
+    if (!v || !I.WaitValue(v, err)) return false;
+    for (int p = 0; p < 3; ++p) {
+        const size_t n = size_t(p ? cSz : ySz);
+        planes[p].resize(n);
+        std::memcpy(planes[p].data(), static_cast<const uint8_t*>(I.rectBuf.map) + off[p], n);
+    }
+    return true;
 }
 
 } // namespace pmvs::gpu

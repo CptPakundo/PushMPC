@@ -15,6 +15,7 @@
 // one frame out while the GPU makes the next.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,6 +52,7 @@ struct Config {
                                         // default: on an RTX 5090 it was slower (4K: 17.0 vs 6.8 ms a pair) and not better
                                         // (synthetic zoom: 37.85 vs 38.06 dB) than the block matcher at quality 2
     float errorLow = 24.f, errorHigh = 48.f;
+    bool deviceReadback = false;        // outputs stay in device memory for Export (frames of an external device: no Read)
     bool refined = true;                // InterpolatePlanesRefined's rule (portable_engine.h); false: PushFPS's own
     float boundaryPx = 1.0f;
     // the block matcher at quality 2 (8 px blocks on the full-size picture): search on a 3x3 binomial-filtered copy; double
@@ -115,6 +117,15 @@ public:
 
 // where an output frame lies in its buffer (packed rows): Y at 0, U at offU, V at offV; one output = stride bytes
 struct OutputLayout { int pitchY = 0, pitchC = 0; uint64_t offU = 0, offV = 0, stride = 0; };
+// ---- frames of an external device (FFmpeg's Vulkan frames in mpv): the caller records the copy in (Import) or out
+// (Export) into the engine's command buffer, with the owner's timeline semaphores to wait for and to signal.
+struct ExternalSync { std::vector<VkSemaphore> wait, signal; std::vector<uint64_t> waitValue, signalValue; };
+// a source slot to fill: R8 / R16 UNORM planes (layout GENERAL, storage usage) holding the source's code values / maxRaw
+struct SlotTarget { VkImage y = VK_NULL_HANDLE, u = VK_NULL_HANDLE, v = VK_NULL_HANDLE; VkImageView yv = VK_NULL_HANDLE, uv = VK_NULL_HANDLE, vv = VK_NULL_HANDLE; int w = 0, h = 0, cw = 0, ch = 0, bits = 8; };
+// a finished output in device memory: the packed readback layout (rows of 4 / 2 samples per 32-bit word)
+struct OutSource { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceSize offset = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0, w = 0, h = 0, cw = 0, ch = 0, bits = 8; };
+using ImportRecorder = std::function<bool(VkCommandBuffer cb, const SlotTarget& t, std::string& err)>;
+using ExportRecorder = std::function<bool(VkCommandBuffer cb, const OutSource& s, std::string& err)>;
 
 class Engine {
 public:
@@ -124,6 +135,15 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     bool Configure(const Config& c, const DeviceRequest& req, std::string& err);
+    // the same on a given context (Context::Adopt: an external device)
+    bool Configure(const Config& c, std::shared_ptr<Context> ctx, std::string& err);
+    // a source picture recorded by the caller into a free slot (and its pyramid); the slot index, or -1
+    int Import(const ImportRecorder& rec, const ExternalSync& sync, std::string& err, uint64_t* ticket = nullptr);
+    // an output (Generate / Real with deviceReadback) recorded by the caller into its frame; frees the readback slot
+    bool Export(int out, const ExportRecorder& rec, const ExternalSync& sync, uint64_t& ticket, std::string& err);
+    // a rectangle of an imported picture back to the host (Subtitle Hold's band): luma x, y, w, h (even), chroma at half;
+    // planes packed (rows of w / w / 2 samples, source bits). Waits for the GPU.
+    bool ReadRect(int slot, int x, int y, int w, int h, std::vector<uint8_t> (&planes)[3], std::string& err);
     const Config& Cfg() const;
     const DeviceInfo& Device() const;
     bool OpticalFlowActive() const;     // the motion comes from VK_NV_optical_flow
