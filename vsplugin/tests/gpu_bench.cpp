@@ -160,8 +160,9 @@ static portable::Picture ToPicture(const Pic& f, int finest)
 // ---- interp
 static void BenchInterp(Y4m& clip)
 {
-    struct Method { std::string name; int kind; int quality; bool of; };   // kind 0 GPU, 1 CPU, 2 blend, 3 repeat
-    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false }, { "gpu-blocks-q1", 0, 1, false }, { "gpu-nvof", 0, 2, true }, { "cpu", 1, 1, false }, { "blend", 2, 0, false }, { "repeat", 3, 0, false } };
+    struct Method { std::string name; int kind; int quality; bool of; float lambda; };   // kind 0 GPU, 1 CPU, 2 blend, 3 repeat
+    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-blocks-q2-l6", 0, 2, false, 6.f }, { "gpu-blocks-q1", 0, 1, false, 3.f }, { "gpu-nvof", 0, 2, true, 3.f },
+                                    { "cpu", 1, 1, false, 3.f }, { "blend", 2, 0, false, 0.f }, { "repeat", 3, 0, false, 0.f } };
     std::ofstream ref;
     if (!g_y4mOut.empty()) {
         ref.open(g_y4mOut + "/" + g_clip + "_ref.y4m", std::ios::binary);
@@ -172,7 +173,7 @@ static void BenchInterp(Y4m& clip)
         Engine e;
         std::string err;
         if (m.kind == 0) {
-            Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.quality = m.quality; c.blockMatcherOnly = !m.of;
+            Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.quality = m.quality; c.blockMatcherOnly = !m.of; c.smoothness = m.lambda;
             if (!MakeEngine(e, c, err)) { std::printf("| %s | interp | %s | - | - | - | %s |\n", g_clip.c_str(), m.name.c_str(), err.c_str()); continue; }
             if (m.of && !e.OpticalFlowActive()) { std::printf("| %s | interp | %s | - | - | - | no VK_NV_optical_flow on this device |\n", g_clip.c_str(), m.name.c_str()); continue; }
         }
@@ -346,8 +347,7 @@ static void BenchCuts(Y4m& clip, Y4m* other)
             PairStats st;
             const int p = e.Estimate(slotA, sb, prev, st, err);
             if (p < 0) { std::printf("cuts: %s\n", err.c_str()); return; }
-            std::printf("STAT %s %s pair %zu unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d
-", g_clip.c_str(), useOf ? "nvof" : "blocks", i, st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
+            std::printf("STAT %s %s pair %zu unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d\n", g_clip.c_str(), useOf ? "nvof" : "blocks", i, st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
             const int d = guard.Decide(st);
             falseRule += d == 1 ? 1 : 0; falseGuard += d == 2 ? 1 : 0; ++pairs; sumCons += st.consistent;
             if (prev >= 0) e.ReleasePair(prev);
@@ -360,8 +360,7 @@ static void BenchCuts(Y4m& clip, Y4m* other)
             const int sb = e.Upload(other->frames[0].View(), err);
             PairStats st;
             const int p = e.Estimate(slotA, sb, prev, st, err);
-            std::printf("STAT %s %s junction unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d
-", g_clip.c_str(), useOf ? "nvof" : "blocks", st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
+            std::printf("STAT %s %s junction unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d\n", g_clip.c_str(), useOf ? "nvof" : "blocks", st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
             const int d = p >= 0 ? guard.Decide(st) : -1;
             note += std::string("; junction: ") + (d == 1 ? "cut (rule)" : d == 2 ? "cut (guard)" : "MISSED") + " (unexplained " + std::to_string(int(100 * std::max(st.unexplainedF, st.unexplainedB))) + " %)";
         }
