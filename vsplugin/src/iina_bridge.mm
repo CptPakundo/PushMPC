@@ -148,7 +148,7 @@ struct Bridge {
     AVFrame* prevFrame = nullptr;           // props template of the previous source frame
     AVBufferRef* outFrames = nullptr;       // our AVHWFramesContext (super resolution changes the size)
     AVBufferRef* device = nullptr;
-    uint64_t in = 0, produced = 0;
+    uint64_t in = 0, produced = 0, emitted = 0;
     std::string why;
     ~Bridge()
     {
@@ -343,7 +343,10 @@ void H_graph_free(AVFilterGraph** g)
     if (g && *g) {
         std::lock_guard<std::mutex> lk(g_lock);
         auto it = g_graphs.find(*g);
-        if (it != g_graphs.end()) { Log("graph closed after %llu frames in", (unsigned long long)it->second->in); g_graphs.erase(it); }
+        if (it != g_graphs.end()) {
+            Log("graph closed: %llu frames in, %llu out (x%d)", (unsigned long long)it->second->in, (unsigned long long)it->second->emitted, it->second->k);
+            g_graphs.erase(it);
+        }
         for (auto c = g_ctx.begin(); c != g_ctx.end();) c = c->second == *g ? g_ctx.erase(c) : std::next(c);
     }
     o_graph_free(g);
@@ -375,6 +378,7 @@ int H_get_frame_flags(AVFilterContext* ctx, AVFrame* f, int flags)
         b->out.pop_front();
         g_av.frame_move_ref(f, o);
         g_av.frame_free(&o);
+        ++b->emitted;
         return 0;
     }
     if (b->mode == Bridge::Mode::Pass) return o_get_frame_flags(ctx, f, flags);
@@ -410,9 +414,19 @@ int PatchImage(const mach_header_64* mh, void* target, void* repl)
                     for (size_t k = 0; k < count; ++k) {
                         if (slots[k] != target) continue;
                         vm_address_t page = vm_address_t(&slots[k]) & ~vm_address_t(vm_page_size - 1);
-                        if (vm_protect(mach_task_self(), page, vm_page_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) { Log("vm_protect failed"); continue; }
+                        // the page's current protection, restored afterwards (it is not always read-only: a __DATA
+                        // page, or one the Objective-C runtime still writes to, must stay writable)
+                        vm_address_t ra = page; vm_size_t rs = 0;
+                        vm_region_basic_info_data_64_t info{};
+                        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+                        mach_port_t obj = MACH_PORT_NULL;
+                        vm_prot_t orig = VM_PROT_READ;
+                        if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &cnt, &obj) == KERN_SUCCESS) orig = info.protection;
+                        if (!(orig & VM_PROT_WRITE)) {
+                            if (vm_protect(mach_task_self(), page, vm_page_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) { Log("vm_protect failed"); continue; }
+                        }
                         slots[k] = repl;
-                        vm_protect(mach_task_self(), page, vm_page_size, false, VM_PROT_READ);
+                        if (!(orig & VM_PROT_WRITE)) vm_protect(mach_task_self(), page, vm_page_size, false, orig);
                         ++n;
                     }
                 }

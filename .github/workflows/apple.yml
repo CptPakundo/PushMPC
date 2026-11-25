@@ -111,8 +111,11 @@ jobs:
             echo "--- crashed (exit $r): backtrace"
             lldb --batch -o run -o "bt all" -o "register read" -k "bt all" -k quit -- ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 2>&1 | tail -120
           fi
-          echo "::notice title=IINA bridge::$(grep -h 'bridge:\|IINA_BRIDGE_RESULT' "$RUNNER_TEMP/bridge.txt" | tr '\n' ' ')"
-          exit $r
+          line=$(grep -h "graph closed:" "$HOME/Library/Logs/PushMPC/iina-bridge.log" | tail -1)
+          echo "::notice title=IINA bridge::$(grep -h 'bridge:\|IINA_BRIDGE_RESULT' "$RUNNER_TEMP/bridge.txt" | tr '\n' ' ') $line"
+          [ "$r" = 0 ] || exit $r
+          n=$(echo "$line" | sed -E 's/.*: ([0-9]+) frames in, ([0-9]+) out.*/\1/'); m=$(echo "$line" | sed -E 's/.*: ([0-9]+) frames in, ([0-9]+) out.*/\2/')
+          if [ -z "$n" ] || [ "$n" -le 0 ] || [ $((10 * m)) -lt $((18 * n)) ]; then echo "::error::the bridge did not double the frames ($line)"; exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -411,8 +414,12 @@ jobs:
           # mpv's encode mode did not apply ~/.config/mpv/mpv.conf in run 45593276787 (no vf): include the block's file
           # explicitly, so the test checks what pushmpc-setup wrote, and print the active filter chain. There is no
           # VSSCRIPT_PATH in the environment: the global Lua helper provides it inside mpv.
-          # mpv's built-in "encoding" profile sets load-scripts=no; scripts are turned back on so the Lua helper runs
-          MPV_HOME="$HOME/.config/mpv" mpv "$clip" --load-scripts=yes --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v 2>&1 | tail -40
+          # mpv's encode mode (--o) does not run scripts (its built-in "encoding" profile; --load-scripts=yes did not
+          # change that in run 45611166441), so the Lua helper cannot act here: the probe above checks it in playback
+          # mode, and this encode test takes the helper's own path
+          export VSSCRIPT_PATH=$(sed -n 's/^local lib = "\(.*\)"$/\1/p' "$helper")
+          echo "VSSCRIPT_PATH from the helper: $VSSCRIPT_PATH"
+          MPV_HOME="$HOME/.config/mpv" mpv "$clip" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v 2>&1 | tail -40
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"
           srcn=$(echo "$src" | awk -F, '{print $NF}'); outn=$(echo "$out" | awk -F, '{print $NF}')
