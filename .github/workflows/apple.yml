@@ -163,8 +163,7 @@ jobs:
           echo "=== vspipe --info (Auto backend)"
           PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" --info vsplugin/tests/ci/apple_clip.vpy
           PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" vsplugin/tests/ci/apple_clip.vpy -- > /dev/null
-          echo "::notice title=apple backend on ${{ matrix.os }}::apple_vt_test=$APPLE_VT; backends that ran: $(grep -h -o 'backend that ran: [a-z]*' "$RUNNER_TEMP"/ran-*.txt 2>/dev/null | cut -d' ' -f4 | tr '
-' ' ')"
+          echo "::notice title=apple backend on ${{ matrix.os }}::apple_vt_test=$APPLE_VT; backends that ran: $(grep -h -o 'backend that ran: [a-z]*' "$RUNNER_TEMP"/ran-*.txt 2>/dev/null | cut -d' ' -f4 | xargs)"
 
       - uses: actions/upload-artifact@v4
         if: always()
