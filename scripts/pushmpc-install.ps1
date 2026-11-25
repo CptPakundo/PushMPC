@@ -191,8 +191,8 @@ $RuntimeFiles = $RuntimeFilesByVendor[$GpuVendor]
 $RuntimeDirs = $RuntimeDirsByVendor[$GpuVendor]
 # Per-file SHA-256 and size of each package's subset (computed from the pinned packages; v2.1.9 AMD downloaded and verified
 # 2026-11-23; v2.2.1 NVIDIA read from the official package 2026-11-25: only avutil-61.dll / swscale-10.dll changed. The v2.2.1
-# AMD values are the v2.1.9 AMD ones with those two files from v2.2.1 NVIDIA: in v2.1.9 both packages had byte-identical root
-# FFmpeg files, and upstream reports 2.2.1's runtime\ unchanged. NOT yet checked on the AMD 2.2.1 package itself (CI): files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
+# AMD values were checked against the official AMD 2.2.1 package by .github/workflows/runtime-pins.yml (2026-11-25, 684 files,
+# run 45592417559): besides the two FFmpeg files, runtime\amd-nr-rdna3\veyra_amd_nr_worker.exe and its manifest changed. Files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
 $RuntimeFileHashesAmd = @{
     'avutil-61.dll' = '4504BCCF90872875B21445D0AC121FF984D65F74CFCDAF61D1E333AABD9D4699 1224192'
     'msvcp140.dll' = '0F885B509A685D2BBFA652FED26B5FB31D88FBDAB0A978C641D1C7B8AA460AA9 557728'
@@ -864,8 +864,8 @@ $RuntimeFileHashesAmd = @{
     'runtime\amd-nr-rdna3\README.md' = '87D14D5313A1F2E99BA4BE0FA505712175CB39E6FF6B6752A1CFBDA48CE215EE 26009'
     'runtime\amd-nr-rdna3\source-manifest.json' = '10F56A8E622EB3F9DA98114C18F91B4D7E9225002D3D9D4F1FD893943E1DC75C 1541'
     'runtime\amd-nr-rdna3\THIRD_PARTY.md' = '0E8C0E5E3B3E4FCDE90B7CC5D98DD83C0D914145D9F30612A5164D65F93B4088 1534'
-    'runtime\amd-nr-rdna3\veyra-rdna3-runtime-manifest.json' = 'BB1834CED6965401D61937F72A256A73A8EE3C78D2675D2F2720C7AC93EC112E 6599'
-    'runtime\amd-nr-rdna3\veyra_amd_nr_worker.exe' = '85DB23C5CE716708F34A017F63ECA408A2F949C54A1A2DC8099B02514788131C 317440'
+    'runtime\amd-nr-rdna3\veyra-rdna3-runtime-manifest.json' = '16D62111663BAF4353496D30BF71041942C663210FFC2F4D9885319EB2DFE00F 6781'
+    'runtime\amd-nr-rdna3\veyra_amd_nr_worker.exe' = '976331D7D9898287E75D903558E8CCD50A154314EBF5C504499054FED469B76E 318464'
     'runtime\amd-nr-rdna3\zluda\cubin_fatbin_map.txt' = 'DFC3B6F2C6B4162B1799407A724C54DD22C2E52CCE0A42DEEFDA3D0FC48A8AF1 1514'
     'runtime\amd-nr-rdna3\zluda\nvapi64.dll' = '2678A451024FD42C1E7BF355B0B371A700924F3D52C8E3752B49BDBCE868E8C7 349696'
     'runtime\amd-nr-rdna3\zluda\nvcuda.dll' = 'B5F118A8F08B3789319CC61E151E1C84FF0F85DC2620A09BD51E7D877FC1EBBE 450048'
