@@ -185,7 +185,13 @@ do_vlc() {
     say "VLC:"
     if [ "$dry" = 1 ]; then say "  would: sh pushmpc-vlc.sh install --plugin $p"; return 0; fi
     mkdir -p "$pm"; cp "$here/vlc/pushmpc-vlc.sh" "$pm/pushmpc-vlc.sh"
-    if sh "$pm/pushmpc-vlc.sh" install --plugin "$p" | sed 's/^/  /'; then record vlc; else say "  VLC's installer failed: VLC not changed"; fi
+    # the installer's hardware-decoding self-test (on by default) plays pushmpc-selftest.mkv from its own folder;
+    # without the clip it skips the test and VLC keeps software decoding
+    if [ -f "$here/vlc/pushmpc-selftest.mkv" ]; then cp "$here/vlc/pushmpc-selftest.mkv" "$pm/pushmpc-selftest.mkv"
+    else say "  (no pushmpc-selftest.mkv in this download: the hardware-decoding self-test is skipped)"; fi
+    out=$(sh "$pm/pushmpc-vlc.sh" install --plugin "$p" 2>&1); rc=$?
+    printf '%s\n' "$out" | sed 's/^/  /'
+    if [ "$rc" = 0 ]; then record vlc; else say "  VLC's installer failed (exit $rc): VLC not changed"; fi
 }
 do_kodi_addon() {
     [ -f "$here/kodi/install.sh" ] || return 0
@@ -231,7 +237,7 @@ case $action in
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; sh "$pm/kodi-installer/install.sh" uninstall | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
-        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer"; rm -f "$pm/pushmpc-vlc.sh" "$sstate" "$plan" "$pm/setup.sh"; fi
+        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
         if [ -f "$pm/install.sh" ]; then
             # shellcheck disable=SC2086
             sh "$pm/install.sh" uninstall $pass

@@ -19,9 +19,15 @@ d=$tmp/$name
 mkdir -p "$d/vsplugin"
 install -m 755 integrations/linux/setup.sh "$d/setup.sh"
 install -m 755 integrations/linux/install.sh "$d/install.sh"
-# optional: the VLC module (PUSHMPC_VLC_PLUGIN=<libpushmpc_plugin.so>) and the Kodi add-on folder with its install.sh
-# (PUSHMPC_KODI_DIR), which setup.sh installs when VLC / Kodi is found
-if [ -n "${PUSHMPC_VLC_PLUGIN:-}" ] && [ -f "$PUSHMPC_VLC_PLUGIN" ]; then mkdir -p "$d/vlc"; install -m 755 "$PUSHMPC_VLC_PLUGIN" "$d/vlc/libpushmpc_plugin.so"; install -m 755 vlcplugin/install/pushmpc-vlc.sh "$d/vlc/pushmpc-vlc.sh"; fi
+# optional: the VLC module (PUSHMPC_VLC_PLUGIN=<libpushmpc_plugin.so>) with the clip its installer's hardware-decoding
+# self-test plays (PUSHMPC_VLC_SELFTEST_CLIP, vlc-plugin.yml's clips/hwclip.mkv: H.264 640x360, no B-frames; shipped as
+# vlc/pushmpc-selftest.mkv next to pushmpc-vlc.sh), and the Kodi add-on folder with its install.sh (PUSHMPC_KODI_DIR),
+# which setup.sh installs when VLC / Kodi is found
+if [ -n "${PUSHMPC_VLC_PLUGIN:-}" ] && [ -f "$PUSHMPC_VLC_PLUGIN" ]; then
+    mkdir -p "$d/vlc"; install -m 755 "$PUSHMPC_VLC_PLUGIN" "$d/vlc/libpushmpc_plugin.so"; install -m 755 vlcplugin/install/pushmpc-vlc.sh "$d/vlc/pushmpc-vlc.sh"
+    if [ -n "${PUSHMPC_VLC_SELFTEST_CLIP:-}" ] && [ -f "$PUSHMPC_VLC_SELFTEST_CLIP" ]; then install -m 644 "$PUSHMPC_VLC_SELFTEST_CLIP" "$d/vlc/pushmpc-selftest.mkv"
+    else echo "make-tarball.sh: no PUSHMPC_VLC_SELFTEST_CLIP: VLC's hardware-decoding self-test will be skipped on install" >&2; fi
+fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
