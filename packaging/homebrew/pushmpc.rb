@@ -3,9 +3,10 @@
 # interpolation on any machine), the mpv script and `pushmpc-setup`, which puts the filter into ~/.config/mpv/mpv.conf
 # (and takes it out again exactly).
 #
-# For our own tap (not homebrew-core): `brew tap pushmpc/tap https://github.com/CptPakundo/homebrew-pushmpc`, then
-# `brew install pushmpc/tap/pushmpc`. The url / sha256 below
-# point at the release tarball; CI (.github/workflows/apple.yml, job homebrew) installs this file from a local tap with
+# For our own tap (not homebrew-core):
+#   brew tap pushmpc/tap https://github.com/CptPakundo/homebrew-pushmpc
+#   brew install pushmpc/tap/pushmpc
+# The url / sha256 below point at the release tarball; CI (.github/workflows/apple.yml, job homebrew) installs this file from a local tap with
 # the checkout's own tarball (`brew install --build-from-source`), then runs `brew test`.
 class Pushmpc < Formula
   desc "Frame generation and upscaling for mpv (VapourSynth filter)"
@@ -17,7 +18,8 @@ class Pushmpc < Formula
 
   depends_on "cmake" => :build
   depends_on "pkgconf" => :build
-  depends_on "mpv"          # Homebrew's mpv is built with VapourSynth (it depends on the vapoursynth formula)
+  # Homebrew's mpv is built with VapourSynth (it depends on the vapoursynth formula)
+  depends_on "mpv"
   depends_on "vapoursynth"
 
   # the Python that Homebrew's vapoursynth is built for (its plugin folder lives in that Python's site-packages)
@@ -31,16 +33,21 @@ class Pushmpc < Formula
 
   def install
     # the SDK headers (VapourSynth4.h) from Homebrew's vapoursynth: pkg-config first, then a search
-    inc = Utils.popen_read("pkgconf", "--variable=includedir", "vapoursynth").chomp
+    inc = begin
+      Utils.safe_popen_read("pkgconf", "--variable=includedir", "vapoursynth").chomp
+    rescue ErrorDuringExecution
+      ""
+    end
     inc = File.join(inc, "vapoursynth") if !inc.empty? && !File.exist?(File.join(inc, "VapourSynth4.h"))
     if inc.empty? || !File.exist?(File.join(inc, "VapourSynth4.h"))
-      hdr = Dir["#{Formula["vapoursynth"].opt_prefix.realpath}/**/VapourSynth4.h"].first
+      hdr = Dir["#{formula_opt_prefix("vapoursynth").realpath}/**/VapourSynth4.h"].first
       odie "VapourSynth4.h not found in the vapoursynth formula" unless hdr
       inc = File.dirname(hdr)
     end
     ohai "VapourSynth headers: #{inc}"
 
-    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{OS.mac? ? "ON" : "OFF"}", *std_cmake_args
+    apple = OS.mac? ? "ON" : "OFF"
+    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
@@ -79,7 +86,7 @@ class Pushmpc < Formula
       clip = core.pushmpc.Enhance(clip, backend="portable", smoother="2")
       clip.set_output()
     PY
-    info = shell_output("#{Formula["vapoursynth"].opt_bin}/vspipe --info #{testpath}/t.vpy")
+    info = shell_output("#{formula_opt_bin("vapoursynth")}/vspipe --info #{testpath}/t.vpy")
     assert_match(/Frames:\s+48/, info)
     assert_match(%r{FPS:\s+48000/1001}, info)
     assert_match "share/pushmpc/pushmpc.vpy", shell_output("#{bin}/pushmpc-setup status --conf #{testpath}/mpv.conf")

@@ -70,7 +70,8 @@ static void Run(const char* name, int w, int h, int bits, int k, const char* sr,
     e.log = [](const std::string& m) { std::printf("    log: %s\n", m.c_str()); };
     Config c; c.width = w; c.height = h; c.bits = bits; c.k = k; c.sr = sr; c.fi = fi; c.srcFps = 23.976;
     std::string err, info;
-    if (!e.Configure(c, err, info)) { std::printf("    not available: %s\n", err.c_str()); return; }
+    if (!e.Configure(c, err, info)) { ++g_unavailable; std::printf("    not available: %s\n", err.c_str()); return; }
+    ++g_configured;
     std::printf("    chain: %s\n", info.c_str());
     const int ow = e.OutWidth(), oh = e.OutHeight(), scale = ow / w;
     CHECK(ow == w * scale && oh == h * scale && (scale == 1 || scale == 2 || scale == 4), "%s: output %dx%d", name, ow, oh);
@@ -148,7 +149,9 @@ int main()
         Run("SR x2 only", 640, 360, 8, 1, "2", "auto");
         if (c.AnyInterpolation()) Run("FI x2 + SR x2", 640, 360, 8, 2, "2", "auto");
     }
-    std::printf("APPLE_VT_RESULT=%s\n", g_fail ? "failed" : "ok");
+    // a VM may list the effects and fail their self-test: then every chain is unavailable and the plugin falls back
+    std::printf("APPLE_VT_RESULT=%s\n", g_fail ? "failed" : g_configured ? "ok" : "unavailable");
+    std::printf("chains configured: %d, unavailable: %d\n", g_configured, g_unavailable);
     std::printf("apple_vt_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
