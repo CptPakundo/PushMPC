@@ -1340,8 +1340,12 @@ private:
 #if defined(__linux__) && !defined(__ANDROID__)   // Kodi 21 has the same dma-buf pool on Wayland/GBM
         if (m_poolChecked) return;
         m_poolChecked = true;
-        m_dmaOk = KodiRendersWithGles();
-        Log(ADDON_LOG_INFO, "frame buffers: %s", m_dmaOk ? "dma-buf allowed (Kodi renders with GLES)" : "system memory (Kodi's renderer cannot take dma-bufs from add-ons)");
+        // 10-bit add-on pictures as dma-bufs (DRM S010) stall Kodi 22's GLES renderer on Wayland (CI): 8-bit only
+        const bool gles = KodiRendersWithGles();
+        m_dmaOk = gles && m_bits == 8;
+        Log(ADDON_LOG_INFO, "frame buffers: %s", m_dmaOk ? "dma-buf allowed (Kodi renders with GLES)"
+                                                    : gles ? "system memory (10-bit pictures as dma-bufs are not shown by Kodi's GLES renderer)"
+                                                           : "system memory (Kodi's renderer cannot take dma-bufs from add-ons)");
         if (m_dmaOk) return;
         VIDEOCODEC_PICTURE d{};
         d.videoFormat = real.videoFormat;
