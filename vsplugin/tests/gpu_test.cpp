@@ -365,11 +365,11 @@ static void TestBackendCut()
 // static strokes (bright with dark outline, like subtitles) in the band, the picture behind moving
 static void TestSubtitleHold()
 {
-    const int W = 640, H = 360, K = 2, N = 24;
+    const int W = 640, H = 360, K = 2, N = 32;
     Harness hs;
     std::vector<Pic> clean;
     for (int i = 0; i < N; ++i) {
-        Pic f = Make(W, H, 8, 6.0 * i, 0);
+        Pic f = Make(W, H, 8, 5.0 * i, 0, 1);   // a detailed picture panning behind the text
         const veyra::pipeline::overlay::Zone z = veyra::pipeline::overlay::subtitleZoneFor(W, H);
         // letters: vertical and horizontal bars 2 px wide, 14 px long, every 14 px across the band's middle
         for (int L = 0; L < 14; ++L) {
@@ -391,7 +391,7 @@ static void TestSubtitleHold()
         if (!h.Init(K, false, hold, c, err)) return false;
         double se = 0; size_t n = 0;
         const veyra::pipeline::overlay::Zone z = veyra::pipeline::overlay::subtitleZoneFor(W, H);
-        for (int64_t o = (N - 8) * K; o < int64_t(N - 3) * K; ++o) {
+        for (int64_t o = (N - 12) * K; o < int64_t(N - 3) * K; ++o) {
             if (o % K == 0) continue;
             Pic g; int kind = 0;
             if (!h.Get(o, g, kind, err)) return false;
