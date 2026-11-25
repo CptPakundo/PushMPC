@@ -1760,6 +1760,9 @@ function Set-MpcHcEntry($state) {
     $types = @('{73646976-0000-0010-8000-00AA00389B71}', '{3231564E-0000-0010-8000-00AA00389B71}', '{73646976-0000-0010-8000-00AA00389B71}', '{30313050-0000-0010-8000-00AA00389B71}')
     if ($DryRun) { Dry "would write $key (PushMPC Filter, Prefer, NV12/P010)" }
     else {
+        # MPC-HC's Filters keys this entry creates: uninstall removes them again while they are empty
+        $made = @(@((Split-Path $MpcFiltersKey), $MpcFiltersKey) | Where-Object { -not (Test-Path $_) })
+        if ($made.Count -and -not (Get-StateValue $state 'mpcCreatedKeys')) { Set-StateValue $state 'mpcCreatedKeys' ($made -join '|') }
         New-Item -Path $key -Force | Out-Null
         New-ItemProperty $key -Name SourceType -PropertyType DWord -Value 0 -Force | Out-Null
         New-ItemProperty $key -Name Enabled -PropertyType DWord -Value 1 -Force | Out-Null
@@ -1788,6 +1791,15 @@ function Remove-MpcHcEntry($state) {
     foreach ($e in ($entries | Where-Object { $_.Props.CLSID -eq $FilterClsid })) {
         if ($DryRun) { Dry "would remove $($e.Key)" } else { Remove-Item $e.Key -Recurse -Force }
         Info "MPC-HC External Filters: entry $($e.Name) removed"
+    }
+    # the Filters keys the install created, when nothing else is in them now (deepest first)
+    $made = "$(Get-StateValue $state 'mpcCreatedKeys')"
+    if ($made) {
+        foreach ($k in @($made.Split('|') | Sort-Object Length -Descending)) {
+            if (-not (Test-Path $k)) { continue }
+            if (@(Get-ChildItem $k).Count -or (Get-Item $k).ValueCount) { continue }
+            if ($DryRun) { Dry "would remove the empty key $k" } else { Remove-Item $k -Force; Info "MPC-HC: the empty key $k (made by the install) removed" }
+        }
     }
     if ($state.disabledVapourSynth) {
         $e = $entries | Where-Object { $_.Name -eq $state.disabledVapourSynth -and $_.Props.CLSID -eq $VapourSynthClsid }
