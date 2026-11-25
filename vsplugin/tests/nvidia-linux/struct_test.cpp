@@ -109,7 +109,12 @@ int main(int argc, char** argv)
     const NvCV_Status bs = vfx.CreateEffect("NoSuchEffect", &bogus);
     std::printf("CreateEffect(NoSuchEffect): %s\n", vfx.Error(bs).c_str());
     CHECK(bs != NVCV_SUCCESS, "an unknown selector is refused");
+    // Windows: without an NVIDIA driver every CreateEffect stops at NVCV_ERR_UNSUPPORTEDDRIVER (-19) before the selector
+    // is looked at, so the names cannot be checked there (the same SDK's selectors are checked on Linux)
+    constexpr NvCV_Status kUnsupportedDriver = -19;
+    if (bs == kUnsupportedDriver) std::printf("selectors: not checkable without an NVIDIA driver on this OS (checked by the Linux job)\n");
     for (const auto& e : effs) {
+        if (bs == kUnsupportedDriver) break;
         void* h = nullptr;
         const NvCV_Status s = vfx.CreateEffect(e.sel, &h);
         std::printf("CreateEffect(%s): %s\n", e.sel, vfx.Error(s).c_str());
