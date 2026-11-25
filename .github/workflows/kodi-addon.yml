@@ -185,7 +185,7 @@ jobs:
           export WAYLAND_DISPLAY=wayland-pm
           home="$HOME/.var/app/tv.kodi.Kodi/data"; mkdir -p "$home"
           dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
-            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu \
+            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --gles \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
             --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2,hdr10_kodi"
       - name: Summary

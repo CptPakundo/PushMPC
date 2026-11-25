@@ -16,6 +16,7 @@ ap.add_argument("--major", type=int, required=True)
 ap.add_argument("--out", required=True)
 ap.add_argument("--cases", default="")
 ap.add_argument("--kill", default="", help="command that stops any leftover Kodi")
+ap.add_argument("--gles", action="store_true", help="Kodi renders with GLES (10-bit stays with Kodi's decoder)")
 ap.add_argument("--gpu", action="store_true", help="the GPU engine is expected (Vulkan present)")
 ap.add_argument("--play", type=float, default=14.0)
 a = ap.parse_args()
@@ -39,7 +40,7 @@ CASES = [
     ("upscale2", "h264.mp4", {"smoother": 2, "upscale": 2}, 2, True, "1280x720", "play"),
     ("hevc_x2", "hevc.mkv", {"smoother": 2}, 2, True, "640x360", "play"),
     ("mpeg2_x2", "mpeg2.ts", {"smoother": 2}, 2, True, "640x360", "play"),
-    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22, "640x360", "play"),
+    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22 and not a.gles, "640x360", "play"),
     ("hdr10_kodi", "hdr10.mkv", {"enabled": "false"}, 1, False, "640x360", "play"),   # the same file through Kodi alone
     ("fonts", "styled.mkv", {"smoother": 2}, 2, True, "640x360", "subs"),
     ("seek", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "seek"),

@@ -126,6 +126,26 @@ struct KodiIo {
     }
 };
 
+// does Kodi render with GLES (its GBM and some Wayland builds) rather than desktop GL
+bool KodiUsesGles()
+{
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (const char* e = std::getenv("PUSHMPC_KODI_DMABUF")) return e[0] == '1';
+    FILE* m = std::fopen("/proc/self/maps", "r");
+    if (!m) return false;
+    bool gles = false, gl = false;
+    char line[512];
+    while (std::fgets(line, sizeof(line), m)) {
+        if (std::strstr(line, "libGLESv2.so")) gles = true;
+        if (std::strstr(line, "libGL.so") || std::strstr(line, "libOpenGL.so") || std::strstr(line, "libGLX.so")) gl = true;
+    }
+    std::fclose(m);
+    return gles && !gl;
+#else
+    return false;
+#endif
+}
+
 // codecs Kodi's CAddonVideoCodec::CopyToInitData accepts (else it refuses to open the add-on decoder):
 // Kodi 21: h264, vp8, vp9, av1. Kodi 22: + hevc, rawvideo.
 bool KodiAcceptsCodecName(AVCodecID id)
@@ -652,6 +672,11 @@ private:
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         else if (bits > 10) why = "more than 10 bits per sample";
+#if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
+        // Kodi 22 with GLES on Wayland / GBM (where its buffer manager has a dma-buf pool; Wayland CI): its stream-detail probe of a 10-bit file stops Kodi once the add-on decodes it
+        // (open issue); Kodi's own decoder plays those files there for now
+        else if (bits > 8 && KodiUsesGles() && (std::getenv("WAYLAND_DISPLAY") || !std::getenv("DISPLAY")) && !std::getenv("PUSHMPC_GLES_10BIT")) why = "10-bit on Kodi with GLES: Kodi's own decoder for now (open issue)";
+#endif
         if (!why.empty()) {
             Log(ADDON_LOG_INFO, "video stays with Kodi's decoder: %s", why.c_str());
             return;
@@ -1317,24 +1342,7 @@ private:
     // (CLinuxRendererGL::UploadTexture crashes: Kodi issue 29344). So, unless Kodi renders with GLES, the dma-buf pool is
     // configured with a decoy size once (the manager reuses a pool only for the same format and size), and every real
     // request then comes from a system-memory pool. A dma-buf that still arrives is given back and asked for again.
-    static bool KodiRendersWithGles()
-    {
-#if defined(__linux__) && !defined(__ANDROID__)
-        if (const char* e = std::getenv("PUSHMPC_KODI_DMABUF")) return e[0] == '1';
-        FILE* m = std::fopen("/proc/self/maps", "r");
-        if (!m) return false;
-        bool gles = false, gl = false;
-        char line[512];
-        while (std::fgets(line, sizeof(line), m)) {
-            if (std::strstr(line, "libGLESv2.so")) gles = true;
-            if (std::strstr(line, "libGL.so") || std::strstr(line, "libOpenGL.so") || std::strstr(line, "libGLX.so")) gl = true;
-        }
-        std::fclose(m);
-        return gles && !gl;
-#else
-        return false;
-#endif
-    }
+    static bool KodiRendersWithGles() { return KodiUsesGles(); }
     void CheckBufferPool(const VIDEOCODEC_PICTURE& real)
     {
 #if defined(__linux__) && !defined(__ANDROID__)   // Kodi 21 has the same dma-buf pool on Wayland/GBM
