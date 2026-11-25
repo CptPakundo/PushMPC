@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: PushMPC.PushMPC
+PackageVersion: 0.6.0
+MinimumOSVersion: 10.0.19041.0
+InstallerType: exe
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+InstallerSwitches:
+  Silent: /S
+  SilentWithProgress: /S
+UpgradeBehavior: install
+ElevationRequirement: elevationProhibited
+ProductCode: PushMPC
+AppsAndFeaturesEntries:
+  - DisplayName: PushMPC
+    Publisher: PushMPC (community)
+    ProductCode: PushMPC
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/PushMPC-Setup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.9.0

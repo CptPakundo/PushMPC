@@ -17,7 +17,7 @@ namespace {
 double NowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 VkDeviceSize Align(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1) / a * a; }
 
-enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PCount };
+enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PBlur, PCount };
 constexpr VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SI = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SB = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                            SBD = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, SMP = VK_DESCRIPTOR_TYPE_SAMPLER,
                            SIM = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -28,22 +28,75 @@ std::vector<PipeDesc> Descs()
         { kSpv_pyr0, sizeof(kSpv_pyr0), { CIS, SI }, 16 },
         { kSpv_pyrdown, sizeof(kSpv_pyrdown), { SI, SI }, 16 },
         { kSpv_dedup, sizeof(kSpv_dedup), { SI, SI, SBD }, 8 },
-        { kSpv_me, sizeof(kSpv_me), { SI, SI, SB, SB, SB, SB }, 64 },
-        { kSpv_mefinal, sizeof(kSpv_mefinal), { SB, SB, SB, SBD }, 20 },
+        { kSpv_me, sizeof(kSpv_me), { SI, SI, SB, SB, SB, SB, SB }, 104 },
+        { kSpv_mefinal, sizeof(kSpv_mefinal), { SB, SB, SB, SBD }, 32 },
         { kSpv_mad, sizeof(kSpv_mad), { SI, SI, SBD }, 8 },
-        { kSpv_fbcheck, sizeof(kSpv_fbcheck), { SB, SB, SBD }, 12 },
-        { kSpv_interp, sizeof(kSpv_interp), { CIS, CIS, CIS, CIS, CIS, CIS, SB, SB, SBD, SI, SI, SI, SB }, 104 },
+        { kSpv_fbcheck, sizeof(kSpv_fbcheck), { SB, SB, SBD, SB }, 12 },
+        { kSpv_interp, sizeof(kSpv_interp), { CIS, CIS, CIS, CIS, CIS, CIS, SB, SB, SBD, SI, SI, SI, SB, SB, SB }, 112 },
         { kSpv_nis, sizeof(kSpv_nis), { UB, SMP, SIM, SIM, SIM, SI }, 0 },
         { kSpv_easu, sizeof(kSpv_easu), { CIS, SI }, 72 },
         { kSpv_rcas, sizeof(kSpv_rcas), { CIS, SI }, 24 },
         { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 60 },
-        { kSpv_ofconv, sizeof(kSpv_ofconv), { SB, SI, SI, SB, SB, SBD }, 40 },
+        { kSpv_ofconv, sizeof(kSpv_ofconv), { SB, SB, SI, SI, SB, SB, SBD }, 52 },
+        { kSpv_blur, sizeof(kSpv_blur), { SI, SI }, 8 },
     };
 }
 
-struct Cell { int32_t vx, vy, cost, zero; float subx, suby; };   // me.comp's Cell (std430: 24 bytes)
+struct Cell { int32_t vx, vy, cost, zero; float subx, suby; int32_t pcost, pad; };   // me.comp's Cell (std430: 32 bytes)
 
 uint32_t AsU(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+
+// the global motion of a field: an affine model v(x, y) = (a0 + a1 x + a2 y, a3 + a4 x + a5 y) fitted by iteratively
+// reweighted least squares (Huber, 1 px), on up to 6000 blocks. Valid when it explains the field: half the blocks within
+// 1.5 px and a median residual under 1 px (a pan, a zoom, a rotation, a camera move behind small objects).
+struct GlobalMotion { float a[6] = {}; bool valid = false; };
+GlobalMotion FitAffine(const float* field, int bx, int by, int bs)
+{
+    GlobalMotion g;
+    const int n = bx * by;
+    if (n < 16) return g;
+    const int stride = std::max(1, n / 6000);
+    double ax[3] = { 0, 0, 0 }, ay[3] = { 0, 0, 0 };
+    std::vector<float> w(size_t(n), 1.f);
+    for (int it = 0; it < 5; ++it) {
+        double M[3][3] = {}, rx[3] = {}, ry[3] = {};
+        for (int k = 0; k < n; k += stride) {
+            const double x = (k % bx + 0.5) * bs, y = (k / bx + 0.5) * bs, ww = w[size_t(k)];
+            const double b[3] = { 1.0, x, y };
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) M[r][c] += ww * b[r] * b[c];
+                rx[r] += ww * b[r] * field[2 * k]; ry[r] += ww * b[r] * field[2 * k + 1];
+            }
+        }
+        // 3x3 solve (Cramer); a singular system (no spread) ends the fit
+        auto det3 = [](double m[3][3]) { return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]); };
+        const double d = det3(M);
+        if (std::abs(d) < 1e-9) return g;
+        for (int col = 0; col < 3; ++col) {
+            double Mx[3][3], My[3][3];
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) { Mx[r][c] = c == col ? rx[r] : M[r][c]; My[r][c] = c == col ? ry[r] : M[r][c]; }
+            ax[col] = det3(Mx) / d; ay[col] = det3(My) / d;
+        }
+        for (int k = 0; k < n; k += stride) {
+            const double x = (k % bx + 0.5) * bs, y = (k / bx + 0.5) * bs;
+            const double ex = field[2 * k] - (ax[0] + ax[1] * x + ax[2] * y), ey = field[2 * k + 1] - (ay[0] + ay[1] * x + ay[2] * y);
+            const double r = std::sqrt(ex * ex + ey * ey);
+            w[size_t(k)] = float(r <= 1.0 ? 1.0 : 1.0 / r);
+        }
+    }
+    std::vector<float> res;
+    int inl = 0, cnt = 0;
+    for (int k = 0; k < n; k += stride) {
+        const double x = (k % bx + 0.5) * bs, y = (k / bx + 0.5) * bs;
+        const double ex = field[2 * k] - (ax[0] + ax[1] * x + ax[2] * y), ey = field[2 * k + 1] - (ay[0] + ay[1] * x + ay[2] * y);
+        const float r = float(std::sqrt(ex * ex + ey * ey));
+        res.push_back(r); inl += r < 1.5f ? 1 : 0; ++cnt;
+    }
+    std::nth_element(res.begin(), res.begin() + long(res.size() / 2), res.end());
+    g.valid = inl * 2 >= cnt && res[res.size() / 2] < 1.0f;
+    g.a[0] = float(ax[0]); g.a[1] = float(ax[1]); g.a[2] = float(ax[2]); g.a[3] = float(ay[0]); g.a[4] = float(ay[1]); g.a[5] = float(ay[2]);
+    return g;
+}
 
 } // namespace
 
@@ -69,9 +122,9 @@ struct Engine::Impl {
     std::vector<Job> jobs;
     size_t nextJob = 0;
 
-    struct Slot { Image y, u, v; std::vector<Image> pyr; Image ofLuma; bool used = false; uint64_t lastUse = 0; };
+    struct Slot { Image y, u, v; std::vector<Image> pyr; Image pyrF, ofLuma; bool used = false; uint64_t lastUse = 0; };
     std::vector<Slot> slots;
-    struct Pair { bool used = false; int a = -1, b = -1; Buffer fieldF, fieldK, costF, costK, stats, hold; bool holdOn = false; int zx = 0, zy = 0, zw = 0, zh = 0; uint64_t lastUse = 0, meTicket = 0; double t0 = 0; };
+    struct Pair { bool used = false; int a = -1, b = -1; Buffer fieldF, fieldK, costF, costK, consF, consK, stats, hold, hostF, hostK; bool holdOn = false; int zx = 0, zy = 0, zw = 0, zh = 0; uint64_t lastUse = 0, meTicket = 0; double t0 = 0; };
     std::vector<Pair> pairs;
     std::vector<Buffer> sweep1, sweep2;   // per level
     Buffer staging[2]; uint64_t stagingUse[2] = { 0, 0 }; int nextStaging = 0;
@@ -83,13 +136,32 @@ struct Engine::Impl {
     Image midY, midU, midV, upTmp, upY, coefScale, coefUsm;
     Buffer nisUbo;
     // optical flow
-    VkOpticalFlowSessionNV ofSession = VK_NULL_HANDLE;
-    Image ofA, ofB, ofFlowF, ofFlowB;
-    Buffer ofBufF, ofBufB;
-    int ofGrid = 4, ofGw = 0, ofGh = 0;
-    uint64_t ofLast = 0;
+    struct OfSet {
+        VkOpticalFlowSessionNV session = VK_NULL_HANDLE;
+        Image a, b, flowF, flowB, costF, costB;
+        Buffer bufF, bufB, cbufF, cbufB;
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        bool cost = false;
+        uint64_t last = 0;
+    };
+    std::vector<OfSet> ofSets;
+    size_t ofNext = 0;
+    int ofLevel = 0, ofGw = 0, ofGh = 0;   // the flow's input level (0 full size, 1 half) and its 4x4 grid
     VkCommandPool ofPool = VK_NULL_HANDLE;
-    VkCommandBuffer ofCb = VK_NULL_HANDLE;
+    Buffer hintF, hintK, hintCost, hintStats;   // the hybrid mode's flow fields (block-matcher candidates)
+    void FreeOf()
+    {
+        const VkDevice d = ctx->Dev();
+        for (auto& s : ofSets) {
+            for (Image* i : { &s.a, &s.b, &s.flowF, &s.flowB, &s.costF, &s.costB }) ctx->Destroy(*i);
+            for (Buffer* b : { &s.bufF, &s.bufB, &s.cbufF, &s.cbufB }) ctx->Destroy(*b);
+            if (s.session) vkDestroyOpticalFlowSessionNV(d, s.session, nullptr);
+        }
+        ofSets.clear();
+        for (Buffer* b : { &hintF, &hintK, &hintCost, &hintStats }) ctx->Destroy(*b);
+        if (ofPool) vkDestroyCommandPool(d, ofPool, nullptr);
+        ofPool = VK_NULL_HANDLE;
+    }
 
     ~Impl() { Free(); }
     void Free();
@@ -145,7 +217,26 @@ struct Engine::Impl {
     bool Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err);
     bool UpscaleAndPack(Job& j, int out, std::string& err);
     bool MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forward, Pair& pr, std::string& err);
-    bool MotionOf(int sa, int sb, Pair& pr, std::string& err);
+    bool MotionOf(int sa, int sb, Pair& pr, bool fresh, bool hint, std::string& err);
+    bool hintNow = false;   // the hybrid mode: MotionDir adds the hint fields as candidates
+    // both fields' per-block consistency (fbcheck.comp twice) and the agreement counts
+    GlobalMotion globalF, globalK;   // fitted to the last pair's fields (FitAffine): the next pair's global candidate
+    // the fields into host memory (the global-motion fit reads them after the wait)
+    void Mirror(Job& j, Pair& pr)
+    {
+        Barrier(j.cb);
+        VkBufferCopy c{ 0, 0, VkDeviceSize(fbx) * VkDeviceSize(fby) * 8 };
+        vkCmdCopyBuffer(j.cb, pr.fieldF.buf, pr.hostF.buf, 1, &c);
+        vkCmdCopyBuffer(j.cb, pr.fieldK.buf, pr.hostK.buf, 1, &c);
+    }
+    bool Consist(Job& j, Pair& pr, std::string& err)
+    {
+        struct { int bx, by, bs; } pb{ fbx, fby, fbs };
+        const uint32_t gx = uint32_t((fbx + 7) / 8), gy = uint32_t((fby + 7) / 8);
+        if (!Bind(*this, j, PFb).Buf(0, pr.fieldF).Buf(1, pr.fieldK).Buf(2, pr.stats, 768, 256).Buf(3, pr.consF).Run(&pb, gx, gy, err)) return false;
+        if (!Bind(*this, j, PFb).Buf(0, pr.fieldK).Buf(1, pr.fieldF).Buf(2, pr.stats, 1024, 256).Buf(3, pr.consK).Run(&pb, gx, gy, err)) return false;
+        return true;
+    }
     int FreeOut() const { for (size_t i = 0; i < outUsed.size(); ++i) if (!outUsed[i]) return int(i); return -1; }
 };
 
@@ -155,21 +246,17 @@ void Engine::Impl::Free()
     const VkDevice d = ctx->Dev();
     if (ctx->External()) { std::string e; if (timeline) WaitValue(value, e); }   // a shared device: wait for our own work only
     else vkDeviceWaitIdle(d);
-    for (auto& s : slots) { ctx->Destroy(s.y); ctx->Destroy(s.u); ctx->Destroy(s.v); for (auto& i : s.pyr) ctx->Destroy(i); ctx->Destroy(s.ofLuma); }
+    for (auto& s : slots) { ctx->Destroy(s.y); ctx->Destroy(s.u); ctx->Destroy(s.v); for (auto& i : s.pyr) ctx->Destroy(i); ctx->Destroy(s.pyrF); ctx->Destroy(s.ofLuma); }
     slots.clear();
-    for (auto& p : pairs) { ctx->Destroy(p.fieldF); ctx->Destroy(p.fieldK); ctx->Destroy(p.costF); ctx->Destroy(p.costK); ctx->Destroy(p.stats); ctx->Destroy(p.hold); }
+    for (auto& p : pairs) { ctx->Destroy(p.fieldF); ctx->Destroy(p.fieldK); ctx->Destroy(p.costF); ctx->Destroy(p.costK); ctx->Destroy(p.consF); ctx->Destroy(p.consK); ctx->Destroy(p.hostF); ctx->Destroy(p.hostK); ctx->Destroy(p.stats); ctx->Destroy(p.hold); }
     pairs.clear();
     for (auto& b : sweep1) ctx->Destroy(b);
     for (auto& b : sweep2) ctx->Destroy(b);
     sweep1.clear(); sweep2.clear();
     for (auto& b : staging) ctx->Destroy(b);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
-    for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm, &ofA, &ofB, &ofFlowF, &ofFlowB }) ctx->Destroy(*i);
-    ctx->Destroy(ofBufF); ctx->Destroy(ofBufB);
-    if (ofSession) vkDestroyOpticalFlowSessionNV(d, ofSession, nullptr);
-    ofSession = VK_NULL_HANDLE;
-    if (ofPool) vkDestroyCommandPool(d, ofPool, nullptr);
-    ofPool = VK_NULL_HANDLE;
+    for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
+    FreeOf();
     for (auto& j : jobs) if (j.dp) vkDestroyDescriptorPool(d, j.dp, nullptr);
     jobs.clear();
     if (pool) vkDestroyCommandPool(d, pool, nullptr);
@@ -379,22 +466,27 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
     const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    I.useOf = I.ctx->OpticalFlow() && c.quality >= 0;
-    if (c.blockMatcherOnly) I.useOf = false;
+    I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
+    // the flow's input: the half-size luma above 1440 lines (Auto), else the full size; its 4x4 grid
+    I.ofLevel = std::min(I.levels - 1, c.nvofInput == 2 || (c.nvofInput == 0 && c.height > 1440) ? 1 : 0);
+    I.ofGw = (I.lw[size_t(I.ofLevel)] + 3) / 4; I.ofGh = (I.lh[size_t(I.ofLevel)] + 3) / 4;
     I.slots.resize(size_t(std::max(3, c.sourceSlots)));
     for (auto& s : I.slots) {
         if (!I.ctx->CreateImage(c.width, c.height, planeFmt, planeUse, false, s.y, err) || !I.ctx->CreateImage(I.cw, I.ch, planeFmt, planeUse, false, s.u, err)
             || !I.ctx->CreateImage(I.cw, I.ch, planeFmt, planeUse, false, s.v, err)) return false;
         s.pyr.resize(size_t(I.levels));
         for (int l = 0; l < I.levels; ++l) if (!I.ctx->CreateImage(I.lw[size_t(l)], I.lh[size_t(l)], VK_FORMAT_R8_UINT, pyrUse, false, s.pyr[size_t(l)], err)) return false;
+        if (I.finest == 0 && c.prefilter && !I.ctx->CreateImage(c.width, c.height, VK_FORMAT_R8_UINT, pyrUse, false, s.pyrF, err)) return false;
     }
     auto host = [&](VkDeviceSize n, VkBufferUsageFlags u, Buffer& b) { return I.ctx->CreateBuffer(n, u | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, b, err); };
     auto dev = [&](VkDeviceSize n, Buffer& b) { return I.ctx->CreateBuffer(n, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, b, err); };
-    const VkDeviceSize fieldBytes = VkDeviceSize(I.fbx) * VkDeviceSize(I.fby) * 8, costBytes = VkDeviceSize(I.fbx) * VkDeviceSize(I.fby) * 4;
+    // field buffers large enough for the block grid and for the flow's dense grid
+    const VkDeviceSize cellsMax = std::max(VkDeviceSize(I.fbx) * VkDeviceSize(I.fby), I.useOf ? VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) : 0);
+    const VkDeviceSize fieldBytes = cellsMax * 8, costBytes = cellsMax * 4;
     I.pairs.resize(size_t(std::max(3, c.sourceSlots)));
     for (auto& p : I.pairs)
-        if (!dev(fieldBytes, p.fieldF) || !dev(fieldBytes, p.fieldK) || !dev(costBytes, p.costF) || !dev(costBytes, p.costK) || !host(1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.stats)) return false;
+        if (!dev(fieldBytes, p.fieldF) || !dev(fieldBytes, p.fieldK) || !dev(costBytes, p.costF) || !dev(costBytes, p.costK) || !dev(costBytes, p.consF) || !dev(costBytes, p.consK) || !host(fieldBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.hostF) || !host(fieldBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.hostK) || !host(1536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.stats)) return false;
     I.sweep1.resize(size_t(I.levels)); I.sweep2.resize(size_t(I.levels));
     for (int l = 0; l < I.levels; ++l) {
         const VkDeviceSize n = VkDeviceSize((I.lw[size_t(l)] + 7) / 8) * VkDeviceSize((I.lh[size_t(l)] + 7) / 8) * sizeof(Cell);
@@ -431,49 +523,57 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
             std::memcpy(I.nisUbo.map, &nc, 28 * 4);
         }
     }
-    // optical flow: the luma copies it reads, its flow images and their readable copies
+    // optical flow: two sets (session, its input copies, flow and cost images and their readable copies), used in turn so
+    // the flow of one pair runs while the previous pair's frames are made
     if (I.useOf) {
         std::string ofErr;
-        I.ofGrid = 4;
-        I.ofGw = (c.width + I.ofGrid - 1) / I.ofGrid; I.ofGh = (c.height + I.ofGrid - 1) / I.ofGrid;
-        const uint32_t inUse = VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, outUse = VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV;
-        bool ok = I.ctx->CreateImage(c.width, c.height, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, false, I.ofA, ofErr, inUse)
-               && I.ctx->CreateImage(c.width, c.height, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, false, I.ofB, ofErr, inUse)
-               && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R16G16_S10_5_NV, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, I.ofFlowF, ofErr, outUse)
-               && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R16G16_S10_5_NV, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, I.ofFlowB, ofErr, outUse)
-               && dev(VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) * 4, I.ofBufF) && dev(VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) * 4, I.ofBufB);
-        if (ok) {
-            VkOpticalFlowSessionCreateInfoNV oi{ VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV };
-            oi.width = uint32_t(c.width); oi.height = uint32_t(c.height);
-            oi.imageFormat = VK_FORMAT_R8_UNORM; oi.flowVectorFormat = VK_FORMAT_R16G16_S10_5_NV;
-            oi.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
-            oi.performanceLevel = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV;
-            oi.flags = VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV;
-            ok = vkCreateOpticalFlowSessionNV(d, &oi, nullptr, &I.ofSession) == VK_SUCCESS;
-            if (!ok) ofErr = "vkCreateOpticalFlowSessionNV failed";
+        bool ok = true;
+        const uint32_t inUse = VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, outUse = VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, costUse = VK_OPTICAL_FLOW_USAGE_COST_BIT_NV;
+        const int iw = I.lw[size_t(I.ofLevel)], ih = I.lh[size_t(I.ofLevel)];
+        const VkOpticalFlowPerformanceLevelNV levels[3] = { VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV, VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV, VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV };
+        VkCommandPoolCreateInfo opi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+        opi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; opi.queueFamilyIndex = I.ctx->OfFamily();
+        ok = vkCreateCommandPool(d, &opi, nullptr, &I.ofPool) == VK_SUCCESS;
+        I.ofSets.resize(2);
+        for (auto& s : I.ofSets) {
+            if (!ok) break;
+            const VkDeviceSize cells = VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh);
+            ok = I.ctx->CreateImage(iw, ih, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, false, s.a, ofErr, inUse)
+              && I.ctx->CreateImage(iw, ih, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, false, s.b, ofErr, inUse)
+              && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R16G16_S10_5_NV, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, s.flowF, ofErr, outUse)
+              && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R16G16_S10_5_NV, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, s.flowB, ofErr, outUse)
+              && dev(cells * 4, s.bufF) && dev(cells * 4, s.bufB) && dev(Align(cells, 4), s.cbufF) && dev(Align(cells, 4), s.cbufB);
+            // the cost output is optional: the session works without it (no rejection then)
+            s.cost = ok && I.cfg.nvofCost && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R8_UINT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, s.costF, ofErr, costUse)
+                  && I.ctx->CreateImage(I.ofGw, I.ofGh, VK_FORMAT_R8_UINT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, false, s.costB, ofErr, costUse);
+            if (ok) {
+                VkOpticalFlowSessionCreateInfoNV oi{ VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV };
+                oi.width = uint32_t(iw); oi.height = uint32_t(ih);
+                oi.imageFormat = VK_FORMAT_R8_UNORM; oi.flowVectorFormat = VK_FORMAT_R16G16_S10_5_NV;
+                if (s.cost) oi.costFormat = VK_FORMAT_R8_UINT;
+                oi.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
+                oi.performanceLevel = levels[std::clamp(I.cfg.nvofPreset, 0, 2)];
+                oi.flags = VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV | (s.cost ? VK_OPTICAL_FLOW_SESSION_CREATE_ENABLE_COST_BIT_NV : 0);
+                ok = vkCreateOpticalFlowSessionNV(d, &oi, nullptr, &s.session) == VK_SUCCESS;
+                if (!ok) ofErr = "vkCreateOpticalFlowSessionNV failed";
+            }
+            if (ok) {
+                auto bind = [&](VkOpticalFlowSessionBindingPointNV p, const Image& img) { return vkBindOpticalFlowSessionImageNV(d, s.session, p, img.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS; };
+                ok = bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, s.a) && bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV, s.b)
+                  && bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV, s.flowF) && bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV, s.flowB)
+                  && (!s.cost || (bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_COST_NV, s.costF) && bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_COST_NV, s.costB)));
+                if (!ok) ofErr = "vkBindOpticalFlowSessionImageNV failed";
+            }
+            if (ok) {
+                VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                ai.commandPool = I.ofPool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+                ok = vkAllocateCommandBuffers(d, &ai, &s.cb) == VK_SUCCESS;
+            }
         }
-        if (ok) {
-            ok = vkBindOpticalFlowSessionImageNV(d, I.ofSession, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, I.ofA.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS
-              && vkBindOpticalFlowSessionImageNV(d, I.ofSession, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV, I.ofB.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS
-              && vkBindOpticalFlowSessionImageNV(d, I.ofSession, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV, I.ofFlowF.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS
-              && vkBindOpticalFlowSessionImageNV(d, I.ofSession, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV, I.ofFlowB.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS;
-            if (!ok) ofErr = "vkBindOpticalFlowSessionImageNV failed";
-        }
-        if (ok) {
-            VkCommandPoolCreateInfo opi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-            opi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; opi.queueFamilyIndex = I.ctx->OfFamily();
-            VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            ok = vkCreateCommandPool(d, &opi, nullptr, &I.ofPool) == VK_SUCCESS;
-            ai.commandPool = I.ofPool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
-            ok = ok && vkAllocateCommandBuffers(d, &ai, &I.ofCb) == VK_SUCCESS;
-        }
-        if (!ok) {   // the block matcher instead
-            for (Image* i : { &I.ofA, &I.ofB, &I.ofFlowF, &I.ofFlowB }) I.ctx->Destroy(*i);
-            I.ctx->Destroy(I.ofBufF); I.ctx->Destroy(I.ofBufB);
-            if (I.ofSession) vkDestroyOpticalFlowSessionNV(d, I.ofSession, nullptr);
-            I.ofSession = VK_NULL_HANDLE;
-            I.useOf = false;
-        }
+        if (ok && I.cfg.nvofHybrid && !dev(VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) * 8, I.hintF)) ok = false;
+        if (ok && I.cfg.nvofHybrid && (!dev(VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) * 8, I.hintK) || !dev(VkDeviceSize(I.ofGw) * VkDeviceSize(I.ofGh) * 4, I.hintCost) || !host(1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.hintStats))) ok = false;
+        if (!ok) { I.FreeOf(); I.useOf = false; }
+        else if (!I.cfg.nvofHybrid && I.cfg.nvofDense) { I.fbx = I.ofGw; I.fby = I.ofGh; I.fbs = 4 << I.ofLevel; }   // the field at the flow's own resolution
     }
 
     // every image to GENERAL; the NIS tables
@@ -481,8 +581,9 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     Impl::Job& j = I.Begin(err, ok);
     if (!ok) return false;
     auto gen = [&](const Image& i) { if (i.img) I.ToGeneral(j.cb, i.img); };
-    for (auto& s : I.slots) { gen(s.y); gen(s.u); gen(s.v); for (auto& p : s.pyr) gen(p); }
-    for (const Image* i : { &I.midY, &I.midU, &I.midV, &I.upTmp, &I.upY, &I.coefScale, &I.coefUsm, &I.ofA, &I.ofB, &I.ofFlowF, &I.ofFlowB }) gen(*i);
+    for (auto& s : I.slots) { gen(s.y); gen(s.u); gen(s.v); for (auto& p : s.pyr) gen(p); gen(s.pyrF); }
+    for (const Image* i : { &I.midY, &I.midU, &I.midV, &I.upTmp, &I.upY, &I.coefScale, &I.coefUsm }) gen(*i);
+    for (auto& s : I.ofSets) for (const Image* i : { &s.a, &s.b, &s.flowF, &s.flowB, &s.costF, &s.costB }) gen(*i);
     Buffer coefStage;
     if (I.coefScale.img) {
         if (!host(sizeof(coef_scale_fp16) + sizeof(coef_usm_fp16), 0, coefStage)) return false;
@@ -553,6 +654,10 @@ int Engine::Upload(const YuvView& v, std::string& err)
         struct { int sw, sh, dw, dh; } pd{ I.lw[size_t(l - 1)], I.lh[size_t(l - 1)], I.lw[size_t(l)], I.lh[size_t(l)] };
         if (!Impl::Bind(I, j, PPyrDown).Img(0, s.pyr[size_t(l - 1)].view).Img(1, s.pyr[size_t(l)].view).Run(&pd, uint32_t((pd.dw + 15) / 16), uint32_t((pd.dh + 7) / 8), err)) return -1;
     }
+    if (s.pyrF.img) {   // the prefiltered full-size luma the block matcher searches on at quality 2
+        struct { int w, h; } pb{ I.cfg.width, I.cfg.height };
+        if (!Impl::Bind(I, j, PBlur).Img(0, s.pyr[0].view).Img(1, s.pyrF.view).Run(&pb, uint32_t((pb.w + 15) / 16), uint32_t((pb.h + 7) / 8), err)) return -1;
+    }
     const uint64_t val = I.Submit(j, err);
     if (!val) return -1;
     I.stagingUse[sb] = val;
@@ -601,84 +706,113 @@ bool Engine::Impl::MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forw
             int w, h, bx, by, pbx, pby, flags, range;
             float lambda, scale;
             int prevBx, prevBy, prevBs, limX, limY, pad;
-        } pc{ W, H, bx, by, pbx, pby, 0, range, std::max(0.f, cfg.smoothness), float(1 << level), fbx, fby, fbs, W / 2 + range * 2, H / 2 + range * 2, 0 };
+            float g[6];
+            int hbx, hby, hbs, pad2;
+        } pc{ W, H, bx, by, pbx, pby, 0, range, std::max(0.f, cfg.smoothness), float(1 << level), fbx, fby, fbs, W / 2 + range * 2, H / 2 + range * 2, 0, {}, ofGw, ofGh, 4 << ofLevel, 0 };
+        const Buffer& hint = hintNow ? (forward ? hintF : hintK) : dummy;
+        // lambda per level: below the half-size level a pixel of vector difference is half the motion, so the penalty doubles
+        if (cfg.lambdaScale && level == 0) pc.lambda *= 2.f;
+        const GlobalMotion& gm = forward ? globalF : globalK;
+        const bool useGlobal = cfg.globalCandidate && usePrev && gm.valid;
+        if (useGlobal) for (int q = 0; q < 6; ++q) pc.g[q] = gm.a[q];
+        const VkImageView va = level == 0 && A.pyrF.img ? A.pyrF.view : A.pyr[size_t(level)].view;
+        const VkImageView vb = level == 0 && B.pyrF.img ? B.pyrF.view : B.pyr[size_t(level)].view;
         const bool last = level == finest;
-        const int base = (level == coarsest ? 1 : 0) | (usePrev ? 8 : 0);
+        const int base = (level == coarsest ? 1 : 0) | (usePrev ? 8 : 0) | (useGlobal ? 64 : 0) | (last && level == 0 && cfg.equiangular ? 32 : 0) | (hintNow ? 128 : 0);
         const Buffer& prevField = usePrev ? (forward ? prev->fieldF : prev->fieldK) : dummy;
         const int sweeps = std::clamp(cfg.sweeps, 1, 2);
         pc.flags = base | (last && sweeps == 1 ? 2 : 0);
-        if (!Bind(*this, j, PMe).Img(0, A.pyr[size_t(level)].view).Img(1, B.pyr[size_t(level)].view).Buf(2, *parent).Buf(3, dummy).Buf(4, prevField).Buf(5, sweep1[size_t(level)])
+        if (!Bind(*this, j, PMe).Img(0, va).Img(1, vb).Buf(2, *parent).Buf(3, dummy).Buf(4, prevField).Buf(5, sweep1[size_t(level)]).Buf(6, hint)
                  .Run(&pc, uint32_t(bx), uint32_t(by), err)) return false;
         Barrier(j.cb);
         const Buffer* outGrid = &sweep1[size_t(level)];
         if (sweeps == 2) {
             pc.flags = base | 4 | (cfg.extended ? 16 : 0) | (last ? 2 : 0);
-            if (!Bind(*this, j, PMe).Img(0, A.pyr[size_t(level)].view).Img(1, B.pyr[size_t(level)].view).Buf(2, *parent).Buf(3, sweep1[size_t(level)]).Buf(4, prevField).Buf(5, sweep2[size_t(level)])
+            if (!Bind(*this, j, PMe).Img(0, va).Img(1, vb).Buf(2, *parent).Buf(3, sweep1[size_t(level)]).Buf(4, prevField).Buf(5, sweep2[size_t(level)]).Buf(6, hint)
                      .Run(&pc, uint32_t(bx), uint32_t(by), err)) return false;
             Barrier(j.cb);
             outGrid = &sweep2[size_t(level)];
         }
         parent = outGrid; pbx = bx; pby = by;
     }
-    struct { int bx, by; float scale, cutFloor, cutRatio; } pf{ fbx, fby, float(1 << finest), 5.0f, 0.6f };
+    struct { int bx, by; float scale, cutFloor, cutRatio; int merge; float mergeSpread, mergeGain; } pf{ fbx, fby, float(1 << finest), 5.0f, 0.6f,
+        finest == 0 && cfg.merge ? 1 : 0, cfg.mergeSpread, cfg.mergeGain };
     if (!Bind(*this, j, PMeFinal).Buf(0, *parent).Buf(1, forward ? pr.fieldF : pr.fieldK).Buf(2, forward ? pr.costF : pr.costK).Buf(3, pr.stats, forward ? 0 : 256, 256)
              .Run(&pf, uint32_t((fbx + 7) / 8), uint32_t((fby + 7) / 8), err)) return false;
     Barrier(j.cb);
     return true;
 }
 
-bool Engine::Impl::MotionOf(int sa, int sb, Pair& pr, std::string& err)
+// the optical flow of a pair into the pair's fields (hint = false), or into the hybrid mode's hint fields (hint = true;
+// the block matcher then runs with them as candidates). fresh: no temporal hints (after a cut, a seek or a Dedup jump).
+bool Engine::Impl::MotionOf(int sa, int sb, Pair& pr, bool fresh, bool hint, std::string& err)
 {
-    if (!WaitValue(ofLast, err)) return false;   // the session's images and command buffer are shared by every pair
-    // 1: the two luma pictures into the session's input images (compute queue)
+    OfSet& s = ofSets[ofNext];
+    ofNext = (ofNext + 1) % ofSets.size();
+    if (!WaitValue(s.last, err)) return false;   // this set's previous pair is done (the other set may still run)
+    // 1: the two luma pictures (full or half size) into the session's input images (compute queue)
     bool ok = true;
     Job& j1 = Begin(err, ok);
     if (!ok) return false;
     VkImageCopy ic{};
     ic.srcSubresource = ic.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    ic.extent = { uint32_t(cfg.width), uint32_t(cfg.height), 1 };
-    vkCmdCopyImage(j1.cb, slots[size_t(sa)].pyr[0].img, VK_IMAGE_LAYOUT_GENERAL, ofA.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
-    vkCmdCopyImage(j1.cb, slots[size_t(sb)].pyr[0].img, VK_IMAGE_LAYOUT_GENERAL, ofB.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    ic.extent = { uint32_t(lw[size_t(ofLevel)]), uint32_t(lh[size_t(ofLevel)]), 1 };
+    vkCmdCopyImage(j1.cb, slots[size_t(sa)].pyr[size_t(ofLevel)].img, VK_IMAGE_LAYOUT_GENERAL, s.a.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    vkCmdCopyImage(j1.cb, slots[size_t(sb)].pyr[size_t(ofLevel)].img, VK_IMAGE_LAYOUT_GENERAL, s.b.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
     const uint64_t v1 = Submit(j1, err);
     if (!v1) return false;
     // 2: the flow, both directions (optical-flow queue)
-    vkResetCommandBuffer(ofCb, 0);
+    vkResetCommandBuffer(s.cb, 0);
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(ofCb, &bi);
+    vkBeginCommandBuffer(s.cb, &bi);
     VkOpticalFlowExecuteInfoNV ei{ VK_STRUCTURE_TYPE_OPTICAL_FLOW_EXECUTE_INFO_NV };
-    vkCmdOpticalFlowExecuteNV(ofCb, ofSession, &ei);
-    vkEndCommandBuffer(ofCb);
+    if (fresh) ei.flags = VK_OPTICAL_FLOW_EXECUTE_DISABLE_TEMPORAL_HINTS_BIT_NV;
+    vkCmdOpticalFlowExecuteNV(s.cb, s.session, &ei);
+    vkEndCommandBuffer(s.cb);
     const uint64_t v2 = ++value;
     VkTimelineSemaphoreSubmitInfo ts{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
     ts.waitSemaphoreValueCount = 1; ts.pWaitSemaphoreValues = &v1; ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &v2;
     const VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.pNext = &ts; si.waitSemaphoreCount = 1; si.pWaitSemaphores = &timeline; si.pWaitDstStageMask = &ws;
-    si.commandBufferCount = 1; si.pCommandBuffers = &ofCb; si.signalSemaphoreCount = 1; si.pSignalSemaphores = &timeline;
+    si.commandBufferCount = 1; si.pCommandBuffers = &s.cb; si.signalSemaphoreCount = 1; si.pSignalSemaphores = &timeline;
     if (ctx->SubmitOf(si) != VK_SUCCESS) { err = "optical flow: submit failed"; return false; }
-    // 3: the flow into the engine's fields and measures (compute queue)
+    // 3: the flow (and its cost) into the engine's fields and measures (compute queue)
     Job& j3 = Begin(err, ok);
     if (!ok) return false;
     VkBufferImageCopy r{};
     r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }; r.imageExtent = { uint32_t(ofGw), uint32_t(ofGh), 1 };
-    vkCmdCopyImageToBuffer(j3.cb, ofFlowF.img, VK_IMAGE_LAYOUT_GENERAL, ofBufF.buf, 1, &r);
-    vkCmdCopyImageToBuffer(j3.cb, ofFlowB.img, VK_IMAGE_LAYOUT_GENERAL, ofBufB.buf, 1, &r);
+    vkCmdCopyImageToBuffer(j3.cb, s.flowF.img, VK_IMAGE_LAYOUT_GENERAL, s.bufF.buf, 1, &r);
+    vkCmdCopyImageToBuffer(j3.cb, s.flowB.img, VK_IMAGE_LAYOUT_GENERAL, s.bufB.buf, 1, &r);
+    if (s.cost) {
+        vkCmdCopyImageToBuffer(j3.cb, s.costF.img, VK_IMAGE_LAYOUT_GENERAL, s.cbufF.buf, 1, &r);
+        vkCmdCopyImageToBuffer(j3.cb, s.costB.img, VK_IMAGE_LAYOUT_GENERAL, s.cbufB.buf, 1, &r);
+    }
     Barrier(j3.cb);
-    struct { int w, h, bx, by, bs, gw, gh, grid; float cutFloor, cutRatio; } pc{ cfg.width, cfg.height, fbx, fby, fbs, ofGw, ofGh, ofGrid, 5.0f, 0.6f };
-    if (!Bind(*this, j3, POfConv).Buf(0, ofBufF).Img(1, slots[size_t(sa)].pyr[0].view).Img(2, slots[size_t(sb)].pyr[0].view).Buf(3, pr.fieldF).Buf(4, pr.costF).Buf(5, pr.stats, 0, 256)
-             .Run(&pc, uint32_t((fbx + 7) / 8), uint32_t((fby + 7) / 8), err)) return false;
-    if (!Bind(*this, j3, POfConv).Buf(0, ofBufB).Img(1, slots[size_t(sb)].pyr[0].view).Img(2, slots[size_t(sa)].pyr[0].view).Buf(3, pr.fieldK).Buf(4, pr.costK).Buf(5, pr.stats, 256, 256)
-             .Run(&pc, uint32_t((fbx + 7) / 8), uint32_t((fby + 7) / 8), err)) return false;
-    Barrier(j3.cb);
-    struct { int w, h; } pm{ lw[size_t(finest)], lh[size_t(finest)] };
-    if (!Bind(*this, j3, PMad).Img(0, slots[size_t(sa)].pyr[size_t(finest)].view).Img(1, slots[size_t(sb)].pyr[size_t(finest)].view).Buf(2, pr.stats, 512, 256)
-             .Run(&pm, uint32_t((pm.w + 15) / 16), uint32_t((pm.h + 15) / 16), err)) return false;
-    struct { int bx, by, bs; } pb{ fbx, fby, fbs };
-    if (!Bind(*this, j3, PFb).Buf(0, pr.fieldF).Buf(1, pr.fieldK).Buf(2, pr.stats, 768, 256).Run(&pb, uint32_t((fbx + 7) / 8), uint32_t((fby + 7) / 8), err)) return false;
+    // the target grid: the pair's field (dense: the flow's own grid; else the block grid), or the hint field (flow grid)
+    const int tbx = hint ? ofGw : fbx, tby = hint ? ofGh : fby, tbs = hint ? (4 << ofLevel) : fbs;
+    const int dense = hint || (cfg.nvofDense && fbx == ofGw && fby == ofGh) ? 1 : 0;
+    struct { int w, h, bx, by, bs, gw, gh, ofScale, dense, useCost; float maxCost, cutFloor, cutRatio; } pc{
+        cfg.width, cfg.height, tbx, tby, tbs, ofGw, ofGh, 1 << ofLevel, dense, s.cost ? 1 : 0, cfg.nvofMaxCost, 5.0f, 0.6f };
+    const Buffer& outF = hint ? hintF : pr.fieldF; const Buffer& outK = hint ? hintK : pr.fieldK;
+    const Buffer& cF = hint ? hintCost : pr.costF; const Buffer& cK = hint ? hintCost : pr.costK;
+    const Buffer& stb = hint ? hintStats : pr.stats;
+    if (!Bind(*this, j3, POfConv).Buf(0, s.bufF).Buf(1, s.cost ? s.cbufF : dummy).Img(2, slots[size_t(sa)].pyr[0].view).Img(3, slots[size_t(sb)].pyr[0].view).Buf(4, outF).Buf(5, cF).Buf(6, stb, 0, 256)
+             .Run(&pc, uint32_t((tbx + 7) / 8), uint32_t((tby + 7) / 8), err)) return false;
+    if (!Bind(*this, j3, POfConv).Buf(0, s.bufB).Buf(1, s.cost ? s.cbufB : dummy).Img(2, slots[size_t(sb)].pyr[0].view).Img(3, slots[size_t(sa)].pyr[0].view).Buf(4, outK).Buf(5, cK).Buf(6, stb, 256, 256)
+             .Run(&pc, uint32_t((tbx + 7) / 8), uint32_t((tby + 7) / 8), err)) return false;
+    if (!hint) {
+        Barrier(j3.cb);
+        struct { int w, h; } pm{ lw[size_t(finest)], lh[size_t(finest)] };
+        if (!Bind(*this, j3, PMad).Img(0, slots[size_t(sa)].pyr[size_t(finest)].view).Img(1, slots[size_t(sb)].pyr[size_t(finest)].view).Buf(2, pr.stats, 512, 256)
+                 .Run(&pm, uint32_t((pm.w + 15) / 16), uint32_t((pm.h + 15) / 16), err)) return false;
+        if (!Consist(j3, pr, err)) return false;
+        Mirror(j3, pr);
+    }
     const uint64_t v3 = Submit(j3, err, v2);
-    pr.meTicket = v3;
-    ofLast = v3;
+    if (!hint) pr.meTicket = v3;
+    s.last = v3;
     return v3 != 0;
 }
 
@@ -698,11 +832,14 @@ int Engine::EstimateBegin(int slotA, int slotB, int prevPair, std::string& err)
     Impl::Pair& pr = I.pairs[size_t(pi)];
     const Impl::Pair* prev = prevPair >= 0 && prevPair < int(I.pairs.size()) && I.pairs[size_t(prevPair)].used ? &I.pairs[size_t(prevPair)] : nullptr;
     const double t0 = NowMs();
-    std::memset(pr.stats.map, 0, 1024);
+    std::memset(pr.stats.map, 0, 1536);
     pr.holdOn = false;
-    if (I.useOf) {
-        if (!I.MotionOf(slotA, slotB, pr, err)) return -1;
+    if (I.useOf && !I.cfg.nvofHybrid) {
+        if (!I.MotionOf(slotA, slotB, pr, prev == nullptr, false, err)) return -1;
     } else {
+        // the hybrid mode: the flow first, as candidates of the block matcher
+        I.hintNow = I.useOf && I.cfg.nvofHybrid;
+        if (I.hintNow && !I.MotionOf(slotA, slotB, pr, prev == nullptr, true, err)) return -1;
         bool ok = true;
         Impl::Job& j = I.Begin(err, ok);
         if (!ok) return -1;
@@ -711,7 +848,8 @@ int Engine::EstimateBegin(int slotA, int slotB, int prevPair, std::string& err)
         if (!Impl::Bind(I, j, PMad).Img(0, I.slots[size_t(slotA)].pyr[size_t(I.finest)].view).Img(1, I.slots[size_t(slotB)].pyr[size_t(I.finest)].view).Buf(2, pr.stats, 512, 256)
                  .Run(&pm, uint32_t((pm.w + 15) / 16), uint32_t((pm.h + 15) / 16), err)) return -1;
         struct { int bx, by, bs; } pb{ I.fbx, I.fby, I.fbs };
-        if (!Impl::Bind(I, j, PFb).Buf(0, pr.fieldF).Buf(1, pr.fieldK).Buf(2, pr.stats, 768, 256).Run(&pb, uint32_t((I.fbx + 7) / 8), uint32_t((I.fby + 7) / 8), err)) return -1;
+        if (!I.Consist(j, pr, err)) return -1;
+        I.Mirror(j, pr);
         pr.meTicket = I.Submit(j, err);
         if (!pr.meTicket) return -1;
     }
@@ -734,6 +872,12 @@ bool Engine::EstimateEnd(int pair, PairStats& st, std::string& err)
     st.zeroCost = float(double(s[128]) / (double(I.lw[size_t(I.finest)]) * double(I.lh[size_t(I.finest)])));
     st.consistent = float(s[192] / n); st.moving = float(s[193] / n);
     st.cutRule = double(s[0]) > n * 0.5 || double(s[64]) > std::max(1.0, double(s[66])) * 0.5;
+    // the global motion of this pair: the next pair's candidate (none across a cut)
+    if (st.cutRule || st.consistent < 0.3f) { I.globalF.valid = I.globalK.valid = false; }
+    else {
+        I.globalF = FitAffine(static_cast<const float*>(pr.hostF.map), I.fbx, I.fby, I.fbs);
+        I.globalK = FitAffine(static_cast<const float*>(pr.hostK.map), I.fbx, I.fby, I.fbs);
+    }
     st.ms = NowMs() - pr.t0;
     I.times.pairs++;
     I.times.meMs += st.ms;
@@ -765,9 +909,10 @@ bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int m
     struct {
         int W, H, CW, CH, mode, plane, target, bps, pitchY, pitchC, offU, offV, fbx, fby, fbs, hold, zx, zy, zw, zh;
         float t, maxV, kRaw, errLow, errHigh;
+        int refined; float boundaryPx;
         float pad;
     } pc{ cfg.width, cfg.height, cw, ch, mode, 0, target, bps, pitchY, pitchC, int(offU), int(offV), fbx, fby, fbs,
-          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, 0 };
+          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, cfg.refined ? 1 : 0, cfg.boundaryPx, 0 };
     const VkDeviceSize outOff = target == 0 ? outStride * VkDeviceSize(out) : 0;
     for (int plane = 0; plane < 2; ++plane) {
         pc.plane = plane;
@@ -776,7 +921,7 @@ bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int m
         Bind b(*this, j, PInterp);
         b.Img(0, A.y.view).Img(1, A.u.view).Img(2, A.v.view).Img(3, B.y.view).Img(4, B.u.view).Img(5, B.v.view)
          .Buf(6, pr ? pr->fieldF : dummy).Buf(7, pr ? pr->fieldK : dummy).Buf(8, readback, outOff, outStride).Img(9, midY.view).Img(10, midU.view).Img(11, midV.view)
-         .Buf(12, pc.hold ? pr->hold : dummy);
+         .Buf(12, pc.hold ? pr->hold : dummy).Buf(13, pr ? pr->consF : dummy).Buf(14, pr ? pr->consK : dummy);
         if (!b.Run(&pc, uint32_t(((w + per - 1) / per + 15) / 16), uint32_t((h + 7) / 8), err)) return false;
     }
     return true;
@@ -828,6 +973,7 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     if (!ok) return false;
     const bool up = I.cfg.upscaler != Upscaler::None;
     const int sa = mode == 2 ? pr.b : pr.a, sb = mode == 1 ? pr.a : pr.b;
+    // modes: 0 generated, 1 / 2 real A / B, 3 the plain blend of A and B (a dissolve or fade)
     if (mode == 0 && I.synth) {
         // a plugged-in synthesis stage (Subtitle Hold is interp.comp's and does not apply)
         PairGpu pg;
@@ -897,6 +1043,8 @@ bool Engine::InjectFields(int pair, const veyra::portable::MotionField& f, const
     vkCmdCopyBuffer(j.cb, st.buf, I.pairs[size_t(pair)].fieldF.buf, 1, &c);
     c.srcOffset = n * 8;
     vkCmdCopyBuffer(j.cb, st.buf, I.pairs[size_t(pair)].fieldK.buf, 1, &c);
+    I.Barrier(j.cb);
+    if (!I.Consist(j, I.pairs[size_t(pair)], err)) { I.ctx->Destroy(st); return false; }
     const uint64_t v = I.Submit(j, err);
     ok = v && I.WaitValue(v, err);
     I.ctx->Destroy(st);
@@ -979,6 +1127,10 @@ int Engine::Import(const ImportRecorder& rec, const ExternalSync& sync, std::str
         I.Barrier(j.cb);
         struct { int sw, sh, dw, dh; } pd{ I.lw[size_t(l - 1)], I.lh[size_t(l - 1)], I.lw[size_t(l)], I.lh[size_t(l)] };
         if (!Impl::Bind(I, j, PPyrDown).Img(0, s.pyr[size_t(l - 1)].view).Img(1, s.pyr[size_t(l)].view).Run(&pd, uint32_t((pd.dw + 15) / 16), uint32_t((pd.dh + 7) / 8), err)) return -1;
+    }
+    if (s.pyrF.img) {   // as Upload: the prefiltered full-size luma the block matcher searches on at quality 2
+        struct { int w, h; } pb{ I.cfg.width, I.cfg.height };
+        if (!Impl::Bind(I, j, PBlur).Img(0, s.pyr[0].view).Img(1, s.pyrF.view).Run(&pb, uint32_t((pb.w + 15) / 16), uint32_t((pb.h + 7) / 8), err)) return -1;
     }
     const uint64_t val = I.SubmitEx(j, sync, err);
     if (!val) return -1;

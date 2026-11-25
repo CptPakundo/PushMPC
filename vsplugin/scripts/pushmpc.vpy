@@ -2,12 +2,16 @@
 # display_fps and user_data; mpv reloads this script on every seek (the plugin keeps its core warm across that).
 #
 # Backends (pushmpc.SelectBackend picks one; user_data backend=... or the Backend setting overrides Auto):
-#   nvidia    pushcore: RTX Video Super Resolution, NVIDIA frame generation, the scene-cut guard (Windows, RTX).
+#   nvidia    RTX Video Super Resolution, NVIDIA frame generation (VFG), RTX Video HDR, the scene-cut guard: pushcore on
+#             Windows; on Linux NVIDIA's Video Effects runtime through CUDA (installed by PushMPC's installer).
+#   apple     Apple's VideoToolbox ML frame interpolation (+ super resolution up to 1080p sources) on Apple silicon,
+#             macOS 26+ (frame-rate conversion on 15.4+); user_data apple_sr=off|2|4, apple_fi=lowlatency|frc.
 #   rife      vs-rife-ncnn-vulkan (core.rife), when you have it installed (any Vulkan GPU). Never downloaded by PushMPC.
 #   portable  PushFPS's motion-compensated frame generation on the CPU (any GPU, Windows, Linux, macOS).
-# Auto: nvidia on an RTX GPU with pushcore, else rife when installed, else portable.
+# Auto: nvidia on an RTX GPU with pushcore, else apple when the Mac offers it, else rife when installed, else portable.
 #
-# user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments, e.g.
+# user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments (pushmpc-display.lua
+# adds display_hdr, display_peak, display_w, display_h from mpv's own view of the display), e.g.
 #   smoother=4,sharper=2,chroma=420        backend=portable,portable_threads=8        backend=rife,rife_model=46
 # Settings otherwise come from PushMPC's own settings: HKCU\Software\PushMPC on Windows (the same as in MPC-HC),
 # ~/.config/pushmpc/settings.ini on Linux and macOS.
@@ -64,7 +68,7 @@ for _kv in str(_ud).split(","):
         _k, _v = _k.strip(), _v.strip()
         if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms", "display_w", "display_h"):
             _args[_k] = int(_v)
-        elif _k in ("display_fps", "sharpness"):
+        elif _k in ("display_fps", "sharpness", "display_peak"):
             _args[_k] = float(_v)
         elif _k:
             _args[_k] = _v
@@ -114,11 +118,23 @@ def _rife(c, args):
 
 _sel = core.pushmpc.SelectBackend(backend=_args.pop("backend", "") or "", **{_k: _args[_k] for _k in ("core_dir", "runtime_dir") if _k in _args})
 _backend = _text(_sel["backend"])
+# interp: the nvidia backend upscales but cannot generate frames on this GPU (Linux: RTX 20, or RTX 30 before its
+# self-test): rife or portable interpolates first, at the source size, then nvidia upscales every frame
+try:
+    _interp = _text(_sel["interp"])
+except (KeyError, IndexError):
+    _interp = ""
 if _backend == "rife":
     clip = _rife(clip, _args)
 else:
+    if _backend == "nvidia" and _interp == "rife":
+        clip = _rife(clip, _args)
+        _args["smoother"] = "off"
     for _k in ("rife_model", "rife_gpu"):
         _args.pop(_k, None)
+    if _backend == "nvidia" and _interp == "portable":
+        clip = core.pushmpc.Enhance(clip, backend="portable", **_args)
+        _args["smoother"] = "off"
     clip = core.pushmpc.Enhance(clip, backend=_backend, **_args)
 # mpv's vf=vapoursynth takes planar YUV only ("Unsupported output format" for RGB): the plugin's full-chroma RGB output
 # (chroma auto/444) goes to YUV 4:4:4, so no chroma resolution is lost. mpv keeps the input's colour parameters for the

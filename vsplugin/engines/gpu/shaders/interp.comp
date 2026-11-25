@@ -14,7 +14,8 @@
 //     real(A, B, t) + shows x (generated - filled(A, B, t))
 // (Interpolate.cpp's statement), so the text stays where it is, sharp, while the picture behind it moves.
 //
-// mode 1 / 2 writes real frame A / B unchanged (a scene cut's nearer real frame; a real frame on its way to the upscaler).
+// mode 1 / 2 writes real frame A / B unchanged (a scene cut's nearer real frame; a real frame on its way to the upscaler);
+// mode 3 the plain blend of A and B at t (a dissolve or a fade, transitions.h).
 layout(local_size_x = 16, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D aY;
 layout(binding = 1) uniform sampler2D aU;
@@ -31,6 +32,9 @@ layout(binding = 11, r16) uniform writeonly image2D mV;
 // the band of both real frames as frame generation takes it, in code values: Y of A, Y of B (zw x zh), U of A, U of B,
 // V of A, V of B (zw / 2 x zh / 2), then how much of the background shows through each luma pixel (0..1)
 layout(binding = 12, std430) readonly buffer Hold { float hd[]; };
+// per-block forward-backward consistency of each field (fbcheck.comp), for the refined rule
+layout(binding = 13, std430) readonly buffer ConsF { float consF[]; };
+layout(binding = 14, std430) readonly buffer ConsK { float consK[]; };
 layout(push_constant) uniform PC {
     int W, H, CW, CH;
     int mode, plane, target, bps;
@@ -38,6 +42,8 @@ layout(push_constant) uniform PC {
     int fbx, fby, fbs, hold;
     int zx, zy, zw, zh;
     float t, maxV, kRaw, errLow, errHigh;
+    int refined;        // 1: InterpolatePlanesRefined's rule (geometric occlusion gate, patch error, boundary candidates)
+    float boundaryPx;
 } pc;
 
 #include "common.glsl"
@@ -82,7 +88,20 @@ float takeC(int pl, bool second, float x, float y)
     return second ? pmSample(bV, csize, pc.kRaw, x, y) : pmSample(aV, csize, pc.kRaw, x, y);
 }
 
-struct Cand { float fx, fy, kx, ky, e1, e2, w1, w2, occlusion; bool firstBetter, single; float ya1, yb1, ya2, yb2; };
+struct Cand { float fx, fy, kx, ky, e1, e2, w1, w2, occlusion, occRaw, cons; bool firstBetter, single; float ya1, yb1, ya2, yb2; };
+
+// refined rule: the candidate's error as the mean over a 3x3 patch (code values scaled to 0..255)
+float patchErr(float px, float py, float vx, float vy)
+{
+    const float t = pc.t;
+    float e = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            float qx = px + float(dx), qy = py + float(dy);
+            e += abs(takeY(false, qx - t * vx, qy - t * vy) - takeY(true, qx + (1.0 - t) * vx, qy + (1.0 - t) * vy));
+        }
+    return e * (255.0 / pc.maxV / 9.0);
+}
 
 Cand candAt(int x, int y)
 {
@@ -94,18 +113,53 @@ Cand candAt(int x, int y)
     PM_FIELD_SAMPLE(fK, pc.fbx, pc.fby, pc.fbs, px, py, k);
     c.fx = f.x; c.fy = f.y; c.kx = -k.x; c.ky = -k.y;
     c.single = abs(c.fx - c.kx) + abs(c.fy - c.ky) < 1e-4;
-    c.ya1 = takeY(false, px - t * c.fx, py - t * c.fy);
-    c.yb1 = takeY(true, px + (1.0 - t) * c.fx, py + (1.0 - t) * c.fy);
-    c.e1 = abs(c.ya1 - c.yb1) * scale;
-    c.w1 = 1.0 / ((c.e1 + 4.0) * (c.e1 + 4.0));
-    if (c.single) { c.ya2 = c.ya1; c.yb2 = c.yb1; c.e2 = c.e1; c.w2 = c.w1; }
-    else {
-        c.ya2 = takeY(false, px - t * c.kx, py - t * c.ky);
-        c.yb2 = takeY(true, px + (1.0 - t) * c.kx, py + (1.0 - t) * c.ky);
-        c.e2 = abs(c.ya2 - c.yb2) * scale;
+    c.cons = 0.0;
+    if (pc.refined != 0) {
+        c.e1 = patchErr(px, py, c.fx, c.fy);
+        c.e2 = c.single ? c.e1 : patchErr(px, py, c.kx, c.ky);
+        // motion boundary: the forward vectors of the neighbouring blocks compete for the worse candidate's place
+        const float bs = float(pc.fbs);
+        vec2 n[4];
+        float g = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            float ox = i == 0 ? -bs : i == 1 ? bs : 0.0, oy = i == 2 ? -bs : i == 3 ? bs : 0.0;
+            PM_FIELD_SAMPLE(fF, pc.fbx, pc.fby, pc.fbs, px + ox, py + oy, n[i]);
+            g = max(g, max(abs(n[i].x - c.fx), abs(n[i].y - c.fy)));
+        }
+        if (g > pc.boundaryPx) {
+            float bestE = 1e30; int best = -1;
+            for (int i = 0; i < 4; ++i) { float e = patchErr(px, py, n[i].x, n[i].y); if (e < bestE) { bestE = e; best = i; } }
+            if (best >= 0 && bestE < max(c.e1, c.e2)) {
+                if (c.e1 >= c.e2) { c.fx = n[best].x; c.fy = n[best].y; c.e1 = bestE; }
+                else { c.kx = n[best].x; c.ky = n[best].y; c.e2 = bestE; }
+                c.single = abs(c.fx - c.kx) + abs(c.fy - c.ky) < 1e-4;
+            }
+        }
+        float cf, ck;
+        PM_BLOCK_SAMPLE(consF, pc.fbx, pc.fby, pc.fbs, px, py, cf);
+        PM_BLOCK_SAMPLE(consK, pc.fbx, pc.fby, pc.fbs, px, py, ck);
+        c.cons = 0.5 * (cf + ck);
+        c.ya1 = takeY(false, px - t * c.fx, py - t * c.fy);
+        c.yb1 = takeY(true, px + (1.0 - t) * c.fx, py + (1.0 - t) * c.fy);
+        c.ya2 = c.single ? c.ya1 : takeY(false, px - t * c.kx, py - t * c.ky);
+        c.yb2 = c.single ? c.yb1 : takeY(true, px + (1.0 - t) * c.kx, py + (1.0 - t) * c.ky);
+        c.w1 = 1.0 / ((c.e1 + 4.0) * (c.e1 + 4.0));
         c.w2 = 1.0 / ((c.e2 + 4.0) * (c.e2 + 4.0));
+    } else {
+        c.ya1 = takeY(false, px - t * c.fx, py - t * c.fy);
+        c.yb1 = takeY(true, px + (1.0 - t) * c.fx, py + (1.0 - t) * c.fy);
+        c.e1 = abs(c.ya1 - c.yb1) * scale;
+        c.w1 = 1.0 / ((c.e1 + 4.0) * (c.e1 + 4.0));
+        if (c.single) { c.ya2 = c.ya1; c.yb2 = c.yb1; c.e2 = c.e1; c.w2 = c.w1; }
+        else {
+            c.ya2 = takeY(false, px - t * c.kx, py - t * c.ky);
+            c.yb2 = takeY(true, px + (1.0 - t) * c.kx, py + (1.0 - t) * c.ky);
+            c.e2 = abs(c.ya2 - c.yb2) * scale;
+            c.w2 = 1.0 / ((c.e2 + 4.0) * (c.e2 + 4.0));
+        }
     }
-    c.occlusion = pmSmoothstep(pc.errLow, pc.errHigh, min(c.e1, c.e2));
+    c.occRaw = pmSmoothstep(pc.errLow, pc.errHigh, min(c.e1, c.e2));
+    c.occlusion = pc.refined != 0 ? c.occRaw * (1.0 - c.cons) : c.occRaw;
     c.firstBetter = c.e1 <= c.e2;
     return c;
 }
@@ -118,7 +172,11 @@ float blendOf(Cand c, float a1, float b1, float a2, float b2)
     float v = c1;
     if (!c.single) {
         float c2 = a2 + (b2 - a2) * t;
-        v = (c1 * c.w1 + c2 * c.w2) / (c.w1 + c.w2);
+        if (pc.refined != 0) {
+            float wn = c.w1 / (c.w1 + c.w2);
+            wn += (0.5 - wn) * (c.occRaw * c.cons);   // consistent but unpredictable: the plain average of the two
+            v = c1 * wn + c2 * (1.0 - wn);
+        } else v = (c1 * c.w1 + c2 * c.w2) / (c.w1 + c.w2);
     }
     v += (nearSample - v) * c.occlusion;
     return v;
@@ -131,6 +189,7 @@ float lumaAt(int x, int y)
 {
     if (pc.mode == 1) return rawAt(aY, x, y);
     if (pc.mode == 2) return rawAt(bY, x, y);
+    if (pc.mode == 3) return quant(rawAt(aY, x, y) + (rawAt(bY, x, y) - rawAt(aY, x, y)) * pc.t);   // a dissolve or fade: the plain blend
     Cand c = candAt(x, y);
     float v = blendOf(c, c.ya1, c.yb1, c.ya2, c.yb2);
     if (pc.hold != 0 && x >= pc.zx && y >= pc.zy && x < pc.zx + pc.zw && y < pc.zy + pc.zh) {
@@ -146,6 +205,11 @@ void chromaAt(int cx, int cy, out float u, out float vv)
 {
     if (pc.mode == 1) { u = rawAt(aU, cx, cy); vv = rawAt(aV, cx, cy); return; }
     if (pc.mode == 2) { u = rawAt(bU, cx, cy); vv = rawAt(bV, cx, cy); return; }
+    if (pc.mode == 3) {
+        u = quant(rawAt(aU, cx, cy) + (rawAt(bU, cx, cy) - rawAt(aU, cx, cy)) * pc.t);
+        vv = quant(rawAt(aV, cx, cy) + (rawAt(bV, cx, cy) - rawAt(aV, cx, cy)) * pc.t);
+        return;
+    }
     const float t = pc.t;
     Cand c = candAt(min(2 * cx, pc.W - 1), min(2 * cy, pc.H - 1));
     float px = float(cx) + 0.5, py = float(cy) + 0.5;

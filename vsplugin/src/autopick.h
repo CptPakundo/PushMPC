@@ -12,6 +12,7 @@
 #include <string>
 #include "PushMpcAuto.h"
 #include "pushmpc/pushcore_abi.h"
+#include "pushmpc/unlocks.h"
 
 namespace pmvs {
 
@@ -29,7 +30,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     if (key == L"fg_quality") { s.fgQuality = is(L"High") ? pm::FgQuality::High : is(L"Low") ? pm::FgQuality::Low : is(L"Medium") ? pm::FgQuality::Medium : pm::FgQuality::Auto; return true; }
     if (key == L"fg_method") {
         s.fgMethod = is(L"VFG") ? pm::FgMethod::Vfg : (is(L"DLSSG") || is(L"DLSS-G")) ? pm::FgMethod::Dlssg : is(L"PushFlow") ? pm::FgMethod::PushFlow
-                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : pm::FgMethod::Auto;
+                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : is(L"NVOF") ? pm::FgMethod::Nvof : pm::FgMethod::Auto;
         return true;
     }
     if (key == L"vrr") { s.vrr = is(L"On") ? pm::VrrMode::On : is(L"Off") ? pm::VrrMode::Off : pm::VrrMode::Auto; return true; }
@@ -102,7 +103,9 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     if (note && c.hdr && c.hdrItm) *note = L"SDR to HDR: PushMPC's own curve is part of the MPC-HC filter, not of the VapourSynth route: off here (RTX Video HDR works)";
     p.cutGuard = c.guardFlow ? 3 : 1;
     p.videoHdrPeak = uint32_t(c.rtxHdrPeak);
-    p.subtitleHold = p.multiplier > 1 && pm::SubtitleHoldWanted(s) ? 1 : 0;   // burned-in subtitles only (mpv draws soft ones after the filter)
+    // burned-in subtitles only (mpv draws soft ones after the filter); Auto = held only while burned-in text is found. The
+    // stub core and older cores ignore 2 (the plugin and the core ship together)
+    p.subtitleHold = p.multiplier > 1 ? pm::SubtitleHoldValue(s, true, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
     return p;
 }
 
@@ -129,6 +132,7 @@ inline void LoadLearned(pm::Costs& c, const std::wstring& gpuName)
             bench = num(std::format(L"PfNext{}", t), c.pfNext[t], nullptr, 0.1, 500) && bench;
         }
         c.pfBenched = bench;
+        pm::ApplyMeasuredCard(c);
     }
     RegCloseKey(k);
 }

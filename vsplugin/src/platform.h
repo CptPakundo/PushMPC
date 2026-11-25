@@ -88,14 +88,14 @@ inline std::string ReadSetting(const char* name)
 struct PortableSettings {
     bool enable = true;
     int smoother = 0;     // 0 Auto, 1 off, 2..8
-    int quality = -1;     // -1 Auto (CPU: balanced; GPU: high), 0 fast, 1 balanced, 2 high (8 px vectors at full size)
+    int quality = -1;     // -1 Auto (balanced on both engines), 0 fast, 1 balanced, 2 high (8 px vectors at full size)
     int threads = 0;      // 0 = all hardware threads (at most 16)
     std::string device;   // PortableDevice: "" / auto (the best Vulkan GPU), cpu (the CPU engine), a number or a part of a name
     std::string upscaler = "auto";   // Upscaler: auto | nis | fsr | off (RTX means auto here)
     std::string target = "screen";   // UpscaleTarget: screen | 1440p | 4k | 5k
     int dedup = -1;       // Dedup: -1 Auto (on), 0 off, 1 on
     int subtitleHold = -1;   // SubtitleHold: -1 Auto (on in the portable engine), 0 off, 1 on
-    std::string motion = "auto";     // PortableMotion: auto (the GPU block matcher) | blocks | nvof (NVIDIA optical flow, opt-in)
+    std::string motion = "auto";     // PortableMotion: auto (the GPU block matcher) | blocks | nvof | hybrid (NVIDIA optical flow, opt-in)
 };
 inline int ParseQuality(const std::string& v, int def)
 {

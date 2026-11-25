@@ -44,3 +44,18 @@ float pmSample(sampler2D tex, vec2 size, float kRaw, float x, float y)
     float bottom = g.x + (g.y - g.x) * fx;
     return top + (bottom - top) * fy;
 }
+
+// the same bilinear over a per-block scalar array (the consistency maps; SampleBlocks in portable_engine.cpp)
+#define PM_BLOCK_SAMPLE(BUF, bx, by, bs, x, y, outV)                                                   \
+    {                                                                                                  \
+        float gx_ = clamp((x) / float(bs) - 0.5, 0.0, float((bx) - 1));                               \
+        float gy_ = clamp((y) / float(bs) - 0.5, 0.0, float((by) - 1));                               \
+        int i0_ = int(gx_), j0_ = int(gy_);                                                            \
+        int i1_ = min(i0_ + 1, (bx) - 1), j1_ = min(j0_ + 1, (by) - 1);                                \
+        float fx_ = gx_ - float(i0_), fy_ = gy_ - float(j0_);                                          \
+        float a_ = BUF[j0_ * (bx) + i0_], b_ = BUF[j0_ * (bx) + i1_];                                  \
+        float c_ = BUF[j1_ * (bx) + i0_], d_ = BUF[j1_ * (bx) + i1_];                                  \
+        float top_ = a_ + (b_ - a_) * fx_;                                                             \
+        float bot_ = c_ + (d_ - c_) * fx_;                                                             \
+        outV = top_ + (bot_ - top_) * fy_;                                                             \
+    }

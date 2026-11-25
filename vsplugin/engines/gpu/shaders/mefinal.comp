@@ -3,13 +3,17 @@
 // PushMPC portable GPU engine: the finest level's grid to a motion field (Motion.cpp's last step): vectors in full-size
 // pixels with their sub-pixel part, a 3x3 vector median per component, the matched error per pixel, and the scene-cut
 // counts (blocks whose matched error stays above the floor and above `ratio` of their zero-motion error).
+// merge (quality 2, 8 px blocks): a quadtree merge to 16 px where the finer detail is not real: the four children of a
+// 16 px parent are replaced by their mean vector when they agree within mergeSpread px, or when they agree within 4x
+// that and together match better than the parent's own vector by less than mergeGain SAD per pixel (noise, not motion
+// detail). Small smooth motion (slow pans, zooms) then gets the 16 px field's stability, boundaries keep 8 px.
 layout(local_size_x = 8, local_size_y = 8) in;
-struct Cell { ivec2 v; int cost; int zero; vec2 sub; };
+struct Cell { ivec2 v; int cost; int zero; vec2 sub; int pcost; int pad; };
 layout(binding = 0, std430) readonly buffer Grid { Cell g[]; };
 layout(binding = 1, std430) writeonly buffer Field { vec2 field[]; };
 layout(binding = 2, std430) writeonly buffer Cost { float cost[]; };
 layout(binding = 3, std430) buffer Stats { uint unexplained; uint costSum256; uint blocks; uint pad; } st;
-layout(push_constant) uniform PC { int bx, by; float scale, cutFloor, cutRatio; } pc;
+layout(push_constant) uniform PC { int bx, by; float scale, cutFloor, cutRatio; int merge; float mergeSpread, mergeGain; } pc;
 
 float wv[9];
 float med9()
@@ -22,25 +26,52 @@ float med9()
     return wv[4];
 }
 
+vec2 own(int i, int j)
+{
+    Cell c = g[j * pc.bx + i];
+    return (vec2(c.v) + c.sub) * pc.scale;
+}
+// the block's vector after the quadtree merge
+vec2 vecAt(int i, int j)
+{
+    if (pc.merge == 0) return own(i, j);
+    const int i0 = (i / 2) * 2, j0 = (j / 2) * 2;
+    if (i0 + 1 >= pc.bx || j0 + 1 >= pc.by) return own(i, j);
+    vec2 v[4];
+    vec2 mean = vec2(0.0);
+    float gain = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const int ii = i0 + (k & 1), jj = j0 + (k >> 1);
+        v[k] = own(ii, jj);
+        mean += v[k];
+        Cell c = g[jj * pc.bx + ii];
+        gain += float(c.pcost - c.cost);
+    }
+    mean *= 0.25;
+    float spread = 0.0;
+    for (int k = 0; k < 4; ++k) spread = max(spread, length(v[k] - mean));
+    gain /= 256.0;   // per pixel of the 16x16 parent
+    const bool merge = spread <= pc.mergeSpread || (spread <= 4.0 * pc.mergeSpread && gain < pc.mergeGain);
+    return merge ? mean : own(i, j);
+}
+
 void main()
 {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= pc.bx || p.y >= pc.by) return;
+    vec2 win[9];
+    int m = 0;
+    for (int dj = -1; dj <= 1; ++dj)
+        for (int di = -1; di <= 1; ++di) win[m++] = vecAt(clamp(p.x + di, 0, pc.bx - 1), clamp(p.y + dj, 0, pc.by - 1));
     vec2 r;
     for (int comp = 0; comp < 2; ++comp) {
-        int m = 0;
-        for (int dj = -1; dj <= 1; ++dj)
-            for (int di = -1; di <= 1; ++di) {
-                int ii = clamp(p.x + di, 0, pc.bx - 1), jj = clamp(p.y + dj, 0, pc.by - 1);
-                Cell c = g[jj * pc.bx + ii];
-                wv[m++] = comp == 0 ? (float(c.v.x) + c.sub.x) * pc.scale : (float(c.v.y) + c.sub.y) * pc.scale;
-            }
+        for (int k = 0; k < 9; ++k) wv[k] = win[k][comp];
         r[comp] = med9();
     }
     int idx = p.y * pc.bx + p.x;
     field[idx] = r;
-    Cell own = g[idx];
-    float c = float(own.cost) / 64.0, z = float(own.zero) / 64.0;
+    Cell o = g[idx];
+    float c = float(o.cost) / 64.0, z = float(o.zero) / 64.0;
     cost[idx] = c;
     if (c > pc.cutFloor && c > pc.cutRatio * z) atomicAdd(st.unexplained, 1u);
     atomicAdd(st.costSum256, uint(c * 256.0 + 0.5));

@@ -19,6 +19,8 @@
 #include "platform.h"
 #include "portable_backend.h"
 #include "cadence.h"
+#include "transitions.h"
+#include <functional>
 #include "veyra/portable/Interpolate.h"
 
 using namespace pmvs;
@@ -145,12 +147,24 @@ static void TestSelect()
     c = SelectBackend("", p); CHECK(c.kind == BackendKind::Nvidia, "empty = auto");
     p.rifeAvailable = true;
     c = SelectBackend("Auto", p); CHECK(c.kind == BackendKind::Nvidia, "RTX wins over rife: %s", c.why.c_str());
-    p.gpuFamily = 5;   // GTX: pushcore runs, but this is no RTX GPU
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife, "GTX -> rife: %s", c.why.c_str());
+    p.gpuFamily = 5;   // GTX without any GPU frame generation files: not usable -> rife
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife, "GTX, no FG files -> rife: %s", c.why.c_str());
+    p.capsAvailable = 1u << 3;   // FSR FG installed: pushcore on any DirectX 12 GPU (T5b item 1)
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Nvidia && c.why.find("DirectX 12") != std::string::npos, "GTX + FSR FG -> pushcore over rife: %s", c.why.c_str());
+    p.anyGpuDisabled = true;     // off switch: the old RTX-only rule
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife && c.why.find("PUSHMPC_DISABLE_ANYGPUCORE") != std::string::npos, "%s", c.why.c_str());
+    p.anyGpuDisabled = false; p.capsAvailable = 0;
     p.rifeAvailable = false;
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "GTX, no rife -> portable: %s", c.why.c_str());
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "GTX, no FG files, no rife -> portable: %s", c.why.c_str());
     p.gpuFamily = 7;   // RDNA 3
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("not an NVIDIA RTX") != std::string::npos, "%s", c.why.c_str());
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("no GPU frame generation method") != std::string::npos, "%s", c.why.c_str());
+    for (uint32_t fam : { 6u, 7u, 8u, 9u, 11u, 12u }) {   // RDNA4..1, Intel, other (Snapdragon): PushFlow installed
+        p.gpuFamily = fam; p.capsAvailable = 1u << 2;
+        c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Nvidia, "family %u + PushFlow -> pushcore: %s", fam, c.why.c_str());
+    }
+    p.gpuFamily = 0; c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "unknown family (no hardware adapter) -> not pushcore: %s", c.why.c_str());
+    c = SelectBackend("pushcore", p); CHECK(c.ok && c.kind == BackendKind::Nvidia, "pushcore is an alias of nvidia");
+    p.gpuFamily = 7; p.capsAvailable = 0;
     p.gpuFamily = 1; p.pushcoreLoaded = false;   // RTX, but pushcore missing
     c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("pushcore is not present") != std::string::npos, "%s", c.why.c_str());
     p.rifeAvailable = true;
@@ -160,6 +174,16 @@ static void TestSelect()
     c = SelectBackend("nvidia", lin); CHECK(!c.ok && c.kind == BackendKind::Nvidia, "nvidia asked on a build without it");
     c = SelectBackend("nvidia", p); CHECK(c.ok && c.kind == BackendKind::Nvidia, "nvidia asked: kept even without pushcore (its own error)");
     c = SelectBackend("rife", lin); CHECK(c.kind == BackendKind::Portable, "rife asked, absent -> portable");
+    {   // the ml backend (pmml): after nvidia, before rife; only with its runtime installed
+        BackendProbe m; m.mlBuilt = true; m.mlAvailable = true; m.rifeAvailable = true;
+        c = SelectBackend("auto", m); CHECK(c.kind == BackendKind::Ml && c.why.find("pmml") != std::string::npos, "ml before rife: %s", c.why.c_str());
+        m.nvidiaBuilt = true; m.pushcoreLoaded = true; m.gpuFamily = 2;
+        c = SelectBackend("auto", m); CHECK(c.kind == BackendKind::Nvidia, "RTX wins over ml: %s", c.why.c_str());
+        c = SelectBackend("ML", m); CHECK(c.kind == BackendKind::Ml, "ml asked: %s", c.why.c_str());
+        m.mlAvailable = false;
+        c = SelectBackend("ml", m); CHECK(c.kind == BackendKind::Portable && c.why.find("not installed") != std::string::npos, "%s", c.why.c_str());
+        CHECK(std::string(BackendName(BackendKind::Ml)) == "ml", "name");
+    }
     lin.rifeAvailable = true;
     c = SelectBackend("RIFE", lin); CHECK(c.kind == BackendKind::Rife, "rife asked");
     c = SelectBackend("portable", p); CHECK(c.kind == BackendKind::Portable, "portable asked on RTX");
@@ -355,6 +379,33 @@ static void TestCadence()
     CHECK(ParseQuality("high", -1) == 2 && ParseQuality("Auto", 1) == -1 && ParseTri("on", -1) == 1 && ParseTri("x", 0) == 0, "words");
 }
 
+// transitions.h: a dissolve is a linear ramp, motion is not; a flash is a bright frame between two matching ones
+static pmvs::gpu::Thumb MakeThumb(int w, int h, std::function<int(int, int)> f)
+{
+    pmvs::gpu::Thumb t; t.w = w; t.h = h; t.px.resize(size_t(w) * size_t(h));
+    double s = 0;
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { const int v = std::clamp(f(x, y), 0, 255); t.px[size_t(y) * size_t(w) + size_t(x)] = uint8_t(v); s += v; }
+    t.mean = s / double(t.px.size());
+    return t;
+}
+static void TestTransitions()
+{
+    using namespace pmvs::gpu;
+    auto sceneA = [](int x, int y) { return 60 + int(50 * std::sin(x * 0.4) * std::cos(y * 0.3)); };
+    auto sceneB = [](int x, int y) { return 180 - int(40 * std::sin(x * 0.25 + y * 0.2)); };
+    auto mix = [&](double a) { return MakeThumb(64, 36, [&](int x, int y) { return int(std::lround(sceneA(x, y) * (1 - a) + sceneB(x, y) * a)); }); };
+    CHECK(LinearTransition(mix(0.25), mix(0.5), mix(0.75)), "dissolve: linear");
+    auto fade = [&](double g) { return MakeThumb(64, 36, [&](int x, int y) { return int(std::lround(sceneA(x, y) * g)); }); };
+    CHECK(LinearTransition(fade(1.0), fade(0.8), fade(0.6)), "fade: linear");
+    auto moved = [&](int dx) { return MakeThumb(64, 36, [&](int x, int y) { return sceneA(x + dx, y); }); };
+    CHECK(!LinearTransition(moved(0), moved(2), moved(4)), "motion: not linear");
+    CHECK(!LinearTransition(moved(0), moved(0), moved(0)), "still: no transition");
+    auto bright = MakeThumb(64, 36, [&](int x, int y) { return sceneA(x, y) + 70; });
+    CHECK(Flash(moved(0), bright, moved(0)), "flash");
+    CHECK(!Flash(fade(0.6), fade(0.8), fade(1.0)), "a fade is not a flash");
+    CHECK(!Flash(moved(0), moved(1), moved(2)), "motion is not a flash");
+}
+
 static void TestCalibrate()
 {
     const Calibration c = Calibrate(1920, 1080, 8, 0, 1);
@@ -379,6 +430,7 @@ int main()
     TestHardCut();
     TestSeekAndOrder();
     TestCadence();
+    TestTransitions();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

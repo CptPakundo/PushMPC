@@ -1,5 +1,5 @@
 {
-  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin, internal research notes R1), and the packages the vsplugin CI workflows use. Resolved and hashed on GitHub's runners by .github/workflows/pins.yml (2026-11-23). An entry whose version, URL or SHA-256 says TODO is never downloaded.",
+  "note": "The VapourSynth runtime PushMPC's installer fetches for the mpv route (vsplugin), and the packages the vsplugin CI workflows use. Resolved and hashed on GitHub's runners by .github/workflows/pins.yml (2026-11-23). An entry whose version, URL or SHA-256 says TODO is never downloaded.",
   "installDir": "%LOCALAPPDATA%\\PushMPC\\vapoursynth",
   "python": {
     "what": "Python embeddable package (amd64), PSF licence; VapourSynth R82's wheel is cp312-abi3 (Python 3.12 or newer), 3.12.10 is the last 3.12 with Windows binaries",
@@ -34,6 +34,11 @@
       "how": "pip wheel (manylinux x86_64)",
       "url": "https://files.pythonhosted.org/packages/3c/30/55b464fe29960af3e8e8254eb236f5e3164c28a6ce66f9706f5d5567ddd4/vapoursynth-82-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
       "sha256": "9BD85641D3655C06FF90C73042204FBCF6DB7BD26F8AE9D60A7EE17ACF534F2E"
+    },
+    "linuxArm64": {
+      "how": "pip wheel (manylinux aarch64); integrations.yml builds the plugin natively on ubuntu-24.04-arm",
+      "url": "https://files.pythonhosted.org/packages/da/12/4af5770814c756d9ade013bd01dbb0adfd90eb85bc2d53dc23a8e623c7f2/vapoursynth-82-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "sha256": "D75F13527367E087265DCEB0B069FA483B2CE0D8636774BC346904A581734836"
     },
     "macos": {
       "how": "pip wheel (macOS 13+ arm64)",

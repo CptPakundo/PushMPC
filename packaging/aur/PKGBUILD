@@ -1,0 +1,51 @@
+# AUR package (dry run: built and checked by .github/workflows/integrations.yml in an archlinux container; never
+# submitted without the maintainer's go). Builds the VapourSynth plugin from the release's source tarball against
+# Arch's own vapoursynth headers.
+#   /usr/lib/pushmpc/pushmpc_vs.so          the plugin, next to the script that loads it
+#   /usr/lib/pushmpc/pushmpc.vpy            the script mpv runs
+#   /usr/lib/vapoursynth/pushmpc_vs.so      a link, so VapourSynth also autoloads it (core.pushmpc in any script)
+#   /usr/bin/pushmpc-setup                  per user: pushmpc-setup install | uninstall | status (the mpv.conf block)
+pkgname=pushmpc
+pkgver=0.6.0
+pkgrel=1
+pkgdesc='Frame generation and scene-cut guard for mpv (VapourSynth plugin, PushFPS portable engine)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/CptPakundo/PushMPC'
+license=('GPL-3.0-or-later')
+depends=('mpv' 'vapoursynth' 'gcc-libs' 'glibc')
+makedepends=('cmake' 'python')
+install=pushmpc.install
+_artcnn=0837e5326e710f49e2ab0a8d995da0708047442e   # vsplugin/models/artcnn.lock.json
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "ArtCNN_C4F16.onnx::https://raw.githubusercontent.com/Artoriuz/ArtCNN/$_artcnn/ONNX/ArtCNN_C4F16.onnx"
+        "ArtCNN_C4F32.onnx::https://raw.githubusercontent.com/Artoriuz/ArtCNN/$_artcnn/ONNX/ArtCNN_C4F32.onnx")
+sha256sums=('SKIP'
+            '7a6436299b8c757dbb7084ac39a25c310db1941133e73d1ee3e74c8b3bddc1ca'
+            'b1a1130469a0538d4484fc3d6ca39854ef3906a3a01df8799997b6ed0408f6ea')
+noextract=('ArtCNN_C4F16.onnx' 'ArtCNN_C4F32.onnx')
+
+build() {
+  cmake -S "PushMPC-$pkgver/vsplugin" -B build -DCMAKE_BUILD_TYPE=Release -DVAPOURSYNTH_SDK=/usr/include/vapoursynth
+  cmake --build build --target pushmpc_vs portable_test
+  # ArtCNN upscaling shaders from the pinned ONNX weights (the sources above; the generator checks them again)
+  python "PushMPC-$pkgver/integrations/mpv/make-shaders.py" shaders --cache "$srcdir"
+}
+
+check() {
+  ./build/portable_test
+}
+
+package() {
+  install -Dm755 "PushMPC-$pkgver/vsplugin/bin/pushmpc_vs.so" "$pkgdir/usr/lib/pushmpc/pushmpc_vs.so"
+  install -Dm644 "PushMPC-$pkgver/vsplugin/scripts/pushmpc.vpy" "$pkgdir/usr/lib/pushmpc/pushmpc.vpy"
+  install -Dm644 "PushMPC-$pkgver/integrations/mpv/pushmpc.lua" "$pkgdir/usr/lib/pushmpc/pushmpc.lua"
+  install -Dm644 -t "$pkgdir/usr/lib/pushmpc/shaders" shaders/*.glsl shaders/SHADER-LICENSES.txt
+  install -dm755 "$pkgdir/usr/lib/vapoursynth"
+  ln -s ../pushmpc/pushmpc_vs.so "$pkgdir/usr/lib/vapoursynth/pushmpc_vs.so"
+  install -Dm755 "PushMPC-$pkgver/integrations/mpv/mpv-integration.sh" "$pkgdir/usr/share/pushmpc/mpv-integration.sh"
+  install -Dm755 "PushMPC-$pkgver/integrations/linux/vs-python-link.sh" "$pkgdir/usr/share/pushmpc/vs-python-link.sh"
+  install -dm755 "$pkgdir/usr/bin"
+  printf '#!/bin/sh\n# PushMPC: puts the PushMPC block into your mpv.conf (install), takes it out again (uninstall), shows it (status)\n[ "${1:-install}" = install ] && sh /usr/share/pushmpc/vs-python-link.sh\nexec sh /usr/share/pushmpc/mpv-integration.sh "${1:-install}" --script /usr/lib/pushmpc/pushmpc.vpy\n' > "$pkgdir/usr/bin/pushmpc-setup"
+  chmod 755 "$pkgdir/usr/bin/pushmpc-setup"
+  install -Dm644 "PushMPC-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

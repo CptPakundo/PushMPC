@@ -1,0 +1,8 @@
+{
+  "note": "Slang (shader-slang/slang, Apache-2.0 WITH LLVM-exception): build-time only, on CI, to compile the cut guard's HLSL (vsplugin/engines/nvidia-linux/shaders) to CUDA for the Linux / Windows-on-Arm nvidia backend. Never shipped to users.",
+  "version": "2026.21",
+  "linux_x86_64": {
+    "url": "https://github.com/shader-slang/slang/releases/download/v2026.21/slang-2026.21-linux-x86_64.tar.gz",
+    "sha256": "691F9341E5BEC099EEC97EE30A83BCBEF541CEE7FE3B4DE68A821D42F9506C2F"
+  }
+}

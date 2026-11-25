@@ -24,6 +24,7 @@
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
+#include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
 #include "veyra/pipeline/Rdna3NrBackend.h"
@@ -33,6 +34,7 @@
 #include "veyra/pushflow/PushFlowBackend.h"
 #include "veyra/gfx/AmfFrcBackend.h"
 #include "veyra/ngx/DlssgLite.h"
+#include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -185,6 +187,7 @@ const char* fgName(uint32_t b) {
     case PUSHCORE_FG_PUSHFLOW: return "PushFlow";
     case PUSHCORE_FG_FSR: return "FSR FG";
     case PUSHCORE_FG_AMDFRC: return "AMD FRC";
+    case PUSHCORE_FG_NVOF: return "NVOF FG";
     default: return "none";
     }
 }
@@ -246,6 +249,26 @@ bool findAdapter(uint64_t luid, DXGI_ADAPTER_DESC1& out) {
     return false;
 }
 
+// The user-mode driver version of the adapter ("32.0.15.9140"), the key of the self-test cache (pushmpc/unlocks.h)
+std::wstring driverVersionOf(const LUID& luid) {
+    ComPtr<IDXGIFactory4> f;
+    ComPtr<IDXGIAdapter> a;
+    LARGE_INTEGER v{};
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f))) || FAILED(f->EnumAdapterByLuid(luid, IID_PPV_ARGS(&a))) ||
+        FAILED(a->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v))) return L"unknown";
+    return std::format(L"{}.{}.{}.{}", HIWORD(v.HighPart), LOWORD(v.HighPart), HIWORD(v.LowPart), LOWORD(v.LowPart));
+}
+// T5b unlock: RTX VSR on GTX 16 (TU116 / TU117, compute capability 7.5: nvngx_vsr ships complete sm_75 kernels; the only
+// gate is NGX's feature table). Eligible when the files are there; on only after its self-test passed on this adapter
+// and driver (tests\gtx16-vsr-manual.ps1 runs pushmpc\tools\vsr_gate_probe and records the result), or forced on.
+// Off switch PUSHMPC_DISABLE_GTX16VSR=1 / Unlocks\Gtx16Vsr = 0. The decision goes to the log and to reason[RTX_VSR].
+pmu::UnlockDecision gtx16VsrDecision(const DXGI_ADAPTER_DESC1& d, bool files) {
+    std::wstring src;
+    const pmu::UnlockMode mode = pmu::ReadUnlockMode(pmu::Unlock::Gtx16Vsr, &src);
+    const pmu::SelfTest t = pmu::ReadSelfTest(pmu::Unlock::Gtx16Vsr, pmu::SelfTestKey(d.VendorId, d.DeviceId, driverVersionOf(d.AdapterLuid)));
+    return pmu::DecideUnlock(pmu::Unlock::Gtx16Vsr, mode, files, L"nvngx_vsr.dll is not installed", t, false, src);
+}
+
 void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeDir, PushCoreCaps& c) {
     const std::wstring name = d.Description;
     const uint32_t v = d.VendorId, fam = familyOf(v, name);
@@ -263,6 +286,16 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         std::snprintf(c.reason[bit], sizeof(c.reason[bit]), "%s", !hardware ? needHw : needFiles);
     };
     const std::wstring rt = runtimeDir.wstring();
+    // T5b: NVOF frame generation (FSR 3.1 interpolation on NVIDIA's optical-flow hardware): NVOFA on the card (every Turing
+    // but TU117, Ampere and later), a core built with the Optical Flow SDK, the FidelityFX files; off switch NvofWarp
+    {
+        const bool nvofa = pmu::HasNvofa(v, d.DeviceId, rtx, name);
+        const bool offSwitch = pmu::ReadUnlockMode(pmu::Unlock::NvofWarp) == pmu::UnlockMode::Off;
+        const bool ffx = fsrLoader && fileExists(fsr / L"amd_fidelityfx_framegeneration_dx12.dll");
+        set(PUSHCORE_CAP_NVOF_FG, nvofa && !offSwitch, ffx && veyra::ngx::NvOfSession::builtWithSdk(),
+            offSwitch ? "switched off (PUSHMPC_DISABLE_NVOFWARP / Unlocks NvofWarp = 0)" : "needs NVIDIA's optical-flow hardware (Turing except GTX 1650 / TU117, or newer)",
+            !ffx ? "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)" : "this pushcore was built without NVIDIA Optical Flow support");
+    }
     set(PUSHCORE_CAP_VFG, vfgHw, veyra::pipeline::VfgBackend::runtimeAvailable(rt), "needs an NVIDIA RTX 30, 40 or 50 card",
         "the VFG files are not installed (runtime\\nvidia-vfg)");
     set(PUSHCORE_CAP_DLSSG, nvidia && rtx && fam != PUSHCORE_FAMILY_RTX20, fileExists(runtimeDir / L"nvngx_dlssg.dll"),
@@ -279,7 +312,18 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         "FSR 4 ML frame generation needs an AMD RX 9000", "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)");
     set(PUSHCORE_CAP_AMDFRC, amd || fileExists(system32() / L"amfrt64.dll"), veyra::gfx::AmfFrcBackend::runtimeInstalled(),
         "needs AMD's driver (AMF runtime)", "AMD's AMF runtime is not installed");
-    set(PUSHCORE_CAP_RTX_VSR, nvidia && rtx, fileExists(runtimeDir / L"nvngx_vsr.dll"), "needs an NVIDIA RTX card", "nvngx_vsr.dll is not installed");
+    const bool vsrFiles = fileExists(runtimeDir / L"nvngx_vsr.dll");
+    const bool gtx16 = nvidia && !rtx && pmu::IsGtx16(v, d.DeviceId, name);
+    if (gtx16) {
+        // hardware: the card can run it through the unlock (unless switched off); available: files + the unlock is on
+        const pmu::UnlockDecision u = gtx16VsrDecision(d, vsrFiles);
+        const std::string why = narrow(u.why);
+        veyra::log::info("pushcore", std::format("unlock {}", why));
+        const bool off = pmu::ReadUnlockMode(pmu::Unlock::Gtx16Vsr) == pmu::UnlockMode::Off;
+        set(PUSHCORE_CAP_RTX_VSR, !off, vsrFiles && u.on, why.c_str(), vsrFiles ? why.c_str() : "nvngx_vsr.dll is not installed");
+    } else {
+        set(PUSHCORE_CAP_RTX_VSR, nvidia && rtx, vsrFiles, "needs an NVIDIA RTX card (GTX 16: unlock Gtx16Vsr after its self-test)", "nvngx_vsr.dll is not installed");
+    }
     set(PUSHCORE_CAP_VSR_FAMILIES, nvidia && rtx, veyra::pipeline::VfxSrBackend::runtimeAvailable(rt), "needs an NVIDIA RTX card",
         "the Video Effects VideoSuperRes files are not installed");
     set(PUSHCORE_CAP_FSR_SR, true, fsrLoader && fileExists(fsr / L"amd_fidelityfx_upscaler_dx12.dll"), "",
@@ -351,6 +395,10 @@ struct PushCore {
     std::atomic<uint64_t> cutsSeen{0};       // cuts the guard held so far (PushCoreStats.cutGuardCuts)
     std::atomic<uint32_t> subtitleState{0}, subtitlePixels{0};   // PushFPS Subtitle Hold (PushCoreStats), read on the submit thread
     uint32_t subtitlePoll = 0;
+    // Subtitle Hold Auto (settings.subtitleHold == 2): the pass detects on every frame, composes only while burned-in
+    // text is found (gate below); counters of consecutive polls above / below the thresholds
+    bool subAutoInit = false, subCompose = false;
+    uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
 
@@ -493,7 +541,7 @@ struct PushCore {
     }
 
     // PushFPS's simple video page (qml/Veyra/WatchPage.qml) on a fresh install, switch by switch (see
-    // internal research notes for the evidence): the bridge starts from EnhancementSettings{} with nrRuntime Ampere, in
+    // measured): the bridge starts from EnhancementSettings{} with nrRuntime Ampere, in
     // List chain mode (runtimeOrder = nullopt); "smoother" sets multiplier (the FG node on) and content Auto; "sharper"
     // sr on with the current videoSrQuality (standard RTX VSR family); "AI picture enhancement" turns the list's NR
     // node on with its default parameters (one layer: flat fields, nrLayerCount 0) and PushQuickSetup's look writes
@@ -522,6 +570,14 @@ struct PushCore {
         case PUSHCORE_FG_PUSHFLOW:
             s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
             cap = 4;
+            break;
+        case PUSHCORE_FG_NVOF:
+            // NVIDIA's optical-flow hardware as the motion, FSR 3.1's interpolation and warp (T5b, unlock NvofWarp): the
+            // flow runs on the NVOFA engine, the refined vectors feed FidelityFX frame interpolation; 2x
+            s.frameGenerationBackend = FrameGenerationBackend::Fsr;
+            s.opticalFlowBackend = OpticalFlowBackend::Nvidia;
+            s.fgMotionRefine = true;
+            cap = 2;
             break;
         case PUSHCORE_FG_FSR:
             // FSR 4 ML frame generation on RX 9000 (PushFPS's default there), FSR 3.1 elsewhere; FidelityFX flow
@@ -599,7 +655,7 @@ struct PushCore {
         if (const auto e = s.validate(); !e.empty()) { fail("PushMPC settings invalid: " + e); return false; }
         veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}, Subtitle Hold {}",
             s.sr, s.videoSrQuality, int(s.srTarget), fgName(tryFg), s.multiplier, s.vfgQuality, s.nr, nrRuntimeName(s.nrRuntime), s.model.tone, s.model.structure,
-            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold ? "on" : "off"));
+            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold == 2 ? "Auto (while burned-in text is found)" : settings.subtitleHold ? "on" : "off"));
         return true;
     }
 
@@ -697,7 +753,7 @@ struct PushCore {
     }
 
     // The frame generation methods to try, in order, with a multiplier cap each: the asked-for one first, then the
-    // next best this GPU can run (internal research notes section 1), and at the end no frame generation (the open must
+    // next best this GPU can run, and at the end no frame generation (the open must
     // not fail because of one backend: the rest of the picture work still runs).
     std::vector<std::pair<uint32_t, uint32_t>> fallbackChain() const {
         std::vector<std::pair<uint32_t, uint32_t>> c;
@@ -705,7 +761,7 @@ struct PushCore {
         if (m < 2) { c.push_back({settings.fgBackend, 8}); return c; }
         const bool nvidia = ctx.adapter().vendorId == 0x10DE, amd = ctx.adapter().vendorId == 0x1002;
         auto add = [&](uint32_t b, uint32_t cap) {
-            if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG) && !nvidia) return;
+            if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
             if (b == PUSHCORE_FG_DLSSG && family == PUSHCORE_FAMILY_RTX20) return;
             for (const auto& e : c) if (e.first == b && e.second == cap) return;
             c.push_back({b, cap});
@@ -715,6 +771,7 @@ struct PushCore {
         case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
+        case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
         default: add(PUSHCORE_FG_VFG, 8); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
@@ -784,6 +841,7 @@ struct PushCore {
         veyra::pipeline::overlay::setWanted(false);
         veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && settings.subtitleHold != 0);
         subtitleState.store(0, std::memory_order_relaxed); subtitlePixels.store(0, std::memory_order_relaxed);
+        subAutoInit = false; subCompose = false; subOnRun = subOffRun = 0;
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
@@ -1163,9 +1221,21 @@ struct PushCore {
         collectTimings();
         // PushFPS Subtitle Hold: its state and the pixels it held, about twice a second at 24 fps (the pixel count reads
         // the pass's own mapped sample; PushOverlayPass::harvest runs on this thread in update(), so it is read here too)
+        if (graph && haveSettings && settings.subtitleHold == 2 && !subAutoInit) { graph->setSubtitleCompose(false); subAutoInit = true; }
         if (graph && (++subtitlePoll % 12) == 0) {
-            subtitleState.store(uint32_t(graph->subtitleHoldState()), std::memory_order_relaxed);
-            subtitlePixels.store(graph->subtitleHoldPixels(), std::memory_order_relaxed);
+            const uint32_t state = uint32_t(graph->subtitleHoldState()), px = graph->subtitleHoldPixels();
+            // Auto gate: burned-in subtitles (two lines over a 1080p picture upscaled to 4K) hold 78-91 k pixels of the
+            // band; natural video without text held at most 6.4 k (study on four shows, eight segments, RTX 5090,
+            // 2026-11-25). On at >= 0.4 % of the frame for 3 polls (~1.5 s at 24 fps), off below 0.05 % for 10 polls (~5 s).
+            if (state == 1 && haveSettings && settings.subtitleHold == 2) {
+                const double area = double(graph->workWidth()) * graph->workHeight();
+                subOnRun = px >= area * 0.004 ? subOnRun + 1 : 0;
+                subOffRun = px < area * 0.0005 ? subOffRun + 1 : 0;
+                if (!subCompose && subOnRun >= 3) { subCompose = true; graph->setSubtitleCompose(true); veyra::log::info("pushcore", std::format("subtitle hold Auto: burned-in text found ({} pixels): holding", px)); }
+                else if (subCompose && subOffRun >= 10) { subCompose = false; graph->setSubtitleCompose(false); veyra::log::info("pushcore", "subtitle hold Auto: no burned-in text for ~5 s: not holding"); }
+            }
+            subtitleState.store(state == 1 && haveSettings && settings.subtitleHold == 2 && !subCompose ? 4u : state, std::memory_order_relaxed);
+            subtitlePixels.store(px, std::memory_order_relaxed);
         }
         return PUSHCORE_OK;
     }
@@ -1491,7 +1561,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

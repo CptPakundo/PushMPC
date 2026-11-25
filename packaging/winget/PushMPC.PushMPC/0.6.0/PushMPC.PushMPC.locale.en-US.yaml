@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: PushMPC.PushMPC
+PackageVersion: 0.6.0
+PackageLocale: en-US
+Publisher: PushMPC (community)
+PublisherUrl: https://github.com/CptPakundo/PushMPC
+PackageName: PushMPC
+PackageUrl: https://github.com/CptPakundo/PushMPC
+License: GPL-3.0
+LicenseUrl: https://github.com/CptPakundo/PushMPC/blob/main/LICENSE
+ShortDescription: PushFPS video enhancement in media players (MPC-HC, MPC-BE, PotPlayer, mpv and more)
+Description: |-
+  PushMPC brings PushFPS's video enhancement into media players: frame generation up to 8x, RTX Video Super
+  Resolution, the scene-cut guard, SDR to HDR and Auto. It installs per user and sets up the players it finds
+  (MPC-HC, MPC-BE, PotPlayer; mpv, mpv.net, SMPlayer, MPC-QT, Kodi and the Jellyfin/Plex MPV shims through its
+  VapourSynth plugin). Every player change is undone exactly by the uninstall.
+Tags:
+  - video
+  - frame-interpolation
+  - upscaling
+  - directshow
+  - mpv
+  - vapoursynth
+ReleaseNotesUrl: https://github.com/CptPakundo/PushMPC/blob/main/docs/release-notes-0.6.0.md
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

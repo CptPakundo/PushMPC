@@ -115,7 +115,7 @@ int wmain(int argc, wchar_t** argv) {
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
     int sr = -1, fgOpt = -1, mult = -1;
-    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|none): the filter's route
+    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|none): the filter's route
     bool useSettings = false;
     PushCoreSettings ps{};
     ps.structSize = sizeof(ps); ps.source = PUSHCORE_SETTINGS_PUSHMPC; ps.sr = 1; ps.srQuality = 4; ps.srTarget = PUSHCORE_SR_TARGET_4K;
@@ -126,7 +126,7 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--backend") {
             useSettings = true;
             ps.fgBackend = v == L"dlssg" ? PUSHCORE_FG_DLSSG : v == L"pushflow" ? PUSHCORE_FG_PUSHFLOW : v == L"fsr" ? PUSHCORE_FG_FSR
-                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : PUSHCORE_FG_VFG;
+                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : PUSHCORE_FG_VFG;
             if (v == L"none") ps.multiplier = 1;
             continue;
         }

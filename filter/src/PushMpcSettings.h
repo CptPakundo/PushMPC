@@ -1,5 +1,5 @@
 // PushMPC's own settings (HKCU\Software\PushMPC). No PushFPS install is needed: the values map onto the settings
-// PushFPS's simple video page sets (pushcore builds the EnhancementSettings; see internal research notes).
+// PushFPS's simple video page sets (pushcore builds the EnhancementSettings).
 //
 // Values (REG_SZ, absent = the default; case-insensitive):
 //   Enable           DWORD 1/0                       default 1
@@ -15,7 +15,7 @@
 //   Osd              Off | Brief | Always            default Brief  (on-screen status: about 3 s at start and on changes)
 //   OnBattery        Light | Same                    default Light  (on battery: 2x at most, VSR level 2 at most, no clean-up / deband)
 //   FgQuality        Auto | High | Medium | Low      default Auto   (Auto: Medium, High only where it fits at the same multiplier; PushFlow: Low/Medium/High = Fast/Balanced/Quality)
-//   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC   default Auto (frame generation method; Auto by GPU family and budget)
+//   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC | NVOF   default Auto (frame generation method; Auto by GPU family and budget)
 //   Vrr              Auto | On | Off                 default Auto   (Auto: detected (NVIDIA G-SYNC state); On/Off: assume VRR / fixed refresh)
 //   Upscaler         Auto | RTX | FSR | NIS          default Auto   (RTX VSR on NVIDIA RTX, else FSR)
 //   UpscaleTarget    Screen | 1440p | 4K | 5K        default Screen
@@ -39,7 +39,7 @@ inline constexpr int kAuto = -1, kOff = 0;
 
 enum class FgQuality { Low = 0, Medium = 1, High = 2, Auto = 3 };
 // Frame generation method (pushcore PUSHCORE_FG_* + 1; Auto = by GPU family and budget)
-enum class FgMethod { Auto = 0, Vfg = 1, Dlssg = 2, PushFlow = 3, Fsr = 4, AmdFrc = 5 };
+enum class FgMethod { Auto = 0, Vfg = 1, Dlssg = 2, PushFlow = 3, Fsr = 4, AmdFrc = 5, Nvof = 6 };   // index - 1 = PUSHCORE_FG_*
 enum class VrrMode { Auto = 0, On = 1, Off = 2 };
 enum class Upscaler { Auto = 0, Rtx = 1, Fsr = 2, Nis = 3 };
 enum class UpscaleTarget { Screen = 0, P1440 = 1, K4 = 2, K5 = 3 };
@@ -103,15 +103,28 @@ inline CleanStrength NearestStrength(float tone, float structure)
 // the whole band, and on video without burned-in text it held 0 pixels (output identical); but it costs about 0.5 ms GPU per
 // source frame at 4K (4x and 8x), above the 0.3 ms bar, and on burned-in anime subtitles VFG's frames looked the same with it
 // (a fast pan left a text ghost either way). Soft subtitles are drawn by the player after the filter and never need it.
-inline constexpr bool kSubtitleHoldAuto = false;
+// T5b (2026-11-25): Auto = content-gated where pushcore can gate it (PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO): the pass detects
+// on every frame and holds only while burned-in text is found. Study on the RTX 5090 (GPU harness, VFG 4x Medium, 720
+// source frames per segment): four shows, eight natural segments without burned-in text: the detector alone marked up to
+// 6.4 k pixels in three segments (a full hold would have masked them), the gate held in none; a hardsubbed anime pan
+// (two lines) marked 78-91 k pixels and the gate held after ~1.5 s. Detection costs about 0.5 ms GPU per source frame at 4K.
+// Off switch: PUSHMPC_DISABLE_SUBTITLEHOLDAUTO=1 / HKCU\Software\PushMPC\Unlocks SubtitleHoldAuto = 0 (Auto = off again).
+inline constexpr bool kSubtitleHoldAuto = false;   // Auto without the gate (an older pushcore): off, as before
 inline bool SubtitleHoldWanted(const Settings& s) { return s.subtitleHold == kAuto ? kSubtitleHoldAuto : s.subtitleHold != kOff; }
+// PushCoreSettings.subtitleHold: 0 off, 1 on, 2 Auto (gated); gateSupported = pushcore has the gate, autoAllowed = the
+// SubtitleHoldAuto unlock is not switched off
+inline int SubtitleHoldValue(const Settings& s, bool gateSupported, bool autoAllowed)
+{
+    if (s.subtitleHold == kAuto) return gateSupported && autoAllowed ? 2 : (kSubtitleHoldAuto ? 1 : 0);
+    return s.subtitleHold != kOff ? 1 : 0;
+}
 
 // ---- string forms (registry and the page)
 inline std::wstring ChoiceStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : std::to_wstring(v); }
 inline std::wstring OnOffStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : L"On"; }
 inline const wchar_t* FgQualityStr(FgQuality q) { return q == FgQuality::High ? L"High" : q == FgQuality::Low ? L"Low" : q == FgQuality::Medium ? L"Medium" : L"Auto"; }
-inline const wchar_t* FgMethodStr(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"VFG"; case FgMethod::Dlssg: return L"DLSSG"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR"; case FgMethod::AmdFrc: return L"AMDFRC"; default: return L"Auto"; } }
-inline const wchar_t* FgMethodLabel(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"NVIDIA VFG"; case FgMethod::Dlssg: return L"DLSS-G"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR FG"; case FgMethod::AmdFrc: return L"AMD FRC"; default: return L"Auto"; } }
+inline const wchar_t* FgMethodStr(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"VFG"; case FgMethod::Dlssg: return L"DLSSG"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR"; case FgMethod::AmdFrc: return L"AMDFRC"; case FgMethod::Nvof: return L"NVOF"; default: return L"Auto"; } }
+inline const wchar_t* FgMethodLabel(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"NVIDIA VFG"; case FgMethod::Dlssg: return L"DLSS-G"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR FG"; case FgMethod::AmdFrc: return L"AMD FRC"; case FgMethod::Nvof: return L"NVOF FG"; default: return L"Auto"; } }
 inline const wchar_t* VrrStr(VrrMode v) { return v == VrrMode::On ? L"On" : v == VrrMode::Off ? L"Off" : L"Auto"; }
 inline const wchar_t* UpscalerStr(Upscaler u) { return u == Upscaler::Rtx ? L"RTX" : u == Upscaler::Fsr ? L"FSR" : u == Upscaler::Nis ? L"NIS" : L"Auto"; }
 inline const wchar_t* TargetStr(UpscaleTarget t) { return t == UpscaleTarget::P1440 ? L"1440p" : t == UpscaleTarget::K4 ? L"4K" : t == UpscaleTarget::K5 ? L"5K" : L"Screen"; }
@@ -177,7 +190,7 @@ inline Settings LoadSettings()
     const std::wstring fm = RegReadStr(k, L"FgMethod");
     s.fgMethod = _wcsicmp(fm.c_str(), L"VFG") == 0 ? FgMethod::Vfg : (_wcsicmp(fm.c_str(), L"DLSSG") == 0 || _wcsicmp(fm.c_str(), L"DLSS-G") == 0) ? FgMethod::Dlssg
                : _wcsicmp(fm.c_str(), L"PushFlow") == 0 ? FgMethod::PushFlow : _wcsicmp(fm.c_str(), L"FSR") == 0 ? FgMethod::Fsr
-               : (_wcsicmp(fm.c_str(), L"AMDFRC") == 0 || _wcsicmp(fm.c_str(), L"FRC") == 0) ? FgMethod::AmdFrc : FgMethod::Auto;
+               : (_wcsicmp(fm.c_str(), L"AMDFRC") == 0 || _wcsicmp(fm.c_str(), L"FRC") == 0) ? FgMethod::AmdFrc : _wcsicmp(fm.c_str(), L"NVOF") == 0 ? FgMethod::Nvof : FgMethod::Auto;
     const std::wstring vr = RegReadStr(k, L"Vrr");
     s.vrr = _wcsicmp(vr.c_str(), L"On") == 0 ? VrrMode::On : _wcsicmp(vr.c_str(), L"Off") == 0 ? VrrMode::Off : VrrMode::Auto;
     const std::wstring up = RegReadStr(k, L"Upscaler");

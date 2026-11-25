@@ -42,6 +42,22 @@
 using namespace pmvs;
 
 namespace pmvs { void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why); }
+#ifdef PUSHMPC_APPLE
+namespace pmvs { void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why); bool AppleAvailable(std::string& why); }
+#endif
+#ifdef PMVS_NVIDIA_VFX
+namespace pmvs {
+void NvLinuxProbe(const VSMap* in, const VSAPI* a, BackendProbe& p);
+void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
+}
+#endif
+#if PMVS_HAVE_PMML
+namespace pmvs {
+void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
+bool MlRuntimePresent(const std::string& dir);
+std::string MlRuntimeDir(const VSMap* in, const VSAPI* a);
+}
+#endif
 
 #ifdef _WIN32
 namespace {
@@ -439,14 +455,17 @@ void ProbeNvidia(const VSMap* in, const VSAPI* a, BackendProbe& p)
     if (!done) {
         done = true;
         cached.nvidiaBuilt = true;
+        { wchar_t v[8] = {}; cached.anyGpuDisabled = GetEnvironmentVariableW(L"PUSHMPC_DISABLE_ANYGPUCORE", v, 8) > 0 && v[0] == L'1'; }
         CoreHost& h = CoreHost::Get();
         std::string err;
         std::lock_guard<std::mutex> hl(h.Lock());
         PushCoreCaps caps;
-        if (h.Load(NvidiaPaths(in, a), err) && h.Caps(caps)) { cached.pushcoreLoaded = true; cached.gpuFamily = caps.family; cached.gpuName = caps.adapter; }
+        if (h.Load(NvidiaPaths(in, a), err) && h.Caps(caps)) { cached.pushcoreLoaded = true; cached.gpuFamily = caps.family; cached.gpuName = caps.adapter; cached.capsAvailable = caps.available; }
+        if (cached.pushcoreLoaded) Log(std::format("backend probe: {} family {} caps 0x{:X}{}", cached.gpuName, cached.gpuFamily, cached.capsAvailable, cached.anyGpuDisabled ? " (pushcore on non-RTX GPUs switched off)" : ""));
         else Log("backend probe: pushcore not usable" + (err.empty() ? std::string(" (pushcore_capabilities missing)") : ": " + err));
     }
     p.nvidiaBuilt = cached.nvidiaBuilt; p.pushcoreLoaded = cached.pushcoreLoaded; p.gpuFamily = cached.gpuFamily; p.gpuName = cached.gpuName;
+    p.capsAvailable = cached.capsAvailable; p.anyGpuDisabled = cached.anyGpuDisabled;
 }
 
 } // namespace
@@ -469,8 +488,18 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
     if (req.empty()) req = "auto";
     BackendProbe p;
     const std::string lreq = LowerAscii(req);
-#ifdef _WIN32
-    if (lreq == "auto" || lreq == "nvidia") ProbeNvidia(in, a, p);
+#if defined(PMVS_NVIDIA_VFX)   // Linux x86-64, Windows on Arm: CUDA + the Video Effects runtime (engines/nvidia-linux)
+    if (lreq == "auto" || lreq == "nvidia") NvLinuxProbe(in, a, p);
+#elif defined(_WIN32)           // Windows x64: pushcore (any DirectX 12 GPU)
+    if (lreq == "auto" || lreq == "nvidia" || lreq == "pushcore") ProbeNvidia(in, a, p);
+#endif
+#ifdef PUSHMPC_APPLE
+    p.appleBuilt = true;
+    if (lreq == "auto" || lreq == "apple") p.appleAvailable = AppleAvailable(p.appleWhy);
+#endif
+#if PMVS_HAVE_PMML
+    p.mlBuilt = true;
+    if (lreq == "auto" || lreq == "ml") p.mlAvailable = MlRuntimePresent(MlRuntimeDir(forScript ? nullptr : in, a));
 #endif
     // Enhance itself cannot run rife (a script preset): only SelectBackend reports it
     if (forScript) {
@@ -495,8 +524,16 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);
+#ifdef PUSHMPC_APPLE
+    if (c.kind == BackendKind::Apple) return AppleCreate(in, out, core, a, node, c.why);
+#endif
+#if PMVS_HAVE_PMML
+    if (c.kind == BackendKind::Ml) return MlCreate(in, out, core, a, node, c.why);
+#endif
     if (c.kind == BackendKind::Rife) { a->freeNode(node); return fail("rife is a script preset: use pushmpc.vpy (it chains core.rife)"); }
-#ifdef _WIN32
+#if defined(PMVS_NVIDIA_VFX)
+    NvLinuxCreate(in, out, core, a, node, c.why);
+#elif defined(_WIN32)
     Log("backend: " + c.why);
     NvidiaCreate(in, out, core, a, node);
 #else
@@ -505,7 +542,7 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
 #endif
 }
 
-// pushmpc.SelectBackend([backend, rife, core_dir, runtime_dir]) -> {backend: "nvidia"|"portable"|"rife", why}
+// pushmpc.SelectBackend([backend, rife, core_dir, runtime_dir]) -> {backend: "nvidia"|"apple"|"portable"|"rife", why}
 void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const VSAPI* a)
 {
     const BackendChoice c = Choose(in, core, a, true);
@@ -513,6 +550,7 @@ void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const 
     Log("SelectBackend: " + c.why);
     a->mapSetData(out, "backend", BackendName(c.kind), -1, dtUtf8, maReplace);
     a->mapSetData(out, "why", c.why.c_str(), -1, dtUtf8, maReplace);
+    a->mapSetData(out, "interp", c.interp.c_str(), -1, dtUtf8, maReplace);
 }
 
 } // namespace
@@ -527,7 +565,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
-        "display_w:int:opt;display_h:int:opt;",
+        "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
+        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
-    vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;", "backend:data;why:data;", SelectCreate, nullptr, plugin);
+    vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }
