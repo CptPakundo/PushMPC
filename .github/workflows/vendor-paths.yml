@@ -61,6 +61,7 @@ jobs:
           if ($code -eq 0) { Write-Host '::error::a route passed on a runner without an NVIDIA GPU'; exit 1 }
           if ($code -eq 1 -and -not ($log -match '^RESULT route=core') ) { Write-Host '::error::no RESULT lines'; exit 1 }
           "STRUCTURAL CHECK PASS (exit $code)"
+          exit 0
       - name: Tester scripts parse
         timeout-minutes: 2
         shell: pwsh
@@ -75,23 +76,21 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - name: FidelityFX SDK releases (upscaler DLL version, FSR 4 INT8 provider, SHA-256)
+      - name: FidelityFX SDK signed DLLs per tag (version, FSR 4 INT8 provider, SHA-256)
         timeout-minutes: 15
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $rels = gh release list -R GPUOpen-LibrariesAndSDKs/FidelityFX-SDK --limit 8 --json tagName,publishedAt | ConvertFrom-Json
-          $rels | ForEach-Object { "{0}  {1}" -f $_.tagName, $_.publishedAt }
-          foreach ($r in ($rels | Select-Object -First 3)) {
-            $d = Join-Path $env:RUNNER_TEMP ("ffx-" + $r.tagName); New-Item -ItemType Directory -Force $d | Out-Null
-            gh release download $r.tagName -R GPUOpen-LibrariesAndSDKs/FidelityFX-SDK -p '*.zip' -D $d 2>&1 | Out-Null
-            Get-ChildItem $d -Filter *.zip | ForEach-Object { "{0} {1} sha256 {2}" -f $r.tagName, $_.Name, (Get-FileHash $_.FullName -Algorithm SHA256).Hash; Expand-Archive $_.FullName -DestinationPath (Join-Path $d 'x') -Force }
-            Get-ChildItem (Join-Path $d 'x') -Recurse -Include 'amd_fidelityfx_upscaler_dx12.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+          foreach ($tag in 'v2.4.0', 'v2.3.0') {
+            $d = Join-Path $env:RUNNER_TEMP "ffx-$tag"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch $tag --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git $d
+            git -C $d sparse-checkout set Kits/FidelityFX/signedbin
+            Get-ChildItem "$d/Kits/FidelityFX/signedbin" -Filter 'amd_fidelityfx_*_dx12.dll' | Where-Object { $_.Name -match 'upscaler|loader|framegeneration' } | ForEach-Object {
               $s = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.FullName))
               $int8 = $s.Contains('ffxProvider_FSR4_Int8') -or $s.Contains('FSR4-i8')
-              "{0} {1} version {2} size {3} sha256 {4} fsr4Int8Provider={5}" -f $r.tagName, $_.Name, $_.VersionInfo.FileVersion, $_.Length, (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $int8
+              $gfx = ([regex]::Matches($s, 'gfx1[0-9]{3}') | ForEach-Object Value | Sort-Object -Unique) -join ' '
+              "{0} {1} version {2} size {3} sha256 {4} fsr4Int8Provider={5} gfx=[{6}]" -f $tag, $_.Name, $_.VersionInfo.FileVersion, $_.Length, (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $int8, $gfx
             }
+            Remove-Item $d -Recurse -Force
           }
 
   vfx-wheel:
