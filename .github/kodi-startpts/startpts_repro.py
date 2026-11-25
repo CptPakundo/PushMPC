@@ -161,6 +161,24 @@ def start2(p):
                                                              {"setting": "videoscreen.extractcontentgeometry"})))
     say("setting contentgeometryonscan", json.dumps(try_rpc("Settings.GetSettingValue",
                                                             {"setting": "videoscreen.contentgeometryonscan"})))
+    if a.geometry:
+        # the start-up sweep measures the file through Kodi's own demuxer (the plain path); wait for it, then change
+        # the file's modification time so the stored measurement no longer matches and the measurement before
+        # playback runs on the playlist item (which carries #KODIPROP:inputstream)
+        log = os.path.join(a.home, "kodi.log")
+        t = time.time() + 30
+        while time.time() < t:
+            try:
+                if "CVideoLibraryContentGeometryJob::Work" in open(log, encoding="utf-8", errors="replace").read():
+                    say("start-up geometry sweep finished")
+                    break
+            except OSError:
+                pass
+            time.sleep(1)
+        time.sleep(2)
+        now = time.time() + 120
+        os.utime(a.clip, (now, now))
+        say("touched", a.clip)
     say("play m3u", json.dumps(try_rpc("Player.Open", {"item": {"file": m3u}}, timeout=60)))
     t = time.time() + 45
     seeked = False
