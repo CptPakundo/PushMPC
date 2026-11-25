@@ -111,7 +111,7 @@ jobs:
             -DVLC_PLUGIN_INCLUDE="$sdk/include/vlc/plugins" -DVLC_CORE_LIB="$lib" -DPM_FETCH_GPU_DEPS=ON
           cmake --build build
           mkdir -p out/win64
-          cp build/libpushmpc_plugin.dll build/pm_engine_test.exe out/win64/
+          cp build/libpushmpc_plugin.dll build/pm_engine_test.exe build/libpushmpc_d3d11_plugin.dll build/pm_nis_test.exe out/win64/
           x86_64-w64-mingw32-gcc-posix -std=gnu11 -O2 -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='"pushdump"' \
             -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushdump_plugin.dll -L"$sdk/lib" -lvlccore -static-libgcc
           x86_64-w64-mingw32-objdump -p out/win64/libpushmpc_plugin.dll | grep -E "DLL Name|vlc_entry"
@@ -278,6 +278,8 @@ jobs:
         with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
       - name: Engine test
         run: art/plugin-win64/pm_engine_test.exe
+      - name: NIS upscaler of the Direct3D 11 output fork, on WARP (no VLC)
+        run: art/plugin-win64/pm_nis_test.exe
       - name: VLC ${{ env.VLC_WIN_VERSION }} (official portable 7z, SHA-256 checked)
         run: |
           set -eu
@@ -294,6 +296,19 @@ jobs:
                  CLIP10=art/clips/clip10.mkv CLIP720=art/clips/clip720.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
                  PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
           bash vlcplugin/tests/run-module.sh
+      - name: The Direct3D 11 output fork in VLC (vout=pushmpc_d3d11 on WARP; software decoding keeps VLC's quad there)
+        run: |
+          set -u
+          d="$LOCALAPPDATA/PushMPC/vlc"
+          export VLC_PLUGIN_PATH="$(cygpath -w "$d")"
+          mkdir -p res/windows-d3d11fork
+          for mode in auto nis linear; do
+            timeout 60 "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio --play-and-exit --file-logging \
+              --logfile=res/windows-d3d11fork/$mode.log --log-verbose=2 --vout=pushmpc_d3d11 --pushmpc-d3d11-upscale=$mode \
+              --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 art/clips/clip720.mkv; echo "$mode: exit $?"
+            grep -hE "using vout display module|PushMPC NIS|Using .* scaler|upscale|Failed|error" res/windows-d3d11fork/$mode.log | sort | uniq -c | head -8
+          done
+          grep -q 'using vout display module "pushmpc_d3d11"' res/windows-d3d11fork/auto.log || { echo "::error::the fork did not open"; exit 1; }
       - name: pushcore through pm_pushcore.dll (the stub core on WARP; 720p)
         run: |
           set -u
