@@ -50,7 +50,12 @@ jobs:
           find x-linux_x86_64 -type f ! -name '*.so*' | sort | head -100
           cat x-linux_x86_64/*.dist-info/METADATA | head -60 || true
           echo "::endgroup::"
-      - name: VFG fatbin census (SM89 ELF entries the Ampere compat would retarget)
+      - name: Selector names (the wheel's Python bindings and the effect libraries' strings)
+        run: |
+          for f in x-linux_x86_64/nvvfx/effects/*.py x-linux_x86_64/nvvfx/_lib_loader.py; do echo "===== $f"; grep -nE "\"[A-Z][A-Za-z0-9]+\"|'[A-Z][A-Za-z0-9]+'|set_|Set|Mode|Quality|def |class " "$f" | head -80; done
+          for f in libnvVFXTrueHDR.so libnvVFXVideoSuperRes.so libnvVFXVideoFrameGeneration.so libVideoFX.so; do
+            echo "===== strings $f"; strings -n 4 "x-linux_x86_64/nvvfx/libs/$f" | grep -xE "(Src|Dst)Image[0-9]|CudaStream|[A-Z][a-z]+([A-Z][a-z]+)*(Level|Mode|Width|Height|Multiplier|Index|Change|Enabled|Off|Gray|Luminance|Contrast|Saturation|Strength|Timestep|Directory|Path)|TrueHDR|VideoSuperRes|VideoFrameGeneration|ModelDir|ModelSel" | sort -u | head -60
+          done (SM89 ELF entries the Ampere compat would retarget)
         run: |
           python3 -I - <<'PY'
           import glob, struct

@@ -145,18 +145,19 @@ def cmd_compare(wheel, ps1):
     block = block[: block.index("\n}")]
     pins = {}
     for m in re.finditer(r"'([^']+)'\s*=\s*'([0-9A-F]{64}) (\d+)'", block):
-        pins[m.group(1).replace("\\", "/").split("/")[-1].lower()] = (m.group(1), m.group(2), int(m.group(3)))
+        pins[m.group(1).lower()] = (m.group(1), m.group(2), int(m.group(3)))   # keyed by the full relative path
+    base = lambda k: k.replace("\\", "/").split("/")[-1]
     wheelfiles = {}
     for e in members(wheel):
         wheelfiles.setdefault(os.path.basename(e["name"]).lower(), []).append(e)
     rows = []
-    vfx = [k for k, v in pins.items() if "nvidia-vfg" in v[0] or k in ("nvngx_truehdr.dll", "nvngx_vsr.dll")]
+    vfx = [k for k in pins if "nvidia-vfg" in k or base(k) in ("nvngx_truehdr.dll", "nvngx_vsr.dll")]
     print("| PushMPC pin (Veyra 2.2.1 package) | pinned SHA-256 / size | wheel member | wheel SHA-256 / size | result |")
     print("|---|---|---|---|---|")
     matched = 0
     for k in sorted(vfx):
         rel, sha, size = pins[k]
-        cands = wheelfiles.get(k, [])
+        cands = wheelfiles.get(base(k), [])
         if not cands:
             print(f"| `{rel}` | {sha[:12]}… / {size:,} | (none) | – | **absent from the wheel** |"); rows.append((rel, "absent")); continue
         best = next((c for c in cands if c["sha256"] == sha), cands[0])
@@ -169,7 +170,7 @@ def cmd_compare(wheel, ps1):
     print("\nfull hashes:")
     for k in sorted(vfx):
         rel, sha, size = pins[k]
-        for c in wheelfiles.get(k, []):
+        for c in wheelfiles.get(base(k), []):
             print(f"  {rel}: pin {sha} {size} | wheel {c['name']} {c['sha256']} {c['size']}")
 
 
