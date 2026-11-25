@@ -752,7 +752,8 @@ jobs:
               /tmp/clip.mp4 > /tmp/shaders.txt 2>&1 || true
             if grep -q 'vo-passes:' /tmp/shaders.txt; then echo "video output: $vo"; break; fi
             echo "--- $vo did not open:"; grep -iE 'error|fail|could not' /tmp/shaders.txt | head -5
-          done          grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
+          done
+          grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
           echo "::notice title=ArtCNN fallback in mpv::$(grep -E 'upscaling shaders added|vo-passes' /tmp/shaders.txt | tr '\n' ' ' | cut -c1-700)"
           grep -q 'ArtCNN C4F16 (fragment)' /tmp/shaders.txt || { echo "::error::mpv did not run the ArtCNN passes"; exit 1; }
       - name: install.sh --flatpak yes (Flathub mpv for the user), encode mode inside the sandbox
