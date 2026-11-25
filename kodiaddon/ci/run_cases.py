@@ -27,6 +27,7 @@ kodi22 = a.major >= 22
 # name: clip, settings, expected k (0 = Auto), decode expected, output size, drive case
 CASES = [
     ("h264_x2", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "subs"),
+    ("subs_kodi", "h264.mkv", {"enabled": "false"}, 1, False, "640x360", "subs"),   # the subtitle check through Kodi alone
     ("h264_x4", "h264.mkv", {"smoother": 4}, 4, True, "640x360", "play"),
     ("h264_x5", "h264.mp4", {"smoother": 5}, 5, True, "640x360", "play"),
     ("h264_x10", "h264.mp4", {"smoother": 10}, 10, True, "640x360", "play"),

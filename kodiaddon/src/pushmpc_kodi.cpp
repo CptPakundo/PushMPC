@@ -224,7 +224,9 @@ public:
         for (unsigned i = 0; i < m_fmt->nb_streams; ++i) {
             const AVMediaType t = m_fmt->streams[i]->codecpar->codec_type;
             if (t == AVMEDIA_TYPE_VIDEO || t == AVMEDIA_TYPE_AUDIO || t == AVMEDIA_TYPE_SUBTITLE) m_ids.push_back(i + 1);
-            m_fmt->streams[i]->discard = AVDISCARD_ALL;
+            // reported streams start enabled, as with Kodi's own demuxer (stream-detail and thumbnail probes never enable any)
+            const bool reported = t == AVMEDIA_TYPE_VIDEO || t == AVMEDIA_TYPE_AUDIO || t == AVMEDIA_TYPE_SUBTITLE;
+            m_fmt->streams[i]->discard = reported ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
         }
         DecideVideo();
         return true;
@@ -458,7 +460,7 @@ private:
     }
 
     // the transfer of the first decoded frame, for files whose container does not say (the codec's own VUI may):
-    // reads from the start and seeks back, before any stream is enabled
+    // reads from the start and seeks back
     AVColorTransferCharacteristic ProbeTransfer()
     {
         AVColorTransferCharacteristic trc = AVCOL_TRC_UNSPECIFIED;
@@ -470,6 +472,7 @@ private:
         ctx->thread_count = 1;
         AVPacket* pkt = av_packet_alloc();
         AVFrame* frm = av_frame_alloc();
+        const AVDiscard saved = st->discard;
         st->discard = AVDISCARD_DEFAULT;
         if (avcodec_open2(ctx, dec, nullptr) >= 0) {
             for (int n = 0; n < 200 && trc == AVCOL_TRC_UNSPECIFIED; ++n) {
@@ -485,7 +488,7 @@ private:
             }
         }
         if (trc == AVCOL_TRC_RESERVED0) trc = AVCOL_TRC_UNSPECIFIED;
-        st->discard = AVDISCARD_ALL;
+        st->discard = saved;
         av_seek_frame(m_fmt, -1, m_fmt->start_time != AV_NOPTS_VALUE ? m_fmt->start_time : 0, AVSEEK_FLAG_BACKWARD);
         avformat_flush(m_fmt);
         av_frame_free(&frm);
