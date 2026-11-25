@@ -32,7 +32,8 @@ run() {
   [ -s "$log" ] || cp "$OUT/$name.stdout" "$log" 2>/dev/null
   echo "== $name ($api, $quirks): exit $rc"
   grep -hE "for hardware decoding|PushMPC|pmnull|vaapi|vdpau|Failed to|compensate" "$log" | sed 's/^[^:]*: //' | sort | uniq -c | head -10
-  (cd "$OUT" && "$PY" "$here/hwcheck.py" "$name" "$csv" "$log" --expect "$expect" --mult "$mult" --src-frames "$srcn") || fails=$((fails + 1))
+  local abs; abs="$(cd "$OUT" && pwd)"
+  "$PY" "$here/hwcheck.py" "$name" "$abs/$name.csv" "$abs/$name.log" --expect "$expect" --mult "$mult" --src-frames "$srcn" || fails=$((fails + 1))
   [ "$rc" = 0 ] || [ "$rc" = 124 ] || { echo "::error::$name: VLC exit $rc"; fails=$((fails + 1)); }
 }
 PP="--video-filter=postproc:pushmpc_out"

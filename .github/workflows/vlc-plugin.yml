@@ -243,7 +243,7 @@ jobs:
           echo "kernel $(uname -r)"; ls -l /dev/dri 2>&1 || true
           sudo modprobe vgem 2>/dev/null || { sudo apt-get -qq install -y "linux-modules-extra-$(uname -r)" >/dev/null 2>&1; sudo modprobe vgem; } \
             || echo "::warning::vgem not available"
-          ls -l /dev/dri && sudo chmod 666 /dev/dri/*
+          sudo udevadm settle || true; sleep 2; sudo chmod 666 /dev/dri/renderD* /dev/dri/card*; ls -l /dev/dri
           find /usr/lib/x86_64-linux-gnu/vlc \( -name '*vaapi*' -o -name '*vdpau*' \) | sort
       - name: Null VA-API and VDPAU drivers; the module's libva declarations against <va/va.h>
         run: |
@@ -253,9 +253,11 @@ jobs:
           gcc -std=gnu11 -O2 -Wall -fPIC -shared -o fakehw/libvdpau_pmnull.so.1 vlcplugin/tests/fakehw/pmnull_vdpau.c -lpthread
           gcc -std=gnu11 -Wall -o fakehw/layout vlcplugin/tests/fakehw/pm_va_layout_check.c && fakehw/layout
           nm -D fakehw/pmnull_drv_video.so | grep vaDriverInit
+          sudo chmod 666 /dev/dri/renderD128; ls -l /dev/dri
           LIBVA_DRIVERS_PATH=$PWD/fakehw LIBVA_DRIVER_NAME=pmnull vainfo --display drm --device /dev/dri/renderD128 || true
       - name: Hardware-format cases (VA-API through VLC's DRM decoder; VDPAU under Xvfb)
         run: |
+          sudo chmod 666 /dev/dri/renderD128; ls -l /dev/dri/renderD128
           d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
           export VLC=$(command -v vlc) PLUGDIR="$d" FAKEHW=$PWD/fakehw CLIP=art/clips/hwclip.mkv CLIP10=art/clips/hwclip10.mkv \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip.txt) SRC_FRAMES10=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip10.txt) \
@@ -265,6 +267,7 @@ jobs:
         if: always()
         run: |
           set -eu
+          sudo chmod 666 /dev/dri/renderD128
           export LIBVA_DRIVERS_PATH=$PWD/fakehw LIBVA_DRIVER_NAME=pmnull
           d=~/.local/share/pushmpc/vlc; st=$d/hw-selftest.txt; rc=~/.config/vlc/vlcrc
           rm -rf "$d"; mkdir -p ~/.config/vlc && printf '[core]\nvideo-filter=adjust\n[avcodec]\n#avcodec-hw=any\n' > $rc
@@ -290,7 +293,7 @@ jobs:
       - name: Other distros' VLC with the null VA-API driver (Debian 12 3.0.21, Debian 13 t64, Ubuntu 22.04 3.0.16)
         if: always()
         run: |
-          set -u; bad=0
+          set -u; bad=0; sudo chmod 666 /dev/dri/renderD128
           for img in debian:12 debian:13 ubuntu:22.04; do
             l=$(echo "$img" | tr -d ':.')
             docker run --rm --device /dev/dri/renderD128 -v "$PWD":/w -w /w "$img" bash vlcplugin/tests/run-hw-distro.sh "$l" || bad=1
