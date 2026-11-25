@@ -154,7 +154,18 @@ bool registerPlugins(Ort* ort, std::string* log) {
     for (const auto& p : pluginEps(ort->runtimeDir)) {
         if (ort->registered.count(p.id)) continue;
         ort->registered.insert(p.id);
-        if (OrtStatus* s = ort->api->RegisterExecutionProviderLibrary(ort->env, p.id.c_str(), ortPath(p.library).c_str())) {
+#ifdef _WIN32
+        // the EP's own dependencies (OpenVINO's frontends, TBB, ...) sit next to it: put that folder on the DLL search
+        // path while ONNX Runtime loads the library
+        std::basic_string<ORTCHAR_T> dir = ortPath(p.library);
+        dir = dir.substr(0, dir.find_last_of(L"\\/"));
+        SetDllDirectoryW(dir.c_str());
+#endif
+        OrtStatus* regStatus = ort->api->RegisterExecutionProviderLibrary(ort->env, p.id.c_str(), ortPath(p.library).c_str());
+#ifdef _WIN32
+        SetDllDirectoryW(nullptr);
+#endif
+        if (OrtStatus* s = regStatus) {
             if (log) *log += "plugin EP " + p.id + " not registered: " + ort->api->GetErrorMessage(s) + "\n";
             ort->api->ReleaseStatus(s);
         } else if (log) {
