@@ -23,6 +23,7 @@
 #include <shellapi.h>
 #include <dxgi.h>
 #include <thread>
+#include <cwctype>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -49,6 +50,7 @@ struct Payload {
     const unsigned char* data = nullptr; size_t size = 0;
     std::string release, filter, core;
     bool vsplugin = false;   // the optional mpv route component is inside
+    bool vlc = false;        // the optional VLC module is inside
     bool load() {
         HRSRC r = FindResourceW(nullptr, L"PAYLOAD", RT_RCDATA);
         if (!r) return false;
@@ -58,6 +60,7 @@ struct Payload {
         if (!data || size < 12 || memcmp(data, "PMPAYLD1", 8) != 0) { data = nullptr; return false; }
         bool ok = each([&](const std::string& path, const unsigned char* p, uint64_t n) {
             if (path.rfind("vsplugin\\", 0) == 0) vsplugin = true;
+            if (path.rfind("vlc\\", 0) == 0) vlc = true;
             if (path != "payload.txt") return true;
             std::string t(reinterpret_cast<const char*>(p), size_t(n));
             auto val = [&](const char* k) { size_t a = t.find(std::string(k) + "="); if (a == std::string::npos) return std::string(); a += strlen(k) + 1; return Trim(t.substr(a, t.find('\n', a) - a)); };
@@ -205,6 +208,36 @@ std::vector<MpvPlayer> DetectMpvFamily() {
     if (DirExists(JoinPath(la, L"Jellyfin Desktop\\profiles"))) out.push_back({ L"Jellyfin Desktop", JoinPath(la, L"Jellyfin Desktop") });   // its libmpv has VapourSynth
     return out;
 }
+// The other players Setup knows: VLC, Stremio, Plex (native routes of their own) and players with no native route,
+// which capture mode covers (pushmpc-install.ps1 Find-CaptureOnlyPlayers looks in the same places). capture = no
+// frame generation route of PushMPC's own.
+struct OtherPlayer { std::wstring player, exe; bool capture = false; std::wstring how; };
+std::vector<OtherPlayer> DetectOtherPlayers(bool vlcModule) {
+    auto env = [](const wchar_t* v) { wchar_t b[MAX_PATH]{}; GetEnvironmentVariableW(v, b, MAX_PATH); return std::wstring(b); };
+    std::wstring la = env(L"LOCALAPPDATA"), pf = env(L"ProgramW6432"), pf86 = env(L"ProgramFiles(x86)");
+    if (pf.empty()) pf = env(L"ProgramFiles");
+    std::vector<OtherPlayer> out;
+    auto first = [&](std::initializer_list<std::wstring> c) { for (auto& p : c) if (!p.empty() && FileExists(p)) return p; return std::wstring(); };
+    const wchar_t* cap = L"capture mode (fallback: about 50-60 ms delay, no DRM-protected video)";
+    std::wstring vlc;
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) { std::wstring d = RegGetStr(root, L"Software\\VideoLAN\\VLC", L"InstallDir"); if (!d.empty() && FileExists(JoinPath(d, L"vlc.exe"))) { vlc = JoinPath(d, L"vlc.exe"); break; } }
+    if (vlc.empty()) vlc = first({ JoinPath(pf, L"VideoLAN\\VLC\\vlc.exe"), JoinPath(pf86, L"VideoLAN\\VLC\\vlc.exe") });
+    if (!vlc.empty()) out.push_back({ L"VLC", vlc, !vlcModule, vlcModule ? L"the PushMPC module for VLC 3" : cap });
+    std::wstring st = first({ JoinPath(la, L"Programs\\Stremio\\stremio-shell-ng.exe"), JoinPath(pf, L"Stremio\\stremio-shell-ng.exe"), JoinPath(la, L"Programs\\Stremio\\stremio.exe"), JoinPath(pf, L"Stremio\\stremio.exe") });
+    if (!st.empty()) out.push_back({ L"Stremio", st, false, L"through its mpv config file (Stremio 5.0.28 and newer; older versions: capture mode)" });
+    for (auto& d : { JoinPath(pf, L"Plex\\Plex"), JoinPath(pf, L"Plex\\Plex HTPC") })
+        if (FileExists(JoinPath(d, L"libmpv-2.dll"))) out.push_back({ d.find(L"HTPC") != std::wstring::npos ? L"Plex HTPC" : L"Plex", d, true, L"video super resolution inside Plex; frame generation through capture mode (fallback)" });
+    struct P { const wchar_t* name; std::vector<const wchar_t*> rel; };
+    const std::vector<P> probes = { P{ L"KMPlayer 64X", { L"KMPlayer 64X\\KMPlayer64.exe" } }, P{ L"GOM Player", { L"GRETECH\\GomPlayer\\GOM.exe", L"GRETECH\\GOMPlayer\\GOM.exe" } },
+                                    P{ L"Emby Theater", { L"Emby Theater\\Emby.Theater.exe", L"Emby-Theater\\Emby.Theater.exe" } } };
+    const std::wstring roots[] = { pf, pf86, JoinPath(la, L"Programs") };
+    for (const P& p : probes) {
+        std::wstring hit;
+        for (auto* r : p.rel) { for (auto& root : roots) if (!root.empty() && FileExists(JoinPath(root, r))) { hit = JoinPath(root, r); break; } if (!hit.empty()) break; }
+        if (!hit.empty()) out.push_back({ p.name, hit, true, cap });
+    }
+    return out;
+}
 // PotPlayer x64 (filter priority list in HKCU\Software\DAUM\PotPlayerMini64; the script's Find-PotPlayerExe rules)
 MpcHc DetectPotPlayer() {
     MpcHc m;
@@ -337,6 +370,9 @@ void WriteAppsEntry(const std::wstring& version) {
 }
 
 std::wstring ScratchDir() { return JoinPath(TempDir(), Format(L"PushMPC-Setup-%lu", GetCurrentProcessId())); }
+// AMD FSR SDK 2.4 (FSR 4.1 INT8 upscaling on Radeon RX 6000 / 7000 / 9000): offered on the welcome page, on by default
+// (unlocks are on unless the user says no); unchecked = the runtime package's SDK 2.3 set (-FidelityFx Package)
+std::atomic<bool> g_fsrSdk{ true };
 
 Result DoInstall(Op op, bool autoUpdates) {
     Result res;
@@ -386,7 +422,8 @@ Result DoInstall(Op op, bool autoUpdates) {
     // 3. the install itself (no cancel from here: it swaps folders)
     UiProgress(scriptLo, L"Installing");
     fail.clear();
-    rc = RunScript(script, L"install -StageDir " + QuoteArg(stage), scriptLo, 98, nullptr, fail);
+    if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
+    rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package"), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -408,6 +445,10 @@ Result DoInstall(Op op, bool autoUpdates) {
         if (plan["pushflow"] == "download" && ReadManifest(JoinPath(g_installDir, L"runtime")).get("pushflow") != "not installed")
             DeleteFileW(Widen(plan["pushflow-file"]).c_str());   // PushFlow's files are in place; PushFPS's zip (~140 MB) is not needed
         res.message = L"PushMPC " + Widen(v) + L" is installed.";
+        // capture mode (pushmpc-capture.ps1 enable) was switched on for players without a native route
+        if (FileExists(JoinPath(g_installDir, L"capture\\capture.json")))
+            res.message += L"\r\nFor players PushMPC cannot plug into, capture mode is ready: Start menu > PushMPC Capture (fallback). It adds about "
+                           L"50-60 ms of delay and cannot show DRM-protected video.";
     } else res.message = L"Dry run finished: nothing was changed.";
     RemoveTree(stage);
     UiProgress(100, L"Done");
@@ -518,7 +559,7 @@ bool EnsurePlayersClosed(HWND owner) {
 enum Page { PWelcome, PMaintenance, PLicence, PProgress, PFinish };
 enum Ctl {
     IDC_TITLE = 100, IDC_SUBTITLE, IDC_BODY, IDC_WARN, IDC_AUTOUPD, IDC_LICENCE, IDC_ACCEPT, IDC_R_REPAIR, IDC_R_UPDATE, IDC_R_UNINSTALL,
-    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK
+    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK, IDC_FSRSDK
 };
 HFONT g_font = nullptr, g_titleFont = nullptr, g_boldFont = nullptr;
 int g_dpi = 96;
@@ -529,9 +570,21 @@ bool g_busy = false, g_done = false, g_installed = false;
 Result g_result;
 MpcHc g_mpc, g_mpcBe;
 std::vector<MpvPlayer> g_mpvs;
+std::vector<OtherPlayer> g_others;
 std::wstring g_gpu;
 MpcHc g_pot;
-bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.exe.empty() && g_mpvs.empty(); }
+bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.exe.empty() && g_mpvs.empty() && g_others.empty(); }
+// a Radeon that FSR SDK 2.4's FSR 4.1 INT8 upscaler serves (RX 6000 / 7000 / 9000; pushcore's familyOf digit rule)
+bool FsrSdkGpu() {
+    std::wstring n = g_gpu; for (auto& c : n) c = wchar_t(towupper(c));
+    if (n.find(L"RADEON") == std::wstring::npos && n.find(L"AMD") == std::wstring::npos) return false;
+    for (size_t i = 0; i + 2 < n.size(); ++i) {
+        if (n[i] != L'R' || n[i + 1] != L'X') continue;
+        size_t k = i + 2; while (k < n.size() && n[k] == L' ') ++k;
+        if (k < n.size() && iswdigit(n[k])) return n[k] == L'6' || n[k] == L'7' || n[k] == L'9';
+    }
+    return false;
+}
 HBRUSH g_white = nullptr;
 
 HWND C(int id) { return GetDlgItem(g_wnd, id); }
@@ -571,17 +624,20 @@ void ShowPage(Page p) {
     switch (p) {
     case PWelcome: {
         SetText(IDC_TITLE, L"Welcome to PushMPC setup");
-        SetText(IDC_SUBTITLE, L"PushMPC " + ver + L" for MPC-HC and MPC-BE");
+        SetText(IDC_SUBTITLE, L"PushMPC " + ver + L" for your video players");
         std::wstring body =
-            L"PushMPC brings PushFPS's video processing into MPC-HC and MPC-BE: frame generation, RTX Video Super Resolution, AI picture "
-            L"enhancement and SDR to HDR, on the graphics card. Your player stays your player for everything else.\r\n\r\n"
-            L"Setup installs PushMPC for your Windows account only, without administrator rights, into " + g_installDir + L"\r\n\r\n"
-            L"It downloads Veyra's runtime package (about 750 MB) unless PushFPS or Veyra is already installed with the same files.\r\n\r\n"
+            L"PushMPC brings PushFPS's video processing into your player: frame generation, RTX Video Super Resolution, AI picture "
+            L"enhancement and SDR to HDR, on the graphics card. Setup finds your players and graphics card, picks the best engine and "
+            L"sets everything up, with no questions; Auto keeps adjusting while you watch.\r\n\r\n"
+            L"Supported players: MPC-HC, MPC-BE, PotPlayer, mpv, mpv.net, SMPlayer, MPC-QT, VLC, Kodi, Stremio, Plex, Jellyfin. "
+            L"Any other player: capture mode (fallback).\r\n\r\n"
+            L"For your Windows account only, no administrator rights, into " + g_installDir + L". Veyra's runtime package (about 750 MB) "
+            L"is downloaded unless PushFPS or Veyra already has the same files.\r\n\r\n"
             L"Graphics card: " + (g_gpu.empty() ? L"not detected" : g_gpu);
         SetText(IDC_BODY, body); Show(IDC_BODY, true);
         if (NoPlayerFound()) {
-            SetText(IDC_WARN, L"Neither MPC-HC nor MPC-BE was found. PushMPC is a filter for them: install MPC-HC (github.com/clsid2/mpc-hc/releases) "
-                              L"or MPC-BE first, or continue and run setup again after the player has saved its settings once.");
+            SetText(IDC_WARN, L"No supported player was found. Install one first (MPC-HC: github.com/clsid2/mpc-hc/releases, or mpv, VLC, Kodi), "
+                              L"or continue and run setup again later: it sets up every player it finds then.");
         } else {
             std::wstring w;
             if (!g_mpc.exe.empty()) w += L"MPC-HC " + g_mpc.version + L" found: " + g_mpc.exe + (g_mpc.settings ? L"" : L"\r\nMPC-HC has not saved settings yet: start and close it once before setup, so PushMPC can be added to it.");
@@ -593,10 +649,12 @@ void ShowPage(Page p) {
                                  : L"preview: PushMPC is added through VapourSynth once its runtime is installed";
                 w += (w.empty() ? L"" : L"\r\n") + m.player + L" found: " + m.exe + L" (" + how + L")";
             }
+            for (auto& o : g_others) w += (w.empty() ? L"" : L"\r\n") + o.player + L" found: " + o.how;
             SetText(IDC_WARN, w);
         }
         Show(IDC_WARN, true);
         Show(IDC_AUTOUPD, true);
+        Show(IDC_FSRSDK, FsrSdkGpu());
         SetText(IDC_NEXT, L"Next");
         break;
     }
@@ -634,8 +692,8 @@ void ShowPage(Page p) {
         {
             std::wstring body = g_result.message;
             if (g_result.ok && g_op != Op::Uninstall)
-                body += L"\r\n\r\nOpen a video in MPC-HC or MPC-BE: PushMPC starts by itself. Its settings are in the player under Play > Filters > PushMPC Filter; "
-                        L"Auto is the default for everything.\r\n\r\nUpdates, repair and uninstall: Windows Settings > Apps > Installed apps > PushMPC.";
+                body += L"\r\n\r\nOpen a video in your player: PushMPC starts by itself, with Auto for everything. In MPC-HC and MPC-BE its settings "
+                        L"are under Play > Filters > PushMPC Filter.\r\n\r\nUpdates, repair and uninstall: Windows Settings > Apps > Installed apps > PushMPC.";
             SetText(IDC_BODY, body);
         }
         Show(IDC_BODY, true); Show(IDC_DETAILS, true); Show(IDC_LINK, true);
@@ -659,9 +717,10 @@ void Layout() {
     int ch = by - S(16) - top;
     switch (g_page) {
     case PWelcome:
-        MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(214), TRUE);
-        MoveWindow(C(IDC_WARN), m, top + S(218), W - 2 * m, S(48), TRUE);
-        MoveWindow(C(IDC_AUTOUPD), m, top + S(270), W - 2 * m, S(22), TRUE);
+        MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(178), TRUE);
+        MoveWindow(C(IDC_WARN), m, top + S(180), W - 2 * m, S(70), TRUE);
+        MoveWindow(C(IDC_AUTOUPD), m, top + S(254), W - 2 * m, S(22), TRUE);
+        MoveWindow(C(IDC_FSRSDK), m, top + S(276), W - 2 * m, S(22), TRUE);
         break;
     case PMaintenance:
         MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(22), TRUE);
@@ -706,7 +765,7 @@ void OnNext() {
     case PWelcome: g_op = Op::Install; ShowPage(PLicence); break;
     case PMaintenance: {
         if (Button_GetCheck(C(IDC_R_UNINSTALL)) == BST_CHECKED) {
-            if (MessageBoxW(g_wnd, L"Remove PushMPC? The MPC-HC and MPC-BE settings that PushMPC changed are put back.", L"PushMPC setup", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+            if (MessageBoxW(g_wnd, L"Remove PushMPC? Every player setting PushMPC changed is put back.", L"PushMPC setup", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
             g_op = Op::Uninstall;
         } else if (Button_GetCheck(C(IDC_R_UPDATE)) == BST_CHECKED) g_op = Op::Update;
         else g_op = Op::Repair;
@@ -739,6 +798,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         HWND lic = mk(L"EDIT", kLicence, ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_TABSTOP, IDC_LICENCE, WS_EX_CLIENTEDGE);
         (void)lic;
         mk(L"BUTTON", L"I accept the licence terms", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_ACCEPT);
+        Button_SetCheck(mk(L"BUTTON", L"Fetch AMD FSR SDK 2.4 for FSR 4.1 upscaling on this Radeon (AMD's signed files, checked by SHA-256)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UNINSTALL);
@@ -756,7 +816,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_APP_DONE + 1:   // --uninstall from Windows Apps: confirm, then go
-        if (MessageBoxW(w, L"Remove PushMPC? The MPC-HC and MPC-BE settings that PushMPC changed are put back.", L"PushMPC setup", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) StartOp();
+        if (MessageBoxW(w, L"Remove PushMPC? Every player setting PushMPC changed is put back.", L"PushMPC setup", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) StartOp();
         else DestroyWindow(w);
         return 0;
     case WM_SIZE: Layout(); return 0;
@@ -786,6 +846,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_NEXT: OnNext(); return 0;
         case IDC_BACK: if (g_page == PLicence) ShowPage(g_installed ? PMaintenance : PWelcome); return 0;
         case IDC_ACCEPT: if (g_page == PLicence) EnableWindow(C(IDC_NEXT), Button_GetCheck(C(IDC_ACCEPT)) == BST_CHECKED); return 0;
+        case IDC_FSRSDK: g_fsrSdk = Button_GetCheck(C(IDC_FSRSDK)) == BST_CHECKED; return 0;
         case IDCANCEL:
         case IDC_CANCEL:
             if (g_busy) {
@@ -897,6 +958,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g_mpcBe = DetectMpcBe();
     g_pot = DetectPotPlayer();
     g_mpvs = DetectMpvFamily();
+    g_others = DetectOtherPlayers(g_payload.vlc);
     g_gpu = GpuName();
 
     WNDCLASSEXW wc{ sizeof(wc) };
