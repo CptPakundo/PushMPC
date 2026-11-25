@@ -27,7 +27,8 @@ for tag in $tags; do
         grep -q 'CONFIG_D3D11VA 1' config.h || echo "::warning::$tag: D3D11VA is not enabled (no D3D11 frames for pushmpc)"
         make -j"$(nproc)" >/dev/null
     )
-    maj=$(sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' "$src"/libavfilter/version_major.h "$src"/libavfilter/version.h 2>/dev/null | head -1)
+    vdir="$src/libavfilter/"
+    maj=$( (cat "${vdir}version_major.h" "${vdir}version.h" 2>/dev/null || true) | sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
     min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' "$src"/libavfilter/version.h | head -1)
     mic=$(sed -n 's/^#define LIBAVFILTER_VERSION_MICRO *\([0-9]*\).*/\1/p' "$src"/libavfilter/version.h | head -1)
     name="pushmpc-avfilter-$maj.$min.$mic.dll"

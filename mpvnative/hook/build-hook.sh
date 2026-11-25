@@ -22,7 +22,8 @@ if ! grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h; then
 fi
 grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h   # 5.0 has no config_components.h
 make -j"$(nproc)" >/dev/null
-maj=$(sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' libavfilter/version_major.h libavfilter/version.h | head -1)
+vdir=libavfilter/
+maj=$( (cat "${vdir}version_major.h" "${vdir}version.h" 2>/dev/null || true) | sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
 min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' libavfilter/version.h | head -1)
 mic=$(sed -n 's/^#define LIBAVFILTER_VERSION_MICRO *\([0-9]*\).*/\1/p' libavfilter/version.h | head -1)
 so=$(ls libavfilter/libavfilter.so.* | grep -E '\.so\.[0-9]+$' | head -1)
