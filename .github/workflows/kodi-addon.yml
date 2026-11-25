@@ -187,7 +187,7 @@ jobs:
           dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
             --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
-            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2"
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2,hdr10_kodi"
       - name: Summary
         if: always()
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true

@@ -131,6 +131,8 @@ bool AhbDecoder::Receive(AHardwareBuffer*& buf, int64_t& pts, bool& eof)
     AImage* img = nullptr;
     if (AImageReader_acquireNextImage(m_reader, &img) != AMEDIA_OK || !img) { eof = m_eosOut; return false; }
     if (AImage_getHardwareBuffer(img, &buf) != AMEDIA_OK || !buf) { AImage_delete(img); return false; }
+    int32_t iw = 0, ih = 0;
+    if (AImage_getWidth(img, &iw) == AMEDIA_OK && AImage_getHeight(img, &ih) == AMEDIA_OK && iw > 0 && ih > 0) { m_w = iw; m_h = ih; }
     int64_t ns = 0;
     AImage_getTimestamp(img, &ns);
     pts = ns / 1000;
@@ -248,16 +250,13 @@ struct AhbImporter::Impl {
     }
 
     // the hardware buffer as a sampled image with its external format
-    bool ImportImage(AHardwareBuffer* buf, int& w, int& h, std::string& err)
+    bool ImportImage(AHardwareBuffer* buf, int w, int h, std::string& err)
     {
         VkAndroidHardwareBufferFormatPropertiesANDROID fp{ VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID };
         VkAndroidHardwareBufferPropertiesANDROID props{ VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID };
         props.pNext = &fp;
         if (vkGetAndroidHardwareBufferPropertiesANDROID(dev, buf, &props) != VK_SUCCESS) { err = "vkGetAndroidHardwareBufferPropertiesANDROID failed"; return false; }
         if (!Pipeline(fp, err)) return false;
-        AHardwareBuffer_Desc desc{};
-        AHardwareBuffer_describe(buf, &desc);
-        w = int(desc.width); h = int(desc.height);
         VkExternalFormatANDROID ef{ VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID };
         ef.externalFormat = fp.externalFormat;
         VkExternalMemoryImageCreateInfo em{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
@@ -265,7 +264,7 @@ struct AhbImporter::Impl {
         em.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
         VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ii.pNext = &em;
-        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_UNDEFINED; ii.extent = { desc.width, desc.height, 1 };
+        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_UNDEFINED; ii.extent = { uint32_t(w), uint32_t(h), 1 };
         ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
         ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT; ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(dev, &ii, nullptr, &img) != VK_SUCCESS) { err = "vkCreateImage (hardware buffer) failed"; return false; }
@@ -294,13 +293,12 @@ struct AhbImporter::Impl {
 AhbImporter::AhbImporter() = default;
 AhbImporter::~AhbImporter() = default;
 
-int AhbImporter::Fill(pmvs::gpu::Engine& e, AHardwareBuffer* buf, std::string& err)
+int AhbImporter::Fill(pmvs::gpu::Engine& e, AHardwareBuffer* buf, int w, int h, std::string& err)
 {
     if (!m) { m = std::make_unique<Impl>(); m->ctx = e.Ctx(); m->dev = m->ctx->Dev(); }
     Impl& I = *m;
     if (!I.ctx->AndroidHardwareBuffer()) { err = "the Vulkan device cannot import Android hardware buffers"; return -1; }
     I.FreeFrame();
-    int w = 0, h = 0;
     if (!I.ImportImage(buf, w, h, err)) { I.FreeFrame(); return -1; }
     auto rec = [&I, w, h](VkCommandBuffer cb, const pmvs::gpu::SlotTarget& t, std::string& e2) -> bool {
         // the decoder's buffer comes from outside Vulkan: acquire it from the foreign queue family

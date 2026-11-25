@@ -56,7 +56,7 @@ public:
     ~AhbImporter();
     // fill a free source slot of the engine from buf; the slot, or -1 with the reason. Waits for the GPU (so the
     // decoder's buffer can go back right after).
-    int Fill(pmvs::gpu::Engine& e, AHardwareBuffer* buf, std::string& err);
+    int Fill(pmvs::gpu::Engine& e, AHardwareBuffer* buf, int w, int h, std::string& err);
 
 private:
     struct Impl;

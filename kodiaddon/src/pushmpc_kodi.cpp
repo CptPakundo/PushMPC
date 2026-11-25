@@ -879,7 +879,7 @@ public:
         const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
         std::string err;
         const bool pushed = m_engine && m_engine->PushExternal([&](void* ge, std::string& e2) {
-            return m_importer.Fill(*static_cast<pmvs::gpu::Engine*>(ge), buf, e2);
+            return m_importer.Fill(*static_cast<pmvs::gpu::Engine*>(ge), buf, m_ahb->Width(), m_ahb->Height(), e2);
         }, contiguous, err);
         m_ahb->Release();
         if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine (hardware buffer): %s", err.c_str()); m_warned = true; }

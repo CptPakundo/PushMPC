@@ -168,7 +168,7 @@ add_library(inputstream.pushmpc SHARED src/pushmpc_kodi.cpp src/engine/display_h
 # out and FFmpeg's MediaCodec decoders (NDK mode) remain
 set(PM_GLSLANG "" CACHE FILEPATH "glslangValidator for the Android conversion shader")
 if(ANDROID)
-  target_link_libraries(inputstream.pushmpc PRIVATE mediandk android nativewindow log)
+  target_link_libraries(inputstream.pushmpc PRIVATE mediandk android log)
   if(PM_GLSLANG AND PM_GPU_ON)
     set(_aspv "${CMAKE_BINARY_DIR}/android_spv")
     file(MAKE_DIRECTORY "${_aspv}")
