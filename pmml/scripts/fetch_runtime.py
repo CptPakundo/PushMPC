@@ -134,7 +134,7 @@ def list_archive(archive: Path) -> None:
     a = Archive(archive)
     for name, _, size in a.members:
         low = name.lower()
-        if low.endswith((".dll", ".so", ".dylib", ".h", ".json", ".xml")) or ".so." in low or "license" in low:
+        if low.endswith((".dll", ".so", ".dylib", ".h", ".json", ".xml", ".manifest")) or ".so." in low or "license" in low:
             print(f"    {size:>11}  {name}")
     a.close()
 
