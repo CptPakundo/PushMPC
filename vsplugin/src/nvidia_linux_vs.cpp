@@ -263,7 +263,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     src.hdr = IsHdrTransfer(transfer); src.tenBit = bits > 8;
     Display disp; disp.refreshHz = NArgF(in, a, "display_fps", 0); disp.hdr = NArgI(in, a, "display_hdr", 0) != 0;
     Costs costs; costs.card = CardFactor(g.name, g.cls);
-    const Plan plan = Decide(s, src, disp, g.caps, costs);
+    const nvl::Plan plan = Decide(s, src, disp, g.caps, costs);
     Log(std::format("nvidia: {}x{} {}-bit, {}/{} fps, {} frames; {}; display {:.3f} Hz{}, HDR {}; settings from {}{}", src.w, src.h, bits, vi->fpsNum, vi->fpsDen, vi->numFrames,
         src.hdr ? "HDR (PQ/HLG)" : "SDR", disp.refreshHz, disp.refreshHz > 1 ? " (mpv's display_fps)" : " (unknown: x2)", disp.hdr ? "on" : "off",
         ResolveSettingsIni(EnvA("XDG_CONFIG_HOME"), EnvA("HOME")), overrides.empty() ? std::string() : ", overridden:" + overrides));
@@ -307,7 +307,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     d->outBits = w.engine->OutTenBit() ? 10 : 8;
     d->vi = *vi;
     if (!a->queryVideoFormat(&d->vi.format, cfYUV, stInteger, d->outBits, 1, 1, core)) { w.owner = 0; lk.unlock(); a->freeNode(node); delete d; return fail("queryVideoFormat failed"); }
-    const Plan& ep = w.engine->Config().plan;
+    const nvl::Plan& ep = w.engine->Config().plan;
     d->vi.width = ep.vsr ? ep.outW : vi->width;
     d->vi.height = ep.vsr ? ep.outH : vi->height;
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, d->k);
