@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: forward-backward agreement of a pair's two fields, for the cut guard (PushMPC's guard on
+// NVIDIA measures the same on NVOF's fields): a block counts when its forward vector f and the backward field at the
+// place it points to, k, cancel within 1.5 px + 5 % of |f|. Also counts the blocks with real motion (|f| >= 1 px).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, std430) readonly buffer FieldF { vec2 fwd[]; };
+layout(binding = 1, std430) readonly buffer FieldK { vec2 bwd[]; };
+layout(binding = 2, std430) buffer Stats { uint consistent; uint moving; uint pad0, pad1; } st;
+layout(push_constant) uniform PC { int bx, by, bs; } pc;
+#include "common.glsl"
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.bx || p.y >= pc.by) return;
+    vec2 f = fwd[p.y * pc.bx + p.x];
+    vec2 c = (vec2(p) + 0.5) * float(pc.bs);
+    vec2 k;
+    PM_FIELD_SAMPLE(bwd, pc.bx, pc.by, pc.bs, c.x + f.x, c.y + f.y, k);
+    if (length(f + k) <= 1.5 + 0.05 * length(f)) atomicAdd(st.consistent, 1u);
+    if (length(f) >= 1.0) atomicAdd(st.moving, 1u);
+}

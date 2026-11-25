@@ -127,7 +127,7 @@ one for you:
 |---|---|---|---|
 | `nvidia` | PushMPC's engine (everything above) | Windows, NVIDIA RTX | best; GPU |
 | `rife` | vs-rife-ncnn-vulkan, **if you have it installed** (PushMPC never downloads it) | any Vulkan GPU: AMD, Intel, Apple (MoltenVK), NVIDIA | very good; GPU, heavy at 4K |
-| `portable` | PushFPS's motion-compensated frame generation, on the CPU | anything: Windows with AMD or Intel, Linux, macOS | simpler; CPU-bound (see below) |
+| `portable` | PushFPS's motion-compensated frame generation on the GPU through Vulkan (any vendor; MoltenVK on macOS), with NIS or FSR1 upscaling; on the CPU when there is no Vulkan GPU | anything: Windows with AMD or Intel, Linux, macOS | good; light on a GPU, CPU-bound without one (see below) |
 
 **Auto:** an NVIDIA RTX GPU with PushMPC's engine installed gets `nvidia`; otherwise `rife` when the `rife` plugin is
 loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=portable` (or `rife`, `nvidia`) to the
@@ -135,16 +135,28 @@ loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=po
 
 ### What the portable backend does
 
-- Motion both ways between two real frames, PushFPS's scene-cut rule (no blend across a cut: the nearer real frame is
-  shown), and the generated frames at 1/k, 2/k, ... between them.
-- The output keeps the source's format and colour (YUV 4:2:0, 8 or 10 bit, SDR or HDR). Real frames are passed through
-  unchanged. No upscaling, no RTX features.
+- **Engine.** On the best Vulkan GPU it finds (a discrete card first), the GPU engine runs; without one (or with
+  `PortableDevice = cpu`) the CPU engine. The log says which, and why; every frame carries `PushMPCEngine` = `gpu` or `cpu`.
+- Motion both ways between two real frames: PushFPS's block matcher on the GPU (8 px vectors from the full-size picture by
+  default), or, if you ask for it with `motion=nvof`, NVIDIA's optical-flow hardware (`VK_NV_optical_flow`; on an RTX 5090 it
+  measured slower and not better than the block matcher, so it is not the default). Scene cuts: PushFPS's rule plus PushMPC's guard (no blend across a cut: the nearer real frame is shown). The
+  generated frames sit at 1/k, 2/k, ... between the real ones.
+- **Anime on twos and threes (Dedup, on by default):** a repeated frame is recognised (PushFPS's rule) and the generated
+  frames are spread between the different drawings, so a drawing held for two or three frames moves smoothly instead of
+  stepping. The plugin looks two source frames ahead for this (`dedup=0` turns it off).
+- **Subtitle Hold (on by default in this engine):** burned-in subtitles stay sharp and in place while the picture behind
+  them moves (PushFPS's rule; `subtitle_hold=0` turns it off). Soft subtitles are drawn by mpv afterwards anyway.
+- **Upscaling (GPU engine):** to the screen when mpv passes its size (or `target=1440p|4K|5K`), with NVIDIA Image Scaling (NIS) by
+  default or AMD FSR1 (`upscaler=fsr`); `upscaler=off` leaves scaling to mpv. Chroma is scaled bicubic.
+- The output keeps the source's format and colour (YUV 4:2:0, 8 or 10 bit, SDR or HDR). Without upscaling, real frames
+  are passed through unchanged. No RTX features.
+- **Auto and the GPU.** The plugin times one source frame and one generated frame on the GPU at the video's size and
+  picks the largest multiplier the display wants that fits in 60% of a source frame's time.
 - **Auto and the CPU.** When the script loads, the plugin times one motion estimation and one generated frame at the
   video's size, then picks the largest multiplier the display wants that fits in 60% of a source frame's time. Above
   1080p, Auto goes no higher than x2. On a 16-thread desktop CPU, 1080p at 24 fps gets about x2; 4K stays at x1 (the
   CPU is too slow for 4K). `smoother=4` forces x4 even when the CPU cannot keep up (mpv then drops frames). The log
   records the measurement and the choice.
-- A GPU version of the portable engine (Vulkan compute) is planned. It is not part of this preview.
 
 ### With the rife backend
 

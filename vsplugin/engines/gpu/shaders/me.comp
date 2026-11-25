@@ -1,0 +1,161 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: one level of PushFPS's hierarchical block matching (portable/core Motion.cpp), one
+// workgroup per 8x8 block of the level. Same blocks, SAD (edge blocks clamped and scaled to a full block), candidates,
+// smoothness penalty (lambda x distance from the predictor), +-1 refinement repeated while it improves (at most 3
+// steps), and at the finest level the zero-motion SAD and the parabola sub-pixel fit.
+//
+// What differs, because a GPU runs the blocks of a level side by side: the CPU walks the blocks in raster order and
+// takes the left, upper and upper-right blocks of the same level (already done) for the predictor and as candidates.
+// Here a level runs in two sweeps: sweep 1 takes those neighbours from the parent level (2 x its vectors; zero at the
+// coarsest level), sweep 2 takes them from sweep 1's result of the same level, and also tries sweep 1's own vector and
+// its right and lower neighbours (EXTENDED). The CPU engine stays the reference for the field's quality (gpu_test).
+layout(local_size_x = 64) in;
+layout(binding = 0, r8ui) uniform readonly uimage2D A;
+layout(binding = 1, r8ui) uniform readonly uimage2D B;
+struct Cell { ivec2 v; int cost; int zero; vec2 sub; };
+layout(binding = 2, std430) readonly buffer Parent { Cell par[]; };
+layout(binding = 3, std430) readonly buffer Neigh { Cell nb[]; };
+layout(binding = 4, std430) readonly buffer Prev { vec2 prevF[]; };
+layout(binding = 5, std430) writeonly buffer Out { Cell outc[]; };
+layout(push_constant) uniform PC {
+    int w, h, bx, by, pbx, pby, flags, range;
+    float lambda, scale;
+    int prevBx, prevBy, prevBs, limX, limY, pad;
+} pc;
+const int F_COARSEST = 1, F_LAST = 2, F_NEIGH = 4, F_PREV = 8, F_EXTENDED = 16;
+const int kMaxCand = 320;
+
+shared uint sA[64];
+shared ivec2 sCand[kMaxCand];
+shared int sRaw[kMaxCand];
+shared int sCount;
+shared ivec2 sPred;
+
+#include "common.glsl"
+
+int median3(int a, int b, int c) { return max(min(a, b), min(max(a, b), c)); }
+int lroundf(float v) { return v < 0.0 ? -int(floor(-v + 0.5)) : int(floor(v + 0.5)); }
+
+int x0, y0, bw, bh;
+
+int sad(ivec2 c)
+{
+    int bxp = x0 + c.x, byp = y0 + c.y, sum = 0;
+    ivec2 hi = ivec2(pc.w - 1, pc.h - 1);
+    for (int y = 0; y < bh; ++y)
+        for (int x = 0; x < bw; ++x)
+            sum += abs(int(sA[y * 8 + x]) - int(imageLoad(B, clamp(ivec2(bxp + x, byp + y), ivec2(0), hi)).r));
+    if (bw * bh != 64) sum = sum * 64 / (bw * bh);
+    return sum;
+}
+ivec2 clampCand(ivec2 c) { return ivec2(clamp(c.x, -pc.limX, pc.limX), clamp(c.y, -pc.limY, pc.limY)); }
+ivec2 parentAt(int i, int j) { i = clamp(i, 0, pc.pbx - 1); j = clamp(j, 0, pc.pby - 1); return par[j * pc.pbx + i].v; }
+
+void main()
+{
+    const int i = int(gl_WorkGroupID.x), j = int(gl_WorkGroupID.y), tid = int(gl_LocalInvocationIndex);
+    const int idx = j * pc.bx + i;
+    x0 = i * 8; y0 = j * 8;
+    bw = min(8, pc.w - x0); bh = min(8, pc.h - y0);
+    {
+        int px = tid & 7, py = tid >> 3;
+        sA[tid] = (px < bw && py < bh) ? imageLoad(A, ivec2(x0 + px, y0 + py)).r : 0u;
+    }
+    const bool coarsest = (pc.flags & F_COARSEST) != 0, last = (pc.flags & F_LAST) != 0, haveNb = (pc.flags & F_NEIGH) != 0;
+    const int rng = pc.range, side = 2 * rng + 1;
+    if (tid == 0) {
+        ivec2 left = ivec2(0), up = ivec2(0), upRight = ivec2(0);
+        if (haveNb) {
+            left = i > 0 ? nb[idx - 1].v : ivec2(0);
+            up = j > 0 ? nb[idx - pc.bx].v : ivec2(0);
+            upRight = (j > 0 && i + 1 < pc.bx) ? nb[idx - pc.bx + 1].v : up;
+        } else if (!coarsest) {
+            left = i > 0 ? 2 * parentAt((i - 1) / 2, j / 2) : ivec2(0);
+            up = j > 0 ? 2 * parentAt(i / 2, (j - 1) / 2) : ivec2(0);
+            upRight = (j > 0 && i + 1 < pc.bx) ? 2 * parentAt((i + 1) / 2, (j - 1) / 2) : up;
+        }
+        ivec2 parv = coarsest ? ivec2(0) : 2 * parentAt(i / 2, j / 2);
+        ivec2 pred = coarsest ? ivec2(median3(left.x, up.x, upRight.x), median3(left.y, up.y, upRight.y))
+                              : ivec2(median3(left.x, up.x, parv.x), median3(left.y, up.y, parv.y));
+        sPred = pred;
+        int n = 0;
+        sCand[n++] = ivec2(0);
+        sCand[n++] = clampCand(pred);
+        if ((pc.flags & F_PREV) != 0) {
+            vec2 pv;
+            PM_FIELD_SAMPLE(prevF, pc.prevBx, pc.prevBy, pc.prevBs, (float(x0) + 4.0) * pc.scale, (float(y0) + 4.0) * pc.scale, pv);
+            sCand[n++] = clampCand(ivec2(lroundf(pv.x / pc.scale), lroundf(pv.y / pc.scale)));
+        }
+        if (!coarsest) {
+            sCand[n++] = clampCand(parv);
+            ivec2 pn1 = parentAt(i / 2 + ((i & 1) != 0 ? 1 : -1), j / 2);
+            ivec2 pn2 = parentAt(i / 2, j / 2 + ((j & 1) != 0 ? 1 : -1));
+            sCand[n++] = clampCand(2 * pn1);
+            sCand[n++] = clampCand(2 * pn2);
+            sCand[n++] = clampCand(left);
+            sCand[n++] = clampCand(up);
+        }
+        if ((pc.flags & F_EXTENDED) != 0 && haveNb) {
+            sCand[n++] = clampCand(nb[idx].v);
+            if (i + 1 < pc.bx) sCand[n++] = clampCand(nb[idx + 1].v);
+            if (j + 1 < pc.by) sCand[n++] = clampCand(nb[idx + pc.bx].v);
+        }
+        sCount = n;
+    }
+    barrier();
+    const int base = sCount;
+    const int count = base + (coarsest ? side * side : 0);
+    if (coarsest)
+        for (int k = tid; k < side * side; k += 64) sCand[base + k] = clampCand(ivec2(k % side - rng, k / side - rng));
+    barrier();
+    for (int k = tid; k < count; k += 64) sRaw[k] = sad(sCand[k]);
+    barrier();
+    const ivec2 pred = sPred;
+    ivec2 best = ivec2(0);
+    int bestRaw = 0;
+    float bestCost = 1e30;
+    for (int k = 0; k < count; ++k) {
+        ivec2 c = sCand[k];
+        float cost = float(sRaw[k]) + pc.lambda * float(abs(c.x - pred.x) + abs(c.y - pred.y));
+        if (cost < bestCost) { bestCost = cost; best = c; bestRaw = sRaw[k]; }
+    }
+    barrier();
+    for (int step = 0; step < 3; ++step) {
+        const ivec2 centre = best;
+        if (tid < 8) {
+            int k = tid < 4 ? tid : tid + 1;   // the 3x3 ring in row order, the centre skipped
+            ivec2 c = clampCand(centre + ivec2(k % 3 - 1, k / 3 - 1));
+            sCand[tid] = c;
+            sRaw[tid] = sad(c);
+        }
+        barrier();
+        for (int k = 0; k < 8; ++k) {
+            ivec2 c = sCand[k];
+            float cost = float(sRaw[k]) + pc.lambda * float(abs(c.x - pred.x) + abs(c.y - pred.y));
+            if (cost < bestCost) { bestCost = cost; best = c; bestRaw = sRaw[k]; }
+        }
+        barrier();
+        if (best == centre) break;
+    }
+    int zero = 0;
+    vec2 sub = vec2(0.0);
+    if (last) {
+        if (tid < 5) {
+            ivec2 c = tid == 0 ? ivec2(0) : tid == 1 ? best - ivec2(1, 0) : tid == 2 ? best + ivec2(1, 0) : tid == 3 ? best - ivec2(0, 1) : best + ivec2(0, 1);
+            sRaw[tid] = sad(c);
+        }
+        barrier();
+        zero = sRaw[0];
+        int den = sRaw[1] - 2 * bestRaw + sRaw[2];
+        sub.x = den <= 0 ? 0.0 : clamp(float(sRaw[1] - sRaw[2]) / float(2 * den), -0.5, 0.5);
+        den = sRaw[3] - 2 * bestRaw + sRaw[4];
+        sub.y = den <= 0 ? 0.0 : clamp(float(sRaw[3] - sRaw[4]) / float(2 * den), -0.5, 0.5);
+    }
+    if (tid == 0) {
+        Cell c;
+        c.v = best; c.cost = bestRaw; c.zero = zero; c.sub = sub;
+        outc[idx] = c;
+    }
+}

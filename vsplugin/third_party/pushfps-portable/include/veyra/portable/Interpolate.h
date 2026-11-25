@@ -15,6 +15,7 @@
 //   moves toward the nearer real frame's sample instead of a double image;
 //   Live HUD Lock: masked pixels take the nearer real frame directly;
 //   scene cut: no blending at all, the nearer real frame.
+#include "veyra/portable/CrosshairHold.h"
 #include "veyra/portable/Image.h"
 #include "veyra/portable/Motion.h"
 
@@ -28,8 +29,11 @@ struct InterpolateSettings {
 // out gets the size of a. Returns false if a and b differ in size or are empty. Missing fields
 // (empty) or a scene cut give the nearer real frame. mask: Live HUD Lock weights 0..255 of any
 // size (sampled bilinearly), or null.
+// hold / subtitles: Crosshair Hold's and Subtitle Hold's parts for this pair (CrosshairHold.h), or null:
+// then nothing is different.
 bool interpolate(const Bgra& a, const Bgra& b, const MotionField& forward, const MotionField& backward,
-                 const Gray* mask, float t, Bgra& out, int threads = 1, InterpolateSettings settings = {});
+                 const Gray* mask, float t, Bgra& out, int threads = 1, InterpolateSettings settings = {},
+                 const HoldPair* hold = nullptr, const HoldPair* subtitles = nullptr);
 
 // Bilinear BGRA sample at continuous coordinates (pixel centres at +0.5), clamped to the edge.
 void sampleBilinear(const Bgra& image, float x, float y, float out[4]);
