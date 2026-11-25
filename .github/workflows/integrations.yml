@@ -630,7 +630,8 @@ jobs:
             /tmp/clip.mp4 > /tmp/shaders.txt 2>&1 || true
           grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
           echo "::notice title=ArtCNN fallback in mpv::$(grep -E 'upscaling shaders added|vo-passes' /tmp/shaders.txt | tr '\n' ' ' | cut -c1-700)"
-          grep -q 'ArtCNN C4F16 (fragment)' /tmp/shaders.txt || { echo "::error::mpv did not run the ArtCNN passes"; exit 1; }      - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
+          grep -q 'ArtCNN C4F16 (fragment)' /tmp/shaders.txt || { echo "::error::mpv did not run the ArtCNN passes"; exit 1; }
+      - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
         timeout-minutes: 8
         run: |
           set -u
