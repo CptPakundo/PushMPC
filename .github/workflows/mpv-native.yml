@@ -74,12 +74,12 @@ jobs:
           cp "$RUNNER_TEMP/clip.mp4" "$RUNNER_TEMP/t/public.mp4"
       - name: Headless checks
         timeout-minutes: 15
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
+          ls /usr/share/vulkan/icd.d/ || true
+          lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1); [ -n "$lvp" ] && export VK_DRIVER_FILES="$lvp" VK_ICD_FILENAMES="$lvp"
           export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.so" PUSHMPC_ENGINE_LOG="$RUNNER_TEMP/t/engine.log"
           export LD_LIBRARY_PATH="$PREFIX/lib"
-          vulkaninfo --summary 2>/dev/null | grep -iE "deviceName|apiVersion" | head -4 || true
+          vulkaninfo --summary 2>&1 | grep -iE "deviceName|apiVersion|error" | head -6 || true
           bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" linux
       - name: Portable folder (mpv + FFmpeg with vf_pushmpc + engine)
         if: always()

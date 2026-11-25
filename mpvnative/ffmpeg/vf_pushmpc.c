@@ -203,9 +203,10 @@ static const pmeng_api *load_module(AVFilterContext *ctx, const char *opt_path)
     const char *env;
     if (g_api)
         return g_api;
-    /* 1. the option, 2. PUSHMPC_ENGINE, 3. next to this binary, 4. the per-user install, 5. the loader's search path */
-    if ((g_api = try_module(ctx, opt_path)))
-        return g_api;
+    /* 1. the option (when given, nothing else is tried), 2. PUSHMPC_ENGINE, 3. next to this binary, 4. the per-user
+     *    install, 5. the loader's search path */
+    if (opt_path && *opt_path)
+        return g_api = try_module(ctx, opt_path);
     env = getenv("PUSHMPC_ENGINE");
     if ((g_api = try_module(ctx, env)))
         return g_api;

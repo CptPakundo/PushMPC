@@ -183,6 +183,9 @@ public:
         m_settings = s;
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);
+        // tests: a fixed multiplier whatever Auto says (the stub pushcore reports no frame generation capability)
+        m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, 8);
+        if (m_forceK) m_ps.multiplier = uint32_t(m_forceK);
         Log(std::format("d3d11: {}x{} {}, colour {}/{}/{}/{}; display {:.3f} Hz HDR {}; GPU {} ({}); Auto x{} SR {} -> {}x{}{}{}",
             st.width, st.height, ten ? "P010" : "NV12", col[0], col[1], col[2], col[3], m_disp.refreshHz, m_disp.hdr ? "on" : "off", Narrow(g.name),
             Narrow(pm::FamilyName(g.family)), m_choice.multiplier, m_choice.sr ? "on" : "off", m_choice.outW, m_choice.outH,
@@ -210,6 +213,7 @@ public:
                 Log(std::format("d3d11: colour {}/{}/{}/{} differs from the guess: reopening", fc[0], fc[1], fc[2], fc[3]));
                 m_col = fc; m_src.hdr = IsHdr(fc[3]);
                 m_ps = pmvs::ToCore(m_settings, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, nullptr);
+                if (m_forceK) m_ps.multiplier = uint32_t(m_forceK);
                 std::string why;
                 if (!Acquire(W().dllPath.substr(0, W().dllPath.find_last_of(L'\\')), why)) { err = why; return PMENG_ERROR; }
             }
@@ -475,6 +479,7 @@ private:
     pm::Display m_disp;
     pm::Choice m_choice;
     PushCoreSettings m_ps{};
+    int m_forceK = 0;
     std::deque<Item> m_pending;
     uint64_t m_submitted = 0, m_realOut = 0, m_sinceOpen = 0, m_written = 0, m_generated = 0;
     ComPtr<ID3D11VertexShader> m_vs;

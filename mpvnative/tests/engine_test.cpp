@@ -155,13 +155,14 @@ static void TestD3D11(const pmeng_api* api)
     st.range = 1; st.matrix = 1; st.primaries = 1; st.transfer = 1;
     pmeng_output out{}; out.struct_size = sizeof(out);
     char err[512] = {};
-    const std::string opts = std::string("core_dir=") + PME_STUB_DIR + "\nsmoother=2\nsharper=off\ndisplay_fps=48\n";
+    const std::string opts = std::string("core_dir=") + PME_STUB_DIR + "\nsmoother=2\nsharper=off\ndisplay_fps=48\nforce_multiplier=2\n";
     void* h = api->open(&pd, &st, opts.c_str(), &out, err, sizeof(err));
     CHECK(h, "d3d11: open: %s", err);
     if (!h) return;
     std::printf("d3d11: %s | %s | x%u %ux%u fmt %u\n", out.engine, out.description, out.multiplier, out.width, out.height, out.fmt);
     CHECK(out.mem == PMENG_MEM_D3D11 && out.fmt == PMENG_FMT_BGRA, "d3d11: output mem %u fmt %u", out.mem, out.fmt);
     const uint32_t k = out.multiplier;
+    CHECK(k == 2, "d3d11: multiplier %u, expected 2 (force_multiplier)", k);
 
     D3D11_TEXTURE2D_DESC td = {}; td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 4; td.Format = DXGI_FORMAT_NV12;
     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = 0;   // as FFmpeg's hwupload pool (WARP refuses NV12 arrays with shader binding)

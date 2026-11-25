@@ -40,7 +40,8 @@ for c in "${CLIPS[@]}"; do
 done
 
 # 2. 10-bit CPU path (P010 / yuv420p10: HDR-style signal passes through, tags kept)
-"$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=2" -pix_fmt yuv420p10le -color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc -c:v ffv1 "$T/clip10.mkv"
+"$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=2" -vf "setparams=color_trc=smpte2084:color_primaries=bt2020:colorspace=bt2020nc:range=tv" -pix_fmt yuv420p10le -c:v ffv1 "$T/clip10.mkv"
+"$FP" -v error -show_entries stream=color_transfer,color_primaries -of csv=p=0 "$T/clip10.mkv" | sed "s/^/10-bit source tags: /"
 if "$FF" -v info -y -i "$T/clip10.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$T/ff-10.mkv" > "$T/ff-10.log" 2>&1 && check "$T/ff-10.mkv" $((1 + (48 - 1) * 2)) 48 2 \
    && "$FP" -v error -show_entries stream=color_transfer,color_primaries -of csv=p=0 "$T/ff-10.mkv" | tee /dev/stderr | grep -q "smpte2084"; then
     result ffmpeg-10bit-hdr-tags PASS; else tail -5 "$T/ff-10.log"; result ffmpeg-10bit-hdr-tags FAIL; fi
@@ -77,6 +78,8 @@ if [ "$OS" = msys2 ]; then
         -vf "format=nv12,hwupload,pushmpc=smoother=2:core_dir='$stub':display_fps=48,hwdownload,format=bgra" -c:v ffv1 "$T/ff-d3d11.mkv" > "$T/ff-d3d11.log" 2>&1; then
         grep -i "pushmpc\|pushcore" "$T/ff-d3d11.log" | head -4
         if grep -q "zero copy" "$T/ff-d3d11.log" && check "$T/ff-d3d11.mkv" $((1 + (N - 1) * 2)) 48000/1001 2; then result ffmpeg-d3d11-pushcore-x2 PASS; else result ffmpeg-d3d11-pushcore-x2 FAIL; fi
+    elif grep -q "Device creation failed" "$T/ff-d3d11.log"; then
+        tail -3 "$T/ff-d3d11.log"; result ffmpeg-d3d11-pushcore-x2 SKIP   # no video-capable D3D11 adapter (hosted runners: Basic Render Driver)
     else tail -20 "$T/ff-d3d11.log"; result ffmpeg-d3d11-pushcore-x2 FAIL; fi
 fi
 
@@ -92,8 +95,9 @@ if [ -x "$MPV" ] || [ -f "$MPV" ]; then
        && check "$T/mpv-graph.mkv" $((1 + (N - 1) * 2)) 48000/1001 3; then result mpv-lavfi-graph-x2 PASS; else tail -10 "$T/mpv-graph.log"; result mpv-lavfi-graph-x2 FAIL; fi
     # 7. playback timing: vo=null at a 96 Hz "display", display-resample, a seek (graph rebuilt); mpv must see 95.9 fps
     #    from the filter, lock vsync-ratio 1 and drop nothing
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 "$T/clip12.mkv"
     "$MPV" --no-config --vo=null --vo-null-fps=95.904 --video-sync=display-resample --interpolation=no --ao=null --untimed=no \
-        --vf=pushmpc=smoother=4 --script="$HERE/sync.lua" --loop-file=inf "$T/clip.mkv" > "$T/mpv-sync.log" 2>&1
+        --vf=pushmpc=smoother=4 --script="$HERE/sync.lua" "$T/clip12.mkv" > "$T/mpv-sync.log" 2>&1
     grep "pushmpc-ci" "$T/mpv-sync.log" | tee "$T/sync.txt"
     if grep -q "after-seek: estimated-vf-fps=9[56]\." "$T/sync.txt" && grep -q "after-seek.*frame-drop-count=0 " "$T/sync.txt"; then result mpv-display-resample-x4 PASS
     else tail -15 "$T/mpv-sync.log"; result mpv-display-resample-x4 FAIL; fi
