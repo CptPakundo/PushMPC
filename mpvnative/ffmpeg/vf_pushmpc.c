@@ -939,6 +939,8 @@ static int activate(AVFilterContext *ctx)
 
     if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
         if (!s->passthrough && s->eng) {
+            if (s->api->struct_size >= offsetof(pmeng_api, finish) + sizeof(s->api->finish) && s->api->finish)
+                s->api->finish(s->eng);   /* Dedup's held-back outputs */
             if ((ret = drain(ctx, (uint32_t)s->wait_ms, 1)) < 0)
                 return ret;
             pts = s->frames_out ? s->last_out_pts + s->last_out_dur : av_rescale(pts, s->K, 1);

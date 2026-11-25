@@ -130,6 +130,7 @@ struct Engine::Impl {
     Buffer staging[2]; uint64_t stagingUse[2] = { 0, 0 }; int nextStaging = 0;
     VkDeviceSize stOffU = 0, stOffV = 0;
     Buffer readback; VkDeviceSize outStride = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0;
+    Buffer rectBuf;   // ReadRect's host buffer (grown on demand)
     std::vector<bool> outUsed;
     Buffer dedupStats; int nextDedup = 0;
     Buffer dummy;
@@ -254,6 +255,7 @@ void Engine::Impl::Free()
     for (auto& b : sweep2) ctx->Destroy(b);
     sweep1.clear(); sweep2.clear();
     for (auto& b : staging) ctx->Destroy(b);
+    ctx->Destroy(rectBuf);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
     for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
     FreeOf();
@@ -464,7 +466,7 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     I.nextJob = 0;
 
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
+    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
@@ -1156,6 +1158,44 @@ bool Engine::Export(int out, const ExportRecorder& rec, const ExternalSync& sync
     if (!ticket) return false;
     // the slot is rewritten only by a later job, which the queue orders after this one
     I.outUsed[size_t(out)] = false;
+    return true;
+}
+
+
+bool Engine::ReadRect(int slot, int x, int y, int w, int h, std::vector<uint8_t> (&planes)[3], std::string& err)
+{
+    Impl& I = *m;
+    if (slot < 0 || slot >= int(I.slots.size()) || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > I.cfg.width || y + h > I.cfg.height) {
+        err = "GPU engine: ReadRect outside the picture"; return false;
+    }
+    const int bps = I.cfg.bits > 8 ? 2 : 1, cx = x / 2, cy = y / 2, cw = w / 2, ch = h / 2;
+    const VkDeviceSize ySz = VkDeviceSize(w) * VkDeviceSize(h) * VkDeviceSize(bps), cSz = VkDeviceSize(cw) * VkDeviceSize(ch) * VkDeviceSize(bps);
+    const VkDeviceSize offU = Align(ySz, 256), offV = Align(offU + cSz, 256), need = offV + cSz;
+    if (I.rectBuf.size < need) {
+        I.ctx->Destroy(I.rectBuf);
+        if (!I.ctx->CreateBuffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, I.rectBuf, err)) return false;
+    }
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return false;
+    const Impl::Slot& s = I.slots[size_t(slot)];
+    const VkImage img[3] = { s.y.img, s.u.img, s.v.img };
+    const VkDeviceSize off[3] = { 0, offU, offV };
+    for (int p = 0; p < 3; ++p) {
+        VkBufferImageCopy r{};
+        r.bufferOffset = off[p];
+        r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        r.imageOffset = { p ? cx : x, p ? cy : y, 0 };
+        r.imageExtent = { uint32_t(p ? cw : w), uint32_t(p ? ch : h), 1 };
+        vkCmdCopyImageToBuffer(j.cb, img[p], VK_IMAGE_LAYOUT_GENERAL, I.rectBuf.buf, 1, &r);
+    }
+    const uint64_t v = I.Submit(j, err);
+    if (!v || !I.WaitValue(v, err)) return false;
+    for (int p = 0; p < 3; ++p) {
+        const size_t n = size_t(p ? cSz : ySz);
+        planes[p].resize(n);
+        std::memcpy(planes[p].data(), static_cast<const uint8_t*>(I.rectBuf.map) + off[p], n);
+    }
     return true;
 }
 

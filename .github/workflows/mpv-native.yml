@@ -188,6 +188,15 @@ jobs:
           # run from the portable folder (its DLLs), as a user would
           rm -rf $R/pm-portable-prefix; mkdir -p $R/pm-portable-prefix; cp -r $R/PushMPC-mpv-windows $R/pm-portable-prefix/bin
           bash mpvnative/tests/run-tests.sh $R/pm-portable-prefix "$t" msys2
+      - name: D3D11 zero-copy filter path on WARP (harness, stub pushcore)
+        shell: msys2 {0}
+        timeout-minutes: 5
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          export PKG_CONFIG_PATH="$R/pm-prefix/lib/pkgconfig"
+          gcc -O2 -Wall mpvnative/tests/d3d11_warp_harness.c -o "$R/d3d11_warp_harness.exe" $(pkg-config --cflags --libs libavfilter libavutil) -ld3d11 -ldxgi -ldxguid -luuid
+          export PATH="$R/PushMPC-mpv-windows:$PATH" PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
+          "$R/d3d11_warp_harness.exe" "$(cygpath -m "$PWD/build-engine/stub")"
       - name: mpv on a window (d3d11 on WARP, hwupload -> pushmpc -> d3d11 interop), best effort
         shell: msys2 {0}
         continue-on-error: true
@@ -242,56 +251,94 @@ jobs:
           export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.dylib" DYLD_LIBRARY_PATH="$PREFIX/lib"
           bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" macos
 
-  # (b) the runtime hook into an EXISTING mpv: Ubuntu 24.04's own mpv (0.37) and FFmpeg (6.1.1), no rebuild of either
-  hook:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
+  # (b) the runtime hook into an EXISTING mpv: one private libavfilter per FFmpeg branch (6.0 .. 9.1) and architecture,
+  # picked at run time by the system's avfilter_version(); then the distros' own mpv: Ubuntu 24.04 (FFmpeg 6.1),
+  # Debian 13 (7.1), Arch (current).
+  hook-libs:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        tag: [n6.0.1, n6.1.6, n7.0.3, n7.1.5, n8.0.3, n8.1.3, n9.0.2, n9.1]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     env:
       CCACHE_DIR: /home/runner/pm-ccache-hook
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends build-essential pkg-config ccache patchelf
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/pm-ccache-hook
+          key: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.tag }}-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/hook/pushmpc_hook_glue.c') }}
+          restore-keys: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.tag }}-
+      - name: FFmpeg ${{ matrix.tag }} (pinned) and its private libavfilter
+        run: |
+          commit=$(python3 -c "import json,sys;print([b['commit'] for b in json.load(open('mpvnative/pins.json'))['hookBranches'] if b['tag']==sys.argv[1]][0])" "${{ matrix.tag }}")
+          s="$RUNNER_TEMP/ffmpeg"
+          git clone -q --depth 1 -b "${{ matrix.tag }}" https://git.ffmpeg.org/ffmpeg.git "$s"
+          [ "$(git -C "$s" rev-parse HEAD)" = "$commit" ] || { echo "::error::${{ matrix.tag }}: commit mismatch"; exit 1; }
+          bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hooklib"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hooklib-${{ matrix.runner }}-${{ matrix.tag }}
+          path: ${{ runner.temp }}/hooklib/*.so
+          retention-days: 7
+
+  hook:
+    needs: hook-libs
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      CCACHE_DIR: /home/runner/pm-ccache-hook-test
     steps:
       - uses: actions/checkout@v4
       - name: Packages (the distro mpv and FFmpeg)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg libavfilter-dev libavutil-dev nasm pkg-config \
-            build-essential cmake ccache patchelf
-          mpv --version | head -3; dpkg -s libavfilter9 | grep -E '^Version'
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config
+          mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hooklib-${{ matrix.runner }}-*
+          path: ${{ runner.temp }}/hook
+          merge-multiple: true
       - uses: actions/cache@v4
         with:
-          path: |
-            /home/runner/pm-ccache-hook
-            /home/runner/pm-src-hook
-          key: mpvnative-hook-${{ hashFiles('mpvnative/pins.json') }}-${{ github.run_id }}
-          restore-keys: mpvnative-hook-${{ hashFiles('mpvnative/pins.json') }}-
-      - name: FFmpeg 6.1.1 source (the release Ubuntu ships) and the hook
+          path: /home/runner/pm-ccache-hook-test
+          key: mpvnative-hooktest-${{ matrix.runner }}-${{ github.run_id }}
+          restore-keys: mpvnative-hooktest-${{ matrix.runner }}-
+      - name: The hook and the engine module
         run: |
-          pin() { python3 -c "import json,sys;print(json.load(open('mpvnative/pins.json'))['ffmpegDistro'][sys.argv[1]])" "$1"; }
-          s=/home/runner/pm-src-hook/ffmpeg
-          [ -d "$s/.git" ] || git clone -q --depth 1 -b "$(pin tag)" "$(pin repo)" "$s"
-          [ "$(git -C "$s" rev-parse HEAD)" = "$(pin commit)" ] || { echo "::error::ffmpeg 6.1.1 commit mismatch"; exit 1; }
-          bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hook"
-      - name: Engine module
-        run: |
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$RUNNER_TEMP/hook/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          cp mpvnative/ci/SOURCES.txt "$RUNNER_TEMP/hook/"
+          ls -la "$RUNNER_TEMP/hook"
           cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
           cmake --build build-engine --parallel --target pushmpc_engine
-      - name: Distro mpv plays through vf_pushmpc (encode mode, x4) and on vo=null
+          cp build-engine/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+      - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
+        run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
+      - name: Debian 13's mpv (FFmpeg 7.1)
+        timeout-minutes: 15
         run: |
-          export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.so"
-          t="$RUNNER_TEMP/t"; mkdir -p "$t"
-          ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=4" -pix_fmt yuv420p -c:v ffv1 "$t/clip.mkv"
-          n=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv")
-          mpv --no-config --script="$RUNNER_TEMP/hook/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 "$t/clip.mkv" \
-            --o="$t/hook.mkv" --of=matroska --ovc=ffv1 --no-audio --msg-level=all=v > "$t/hook.log" 2>&1 || true
-          grep -iE "pushmpc|cplugin|lavfi|Opening|filter" "$t/hook.log" | head -25
-          python3 mpvnative/tests/check_frames.py "$t/hook.mkv" $((1 + (n - 1) * 4)) 96000/1001 --tolerance 3
-          mpv --no-config --script="$RUNNER_TEMP/hook/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 --vo=null --vo-null-fps=95.904 \
-            --video-sync=display-resample --ao=null --script=mpvnative/tests/sync.lua --loop-file=inf "$t/clip.mkv" > "$t/hook-sync.log" 2>&1 || true
-          grep -E "pushmpc" "$t/hook-sync.log" | head -8
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:trixie sh -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - name: Arch's mpv (current FFmpeg)
+        if: matrix.runner == 'ubuntu-24.04'
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" archlinux:latest sh -c \
+            'pacman -Syu --noconfirm --needed mpv ffmpeg python >/dev/null 2>&1 && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mpvnative-hook
+          name: mpvnative-hook-${{ matrix.runner }}
           path: |
             ${{ runner.temp }}/hook
-            ${{ runner.temp }}/t/*.log
+            ${{ runner.temp }}/t-*/*.log
           retention-days: 7

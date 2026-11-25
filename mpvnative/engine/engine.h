@@ -31,6 +31,7 @@ public:
     virtual uint32_t Pending() = 0;
     virtual int Flush() = 0;
     virtual std::string Stats() = 0;
+    virtual int Finish() { return PMENG_OK; }   // end of stream (engines that hold outputs back)
     std::string err;
 };
 

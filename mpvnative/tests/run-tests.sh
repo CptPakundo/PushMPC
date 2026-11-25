@@ -69,6 +69,15 @@ if [ "$OS" = linux ]; then
         ps=$(grep -o "average:[a-z0-9.]*" "$T/ff-vk-psnr.log" | tail -1); echo "vulkan real frames vs source: $ps"
         case $ps in average:inf|average:[6-9][0-9]*|average:1[0-9][0-9]*) result ffmpeg-vulkan-real-frames-exact PASS ;; *) result ffmpeg-vulkan-real-frames-exact FAIL ;; esac
     else tail -15 "$T/ff-vk.log"; result ffmpeg-vulkan-x2 FAIL; fi
+    # Dedup on the Vulkan path: a clip drawn on twos (12 fps doubled to 24), Subtitle Hold on (the band readback runs)
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=12:duration=4,fps=24" -pix_fmt yuv420p -c:v ffv1 "$T/twos.mkv"
+    N2=$(count "$T/twos.mkv")
+    if PUSHMPC_ENGINE_LOG="$T/engine-twos.log" "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/twos.mkv" \
+        -vf "format=nv12,hwupload,pushmpc=smoother=2:extra=subtitle_hold\=1,hwdownload,format=nv12" -c:v ffv1 "$T/twos-vk.mkv" > "$T/twos-vk.log" 2>&1; then
+        grep -h "close:" "$T/engine-twos.log" | tail -1
+        dups=$(grep -ho "([0-9]* duplicates)" "$T/engine-twos.log" | tail -1 | tr -dc 0-9)
+        if check "$T/twos-vk.mkv" $((1 + (N2 - 1) * 2)) 48 2 && [ "${dups:-0}" -ge $((N2 / 2 - 2)) ]; then result ffmpeg-vulkan-dedup-twos PASS; else echo "duplicates: ${dups:-none} of $N2"; result ffmpeg-vulkan-dedup-twos FAIL; fi
+    else tail -15 "$T/twos-vk.log"; result ffmpeg-vulkan-dedup-twos FAIL; fi
     # fruc_vulkan needs VK_NV_optical_flow (RTX 30+): on lavapipe it must refuse cleanly
     "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 10 \
         -vf "format=nv12,hwupload,fruc_vulkan=fps=source_fps*2,hwdownload,format=nv12" -f null - > "$T/fruc.log" 2>&1

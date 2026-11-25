@@ -2,6 +2,16 @@
   "note": "Sources the mpv-native CI builds from (git tags, checked against these commits after the clone). FFmpeg 9.1 is the first release with fruc_vulkan; mpv 0.42.0 needs libplacebo >= 7.387.0. ffmpegDistro is the source of Ubuntu 24.04's FFmpeg (6.1.1), for the runtime hook's per-version build.",
   "ffmpeg": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n9.1", "commit": "74e4393595cf2b5857f0da925c4e0dd74ea306e5" },
   "ffmpegDistro": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n6.1.1", "commit": "e38092ef9395d7049f871ef4d5411eb410e283e0" },
+  "hookBranches": [
+    { "tag": "n6.0.1", "commit": "c41ff724ede7da657762d61097e26fac296c53bf" },
+    { "tag": "n6.1.6", "commit": "f1e3a2bf7a2f2cde936d1ed97f09a26853d20125" },
+    { "tag": "n7.0.3", "commit": "eaddd1d7140bab19e5a4403d3c0f61fe5f59cb75" },
+    { "tag": "n7.1.5", "commit": "3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587" },
+    { "tag": "n8.0.3", "commit": "8ae0b34901ba60a802f183ee75a250a9fc3e09a5" },
+    { "tag": "n8.1.3", "commit": "1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7" },
+    { "tag": "n9.0.2", "commit": "946fcce07b6dcd0331c8cc609192aeff5e1924f8" },
+    { "tag": "n9.1", "commit": "74e4393595cf2b5857f0da925c4e0dd74ea306e5" }
+  ],
   "mpv": { "repo": "https://github.com/mpv-player/mpv.git", "tag": "v0.42.0", "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3" },
   "libplacebo": { "repo": "https://code.videolan.org/videolan/libplacebo.git", "tag": "v7.387.0", "commit": "275f7dea27924cdd34ab2e6c20e448b6bc4fab65" },
   "vulkanHeaders": { "repo": "https://github.com/KhronosGroup/Vulkan-Headers.git", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2" },

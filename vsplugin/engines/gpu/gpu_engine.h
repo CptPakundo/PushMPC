@@ -139,6 +139,9 @@ public:
     int Import(const ImportRecorder& rec, const ExternalSync& sync, std::string& err, uint64_t* ticket = nullptr);
     // an output (Generate / Real with deviceReadback) recorded by the caller into its frame; frees the readback slot
     bool Export(int out, const ExportRecorder& rec, const ExternalSync& sync, uint64_t& ticket, std::string& err);
+    // a rectangle of an imported picture back to the host (Subtitle Hold's band): luma x, y, w, h (even), chroma at half;
+    // planes packed (rows of w / w / 2 samples, source bits). Waits for the GPU.
+    bool ReadRect(int slot, int x, int y, int w, int h, std::vector<uint8_t> (&planes)[3], std::string& err);
     const Config& Cfg() const;
     const DeviceInfo& Device() const;
     bool OpticalFlowActive() const;     // the motion comes from VK_NV_optical_flow

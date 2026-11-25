@@ -151,6 +151,12 @@ const char* LastError(void* h)
     if (!in->b->err.empty()) in->err = in->b->err;
     return in->err.c_str();
 }
+int Finish(void* h)
+{
+    auto* in = static_cast<Instance*>(h);
+    if (!in) return PMENG_ERROR;
+    GUARD(in->b->Finish())
+}
 int Stats(void* h, char* buf, uint32_t size)
 {
     auto* in = static_cast<Instance*>(h);
@@ -159,7 +165,7 @@ int Stats(void* h, char* buf, uint32_t size)
     return PMENG_OK;
 }
 
-const pmeng_api kApi = { sizeof(pmeng_api), PMENG_ABI_VERSION, Version, Open, Submit, Peek, Write, Skip, Pending, Flush, Close, LastError, Stats };
+const pmeng_api kApi = { sizeof(pmeng_api), PMENG_ABI_VERSION, Version, Open, Submit, Peek, Write, Skip, Pending, Flush, Close, LastError, Stats, Finish };
 
 } // namespace
 

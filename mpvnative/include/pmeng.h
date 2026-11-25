@@ -147,6 +147,9 @@ typedef struct pmeng_api {
     void (*close)(void* h);                          /* warm state (pushcore) may stay for the next open */
     const char* (*last_error)(void* h);
     int (*stats)(void* h, char* buf, uint32_t size); /* one line for the log */
+    /* end of stream: settle what the engine still holds back (Dedup's lookahead); the outputs then arrive through peek.
+       Optional for the caller to check: present when struct_size covers it */
+    int (*finish)(void* h);
 } pmeng_api;
 
 typedef const pmeng_api* (*pmeng_get_api_fn)(uint32_t abi_version);

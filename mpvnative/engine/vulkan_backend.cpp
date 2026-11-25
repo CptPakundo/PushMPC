@@ -7,6 +7,10 @@
 // signalled (+1) around each import and export, so mpv / FFmpeg see the frames as they expect.
 // Not here (the VapourSynth route has them): Dedup re-timing and Subtitle Hold (they need the CPU picture).
 #include <algorithm>
+#include <array>
+#include <future>
+#include <iterator>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +22,8 @@
 #include "gpu_backend.h"
 #include "gpu_engine.h"
 #include "platform.h"
+#include "cadence.h"
+#include "subtitle_hold.h"
 #include "vk_context.h"
 #include "pme_import.h"
 #include "pme_export.h"
@@ -90,12 +96,20 @@ public:
         const std::string q = Opt(o, "portable_quality", ReadSetting("PortableQuality"));
         c.quality = q == "fast" || q == "0" ? 1 : 2;
         if (!m_eng.Configure(c, m_ctx, why)) return false;
-        if (!MakePipes(why)) return false;
+        if (!MakePipesOnce(why)) return false;
 
         const GpuCalibration cal = s.enable && s.smoother == 0 ? CalibrateGpu(m_eng) : GpuCalibration{};
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true)
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
+        m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
+        m_holdOn = m_k > 1 && ParseBool(Opt(o, "subtitle_hold", ReadSetting("SubtitleHold")), false);
+        const int look = m_dedup ? 2 : 0;
+        if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots) {   // a settle can release (lookahead + 1) x k outputs
+            c.outSlots = std::min(needOuts, 28);
+            if (!m_eng.Configure(c, m_ctx, why) || !MakePipesOnce(why)) return false;
+        }
+        m_cadence.Configure(m_k, look, 0);
 
         out.mem = PMENG_MEM_VULKAN;
         out.fmt = m_fmt;
@@ -106,6 +120,8 @@ public:
         std::snprintf(out.engine, sizeof(out.engine), "portable-vulkan");
         std::snprintf(out.description, sizeof(out.description), "PushFPS portable engine on %s (the decoder's device), %dx%d %d-bit -> %dx%d (%s); %s",
                       m_ctx->Info().Describe().c_str(), m_w, m_h, m_bits, m_eng.OutWidth(), m_eng.OutHeight(), UpscalerName(c.upscaler), pk.why.c_str());
+        std::snprintf(out.description + std::strlen(out.description), sizeof(out.description) - std::strlen(out.description), "; Dedup %s, Subtitle Hold %s",
+                      m_dedup ? "on" : "off", m_holdOn ? "on" : "off");
         return true;
     }
 
@@ -149,34 +165,38 @@ public:
         const int slot = m_eng.Import(rec, sync, err, &itk);
         if (slot < 0) return PMENG_ERROR;
         pool->ticket = itk;
-        m_last = itk;
+        m_lastTicket = itk;
         if (m_hostSync && !m_eng.Wait(itk, err)) return PMENG_ERROR;   // diagnostics: PUSHMPC_VK_SYNC=1
 
-        const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_prevSlot >= 0;
-        if (!contiguous) ResetHistory();
-        if (contiguous && m_k > 1) {
-            const int pair = m_eng.EstimateBegin(m_prevSlot, slot, m_prevPair, err);
-            if (pair < 0) return PMENG_ERROR;
-            PairStats ps;
-            if (!m_eng.EstimateEnd(pair, ps, err)) return PMENG_ERROR;
-            const int cut = m_guard.Decide(ps);
-            if (cut) ++m_cuts;
-            for (int j = 1; j < m_k; ++j) {
-                const int mode = cut ? (2 * j < m_k ? 1 : 2) : 0;   // a cut: the nearer real frame, never a morph
-                int o = -1; uint64_t tk = 0;
-                if (!m_eng.Generate(pair, float(j) / float(m_k), mode, o, tk, err)) return PMENG_ERROR;
-                m_q.push_back({ { m_seq, uint32_t(j), uint32_t(m_k), 1 }, o });
-            }
-            if (m_prevPair >= 0) m_eng.ReleasePair(m_prevPair);
-            m_prevPair = pair;
+        const int64_t s = int64_t(m_seq++);
+        const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_last == s - 1;
+        if (!contiguous) Drop();
+        m_last = s;
+        // Dedup (PushFPS portable's rule on the GPU: the quarter-size luma against the last distinct picture)
+        bool dup = false;
+        if (m_dedup && m_lastDistinctSlot >= 0) {
+            DedupStats ds;
+            if (!m_eng.Duplicate(m_lastDistinctSlot, slot, ds, err)) return PMENG_ERROR;
+            dup = ds.duplicate;
         }
-        int o = -1; uint64_t tk = 0;
-        if (!m_eng.Real(slot, o, tk, err)) return PMENG_ERROR;
-        m_q.push_back({ { m_seq, 0, uint32_t(m_k), 0 }, o });
-        if (m_prevSlot >= 0) m_eng.ReleaseSlot(m_prevSlot);   // its outputs are recorded; the queue keeps the order
-        m_prevSlot = slot;
-        ++m_seq;
+        if (dup) { m_eng.ReleaseSlot(slot); ++m_dups; }
+        else {
+            m_slotOf[s] = slot;
+            m_lastDistinctSlot = slot;
+            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;
+            m_prevDistinct = s;
+            if (m_holdOn && !HoldFrame(s, slot)) return PMENG_ERROR;
+        }
+        m_cadence.Push(s, dup);
+        if (!SettleAndEmit()) return PMENG_ERROR;
+        Prune();
         return PMENG_OK;
+    }
+
+    int Finish() override
+    {
+        m_cadence.Finish();
+        return SettleAndEmit() ? PMENG_OK : PMENG_ERROR;
     }
 
     int Peek(pmeng_out_info& info, uint32_t) override
@@ -225,7 +245,7 @@ public:
         uint64_t tk = 0;
         if (!m_eng.Export(it.out, rec, sync, tk, err)) { m_eng.ReleaseOut(it.out); return PMENG_ERROR; }
         pool->ticket = tk;
-        m_last = tk;
+        m_lastTicket = tk;
         if (m_hostSync && !m_eng.Wait(tk, err)) return PMENG_ERROR;
         ++m_written;
         if (it.info.generated) ++m_generated;
@@ -238,15 +258,16 @@ public:
     {
         for (auto& q : m_q) m_eng.ReleaseOut(q.out);
         m_q.clear();
-        ResetHistory();
+        Drop();
         return PMENG_OK;
     }
     std::string Stats() override
     {
-        char b[320];
+        char b[480];
         const auto& t = m_eng.Times();
-        std::snprintf(b, sizeof(b), "portable-vulkan: %llu sources, %llu outputs (%llu generated), %llu cuts; import %.2f ms, motion %.2f ms (means)",
-                      (unsigned long long)m_seq, (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_cuts,
+        std::snprintf(b, sizeof(b), "portable-vulkan: %llu sources (%llu duplicates), %llu outputs (%llu generated, %llu held), %llu cuts, %llu pairs with Subtitle Hold; import %.2f ms, motion %.2f ms (means)",
+                      (unsigned long long)m_seq, (unsigned long long)m_dups, (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_holds,
+                      (unsigned long long)m_cuts, (unsigned long long)m_heldPairs,
                       t.uploads ? t.uploadMs / double(t.uploads) : 0.0, t.pairs ? t.meMs / double(t.pairs) : 0.0);
         return b;
     }
@@ -255,11 +276,144 @@ private:
     struct Item { pmeng_out_info info; int out; };
     struct Pool { VkDescriptorPool pool = VK_NULL_HANDLE; uint64_t ticket = 0; };
 
-    void ResetHistory()
+    struct PairInfo { int id = -1; int cut = 0; bool pending = false; };
+
+    // a seek or gap: every queued output and picture forgotten
+    void Drop()
     {
-        if (m_prevPair >= 0) m_eng.ReleasePair(m_prevPair);
-        if (m_prevSlot >= 0) m_eng.ReleaseSlot(m_prevSlot);
-        m_prevPair = m_prevSlot = -1;
+        for (auto& q : m_q) m_eng.ReleaseOut(q.out);
+        m_q.clear();
+        if (m_holdChain.valid()) m_holdChain.wait();
+        m_holdChain = {};
+        m_holdOf.clear();
+        m_hold.Reset();
+        for (auto& [key, p] : m_pairs) m_eng.ReleasePair(p.id);
+        m_pairs.clear();
+        m_lastPair = -1; m_lastPairKey = { -1, -1 };
+        for (auto& [s, slot] : m_slotOf) m_eng.ReleaseSlot(slot);
+        m_slotOf.clear();
+        m_lastDistinctSlot = -1; m_prevDistinct = -1;
+        m_cadence.Reset();
+        m_last = -1000000;
+    }
+    // the GPU picture of source frame s: its own, or the distinct frame it repeats
+    int SlotAt(int64_t s) const
+    {
+        auto it = m_slotOf.upper_bound(s);
+        if (it == m_slotOf.begin()) return m_slotOf.empty() ? -1 : m_slotOf.begin()->second;
+        return std::prev(it)->second;
+    }
+    bool StartPair(int64_t d0, int64_t d1)
+    {
+        const auto key = std::make_pair(d0, d1);
+        if (m_pairs.count(key)) return true;
+        auto a = m_slotOf.find(d0), b = m_slotOf.find(d1);
+        if (a == m_slotOf.end() || b == m_slotOf.end()) { err = "Vulkan engine: a picture of the pair is gone"; return false; }
+        const int prev = m_lastPairKey.second == d0 ? m_lastPair : -1;
+        const int id = m_eng.EstimateBegin(a->second, b->second, prev, err);
+        if (id < 0) return false;
+        PairInfo pi; pi.id = id; pi.pending = true;
+        m_pairs[key] = pi;
+        m_lastPair = id; m_lastPairKey = key;
+        return true;
+    }
+    bool PairFor(int64_t d0, int64_t d1, PairInfo& out)
+    {
+        const auto key = std::make_pair(d0, d1);
+        auto it = m_pairs.find(key);
+        if (it == m_pairs.end()) { if (!StartPair(d0, d1)) return false; it = m_pairs.find(key); }
+        if (!it->second.pending) { out = it->second; return true; }
+        PairStats st;
+        if (!m_eng.EstimateEnd(it->second.id, st, err)) return false;
+        PairInfo pi; pi.id = it->second.id; pi.cut = m_guard.Decide(st);
+        if (pi.cut) ++m_cuts;
+        if (m_holdOn && !pi.cut) {
+            auto ha = m_holdOf.find(d0), hb = m_holdOf.find(d1);
+            if (ha != m_holdOf.end() && hb != m_holdOf.end()) {
+                auto fa = ha->second.get(), fb = hb->second.get();
+                if (fa && fb) {
+                    auto hp = SubtitleHoldYuv::Pair(*fa, *fb, m_bits);
+                    if (!m_eng.SetHold(pi.id, hp.get(), err)) return false;
+                    if (hp && hp->held > 0) ++m_heldPairs;
+                }
+            }
+        }
+        it->second = pi;
+        out = pi;
+        return true;
+    }
+    // Subtitle Hold: only the subtitle band comes back to the host (about 1.4 MB at 4K 8-bit), the rule runs on a worker
+    bool HoldFrame(int64_t s, int slot)
+    {
+        const veyra::pipeline::overlay::Zone z = veyra::pipeline::overlay::subtitleZoneFor(uint32_t(m_w), uint32_t(m_h));
+        if (z.size == 0) return true;
+        auto band = std::make_shared<std::array<std::vector<uint8_t>, 3>>();
+        std::vector<uint8_t> planes[3];
+        if (!m_eng.ReadRect(slot, int(z.x), int(z.y), int(z.w), int(z.h), planes, err)) return false;
+        for (int p = 0; p < 3; ++p) (*band)[size_t(p)] = std::move(planes[p]);
+        const int bps = m_bits > 8 ? 2 : 1, zx = int(z.x), zy = int(z.y), zw = int(z.w), w = m_w, h = m_h, bits = m_bits;
+        std::shared_future<std::shared_ptr<const HoldFrameYuv>> prev = m_holdChain;
+        SubtitleHoldYuv* hold = &m_hold;
+        m_holdChain = std::async(std::launch::async, [prev, hold, band, bps, zx, zy, zw, w, h, bits]() {
+            if (prev.valid()) prev.wait();
+            // a full-size view whose rows inside the band point into the band copy (the rule reads only the band)
+            portable::YuvView v;
+            v.width = w; v.height = h; v.bits = bits;
+            v.stride[0] = ptrdiff_t(zw) * bps; v.stride[1] = v.stride[2] = ptrdiff_t(zw / 2) * bps;
+            v.data[0] = (*band)[0].data() - (ptrdiff_t(zy) * v.stride[0] + ptrdiff_t(zx) * bps);
+            v.data[1] = (*band)[1].data() - (ptrdiff_t(zy / 2) * v.stride[1] + ptrdiff_t(zx / 2) * bps);
+            v.data[2] = (*band)[2].data() - (ptrdiff_t(zy / 2) * v.stride[2] + ptrdiff_t(zx / 2) * bps);
+            return hold->Frame(v);
+        }).share();
+        m_holdOf[s] = m_holdChain;
+        return true;
+    }
+    // the outputs Cadence settles: GPU work recorded now, exported into the filter's frames by Write
+    bool SettleAndEmit()
+    {
+        std::vector<Settled> settled;
+        m_cadence.Settle(settled);
+        for (const Settled& st : settled) {
+            const int64_t pos = st.n / m_k + (st.n % m_k ? 1 : 0);
+            pmeng_out_info info{ uint64_t(pos), uint32_t(st.n % m_k), uint32_t(m_k), 0 };
+            const Shot& sh = st.shot;
+            int o = -1; uint64_t tk = 0;
+            if (sh.kind != Shot::Generated) {
+                const int slot = SlotAt(sh.src);
+                if (slot < 0) { err = "Vulkan engine: no picture for frame " + std::to_string(sh.src); return false; }
+                if (!m_eng.Real(slot, o, tk, err)) return false;
+                info.generated = sh.kind == Shot::Hold ? 1 : 0;
+                if (sh.kind == Shot::Hold) ++m_holds;
+            } else {
+                PairInfo pi;
+                if (!PairFor(sh.d0, sh.d1, pi)) return false;
+                const int mode = pi.cut ? (sh.t < 0.5f ? 1 : 2) : 0;   // a cut: the nearer real frame, never a morph
+                if (!m_eng.Generate(pi.id, sh.t, mode, o, tk, err)) return false;
+                info.generated = 1;
+            }
+            m_q.push_back({ info, o });
+        }
+        return true;
+    }
+    // forget what no later output can need (as the VapourSynth GPU backend)
+    void Prune()
+    {
+        const auto& dist = m_cadence.Distinct();
+        const int64_t front = dist.empty() ? m_last : dist.front();
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first < front && it->second.id != m_lastPair) { m_eng.ReleasePair(it->second.id); it = m_pairs.erase(it); }
+            else ++it;
+        }
+        for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
+            bool used = false;
+            for (auto& [key, p] : m_pairs) used = used || key.first == it->first || key.second == it->first;
+            if (it->first < front && !used && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
+            else ++it;
+        }
+        for (auto it = m_holdOf.begin(); it != m_holdOf.end();) {
+            if (it->first < front - 1) { it->second.wait(); it = m_holdOf.erase(it); }
+            else ++it;
+        }
     }
 
     static VkFormat PlaneFormatOf(uint32_t p, bool two, bool ten)
@@ -278,7 +432,7 @@ private:
         if (it != m_views.end()) return it->second;
         if (m_views.size() > 256) {   // a new pool (seek, size change): drop the old views once our work is done
             std::string e;
-            if (m_last) m_eng.Wait(m_last, e);
+            if (m_lastTicket) m_eng.Wait(m_lastTicket, e);
             for (auto& kv : m_views) vkDestroyImageView(m_ctx->Dev(), kv.second, nullptr);
             m_views.clear();
         }
@@ -350,6 +504,7 @@ private:
         if (r != VK_SUCCESS) { e = "vkCreateComputePipelines failed (" + std::to_string(int(r)) + ")"; return false; }
         return true;
     }
+    bool MakePipesOnce(std::string& e) { return m_import.p ? true : MakePipes(e); }
     bool MakePipes(std::string& e)
     {
         const VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SI = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SB = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -392,8 +547,19 @@ private:
     CutGuard m_guard;
     uint32_t m_fmt = 0;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1;
-    int m_prevSlot = -1, m_prevPair = -1;
-    uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_last = 0;
+    // Dedup / Cadence / Subtitle Hold (the VapourSynth GPU backend's scheduling)
+    Cadence m_cadence;
+    bool m_dedup = false, m_holdOn = false;
+    int64_t m_last = -1000000, m_prevDistinct = -1;
+    int m_lastDistinctSlot = -1, m_lastPair = -1;
+    std::pair<int64_t, int64_t> m_lastPairKey{ -1, -1 };
+    std::map<int64_t, int> m_slotOf;
+    std::map<std::pair<int64_t, int64_t>, PairInfo> m_pairs;
+    SubtitleHoldYuv m_hold;
+    std::shared_future<std::shared_ptr<const HoldFrameYuv>> m_holdChain;
+    std::map<int64_t, std::shared_future<std::shared_ptr<const HoldFrameYuv>>> m_holdOf;
+    uint64_t m_dups = 0, m_holds = 0, m_heldPairs = 0;
+    uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_lastTicket = 0;
     std::deque<Item> m_q;
     Pipe m_import, m_export;
     VkSampler m_sampler = VK_NULL_HANDLE;
