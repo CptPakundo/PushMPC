@@ -381,15 +381,15 @@ void Log::Writef(const wchar_t* fmt, ...) {
 // ================================================================== processes
 namespace {
 bool IsPlayerName(const wchar_t* exe) {
-    // the players whose settings PushMPC changes (closed by Setup); PotPlayer (manual setup) is found by its modules only
-    static const wchar_t* names[] = { L"mpc-hc64.exe", L"mpc-hc.exe", L"mpc-be64.exe", L"mpc-be.exe" };
+    // the players whose settings PushMPC changes (closed by Setup: each rewrites its settings when it closes)
+    static const wchar_t* names[] = { L"mpc-hc64.exe", L"mpc-hc.exe", L"mpc-be64.exe", L"mpc-be.exe", L"PotPlayerMini64.exe", L"PotPlayer64.exe" };
     for (auto n : names) if (!_wcsicmp(exe, n)) return true;
     return false;
 }
 bool IsMpvFamilyName(const wchar_t* exe) {
     // the mpv route (vsplugin): these load pushmpc_vs.dll and pushcore.dll; not closed by Setup (mpv does not rewrite
     // mpv.conf, and the script leaves smplayer.ini alone while SMPlayer runs), but held files count as in use
-    static const wchar_t* names[] = { L"mpv.exe", L"smplayer.exe", L"mpc-qt.exe" };
+    static const wchar_t* names[] = { L"mpv.exe", L"mpvnet.exe", L"smplayer.exe", L"mpc-qt.exe" };
     for (auto n : names) if (!_wcsicmp(exe, n)) return true;
     return false;
 }
@@ -485,6 +485,10 @@ int RunHidden(const std::wstring& cmdline, const std::function<void(const std::s
     si.hStdInput = nul; si.hStdOutput = wr; si.hStdError = wr;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = cmdline;
+    // Windows PowerShell 5.1 runs the install script: a PSModulePath inherited from PowerShell 7 (Setup or the updater
+    // started from pwsh) makes 5.1 load 7's copies of its own modules, which fail (Get-AuthenticodeSignature not found).
+    // Without the variable, 5.1 uses its defaults; nothing PushMPC starts needs another value.
+    SetEnvironmentVariableW(L"PSModulePath", nullptr);
     BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
                              workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
     CloseHandle(wr);

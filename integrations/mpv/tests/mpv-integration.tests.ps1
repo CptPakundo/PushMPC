@@ -231,6 +231,14 @@ Run 'Uninstall' $r | Out-Null
 $t = Get-Content $xml -Raw
 Check ($t -notmatch 'PushMPC' -and $t -match '<!-- mine -->') 'Kodi: later edits kept, our parts removed'
 
+# 13. the user PATH comes back exactly (a trailing ';' included)
+$r = New-Root; $roots += $r
+Fake-Mpv "$r\Program Files\mpv"
+[IO.File]::WriteAllText("$r\user-path.txt", 'C:\Tools;C:\Other;')
+Run 'Install' $r @{ RuntimeOnPath = $true } | Out-Null
+Check ([IO.File]::ReadAllText("$r\user-path.txt") -eq "C:\Tools;C:\Other;$r\AppData\Local\PushMPC\vapoursynth") 'runtime appended after a trailing separator'
+Run 'Uninstall' $r | Out-Null
+Check ([IO.File]::ReadAllText("$r\user-path.txt") -eq 'C:\Tools;C:\Other;') 'user PATH restored exactly, trailing separator kept'
 # 12. Stremio detected, not changed
 $r = New-Root; $roots += $r
 New-Item -ItemType Directory "$r\AppData\Local\Programs\Stremio" -Force | Out-Null; [IO.File]::WriteAllText("$r\AppData\Local\Programs\Stremio\stremio-shell-ng.exe", 'fake')

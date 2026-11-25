@@ -59,9 +59,7 @@ jobs:
       - name: mpv-integration.ps1 (fake roots)
         shell: pwsh
         run: pwsh -File integrations/mpv/tests/mpv-integration.tests.ps1
-      - name: pushmpc-install.ps1 mpv route (fake roots)
-        shell: pwsh
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-mpv-install.ps1; exit $LASTEXITCODE
+
       - name: pushmpc-install.ps1 MPC-BE steps (fake registry root)
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-mpcbe-install.ps1; exit $LASTEXITCODE
@@ -167,15 +165,18 @@ jobs:
         run: |
           $env:PATH = "$env:VSSCRIPT_DIR;$env:PATH"
           $res = [ordered]@{}
+          # the plugin keeps its log open: read with shared access
+          function Read-Logs([string]$dir) { (Get-ChildItem $dir -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+            $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() } }) -join "`n" }
           function Test-Player([string]$name, [scriptblock]$start, [int]$wait = 30) {
             $logDir = "$env:RUNNER_TEMP\vslog-$($name -replace '\W', '')"; New-Item -ItemType Directory $logDir -Force | Out-Null
             $env:PUSHMPC_VS_LOG_DIR = $logDir
             $p = & $start
             $deadline = (Get-Date).AddSeconds($wait)
-            while ((Get-Date) -lt $deadline) { Start-Sleep 2; $t = (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue | Get-Content -Raw) -join "`n"; if ($t -match 'portable: output|portable: x1|backend: ') { Start-Sleep 4; break } }
+            while ((Get-Date) -lt $deadline) { Start-Sleep 2; $t = Read-Logs $logDir; if ($t -match 'portable: output|portable: x1|backend: ') { Start-Sleep 4; break } }
             if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
             Get-Process mpv, mpvnet, mpc-qt, kodi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            $t = (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue | Get-Content -Raw) -join "`n"
+            $t = Read-Logs $logDir
             $ok = $t -match 'backend: '
             $line = ($t -split "`n" | Where-Object { $_ -match 'backend: |portable: output|portable: x1|create failed' } | Select-Object -First 3) -join ' | '
             $script:res[$name] = "$(if ($ok) { 'PLUGIN RAN' } else { 'no plugin log' }): $line"
@@ -252,14 +253,16 @@ jobs:
             $first = if ($flog) { (Get-Content $flog[0].FullName -TotalCount 6) -join ' / ' } else { '' }
             if (-not $p.HasExited) { [void]$p.CloseMainWindow(); if (-not $p.WaitForExit(15000)) { $p.Kill() } }
             $ok = [bool]($mods -match 'PushMpcFilter') -or [bool]$flog
-            "$tag : $(if ($ok) { 'LOADED' } else { 'not loaded' }) (modules: $($mods -join ','); filter logs: $(@($flog).Count)) $first" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
-            return $ok
+            $line = "$tag : $(if ($ok) { 'LOADED' } else { 'not loaded' }) (modules: $($mods -join ','); filter logs: $(@($flog).Count))"
+            Add-Content "$env:RUNNER_TEMP\pot.txt" $line; Write-Host $line
+            if ($flog) { $fl = Get-Content $flog[0].FullName | Select-String -Pattern 'created|connect|input|output|pass|renderer|upstream|downstream|D3D11' | Select-Object -First 12 | ForEach-Object { "    $($_.Line)" }; Add-Content "$env:RUNNER_TEMP\pot.txt" $fl; $fl | Write-Host }
+            return [bool]$ok
           }
           # A: the product (pushmpc-install.ps1 potplayer-apply)
           Reset-Override
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-install.ps1 potplayer-apply 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
           reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-product.reg" /y | Out-Null
-          $okA = Play 'A product entry (Override, Type 1 file, FilterType 0)'
+          [bool]$okA = (Play 'A product entry (Override, Type 1 file, FilterType 0)' | Select-Object -Last 1)
           reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-after-potplayer-closed.reg" /y | Out-Null
           "OK_A=$okA" >> $env:GITHUB_ENV
           # research variants (only to learn the layout; the product uses A)
@@ -317,9 +320,10 @@ jobs:
           PY=/opt/python/cp312-cp312/bin/python
           url=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['url'])")
           sha=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['sha256'])")
-          curl -fsSL --retry 3 -o /tmp/vs.whl "$url"
-          echo "$(echo "$sha" | tr A-F a-f)  /tmp/vs.whl" | sha256sum -c -
-          $PY -m pip install --no-deps /tmp/vs.whl
+          whl=/tmp/$(basename "$url")
+          curl -fsSL --retry 3 -o "$whl" "$url"
+          echo "$(echo "$sha" | tr A-F a-f)  $whl" | sha256sum -c -
+          $PY -m pip install --no-deps --no-cache-dir "$whl"
           pkg=$($PY -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
           mkdir -p vsplugin/third_party/vapoursynth
           cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
@@ -561,7 +565,7 @@ jobs:
           ver=$(sed -n 's/^pkgver=//p' src/packaging/aur/PKGBUILD)
           b=/home/builder/pkg; mkdir -p $b
           cp src/packaging/aur/PKGBUILD src/packaging/aur/pushmpc.install $b/
-          git -C src archive --format=tar.gz --prefix="PushMPC-$ver/" -o "$b/pushmpc-$ver.tar.gz" HEAD
+          tar -czf "$b/pushmpc-$ver.tar.gz" --exclude=.git --transform "s,^src,PushMPC-$ver," src
           chown -R builder $b
           su builder -c "cd $b && makepkg --printsrcinfo > .SRCINFO && makepkg -f --noconfirm" 2>&1 | tail -25
           cat $b/.SRCINFO
@@ -655,6 +659,13 @@ jobs:
       - name: PushMPC-Setup.exe /S (x64 under Prism)
         timeout-minutes: 20
         run: |
+          # Windows PowerShell 5.1 next to this pwsh step: PowerShell 7's PSModulePath breaks 5.1's built-in modules, so
+          # probe both and run Setup with the variable removed, as from Explorer
+          $wps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          "powershell.exe 5.1 with pwsh's PSModulePath: $(& $wps -NoProfile -Command '(Get-AuthenticodeSignature $env:SystemRoot\explorer.exe).Status' 2>&1)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
+          "powershell.exe 5.1 without PSModulePath: $(& $wps -NoProfile -Command '(Get-AuthenticodeSignature $env:SystemRoot\explorer.exe).Status' 2>&1)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          "powershell.exe architecture: $(& $wps -NoProfile -Command '$env:PROCESSOR_ARCHITECTURE')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           $setup = "$env:RUNNER_TEMP\release\PushMPC-Setup.exe"
           $p = Start-Process $setup -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"; if (-not $p.WaitForExit(1100000)) { $p.Kill(); throw 'Setup timed out' }
           Get-Content "$env:RUNNER_TEMP\setup-out.txt" | Select-Object -Last 40

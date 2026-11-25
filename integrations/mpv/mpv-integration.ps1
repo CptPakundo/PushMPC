@@ -625,21 +625,23 @@ function Invoke-PmMpvIntegration {
                 $done += [pscustomobject]@{ Kind = $p.Kind; Config = $p.Config }
                 $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'installed'; Note = (@($p.Note) + @($w)) -join '; ' }
             }
-            $addedPath = $false
+            $addedPath = $false; $pathBefore = $null; $pathWritten = $null
             if ($RuntimeOnPath) {
                 $cur = Get-PmUserPath $E
                 # appended; but in front when another VapourSynth (SVP's mpv64 folder, RC2 F5) is on the user PATH, which mpv
                 # would otherwise load first (VSScript.dll is found through the PATH). SVP's own mpv loads its copy from its folder.
                 $other = @($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime -and (Test-Path -LiteralPath (Join-Path $_.Trim() 'VSScript.dll')) })
                 $new = if ($other.Count) { $runtime + $(if ($cur) { ';' + $cur.TrimStart(';') } else { '' }) } else { $(if ($cur) { $cur.TrimEnd(';') + ';' } else { '' }) + $runtime }
-                if (-not ($cur.Split(';') -contains $runtime) -and $PSCmdlet.ShouldProcess('user PATH', "add $runtime")) { Set-PmUserPath $E $new; $addedPath = $true }
+                if (-not ($cur.Split(';') -contains $runtime) -and $PSCmdlet.ShouldProcess('user PATH', "add $runtime")) { Set-PmUserPath $E $new; $addedPath = $true; $pathBefore = $cur; $pathWritten = $new }
             }
             if ($PSCmdlet.ShouldProcess($state, 'record the installed targets')) {
                 New-Item -ItemType Directory -Path (Split-Path -Parent $state) -Force | Out-Null
                 $old = if (Test-Path -LiteralPath $state) { Get-Content -LiteralPath $state -Raw | ConvertFrom-Json } else { $null }
                 $keepPath = $addedPath -or ($old -and $old.addedPath)
+                # the user PATH as it was, and as written: an untouched PATH goes back exactly (separators included)
+                if (-not $addedPath -and $old -and $old.PSObject.Properties['pathBefore']) { $pathBefore = $old.pathBefore; $pathWritten = $old.pathWritten }
                 $all = @($done) + @(if ($old) { @($old.targets) | Where-Object { $c = $_.Config; -not ($done | Where-Object { $_.Config -ieq $c }) } })
-                [IO.File]::WriteAllText($state, (@{ targets = $all; addedPath = [bool]$keepPath; runtime = $runtime } | ConvertTo-Json -Depth 4))
+                [IO.File]::WriteAllText($state, (@{ targets = $all; addedPath = [bool]$keepPath; runtime = $runtime; pathBefore = $pathBefore; pathWritten = $pathWritten } | ConvertTo-Json -Depth 4))
             }
         }
         'Uninstall' {
@@ -659,8 +661,9 @@ function Invoke-PmMpvIntegration {
             }
             if ($s -and $s.addedPath) {
                 $cur = Get-PmUserPath $E
-                $parts = @($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime -and $_ -ne $s.runtime })
-                if ($PSCmdlet.ShouldProcess('user PATH', "remove $runtime")) { Set-PmUserPath $E ($parts -join ';') }
+                if ($s.PSObject.Properties['pathWritten'] -and $null -ne $s.pathWritten -and $cur -ceq $s.pathWritten) { $new = [string]$s.pathBefore }
+                else { $new = (@($cur.Split(';') | Where-Object { $_ -and $_ -ne $runtime -and $_ -ne $s.runtime })) -join ';' }
+                if ($PSCmdlet.ShouldProcess('user PATH', "remove $runtime")) { Set-PmUserPath $E $new }
             }
             if ((Test-Path -LiteralPath $state) -and $PSCmdlet.ShouldProcess($state, 'remove')) { Remove-Item -LiteralPath $state }
         }
