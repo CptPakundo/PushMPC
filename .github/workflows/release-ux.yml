@@ -154,6 +154,8 @@ jobs:
             }
             if ($dll) { "  $($dll.Name) SHA-256 $((Get-FileHash $dll.FullName).Hash)" | Tee-Object -Append $log }
           }
+          Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { "$($_.DisplayName)" -like 'Plex*' } | ForEach-Object { "Apps entry: $($_.DisplayName) $($_.DisplayVersion) ($($_.InstallLocation))" } | Tee-Object -Append $log
+          pwsh -NoProfile -File scripts/pushmpc-plex.ps1 status -InstallDir "$env:RUNNER_TEMP\plex-probe" 2>&1 | Tee-Object -Append $log
           @('## Plex on the runner', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           exit 0
       - name: Snapshot before Setup
@@ -164,7 +166,7 @@ jobs:
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\before-vlc.txt"
           "PushMPC folder before: $(Test-Path "$env:LOCALAPPDATA\PushMPC"); Start menu PushMPC: $(Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC")" | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
           Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\before-plex.txt"
-          foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" } | Set-Content "$s\before-plexconf.txt"
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\before-plexconf.txt"
           exit 0   # reg export of a key the runner does not have returns 1
       - name: PushMPC-Setup.exe /S (simulated RTX 4090; the TensorRT-RTX pmml runtime fetched by its pins)
         timeout-minutes: 30
@@ -188,7 +190,7 @@ jobs:
           # Plex: swapped where the version is tested; mpv.conf with the CA bundle and PushMPC's block
           $plexState = Get-Content "$env:LOCALAPPDATA\PushMPC\plex\plex.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
           foreach ($r in @($plexState)) { if ($r) { "Plex swapped: $($r.Name) $($r.Version): libmpv now $((Get-FileHash $r.Dll).Hash) (ours $($r.OursSha)); backup $(Test-Path $r.Backup)" | Tee-Object -Append $log } }
-          foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { if (Test-Path $c) { "$c`:"; Get-Content $c | ForEach-Object { "    $_" } } } | Tee-Object -Append $log
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { if (Test-Path $c) { "$c`:"; Get-Content $c | ForEach-Object { "    $_" } } }) | Tee-Object -Append $log
           "Plex logon check task: $([bool](Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue))" | Tee-Object -Append $log
           $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
           $pmml = [string](Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue)
@@ -206,6 +208,7 @@ jobs:
           if (-not ($pmml -match [regex]::Escape("runtime=$pm"))) { $bad += 'pmml.txt does not name the installed pmml runtime' }
           if (-not (Test-Path "$pm\ort\core\onnxruntime.dll") -or -not $epj -or -not (Test-Path (Join-Path "$pm\eps\trt-rtx" $epj.library))) { $bad += 'the pmml runtime (ONNX Runtime + TensorRT-RTX EP) is not installed' }
           foreach ($r in @($plexState)) { if ($r -and (Get-FileHash $r.Dll).Hash -ne $r.OursSha) { $bad += "Plex $($r.Name): the swapped libmpv is not in place" } }
+          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { if ((Test-Path "$d\libmpv-2.dll") -and -not @($plexState | Where-Object { $_ -and $_.Dir -eq $d }).Count) { $bad += "${d}: Plex was not given the VapourSynth-enabled libmpv (version not in the tested list, or the swap failed: see the log)" } }
           foreach ($r in @($plexState)) { if ($r) { $c = if ($r.Name -eq 'Plex HTPC') { "$env:LOCALAPPDATA\Plex HTPC\mpv.conf" } else { "$env:LOCALAPPDATA\Plex\mpv.conf" }; if (-not ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match 'tls-ca-file=.*cacert\.pem')) { $bad += "Plex $($r.Name): mpv.conf has no PushMPC block with tls-ca-file" } } }
           if (-not $cap -or -not (@($cap.players) -match 'KMPlayer') -or -not (@($cap.players) -match '^VLC')) { $bad += 'capture mode not on for KMPlayer and VLC' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
@@ -236,7 +239,7 @@ jobs:
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
           Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\after-plex.txt"
           if ((@(Get-Content "$s\before-plex.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-plex.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += "Plex's libmpv not put back" }
-          foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" } | Set-Content "$s\after-plexconf.txt"
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\after-plexconf.txt"
           if ((@(Get-Content "$s\before-plexconf.txt") -join "`n") -ne (@(Get-Content "$s\after-plexconf.txt") -join "`n")) { $bad += "Plex's mpv.conf not as before" }
           if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left: the Plex logon check task' }
           $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)
@@ -271,7 +274,8 @@ jobs:
           cp /usr/include/vapoursynth/VapourSynth4.h /usr/include/vapoursynth/VSHelper4.h vsplugin/third_party/vapoursynth/
           # the ml backend (pmml): ONNX Runtime's headers by their pin; pmml's graphs for the tarball
           python -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-x64 --out /tmp/pmml-rt --cache /tmp/pmml-dl --flavors core --headers >/dev/null
-          python -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 numpy==1.26.4
+          # Arch's Python is newer than the pinned onnx wheels: the current ones (the graphs are plain opset-16 ONNX)
+          python -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx numpy
           /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs >/dev/null
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include >/dev/null
           cmake --build build --target pushmpc_vs --parallel >/dev/null

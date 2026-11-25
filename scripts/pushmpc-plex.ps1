@@ -56,14 +56,26 @@ function Info([string]$t) { if ($Machine) { M "info|$t" } else { Write-Host "   
 function Warn([string]$t) { if ($Machine) { M "warn|$t" } else { Write-Host "    $t" -ForegroundColor Yellow }; if ($ResultFile) { Add-Content -LiteralPath $ResultFile -Value "warn|$t" } }
 function Get-Sha256([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToUpperInvariant() }
 
+# Plex's version: its Apps entry (DisplayVersion, the version Plex shows), else the program's file version
+function Get-PlexVersion([string]$dir, [string]$exe) {
+    foreach ($root in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') {
+        foreach ($k in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $p = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+            if (-not $p -or -not $p.DisplayVersion -or "$($p.DisplayName)" -notlike 'Plex*' -or "$($p.DisplayName)" -like '*Media Server*') { continue }
+            $loc = "$($p.InstallLocation)".TrimEnd('\'); $icon = "$($p.DisplayIcon)"
+            if (($loc -and $loc -ieq $dir.TrimEnd('\')) -or ($icon -and $icon.Trim('"').StartsWith($dir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) { return "$($p.DisplayVersion)" }
+        }
+    }
+    if (Test-Path -LiteralPath $exe) { $vi = (Get-Item -LiteralPath $exe).VersionInfo; foreach ($v in @($vi.FileVersion, $vi.ProductVersion)) { if ("$v".Trim()) { return "$v".Trim() } } }
+    return ''
+}
 function Get-Plex {
     $out = @()
     foreach ($a in @(@{ Name = 'Plex HTPC'; Dir = Join-Path $PlexRoot 'Plex\Plex HTPC'; Exe = 'Plex HTPC.exe' }, @{ Name = 'Plex for Windows'; Dir = Join-Path $PlexRoot 'Plex\Plex'; Exe = 'Plex.exe' })) {
         $dll = @('libmpv-2.dll', 'mpv-2.dll') | ForEach-Object { Join-Path $a.Dir $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         if (-not $dll) { continue }
         $exe = Join-Path $a.Dir $a.Exe
-        $ver = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion } else { '' }
-        if (-not $ver) { $ver = (Get-Item -LiteralPath $dll).VersionInfo.ProductVersion }
+        $ver = Get-PlexVersion $a.Dir $exe
         $tested = [bool](@($Tested[$a.Name] | Where-Object { $ver -like $_ }).Count)
         $out += [pscustomobject]@{ Name = $a.Name; Dir = $a.Dir; Dll = $dll; Version = "$ver"; Tested = $tested; Sha = (Get-Sha256 $dll) }
     }
