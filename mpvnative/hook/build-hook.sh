@@ -18,7 +18,7 @@ cc=cc; command -v ccache >/dev/null && cc="ccache cc"
 if [ ! -f config_components.h ] || ! grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h; then
     ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
         --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
-        --disable-postproc --disable-asm > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
+        $(./configure --help | grep -q disable-postproc && echo --disable-postproc) --disable-asm > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
 fi
 grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h
 make -j"$(nproc)" >/dev/null

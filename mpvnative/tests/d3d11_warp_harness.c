@@ -85,13 +85,25 @@ int main(int argc, char **argv)
     }
     if ((ret = av_hwdevice_ctx_init(devref)) < 0) { fprintf(stderr, "harness: av_hwdevice_ctx_init %d\n", ret); return 1; }
 
-    frames = av_hwframe_ctx_alloc(devref);
-    {
-        AVHWFramesContext *fc = (AVHWFramesContext *)frames->data;
-        fc->format = AV_PIX_FMT_D3D11; fc->sw_format = AV_PIX_FMT_NV12; fc->width = W; fc->height = H;
-        fc->initial_pool_size = 16;   /* one array texture, as a decoder's pool */
+    {   /* a decoder's layout (one array texture, slices) first; WARP may refuse some bind flags for NV12 arrays */
+        static const UINT binds[] = { 0, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET };
+        static const int sizes[] = { 16, 0 };
+        int b, z;
+        ret = -1;
+        for (z = 0; z < 2 && ret < 0; z++)
+            for (b = 0; b < 3 && ret < 0; b++) {
+                AVHWFramesContext *fc;
+                av_buffer_unref(&frames);
+                frames = av_hwframe_ctx_alloc(devref);
+                fc = (AVHWFramesContext *)frames->data;
+                fc->format = AV_PIX_FMT_D3D11; fc->sw_format = AV_PIX_FMT_NV12; fc->width = W; fc->height = H;
+                fc->initial_pool_size = sizes[z];
+                ((AVD3D11VAFramesContext *)fc->hwctx)->BindFlags = binds[b];
+                ret = av_hwframe_ctx_init(frames);
+                printf("harness: NV12 pool, %s, bind flags 0x%x: %s\n", sizes[z] ? "array of 16" : "single textures", binds[b], ret < 0 ? "refused" : "ok");
+            }
     }
-    if ((ret = av_hwframe_ctx_init(frames)) < 0) { fprintf(stderr, "harness: NV12 array pool %d\n", ret); return 1; }
+    if (ret < 0) { fprintf(stderr, "harness: no NV12 pool on this adapter\n"); return 1; }
 
     graph = avfilter_graph_alloc();
     src = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("buffer"), "src");
@@ -127,7 +139,7 @@ int main(int argc, char **argv)
             if ((ret = av_buffersrc_add_frame(src, hw)) < 0) { fprintf(stderr, "harness: add frame %d\n", ret); return 1; }
             av_frame_free(&sw); av_frame_free(&hw);
         } else {
-            av_buffersrc_add_frame(src, NULL);   /* EOF */
+            if (av_buffersrc_add_frame(src, NULL) < 0) return 1;   /* EOF */
         }
         for (;;) {
             AVFrame *out = av_frame_alloc();
