@@ -63,7 +63,7 @@ struct PairStats {
 };
 struct DedupStats { float maxBlock = 0, mean = 0; bool duplicate = false; };
 
-// ---- the seams for more motion sources and a learned synthesis stage ("flow once, synthesize many"; SP7: splat to
+// ---- the seams for more motion sources and a learned synthesis stage ("flow once, synthesize many": e.g. splat to
 // phase t + a small fusion CNN). Motion is estimated once per pair of real frames (Estimate), into one field format
 // whatever the source; every output phase of the pair reuses it (Generate). A Synthesizer replaces interp.comp for
 // generated frames; without one (the default) interp.comp runs. Cut, Dedup, Subtitle Hold, upscaling and readback stay
