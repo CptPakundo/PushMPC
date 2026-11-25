@@ -139,7 +139,10 @@ typedef struct PushCoreSettings {
        picture round it moves is taken out of what frame generation is given and laid back over what it makes, so
        burned-in subtitles do not warp or ghost. Only thin, contrasting bars that have stood still for several moving
        frames are masked, never the whole band. Soft subtitles are drawn by the player after the filter and never reach
-       it. 1 = on; default 0 (a smaller struct). Runs with VFG, DLSS-G, PushFlow (not Predict), FSR FG and AMD FRC. */
+       it. 1 = on; default 0 (a smaller struct). Runs with VFG, DLSS-G, PushFlow (not Predict), FSR FG and AMD FRC.
+       2 = Auto (PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO): the pass detects on every frame but holds only while burned-in text
+       is found (>= 0.4 % of the frame for ~1.5 s; off after ~5 s below 0.05 %); PushCoreStats.subtitleHoldState 4 =
+       running, waiting for text. */
     int32_t subtitleHold;
 } PushCoreSettings;
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
@@ -242,7 +245,7 @@ typedef struct PushCoreStats {
     uint64_t cutGuardCuts;
     /* Appended (PUSHCORE_FEATURE_SUBTITLE_HOLD): PushFPS's EnhanceGraph::subtitleHoldState(): 0 not asked for, 1 running,
        2 asked for and unavailable (failed to start), 3 asked for and not part of this graph (no frame generation, or a
-       method without it); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
+       method without it), 4 Auto: running and detecting, not holding (no burned-in text found); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
     uint32_t subtitleHoldState;
     uint32_t subtitleHoldPixels;
 } PushCoreStats;
@@ -304,6 +307,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_HDR_PEAK 64u   /* PushCoreSettings.videoHdrPeak */
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
+#define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */

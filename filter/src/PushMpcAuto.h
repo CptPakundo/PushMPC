@@ -314,6 +314,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // RTX VSR on GTX 16 (unlock Gtx16Vsr): no tensor cores, the HMMA work runs on the FP16 units at a fraction of the
     // rate, so its prior is 4x the RTX card factor until the running graph has measured it (vsrScale learned)
     if (g.family == kGtx && !c.learnedVsr) c.vsrScale *= 4.0;
+    // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
+    // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
+    // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
+    if ((g.family == kRdna3 || g.family == kRdna2) && !c.learnedVsr) c.fsrSr *= 2.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;

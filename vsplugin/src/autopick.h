@@ -12,6 +12,7 @@
 #include <string>
 #include "PushMpcAuto.h"
 #include "pushmpc/pushcore_abi.h"
+#include "pushmpc/unlocks.h"
 
 namespace pmvs {
 
@@ -102,7 +103,9 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     if (note && c.hdr && c.hdrItm) *note = L"SDR to HDR: PushMPC's own curve is part of the MPC-HC filter, not of the VapourSynth route: off here (RTX Video HDR works)";
     p.cutGuard = c.guardFlow ? 3 : 1;
     p.videoHdrPeak = uint32_t(c.rtxHdrPeak);
-    p.subtitleHold = p.multiplier > 1 && pm::SubtitleHoldWanted(s) ? 1 : 0;   // burned-in subtitles only (mpv draws soft ones after the filter)
+    // burned-in subtitles only (mpv draws soft ones after the filter); Auto = held only while burned-in text is found. The
+    // stub core and older cores ignore 2 (the plugin and the core ship together)
+    p.subtitleHold = p.multiplier > 1 ? pm::SubtitleHoldValue(s, true, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
     return p;
 }
 

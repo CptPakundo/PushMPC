@@ -48,6 +48,7 @@
 #include "ID3DVideoMemoryConfiguration.h"
 #include "IMediaSideData.h"
 #include "pushmpc/pushcore_abi.h"
+#include "pushmpc/unlocks.h"            // T5b: vendor unlocks (off switches, self-test results)
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
@@ -4254,7 +4255,8 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.cutGuard = c.guardFlow ? 3 : 1;   // 3: with NVIDIA's optical flow (Auto: when it fits the budget)
     p.videoHdrPeak = uint32_t(c.rtxHdrPeak);                             // HDR boost: RTX Video HDR's peak (Low 500 / Medium 700 / High 1000)
     // PushFPS 4.5's Subtitle Hold: only with frame generation (pushcore leaves it out of a graph without it anyway)
-    p.subtitleHold = (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) && p.multiplier > 1 && pm::SubtitleHoldWanted(s) ? 1 : 0;
+    p.subtitleHold = (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) && p.multiplier > 1
+        ? pm::SubtitleHoldValue(s, (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) != 0, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
@@ -4931,7 +4933,7 @@ public:
         FillCombo(m_Dlg, IDC_PM_VRR, { L"Auto", L"Assume VRR", L"Assume fixed" });
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
-        FillCombo(m_Dlg, IDC_PM_SUBHOLD, { pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
+        FillCombo(m_Dlg, IDC_PM_SUBHOLD, { (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) && pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off ? L"Auto (on text)" : pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
         for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 140, 0);
         for (int id : { IDC_PM_FGMETHOD, IDC_PM_UPSCALER, IDC_PM_HDRMETHOD }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 260, 0);
         Show(pm::LoadSettings());

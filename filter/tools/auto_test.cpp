@@ -234,6 +234,11 @@ int main()
             RegBase() = L"Software\\PushMPC";
             check(a.known && a.passed && !b.known, L"self-test cache: same key read back, another driver is stale");
         }
+        {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
+            Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;
+            check(SubtitleHoldValue(a, true, true) == 2 && SubtitleHoldValue(a, false, true) == 0 && SubtitleHoldValue(a, true, false) == 0
+                  && SubtitleHoldValue(off, true, true) == 0 && SubtitleHoldValue(on, false, false) == 1, L"Subtitle Hold: Auto gated (2) only with the core's gate and the unlock on; Off/On manual");
+        }
         wprintf(L"  vendor paths: %d failed\n", fails);
     }
     Display real = QueryDisplay(PlayerWindow());

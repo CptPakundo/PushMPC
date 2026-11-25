@@ -383,6 +383,10 @@ struct PushCore {
     std::atomic<uint64_t> cutsSeen{0};       // cuts the guard held so far (PushCoreStats.cutGuardCuts)
     std::atomic<uint32_t> subtitleState{0}, subtitlePixels{0};   // PushFPS Subtitle Hold (PushCoreStats), read on the submit thread
     uint32_t subtitlePoll = 0;
+    // Subtitle Hold Auto (settings.subtitleHold == 2): the pass detects on every frame, composes only while burned-in
+    // text is found (gate below); counters of consecutive polls above / below the thresholds
+    bool subAutoInit = false, subCompose = false;
+    uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
 
@@ -631,7 +635,7 @@ struct PushCore {
         if (const auto e = s.validate(); !e.empty()) { fail("PushMPC settings invalid: " + e); return false; }
         veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}, Subtitle Hold {}",
             s.sr, s.videoSrQuality, int(s.srTarget), fgName(tryFg), s.multiplier, s.vfgQuality, s.nr, nrRuntimeName(s.nrRuntime), s.model.tone, s.model.structure,
-            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold ? "on" : "off"));
+            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold == 2 ? "Auto (while burned-in text is found)" : settings.subtitleHold ? "on" : "off"));
         return true;
     }
 
@@ -816,6 +820,7 @@ struct PushCore {
         veyra::pipeline::overlay::setWanted(false);
         veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && settings.subtitleHold != 0);
         subtitleState.store(0, std::memory_order_relaxed); subtitlePixels.store(0, std::memory_order_relaxed);
+        subAutoInit = false; subCompose = false; subOnRun = subOffRun = 0;
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
@@ -1195,9 +1200,21 @@ struct PushCore {
         collectTimings();
         // PushFPS Subtitle Hold: its state and the pixels it held, about twice a second at 24 fps (the pixel count reads
         // the pass's own mapped sample; PushOverlayPass::harvest runs on this thread in update(), so it is read here too)
+        if (graph && haveSettings && settings.subtitleHold == 2 && !subAutoInit) { graph->setSubtitleCompose(false); subAutoInit = true; }
         if (graph && (++subtitlePoll % 12) == 0) {
-            subtitleState.store(uint32_t(graph->subtitleHoldState()), std::memory_order_relaxed);
-            subtitlePixels.store(graph->subtitleHoldPixels(), std::memory_order_relaxed);
+            const uint32_t state = uint32_t(graph->subtitleHoldState()), px = graph->subtitleHoldPixels();
+            // Auto gate: burned-in subtitles (two lines over a 1080p picture upscaled to 4K) hold 78-91 k pixels of the
+            // band; natural video without text held at most 6.4 k (study on four shows, eight segments, RTX 5090,
+            // 2026-11-25). On at >= 0.4 % of the frame for 3 polls (~1.5 s at 24 fps), off below 0.05 % for 10 polls (~5 s).
+            if (state == 1 && haveSettings && settings.subtitleHold == 2) {
+                const double area = double(graph->workWidth()) * graph->workHeight();
+                subOnRun = px >= area * 0.004 ? subOnRun + 1 : 0;
+                subOffRun = px < area * 0.0005 ? subOffRun + 1 : 0;
+                if (!subCompose && subOnRun >= 3) { subCompose = true; graph->setSubtitleCompose(true); veyra::log::info("pushcore", std::format("subtitle hold Auto: burned-in text found ({} pixels): holding", px)); }
+                else if (subCompose && subOffRun >= 10) { subCompose = false; graph->setSubtitleCompose(false); veyra::log::info("pushcore", "subtitle hold Auto: no burned-in text for ~5 s: not holding"); }
+            }
+            subtitleState.store(state == 1 && haveSettings && settings.subtitleHold == 2 && !subCompose ? 4u : state, std::memory_order_relaxed);
+            subtitlePixels.store(px, std::memory_order_relaxed);
         }
         return PUSHCORE_OK;
     }
@@ -1523,7 +1540,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

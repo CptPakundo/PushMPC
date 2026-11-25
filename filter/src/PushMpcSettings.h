@@ -103,8 +103,21 @@ inline CleanStrength NearestStrength(float tone, float structure)
 // the whole band, and on video without burned-in text it held 0 pixels (output identical); but it costs about 0.5 ms GPU per
 // source frame at 4K (4x and 8x), above the 0.3 ms bar, and on burned-in anime subtitles VFG's frames looked the same with it
 // (a fast pan left a text ghost either way). Soft subtitles are drawn by the player after the filter and never need it.
-inline constexpr bool kSubtitleHoldAuto = false;
+// T5b (2026-11-25): Auto = content-gated where pushcore can gate it (PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO): the pass detects
+// on every frame and holds only while burned-in text is found. Study on the RTX 5090 (GPU harness, VFG 4x Medium, 720
+// source frames per segment): four shows, eight natural segments without burned-in text: the detector alone marked up to
+// 6.4 k pixels in three segments (a full hold would have masked them), the gate held in none; a hardsubbed anime pan
+// (two lines) marked 78-91 k pixels and the gate held after ~1.5 s. Detection costs about 0.5 ms GPU per source frame at 4K.
+// Off switch: PUSHMPC_DISABLE_SUBTITLEHOLDAUTO=1 / HKCU\Software\PushMPC\Unlocks SubtitleHoldAuto = 0 (Auto = off again).
+inline constexpr bool kSubtitleHoldAuto = false;   // Auto without the gate (an older pushcore): off, as before
 inline bool SubtitleHoldWanted(const Settings& s) { return s.subtitleHold == kAuto ? kSubtitleHoldAuto : s.subtitleHold != kOff; }
+// PushCoreSettings.subtitleHold: 0 off, 1 on, 2 Auto (gated); gateSupported = pushcore has the gate, autoAllowed = the
+// SubtitleHoldAuto unlock is not switched off
+inline int SubtitleHoldValue(const Settings& s, bool gateSupported, bool autoAllowed)
+{
+    if (s.subtitleHold == kAuto) return gateSupported && autoAllowed ? 2 : (kSubtitleHoldAuto ? 1 : 0);
+    return s.subtitleHold != kOff ? 1 : 0;
+}
 
 // ---- string forms (registry and the page)
 inline std::wstring ChoiceStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : std::to_wstring(v); }
