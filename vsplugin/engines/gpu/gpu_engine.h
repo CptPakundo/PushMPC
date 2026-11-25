@@ -44,7 +44,7 @@ struct Config {
                                         // search keeps covering a fast pan at 4K)
     int searchRange = 8;
     float smoothness = 3.0f;
-    int sourceSlots = 6, outSlots = 10;
+    int sourceSlots = 8, outSlots = 10;
     bool blockMatcherOnly = true;       // false: NVIDIA's optical flow (VK_NV_optical_flow) where the driver has it. Off by
                                         // default: on an RTX 5090 it was slower (4K: 17.0 vs 6.8 ms a pair) and not better
                                         // (synthetic zoom: 37.85 vs 38.06 dB) than the block matcher at quality 2

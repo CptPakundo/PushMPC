@@ -187,7 +187,7 @@ jobs:
           N=${{ github.event.inputs.bench_frames || '30' }}
           echo "| clip | test | method | PSNR-Y | SSIM-Y | ms | note |" > $o/table.md
           echo "|---|---|---|---|---|---|---|" >> $o/table.md
-          run() { build/gpu_bench "$@" --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md; }
+          run() { build/gpu_bench "$@" --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || echo "::warning::gpu_bench $* printed no result"; }
           clips=""
           for n in park_joy ducks_take_off in_to_tree old_town_cross bbb60; do [ -s "$c/$n.y4m" ] && clips="$clips $n"; done
           for n in $clips; do run "$c/$n.y4m" --clip $n --test interp --frames $N --y4m-out $o/y4m; done
@@ -279,7 +279,7 @@ jobs:
           $h = (Get-FileHash $f -Algorithm SHA256).Hash
           if ($h -ne $pin.sha256.ToUpperInvariant()) { throw "SHA-256 mismatch for $($pin.url): $h" }
           $d = Join-Path $env:RUNNER_TEMP 'mesa'; 7z x $f "-o$d" -y | Out-Null
-          $json = Get-ChildItem $d -Recurse -Filter 'lvp_icd.x86_64.json' | Where-Object { $_.FullName -match '\x64\' } | Select-Object -First 1
+          $json = Get-ChildItem $d -Recurse -Filter 'lvp_icd.x86_64.json' | Where-Object { $_.FullName -like '*\x64\*' } | Select-Object -First 1
           if (-not $json) { Get-ChildItem $d -Recurse -Filter '*.json' | ForEach-Object { Write-Host $_.FullName }; throw 'no lvp_icd.x86_64.json' }
           Get-Content $json.FullName | Write-Host
           # the loader ignores VK_ICD_FILENAMES / VK_DRIVER_FILES on an elevated runner: register the ICD in the
@@ -354,8 +354,9 @@ jobs:
           echo "| clip | test | label | - | - | - | decisions |" > $o/table.md; echo "|---|---|---|---|---|---|---|" >> $o/table.md
           for l in $o/*.labels; do
             n=$(basename "$l" .labels)
-            build/gpu_bench "$o/$n.y4m" --clip $n --test windows --labels "$l" --frames 100000 | grep '^|' >> $o/table.md
+            build/gpu_bench "$o/$n.y4m" --clip $n --test windows --labels "$l" --frames 100000 | tee -a $o/windows.log | grep '^|' >> $o/table.md || true
           done
+          grep '^MISS' $o/windows.log || true
           cat $o/summary.json
           cat $o/table.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -367,6 +368,7 @@ jobs:
             ${{ runner.temp }}/cutset/*.labels
             ${{ runner.temp }}/cutset/*.jpg
             ${{ runner.temp }}/cutset/table.md
+            ${{ runner.temp }}/cutset/windows.log
 
   macos:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'true'

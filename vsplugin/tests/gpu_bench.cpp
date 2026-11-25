@@ -169,6 +169,11 @@ static void BenchInterp(Y4m& clip)
     auto me3 = [](Config& c) { c.prefilter = c.lambdaScale = c.equiangular = c.merge = c.globalCandidate = false; };
     std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-q2-no-me-fixes", 0, 2, false, 3.f, true, me3 }, { "gpu-classic-q2", 0, 2, false, 3.f, false, me3 },
                                     { "gpu-blocks-q1", 0, 1, false, 3.f },
+                                    { "q2-no-prefilter", 0, 2, false, 3.f, true, [](Config& c) { c.prefilter = false; } },
+                                    { "q2-no-lambda-scale", 0, 2, false, 3.f, true, [](Config& c) { c.lambdaScale = false; } },
+                                    { "q2-no-equiangular", 0, 2, false, 3.f, true, [](Config& c) { c.equiangular = false; } },
+                                    { "q2-no-merge", 0, 2, false, 3.f, true, [](Config& c) { c.merge = false; } },
+                                    { "q2-no-global", 0, 2, false, 3.f, true, [](Config& c) { c.globalCandidate = false; } },
                                     { "gpu-nvof", 0, 2, true, 3.f }, { "gpu-nvof-slow", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 0; } },
                                     { "gpu-nvof-fast", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 2; } },
                                     { "gpu-nvof-full-input", 0, 2, true, 3.f, true, [](Config& c) { c.nvofInput = 1; } },
@@ -260,9 +265,9 @@ static void BenchTwos(Y4m& clip)
     std::vector<Pic> src;
     for (size_t j = 0; j < clip.frames.size(); ++j) src.push_back(clip.frames[j & ~size_t(1)]);
     for (int dedup = 1; dedup >= 0; --dedup) {
+        std::map<int, Pic> outs;   // before the backend: its destructor releases into it
         Pipeline<int> pipe;
         GpuBackend<int> be;
-        std::map<int, Pic> outs;
         int next = 1;
         Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits;
         std::string err;
@@ -335,9 +340,9 @@ static void BenchTransitions(Y4m& a, Y4m& b)
         std::vector<Pic> src;
         for (int i = 0; i < N; i += 2) src.push_back(full[size_t(i)]);
         const int K = 2;
+        std::map<int, Pic> outs;   // before the backend: its destructor releases into it
         Pipeline<int> pipe;
         GpuBackend<int> be;
-        std::map<int, Pic> outs;
         int next = 1;
         Config c; c.width = a.w; c.height = a.h; c.bits = a.bits;
         std::string err;
@@ -400,6 +405,9 @@ static void BenchWindows(Y4m& clip, const std::string& labelsPath)
         if (p < 0) { std::printf("windows: %s\n", err.c_str()); return; }
         const Thumb t2 = Thumb::Of(f[2].View()), t3 = Thumb::Of(f[3].View()), t4 = Thumb::Of(f[4].View()), t5 = Thumb::Of(f[5].View());
         const int d = DecidePair(guard, st, rules, &t2, &t3, &t4, &t5);
+        if (labels[w] == "hard" && d != 1 && d != 2)
+            std::printf("MISS %s window %zu unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d decided %d\n", g_clip.c_str(), w, st.unexplainedF, st.unexplainedB,
+                        st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0, d);
         auto& t = tally[labels[w]];
         t[0]++; t[size_t(1 + std::clamp(d, 0, 4))]++;
         e.ReleasePair(p); e.ReleaseSlot(sa); e.ReleaseSlot(sb);
@@ -418,9 +426,9 @@ static void BenchThroughput(Y4m& clip)
     struct T { const char* name; bool of; bool hybrid; };
     for (const T& m : { T{ "gpu-blocks-q2", false, false }, T{ "gpu-nvof", true, false }, T{ "gpu-hybrid", true, true } }) {
         const int K = 4;
+        std::map<int, Pic> outs;   // before the backend: its destructor releases into it
         Pipeline<int> pipe;
         GpuBackend<int> be;
-        std::map<int, Pic> outs;
         int next = 1;
         Config c; c.width = clip.w; c.height = clip.h; c.bits = clip.bits; c.blockMatcherOnly = !m.of; c.nvofHybrid = m.hybrid;
         std::string err;
@@ -592,6 +600,7 @@ static void Synthetic(int W, int H, int frames, Y4m& out)
 
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IOLBF, 1 << 16);   // line by line into a pipe (nothing lost if a run dies)
     std::string file, test = "interp", cutWith, labelsPath;
     int frames = 40, skip = 0;
     for (int i = 1; i < argc; ++i) {

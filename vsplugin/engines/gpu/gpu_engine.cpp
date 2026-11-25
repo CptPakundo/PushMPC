@@ -708,7 +708,7 @@ bool Engine::Impl::MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forw
         const VkImageView va = level == 0 && A.pyrF.img ? A.pyrF.view : A.pyr[size_t(level)].view;
         const VkImageView vb = level == 0 && B.pyrF.img ? B.pyrF.view : B.pyr[size_t(level)].view;
         const bool last = level == finest;
-        const int base = (level == coarsest ? 1 : 0) | (usePrev ? 8 : 0) | (useGlobal ? 64 : 0) | (last && cfg.equiangular ? 32 : 0) | (hintNow ? 128 : 0);
+        const int base = (level == coarsest ? 1 : 0) | (usePrev ? 8 : 0) | (useGlobal ? 64 : 0) | (last && level == 0 && cfg.equiangular ? 32 : 0) | (hintNow ? 128 : 0);
         const Buffer& prevField = usePrev ? (forward ? prev->fieldF : prev->fieldK) : dummy;
         const int sweeps = std::clamp(cfg.sweeps, 1, 2);
         pc.flags = base | (last && sweeps == 1 ? 2 : 0);

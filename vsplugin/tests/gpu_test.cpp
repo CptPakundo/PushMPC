@@ -215,7 +215,9 @@ static void TestMotion(int quality)
     const int sx = e.Upload(x.View(), err);
     PairStats cs;
     const int cp = e.Estimate(sb, sx, pair, cs, err);
-    CHECK(cp >= 0 && cs.cutRule, "hard cut: PushFPS's rule (%.2f / %.2f unexplained)", cs.unexplainedF, cs.unexplainedB);
+    CutGuard guard;
+    const int decided = cp >= 0 ? guard.Decide(cs) : 0;
+    CHECK(decided != 0, "hard cut: decided %d (PushFPS's rule %d, %.2f / %.2f unexplained, agreement %.2f)", decided, cs.cutRule ? 1 : 0, cs.unexplainedF, cs.unexplainedB, cs.consistent);
 }
 
 // ---- the backend on int handles
