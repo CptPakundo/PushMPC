@@ -12,3 +12,14 @@ PushMPC's changes (the patch, marked "PushMPC" in the code):
 
 PushMPC's own files (GPL-3.0-or-later): `modules/video_output/win32/pm_nis_d3d11.{cpp,h}`: NVIDIA Image Scaling 1.0.3
 (MIT, `vsplugin/third_party/nis`) on the decoder's textures, in compute shaders.
+
+## The OpenGL output fork (Linux)
+
+Built from the same VLC 3.0.24 tarball (`modules/video_output/opengl/`), with `pushmpc-vlc-3.0.24-gl.patch`:
+- `display.c`: module name `pushmpc_gl` (score 0, chosen with `vout=pushmpc_gl`); it declares only `pushmpc-gl-upscale`
+  (`fsr`, default, or `off`) and `pushmpc-gl-sharpness`, and reads VLC's own `gl`, `glconv` and colour options.
+- `vout_helper.c`: flat 2D pictures that are upscaled are drawn by VLC's shaders into a source-size texture, then go
+  through `pm_glscale` into the window. 360°, stereo and rotated pictures, and downscaling, keep VLC's path.
+
+PushMPC's own files (GPL-3.0-or-later): `modules/video_output/opengl/pm_glscale.{c,h}`: AMD FidelityFX Super Resolution 1
+(EASU + RCAS, after AMD's MIT-licensed reference) as GLSL 1.20 / ES 1.00 fragment shaders.
