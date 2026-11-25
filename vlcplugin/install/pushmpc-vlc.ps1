@@ -145,6 +145,9 @@ switch ($Action) {
         $state = @{
             'video-filter' = Get-RcValue $lines 'core' 'video-filter'
             'd3d11-upscale-mode' = Get-RcValue $lines 'direct3d11' 'd3d11-upscale-mode'
+            # no vlcrc yet (VLC never ran): uninstall removes the one this install wrote
+            'vlcrc-absent' = $(if (Test-Path $VlcRc) { 'no' } else { 'yes' })
+            'vlcdir-absent' = $(if (Test-Path (Split-Path $VlcRc)) { 'no' } else { 'yes' })
         }
         $prev = Read-State; if ($prev) { $state = $prev }  # a repeated install keeps the first originals
         $state | ConvertTo-Json | Set-Content -Encoding UTF8 $stateFile
@@ -164,6 +167,12 @@ switch ($Action) {
             $lines = Set-RcValue $lines 'direct3d11' 'd3d11-upscale-mode' $orig
             $lines = Set-RcValue $lines 'pushmpc' 'pushmpc-smoother' $null
             Write-Rc $VlcRc $lines
+            # a vlcrc this install created and VLC never filled holds no setting now: removed again (and VLC's folder)
+            if ($state -and "$($state.'vlcrc-absent')" -eq 'yes' -and -not @(Get-Content $VlcRc | Where-Object { $_.Trim() -and $_ -notmatch '^\s*(\[|#)' }).Count) {
+                Remove-Item -Force $VlcRc
+                $dir = Split-Path $VlcRc
+                if ("$($state.'vlcdir-absent')" -eq 'yes' -and (Test-Path $dir) -and -not (Get-ChildItem $dir -Force)) { Remove-Item $dir }
+            }
         }
         Set-UserPluginPath $PluginDir $false
         Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $PluginDir 'libpushmpc_plugin.dll'), $stateFile
