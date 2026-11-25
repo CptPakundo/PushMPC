@@ -578,7 +578,7 @@ class CPushVideoCodec : public kodi::addon::CInstanceVideoCodec
 public:
     CPushVideoCodec(const kodi::addon::IInstanceInfo& instance, CPushInputStream* in)
         : CInstanceVideoCodec(instance), m_in(in) {}
-    ~CPushVideoCodec() override { Teardown(); }
+    ~CPushVideoCodec() override { Log(ADDON_LOG_DEBUG, "decoder closing"); Teardown(); Log(ADDON_LOG_DEBUG, "decoder closed"); }
 
     bool Open(const kodi::addon::VideoCodecInitdata&) override
     {
@@ -655,6 +655,7 @@ public:
 
     void Reset() override
     {
+        Log(ADDON_LOG_DEBUG, "decoder reset");
         if (m_ctx) avcodec_flush_buffers(m_ctx);
         m_drained = false;
         m_queue.clear();
@@ -822,7 +823,7 @@ private:
             picture.decodedDataSize = size_t(picture.planeOffsets[2]) + size_t(picture.stride[2]) * size_t(och);
         }
         picture.pts = s.pts;
-        if (!GetFrameBuffer(picture)) return VC_ERROR;
+        if (!GetFrameBuffer(picture)) { Log(ADDON_LOG_WARNING, "Kodi gave no frame buffer"); return VC_ERROR; }
         uint8_t* dst[4] = {};
         int ds[3] = {};
         if (p010) {

@@ -90,9 +90,16 @@ elif case == "chapter":
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE chapter_ok", ms(p1.get("time", {})) >= 10000 and ms(p1.get("time", {})) > t0 + 4000)
 elif case == "subs":
-    rpc("Player.SetSubtitle", {"playerid": PLAYER[0], "subtitle": 0, "enable": True})
-    time.sleep(2)
-    p1 = props(); print("DRIVE props1", json.dumps(p1))
+    subs = rpc("Player.GetProperties", {"playerid": PLAYER[0], "properties": ["subtitles"]})
+    print("DRIVE subtitles", json.dumps(subs))
+    for _ in range(5):   # libass may still be loading fonts: ask again until Kodi takes it
+        r = rpc("Player.SetSubtitle", {"playerid": PLAYER[0], "subtitle": 0, "enable": True})
+        print("DRIVE setsubtitle", json.dumps(r))
+        time.sleep(2)
+        p1 = props()
+        if p1.get("subtitleenabled") and p1.get("currentsubtitle"):
+            break
+    print("DRIVE props1", json.dumps(p1))
     print("DRIVE subs_ok", bool(p1.get("subtitleenabled")) and bool(p1.get("currentsubtitle")))
     print("DRIVE audio_ok", bool(p1.get("currentaudiostream")))
 rest = max(0.0, secs - (time.time() - (deadline - 90)))
