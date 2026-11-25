@@ -1073,8 +1073,13 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
             if (!d.SelfTestSr(perr, &ms)) { notes.push_back(name + " does not run here (self-test: " + perr + ")"); endSr(); continue; }
             const double flowMs = (d.editFlow || d.recover || d.frcFlow) ? d.stats.benchFlowMs : 0.0;
             if (!FitsRealTime(ms, d.stats.benchFiMs, flowMs, std::max(1, d.cfg.k), c.srcFps, &cost)) {
-                notes.push_back(Fmt("%s is too slow here (%.1f ms a frame, %.1f ms per source frame with interpolation; budget %.1f ms)", name.c_str(), ms, cost, 1000.0 / (c.srcFps > 0 ? c.srcFps : 23.976) * 0.85));
-                endSr(); continue;
+                const std::string slow = Fmt("%s is slower than real time here (%.1f ms a frame, %.1f ms per source frame with interpolation; budget %.1f ms)", name.c_str(), ms, cost,
+                                             1000.0 / (c.srcFps > 0 ? c.srcFps : 23.976) * 0.85);
+                // Auto moves on; an upscaler the user named is kept (the ladder drops it to a plain scale if playback falls behind)
+                std::string mode = c.sr; for (auto& ch : mode) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+                const bool named = mode == "editing" || mode == "artcnn" || mode == "artcnn32" || mode == "artcnn16" || mode == "lowlatency";
+                if (!named || &cand != &so.order.back()) { notes.push_back(slow); endSr(); continue; }
+                notes.push_back(slow + ": kept (your setting)");
             }
             d.stats.benchSrMs = ms;
             notes.push_back(Fmt("%s: %.1f ms a frame", name.c_str(), ms));
