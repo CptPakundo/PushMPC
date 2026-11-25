@@ -191,6 +191,33 @@ runi uninstall
 check "8 nothing left" same "$(snap)" "$before"
 MPV_VSFAIL=0
 
+# 9. NVIDIA proprietary driver and a build with the fetcher: asked (answered ahead), fetched, removed on uninstall
+fresh
+mkdir -p "$HOME/fakeproc"; echo 'NVRM version: fake' > "$HOME/fakeproc/version"; PUSHMPC_NVIDIA_PROC=$HOME/fakeproc/version; export PUSHMPC_NVIDIA_PROC
+printf '#!/bin/sh\necho "$*" >> "$HOME/fetch-calls.txt"\ncase "$*" in *--uninstall*) rm -rf "$HOME/.local/share/pushmpc/nvidia-vfx" ;; *) mkdir -p "$HOME/.local/share/pushmpc/nvidia-vfx"; echo lib > "$HOME/.local/share/pushmpc/nvidia-vfx/libVideoFX.so" ;; esac\n' > "$pkg/nvidia-vfx-fetch.sh"
+printf '{}\n' > "$pkg/nvidia-vfx-pin.json"; printf 'ELF-selftest' > "$pkg/vsplugin/pushmpc-nvvfx-selftest"
+before=$(snap)
+runi install --flatpak no --nvidia-vfx yes; check "9 install exits 0" same $? 0
+check "9 fetcher run with the licence accepted" has '^--accept-nvidia-license$' "$HOME/fetch-calls.txt"
+check "9 runtime in place" test -f "$HOME/.local/share/pushmpc/nvidia-vfx/libVideoFX.so"
+check "9 self-test next to the plugin" test -f "$HOME/.local/share/pushmpc/vsplugin/pushmpc-nvvfx-selftest"
+runi uninstall
+check "9 fetcher run with --uninstall" has '^--uninstall$' "$HOME/fetch-calls.txt"
+rm -f "$HOME/fetch-calls.txt"
+check "9 nothing left" same "$(snap)" "$before"
+runi install --flatpak no --nvidia-vfx no
+check "9 declined: fetcher not run" test ! -e "$HOME/fetch-calls.txt"
+check "9 declined: says so" has "NVIDIA's video effects not downloaded" "$out"
+runi uninstall
+runi install --flatpak no < /dev/null
+check "9 no terminal: not asked" has 'run again with --nvidia-vfx yes' "$out"
+runi uninstall
+rm -f "$pkg/nvidia-vfx-fetch.sh"
+runi install --flatpak no --nvidia-vfx yes
+check "9 build without the fetcher: no NVIDIA step" hasnot 'NVIDIA driver found' "$out"
+runi uninstall
+unset PUSHMPC_NVIDIA_PROC
+
 # 7. dry run writes nothing
 fresh
 MPV_VS=1

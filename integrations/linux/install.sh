@@ -3,7 +3,7 @@
 # plugin (pushmpc.Enhance: frame generation, scene-cut guard) into every mpv-based player it finds and takes it out
 # again exactly.
 #
-#   ./install.sh [install]   [--flatpak ask|yes|no] [--yes] [--dry-run]
+#   ./install.sh [install]   [--flatpak ask|yes|no] [--nvidia-vfx ask|yes|no] [--yes] [--dry-run]
 #   ./install.sh uninstall   [--keep-flatpak-mpv]
 #   ./install.sh status
 #
@@ -23,6 +23,10 @@
 #   MPC-QT            Options > Tweaks "mpv options file" in ~/.config/mpc-qt/settings.json
 #   Jellyfin MPV Shim, Plex-MPV-Shim   the block in the mpv.conf beside their conf.json
 #   Jellyfin Desktop  the block in ~/.local/share/jellyfin-desktop/profiles/<id>/mpv.conf (system libmpv)
+#   NVIDIA (proprietary driver only)   after you accept NVIDIA's licence (asked once; --nvidia-vfx yes|no answers ahead),
+#                     nvidia-vfx-fetch.sh downloads NVIDIA's Video Effects runtime (RTX Video Super Resolution, RTX Video
+#                     HDR, frame generation) from NVIDIA's package index, checked against pinned SHA-256s, into
+#                     ~/.local/share/pushmpc/nvidia-vfx; uninstall removes it. pushmpc-nvvfx-selftest sits next to the plugin.
 #   Kodi (native)     ~/.kodi/userdata/playercorefactory.xml: mpv (or the Flathub mpv) as the external player
 #                     for every video, in marked parts
 # Environment for tests: HOME, XDG_*; PUSHMPC_SRC (folder with vsplugin/ and mpv-integration.sh; default: next to
@@ -37,10 +41,11 @@ FLATPAK_MPV=io.mpv.Mpv
 
 action=install
 case ${1:-} in install|uninstall|status) action=$1; shift ;; esac
-flatpak_answer=ask; yes=0; dry=0; keep_fp=0
+flatpak_answer=ask; nvvfx_answer=ask; yes=0; dry=0; keep_fp=0
 while [ $# -gt 0 ]; do
     case $1 in
         --flatpak) flatpak_answer=$2; shift 2 ;;
+        --nvidia-vfx) nvvfx_answer=$2; shift 2 ;;
         --yes|-y) yes=1; shift ;;
         --dry-run) dry=1; shift ;;
         --keep-flatpak-mpv) keep_fp=1; shift ;;
@@ -318,12 +323,49 @@ kodi_install() {
 }
 kodi_revert() { kodi_strip "$1" > "$1.pushmpc-tmp" && mv "$1.pushmpc-tmp" "$1"; }
 
+# ------------------------------------------------------------------------------------------------ NVIDIA Video Effects runtime
+# Only with NVIDIA's own driver (/proc/driver/nvidia exists; nouveau has none) and when this build carries the fetcher.
+nvproc=${PUSHMPC_NVIDIA_PROC:-/proc/driver/nvidia/version}
+ask_nvvfx() {
+    case $nvvfx_answer in yes) return 0 ;; no) return 1 ;; esac
+    [ "$yes" = 1 ] && return 0
+    [ -t 0 ] || { say "  (not asked: no terminal; run again with --nvidia-vfx yes to accept NVIDIA's licence and download it)"; return 1; }
+    say ''
+    say "Your NVIDIA graphics card can use NVIDIA's own video enhancement: RTX Video Super Resolution, RTX Video HDR"
+    say "and frame generation. PushMPC may not ship NVIDIA's files, so they are downloaded from NVIDIA's package index"
+    say "(pypi.nvidia.com), checked against fixed SHA-256 checksums and kept in $pm/nvidia-vfx."
+    say "They come under NVIDIA's licence (NVIDIA Software License Agreement and the Product-Specific Terms for NVIDIA"
+    say "AI Products). Without them PushMPC still works with its own frame generation."
+    printf "Accept NVIDIA's licence and download NVIDIA's video effects now? [y/N] "
+    read -r a || a=n
+    case $a in y|Y|yes|Yes) return 0 ;; *) return 1 ;; esac
+}
+nvidia_step() {
+    [ -f "$pm/nvidia-vfx-fetch.sh" ] || return 0
+    [ -e "$nvproc" ] || return 0
+    say "NVIDIA driver found:"
+    if ! ask_nvvfx; then say "  NVIDIA's video effects not downloaded (PushMPC's own frame generation is used)"; return 0; fi
+    [ "$dry" = 1 ] && { say "would: sh $pm/nvidia-vfx-fetch.sh --accept-nvidia-license"; return 0; }
+    sh "$pm/nvidia-vfx-fetch.sh" --accept-nvidia-license; rc=$?
+    case $rc in
+        0) record "nvvfx"; say "  NVIDIA's video effects installed ($pm/nvidia-vfx)" ;;
+        3) say "  NVIDIA publishes no video effects runtime for this processor type: PushMPC's own frame generation is used" ;;
+        *) say "  NVIDIA's video effects could not be installed (exit $rc): PushMPC's own frame generation is used; run this again later" ;;
+    esac
+    return 0
+}
+
 # ------------------------------------------------------------------------------------------------ install
 copy_files() {
     for f in pushmpc_vs.so pushmpc.vpy; do [ -f "$src/vsplugin/$f" ] || { echo "install.sh: $src/vsplugin/$f is missing (run install.sh from the unpacked PushMPC folder)" >&2; exit 1; }; done
     run mkdir -p "$plugdir"
     run cp "$src/vsplugin/pushmpc_vs.so" "$src/vsplugin/pushmpc.vpy" "$plugdir/"
     [ -f "$src/LICENSE" ] && run cp "$src/LICENSE" "$pm/"
+    # the Linux NVIDIA backend (when this build has it): its self-test next to the plugin, its runtime fetcher in $pm
+    [ -f "$src/vsplugin/pushmpc-nvvfx-selftest" ] && { run cp "$src/vsplugin/pushmpc-nvvfx-selftest" "$plugdir/"; run chmod 755 "$plugdir/pushmpc-nvvfx-selftest"; }
+    for f in nvidia-vfx-fetch.sh nvidia-vfx-pin.json; do
+        if [ -f "$src/$f" ]; then run cp "$src/$f" "$pm/$f"; elif [ -f "$src/scripts/$f" ]; then run cp "$src/scripts/$f" "$pm/$f"; fi
+    done
     [ "$here/install.sh" = "$pm/install.sh" ] || run cp "$here/install.sh" "$pm/install.sh"
     if [ -f "$src/mpv-integration.sh" ]; then run cp "$src/mpv-integration.sh" "$mi"; elif [ -f "$src/integrations/mpv/mpv-integration.sh" ]; then run cp "$src/integrations/mpv/mpv-integration.sh" "$mi"; fi
     [ "$dry" = 1 ] && mi=$src/mpv-integration.sh && [ -f "$mi" ] || true
@@ -355,6 +397,7 @@ install_flatpak_mpv() {
 
 do_install() {
     copy_files
+    nvidia_step
     targets=0
     nat=0; native_mpv_vs && nat=1
     conf=$cfg/mpv/mpv.conf
@@ -434,12 +477,13 @@ do_uninstall() {
                 flatpak-mpv-installed)
                     if [ "$keep_fp" = 1 ]; then say "Flathub mpv kept (--keep-flatpak-mpv)"
                     else say "Removing the Flathub mpv PushMPC installed"; run flatpak uninstall --user -y --noninteractive "$FLATPAK_MPV"; fi ;;
+                nvvfx) say "NVIDIA's video effects:"; [ -f "$pm/nvidia-vfx-fetch.sh" ] && run sh "$pm/nvidia-vfx-fetch.sh" --uninstall ;;
                 flathub-remote-added) [ "$keep_fp" = 1 ] || { flatpak list --user 2>/dev/null | grep -q . || run flatpak remote-delete --user flathub; } ;;
             esac
         done
     fi
     run rm -rf "$plugdir"
-    run rm -f "$state" "$pm/LICENSE" "$pm/mpv-integration.sh"
+    run rm -f "$state" "$pm/LICENSE" "$pm/mpv-integration.sh" "$pm/nvidia-vfx-fetch.sh" "$pm/nvidia-vfx-pin.json"
     [ "$here" = "$pm" ] || run rm -f "$pm/install.sh"
     say "PushMPC removed."
     [ "$dry" = 1 ] || { rm -f "$pm/install.sh" 2>/dev/null; rmdir "$pm" 2>/dev/null; }

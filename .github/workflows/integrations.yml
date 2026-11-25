@@ -407,7 +407,7 @@ jobs:
       - name: Packages (mpv requires vapoursynth on Arch), test clip
         timeout-minutes: 15
         run: |
-          pacman -Syu --noconfirm --needed mpv vapoursynth ffmpeg xorg-server-xvfb mesa dbus celluloid haruna smplayer >/dev/null
+          pacman -Syu --noconfirm --needed mpv vapoursynth ffmpeg diffutils xorg-server-xvfb mesa dbus celluloid haruna smplayer >/dev/null
           pacman -Si mpc-qt >/dev/null 2>&1 && pacman -S --noconfirm --needed mpc-qt >/dev/null || echo "mpc-qt: not in the Arch repositories (AUR only)"
           pacman -Q mpv vapoursynth celluloid haruna smplayer mpc-qt 2>&1 | tee /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
@@ -466,11 +466,12 @@ jobs:
             timeout 40 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x720x24' $p /tmp/clip.mp4 > /tmp/$p.out 2>&1 &
             pid=$!
             for i in $(seq 1 35); do sleep 1; grep -qs 'backend: ' $PUSHMPC_VS_LOG_DIR/*.log && break; done
-            kill $pid 2>/dev/null; pkill -f "$p /tmp/clip.mp4" 2>/dev/null; pkill mpv 2>/dev/null; sleep 1
+            kill $pid 2>/dev/null || true; pkill -f "$p /tmp/clip.mp4" 2>/dev/null || true; pkill mpv 2>/dev/null || true; sleep 1
             if grep -qs 'backend: ' $PUSHMPC_VS_LOG_DIR/*.log; then echo "$p: PLUGIN RAN ($(grep -h -m1 'portable: output' $PUSHMPC_VS_LOG_DIR/*.log))" >> $res
             else echo "$p: no plugin log; last output: $(tail -n 3 /tmp/$p.out | tr '\n' ' ')" >> $res; fi
           done
           cat $res
+          echo "::notice title=Linux frontends under Xvfb::$(tr '\n' ' ' < $res)"
           rm -r $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           { echo '## linux-arch'; echo; echo '```'; cat /tmp/versions.txt; echo "mpv encode: ${ARCH_FRAMES:-}"; cat $res; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

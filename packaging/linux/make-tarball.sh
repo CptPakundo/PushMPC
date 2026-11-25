@@ -6,7 +6,7 @@
 #     vsplugin/pushmpc_vs.so     the VapourSynth plugin (portable backend)
 #     vsplugin/pushmpc.vpy       the script mpv runs (vsplugin/scripts/pushmpc.vpy)
 #     LICENSE, README.txt
-#   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version>      (run from the repository root)
+#   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version> [<pushmpc-nvvfx-selftest>]   (run from the repository root)
 set -eu
 so=$1; arch=$3; ver=$4
 mkdir -p "$2"; out=$(cd "$2" && pwd)
@@ -19,6 +19,11 @@ install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
 install -m 644 LICENSE "$d/LICENSE"
+# the Linux NVIDIA backend's runtime fetcher (NVIDIA's files are downloaded on the user's machine, never shipped) and
+# its self-test (optional 5th argument), when this build has them
+[ -f scripts/nvidia-vfx-fetch.sh ] && install -m 755 scripts/nvidia-vfx-fetch.sh "$d/nvidia-vfx-fetch.sh"
+[ -f scripts/nvidia-vfx-pin.json ] && install -m 644 scripts/nvidia-vfx-pin.json "$d/nvidia-vfx-pin.json"
+[ -n "${5:-}" ] && [ -f "$5" ] && install -m 755 "$5" "$d/vsplugin/pushmpc-nvvfx-selftest"
 cat > "$d/README.txt" <<EOF
 PushMPC $ver for Linux ($arch): frame generation and the scene-cut guard for mpv and mpv-based players.
 
