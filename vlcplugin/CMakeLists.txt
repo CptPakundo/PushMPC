@@ -134,6 +134,14 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
                              "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
   target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
                              _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
+  # what VLC's own config.h sets for this module (without HAVE_ID3D11VIDEODECODER the output never creates its staging
+  # texture for software-decoded pictures and crashes in Prepare; the other two give the HDR detection and render fence)
+  include(CheckIncludeFile)
+  check_include_file(d3d11_4.h PM_HAVE_D3D11_4_H)
+  check_include_file(dxgi1_6.h PM_HAVE_DXGI1_6_H)
+  target_compile_definitions(pushmpc_d3d11_plugin PRIVATE HAVE_ID3D11VIDEODECODER
+                             $<$<BOOL:${PM_HAVE_D3D11_4_H}>:HAVE_D3D11_4_H> $<$<BOOL:${PM_HAVE_DXGI1_6_H}>:HAVE_DXGI1_6_H>)
+  message(STATUS "pushmpc_d3d11: d3d11_4.h ${PM_HAVE_D3D11_4_H}, dxgi1_6.h ${PM_HAVE_DXGI1_6_H}")
   target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations
     # vlc_threads.h calls poll(), which VLC's own tree declares in its compat layer: Winsock's WSAPoll for the C++ files
     "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include winsock2.h>" "$<$<COMPILE_LANGUAGE:CXX>:-Dpoll=WSAPoll>")
