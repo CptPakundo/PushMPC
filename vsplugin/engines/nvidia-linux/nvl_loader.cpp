@@ -1,5 +1,7 @@
 // Run-time loading of the CUDA driver and the Video Effects runtime (nvl_cuda.h, nvl_vfx.h). Linux only.
+#include <dirent.h>
 #include <dlfcn.h>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include "nvl_cuda.h"
@@ -68,10 +70,35 @@ bool VfxApi::Load(const std::string& r, std::string& why)
 {
     if (!libs.empty()) return true;
     root = r;
+    // The wheel's libraries find each other only when already loaded: libNVCVImage.so carries a build-machine RPATH
+    // (/usr/local/cuda-12.8/...) and the others only $ORIGIN/../../nvidia_vfx.libs (cudart). As NVIDIA's own Python
+    // loader does, they are loaded here by absolute path in dependency order (RTLD_GLOBAL), so every later NEEDED entry
+    // (and the effect libraries libVideoFX opens) resolves to these copies by SONAME.
+    {
+        DIR* d = opendir((root + "/nvidia_vfx.libs").c_str());
+        if (d) {
+            while (dirent* e = readdir(d))
+                if (!std::strncmp(e->d_name, "libcudart", 9)) {
+                    void* h = dlopen((root + "/nvidia_vfx.libs/" + e->d_name).c_str(), RTLD_NOW | RTLD_GLOBAL);
+                    if (h) libs.push_back(h);
+                }
+            closedir(d);
+        }
+    }
+    for (const char* dep : { "libnppc.so.12", "libnppial.so.12", "libnppicc.so.12", "libnppidei.so.12", "libnppig.so.12", "libnppif.so.12", "libnppim.so.12",
+                             "libnppist.so.12", "libnppitc.so.12", "libcudnn.so.9" }) {
+        std::string w;
+        if (!Open(dep, w) && std::strstr(dep, "libnpp") && std::strcmp(dep, "libnppif.so.12") && std::strcmp(dep, "libnppim.so.12") && std::strcmp(dep, "libnppist.so.12") && std::strcmp(dep, "libnppitc.so.12")) {
+            why = w; Unload(); return false;   // the NPP modules libNVCVImage needs (NEEDED); the other four are optional
+        }
+    }
     void* image = Open("libNVCVImage.so", why);
-    if (!image) return false;
+    if (!image) { Unload(); return false; }
     void* core = Open("libVideoFX.so", why);
     if (!core) { Unload(); return false; }
+    std::string w;
+    Open("libnvngxruntime.so", w);
+    Open("libVideoFXLocal.so", w);
     bool ok = Bind(core, "NvVFX_CreateEffect", CreateEffect, why) && Bind(core, "NvVFX_DestroyEffect", DestroyEffect, why) && Bind(core, "NvVFX_SetU32", SetU32, why)
         && Bind(core, "NvVFX_SetF32", SetF32, why) && Bind(core, "NvVFX_SetImage", SetImage, why) && Bind(core, "NvVFX_SetCudaStream", SetCudaStream, why)
         && Bind(core, "NvVFX_Load", LoadEffect, why) && Bind(core, "NvVFX_Run", Run, why) && Bind(core, "NvVFX_GetVersion", GetVersion, why)

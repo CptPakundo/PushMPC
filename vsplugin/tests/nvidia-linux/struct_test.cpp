@@ -45,7 +45,9 @@ int main(int argc, char** argv)
     CHECK(!g.driver && g.why.find("cuInit") != std::string::npos, "no GPU reported through cuInit: %s", g.why.c_str());
     CHECK(g.runtime, "runtime found in %s: %s", root.c_str(), g.runtimeWhy.c_str());
 
-    // 2. every library resolves
+    // 2. every library resolves (after the loader preloaded the runtime in dependency order, as the engine does)
+    VfxApi vfx; std::string why;
+    CHECK(vfx.Load(root, why), "VfxApi::Load: %s", why.c_str());
     const char* all[] = { "libNVCVImage.so", "libVideoFX.so", "libVideoFXLocal.so", "libnvVFXVideoSuperRes.so", "libnvVFXTrueHDR.so", "libnvVFXVideoFrameGeneration.so",
                           "libnvidia-ngx-vsr.so.1.8.3", "libnvidia-ngx-truehdr.so.1.2.3", "libnvngxruntime.so" };
     std::vector<void*> handles;
@@ -56,8 +58,6 @@ int main(int argc, char** argv)
     }
 
     // 3. the API
-    VfxApi vfx; std::string why;
-    CHECK(vfx.Load(root, why), "VfxApi::Load: %s", why.c_str());
     if (!vfx.CreateEffect) { std::printf("nvl_struct_test: %d passed, %d failed\n", g_pass, g_fail); return 1; }
     unsigned version = 0;
     const NvCV_Status vs = vfx.GetVersion(&version);
