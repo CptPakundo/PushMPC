@@ -63,6 +63,7 @@ GpuInfo ProbeGpu(int device, const std::string& runtimeDir)
     const bool rt = g.runtime;
     g.caps.vsr = rt && VsrCapable(g.cls) && FileExists(In(libs, os::kNames.vsr));
     g.caps.hdr = rt && VsrCapable(g.cls) && FileExists(In(libs, os::kNames.hdr));
+    { std::string ofWhy; g.caps.nvof = VsrCapable(g.cls) && OpticalFlow::LibraryPresent(ofWhy); }   // NVOFA: Turing RTX and newer
     const bool vfgFile = rt && FileExists(In(libs, os::kNames.vfg));
     if (!vfgFile) g.caps.vfgWhy = rt ? "the VFG library is missing from the runtime" : g.runtimeWhy;
     else if (VfgNative(g.major, g.minor)) g.caps.vfg = true;
@@ -84,6 +85,8 @@ Engine::~Engine()
         for (auto& u : m_up) { if (u.host) m_cu->cuMemFreeHost(u.host); if (u.done) m_cu->cuEventDestroy(u.done); }
         for (auto& s : m_slots) { if (s.host) m_cu->cuMemFreeHost(s.host); if (s.done) m_cu->cuEventDestroy(s.done); }
         m_guard.Close();
+        m_of.Close();
+        for (auto& e : m_ev) if (e) m_cu->cuEventDestroy(e);
         if (m_module) m_cu->cuModuleUnload(m_module);
         if (m_stream) m_cu->cuStreamDestroy(m_stream);
     }
@@ -207,9 +210,12 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
             || !Cv(m_vfx.LoadEffect(m_hdr), "NvVFX_Load(TrueHDR)", err)) return false;
         what += "RTX Video HDR peak " + std::to_string(int(cfg.hdrPeak)) + " cd/m2; ";
     }
-    // VFG (Ampere: the compatibility first, before the library loads its kernels)
+    // frame generation: VFG (Ampere: the compatibility first, before the library loads its kernels), or NVIDIA optical
+    // flow + our warp (the fast tier on GPUs without VFG)
     if (p.k >= 2) {
         if (!MakeImage(m_vfgOut, ow, oh, m_enhTenBit, err)) return false;
+    }
+    if (p.k >= 2 && !p.nvof) {
         const std::string vfgPath = In(VfxApi::LibDir(gpu.runtimeDir), os::kNames.vfg);
         m_vfgLib = m_vfx.Open(os::kNames.vfg, err);
         if (!m_vfgLib) return false;
@@ -224,11 +230,23 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
             || !Cv(m_vfx.SetImage(m_vfg, sel::kDst0, m_vfgOut.desc), "VFG DstImage0", err)
             || !Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(p.k)), "VFG FrameMultiplier", err)) return false;
         what += "VFG " + std::string(p.vfgQuality >= 2 ? "High" : p.vfgQuality <= 0 ? "Low" : "Medium") + " x" + std::to_string(p.k) + (cfg.ampere ? " (RTX 30 compatibility)" : "") + "; ";
+    }
+    if (p.k >= 2 && (p.nvof || cfg.guardFlow)) {
+        std::string ferr;
+        if (!Cu(m_cu->cuModuleGetFunction(&m_toGray, m_module, "nvl_luma_to_gray8"), "nvl_luma_to_gray8", err)
+            || !Cu(m_cu->cuModuleGetFunction(&m_warp, m_module, "nvl_warp"), "nvl_warp", err)) return false;
+        if (m_of.Open(*m_cu, m_ctx, m_stream, uint32_t(cfg.srcW), uint32_t(cfg.srcH), ferr)) {
+            for (auto& e : m_ev) if (!Cu(m_cu->cuEventCreate(&e, CU_EVENT_DEFAULT), "cuEventCreate (timing)", err)) return false;
+            what += std::string(p.nvof ? "optical flow + warp x" + std::to_string(p.k) : std::string("optical flow for the cut guard")) + " (NVOFA grid " + std::to_string(m_of.Grid()) + "); ";
+        } else if (p.nvof) { err = ferr; return false; }
+        else what += "no optical flow for the cut guard (" + ferr + "); ";
+    }
+    if (p.k >= 2) {
         // the cut guard: Windows' HLSL on the GPU when built (PUSHMPC_CUT_GUARD=cpu keeps the CPU port)
         const char* mode = std::getenv("PUSHMPC_CUT_GUARD");
         std::string gerr;
         if (mode && !std::strcmp(mode, "cpu")) what += "cut guard: CPU (PUSHMPC_CUT_GUARD=cpu); ";
-        else if (m_guard.Open(*m_cu, m_stream, uint32_t(ow), uint32_t(oh), m_enhTenBit, gerr)) what += "cut guard: GPU (PushMPC's HLSL via Slang); ";
+        else if (m_guard.Open(*m_cu, m_stream, uint32_t(ow), uint32_t(oh), m_enhTenBit, gerr)) what += std::string("cut guard: GPU (PushMPC's HLSL via Slang") + (m_of.Ready() ? ", with optical flow" : "") + "); ";
         else what += "cut guard: CPU (" + gerr + "); ";
     }
     unsigned version = 0;
@@ -264,6 +282,16 @@ bool Engine::Upload(const SrcView& v, int parity, std::string& err)
     }
     if (!Cu(m_cu->cuEventRecord(u.done, m_stream), "cuEventRecord", err)) return false;
     u.used = true;
+    m_flowFresh = false;
+    if (m_of.Ready()) {
+        // the source luma as NVOF's 8-bit input of this parity
+        const uint8_t* yp = reinterpret_cast<const uint8_t*>(m_srcPlane[0]);
+        unsigned yPitch = unsigned(m_srcPitch[0]), gPitch = m_of.InputPitch();
+        int bitsIn = v.bits, gw = v.width, gh = v.height;
+        uint8_t* gp = reinterpret_cast<uint8_t*>(m_of.Input(parity));
+        void* gargs[] = { &yp, &yPitch, &bitsIn, &gw, &gh, &gp, &gPitch };
+        if (!Launch(m_toGray, unsigned(gw), unsigned(gh), gargs, err)) return false;
+    }
     // convert into the first stage's input, or straight into enhanced[parity]
     const bool stages = m_vsr || m_hdr;
     Image& dst = stages ? m_packed : m_enh[parity];
@@ -289,7 +317,7 @@ bool Engine::Upload(const SrcView& v, int parity, std::string& err)
     return true;
 }
 
-int Engine::ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag, const Image* alt)
+int Engine::ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag, const Image* alt, CUdeviceptr holdFlag2, const Image* alt2)
 {
     int idx = -1;
     for (size_t i = 0; i < m_slots.size(); ++i) if (!m_slots[i].busy) { idx = int(i); break; }
@@ -304,7 +332,10 @@ int Engine::ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag, cons
     const uint32_t* flag = reinterpret_cast<const uint32_t*>(holdFlag);
     const uint32_t* altPtr = alt ? reinterpret_cast<const uint32_t*>(alt->ptr) : nullptr;
     unsigned altPitch = alt ? unsigned(alt->pitch) : 0u;
-    void* args[] = { &in, &inPitch, &tb, &w, &h, &k, &bits, &out, &flag, &altPtr, &altPitch };
+    const uint32_t* flag2 = reinterpret_cast<const uint32_t*>(holdFlag2);
+    const uint32_t* alt2Ptr = alt2 ? reinterpret_cast<const uint32_t*>(alt2->ptr) : nullptr;
+    unsigned alt2Pitch = alt2 ? unsigned(alt2->pitch) : 0u;
+    void* args[] = { &in, &inPitch, &tb, &w, &h, &k, &bits, &out, &flag, &altPtr, &altPitch, &flag2, &alt2Ptr, &alt2Pitch };
     if (!Launch(m_toYuv, unsigned((w + 1) / 2), unsigned((h + 1) / 2), args, err)) return -1;
     const int obps = m_outBits > 8 ? 2 : 1, cw = (w + 1) / 2, ch = (h + 1) / 2;
     const int pw[3] = { w, cw, cw }, ph[3] = { h, ch, ch };
@@ -324,21 +355,71 @@ int Engine::Generate(int parity, int j, int k, bool newPair, std::string& err)
 {
     Ctx c(*m_cu, m_ctx);
     if (!c.ok) { err = "cuCtxPushCurrent failed"; return -1; }
-    if (!m_vfg) { err = "VFG is not loaded"; return -1; }
-    // NVIDIA's sample (and PushFPS): both inputs are rebound for each NEW pair, even when the pointers are unchanged;
-    // rebinding for every subframe would start a new pair inside the SDK
-    if (newPair) {
-        if (!Cv(m_vfx.SetImage(m_vfg, sel::kSrc0, m_enh[1 - parity].desc), "VFG SrcImage0", err) || !Cv(m_vfx.SetImage(m_vfg, sel::kSrc1, m_enh[parity].desc), "VFG SrcImage1", err)
-            || !Cv(m_vfx.SetU32(m_vfg, sel::kShot, 0), "VFG ShotChange", err)) return -1;
-    }
-    if (!Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(k)), "VFG FrameMultiplier", err) || !Cv(m_vfx.SetU32(m_vfg, sel::kIndex, unsigned(j)), "VFG FrameIndex", err)
-        || !Cv(m_vfx.Run(m_vfg, 1), "NvVFX_Run(VideoFrameGeneration)", err)) return -1;
+    if (m_vfg) {
+        // NVIDIA's sample (and PushFPS): both inputs are rebound for each NEW pair, even when the pointers are unchanged;
+        // rebinding for every subframe would start a new pair inside the SDK
+        if (newPair) {
+            if (!Cv(m_vfx.SetImage(m_vfg, sel::kSrc0, m_enh[1 - parity].desc), "VFG SrcImage0", err) || !Cv(m_vfx.SetImage(m_vfg, sel::kSrc1, m_enh[parity].desc), "VFG SrcImage1", err)
+                || !Cv(m_vfx.SetU32(m_vfg, sel::kShot, 0), "VFG ShotChange", err)) return -1;
+        }
+        if (!Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(k)), "VFG FrameMultiplier", err) || !Cv(m_vfx.SetU32(m_vfg, sel::kIndex, unsigned(j)), "VFG FrameIndex", err)
+            || !Cv(m_vfx.Run(m_vfg, 1), "NvVFX_Run(VideoFrameGeneration)", err)) return -1;
+    } else if (m_cfg.plan.nvof && m_of.Ready() && m_flowFresh) {
+        // the optical-flow tier: A and B warped to t = j / k along NVOF's two flows (nvl_kernels.cu nvl_warp)
+        const uint32_t* A = reinterpret_cast<const uint32_t*>(m_enh[1 - parity].ptr);
+        const uint32_t* B = reinterpret_cast<const uint32_t*>(m_enh[parity].ptr);
+        unsigned pitch = unsigned(m_enh[parity].pitch), flowPitch = m_of.FlowPitch(), outPitch = unsigned(m_vfgOut.pitch);
+        int tb = m_enhTenBit ? 1 : 0, w = m_vfgOut.w, h = m_vfgOut.h, gw = int(m_of.GridW()), gh = int(m_of.GridH()), grid = int(m_of.Grid());
+        const int16_t* fwd = reinterpret_cast<const int16_t*>(m_of.Forward());
+        const int16_t* bwd = reinterpret_cast<const int16_t*>(m_of.Backward());
+        float sx = float(w) / float(m_of.Width()), sy = float(h) / float(m_of.Height()), t = float(j) / float(k);
+        uint32_t* out = reinterpret_cast<uint32_t*>(m_vfgOut.ptr);
+        void* args[] = { &A, &B, &pitch, &tb, &w, &h, &fwd, &bwd, &flowPitch, &gw, &gh, &grid, &sx, &sy, &t, &out, &outPitch };
+        const bool time = j == 1 && !m_evWarp && m_ev[2];
+        if (time && !Cu(m_cu->cuEventRecord(m_ev[2], m_stream), "cuEventRecord", err)) return -1;
+        if (!Launch(m_warp, unsigned(w), unsigned(h), args, err)) return -1;
+        if (time) { if (!Cu(m_cu->cuEventRecord(m_ev[3], m_stream), "cuEventRecord", err)) return -1; m_evWarp = true; }
+    } else { err = m_cfg.plan.nvof ? "the optical flow of this pair is missing" : "no frame generation is loaded"; return -1; }
     if (m_guard.Ready()) {
-        // Windows' holdOnCut: up to the pair's midpoint A on a hard or soft cut, after it A on a hard cut
+        // Windows' holdOnCut: up to the pair's midpoint A on a hard or soft cut; after it A on a hard cut, B on a soft one
         const unsigned par = unsigned(parity);
-        return ToSlot(m_vfgOut, err, 2 * j <= k ? m_guard.AnyFlag(par) : m_guard.HardFlag(par), &m_enh[1 - parity]);
+        if (2 * j <= k) return ToSlot(m_vfgOut, err, m_guard.AnyFlag(par), &m_enh[1 - parity]);
+        return ToSlot(m_vfgOut, err, m_guard.HardFlag(par), &m_enh[1 - parity], m_guard.SoftOnlyFlag(par), &m_enh[parity]);
     }
     return ToSlot(m_vfgOut, err);
+}
+
+bool Engine::Flow(int parity, std::string& err)
+{
+    if (!m_of.Ready()) return true;
+    Ctx c(*m_cu, m_ctx);
+    if (!c.ok) { err = "cuCtxPushCurrent failed"; return false; }
+    ResolveTimers();
+    const bool time = !m_evFlow && m_ev[0];
+    if (time && !Cu(m_cu->cuEventRecord(m_ev[0], m_stream), "cuEventRecord", err)) return false;
+    if (!m_of.Run(parity, err)) return false;
+    if (time) { if (!Cu(m_cu->cuEventRecord(m_ev[1], m_stream), "cuEventRecord", err)) return false; m_evFlow = true; }
+    m_flowFresh = true;
+    return true;
+}
+
+void Engine::ResolveTimers()
+{
+    float ms = 0;
+    if (m_evFlow && m_cu->cuEventQuery(m_ev[1]) == CUDA_SUCCESS) {
+        if (m_cu->cuEventElapsedTime(&ms, m_ev[0], m_ev[1]) == CUDA_SUCCESS && ms > 0) { m_flowMs += ms; ++m_flowN; }
+        m_evFlow = false;
+    }
+    if (m_evWarp && m_cu->cuEventQuery(m_ev[3]) == CUDA_SUCCESS) {
+        if (m_cu->cuEventElapsedTime(&ms, m_ev[2], m_ev[3]) == CUDA_SUCCESS && ms > 0) { m_warpMs += ms; ++m_warpN; }
+        m_evWarp = false;
+    }
+}
+
+void Engine::FlowCosts(double& flowMs, double& warpMs)
+{
+    flowMs = m_flowN > 4 ? m_flowMs / m_flowN : 0;   // the first few include the session's warm-up
+    warpMs = m_warpN > 4 ? m_warpMs / m_warpN : 0;
 }
 
 bool Engine::Guard(int parity, bool compare, std::string& err)
@@ -346,7 +427,15 @@ bool Engine::Guard(int parity, bool compare, std::string& err)
     if (!m_guard.Ready()) return true;
     Ctx c(*m_cu, m_ctx);
     if (!c.ok) { err = "cuCtxPushCurrent failed"; return false; }
-    return m_guard.Test(m_enh[1 - parity].ptr, m_enh[parity].ptr, m_enh[parity].pitch, unsigned(parity), compare, err);
+    GpuGuard::Flow f;
+    if (compare && m_flowFresh && m_of.Ready()) {
+        // the shader's "forward" = vectors from the current frame to the previous one (our backward run), with its cost
+        f.flags = 1u | 2u | 4u;
+        f.forward = m_of.Backward(); f.cost = m_of.Cost(); f.backward = m_of.Forward();
+        f.flowPitch = m_of.FlowPitch(); f.costPitch = m_of.CostPitch();
+        f.gridW = m_of.GridW(); f.gridH = m_of.GridH(); f.extentW = m_of.Width(); f.extentH = m_of.Height();
+    }
+    return m_guard.Test(m_enh[1 - parity].ptr, m_enh[parity].ptr, m_enh[parity].pitch, unsigned(parity), compare, err, f);
 }
 
 int Engine::Emit(int parity, std::string& err)

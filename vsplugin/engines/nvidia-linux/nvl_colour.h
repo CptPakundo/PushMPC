@@ -142,3 +142,15 @@ NVL_HD uint32_t GuardLuma(uint32_t y, int bits, bool full)
 }
 
 } // namespace pmvs::nvl
+
+namespace pmvs::nvl {
+// the fast interpolation tier's flow arithmetic (nvl_kernels.cu nvl_warp; nvl_test checks it): intermediate flows at time
+// t from the two directions (Super SloMo's linear approximation), and a side's weight from its round-trip error
+NVL_HD void IntermediateFlows(float t, float f01x, float f01y, float f10x, float f10y, float& t0x, float& t0y, float& t1x, float& t1y)
+{
+    const float u = 1.f - t;
+    t0x = -u * t * f01x + t * t * f10x; t0y = -u * t * f01y + t * t * f10y;
+    t1x = u * u * f01x - t * u * f10x;  t1y = u * u * f01y - t * u * f10y;
+}
+NVL_HD float RoundTripWeight(float timeWeight, float errPixels) { return timeWeight / (1.f + 0.5f * errPixels * errPixels); }
+} // namespace pmvs::nvl

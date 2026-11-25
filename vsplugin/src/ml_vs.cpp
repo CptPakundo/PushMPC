@@ -167,6 +167,18 @@ std::vector<pmml::ProbeResult> CachedResults(const std::string& file, int w, int
 
 } // namespace
 
+// the multiplier pmml's measured candidates reach for this clip (the autobench cache): -1 = not measured, 0 = none fits;
+// the nvidia backend's Auto compares it with its own optical-flow tier on GPUs without VFG (backend.h PickInterp)
+int MlMeasuredMultiplier(const std::string& runtimeDir, int width, int height, double fps, double displayHz)
+{
+    const auto results = CachedResults(runtimeDir + "/pmml-autobench.json", width, height);
+    if (results.empty()) return -1;
+    if (fps <= 1) fps = 23.976;
+    const int wantK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, 8) : 2;
+    const auto c = pmml::choose(results, fps, wantK);
+    return c.ok ? c.multiplier : 0;
+}
+
 bool MlRuntimePresent(const std::string& dir)
 {
     if (dir.empty()) return false;

@@ -62,7 +62,8 @@ def moving(w, h, bits, n=96, cut=48):
 cases = [("1080p 8-bit, display 240 Hz (Auto: VSR to 4K, VFG)", 1920, 1080, 8, {"display_fps": 240.0}),
          ("1080p 8-bit, display 60 Hz, HDR output (RTX Video HDR)", 1920, 1080, 8, {"display_fps": 60.0, "display_hdr": 1}),
          ("4K 10-bit HDR source, 120 Hz (no VSR; VFG on RGB10A2)", 3840, 2160, 10, {"display_fps": 120.0, "transfer": 16, "matrix": 9, "primaries": 9}),
-         ("1080p, x4 High, VSR level 4 fixed", 1920, 1080, 8, {"smoother": "4", "fg_quality": "High", "sharper": "4"})]
+         ("1080p, x4 High, VSR level 4 fixed", 1920, 1080, 8, {"smoother": "4", "fg_quality": "High", "sharper": "4"}),
+         ("1080p, optical-flow tier x4 (NVOFA + warp; the RTX 20 default)", 1920, 1080, 8, {"smoother": "4", "fg_method": "NVOF"})]
 for name, w, h, bits, args in cases:
     src = moving(w, h, bits)
     try:

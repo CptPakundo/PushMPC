@@ -44,8 +44,12 @@ struct BackendProbe {
     bool mlBuilt = false;         // this build has the ml backend (pmml)
     bool mlAvailable = false;     // the pmml runtime is installed (ml_vs.cpp MlRuntimePresent)
     std::string gpuName;
-    bool nvidiaNoFg = false;      // the nvidia backend runs but cannot generate frames here (Linux: RTX 20, or RTX 30 before
-                                  // its self-test): it upscales, and interpolation comes from rife / portable before it
+    bool nvidiaNoFg = false;      // the nvidia backend has no VFG here (Linux: RTX 20, or RTX 30 before its self-test): the
+                                  // interpolator is picked by PickInterp (ml, its own optical-flow tier, rife, portable)
+    bool nvidiaNvof = false;      // ... but NVIDIA optical-flow hardware for its own fast tier (NVOFA + warp)
+    int nvofK = 0;                // the multiplier that tier reaches here (its measured / prior cost; 0 = unknown or none)
+    int mlK = -1;                 // pmml's measured multiplier for this clip (autobench cache; 0 = none fits, -1 = not measured)
+    int srcHeight = 0;            // the clip (SelectBackend's optional width / height), 0 = unknown
     uint32_t capsAvailable = 0;   // pushcore_capabilities' available bits (PUSHCORE_CAP_*)
     bool anyGpuDisabled = false;  // PUSHMPC_DISABLE_ANYGPUCORE=1: pushcore on RTX only (the old rule)
 };
@@ -59,6 +63,27 @@ inline bool PushcoreUsable(const BackendProbe& p)
     if (!p.nvidiaBuilt || !p.pushcoreLoaded) return false;
     if (IsRtxFamily(p.gpuFamily)) return true;
     return !p.anyGpuDisabled && IsD3d12Family(p.gpuFamily) && (p.capsAvailable & kGpuFgCaps) != 0;
+}
+
+// Without VFG on an NVIDIA GPU (Linux): who interpolates before the nvidia backend upscales. Quality first, by measured
+// cost: RIFE through pmml (TensorRT-RTX, else CUDA / CPU EPs) when its measured multiplier is at least the optical-flow
+// tier's; the optical-flow tier (NVOFA + warp, empty interp: the nvidia backend generates) when it reaches more; with no
+// measurement yet, pmml for sources up to 1080p (RIFE fits there) and the optical-flow tier above; then rife, portable.
+inline std::string PickInterp(const BackendProbe& p, std::string* why)
+{
+    const bool ml = p.mlBuilt && p.mlAvailable;
+    const int kNv = p.nvidiaNvof ? p.nvofK : 0;
+    int kMl = 0;
+    if (ml) kMl = p.mlK >= 0 ? p.mlK : (p.srcHeight > 0 && p.srcHeight > 1080 ? 1 : 2);
+    std::string w;
+    std::string out;
+    if (ml && kMl >= 2 && kMl >= kNv) { out = "ml"; w = "RIFE through pmml (x" + std::to_string(kMl) + (p.mlK >= 0 ? ", measured" : ", not measured yet") + ")"; }
+    else if (kNv >= 2) { out = ""; w = "NVIDIA optical flow + warp (x" + std::to_string(kNv) + (ml ? ", pmml reaches x" + std::to_string(kMl) : std::string()) + ")"; }
+    else if (ml && kMl >= 1) { out = "ml"; w = "RIFE through pmml"; }
+    else if (p.rifeAvailable) { out = "rife"; w = "vs-rife-ncnn-vulkan"; }
+    else { out = "portable"; w = "the portable engine"; }
+    if (why) *why = w;
+    return out;
 }
 
 // interp: with kind nvidia, the interpolator the script chains before it ("rife" or "portable"; empty = nvidia does it)
@@ -76,7 +101,7 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         r.kind = BackendKind::Nvidia;   // as asked; when pushcore cannot run, its own error says why (the R1 behaviour)
         r.ok = p.nvidiaBuilt;
         r.why = p.nvidiaBuilt ? "nvidia (your setting)" : "nvidia: this build has no pushcore backend (Windows only)";
-        if (p.nvidiaBuilt && p.nvidiaNoFg) { r.interp = p.rifeAvailable ? "rife" : "portable"; r.why += "; frame generation by " + r.interp; }
+        if (p.nvidiaBuilt && p.nvidiaNoFg) { std::string w; r.interp = PickInterp(p, &w); r.why += "; frame generation by " + w; }
         return r;
     }
     if (requested == "portable") { r.kind = BackendKind::Portable; r.why = "portable (your setting)"; return r; }
@@ -100,7 +125,7 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         r.kind = BackendKind::Nvidia;
         r.why = IsRtxFamily(p.gpuFamily) ? "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia"
                                          : "Auto: pushcore is present and runs GPU frame generation on " + gpu + " (DirectX 12): nvidia (pushcore)";
-        if (p.nvidiaNoFg) { r.interp = p.rifeAvailable ? "rife" : "portable"; r.why += " (upscaling; no NVIDIA frame generation on this GPU: " + r.interp + " interpolates)"; }
+        if (p.nvidiaNoFg) { std::string w; r.interp = PickInterp(p, &w); r.why += " (no VFG on this GPU; frame generation by " + w + ")"; }
         return r;
     }
     std::string not_nv = !p.nvidiaBuilt ? "no pushcore backend in this build" : !p.pushcoreLoaded ? "pushcore is not present"

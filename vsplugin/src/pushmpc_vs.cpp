@@ -49,6 +49,7 @@ namespace pmvs { void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, con
 namespace pmvs {
 void NvLinuxProbe(const VSMap* in, const VSAPI* a, BackendProbe& p);
 void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
+int NvLinuxNvofMultiplier(const VSMap* in, const VSAPI* a, int width, int height, double fps, double displayHz);
 }
 #endif
 #if PMVS_HAVE_PMML
@@ -56,6 +57,7 @@ namespace pmvs {
 void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
 bool MlRuntimePresent(const std::string& dir);
 std::string MlRuntimeDir(const VSMap* in, const VSAPI* a);
+int MlMeasuredMultiplier(const std::string& runtimeDir, int width, int height, double fps, double displayHz);
 }
 #endif
 
@@ -499,13 +501,31 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
 #endif
 #if PMVS_HAVE_PMML
     p.mlBuilt = true;
-    if (lreq == "auto" || lreq == "ml") p.mlAvailable = MlRuntimePresent(MlRuntimeDir(forScript ? nullptr : in, a));
+    if (lreq == "auto" || lreq == "ml" || (p.nvidiaNoFg && forScript)) p.mlAvailable = MlRuntimePresent(MlRuntimeDir(forScript ? nullptr : in, a));
 #endif
     // Enhance itself cannot run rife (a script preset): only SelectBackend reports it
     if (forScript) {
         int err = 0;
         const int64_t hint = a->mapGetInt(in, "rife", 0, &err);
         p.rifeAvailable = err ? a->getPluginByNamespace("rife", core) != nullptr : hint != 0;
+#if defined(PMVS_NVIDIA_VFX)
+        // no VFG here: the clip's size and rate (SelectBackend's optional arguments) let Auto compare the measured
+        // interpolators (pmml's autobench, the optical-flow tier's own measurements) before the script chains one
+        if (p.nvidiaNoFg) {
+            int e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0;
+            const int w = int(a->mapGetInt(in, "width", 0, &e1)), h = int(a->mapGetInt(in, "height", 0, &e2));
+            const int64_t fn = a->mapGetInt(in, "fpsnum", 0, &e3), fd = a->mapGetInt(in, "fpsden", 0, &e4);
+            const double disp = a->mapGetFloat(in, "display_fps", 0, &e5);
+            const double fps = !e3 && !e4 && fn > 0 && fd > 0 ? double(fn) / double(fd) : 23.976;
+            if (!e1 && !e2 && w > 0 && h > 0) {
+                p.srcHeight = h;
+                if (p.nvidiaNvof) p.nvofK = NvLinuxNvofMultiplier(in, a, w, h, fps, e5 ? 0.0 : disp);
+#if PMVS_HAVE_PMML
+                if (p.mlAvailable) p.mlK = MlMeasuredMultiplier(MlRuntimeDir(nullptr, a), w, h, fps, e5 ? 0.0 : disp);
+#endif
+            }
+        }
+#endif
     }
     return SelectBackend(req, p);
 }
@@ -568,5 +588,5 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
-    vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
+    vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }

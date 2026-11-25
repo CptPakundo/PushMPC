@@ -48,6 +48,8 @@ public:
             }, contiguous);
         const int parity = int(s & 1);
         if (!engine->Upload(v, parity, err)) return false;
+        // NVIDIA optical flow of the pair (the fast tier's motion and the guard's flow measures), before both use it
+        if (contiguous && grid.k >= 2 && engine->HasFlow() && !engine->Flow(parity, err)) return false;
         if (gpuGuard && grid.k >= 2 && !engine->Guard(parity, contiguous, err)) return false;
         if (contiguous && grid.k >= 2) {
             if (cut.cut) ++heldCuts;

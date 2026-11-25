@@ -116,10 +116,12 @@ def _rife(c, args):
     return core.resize.Bicubic(out, format=vs.YUV420P10 if bits > 8 else vs.YUV420P8, matrix_s=mat)
 
 
-_sel = core.pushmpc.SelectBackend(backend=_args.pop("backend", "") or "", **{_k: _args[_k] for _k in ("core_dir", "runtime_dir") if _k in _args})
+_selargs = {_k: _args[_k] for _k in ("core_dir", "runtime_dir", "display_fps") if _k in _args}
+_sel = core.pushmpc.SelectBackend(backend=_args.pop("backend", "") or "", width=clip.width, height=clip.height, fpsnum=clip.fps.numerator, fpsden=clip.fps.denominator, **_selargs)
 _backend = _text(_sel["backend"])
-# interp: the nvidia backend upscales but cannot generate frames on this GPU (Linux: RTX 20, or RTX 30 before its
-# self-test): rife or portable interpolates first, at the source size, then nvidia upscales every frame
+# interp: no VFG on this GPU (Linux: RTX 20, or RTX 30 before its self-test): Auto compared the measured interpolators;
+# ml (RIFE through pmml), rife or portable interpolates first, at the source size, then nvidia upscales every frame;
+# empty: the nvidia backend generates the frames itself (VFG, or its NVIDIA optical-flow tier)
 try:
     _interp = _text(_sel["interp"])
 except (KeyError, IndexError):
@@ -132,6 +134,9 @@ else:
         _args["smoother"] = "off"
     for _k in ("rife_model", "rife_gpu"):
         _args.pop(_k, None)
+    if _backend == "nvidia" and _interp == "ml":
+        clip = core.pushmpc.Enhance(clip, backend="ml", **_args)
+        _args["smoother"] = "off"
     if _backend == "nvidia" and _interp == "portable":
         clip = core.pushmpc.Enhance(clip, backend="portable", **_args)
         _args["smoother"] = "off"
