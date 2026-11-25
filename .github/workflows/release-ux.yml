@@ -129,6 +129,7 @@ jobs:
           (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\before-env.txt"
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\before-vlc.txt"
           "PushMPC folder before: $(Test-Path "$env:LOCALAPPDATA\PushMPC"); Start menu PushMPC: $(Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC")" | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
+          exit 0   # reg export of a key the runner does not have returns 1
       - name: PushMPC-Setup.exe /S (simulated RTX 4090; a pmml runtime with the TensorRT-RTX EP)
         timeout-minutes: 25
         env:
@@ -162,6 +163,7 @@ jobs:
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+          exit 0
       - name: Auto plan on the runner's own adapter (the installed script)
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-install.ps1" autoplan 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
@@ -190,6 +192,7 @@ jobs:
           @('## win-setup', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: win-setup-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs\n${{ runner.temp }}/snap" }
