@@ -20,3 +20,4 @@ installer/bin/
 setup-payload.bin
 vsplugin/bin/
 build-portable/
+__pycache__/

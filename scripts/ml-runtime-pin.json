@@ -1,0 +1,122 @@
+{
+  "note": "Pins of pmml, PushMPC's ML runtime layer (pmml/). Everything here is fetched from its official source (nuget.org, pypi.org, GitHub releases of the upstream project) by pmml/scripts/fetch_runtime.py, at install time on the user's machine and on CI, and checked against the SHA-256 below. An entry whose sha256 is TODO is fetched only with --allow-unpinned (CI prints the hash; nothing unpinned ships). Wheels are used as archives: only their native libraries (and licence files) are extracted; Python is never needed to run them. Layout under the runtime folder: ort/<flavor>/ (one ONNX Runtime per flavor, one flavor per process), eps/<ep>/ (plugin execution providers with an ep.json), ncnn/, models/.",
+  "schema": 1,
+  "onnxruntime": {
+    "core": {
+      "what": "ONNX Runtime (CPU, CoreML on macOS, XNNPACK) with the plugin-EP ABI (RegisterExecutionProviderLibrary / GetEpDevices / AppendExecutionProvider_V2): the host of the TensorRT-RTX, OpenVINO and QNN plugin EPs. 1.30 is the newest version inside the TensorRT-RTX EP 0.5 test matrix (ORT 1.25.0-1.30.0). MIT.",
+      "version": "1.30.0",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.30.0/microsoft.ml.onnxruntime.1.30.0.nupkg",
+      "sha256": "TODO",
+      "platforms": {
+        "win-x64": "runtimes/win-x64/native/*",
+        "win-arm64": "runtimes/win-arm64/native/*",
+        "linux-x64": "runtimes/linux-x64/native/*",
+        "linux-arm64": "runtimes/linux-arm64/native/*",
+        "osx-arm64": "runtimes/osx-arm64/native/*"
+      },
+      "headers": "build/native/include/*.h"
+    },
+    "directml": {
+      "what": "ONNX Runtime with the DirectML EP (any D3D12 GPU; zero-copy with D3D12 resources). 1.24.4 is the last DirectML build Microsoft published (DirectML is 'legacy' in Windows ML); it still has the plugin-EP ABI v24. MIT.",
+      "version": "1.24.4",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.24.4/microsoft.ml.onnxruntime.directml.1.24.4.nupkg",
+      "sha256": "TODO",
+      "platforms": {
+        "win-x64": "runtimes/win-x64/native/*",
+        "win-arm64": "runtimes/win-arm64/native/*"
+      },
+      "headers": "build/native/include/*.h"
+    },
+    "directmlRuntime": {
+      "what": "DirectML redistributable (the DirectML.dll the directml flavor loads; same pin as PushFPS 4.5.3's prepare_runtime.py)",
+      "version": "1.15.4",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+      "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+      "into": "directml",
+      "platforms": {
+        "win-x64": "bin/x64-win/DirectML.dll",
+        "win-arm64": "bin/arm64-win/DirectML.dll"
+      }
+    },
+    "migraphx": {
+      "what": "ONNX Runtime with the MIGraphX EP (AMD ROCm on Linux, RDNA3/4 and Instinct). The wheel is used as an archive: onnxruntime/capi/*.so. Needs ROCm/MIGraphX installed by the distribution. MIT.",
+      "version": "1.27.1",
+      "platforms": {
+        "linux-x64": {
+          "url": "https://files.pythonhosted.org/packages/9c/b7/7946bd996b95c859162ccd76c7e1e3f01e3627e5bf06a3ae1bf288fe89bd/onnxruntime_migraphx-1.27.1-cp312-cp312-manylinux_2_34_x86_64.whl",
+          "sha256": "089c992442b6bff9f7786173ce6a31db111b104ae66be34d5467593951d905a4",
+          "extract": "onnxruntime/capi/*.so*"
+        }
+      }
+    }
+  },
+  "eps": {
+    "trt-rtx": {
+      "what": "NVIDIA TensorRT for RTX as an ONNX Runtime plugin EP (NVIDIA/TensorRT-RTX-EP-ABI 0.5.0; bundles the TensorRT-RTX 1.7 runtime). RTX GPUs; JIT engine build on the user's GPU, cached. Host: ort/core.",
+      "epName": "NvTensorRTRTXExecutionProvider",
+      "version": "0.5.0",
+      "platforms": {
+        "win-x64": { "url": "https://files.pythonhosted.org/packages/ef/64/6a704b972f2c6806b3a13abce3e0d827deb0e4192e7f4240ffdafa8d099c/onnxruntime_ep_nv_tensorrt_rtx_cu13-0.5.0-py3-none-win_amd64.whl", "sha256": "609b19f7236c8522ef005a9f763003a78f492e5d871afad39fe1b247760eb3c7" },
+        "win-arm64": { "url": "https://files.pythonhosted.org/packages/bc/ce/466b4bf509bea2fc3e21fb72edb0233d02fdad4d1a362c591ba25bb7029d/onnxruntime_ep_nv_tensorrt_rtx_cu13-0.5.0-py3-none-win_arm64.whl", "sha256": "b60932e1acd243722915953e3dc6714327038d4f1db6b728de20cead0bc7c4ac" },
+        "linux-x64": { "url": "https://files.pythonhosted.org/packages/6b/ea/033a6d73b74a443cbf67247e3700b2a2f5076b37af4b00e433fbbd46fa6d/onnxruntime_ep_nv_tensorrt_rtx_cu13-0.5.0-py3-none-manylinux_2_28_x86_64.whl", "sha256": "32f575c633d171b4edf4b53d3bb22b72a6c9c0a850d2982ce9a788a5d40d3298" },
+        "linux-arm64": { "url": "https://files.pythonhosted.org/packages/9c/5e/9b63610651a0f5d2c8712b84f64c8cee3b3b83564cc20be207d00272d982/onnxruntime_ep_nv_tensorrt_rtx_cu13-0.5.0-py3-none-manylinux_2_35_aarch64.whl", "sha256": "1f0bb2b89bb3dfd43096fccb8ec1f581c266c5852c4e6ba672b7bf790c8c96c2" }
+      },
+      "extract": ["**/*.dll", "**/*.so*", "**/LICENSE*", "**/*NOTICE*"],
+      "library": ["*onnxruntime*providers*nv*tensorrt*rtx*", "*onnxruntime_ep*tensorrt*rtx*", "*nv_tensorrt_rtx_ep*", "*tensorrt_rtx_ep*"]
+    },
+    "openvino": {
+      "what": "Intel OpenVINO as an ONNX Runtime plugin EP (Intel.ML.OnnxRuntime.EP.OpenVINO 1.8.1): Arc / Xe iGPU (XMX), Intel NPU, CPU. Host: ort/core. Apache-2.0.",
+      "epName": "OpenVINOExecutionProvider",
+      "version": "1.8.1",
+      "platforms": {
+        "win-x64": { "url": "https://files.pythonhosted.org/packages/75/98/224ead07344390258ae0515ed285ba2951e9c1405f4507443a03bb7dd5c7/onnxruntime_ep_openvino-1.8.1-py3-none-win_amd64.whl", "sha256": "1acd878be173b02bb8b953460f2f59b121e5f6e47ebc6aad490c0590cf6718fb" },
+        "linux-x64": { "url": "https://files.pythonhosted.org/packages/88/01/4e72a8a65b584f01d6e59eb453bae397b82b2e51df1b5c94efa05e17800b/onnxruntime_ep_openvino-1.8.1-py3-none-manylinux_2_28_x86_64.whl", "sha256": "3832643158c8c187fcab6db661cde2a8c06a2b3559d95d0f2411ac0e51c5e924" }
+      },
+      "extract": ["**/*.dll", "**/*.so*", "**/*.xml", "**/LICENSE*", "**/*NOTICE*"],
+      "library": ["*onnxruntime*providers*openvino*", "*openvino*ep*"]
+    },
+    "qnn": {
+      "what": "Qualcomm QNN (Hexagon NPU, Adreno GPU backend) as an ONNX Runtime plugin EP (onnxruntime-qnn 2.8.0, needs ORT >= 1.24.2). Snapdragon X on Windows ARM64. Host: ort/core.",
+      "epName": "QNNExecutionProvider",
+      "version": "2.8.0",
+      "platforms": {
+        "win-arm64": { "url": "https://files.pythonhosted.org/packages/33/6c/e1bcbd4469e104d54e8ddafac06ee53e28353d2996ec92d1f879e1aae933/onnxruntime_qnn-2.8.0-cp312-cp312-win_arm64.whl", "sha256": "ab39a35a2691d7a4dfaaceca92990d59a5ef362c596c49ea317c4dd65c7bfe14" },
+        "win-x64": { "url": "https://files.pythonhosted.org/packages/55/1f/0fcc1afd8e80cd22b1a10986a33aa3c7d52966e2a3fad05f1bd9afb280df/onnxruntime_qnn-2.8.0-cp312-cp312-win_amd64.whl", "sha256": "4f7d29204ea732ccbbb935a4aed214db828e0bfd8ac1d416f2e926f89dfb9d96" }
+      },
+      "extract": ["**/*.dll", "**/*.so*", "**/*.cat", "**/LICENSE*", "**/*NOTICE*"],
+      "library": ["*onnxruntime*providers*qnn*", "*qnn*ep*"]
+    },
+    "amdgpu": {
+      "what": "AMD's AMDGPUExecutionProvider exists only through the Windows ML ExecutionProviderCatalog (Windows 11 24H2+, Adrenalin 24.12.1+); PyPI has a 0.0.0 placeholder only. pmml registers whatever EP library the catalog reports (PMML_EP_LIBRARY / eps/amdgpu/ep.json written by the installer); until then AMD on Windows runs DirectML.",
+      "epName": "AMDGPUExecutionProvider",
+      "version": "catalog",
+      "platforms": {}
+    }
+  },
+  "ncnn": {
+    "what": "Tencent ncnn with Vulkan (BSD-3), prebuilt release packages; linked statically into pmml's ncnn backend (Linux/macOS/Windows any Vulkan GPU, MoltenVK on macOS).",
+    "version": "20261020",
+    "platforms": {
+      "linux-x64": { "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-ubuntu-2404.zip", "sha256": "TODO" },
+      "win-x64": { "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-windows-vs2022.zip", "sha256": "TODO" },
+      "osx": { "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-macos.zip", "sha256": "TODO" }
+    },
+    "pnnx": { "what": "the ONNX -> ncnn converter (CI only)", "version": "20261020" }
+  },
+  "models": {
+    "pushflow": {
+      "what": "PushFlow's RIFE models exactly as PushFPS ships them: scripts/pushflow/prepare_runtime.py at the PushFPS tag in scripts/pushfps-pin.json (vs-mlrt external-models rife_v4.25_lite / rife_v4.26, MIT weights by hzwer, with the grid and mask outputs added). An installed PushFPS (runtime/experimental/pushflow) is used as is when its models.json hashes match.",
+      "fast": { "file": "pushflow-fast.onnx", "sha256": "d352aa847c9a88cdc006616d5727c5f57d470caf2352673eda813bc4bebef111", "from": "rife_v4.25_lite.7z", "archiveSha256": "7d53e29fff5e67345b19f4ce97dfd1e34b490eedc752df2236904fda1a13842c" },
+      "quality": { "file": "pushflow-quality.onnx", "sha256": "c0b5803ba07da68643760094ed0a84988a39237b506b82c851f73e681a4d0d5f", "from": "rife_v4.26.7z", "archiveSha256": "dfdabd84a2a3db773f87604b8cc255e94a6a72f13550d910ccd3b4ee2606cd4f" }
+    },
+    "synth": {
+      "what": "pmml's own small graphs (pmml/scripts/make_graphs.py, GPL-3.0): pack (full-size frames -> the network's padded input), synth (rebuild at full size from the network's grids and mask, and 'flow once, synthesize many' for further timesteps). Generated at build time; deterministic."
+    }
+  },
+  "clips": {
+    "what": "Public test clips for the correctness and quality checks (CI only): Xiph derf 720p50 Y4M (the first 24 frames by an HTTP range; one frame is 1382406 bytes)",
+    "frames": 24,
+    "names": ["ducks_take_off", "park_joy", "in_to_tree"],
+    "url": "https://media.xiph.org/video/derf/y4m/{name}_420_720p50.y4m"
+  }
+}

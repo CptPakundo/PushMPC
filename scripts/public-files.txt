@@ -44,3 +44,11 @@ integrations/mpv/**
 scripts/vapoursynth-pin.json
 scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
+pmml/CMakeLists.txt
+pmml/build.cmd
+pmml/include/**
+pmml/src/**
+pmml/tools/**
+pmml/tests/**
+pmml/scripts/**
+scripts/ml-runtime-pin.json
