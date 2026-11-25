@@ -37,17 +37,34 @@ for d in repo.iter("dir"):
         if ad.get("id") != aid:
             continue
         plats = [e.findtext("platform") for e in ad.iter("extension") if e.findtext("platform")]
-        print("  found", aid, ad.get("version"), "platform", plats)
-        if plats and not any(p in ("all", "windx64", "windows-x86_64") or "win" in p and "64" in p for p in " ".join(plats).split()):
+        paths = [e.findtext("path") for e in ad.iter("extension") if e.findtext("path")]
+        print("  found", aid, ad.get("version"), "platform", plats, "path", paths)
+        if "windows-x86_64" not in " ".join(plats).split():
             continue
         if best is None or vkey(ad.get("version")) > vkey(best[0]):
-            best = (ad.get("version"), datadir.rstrip("/"))
+            best = (ad.get("version"), datadir.rstrip("/"), paths[0] if paths else f"{aid}+windows-x86_64/{aid}-{ad.get('version')}.zip")
 if not best:
     sys.exit(f"{aid} not found for Windows x64 in the official repository")
-ver, datadir = best
-url = f"{datadir}/{aid}/{aid}-{ver}.zip"
-print("download", url)
-z = zipfile.ZipFile(io.BytesIO(get(url)))
+ver, datadir, rel = best
+cands = [rel, f"{aid}+windows-x86_64/{aid}+windows-x86_64-{ver}.zip", f"{aid}/{aid}+windows-x86_64-{ver}.zip",
+         f"{aid}+windows-x86_64/{aid}-{ver}.zip"]
+data = None
+for c in dict.fromkeys(cands):
+    url = f"{datadir}/{c}"
+    try:
+        data = get(url)
+        print("download", url)
+        break
+    except Exception as e:  # noqa: BLE001
+        print("  no", url, e)
+if data is None:
+    for d_ in (f"{datadir}/{aid}/", f"{datadir}/{aid}+windows-x86_64/"):
+        try:
+            print(d_, re.findall(r'href="([^"]+.zip)"', get(d_).decode("utf-8", "replace")))
+        except Exception as e:  # noqa: BLE001
+            print("  no listing", d_, e)
+    sys.exit("download failed")
+z = zipfile.ZipFile(io.BytesIO(data))
 z.extractall(os.path.join(home, "addons"))
 print("installed", sorted(set(n.split("/")[0] for n in z.namelist())))
 with open(os.path.join(home, "addons", aid, "addon.xml"), encoding="utf-8") as f:
