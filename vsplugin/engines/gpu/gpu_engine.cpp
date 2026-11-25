@@ -37,7 +37,7 @@ std::vector<PipeDesc> Descs()
         { kSpv_nis, sizeof(kSpv_nis), { UB, SMP, SIM, SIM, SIM, SI }, 0 },
         { kSpv_easu, sizeof(kSpv_easu), { CIS, SI }, 72 },
         { kSpv_rcas, sizeof(kSpv_rcas), { CIS, SI }, 24 },
-        { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 60 },
+        { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 64 },
         { kSpv_ofconv, sizeof(kSpv_ofconv), { SB, SB, SI, SI, SB, SB, SBD }, 52 },
         { kSpv_blur, sizeof(kSpv_blur), { SI, SI }, 8 },
     };
@@ -221,6 +221,7 @@ struct Engine::Impl {
     };
     bool Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err);
     bool UpscaleAndPack(Job& j, int out, std::string& err);
+    int OutFlags() const { return (cfg.semiPlanarOut ? 1 : 0) | ((cfg.msbOut && bps == 2 ? 16 - cfg.bits : 0) << 8); }
     bool MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forward, Pair& pr, std::string& err);
     bool MotionOf(int sa, int sb, Pair& pr, bool fresh, bool hint, std::string& err);
     bool hintNow = false;   // the hybrid mode: MotionDir adds the hint fields as candidates
@@ -472,7 +473,7 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     I.nextJob = 0;
 
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
+    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : c.importable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
@@ -506,8 +507,9 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     for (auto& b : I.staging) if (!host(I.stOffV + cSz, 0, b)) return false;
     // readback: packed rows, 4-byte pitch, planes at 256-byte offsets; one slot per output in flight
     I.pitchY = int(Align(VkDeviceSize(I.outW) * VkDeviceSize(I.bps), 4)); I.pitchC = int(Align(VkDeviceSize(I.ocw) * VkDeviceSize(I.bps), 4));
+    if (c.semiPlanarOut) I.pitchC = int(Align(VkDeviceSize(I.ocw) * 2 * VkDeviceSize(I.bps), 16));   // U V pairs; whole 8-byte groups
     const VkDeviceSize align = std::max<VkDeviceSize>(256, I.ctx->Limits().minStorageBufferOffsetAlignment);
-    I.offU = Align(VkDeviceSize(I.pitchY) * VkDeviceSize(I.outH), align); I.offV = Align(I.offU + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
+    I.offU = Align(VkDeviceSize(I.pitchY) * VkDeviceSize(I.outH), align); I.offV = c.semiPlanarOut ? I.offU : Align(I.offU + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outStride = Align(I.offV + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outUsed.assign(size_t(std::max(2, c.outSlots)), false);
     if (c.deviceReadback ? !dev(I.outStride * I.outUsed.size(), I.readback) : !host(I.outStride * I.outUsed.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.readback)) return false;
@@ -918,9 +920,9 @@ bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int m
         int W, H, CW, CH, mode, plane, target, bps, pitchY, pitchC, offU, offV, fbx, fby, fbs, hold, zx, zy, zw, zh;
         float t, maxV, kRaw, errLow, errHigh;
         int refined; float boundaryPx;
-        float pad;
+        int outFlags;
     } pc{ cfg.width, cfg.height, cw, ch, mode, 0, target, bps, pitchY, pitchC, int(offU), int(offV), fbx, fby, fbs,
-          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, cfg.refined ? 1 : 0, cfg.boundaryPx, 0 };
+          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, cfg.refined ? 1 : 0, cfg.boundaryPx, OutFlags() };
     const VkDeviceSize outOff = target == 0 && !extOut ? outStride * VkDeviceSize(out) : 0;
     const Buffer& outB = extOut ? *extOut : readback;
     for (int plane = 0; plane < 2; ++plane) {
@@ -959,8 +961,8 @@ bool Engine::Impl::UpscaleAndPack(Job& j, int out, std::string& err)
         if (!Bind(*this, j, PRcas).Img(0, upTmp.view).Img(1, upY.view).Run(&pr, uint32_t((outW + 7) / 8), uint32_t((outH + 7) / 8), err)) return false;
     }
     Barrier(j.cb);
-    struct { int OW, OH, OCW, OCH, SW, SH, SCW, SCH, plane, bps, pitchY, pitchC, offU, offV; float maxV; } pp{
-        outW, outH, ocw, och, cfg.width, cfg.height, cw, ch, 0, bps, pitchY, pitchC, int(offU), int(offV), maxV };
+    struct { int OW, OH, OCW, OCH, SW, SH, SCW, SCH, plane, bps, pitchY, pitchC, offU, offV; float maxV; int outFlags; } pp{
+        outW, outH, ocw, och, cfg.width, cfg.height, cw, ch, 0, bps, pitchY, pitchC, int(offU), int(offV), maxV, OutFlags() };
     const int per = 4 / bps;
     for (int plane = 0; plane < 2; ++plane) {
         pp.plane = plane;
@@ -983,7 +985,7 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     const bool up = I.cfg.upscaler != Upscaler::None;
     const int sa = mode == 2 ? pr.b : pr.a, sb = mode == 1 ? pr.a : pr.b;
     // modes: 0 generated, 1 / 2 real A / B, 3 the plain blend of A and B (a dissolve or fade)
-    if (mode == 0 && I.synth) {
+    if (mode == 0 && I.synth && !I.cfg.semiPlanarOut) {
         // a plugged-in synthesis stage (Subtitle Hold is interp.comp's and does not apply)
         PairGpu pg;
         Engine::PairResources(pair, pg);
@@ -1028,6 +1030,19 @@ int Engine::ImportOutput(int fd, uint64_t size, std::string& err)
     if (size < I.outStride) { err = "imported buffer smaller than one output (" + std::to_string(size) + " < " + std::to_string(I.outStride) + ")"; return -1; }
     Buffer b;
     if (!I.ctx->ImportDmaBuf(fd, I.outStride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b, err)) return -1;
+    const int id = I.nextImport++;
+    I.imports[id] = b;
+    return id;
+}
+
+uint64_t Engine::HostImportAlignment() const { return m->ctx ? m->ctx->HostImportAlignment() : 0; }
+
+int Engine::ImportHostOutput(void* ptr, uint64_t size, std::string& err)
+{
+    Impl& I = *m;
+    if (size < I.outStride) { err = "imported range smaller than one output"; return -1; }
+    Buffer b;
+    if (!I.ctx->ImportHost(ptr, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b, err)) return -1;
     const int id = I.nextImport++;
     I.imports[id] = b;
     return id;
@@ -1080,7 +1095,8 @@ void Engine::Read(int out, const YuvOut& o)
     if (!I.readback.map) { I.outUsed[size_t(out)] = false; return; }   // deviceReadback: Export, not Read
     const uint8_t* base = static_cast<const uint8_t*>(I.readback.map) + I.outStride * VkDeviceSize(out);
     for (int p = 0; p < 3; ++p) {
-        const int w = p ? I.ocw : I.outW, h = p ? I.och : I.outH, pitch = p ? I.pitchC : I.pitchY;
+        if (p == 2 && I.cfg.semiPlanarOut) break;   // U and V share plane 1
+        const int w = p ? I.ocw * (I.cfg.semiPlanarOut ? 2 : 1) : I.outW, h = p ? I.och : I.outH, pitch = p ? I.pitchC : I.pitchY;
         const uint8_t* src = base + (p == 0 ? 0 : p == 1 ? I.offU : I.offV);
         const size_t row = size_t(w) * size_t(I.bps);
         for (int y = 0; y < h; ++y) std::memcpy(o.data[p] + ptrdiff_t(y) * o.stride[p], src + size_t(y) * size_t(pitch), row);
@@ -1170,7 +1186,7 @@ uint64_t Engine::Impl::SubmitEx(Job& j, const ExternalSync& s, std::string& err)
 int Engine::Import(const ImportRecorder& rec, const ExternalSync& sync, std::string& err, uint64_t* ticket)
 {
     Impl& I = *m;
-    if (!I.cfg.deviceReadback) { err = "GPU engine: Import needs Config::deviceReadback"; return -1; }
+    if (!I.cfg.deviceReadback && !I.cfg.importable) { err = "GPU engine: Import needs Config::deviceReadback or importable"; return -1; }
     int slot = -1;
     for (size_t i = 0; i < I.slots.size(); ++i) if (!I.slots[i].used) { slot = int(i); break; }
     if (slot < 0) { err = "GPU engine: no free picture slot"; return -1; }

@@ -51,7 +51,9 @@ if font:
                 "Style: Default,PushMPC Attached,36,&H00FFFFFF,0,2,20\n\n[Events]\n"
                 "Format: Layer, Start, End, Style, Text\n"
                 "Dialogue: 0,0:00:00.00,0:00:14.00,Default,Styled subtitle with an attached font\n")
-    run(src[:4] + ['-t', '15', '-i', ass, '-attach', font, '-map', '0:v', '-map', '1:s', '-c:v', 'libx264', '-preset', 'veryfast',
-                   '-pix_fmt', 'yuv420p', '-c:s', 'ass', '-metadata:s:t', 'mimetype=application/x-truetype-font',
-                   '-metadata:s:t', 'filename=pushmpc-attached.ttf', os.path.join(out, 'styled.mkv')])
+    run(src + ['-t', '15', '-i', ass, '-attach', font, '-map', '0:v', '-map', '1:a', '-map', '2:s', '-c:v', 'libx264',
+               '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-c:s', 'ass',
+               '-metadata:s:t', 'mimetype=application/x-truetype-font', '-metadata:s:t', 'filename=pushmpc-attached.ttf',
+               os.path.join(out, 'styled.mkv')])
+    os.remove(ass)   # no external subtitle next to the clip: the embedded one is the case
 print("clips:", sorted(os.listdir(out)))

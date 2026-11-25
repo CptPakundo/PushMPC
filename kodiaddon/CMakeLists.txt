@@ -85,6 +85,9 @@ if(PM_GPU_ON)
   target_include_directories(pm_gpu PUBLIC "${VS}/engines/gpu" "${PMVS_VULKAN_HEADERS_DIR}/include" "${PMVS_VOLK_DIR}" "${VS}/third_party/nis"
                              PRIVATE "${VS}/engines/gpu/spv")
   target_compile_definitions(pm_gpu PUBLIC PMVS_GPU VK_NO_PROTOTYPES)
+  if(ANDROID)
+    target_compile_definitions(pm_gpu PUBLIC VK_USE_PLATFORM_ANDROID_KHR)   # hardware-buffer import (decoder frames)
+  endif()
   target_link_libraries(pm_gpu PUBLIC pm_portable ${CMAKE_DL_LIBS})
   target_link_libraries(pm_kodi_engine PUBLIC pm_gpu)
   message(STATUS "engines: GPU (Vulkan) + CPU")
@@ -160,6 +163,24 @@ foreach(l ${_ff_libs})
 endforeach()
 
 add_library(inputstream.pushmpc SHARED src/pushmpc_kodi.cpp src/engine/display_hz.c)
+# Android: MediaCodec into AImageReader hardware buffers, imported into the GPU engine (src/android); the conversion
+# shader is compiled by glslang at build time (-DPM_GLSLANG=<glslangValidator>); without it the zero-copy path is left
+# out and FFmpeg's MediaCodec decoders (NDK mode) remain
+set(PM_GLSLANG "" CACHE FILEPATH "glslangValidator for the Android conversion shader")
+if(ANDROID)
+  target_link_libraries(inputstream.pushmpc PRIVATE mediandk android nativewindow log)
+  if(PM_GLSLANG AND PM_GPU_ON)
+    set(_aspv "${CMAKE_BINARY_DIR}/android_spv")
+    file(MAKE_DIRECTORY "${_aspv}")
+    add_custom_command(OUTPUT "${_aspv}/ahb2yuv_spv.h"
+      COMMAND "${PM_GLSLANG}" -V --target-env vulkan1.2 --vn kSpv_ahb2yuv -o "${_aspv}/ahb2yuv_spv.h" "${CMAKE_CURRENT_SOURCE_DIR}/src/android/ahb2yuv.comp"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/android/ahb2yuv.comp" COMMENT "glslang: ahb2yuv.comp" VERBATIM)
+    target_sources(inputstream.pushmpc PRIVATE src/android/ahb_path.cpp "${_aspv}/ahb2yuv_spv.h")
+    target_include_directories(inputstream.pushmpc PRIVATE "${_aspv}")
+    target_compile_definitions(inputstream.pushmpc PRIVATE PM_AHB)
+    message(STATUS "Android: zero-copy MediaCodec path (hardware buffers into the GPU engine)")
+  endif()
+endif()
 target_include_directories(inputstream.pushmpc PRIVATE "${KODI_DEVKIT}" "${FFMPEG_ROOT}/include" src src/engine)
 target_compile_definitions(inputstream.pushmpc PRIVATE PM_ADDON_VERSION="${ADDON_VERSION}" PM_KODI_API_MAJOR=${KODI_API_MAJOR} PM_KODI22=${PM_KODI22})
 target_link_libraries(inputstream.pushmpc PRIVATE pm_kodi_engine ${FF_LINK})

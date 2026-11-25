@@ -154,3 +154,11 @@ msgstr ""
 msgctxt "#30109"
 msgid "The GPU engine runs on any Vulkan 1.2 GPU and is much faster; the CPU engine is the fallback."
 msgstr ""
+
+msgctxt "#30043"
+msgid "Frame generation for HDR files on Kodi 21 (tone-mapped to SDR)"
+msgstr ""
+
+msgctxt "#30110"
+msgid "Off: Kodi plays HDR files as real HDR without frame generation (best on an HDR display). On: they get frame generation, converted to SDR."
+msgstr ""

@@ -110,9 +110,13 @@ def launch(args, seconds, drive_case=None, drive_out=None):
     time.sleep(2)
 
 # first start: Kodi registers the add-on (disabled, as for any add-on copied in by hand); enable it in the database
-launch([], 25, "enable", os.path.join(a.out, "first-start.txt"))
-print(open(os.path.join(a.out, "first-start.txt"), encoding="utf-8", errors="replace").read(), flush=True)
-dbs = sorted(glob.glob(os.path.join(ud, "Database", "Addons*.db")))
+# a slow first start (Wayland, a cold Flatpak) may end before Kodi wrote its add-on database: start again then
+for attempt in range(3):
+    launch([], 25, "enable", os.path.join(a.out, f"first-start-{attempt}.txt"))
+    print(open(os.path.join(a.out, f"first-start-{attempt}.txt"), encoding="utf-8", errors="replace").read(), flush=True)
+    dbs = sorted(glob.glob(os.path.join(ud, "Database", "Addons*.db")))
+    if dbs:
+        break
 print("databases:", dbs, flush=True)
 if dbs:
     con = sqlite3.connect(dbs[-1])

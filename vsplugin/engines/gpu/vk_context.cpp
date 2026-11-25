@@ -352,6 +352,25 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
         m_dmabuf = true;
     }
 #endif
+#if defined(__ANDROID__)
+    // decoder frames from AImageReader: VK_ANDROID_external_memory_android_hardware_buffer with the YCbCr conversion
+    VkPhysicalDeviceSamplerYcbcrConversionFeatures fY{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES };
+    if (HasDeviceExt(m_phys, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) && HasDeviceExt(m_phys, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) {
+        VkPhysicalDeviceSamplerYcbcrConversionFeatures qY{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES };
+        VkPhysicalDeviceFeatures2 q2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        q2.pNext = &qY;
+        vkGetPhysicalDeviceFeatures2(m_phys, &q2);
+        if (qY.samplerYcbcrConversion) {
+            exts.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+            exts.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+            fY.samplerYcbcrConversion = VK_TRUE;
+            fY.pNext = f12.pNext; f12.pNext = &fY;
+            m_ahb = true;
+        }
+    }
+#endif
+    bool hostImport = false;
+    if (HasDeviceExt(m_phys, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) { exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME); hostImport = true; }
     VkDeviceQueueCreateInfo qis[2] = { qi, qi };
     uint32_t qCount = 1;
     if (ofFam >= 0 && uint32_t(ofFam) != m_family) { qis[1].queueFamilyIndex = uint32_t(ofFam); qCount = 2; }
@@ -360,8 +379,15 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
     di.queueCreateInfoCount = qCount; di.pQueueCreateInfos = qis;
     di.enabledExtensionCount = uint32_t(exts.size()); di.ppEnabledExtensionNames = exts.data();
     const VkResult r = vkCreateDevice(m_phys, &di, nullptr, &m_dev);
-    if (r != VK_SUCCESS) { m_dmabuf = false; err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
+    if (r != VK_SUCCESS) { m_dmabuf = false; m_ahb = false; err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
     volkLoadDevice(m_dev);
+    if (hostImport && vkGetMemoryHostPointerPropertiesEXT) {
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
+        VkPhysicalDeviceProperties2 p2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+        p2.pNext = &hp;
+        vkGetPhysicalDeviceProperties2(m_phys, &p2);
+        m_hostAlign = hp.minImportedHostPointerAlignment ? hp.minImportedHostPointerAlignment : 4096;
+    }
     vkGetDeviceQueue(m_dev, m_family, 0, &m_queue);
     if (ofFam >= 0 && vkCreateOpticalFlowSessionNV) { m_ofFamily = uint32_t(ofFam); vkGetDeviceQueue(m_dev, m_ofFamily, 0, &m_ofQueue); }
     return true;
@@ -517,6 +543,34 @@ bool Context::ImportDmaBuf(int fd, VkDeviceSize size, VkBufferUsageFlags usage, 
     err = "dma-buf import is Linux only";
     return false;
 #endif
+}
+
+bool Context::ImportHost(void* ptr, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out, std::string& err)
+{
+    out = {};
+    if (!m_hostAlign || !vkGetMemoryHostPointerPropertiesEXT) { err = "host memory import not supported by " + m_info.name; return false; }
+    if ((reinterpret_cast<uintptr_t>(ptr) % m_hostAlign) || (size % m_hostAlign)) { err = "host range not aligned to " + std::to_string(m_hostAlign); return false; }
+    VkExternalMemoryBufferCreateInfo eb{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+    eb.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.pNext = &eb; bi.size = size; bi.usage = usage; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_dev, &bi, nullptr, &out.buf) != VK_SUCCESS) { err = "vkCreateBuffer (host import) failed"; return false; }
+    VkMemoryRequirements mr{};
+    vkGetBufferMemoryRequirements(m_dev, out.buf, &mr);
+    VkMemoryHostPointerPropertiesEXT hp{ VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+    if (vkGetMemoryHostPointerPropertiesEXT(m_dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr, &hp) != VK_SUCCESS) {
+        err = "vkGetMemoryHostPointerPropertiesEXT failed"; Destroy(out); return false;
+    }
+    const int type = MemoryType(mr.memoryTypeBits & hp.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (type < 0 || mr.size > size) { err = "no memory type can import this host range"; Destroy(out); return false; }
+    VkImportMemoryHostPointerInfoEXT imp{ VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
+    imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT; imp.pHostPointer = ptr;
+    VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.pNext = &imp; ai.allocationSize = size; ai.memoryTypeIndex = uint32_t(type);
+    if (vkAllocateMemory(m_dev, &ai, nullptr, &out.mem) != VK_SUCCESS) { err = "vkAllocateMemory (host import) failed"; Destroy(out); return false; }
+    if (vkBindBufferMemory(m_dev, out.buf, out.mem, 0) != VK_SUCCESS) { err = "vkBindBufferMemory (host import) failed"; Destroy(out); return false; }
+    out.size = size;
+    return true;
 }
 
 void Context::Destroy(Buffer& b)

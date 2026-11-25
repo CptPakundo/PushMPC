@@ -52,7 +52,11 @@ struct Config {
                                         // default: on an RTX 5090 it was slower (4K: 17.0 vs 6.8 ms a pair) and not better
                                         // (synthetic zoom: 37.85 vs 38.06 dB) than the block matcher at quality 2
     float errorLow = 24.f, errorHigh = 48.f;
+    bool importable = false;            // source slots writable by Import (a decoder's GPU frames: Android hardware buffers)
     bool deviceReadback = false;        // outputs stay in device memory for Export (frames of an external device: no Read)
+    // the packed output's layout: semiPlanarOut puts U and V interleaved (NV12 / P010); msbOut stores samples in the high
+    // bits of 16 (P010). Both default off: planar, low bits (the VapourSynth and Kodi planar formats)
+    bool semiPlanarOut = false, msbOut = false;
     bool refined = true;                // InterpolatePlanesRefined's rule (portable_engine.h); false: PushFPS's own
     float boundaryPx = 1.0f;
     // the block matcher at quality 2 (8 px blocks on the full-size picture): search on a 3x3 binomial-filtered copy; double
@@ -187,6 +191,9 @@ public:
     bool DmaBufImport() const;
     OutputLayout Layout() const;
     int ImportOutput(int fd, uint64_t size, std::string& err);
+    // the same for a host memory range (VK_EXT_external_memory_host): ptr and size aligned to HostImportAlignment()
+    uint64_t HostImportAlignment() const;   // 0: not supported
+    int ImportHostOutput(void* ptr, uint64_t size, std::string& err);
     void ReleaseOutput(int id);
     bool GenerateInto(int pair, float t, int mode, int output, uint64_t& ticket, std::string& err);
     bool RealInto(int slot, int output, uint64_t& ticket, std::string& err);

@@ -8,6 +8,7 @@
 // Pictures are planar YUV 4:2:0, 8 bits or 16-bit containers (10 bits), as pm_engine.h describes.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include "pm_engine.h"
@@ -20,6 +21,8 @@ struct EngineCfg {
     int outWidth = 0, outHeight = 0;   // 0: source size; else the GPU upscaler's output (ignored by the CPU engine)
     int upscaler = 0;                  // 0 none, 1 NIS, 2 FSR1
     int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
+    bool semiPlanar = false;
+    bool external = false;             // frames arrive on the GPU (PushExternal: Android hardware buffers), not as planes           // GPU engine output NV12 / P010 (U and V interleaved; 10-bit in the high bits)
 };
 
 // the GPU engine's output layout (packed rows); a player buffer laid out like this can be written in place
@@ -49,6 +52,13 @@ public:
     virtual bool CanImport() const { return false; }
     virtual int Import(int /*fd*/, uint64_t /*size*/, std::string& err) { err = "no zero copy on this engine"; return -1; }
     virtual void ReleaseImport(int /*id*/) {}
+    // a player's system-memory frame buffer (VK_EXT_external_memory_host): ptr and size aligned to HostAlignment()
+    // a frame already on the GPU: fill writes it into the engine's free source slot (pmvs::gpu::Engine::Import) and
+    // returns that slot, or -1. GPU engine only (configured with EngineCfg::external).
+    using SlotFiller = std::function<int(void* gpuEngine, std::string& err)>;
+    virtual bool PushExternal(const SlotFiller& /*fill*/, bool /*contiguous*/, std::string& err) { err = "no GPU frames on this engine"; return false; }
+    virtual uint64_t HostAlignment() const { return 0; }
+    virtual int ImportHost(void* /*ptr*/, uint64_t /*size*/, std::string& err) { err = "no host import on this engine"; return -1; }
     virtual bool GenerateInto(float /*t*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual bool RealInto(bool /*current*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual EngineStats Stats() const = 0;

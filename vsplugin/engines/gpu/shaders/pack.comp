@@ -15,6 +15,7 @@ layout(push_constant) uniform PC {
     int plane, bps, pitchY, pitchC;
     int offU, offV;
     float maxV;
+    int outFlags;   // bit 0 chroma interleaved (NV12 / P010), bits 8..15 left shift (P010: 6)
 } pc;
 
 float cubic(sampler2D s, float x, float y, ivec2 size)
@@ -43,10 +44,11 @@ void main()
     const int w = pc.plane == 0 ? pc.OW : pc.OCW, h = pc.plane == 0 ? pc.OH : pc.OCH;
     const int x0 = gx * per;
     if (x0 >= w || y >= h) return;
+    const uint sh = uint((pc.outFlags >> 8) & 255);
     if (pc.plane == 0) {
         uint word = 0u;
         for (int k = 0; k < per && x0 + k < w; ++k)
-            word |= uint(floor(texelFetch(upY, ivec2(x0 + k, y), 0).r * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
+            word |= (uint(floor(texelFetch(upY, ivec2(x0 + k, y), 0).r * pc.maxV + 0.5)) << sh) << uint(k * 8 * pc.bps);
         ow[(y * pc.pitchY + x0 * pc.bps) >> 2] = word;
         return;
     }
@@ -55,11 +57,26 @@ void main()
     // source chroma coordinates (sample index space) of this output chroma sample
     float sy = (float(2 * y + 1) * ry) * 0.5 - 0.5;
     uint wu = 0u, wv = 0u;
+    uint su[4] = uint[4](0u, 0u, 0u, 0u), sv[4] = uint[4](0u, 0u, 0u, 0u);
     for (int k = 0; k < per && x0 + k < w; ++k) {
         float sx = ((float(2 * (x0 + k)) + 0.5) * rx - 0.5) * 0.5;
-        wu |= uint(floor(cubic(midU, sx, sy, cs) * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
-        wv |= uint(floor(cubic(midV, sx, sy, cs) * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
+        su[k] = uint(floor(cubic(midU, sx, sy, cs) * pc.maxV + 0.5)) << sh;
+        sv[k] = uint(floor(cubic(midV, sx, sy, cs) * pc.maxV + 0.5)) << sh;
+        wu |= su[k] << uint(k * 8 * pc.bps);
+        wv |= sv[k] << uint(k * 8 * pc.bps);
     }
-    ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
-    ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+    if ((pc.outFlags & 1) == 0) {
+        ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
+        ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+        return;
+    }
+    // U and V interleaved (NV12 / P010)
+    const int base = (pc.offU + y * pc.pitchC + x0 * 2 * pc.bps) >> 2;
+    if (pc.bps == 1) {
+        ow[base] = su[0] | (sv[0] << 8) | (su[1] << 16) | (sv[1] << 24);
+        ow[base + 1] = su[2] | (sv[2] << 8) | (su[3] << 16) | (sv[3] << 24);
+    } else {
+        ow[base] = su[0] | (sv[0] << 16);
+        ow[base + 1] = su[1] | (sv[1] << 16);
+    }
 }

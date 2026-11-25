@@ -74,6 +74,12 @@ public:
     bool DmaBuf() const { return m_dmabuf; }
     // fd stays the caller's (a duplicate is imported); the buffer is device memory owned by the dma-buf
     bool ImportDmaBuf(int fd, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out, std::string& err);
+    // host memory as a storage buffer the shaders write into (VK_EXT_external_memory_host): a player's system-memory
+    // frame buffer. 0 when not supported; else the alignment the pointer and size need
+    VkDeviceSize HostImportAlignment() const { return m_hostAlign; }
+    // Android: decoder frames (AHardwareBuffer) importable as sampled images with a YCbCr conversion
+    bool AndroidHardwareBuffer() const { return m_ahb; }
+    bool ImportHost(void* ptr, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out, std::string& err);
     uint32_t OfFamily() const { return m_ofFamily; }
     VkResult SubmitOf(const VkSubmitInfo& si);
     VkResult WaitIdle();
@@ -97,6 +103,8 @@ private:
     uint32_t m_family = 0, m_ofFamily = 0;
     VkQueue m_ofQueue = VK_NULL_HANDLE;
     bool m_dmabuf = false;
+    VkDeviceSize m_hostAlign = 0;
+    bool m_ahb = false;
     std::mutex m_ofLock;
     VkPhysicalDeviceLimits m_limits{};
     VkPhysicalDeviceMemoryProperties m_mem{};

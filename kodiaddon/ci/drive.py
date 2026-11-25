@@ -1,7 +1,8 @@
 """Drive a running Kodi over JSON-RPC (TCP 9090, enabled by default for local programs) during a test case:
 wait for playback, optionally seek / step a chapter / switch subtitles on, report player properties, then quit.
 usage: drive.py <case> <seconds>   (case: play, seek, chapter, subs)"""
-import json, socket, sys, time
+import functools, json, socket, sys, time
+print = functools.partial(print, flush=True)   # the output survives a kill
 
 def rpc(method, params=None, timeout=5.0):
     """one request; Kodi also pushes notifications (Player.OnPlay ...) on the socket: skip them, return the reply"""

@@ -26,6 +26,11 @@ extern "C" {
 }
 
 #include "cadence.h"
+#include "android/ahb_path.h"
+#if defined(__ANDROID__) && defined(PM_AHB)
+#include "gpu_engine.h"   // the engine type the hardware-buffer importer fills
+#endif
+#include "tonemap.h"
 #include "kodi_engine.h"
 
 #include <algorithm>
@@ -84,6 +89,7 @@ struct Settings {
     int displayHz = 0;
     int threads = 0;
     int engine = 0;     // 0 Auto (GPU, else CPU), 1 CPU, 2 GPU
+    bool hdr21Sdr = false;   // Kodi 21: frame generation for HDR files, tone-mapped to SDR (off: Kodi plays them as HDR)
     static Settings Read()
     {
         Settings s;
@@ -95,6 +101,7 @@ struct Settings {
         s.displayHz = kodi::addon::GetSettingInt("displayhz", 0);
         s.threads = kodi::addon::GetSettingInt("threads", 0);
         s.engine = kodi::addon::GetSettingInt("engine", 0);
+        s.hdr21Sdr = kodi::addon::GetSettingBoolean("hdr21sdr", false);
         return s;
     }
 };
@@ -383,7 +390,14 @@ public:
         if (!m_fmt || streamid < 1 || unsigned(streamid) > m_fmt->nb_streams) return;
         m_fmt->streams[streamid - 1]->discard = enable ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
     }
-    bool OpenStream(int streamid) override { EnableStream(streamid, true); return true; }
+    bool OpenStream(int streamid) override
+    {
+        EnableStream(streamid, true);
+        if (streamid - 1 == m_videoIndex) m_playback = true;
+        return true;
+    }
+    // VideoPlayer opens the streams it plays; Kodi's thumbnail and stream-detail probes never do
+    bool Playback() const { return m_playback; }
 
     void DemuxReset() override {}
     void DemuxAbort() override {}
@@ -476,6 +490,9 @@ public:
     int K() const { return m_k; }
     const Settings& Config() const { return m_settings; }
     const pmk::EngineCfg& EngineConfig() const { return m_engineCfg; }
+    bool ToneMap() const { return m_toneMap; }
+    bool ToneMapPq() const { return m_trc == AVCOL_TRC_SMPTE2084; }
+    double PeakNits() const { return m_hasMdm && m_mdm.has_luminance ? av_q2d(m_mdm.max_luminance) : 0.0; }
     // the engine opened (and calibrated) for Auto, handed over to the decoder once
     std::unique_ptr<pmk::IEngine> TakeEngine() { return std::move(m_engine); }
     int OutWidth() const { return m_outW; }
@@ -629,8 +646,9 @@ private:
         if (!m_settings.enabled) why = "off in the add-on settings";
         else if (!avcodec_find_decoder(p->codec_id)) why = std::string("no decoder for ") + avcodec_get_name(p->codec_id);
         else if (HasDolbyVision(st)) why = "Dolby Vision: Kodi's own decoder keeps it";
-        else if (IsHdrTransfer(trc) && (!PM_KODI22 || !m_settings.hdr))
-            why = PM_KODI22 ? "HDR is off in the add-on settings" : "HDR: Kodi 21 cannot take HDR pictures from an add-on";
+        else if (IsHdrTransfer(trc) && PM_KODI22 && !m_settings.hdr) why = "HDR is off in the add-on settings";
+        else if (IsHdrTransfer(trc) && !PM_KODI22 && !m_settings.hdr21Sdr)
+            why = "HDR: Kodi 21 cannot take HDR pictures from an add-on (frame generation in SDR is an add-on setting)";
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         else if (bits > 10) why = "more than 10 bits per sample";
@@ -639,10 +657,18 @@ private:
             return;
         }
         m_decode = true;
+        m_toneMap = !PM_KODI22 && IsHdrTransfer(trc);   // only reached with the setting on
+        if (m_toneMap) Log(ADDON_LOG_INFO, "HDR on Kodi 21: tone-mapped to SDR BT.709 for frame generation (add-on setting)");
         m_engineCfg = pmk::EngineCfg{};
-        m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 ? 10 : 8;
+        m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 && !m_toneMap ? 10 : 8;
         m_engineCfg.threads = m_settings.threads; m_engineCfg.quality = m_settings.quality;
         m_engineCfg.backend = m_settings.engine;
+#if defined(__ANDROID__) && defined(PM_AHB)
+        m_engineCfg.external = true;   // decoder frames straight into the engine (AImageReader hardware buffers)
+#endif
+#if PM_KODI22 && defined(_WIN32)
+        m_engineCfg.semiPlanar = true;   // NV12 / P010: the DXVA renderer uploads them with a plain copy
+#endif
         std::string upWhy, engWhy;
         DecideUpscale(st, m_engineCfg, upWhy);
         m_engine = pmk::OpenEngine(m_engineCfg, engWhy);
@@ -654,6 +680,20 @@ private:
             why = "x" + std::to_string(m_k) + " (your setting)";
         } else {
             m_k = std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why));
+            // Auto upscaling only where the GPU keeps up: one upscaled frame must fit the same budget as Auto's
+            // multiplier (60 % of a source frame); else Kodi's scaler, and the multiplier is decided again without it
+            const double frameMs = 1000.0 / (m_fps > 0 ? m_fps : 23.976);
+            const double upMs = m_engine->Stats().genMs;
+            if (m_settings.upscale == 0 && m_engineCfg.upscaler && m_engine->IsGpu() && upMs > 0.6 * frameMs) {
+                char b[160];
+                std::snprintf(b, sizeof(b), "; Auto dropped it: an upscaled frame takes %.1f ms here (budget %.1f ms)", upMs, 0.6 * frameMs);
+                upWhy += b;
+                m_engine.reset();
+                m_engineCfg.upscaler = 0; m_engineCfg.outWidth = 0; m_engineCfg.outHeight = 0;
+                std::string why2;
+                m_engine = pmk::OpenEngine(m_engineCfg, why2);
+                m_k = m_engine ? std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why)) : 1;
+            }
         }
         const int up = m_settings.upscale == 2 ? 2 : 1;
         m_outW = m_engine ? m_engine->OutWidth() * up : p->width * up;
@@ -679,6 +719,8 @@ private:
     int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
     uint64_t m_reads = 0;
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
+    bool m_toneMap = false;
+    bool m_playback = false;
     AVColorPrimaries m_prim = AVCOL_PRI_UNSPECIFIED;
     AVColorSpace m_space = AVCOL_SPC_UNSPECIFIED;
     AVMasteringDisplayMetadata m_mdm{};
@@ -700,17 +742,53 @@ public:
     {
         const AVCodecParameters* par = m_in ? m_in->VideoPar() : nullptr;
         if (!par) return false;
-        const AVCodec* dec = avcodec_find_decoder(par->codec_id);
-        if (!dec) return false;
-        m_ctx = avcodec_alloc_context3(dec);
-        avcodec_parameters_to_context(m_ctx, par);
-        m_ctx->pkt_timebase = kUs;
-        m_ctx->thread_count = 0;
-        TryHardware();
-        const int r = avcodec_open2(m_ctx, dec, nullptr);
-        if (r < 0) {
-            Log(ADDON_LOG_ERROR, "avcodec_open2: %s", FfErr(r).c_str());
-            return false;
+        m_cfg = m_in->EngineConfig();
+        m_engine = m_in->TakeEngine();
+        const bool playback = m_in->Playback();
+        const AVCodec* dec = nullptr;
+#if defined(__ANDROID__)
+        // Android: MediaCodec for playback (Kodi's probes decode in software: hardware decoder instances are few)
+        if (playback) {
+#if defined(PM_AHB)
+            if (m_engine && m_engine->IsGpu()) {
+                std::string why;
+                auto ahb = std::make_unique<pmk::AhbDecoder>();
+                if (ahb->Open(par, why)) {
+                    m_ahb = std::move(ahb);
+                    Log(ADDON_LOG_INFO, "decoder: MediaCodec into hardware buffers, imported into the GPU engine (zero copy)");
+                } else {
+                    Log(ADDON_LOG_INFO, "decoder: no zero-copy MediaCodec path (%s)", why.c_str());
+                }
+            }
+#endif
+            if (!m_ahb) {
+                const std::string name = std::string(avcodec_get_name(par->codec_id)) + "_mediacodec";
+                if (const AVCodec* mc = avcodec_find_decoder_by_name(name.c_str())) {
+                    AVCodecContext* c = avcodec_alloc_context3(mc);
+                    avcodec_parameters_to_context(c, par);
+                    c->pkt_timebase = kUs;
+                    AVDictionary* o = nullptr;
+                    av_dict_set(&o, "ndk_codec", "1", 0);   // NDK MediaCodec: no Java VM needed
+                    if (avcodec_open2(c, mc, &o) >= 0) { m_ctx = c; dec = mc; m_hw = true; }
+                    else avcodec_free_context(&c);
+                    av_dict_free(&o);
+                }
+            }
+        }
+#endif
+        if (!m_ahb && !m_ctx) {
+            dec = avcodec_find_decoder(par->codec_id);
+            if (!dec) return false;
+            m_ctx = avcodec_alloc_context3(dec);
+            avcodec_parameters_to_context(m_ctx, par);
+            m_ctx->pkt_timebase = kUs;
+            m_ctx->thread_count = playback ? 0 : 2;
+            if (playback) TryHardware();
+            const int r = avcodec_open2(m_ctx, dec, nullptr);
+            if (r < 0) {
+                Log(ADDON_LOG_ERROR, "avcodec_open2: %s", FfErr(r).c_str());
+                return false;
+            }
         }
         m_frame = av_frame_alloc();
         m_sw = av_frame_alloc();
@@ -718,9 +796,10 @@ public:
         m_k = std::max(1, m_in->K());
         m_frameUs = m_in->VideoFrameUs();
         m_test2x = m_in->Config().upscale == 2;
-        m_cfg = m_in->EngineConfig();
-        m_engine = m_in->TakeEngine();
-        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", dec->name, m_hw ? " (hardware)" : "", m_k, m_in->OutWidth(), m_in->OutHeight());
+        m_toneMap = m_in->ToneMap();
+        if (m_toneMap) m_tm.Configure(m_in->ToneMapPq(), m_in->PeakNits());
+        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", m_ahb ? "MediaCodec (hardware buffers)" : dec->name, m_hw ? " (hardware)" : "",
+            m_k, m_in->OutWidth(), m_in->OutHeight());
         return true;
     }
 
@@ -728,6 +807,12 @@ public:
 
     bool AddData(const DEMUX_PACKET& packet) override
     {
+#if defined(__ANDROID__) && defined(PM_AHB)
+        if (m_ahb) {
+            if (!packet.pData || packet.iSize <= 0) return true;
+            return m_ahb->Send(packet.pData, packet.iSize, packet.pts == kNoPts ? -1 : int64_t(std::llround(packet.pts)));
+        }
+#endif
         if (!m_ctx) return false;
         if (m_drained) { avcodec_flush_buffers(m_ctx); m_drained = false; }
         if (!packet.pData || packet.iSize <= 0) return true;
@@ -746,8 +831,11 @@ public:
 
     VIDEOCODEC_RETVAL GetPicture(VIDEOCODEC_PICTURE& picture) override
     {
-        if (!m_ctx) return VC_ERROR;
         const bool drain = (picture.flags & VIDEOCODEC_PICTURE_FLAG_DRAIN) != 0;
+#if defined(__ANDROID__) && defined(PM_AHB)
+        if (m_ahb) return GetPictureAhb(picture, drain);
+#endif
+        if (!m_ctx) return VC_ERROR;
         for (;;) {
             if (!m_queue.empty()) return Emit(picture);
             const int r = avcodec_receive_frame(m_ctx, m_frame);
@@ -768,12 +856,53 @@ public:
         }
     }
 
+#if defined(__ANDROID__) && defined(PM_AHB)
+    VIDEOCODEC_RETVAL GetPictureAhb(VIDEOCODEC_PICTURE& picture, bool drain)
+    {
+        if (drain) m_ahb->SendEnd();
+        for (int spin = 0;; ++spin) {
+            if (!m_queue.empty()) return Emit(picture);
+            AHardwareBuffer* buf = nullptr;
+            int64_t pts = 0;
+            bool eof = false;
+            if (m_ahb->Receive(buf, pts, eof)) { OnGpuFrame(buf, pts); continue; }
+            if (drain && !eof && spin < 200) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
+            if (m_havePrev) { m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true}); m_havePrev = false; continue; }
+            return drain ? VC_EOF : VC_BUFFER;
+        }
+    }
+    // a decoder frame on the GPU: imported into the engine's source slot, then the pictures of the previous frame
+    void OnGpuFrame(AHardwareBuffer* buf, int64_t pts)
+    {
+        m_gpuFrames = true;
+        if (m_pic[0].buf.empty()) Setup(m_ahb->Width(), m_ahb->Height(), m_ahb->Bits());
+        const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
+        std::string err;
+        const bool pushed = m_engine && m_engine->PushExternal([&](void* ge, std::string& e2) {
+            return m_importer.Fill(*static_cast<pmvs::gpu::Engine*>(ge), buf, e2);
+        }, contiguous, err);
+        m_ahb->Release();
+        if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine (hardware buffer): %s", err.c_str()); m_warned = true; }
+        if (m_havePrev) {
+            const bool pair = pushed && m_engine->HavePair();
+            for (const pmk::Slot& s : pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair)) m_queue.push_back(Out{s, m_prevSlot, false});
+        }
+        m_prevSlot = m_havePrev ? 1 - m_prevSlot : 0;
+        m_prevPts = pts;
+        m_havePrev = true;
+    }
+#endif
+
     const char* GetName() override { return "pushmpc"; }
 
     void Reset() override
     {
         Log(ADDON_LOG_DEBUG, "decoder reset");
+        ReleaseImports();
         if (m_ctx) avcodec_flush_buffers(m_ctx);
+#if defined(__ANDROID__) && defined(PM_AHB)
+        if (m_ahb) m_ahb->Flush();
+#endif
         m_drained = false;
         m_queue.clear();
         m_havePrev = false;
@@ -838,13 +967,14 @@ private:
             f = m_sw;
         }
         const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(f->format));
-        const int bits = d && d->comp[0].depth > 8 ? 10 : 8;
+        const int bits = d && d->comp[0].depth > 8 && !m_toneMap ? 10 : 8;
         if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
         int64_t pts = f->best_effort_timestamp;
         if (pts == AV_NOPTS_VALUE) pts = m_havePrev ? m_prevPts + int64_t(m_frameUs > 0 ? m_frameUs : 41708) : 0;
 
         const int cur = m_havePrev ? 1 - m_prevSlot : 0;
-        ToPlanes(f, m_pic[cur]);
+        if (m_toneMap) ToneMapPlanes(f, m_pic[cur]);
+        else ToPlanes(f, m_pic[cur]);
         av_frame_unref(m_frame);
         av_frame_unref(m_sw);
 
@@ -891,6 +1021,30 @@ private:
 
     AVPixelFormat EngineFmt() const { return m_bits > 8 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P; }
 
+    // Kodi 21, HDR with the setting on: the decoded frame (any 10/12-bit 4:2:0 layout, via swscale to planar 16-bit)
+    // tone-mapped into the engine's 8-bit SDR planes
+    void ToneMapPlanes(const AVFrame* f, Planes& out)
+    {
+        const AVPixelFormat want = AV_PIX_FMT_YUV420P10LE;
+        const uint16_t* sp[3];
+        ptrdiff_t ss[3];
+        int bits = 10;
+        if (AVPixelFormat(f->format) == want || AVPixelFormat(f->format) == AV_PIX_FMT_YUV420P12LE) {
+            if (AVPixelFormat(f->format) == AV_PIX_FMT_YUV420P12LE) bits = 12;
+            for (int i = 0; i < 3; ++i) { sp[i] = reinterpret_cast<const uint16_t*>(f->data[i]); ss[i] = f->linesize[i]; }
+        } else {
+            if (m_hdrTmp.buf.empty()) m_hdrTmp.Alloc(m_w, m_h, 2);
+            m_swsHdr = sws_getCachedContext(m_swsHdr, m_w, m_h, AVPixelFormat(f->format), m_w, m_h, want, SWS_POINT, nullptr, nullptr, nullptr);
+            if (!m_swsHdr) return;
+            int ls[4] = {int(m_hdrTmp.stride[0]), int(m_hdrTmp.stride[1]), int(m_hdrTmp.stride[2]), 0};
+            uint8_t* dst[4] = {m_hdrTmp.data[0], m_hdrTmp.data[1], m_hdrTmp.data[2], nullptr};
+            sws_scale(m_swsHdr, f->data, f->linesize, 0, m_h, dst, ls);
+            for (int i = 0; i < 3; ++i) { sp[i] = reinterpret_cast<const uint16_t*>(m_hdrTmp.data[i]); ss[i] = m_hdrTmp.stride[i]; }
+        }
+        uint8_t* const dp[3] = {out.data[0], out.data[1], out.data[2]};
+        m_tm.Run(sp, ss, bits, m_w, m_h, dp, out.stride, m_cfg.threads);
+    }
+
     void ToPlanes(const AVFrame* f, Planes& out)
     {
         if (AVPixelFormat(f->format) == EngineFmt()) {
@@ -915,34 +1069,43 @@ private:
         const pmk::Slot& s = q.slot;
         const int bytes = m_bits > 8 ? 2 : 1;
         const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
-#if PM_KODI22 && defined(_WIN32)
-        // P010 on Windows (the DXVA renderer's native layout, as Kodi's own decoders hand it over); planar 10-bit elsewhere:
-        // Kodi 22's GL/GLES renderer stops on system-memory P010 (CI, Flathub Kodi 22) and takes planar 10-bit as from
-        // its own software decoder
-        const bool p010 = m_bits > 8;
-        picture.videoFormat = p010 ? VIDEOCODEC_FORMAT_P010 : VIDEOCODEC_FORMAT_I420;
+        // The picture's layout, one of three:
+        //  - engine: the GPU engine's own output layout (planar, or NV12 / P010 on Windows with Kodi 22, the DXVA
+        //    renderer's copy-only formats), so the engine can write into Kodi's buffer in place: a dma-buf (Linux
+        //    GBM/Wayland with a GLES renderer) or Kodi's system memory imported as host memory; else its readback is
+        //    copied straight into the buffer;
+        //  - P010 packed on the CPU (Windows, Kodi 22, the CPU engine);
+        //  - plain planar (Kodi 21, the CPU engine elsewhere, the x2 test path).
+        const bool semi = EngineSemi();
+        const bool engineLayout = EngineLayout();
+#if PM_KODI22
+        const bool p010Cpu = !engineLayout && Windows() && m_bits > 8;
+        picture.videoFormat = semi ? (m_bits > 8 ? VIDEOCODEC_FORMAT_P010 : VIDEOCODEC_FORMAT_NV12)
+                              : p010Cpu ? VIDEOCODEC_FORMAT_P010 : m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
 #else
-        const bool p010 = false;
+        const bool p010Cpu = false;
         picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
 #endif
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
-        CheckBufferPool(picture);   // before the layout: zero copy needs a renderer that takes dma-bufs
+        CheckBufferPool(picture);   // before the layout: dma-bufs only where Kodi's renderer takes them
+        const uint64_t hostAlign = engineLayout && !m_hostOff && !DmaPath() ? m_engine->HostAlignment() : 0;
         picture.planeOffsets[0] = 0;
         picture.stride[0] = uint32_t(ow * bytes);
-        if (p010) {
+        if (engineLayout) {
+            picture.stride[0] = uint32_t(m_layout.pitchY);
+            picture.stride[1] = uint32_t(m_layout.pitchC);
+            picture.stride[2] = semi ? 0 : uint32_t(m_layout.pitchC);
+            picture.planeOffsets[1] = uint32_t(m_layout.offU);
+            picture.planeOffsets[2] = semi ? 0 : uint32_t(m_layout.offV);
+            // host import: room to start the picture on an aligned address inside Kodi's buffer
+            picture.decodedDataSize = size_t(m_layout.size + (hostAlign ? 2 * hostAlign : 0));
+        } else if (p010Cpu) {
             picture.stride[1] = uint32_t(ocw * 4);
             picture.stride[2] = 0;
             picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
             picture.planeOffsets[2] = 0;
             picture.decodedDataSize = size_t(picture.planeOffsets[1]) + size_t(picture.stride[1]) * size_t(och);
-        } else if (ZeroCopyLayout()) {
-            // the GPU engine's output layout, so the engine can write into Kodi's buffer in place (zero copy)
-            picture.stride[0] = uint32_t(m_layout.pitchY);
-            picture.stride[1] = picture.stride[2] = uint32_t(m_layout.pitchC);
-            picture.planeOffsets[1] = uint32_t(m_layout.offU);
-            picture.planeOffsets[2] = uint32_t(m_layout.offV);
-            picture.decodedDataSize = size_t(m_layout.size);
         } else {
             picture.stride[1] = picture.stride[2] = uint32_t(ocw * bytes);
             picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
@@ -952,14 +1115,19 @@ private:
         picture.pts = s.pts;
         if (!GetFrameBuffer(picture)) { Log(ADDON_LOG_WARNING, "Kodi gave no frame buffer"); return VC_ERROR; }
         if (!KeepSysMemIfNeeded(picture)) return VC_ERROR;
-        const int zc = ZeroCopyTarget(picture);   // the imported Kodi buffer, or -1: copy path
+        int zc = -1;   // the imported Kodi buffer the engine writes into, or -1
+        if (engineLayout) {
+            if (DmaPath()) zc = ZeroCopyTarget(picture);
+            else if (hostAlign) zc = HostTarget(picture, hostAlign);   // may move planeOffsets to an aligned start
+        }
         uint8_t* dst[4] = {};
         int ds[3] = {};
-        if (p010) {
+        if (p010Cpu) {
             if (m_packTmp.buf.empty() || m_packW != ow || m_packH != oh) { m_packTmp.Alloc(ow, oh, 2); m_packW = ow; m_packH = oh; }
             for (int i = 0; i < 3; ++i) { dst[i] = m_packTmp.data[i]; ds[i] = int(m_packTmp.stride[i]); }
         } else {
             for (int i = 0; i < 3; ++i) { dst[i] = picture.decodedData + picture.planeOffsets[i]; ds[i] = int(picture.stride[i]); }
+            if (semi) { dst[2] = nullptr; ds[2] = 0; }
         }
         pm_yuv_out kodiOut{};
         for (int i = 0; i < 3; ++i) { kodiOut.data[i] = dst[i]; kodiOut.stride[i] = ds[i]; }
@@ -969,24 +1137,27 @@ private:
         if (zc >= 0) {
             done = s.real ? m_engine->RealInto(q.current, zc, err) : m_engine->GenerateInto(s.t, zc, err);
             if (done) { ++m_zeroCopied; if (!s.real) ++m_generated; }
-            else { Log(ADDON_LOG_WARNING, "zero copy failed (%s): copy path from now on", err.c_str()); m_zcOff = true; err.clear(); }
+            else { Log(ADDON_LOG_WARNING, "in-place output failed (%s): copy path from now on", err.c_str()); m_zcOff = m_hostOff = true; err.clear(); }
         }
         if (done) {
         } else if (!s.real && m_engine) {
             if (!m_test2x) {
-                done = m_engine->Generate(s.t, kodiOut, err);   // straight into Kodi's buffer
+                done = m_engine->Generate(s.t, kodiOut, err);   // the engine's readback straight into Kodi's buffer
                 if (done) ++m_generated;
             } else {
                 pm_yuv_out g{};
                 for (int i = 0; i < 3; ++i) { g.data[i] = m_gen.data[i]; g.stride[i] = m_gen.stride[i]; }
                 if (m_engine->Generate(s.t, g, err)) { srcp = &m_gen; ++m_generated; }
             }
-        } else if (s.real && m_upscaled && !m_test2x) {
-            done = m_engine->Real(q.current, kodiOut, err);
+        } else if (s.real && ((m_upscaled && !m_test2x) || semi || m_gpuFrames)) {
+            done = m_engine->Real(q.current, kodiOut, err);   // through the engine: upscaled, or in its NV12 / P010 layout
         }
         if (!err.empty() && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
         if (!done) {
-            if (!m_test2x && !m_upscaled) {
+            if (semi) {
+                // the engine could not give this picture: the source frame packed on the CPU (rare: an engine error)
+                PackSemi(picture, srcp, ow, oh);
+            } else if (!m_test2x && !m_upscaled) {
                 for (int i = 0; i < 3; ++i) {
                     const int ph = i ? (m_h + 1) / 2 : m_h, pw = (i ? (m_w + 1) / 2 : m_w) * bytes;
                     av_image_copy_plane(dst[i], ds[i], srcp->data[i], int(srcp->stride[i]), pw, ph);
@@ -999,16 +1170,93 @@ private:
                 if (m_swsOut) sws_scale(m_swsOut, sp, sl, 0, m_h, dst, dl);
             }
         }
-        if (p010) PackP010(picture, ow, oh);
+        if (p010Cpu) PackP010(picture, ow, oh);
         ++m_emitted;
         Log(ADDON_LOG_DEBUG, "out pts=%lld real=%d t=%.3f", static_cast<long long>(s.pts), s.real ? 1 : 0, double(s.t));
         if ((m_emitted % 600) == 0 && m_engine) {
             const pmk::EngineStats st = m_engine->Stats();
-            Log(ADDON_LOG_INFO, "%llu pictures out (%llu generated), cuts %llu, motion %.1f ms, generated frame %.1f ms",
+            Log(ADDON_LOG_INFO, "%llu pictures out (%llu generated, %llu written in place), cuts %llu, motion %.1f ms, generated frame %.1f ms",
                 static_cast<unsigned long long>(m_emitted), static_cast<unsigned long long>(m_generated),
-                static_cast<unsigned long long>(st.cuts), st.meMs, st.genMs);
+                static_cast<unsigned long long>(m_zeroCopied), static_cast<unsigned long long>(st.cuts), st.meMs, st.genMs);
         }
         return VC_PICTURE;
+    }
+
+    static bool Windows()
+    {
+#if defined(_WIN32)
+        return true;
+#else
+        return false;
+#endif
+    }
+    // the GPU engine's layout for Kodi's picture (planar, or NV12 / P010 when the engine was set up for it)
+    bool EngineLayout()
+    {
+        if (!m_engine || !m_engine->IsGpu() || m_test2x) return false;
+        if (!m_layoutKnown) { m_layoutKnown = m_engine->Layout(m_layout); }
+        return m_layoutKnown;
+    }
+    bool EngineSemi() { return EngineLayout() && m_cfg.semiPlanar && PM_KODI22; }
+    bool DmaPath() const { return m_dmaOk && !m_zcOff; }
+
+    // Kodi's system-memory frame buffer as the engine's output (VK_EXT_external_memory_host): the picture starts on the
+    // next aligned address inside the buffer (planeOffsets move with it), and that aligned range is imported. Kodi's
+    // pool recycles its buffers for the life of this decoder, so the imports are cached by address and all released
+    // with the decoder, on Reset and on a size change (before Kodi can free a buffer).
+    int HostTarget(VIDEOCODEC_PICTURE& picture, uint64_t align)
+    {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(picture.decodedData);
+        const uintptr_t start = (base + align - 1) / align * align;
+        const uint64_t size = (m_layout.size + align - 1) / align * align;
+        if (start + size > base + picture.decodedDataSize) return -1;
+        const uint32_t pad = uint32_t(start - base);
+        picture.planeOffsets[0] = pad;
+        picture.planeOffsets[1] = pad + uint32_t(m_layout.offU);
+        if (picture.planeOffsets[2]) picture.planeOffsets[2] = pad + uint32_t(m_layout.offV);
+        const auto key = std::make_pair(uint64_t(start), size);
+        auto it = m_hostImports.find(key);
+        if (it != m_hostImports.end()) return it->second;
+        std::string err;
+        const int id = m_engine->ImportHost(reinterpret_cast<void*>(start), size, err);
+        if (id < 0) {
+            Log(ADDON_LOG_INFO, "in-place output: Kodi's buffer cannot be imported here (%s): copy path", err.c_str());
+            m_hostOff = true;
+            return -1;
+        }
+        if (m_hostImports.empty()) Log(ADDON_LOG_INFO, "in-place output: the engine writes into Kodi's system-memory frame buffers");
+        m_hostImports[key] = id;
+        return id;
+    }
+
+    // a source frame (engine layout planar) into Kodi's NV12 / P010 picture on the CPU
+    void PackSemi(const VIDEOCODEC_PICTURE& picture, const Planes* src, int ow, int oh)
+    {
+        const int ocw = (ow + 1) / 2, och = (oh + 1) / 2;
+        const int sh = m_bits > 8 ? 16 - m_bits : 0;
+        uint8_t* y = picture.decodedData + picture.planeOffsets[0];
+        uint8_t* uv = picture.decodedData + picture.planeOffsets[1];
+        for (int r = 0; r < oh && r < m_h; ++r) {
+            if (m_bits > 8) {
+                const uint16_t* s = reinterpret_cast<const uint16_t*>(src->data[0] + src->stride[0] * r);
+                uint16_t* d = reinterpret_cast<uint16_t*>(y + size_t(picture.stride[0]) * size_t(r));
+                for (int x = 0; x < ow && x < m_w; ++x) d[x] = uint16_t(s[x] << sh);
+            } else {
+                std::memcpy(y + size_t(picture.stride[0]) * size_t(r), src->data[0] + src->stride[0] * r, size_t(std::min(ow, m_w)));
+            }
+        }
+        for (int r = 0; r < och && r < (m_h + 1) / 2; ++r)
+            for (int x = 0; x < ocw && x < (m_w + 1) / 2; ++x) {
+                if (m_bits > 8) {
+                    const uint16_t* u = reinterpret_cast<const uint16_t*>(src->data[1] + src->stride[1] * r);
+                    const uint16_t* v = reinterpret_cast<const uint16_t*>(src->data[2] + src->stride[2] * r);
+                    uint16_t* d = reinterpret_cast<uint16_t*>(uv + size_t(picture.stride[1]) * size_t(r));
+                    d[2 * x] = uint16_t(u[x] << sh); d[2 * x + 1] = uint16_t(v[x] << sh);
+                } else {
+                    uint8_t* d = uv + size_t(picture.stride[1]) * size_t(r);
+                    d[2 * x] = src->data[1][src->stride[1] * r + x]; d[2 * x + 1] = src->data[2][src->stride[2] * r + x];
+                }
+            }
     }
 
     // zero copy (Kodi 22 on Linux GBM/Wayland, GPU engine with dma-buf import): Kodi's frame buffers are dma-bufs
@@ -1017,8 +1265,8 @@ private:
     bool ZeroCopyLayout()
     {
 #if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
-        if (!m_dmaOk || m_zcOff || !m_engine || !m_engine->IsGpu() || !m_engine->CanImport() || m_test2x || std::getenv("PUSHMPC_NO_ZERO_COPY")) return false;
-        return m_engine->Layout(m_layout);
+        if (!m_dmaOk || m_zcOff || !EngineLayout() || !m_engine->CanImport() || std::getenv("PUSHMPC_NO_ZERO_COPY")) return false;
+        return true;
 #else
         return false;
 #endif
@@ -1128,8 +1376,13 @@ private:
 
     void ReleaseImports()
     {
-        if (m_engine) for (auto& kv : m_imports) m_engine->ReleaseImport(kv.second);
+        if (m_engine) {
+            for (auto& kv : m_imports) m_engine->ReleaseImport(kv.second);
+            for (auto& kv : m_hostImports) m_engine->ReleaseImport(kv.second);
+        }
         m_imports.clear();
+        m_hostImports.clear();
+        m_layoutKnown = false;
     }
 
     // planar 10-bit (low bits) into Kodi's P010 buffer (high bits, U and V interleaved)
@@ -1153,10 +1406,14 @@ private:
     {
         if (m_zeroCopied) Log(ADDON_LOG_INFO, "zero copy: %llu pictures written in place", static_cast<unsigned long long>(m_zeroCopied));
         ReleaseImports();
+#if defined(__ANDROID__) && defined(PM_AHB)
+        m_ahb.reset();
+#endif
         m_engine.reset();
         if (m_sws) sws_freeContext(m_sws);
         if (m_swsOut) sws_freeContext(m_swsOut);
-        m_sws = m_swsOut = nullptr;
+        if (m_swsHdr) sws_freeContext(m_swsHdr);
+        m_sws = m_swsOut = m_swsHdr = nullptr;
         av_frame_free(&m_frame);
         av_frame_free(&m_sw);
         av_packet_free(&m_pkt);
@@ -1173,17 +1430,27 @@ private:
     bool m_drained = false;
     SwsContext* m_sws = nullptr;
     SwsContext* m_swsOut = nullptr;
+    SwsContext* m_swsHdr = nullptr;
+    pmk::ToneMapper m_tm;
+    bool m_toneMap = false;
     pmk::EngineCfg m_cfg;
     std::unique_ptr<pmk::IEngine> m_engine;
+    bool m_gpuFrames = false;   // frames reach the engine on the GPU (no CPU planes: real pictures come from the engine)
+#if defined(__ANDROID__) && defined(PM_AHB)
+    std::unique_ptr<pmk::AhbDecoder> m_ahb;
+    pmk::AhbImporter m_importer;
+#endif
     bool m_upscaled = false, m_test2x = false, m_warned = false;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_outW = 0, m_outH = 0;
     double m_frameUs = 0;
     Planes m_pic[2];
     Planes m_gen;
     Planes m_packTmp;
+    Planes m_hdrTmp;
     pmk::OutLayout m_layout;
     std::map<std::pair<uint64_t, uint64_t>, int> m_imports;
-    bool m_zcOff = false, m_zcNoted = false, m_poolChecked = false, m_dmaOk = false;
+    bool m_zcOff = false, m_zcNoted = false, m_poolChecked = false, m_dmaOk = false, m_hostOff = false, m_layoutKnown = false;
+    std::map<std::pair<uint64_t, uint64_t>, int> m_hostImports;
     unsigned long long m_zeroCopied = 0;
     int m_packW = 0, m_packH = 0;
     int m_prevSlot = 0;

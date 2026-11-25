@@ -104,7 +104,8 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
             # zero copy test: udmabuf stands in for Kodi's dma-buf frame buffers
-            sudo modprobe udmabuf && sudo chmod 666 /dev/udmabuf || echo "no udmabuf on this kernel"
+            sudo modprobe udmabuf 2>/dev/null || echo "no udmabuf module"; sudo modprobe vgem 2>/dev/null || echo "no vgem module"
+            sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
           ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|cadence_test|FAIL|Passed|Failed" || true
@@ -314,7 +315,7 @@ jobs:
         id: ffcache
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
       - name: FFmpeg static (NDK)
         if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
@@ -324,13 +325,22 @@ jobs:
         if: steps.ffcache.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
+      - name: glslang (pinned; the Android conversion shader)
+        run: |
+          d=$RUNNER_TEMP/glslang; mkdir -p "$d"
+          j() { python3 -c "import json,sys; v=json.load(open('vsplugin/engines/gpu/gpu-pins.json')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          curl -fsSL --retry 3 -o "$d/g.tar.gz" "$(j glslang linux url)"
+          echo "$(j glslang linux sha256)  $d/g.tar.gz" | sha256sum -c -
+          tar -xzf "$d/g.tar.gz" -C "$d"
+          g=$(find "$d" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d" -path "*bin/glslang" | head -1)
+          chmod +x "$g"; echo "GLSLANG=$g" >> "$GITHUB_ENV"
       - name: Build
         run: |
           cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
-            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
+            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg" -DPM_GLSLANG="$GLSLANG"
           cmake --build build --parallel
           ls -la build/addon/inputstream.pushmpc
           "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build/addon/inputstream.pushmpc/libinputstream.pushmpc.so | grep NEEDED
