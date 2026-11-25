@@ -54,7 +54,7 @@ constexpr double kNoPts = double(STREAM_NOPTS_VALUE);
 constexpr AVRational kUs{1, STREAM_TIME_BASE};
 
 template<typename... Args>
-void Log(AddonLog level, const char* fmt, Args... args)
+void Log(ADDON_LOG level, const char* fmt, Args... args)
 {
     kodi::Log(level, (std::string("PushMPC: ") + fmt).c_str(), args...);
 }

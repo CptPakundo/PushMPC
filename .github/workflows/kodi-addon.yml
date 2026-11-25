@@ -50,7 +50,7 @@ jobs:
 
       - name: FFmpeg cache
         id: ffcache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ffmpeg
           key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-v1
@@ -72,6 +72,13 @@ jobs:
           7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ff.zip" > /dev/null
           mv "$RUNNER_TEMP/$z" "$RUNNER_TEMP/ffmpeg"
           ls "$RUNNER_TEMP/ffmpeg/bin" "$RUNNER_TEMP/ffmpeg/lib" | head -40
+
+      - name: FFmpeg cache save (right away, so a later failure does not lose it)
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-v1
 
       - name: Configure and build
         shell: bash
