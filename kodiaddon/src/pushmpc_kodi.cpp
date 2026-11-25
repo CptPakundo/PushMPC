@@ -761,7 +761,7 @@ public:
                 }
             }
 #endif
-            if (!m_ahb) {
+            if (!HaveAhb()) {
                 const std::string name = std::string(avcodec_get_name(par->codec_id)) + "_mediacodec";
                 if (const AVCodec* mc = avcodec_find_decoder_by_name(name.c_str())) {
                     AVCodecContext* c = avcodec_alloc_context3(mc);
@@ -776,7 +776,7 @@ public:
             }
         }
 #endif
-        if (!m_ahb && !m_ctx) {
+        if (!HaveAhb() && !m_ctx) {
             dec = avcodec_find_decoder(par->codec_id);
             if (!dec) return false;
             m_ctx = avcodec_alloc_context3(dec);
@@ -798,7 +798,7 @@ public:
         m_test2x = m_in->Config().upscale == 2;
         m_toneMap = m_in->ToneMap();
         if (m_toneMap) m_tm.Configure(m_in->ToneMapPq(), m_in->PeakNits());
-        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", m_ahb ? "MediaCodec (hardware buffers)" : dec->name, m_hw ? " (hardware)" : "",
+        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", HaveAhb() ? "MediaCodec (hardware buffers)" : dec->name, m_hw ? " (hardware)" : "",
             m_k, m_in->OutWidth(), m_in->OutHeight());
         return true;
     }
@@ -1435,6 +1435,14 @@ private:
     bool m_toneMap = false;
     pmk::EngineCfg m_cfg;
     std::unique_ptr<pmk::IEngine> m_engine;
+    bool HaveAhb() const
+    {
+#if defined(__ANDROID__) && defined(PM_AHB)
+        return m_ahb != nullptr;
+#else
+        return false;
+#endif
+    }
     bool m_gpuFrames = false;   // frames reach the engine on the GPU (no CPU planes: real pictures come from the engine)
 #if defined(__ANDROID__) && defined(PM_AHB)
     std::unique_ptr<pmk::AhbDecoder> m_ahb;

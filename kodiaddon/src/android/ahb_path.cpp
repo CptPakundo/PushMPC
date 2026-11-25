@@ -33,6 +33,11 @@ AhbDecoder::~AhbDecoder()
 
 bool AhbDecoder::Open(const AVCodecParameters* par, std::string& why)
 {
+    if (__builtin_available(android 26, *)) {
+    } else {
+        why = "Android 8 or later needed (AImageReader hardware buffers)";
+        return false;
+    }
     const char* mime = nullptr;
     const char* bsf = nullptr;
     switch (par->codec_id) {
@@ -286,6 +291,7 @@ struct AhbImporter::Impl {
     }
 };
 
+AhbImporter::AhbImporter() = default;
 AhbImporter::~AhbImporter() = default;
 
 int AhbImporter::Fill(pmvs::gpu::Engine& e, AHardwareBuffer* buf, std::string& err)

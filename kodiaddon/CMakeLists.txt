@@ -178,6 +178,9 @@ if(ANDROID)
     target_sources(inputstream.pushmpc PRIVATE src/android/ahb_path.cpp "${_aspv}/ahb2yuv_spv.h")
     target_include_directories(inputstream.pushmpc PRIVATE "${_aspv}")
     target_compile_definitions(inputstream.pushmpc PRIVATE PM_AHB)
+    # Android 8 APIs (AImageReader with usage, AImage hardware buffers): weak symbols, checked at run time
+    set_source_files_properties(src/android/ahb_path.cpp PROPERTIES COMPILE_DEFINITIONS __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
+                                COMPILE_OPTIONS "-Wno-unguarded-availability;-Wno-error=unguarded-availability")
     message(STATUS "Android: zero-copy MediaCodec path (hardware buffers into the GPU engine)")
   endif()
 endif()

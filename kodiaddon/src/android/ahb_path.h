@@ -52,6 +52,7 @@ private:
 // imports AHardwareBuffers into the engine's source slots (on the engine's Vulkan device)
 class AhbImporter {
 public:
+    AhbImporter();
     ~AhbImporter();
     // fill a free source slot of the engine from buf; the slot, or -1 with the reason. Waits for the GPU (so the
     // decoder's buffer can go back right after).
