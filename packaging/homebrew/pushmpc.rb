@@ -60,9 +60,10 @@ class Pushmpc < Formula
     libexec.install "integrations/mpv/mpv-integration.sh"
 
     # Homebrew's mpv (0.41+) dlopen()s the VSScript library (libvsscript.dylib) by leaf name, but Homebrew's
-    # vapoursynth keeps it inside its virtualenv, where dyld never looks: mpv's vf=vapoursynth then fails ("Failed to load VapourSynth
-    # VSScript library"). dyld's default fallback path includes ~/lib, so pushmpc-setup links the library there (and
-    # takes the link out again), which also works for an mpv started from Finder (no shell environment).
+    # vapoursynth keeps it inside its virtualenv, and dyld's fallback search is only /usr/lib: mpv's vf=vapoursynth
+    # fails ("Failed to load VapourSynth VSScript library"). mpv honours VSSCRIPT_PATH, so pushmpc-setup sets it for
+    # the login session (launchctl setenv, which apps started from Finder, the Dock and new Terminal windows inherit)
+    # and at every login (a LaunchAgent), and takes both out again on uninstall.
     vs_real = formula_opt_prefix("vapoursynth").realpath
     # VapourSynth R7x+ names it libvsscript (mpv tries libvsscript first, then libvapoursynth-script)
     vsscript = Dir["#{vs_real}/**/lib{vsscript,vapoursynth-script}.{dylib,so}"].min_by(&:length)
@@ -72,21 +73,34 @@ class Pushmpc < Formula
     (bin/"pushmpc-setup").write <<~SH
       #!/bin/sh
       # pushmpc-setup [install|uninstall|status] [mpv-integration.sh options]: PushMPC in ~/.config/mpv/mpv.conf, and
-      # (macOS) ~/lib/<VSScript library> -> Homebrew's, so Homebrew's mpv finds VapourSynth.
+      # (macOS) VSSCRIPT_PATH for the login session and every login, so Homebrew's mpv finds VapourSynth.
       action=${1:-install}
       [ $# -gt 0 ] && shift
       vsscript="#{vsscript_opt}"
-      link="$HOME/lib/$(basename "$vsscript")"
-      mark="$HOME/lib/.pushmpc-vsscript-link"
+      agent="$HOME/Library/LaunchAgents/com.pushmpc.vsscript.plist"
       if [ "$(uname -s)" = Darwin ] && [ -n "$vsscript" ]; then
         case $action in
           install)
-            if [ -e "$link" ] || [ -L "$link" ]; then echo "VSScript: $link exists (kept)"
-            else mkdir -p "$HOME/lib" && ln -s "$vsscript" "$link" && : > "$mark" && echo "VSScript: linked $link -> $vsscript (mpv finds VapourSynth)"; fi ;;
+            mkdir -p "$HOME/Library/LaunchAgents"
+            cat > "$agent" <<PLIST
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0"><dict>
+        <key>Label</key><string>com.pushmpc.vsscript</string>
+        <key>ProgramArguments</key><array><string>/bin/launchctl</string><string>setenv</string><string>VSSCRIPT_PATH</string><string>$vsscript</string></array>
+        <key>RunAtLoad</key><true/>
+      </dict></plist>
+      PLIST
+            if launchctl setenv VSSCRIPT_PATH "$vsscript" 2>/dev/null; then echo "VSSCRIPT_PATH=$vsscript (this session and every login)"
+            else echo "VSSCRIPT_PATH set from the next login (launchctl setenv failed here); now: export VSSCRIPT_PATH=$vsscript"; fi ;;
           uninstall)
-            if [ -f "$mark" ]; then rm -f "$link" "$mark"; rmdir "$HOME/lib" 2>/dev/null; echo "VSScript: link removed"; fi ;;
+            if [ -f "$agent" ]; then
+              rm -f "$agent"
+              [ "$(launchctl getenv VSSCRIPT_PATH 2>/dev/null)" = "$vsscript" ] && launchctl unsetenv VSSCRIPT_PATH 2>/dev/null
+              echo "VSSCRIPT_PATH: LaunchAgent removed"
+            fi ;;
           status)
-            if [ -e "$link" ]; then echo "VSScript: $link -> $(readlink "$link")"; else echo "VSScript: $link missing (Homebrew mpv cannot load VapourSynth; run pushmpc-setup install)"; fi ;;
+            echo "VSSCRIPT_PATH: session '$(launchctl getenv VSSCRIPT_PATH 2>/dev/null)', LaunchAgent $([ -f "$agent" ] && echo present || echo absent)" ;;
         esac
       fi
       exec /bin/sh "#{opt_libexec}/mpv-integration.sh" "$action" --script "#{opt_pkgshare}/pushmpc.vpy" "$@"
@@ -97,8 +111,9 @@ class Pushmpc < Formula
     <<~EOS
       To use PushMPC in mpv (and in IINA with "Use config directory" and a VapourSynth-enabled libmpv), run:
         pushmpc-setup install
-      It also links Homebrew's VSScript library into ~/lib: Homebrew's mpv looks for that library
-      by name and cannot find it inside the vapoursynth formula's virtualenv.
+      It also sets VSSCRIPT_PATH (this login session and a LaunchAgent for later logins): Homebrew's mpv
+      cannot find VapourSynth's VSScript library on its own. Terminals already open need:
+        export VSSCRIPT_PATH="$(launchctl getenv VSSCRIPT_PATH)"
       Before `brew uninstall pushmpc`, run `pushmpc-setup uninstall` (your mpv.conf comes back byte for byte).
       Settings: ~/.config/pushmpc/settings.ini (Smoother=auto|off|2..8, Backend=auto|apple|portable,
       AppleSuperResolution=auto|off|2|4). Logs: ~/Library/Logs/PushMPC.
