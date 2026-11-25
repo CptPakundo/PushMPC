@@ -355,6 +355,8 @@ jobs:
           $out = "$env:RUNNER_TEMP\sp.txt"
           $files = @("$env:APPDATA\Stremio\mpv-config.txt", "$env:LOCALAPPDATA\PushMPC\stremio\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf", "$env:LOCALAPPDATA\Plex HTPC\mpv.conf")
           $snap = { foreach ($f in $files) { if (Test-Path $f) { "$f=$((Get-FileHash $f).Hash)" } else { "$f=absent" } } }
+          # Stremio's installer starts Stremio; the writer leaves a running Stremio alone (it rewrites its settings)
+          Get-Process stremio-shell-ng, stremio, stremio-runtime -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 2
           $before = & $snap
           . ./integrations/mpv/mpv-integration.ps1
           $rows = Invoke-PmMpvIntegration -Action Install

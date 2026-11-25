@@ -508,7 +508,7 @@ function Uninstall-PmMpcQt {
 # filter softly; a vf= line that fails would stop playback). Read from the DLL's strings; nothing is loaded.
 function Test-PmPlexLibmpv([string]$Dll) {
     try { $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Dll)) } catch { return [pscustomobject]@{ Ok = $false; Why = "cannot read $Dll" } }
-    if (-not $t.Contains('d3d11vpp') -or -not $t.Contains('scaling-mode')) { return [pscustomobject]@{ Ok = $false; Why = "its libmpv is older than mpv 0.38 (no d3d11vpp scaling-mode)" } }
+    if (-not $t.Contains('d3d11vpp') -or -not $t.Contains('scaling-mode')) { return [pscustomobject]@{ Ok = $false; Why = "its libmpv has no d3d11vpp scaling-mode (it came with mpv after 0.38)" } }
     if (-not $t.Contains('mp.options')) { return [pscustomobject]@{ Ok = $false; Why = 'its libmpv has no Lua scripting' } }
     return [pscustomobject]@{ Ok = $true; Why = '' }
 }

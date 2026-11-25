@@ -280,7 +280,7 @@ $rows = Run 'Install' $r
 $pc = "$r\AppData\Local\Plex\mpv.conf"; $pt = (Read-PmText $pc).Text
 Check (($rows | Where-Object Player -eq 'Plex for Windows').Result -eq 'installed') 'Plex for Windows (new libmpv, NVIDIA): installed'
 Check ($pt -match 'script-opts-append=pushmpc-mode=vsr' -and $pt -match 'pushmpc-scaling=nvidia' -and $pt -match 'scripts-append=.*pushmpc\.lua' -and $pt -notmatch 'vf-append' -and $pt.EndsWith("glsl-shaders-append=C:/x.glsl`r`n")) 'Plex: VSR through pushmpc.lua, the user''s lines kept'
-Check (($rows | Where-Object Player -eq 'Plex HTPC').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'Plex HTPC').Note -match '0\.38') 'Plex HTPC with an old libmpv: not changed, says why'
+Check (($rows | Where-Object Player -eq 'Plex HTPC').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'Plex HTPC').Note -match 'scaling-mode') 'Plex HTPC with an old libmpv: not changed, says why'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Plex: restored byte for byte'
 $env:PUSHMPC_GPU_VENDOR = 'AMD Radeon RX 9070'
