@@ -1,5 +1,5 @@
-// PushMPC "Auto": the upgrade ladder (auto-ladder-research.md, gpu-best-results.md section 1, vfg-medium-vs-high.md
-// section 8.2; settings-and-runtime.md "Auto rules").
+// PushMPC "Auto": the upgrade ladder (internal research notes, internal research notes section 1, internal research notes
+// section 8.2; internal research notes "Auto rules").
 //
 //  1. Frame generation first. The method by GPU family (RTX 50/40/30: NVIDIA VFG, then DLSS-G, PushFlow, FSR FG;
 //     RTX 20 and GTX: PushFlow, then FSR FG; Radeon: PushFlow, then FSR FG (FSR 4 ML on RX 9000), then AMD FRC; Intel:
@@ -79,7 +79,7 @@ inline const wchar_t* FamilyName(uint32_t f)
     static const wchar_t* n[] = { L"unknown GPU", L"RTX 50", L"RTX 40", L"RTX 30", L"RTX 20", L"GTX", L"RX 9000", L"RX 7000", L"RX 6000", L"RX 5000", L"Radeon", L"Intel", L"other GPU" };
     return f < 13 ? n[f] : n[0];
 }
-// GPU time relative to the RTX 5090 for the priors, before anything was measured (gpu-best-results.md 4c; estimates)
+// GPU time relative to the RTX 5090 for the priors, before anything was measured (internal research notes 4c; estimates)
 inline double CardFactor(const std::wstring& name, uint32_t family)
 {
     auto has = [&](const wchar_t* s) { std::wstring a = name; for (auto& c : a) c = wchar_t(towupper(c)); std::wstring b = s; for (auto& c : b) c = wchar_t(towupper(c)); return a.find(b) != std::wstring::npos; };
@@ -95,7 +95,7 @@ inline double CardFactor(const std::wstring& name, uint32_t family)
 // Frame generation methods as Auto sees them (index = FgMethod - 1 = PUSHCORE_FG_*)
 enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kFgKeys };
 
-// Measured costs (RTX 5090; vfg-medium-vs-high.md section 6, gpu-best-results.md 4b), ms per source frame at p95 for a
+// Measured costs (RTX 5090; internal research notes section 6, internal research notes 4b), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
 struct Costs {
     // FG batch p95 per multiplier M = 2..8 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
@@ -244,7 +244,7 @@ inline double FgCost(const Costs& c, FgMethod method, int quality, int m, double
 {
     return FgPrior(c, method, quality, m, pix) * c.fgScale[FgKeyOf(method, quality)];
 }
-// The order Auto tries the frame generation methods in, by GPU family (gpu-best-results.md section 1)
+// The order Auto tries the frame generation methods in, by GPU family (internal research notes section 1)
 inline std::vector<FgMethod> FgOrder(const Gpu& g)
 {
     switch (g.family) {
@@ -363,7 +363,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     r.debandStrength = int(s.debandStrength);
     double debandMs = deband ? DebandCost(c, r.debandStrength, src.w, src.h) : 0.0;
 
-    // NR cost by family until measured (gpu-best-results.md: heavy on RTX 30 and on the RX 7000 worker)
+    // NR cost by family until measured (internal research notes: heavy on RTX 30 and on the RX 7000 worker)
     const double nrPrior = c.learnedNr ? c.nrMs : g.family == kRtx50 ? c.nrMs : g.family == kRtx40 ? c.nrMs * 1.5 : g.family == kRtx30 ? c.nrMs * 4
                          : g.family == kRdna4 ? 6.0 * 1.2 : g.family == kRdna3 ? 30.0 : c.nrMs * 4;
     auto baseCost = [&](bool nr) {
@@ -863,7 +863,7 @@ inline VrrProbe ProbeVrr(HWND wnd, const MONITORINFOEXW& mi, bool nvidia)
 }
 
 // ------------------------------------------------------------------------------------------------ the host player
-// Round 2 (MPC-BE, players-mpcbe-potplayer.md C1/C2): the player hosting this filter, from the process's exe name.
+// Round 2 (MPC-BE, internal research notes C1/C2): the player hosting this filter, from the process's exe name.
 enum class Host { MpcHc, MpcBe, PotPlayer, Other };
 inline Host HostFromExe(const std::wstring& exe)
 {
