@@ -62,17 +62,10 @@ if [ "$OS" = linux ]; then
         # import + export alone (x1: every output is a real frame) must be lossless; PSNR per plane for the log
         "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 24 \
             -vf "format=nv12,hwupload,pushmpc=smoother=1,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk1.mkv" > "$T/ff-vk1.log" 2>&1
-        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 vs source: /"
-        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]trim=start_frame=1,setpts=PTS-STARTPTS,format=yuv420p[a];[1]setpts=PTS-STARTPTS,format=yuv420p[b];[a][b]psnr=shortest=1" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 frame n vs source n-1: /"
-        "$FF" -v error -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr=stats_file=$T/vk1-psnr.txt" -f null - 2>&1; head -8 "$T/vk1-psnr.txt" | cut -c1-120 | sed "s/^/vk1 per frame: /"
-        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[1]trim=start_frame=1,setpts=PTS-STARTPTS,format=yuv420p[b];[0]setpts=PTS-STARTPTS,format=yuv420p[a];[a][b]psnr=shortest=1" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 frame n vs source n+1: /"
-        PUSHMPC_VK_SYNC=1 "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 24 -vf "format=nv12,hwupload,pushmpc=smoother=1,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk1s.mkv" > "$T/ff-vk1s.log" 2>&1
-        "$FF" -v info -i "$T/ff-vk1s.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 with host waits vs source: /"
-        for f in clip ff-vk1; do "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 100 + 300)) -N 16 | sed "s/^/$f Y row 100: /"; "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 360 + 640 * 50 + 300)) -N 16 | sed "s/^/$f UV row 50: /"; done
-        "$FF" -v error -y -i "$T/ff-vk1.mkv" -frames:v 1 "$T/vk1-frame0.png"; "$FF" -v error -y -i "$T/clip.mkv" -frames:v 1 "$T/src-frame0.png"
-        "$FF" -v error -y -i "$T/ff-vk.mkv" -vf "select='lt(n,4)'" -vsync 0 "$T/vk2-%d.png"
+        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]settb=1/24,setpts=N,format=yuv420p[a];[1]settb=1/24,setpts=N,format=yuv420p[b];[a][b]psnr=shortest=1" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 > "$T/vk1-psnr.txt"; echo "vulkan x1 vs source: $(cat "$T/vk1-psnr.txt")"
+        grep -q "average:inf" "$T/vk1-psnr.txt" && result ffmpeg-vulkan-x1-lossless PASS || result ffmpeg-vulkan-x1-lossless FAIL
         # the real frames (every 2nd output) must come back unchanged through import, engine and export
-        "$FF" -v info -i "$T/ff-vk.mkv" -i "$T/clip.mkv" -lavfi "[0]select='not(mod(n,2))',setpts=N/(FRAME_RATE*TB),format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - > "$T/ff-vk-psnr.log" 2>&1
+        "$FF" -v info -i "$T/ff-vk.mkv" -i "$T/clip.mkv" -lavfi "[0]select='not(mod(n,2))',settb=1/24,setpts=N,format=yuv420p[a];[1]settb=1/24,setpts=N,format=yuv420p[b];[a][b]psnr=shortest=1" -f null - > "$T/ff-vk-psnr.log" 2>&1
         ps=$(grep -o "average:[a-z0-9.]*" "$T/ff-vk-psnr.log" | tail -1); echo "vulkan real frames vs source: $ps"
         case $ps in average:inf|average:[6-9][0-9]*|average:1[0-9][0-9]*) result ffmpeg-vulkan-real-frames-exact PASS ;; *) result ffmpeg-vulkan-real-frames-exact FAIL ;; esac
     else tail -15 "$T/ff-vk.log"; result ffmpeg-vulkan-x2 FAIL; fi
