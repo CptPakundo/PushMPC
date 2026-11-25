@@ -3,8 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(inputstream_startptsrepro CXX)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded) # static CRT: the dev kit's Windows headers clash with the DLL CRT
-set(KODI_DEVKIT "" CACHE PATH "kodi-dev-kit/include")
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded) set(KODI_DEVKIT "" CACHE PATH "kodi-dev-kit/include")
 file(STRINGS "${KODI_DEVKIT}/kodi/versions.h" _ver REGEX "^#define ADDON_(GLOBAL|INSTANCE)_VERSION_[A-Z]+(_MIN|_XML_ID)? ")
 foreach(l ${_ver})
   if(l MATCHES "^#define (ADDON_[A-Z_]+) +\"([^\"]+)\"")
@@ -27,7 +26,7 @@ configure_file(addon.xml.in "${OUT}/addon.xml" @ONLY)
 add_library(inputstream.startptsrepro SHARED main.cpp)
 target_include_directories(inputstream.startptsrepro PRIVATE "${KODI_DEVKIT}")
 if(MSVC)
-  target_compile_definitions(inputstream.startptsrepro PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_definitions(inputstream.startptsrepro PRIVATE TARGET_WINDOWS NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
   target_compile_options(inputstream.startptsrepro PRIVATE /EHsc)
 endif()
 set_target_properties(inputstream.startptsrepro PROPERTIES PREFIX "" OUTPUT_NAME inputstream.startptsrepro
