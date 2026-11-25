@@ -1,6 +1,6 @@
 // inputstream.pushmpc: PushMPC frame generation inside Kodi's own VideoPlayer (Kodi 21 Omega, 22 Piers).
 //
-// How Kodi lets an add-on do this (verified in Kodi's source, see kodiaddon/README.md):
+// How Kodi lets an add-on do this (Kodi source, xbmc/cores/VideoPlayer, 21.3-Omega and 22 Piers):
 //   - CDVDFactoryInputStream asks every enabled inputstream add-on CInputStreamAddon::Supports(); with no ListItem
 //     property it matches the file extension against addon.xml's @extension. So this add-on demuxes normal local files.
 //   - A stream reported with INPUTSTREAM_FEATURE_DECODE gets externalInterfaces, and CDVDFactoryCodec::CreateVideoCodec

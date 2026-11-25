@@ -21,6 +21,10 @@ on:
         type: string
         default: ''
 
+concurrency:
+  group: kodi-addon-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FFMPEG_VERSION: '8.1'
   KODI21_TAG: '21.3-Omega'

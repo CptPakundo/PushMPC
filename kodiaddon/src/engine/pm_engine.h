@@ -4,7 +4,7 @@
  * Kept deliberately small so the engine behind it can change without touching the VLC side:
  *   - today: vsplugin's portable engine (PushFPS's portable core on the CPU: block-matching motion both ways, motion-
  *     compensated interpolation, PushFPS's scene-cut rule), engine_portable.cpp;
- *   - next: track T1's Vulkan GPU engine (branch track/portable-gpu) implements the same calls;
+ *   - next: the portable Vulkan GPU engine implements the same calls;
  *   - Windows RTX: pushcore (D3D11 in, D3D11 out) is a separate path in pushmpc_vlc.c, not behind this interface,
  *     because its frames never touch the CPU.
  * Pictures are planar YUV 4:2:0, 8 bits (1 byte per sample) or 9..16 bits (2 bytes, little endian), as VLC's
