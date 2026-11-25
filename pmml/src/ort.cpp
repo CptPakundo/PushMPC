@@ -695,7 +695,97 @@ private:
     Stats stats_;
 };
 
+class OrtRawSession final : public RawSession {
+public:
+    ~OrtRawSession() override {
+        if (!ort) return;
+        if (session_) ort->api->ReleaseSession(session_);
+        if (cpu_) ort->api->ReleaseMemoryInfo(cpu_);
+    }
+    bool init(const std::string& runtimeDir, const Backend& b, const std::string& model, const std::vector<std::pair<std::string, int64_t>>& dims,
+              const std::string& cacheDir, std::string* err) {
+        ort = loadOrt(runtimeDir, b.flavor, err);
+        if (!ort) return false;
+        Options o;
+        o.runtimeDir = runtimeDir;
+        o.backend = b;
+        o.cacheDir = cacheDir;
+        OrtSessionOptions* so = nullptr;
+        PMML_TRY(ort->api->CreateSessionOptions(&so));
+        struct Guard { Ort* o; OrtSessionOptions* s; ~Guard() { o->api->ReleaseSessionOptions(s); } } guard{ort, so};
+        PMML_TRY(ort->api->SetSessionGraphOptimizationLevel(so, ORT_ENABLE_ALL));
+        for (auto& d : dims) PMML_TRY(ort->api->AddFreeDimensionOverrideByName(so, d.first.c_str(), d.second));
+        EpChoice c;
+        if (!appendEp(ort, so, o, &c, err)) return false;
+        describe_ = c.describe;
+        PMML_TRY(ort->api->CreateSession(ort->env, ortPath(model).c_str(), so, &session_));
+        PMML_TRY(ort->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &cpu_));
+        OrtAllocator* alloc = nullptr;
+        PMML_TRY(ort->api->GetAllocatorWithDefaultOptions(&alloc));
+        char* name = nullptr;
+        PMML_TRY(ort->api->SessionGetInputName(session_, 0, alloc, &name));
+        input_ = name;
+        alloc->Free(alloc, name);
+        size_t n = 0;
+        PMML_TRY(ort->api->SessionGetOutputCount(session_, &n));
+        for (size_t i = 0; i < n; ++i) {
+            PMML_TRY(ort->api->SessionGetOutputName(session_, i, alloc, &name));
+            outputs_.push_back(name);
+            alloc->Free(alloc, name);
+        }
+        return true;
+    }
+    size_t outputCount() const override { return outputs_.size(); }
+    bool run(const float* input, const std::vector<int64_t>& shape, const std::vector<float*>& outs, const std::vector<size_t>& bytes, std::string* err) override {
+        size_t count = 1;
+        for (auto d : shape) count *= size_t(d);
+        OrtValue* in = nullptr;
+        PMML_TRY(ort->api->CreateTensorWithDataAsOrtValue(cpu_, const_cast<float*>(input), count * 4, shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in));
+        std::vector<const char*> names;
+        for (auto& n : outputs_) names.push_back(n.c_str());
+        std::vector<OrtValue*> got(outputs_.size(), nullptr);
+        const char* inName = input_.c_str();
+        OrtStatus* s = ort->api->Run(session_, nullptr, &inName, &in, 1, names.data(), names.size(), got.data());
+        ort->api->ReleaseValue(in);
+        bool ok = true;
+        if (s) { if (err) *err = std::string("Run: ") + ort->api->GetErrorMessage(s); ort->api->ReleaseStatus(s); ok = false; }
+        for (size_t i = 0; i < got.size(); ++i) {
+            if (ok && i < outs.size() && outs[i]) {
+                void* data = nullptr;
+                OrtTensorTypeAndShapeInfo* info = nullptr;
+                size_t elems = 0;
+                OrtStatus* s1 = ort->api->GetTensorMutableData(got[i], &data);
+                OrtStatus* s2 = s1 ? nullptr : ort->api->GetTensorTypeAndShape(got[i], &info);
+                if (s1 || s2) { ok = false; if (err) *err = "output " + std::to_string(i) + " unreadable"; if (s1) ort->api->ReleaseStatus(s1); if (s2) ort->api->ReleaseStatus(s2); }
+                else {
+                    if (OrtStatus* s3 = ort->api->GetTensorShapeElementCount(info, &elems)) ort->api->ReleaseStatus(s3);
+                    ort->api->ReleaseTensorTypeAndShapeInfo(info);
+                    if (elems * 4 > bytes[i]) { ok = false; if (err) *err = "output " + std::to_string(i) + " is larger than its buffer"; }
+                    else std::memcpy(outs[i], data, elems * 4);
+                }
+            }
+            if (got[i]) ort->api->ReleaseValue(got[i]);
+        }
+        return ok;
+    }
+    std::string describe() const override { return describe_; }
+
+private:
+    Ort* ort = nullptr;
+    OrtSession* session_ = nullptr;
+    OrtMemoryInfo* cpu_ = nullptr;
+    std::string input_, describe_;
+    std::vector<std::string> outputs_;
+};
+
 }  // namespace
+
+std::unique_ptr<RawSession> createOrtRaw(const std::string& runtimeDir, const Backend& b, const std::string& model,
+                                         const std::vector<std::pair<std::string, int64_t>>& dims, const std::string& cacheDir, std::string* err) {
+    auto p = std::make_unique<OrtRawSession>();
+    if (!p->init(runtimeDir, b, model, dims, cacheDir, err)) return nullptr;
+    return p;
+}
 
 std::unique_ptr<Interpolator> createOrt(const Options& o, std::string* err) {
     auto p = std::make_unique<OrtInterpolator>();

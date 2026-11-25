@@ -315,6 +315,16 @@ jobs:
           $lib = Get-ChildItem $src -Recurse -File -Filter dolby_vision.dll.lib | Where-Object FullName -match '\\release\\' | Select-Object -First 1
           Copy-Item $dll.FullName "$out\bin"; Copy-Item $lib.FullName "$out\lib"
 
+      # pmml (PushMPC's ML runtime layer) lets PushFlow run on other ONNX Runtime EPs than DirectML (TensorRT-RTX,
+      # OpenVINO, AMD GPU); it is linked into pushcore with the ONNX Runtime C API headers from its pinned package
+      - name: pmml headers (ONNX Runtime C API, pinned)
+        timeout-minutes: 5
+        env:
+          PUSHFLOW_PYTHON: ${{ steps.pushflow-python.outputs.python-path }}
+        run: |
+          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core --headers
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Configure PushFPS with pushcore (PUSHMPC_SOURCE_DIR)
         timeout-minutes: 10
         run: |
@@ -338,7 +348,8 @@ jobs:
             "-DVEYRA_FIDELITYFX2_ROOT=$env:DEPS\ffx2\Kits\FidelityFX" `
             "-DVEYRA_AMF_SDK_ROOT=$env:DEPS\amf\amf\public" `
             "-DVEYRA_ONNXRUNTIME_ROOT=$env:DEPS\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=$env:DEPS\pushflow\dml" `
-            "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" @nvof @dovi
+            "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" `
+            "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and

@@ -56,6 +56,8 @@ bool findModel(const Options& o, ModelFiles* m, std::string* err);
 // Backends.
 std::unique_ptr<Interpolator> createOrt(const Options& o, std::string* err);
 std::vector<DeviceInfo> listOrt(const std::string& runtimeDir, std::string* log);
+std::unique_ptr<RawSession> createOrtRaw(const std::string& runtimeDir, const Backend& b, const std::string& model,
+                                         const std::vector<std::pair<std::string, int64_t>>& dims, const std::string& cacheDir, std::string* err);
 #if PMML_WITH_NCNN
 std::unique_ptr<Interpolator> createNcnn(const Options& o, std::string* err);
 std::vector<DeviceInfo> listNcnn(const std::string& runtimeDir, std::string* log);

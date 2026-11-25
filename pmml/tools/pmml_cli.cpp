@@ -245,6 +245,51 @@ int cmdProbe(const Args& a) {
     return r.ok ? 0 : 1;
 }
 
+// raw: pmml::RawSession (pushcore's hook) on a synthetic packed tensor, against the same model on the CPU EP of the
+// same ONNX Runtime flavor; prints PSNR per output (0..1 picture, grids, mask)
+int cmdRaw(const Args& a) {
+    std::string err;
+    pmml::Options o = options(a, &err);
+    const std::string model = a.get("--model");
+    const std::string size = a.get("--size", "640x384");
+    const int w = std::atoi(size.c_str()), h = std::atoi(size.substr(size.find('x') + 1).c_str());
+    const std::vector<std::pair<std::string, int64_t>> dims = {{"batch", 1}, {"height", h}, {"width", w}};
+    std::vector<float> in(size_t(7) * w * h);
+    for (int c = 0; c < 6; ++c)
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const int sx = x - (c >= 3 ? 12 : 0);
+                in[(size_t(c) * h + y) * w + x] = 0.3f + 0.2f * std::sin(sx / 7.0f) * std::cos(y / 9.0f) + ((sx > 100 && sx < 160 && y > 80 && y < 140) ? 0.4f : 0.f);
+            }
+    std::fill(in.begin() + size_t(6) * w * h, in.end(), 0.5f);
+    const size_t plane = size_t(w) * h;
+    const size_t counts[4] = {plane * 3, plane * 2, plane * 2, plane};
+    auto runOne = [&](const pmml::Backend& b, std::vector<std::vector<float>>& outs) -> bool {
+        auto s = pmml::RawSession::create(o.runtimeDir, b, model, dims, o.cacheDir, &err);
+        if (!s) return false;
+        std::printf("%s: %s, %zu outputs\n", b.key().c_str(), s->describe().c_str(), s->outputCount());
+        outs.assign(4, {});
+        std::vector<float*> ptr; std::vector<size_t> bytes;
+        for (int i = 0; i < 4; ++i) { outs[size_t(i)].resize(counts[i]); ptr.push_back(outs[size_t(i)].data()); bytes.push_back(counts[i] * 4); }
+        return s->run(in.data(), {1, 7, h, w}, ptr, bytes, &err);
+    };
+    std::vector<std::vector<float>> got, ref;
+    if (!runOne(o.backend, got)) { std::fprintf(stderr, "raw: %s\n", err.c_str()); return 3; }
+    pmml::Backend cpu = o.backend; cpu.ep = "cpu"; cpu.device = 0;
+    if (!runOne(cpu, ref)) { std::fprintf(stderr, "raw (cpu): %s\n", err.c_str()); return 3; }
+    double worst = 99;
+    for (int i = 0; i < 4; ++i) {
+        double se = 0;
+        for (size_t k = 0; k < counts[i]; ++k) { const double d = got[size_t(i)][k] - ref[size_t(i)][k]; se += d * d; }
+        const double mse = se / double(counts[i]);
+        const double db = mse < 1e-14 ? 99.0 : 10 * std::log10((i == 1 || i == 2 ? 4.0 : 1.0) / mse);
+        worst = std::min(worst, db);
+        std::printf("PMML_RAW output %d: %.2f dB against the CPU EP\n", i, db);
+    }
+    const double minDb = std::atof(a.get("--min-db", "40").c_str());
+    return worst >= minDb ? 0 : 7;
+}
+
 std::vector<std::string> runLines(const std::string& cmd, const char* prefix) {
     std::vector<std::string> out;
 #ifdef _WIN32
@@ -336,6 +381,7 @@ int main(int argc, char** argv) {
     if (cmd == "list") return cmdList(a);
     if (cmd == "run") return cmdRun(a);
     if (cmd == "probe") return cmdProbe(a);
+    if (cmd == "raw") return cmdRaw(a);
     if (cmd == "auto") return cmdAuto(a, argv[0]);
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
     return 2;

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pmml {
@@ -82,6 +83,21 @@ public:
     virtual bool setPair(const Frame& a, const Frame& b, int phases, std::string* err) = 0;
     virtual bool render(float t, const OutFrame& out, std::string* err) = 0;
     virtual Stats stats() const = 0;
+    virtual std::string describe() const = 0;
+};
+
+// One ONNX model on one backend with host buffers: the hook for hosts that keep their own pre/post-processing (pushcore's
+// PushFlow keeps its D3D12 pack and rebuild shaders and hands pmml the packed tensor when the chosen EP is not
+// DirectML). dims: free dimensions to fix (name, value). Outputs are copied into the caller's buffers in model order.
+class RawSession {
+public:
+    virtual ~RawSession() = default;
+    static std::unique_ptr<RawSession> create(const std::string& runtimeDir, const Backend& backend, const std::string& modelPath,
+                                              const std::vector<std::pair<std::string, int64_t>>& dims, const std::string& cacheDir, std::string* err);
+    virtual size_t outputCount() const = 0;
+    // input: [1, C, H, W] float; outputs[i]: room for output i (outputBytes[i] bytes), nullptr = not wanted
+    virtual bool run(const float* input, const std::vector<int64_t>& shape, const std::vector<float*>& outputs, const std::vector<size_t>& outputBytes,
+                     std::string* err) = 0;
     virtual std::string describe() const = 0;
 };
 

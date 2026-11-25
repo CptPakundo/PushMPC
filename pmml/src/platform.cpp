@@ -98,6 +98,12 @@ std::unique_ptr<Interpolator> Interpolator::create(const Options& o, std::string
     return nullptr;
 }
 
+std::unique_ptr<RawSession> RawSession::create(const std::string& runtimeDir, const Backend& backend, const std::string& modelPath,
+                                               const std::vector<std::pair<std::string, int64_t>>& dims, const std::string& cacheDir, std::string* err) {
+    if (backend.runtime != "ort") { if (err) *err = "RawSession runs ONNX Runtime backends only"; return nullptr; }
+    return detail::createOrtRaw(runtimeDir, backend, modelPath, dims, cacheDir, err);
+}
+
 std::vector<DeviceInfo> listDevices(const std::string& runtimeDir, std::string* log) {
     auto v = detail::listOrt(runtimeDir, log);
 #if PMML_WITH_NCNN

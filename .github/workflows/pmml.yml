@@ -273,6 +273,10 @@ jobs:
             done
           done
           build/pmml_cli.exe run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --backend ort:directml:dml:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 --host-intermediates --compare pmml-data/ref/$n-fast --min-db 40 | tee -a run.log
+      - name: RawSession (pushcore's hook) on DirectML-WARP against the CPU EP
+        env: { PMML_DML_WARP: '1' }
+        timeout-minutes: 10
+        run: build/pmml_cli.exe raw --runtime rt --backend ort:directml:dml:0 --model pmml-data/models/pushflow-fast.onnx --size 640x384 --min-db 40
       - name: Auto end to end on WARP (each probe in its own process)
         env: { PMML_DML_WARP: '1' }
         timeout-minutes: 15

@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 452c889a..bc57c9c4 100644
+index 452c889a..f7630fe4 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -417,6 +417,7 @@ veyra_add_compute_shader(veyra_shader_flow_fill FlowFill)
@@ -18,7 +18,24 @@ index 452c889a..bc57c9c4 100644
    src/pipeline/VfgAmpereCompat.cpp
    src/pipeline/VfxSrBackend.cpp
  )
-@@ -855,7 +857,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
+@@ -530,6 +532,16 @@ else()
+   message(STATUS "PushFlow: ONNX Runtime headers not found; PushFlow is built as unavailable")
+ endif()
+ add_dependencies(veyra_pipeline veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct veyra_shader_push_guard veyra_shader_push_predict)
++# PushMPC (local addition): PushFlow on any ONNX Runtime execution provider through PushMPC's pmml (TensorRT-RTX,
++# OpenVINO, AMD GPU, ...), chosen by pushflow\pmml.txt or VEYRA_PUSHFLOW_PMML; DirectML stays the default and fallback.
++set(PUSHMPC_PMML_ORT_INCLUDE "" CACHE PATH "ONNX Runtime 1.22+ C API headers for PushMPC's pmml")
++if(PUSHMPC_SOURCE_DIR AND PUSHMPC_PMML_ORT_INCLUDE AND EXISTS "${PUSHMPC_SOURCE_DIR}/../pmml/CMakeLists.txt")
++  set(PMML_ORT_INCLUDE "${PUSHMPC_PMML_ORT_INCLUDE}" CACHE STRING "" FORCE)
++  add_subdirectory("${PUSHMPC_SOURCE_DIR}/../pmml" pmml EXCLUDE_FROM_ALL)
++  target_link_libraries(veyra_pipeline PRIVATE pmml)
++  target_compile_definitions(veyra_pipeline PRIVATE VEYRA_HAVE_PMML=1)
++  message(STATUS "PushFlow: pmml (any ONNX Runtime EP) from ${PUSHMPC_SOURCE_DIR}/../pmml")
++endif()
+ 
+ # Optional independent RX7000 network worker. All third-party source and runtime
+ # assets remain external; only our host and reproducible preparation script live here.
+@@ -855,7 +867,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
  
    # veyra_sources: product input sources (Playbook R3/R7). MediaFileSource
    # composes veyra_media; no second decode implementation exists.
@@ -27,7 +44,7 @@ index 452c889a..bc57c9c4 100644
    add_library(veyra_sources STATIC
      src/source/NativeCaptureSink.cpp
      src/source/MediaFileSource.cpp
-@@ -2407,3 +2409,9 @@ if(TARGET veyra_qml_ui)
+@@ -2407,3 +2419,9 @@ if(TARGET veyra_qml_ui)
    configure_file(apps/veyra/veyra.manifest ${CMAKE_CURRENT_BINARY_DIR}/veyra-qml.manifest COPYONLY)
    target_link_options(veyra_qml_ui PRIVATE "/MANIFESTINPUT:veyra-qml.manifest")
  endif()
@@ -2579,3 +2596,223 @@ index 94591579..e58d9d72 100644
              for(auto event:p.events)if(event)p.cu(p.cuEventDestroyFn(event),"cuEventDestroy profile");
              if(p.outputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.outputSemaphore),"destroy output semaphore");
              if(p.inputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.inputSemaphore),"destroy input semaphore");
+diff --git a/src/pushflow/PushFlowBackend.cpp b/src/pushflow/PushFlowBackend.cpp
+index f0e52b55..22c5f898 100644
+--- a/src/pushflow/PushFlowBackend.cpp
++++ b/src/pushflow/PushFlowBackend.cpp
+@@ -29,6 +29,9 @@
+ #include <DirectML.h>
+ #include <onnxruntime_c_api.h>
+ #include <dml_provider_factory.h>
++#ifdef VEYRA_HAVE_PMML
++#include "pmml/pmml.h"
++#endif
+ #endif
+ 
+ namespace veyra::pushflow {
+@@ -175,6 +178,33 @@ bool runtimeInstalled(const std::wstring& runtimeDir, std::wstring* reason) {
+ #endif
+ }
+ 
++#ifdef VEYRA_HAVE_PMML
++// PushMPC (local addition): the network on another ONNX Runtime execution provider through pmml. The pack, rebuild,
++// Guard and Predict shaders stay as they are; the packed tensor goes to the host, pmml runs the same model on the
++// chosen EP (TensorRT-RTX, OpenVINO, AMD GPU, QNN, CPU...) and its outputs come back into the same buffers. Chosen
++// by VEYRA_PUSHFLOW_PMML ("<pmml runtime folder>|<backend>") or pushflow\pmml.txt (runtime=..., backend=...),
++// written by PushMPC's Auto when its measurement prefers such an EP; anything that fails falls back to DirectML.
++static bool pmmlChoice(const fs::path& dir, std::string* runtime, std::string* backend) {
++    char env[1024]{};
++    const DWORD n = GetEnvironmentVariableA("VEYRA_PUSHFLOW_PMML", env, sizeof(env));
++    std::string text = n > 0 && n < sizeof(env) ? std::string(env) : std::string();
++    if (!text.empty()) {
++        const auto bar = text.find('|');
++        if (bar == std::string::npos) return false;
++        *runtime = text.substr(0, bar); *backend = text.substr(bar + 1);
++    } else {
++        std::ifstream f(dir / L"pmml.txt");
++        for (std::string line; std::getline(f, line);) {
++            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
++            if (line.rfind("runtime=", 0) == 0) *runtime = line.substr(8);
++            if (line.rfind("backend=", 0) == 0) *backend = line.substr(8);
++        }
++    }
++    pmml::Backend b;
++    return !runtime->empty() && pmml::Backend::parse(*backend, &b) && b.runtime == "ort" && b.ep != "dml";
++}
++#endif
++
+ struct PushFlowBackend::Impl {
+     Status status;
+     double inferMs = 0;
+@@ -257,6 +287,12 @@ struct PushFlowBackend::Impl {
+     std::array<void*, 5> allocations{};
+     ComPtr<IDMLDevice> dmlDevice;
+     std::string inputName;                                    // the model's one input (the split models share it)
++#ifdef VEYRA_HAVE_PMML
++    std::unique_ptr<pmml::RawSession> alt;                    // PushMPC: the network on another EP (see pmmlChoice)
++    ComPtr<ID3D12Resource> altReadback, altUpload;            // persistently mapped staging for the tensors
++    float* altIn = nullptr;
++    float* altOut = nullptr;
++#endif
+     std::vector<std::pair<std::string, int64_t>> fixedDims;   // the free dimensions the main session was fixed to
+     // PushFlow 2, Fusion's first step (docs/PUSHFLOW2.md; scripts/pushflow/rife_graph.py split_encoder).
+     // The whole model encodes both frames every time it makes a frame. Cut in two, the second frame is
+@@ -590,6 +626,75 @@ struct PushFlowBackend::Impl {
+             list->ResourceBarrier(1, &b);
+         });
+     }
++#ifdef VEYRA_HAVE_PMML
++    // PushMPC: input tensor to the host, the network on pmml's EP, the outputs back into buffers 1..4 (waits).
++    bool runAlt() {
++        const uint64_t plane = uint64_t(status.padW) * status.padH;
++        const uint64_t inBytes = plane * channels * 4;
++        const uint64_t outFloats[4] = {plane * 3, plane * 2, plane * 2, plane};
++        if (!oneShot([&](ID3D12GraphicsCommandList* list) {
++                D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = buffers[0].Get();
++                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++                b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++                list->ResourceBarrier(1, &b);
++                list->CopyBufferRegion(altReadback.Get(), 0, buffers[0].Get(), 0, inBytes);
++                std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
++                list->ResourceBarrier(1, &b);
++            })) return false;
++        std::vector<float*> outs;
++        std::vector<size_t> sizes;
++        uint64_t offset = 0;
++        const int tensors = haveGrids ? 4 : 1;
++        for (int i = 0; i < 4; ++i) { outs.push_back(i < tensors ? altOut + offset : nullptr); sizes.push_back(size_t(outFloats[i] * 4)); offset += outFloats[i]; }
++        std::string err;
++        if (!alt->run(altIn, {1, int64_t(channels), int64_t(status.padH), int64_t(status.padW)}, outs, sizes, &err)) {
++            veyra::log::error("pushflow", "pmml: " + err);
++            return false;
++        }
++        return oneShot([&](ID3D12GraphicsCommandList* list) {
++            uint64_t off = 0;
++            for (int i = 0; i < tensors; ++i) {
++                D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = buffers[i + 1].Get();
++                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++                b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++                list->ResourceBarrier(1, &b);
++                list->CopyBufferRegion(buffers[i + 1].Get(), 0, altUpload.Get(), off * 4, outFloats[i] * 4);
++                std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
++                list->ResourceBarrier(1, &b);
++                off += outFloats[i];
++            }
++        });
++    }
++    // The pmml session and the tensors' buffers and staging. False: DirectML as before.
++    bool openAlt(const fs::path& dir, const fs::path& model) {
++        std::string runtime, backendText;
++        if (!pmmlChoice(dir, &runtime, &backendText)) return false;
++        pmml::Backend backend;
++        pmml::Backend::parse(backendText, &backend);
++        std::string err;
++        const std::vector<std::pair<std::string, int64_t>> dims = {{"batch", 1}, {"height", status.padH}, {"width", status.padW},
++                                                                   {"pushflow_n", 1}, {"pushflow_h", status.padH}, {"pushflow_w", status.padW}};
++        auto session = pmml::RawSession::create(runtime, backend, narrow(model.wstring()), dims, runtime, &err);
++        if (!session) { veyra::log::warn("pushflow", "pmml " + backendText + " not used: " + err + "; DirectML"); return false; }
++        channels = 7;
++        haveGrids = session->outputCount() >= 4 && facts.known;
++        const uint64_t plane = uint64_t(status.padW) * status.padH;
++        const uint64_t floats[5] = {plane * channels, plane * 3, plane * 2, plane * 2, plane};
++        const int tensors = haveGrids ? 5 : 2;
++        for (int i = 0; i < tensors; ++i)
++            if (!makeTensorBuffer(floats[i] * 4, buffers[i])) return false;
++        altReadback = readbackBuffer(device.Get(), floats[0] * 4);
++        altUpload = pipeline::makeUploadBuffer(device.Get(), (floats[1] + floats[2] + floats[3] + floats[4]) * 4);
++        if (!altReadback || !altUpload || FAILED(altReadback->Map(0, nullptr, reinterpret_cast<void**>(&altIn))) ||
++            FAILED(altUpload->Map(0, nullptr, reinterpret_cast<void**>(&altOut)))) return false;
++        status.provider = "pmml: " + session->describe();
++        status.model = narrow(model.filename().wstring());
++        status.precision = "fp32";
++        alt = std::move(session);
++        veyra::log::info("pushflow", "network on " + status.provider);
++        return true;
++    }
++#endif
+     std::vector<float> readRgb() {
+         const uint64_t bytes = uint64_t(status.padW) * status.padH * 3 * 4;
+         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+@@ -722,6 +827,9 @@ struct PushFlowBackend::Impl {
+     // wait=true: the call returns only after the GPU finished the network (start-up checks).
+     bool run(bool wait = false) {
+         if (faulted) return false;
++#ifdef VEYRA_HAVE_PMML
++        if (alt) return runAlt();
++#endif
+         bool crashed = false;
+         const bool async = queued && !wait && (syncEvery == 0 || ++sinceSync < syncEvery);
+         if (!async) sinceSync = 0;
+@@ -828,6 +936,17 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+     const uint32_t block = std::max(p.facts.pad, kBlock);
+     p.status.padW = (p.status.modelW + block - 1) / block * block;
+     p.status.padH = (p.status.modelH + block - 1) / block * block;
++    bool altActive = false;
++    const auto loadStart = std::chrono::steady_clock::now();
++    std::string runtimeName = "pmml";
++#ifdef VEYRA_HAVE_PMML
++    altActive = p.openAlt(dir, fp32Model);
++    if (altActive) encoderCache = false;   // the encoder cache is DirectML's
++#endif
++    // the D3D12 tensor buffers exist only once the network's runtime is open (below, or pmml's above)
++    const uint64_t plane = uint64_t(p.status.padW) * p.status.padH;
++    uint64_t floats[5] = {plane * 7, plane * 3, plane * 2, plane * 2, plane};
++    if (!altActive) {
+     // DirectML first, from our folder, so ONNX Runtime and we use the same (redistributed) copy.
+     p.dmlModule = LoadLibraryExW((dir / L"DirectML.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+     p.ortModule = LoadLibraryExW((dir / L"onnxruntime.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+@@ -847,7 +966,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+     if (!p.ok(api->CreateMemoryInfo("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault, &p.memory), "memory info")) return false;
+ 
+     // The full-precision model is the reference and the fallback.
+-    const auto loadStart = std::chrono::steady_clock::now();
++    runtimeName = base->GetVersionString();
+     bool grids = false;
+     if (!p.open(fp32Model, queue, &p.session, p.channels, grids)) return false;
+     p.haveGrids = grids && p.facts.known;
+@@ -855,8 +974,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+     p.status.precision = "fp32";
+ 
+     // D3D12 buffers for the tensors, always in UNORDERED_ACCESS (as DirectML expects).
+-    const uint64_t plane = uint64_t(p.status.padW) * p.status.padH;
+-    const uint64_t floats[5] = {plane * p.channels, plane * 3, plane * 2, plane * 2, plane};
++    floats[0] = plane * p.channels;
+     const auto makeBuffer = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out) {
+         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+         D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = (bytes + 255) / 256 * 256; bd.Height = 1;
+@@ -927,6 +1045,8 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+             accepted ? "fp16" : "fp32 (half precision does not match on this GPU)"));
+     }
+ 
++    }   // !altActive (PushMPC: pmml opened the network above)
++
+     // Shaders, descriptors and the output picture.
+     std::vector<uint8_t> cs;
+     if (!p.packPass.loadShader("PushFlowPack.dxil", cs) || !p.packPass.create(device, cs, 1 + 2 * kSrvRing, 2, 1, 12)) return false;
+@@ -998,7 +1118,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+     // The rebuild is what keeps the Fast tier sharp; at full size the network's own picture is used.
+     p.status.rebuild = p.haveGrids && (p.status.modelW != width || p.status.modelH != height);
+     p.status.grids = p.haveGrids; p.status.alignCorners = p.facts.alignCorners; p.status.maskForFirst = p.facts.maskForFirst;
+-    p.status.provider = "DirectML";
++    if (!altActive) p.status.provider = "DirectML";
+     {
+         D3D12_QUERY_HEAP_DESC qd{}; qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = 2 * Impl::kTimeRing;
+         UINT64 frequency = 0;
+@@ -1110,7 +1230,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+         if (!p.status.split) veyra::log::warn("pushflow", "the encoder cache was asked for and is not used: " + p.status.splitState);
+     }
+     // Queued inference (see Impl::runOptions); a failure here only keeps the waits.
+-    if (GetEnvironmentVariableW(L"VEYRA_PUSHFLOW_SYNC", nullptr, 0) == 0) {
++    if (p.api && GetEnvironmentVariableW(L"VEYRA_PUSHFLOW_SYNC", nullptr, 0) == 0) {
+         if (p.ok(p.api->CreateRunOptions(&p.runOptions), "CreateRunOptions") &&
+             p.ok(p.api->AddRunConfigEntry(p.runOptions, "disable_synchronize_execution_providers", "1"), "run option")) p.queued = true;
+     }
+@@ -1124,7 +1244,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+                                           : std::string("inference waits for the GPU each frame"));
+     p.status.ready = true;
+     veyra::log::info("pushflow", std::format("ready runtime={} model={} precision={} tier={} size={}x{} model={}x{} padded={}x{} channels={} "
+-        "rebuild={} grids={} encoding={} encoderCache={} loadMs={:.0f}", base->GetVersionString(), p.status.model, p.status.precision, tier, width, height,
++        "rebuild={} grids={} encoding={} encoderCache={} loadMs={:.0f}", runtimeName, p.status.model, p.status.precision, tier, width, height,
+         p.status.modelW, p.status.modelH, p.status.padW, p.status.padH, p.channels, p.status.rebuild ? 1 : 0, p.haveGrids ? 1 : 0,
+         unsigned(encoding), p.status.splitState.empty() ? std::string("not asked for") : p.status.splitState,
+         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count()));
