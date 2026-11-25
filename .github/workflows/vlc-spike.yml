@@ -109,6 +109,13 @@ jobs:
           export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           bash vlcplugin/spike/run-cases.sh
+      - name: Real displays under Xvfb (gl on llvmpipe, xcb_x11)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get -qq install -y --no-install-recommends xvfb vlc-plugin-video-output libgl1-mesa-dri >/dev/null
+          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux-display \
+                 VOUTS="gl xcb_x11" HWARGS="--avcodec-hw=none" LABEL="Linux, Ubuntu VLC"
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/spike/run-display.sh
       - name: Flathub VLC (org.videolan.VLC) with the same plugin through VLC_PLUGIN_PATH
         if: ${{ github.event_name == 'push' || inputs.flatpak }}
         timeout-minutes: 20
@@ -169,6 +176,13 @@ jobs:
                  LABEL="Windows, VLC ${VLC_WIN_VERSION} win64" D3D11=1
           bash vlcplugin/spike/run-cases.sh
           grep -hE "D3D11 opaque picture|d3d11va|D3D11VA" res/windows/d3d11_m4.log | head -12 || true
+      - name: Real displays (direct3d11 and direct3d9 on WARP, glwin32)
+        timeout-minutes: 10
+        run: |
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$LOCALAPPDATA/pushspike")" \
+                 CLIP=art/clip/clip.mkv OUT=res/windows-display VOUTS="direct3d11 direct3d9 glwin32" HWARGS="--avcodec-hw=none" \
+                 RCARGS="--rc-quiet" LABEL="Windows, VLC ${VLC_WIN_VERSION}"
+          bash vlcplugin/spike/run-display.sh
       - name: direct3d11 display (real vout on the runner's WARP adapter) with d3d11va and the static filter
         run: |
           export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" VLC_PLUGIN_PATH="$(cygpath -w "$LOCALAPPDATA/pushspike")"
@@ -228,6 +242,13 @@ jobs:
                  HWARGS="--codec=avcodec,none --avcodec-hw=none"
           bash vlcplugin/spike/run-cases.sh
           grep -ihE "pushspike|library validation|code signature|not valid|dlopen|cannot load" res/macos/pp_m2.log | head -20 || true
+      - name: Real display (macosx vout in the runner's GUI session)
+        timeout-minutes: 8
+        run: |
+          d=~/Library/Application\ Support/pushspike
+          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos-display \
+                 VOUTS="macosx" HWARGS="--codec=avcodec,none --avcodec-hw=none" LABEL="macOS, VLC.app cask"
+          bash vlcplugin/spike/run-display.sh
       - name: Same plugin inside the bundle (plugins dir; CI only, breaks the bundle signature)
         run: |
           cp out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/plugins/ || true
