@@ -37,7 +37,7 @@ jobs:
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
-          sudo apt-get install -y --no-install-recommends cuda-nvcc-${CUDA_PKG_VERSION} cuda-cudart-dev-${CUDA_PKG_VERSION}
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-${CUDA_PKG_VERSION} cuda-cudart-dev-${CUDA_PKG_VERSION} cuda-cuobjdump-${CUDA_PKG_VERSION}
           ls /usr/local/ | grep cuda
           /usr/local/cuda-${CUDA_PKG_VERSION/-/.}/bin/nvcc --version
           echo "CUDA_PATH=/usr/local/cuda-${CUDA_PKG_VERSION/-/.}" >> "$GITHUB_ENV"
@@ -68,10 +68,11 @@ jobs:
           grep -E "PMVS_NVIDIA_LINUX:BOOL=ON" build/CMakeCache.txt
           cmake --build build --parallel
           ls -la vsplugin/bin build/nvl_kernels.fatbin
-          # the plugin exports only VapourSynth's entry point; CUDA / VFX are run-time loaded (no libcuda in NEEDED)
-          nm -D --defined-only vsplugin/bin/pushmpc_vs.so | grep -E ' T ' | tee exports.txt
-          [ "$(grep -c ' T ' exports.txt)" = 1 ] && grep -q VapourSynthPluginInit2 exports.txt
-          ! readelf -d vsplugin/bin/pushmpc_vs.so | grep -E 'NEEDED.*(cuda|VideoFX|NVCV)'
+          # the backend exports nothing (hidden); CUDA / VFX are run-time loaded (no libcuda in NEEDED)
+          nm -D --defined-only vsplugin/bin/pushmpc_vs.so | grep -E " T " | tee exports.txt
+          grep -q VapourSynthPluginInit2 exports.txt
+          if grep -q "pmvs3nvl" exports.txt; then echo "::error::backend symbols exported"; exit 1; fi
+          if readelf -d vsplugin/bin/pushmpc_vs.so | grep -E "NEEDED.*(cuda|VideoFX|NVCV)"; then echo "::error::CUDA / VFX linked at build time"; exit 1; fi
           readelf -d vsplugin/bin/pushmpc_vs.so | grep NEEDED
           # the embedded kernels: SASS for 75 / 86 / 89 / 120 and PTX
           "$CUDA_PATH/bin/cuobjdump" --list-elf --list-ptx build/nvl_kernels.fatbin
