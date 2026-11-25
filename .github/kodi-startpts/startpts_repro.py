@@ -180,9 +180,18 @@ write(m3u, f"#EXTM3U\n#KODIPROP:inputstream={ADDON}\n#EXTINF:-1,ffmpegdirect sta
 say("m3u:", open(m3u, encoding="utf-8").read())
 
 launch("start1", False, start1)
+import sqlite3
+adbs = glob.glob(os.path.join(ud, "Database", "Addons*.db"))
+if adbs:
+    # an add-on unpacked by hand is registered disabled; Addons.SetAddonEnabled above should have enabled it already
+    con = sqlite3.connect(max(adbs))
+    say("installed row", con.execute("SELECT addonID, enabled, disabledReason FROM installed WHERE addonID=?",
+                                     (ADDON,)).fetchall())
+    con.execute("UPDATE installed SET enabled=1, disabledReason=0 WHERE addonID=?", (ADDON,))
+    con.commit()
+    con.close()
 dbs = glob.glob(os.path.join(ud, "Database", "MyVideos*.db"))
 if dbs:
-    import sqlite3
     con = sqlite3.connect(max(dbs))
     say("files rows", con.execute("SELECT idFile, strFilename, playCount FROM files").fetchall())
     con.close()

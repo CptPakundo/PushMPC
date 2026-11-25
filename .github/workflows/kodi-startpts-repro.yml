@@ -39,9 +39,11 @@ jobs:
           7z x -y -o/c/kodi "$RUNNER_TEMP/kodi.exe" > /dev/null
           rm -rf '/c/kodi/$PLUGINSDIR' '/c/kodi/uninstall.exe'
           mkdir -p /c/kodi/portable_data
-          ls /c/kodi/addons | grep -E '^inputstream' || true
-          cat /c/kodi/addons/inputstream.ffmpegdirect/addon.xml | head -12
+          mkdir -p out
           grep -c 'videoscreen.extractcontentgeometry' /c/kodi/system/settings/settings.xml || true
+      - name: inputstream.ffmpegdirect from Kodi's official repository
+        shell: bash
+        run: python .github/kodi-startpts/fetch_addon.py C:/kodi C:/kodi/portable_data inputstream.ffmpegdirect
       - name: Test clip (ffmpeg testsrc)
         shell: bash
         run: |
@@ -57,7 +59,7 @@ jobs:
         run: |
           $geo = @()
           if ("${{ matrix.build }}" -eq "nightly") { $geo = @("--geometry") }
-          python kodiaddon/ci/startpts_repro.py --kodi C:\kodi\kodi.exe --home C:\kodi\portable_data `
+          python .github/kodi-startpts/startpts_repro.py --kodi C:\kodi\kodi.exe --home C:\kodi\portable_data `
             --clip C:/clips/testsrc.mkv --out out @geo
           Copy-Item kodi-url.txt, kodi-sha256.txt out/
       - name: Crash dump stack (cdb, no Kodi symbols)
@@ -76,6 +78,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force out | Out-Null
           Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error','Windows Error Reporting'} -MaxEvents 10 -ErrorAction SilentlyContinue |
             Where-Object { $_.Message -match 'kodi' } | Format-List TimeCreated, Message | Out-String -Width 300 | Tee-Object out/eventlog.txt
       - name: Summary
