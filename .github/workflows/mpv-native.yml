@@ -11,7 +11,7 @@ name: mpv-native
 
 on:
   push:
-    branches: ['track/mpv-native']
+    branches: ['track/mpv-native', 'track/mpv-native-*']
     paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', '.github/workflows/mpv-native.yml']
   workflow_dispatch:
     inputs:
