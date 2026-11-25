@@ -80,7 +80,6 @@ jobs:
           if ($LASTEXITCODE) { throw "build failed" }
           $exe = "build-probe\Release\vpl_ai_probe.exe"
           "probe sha256 $((Get-FileHash $exe).Hash)"
-          & dumpbin /dependents $exe 2>$null | Select-String '\.dll'
 
       - name: Run the probe (no Intel GPU expected)
         timeout-minutes: 15
