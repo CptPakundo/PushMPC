@@ -308,7 +308,7 @@ jobs:
         run: |
           set -u
           t=$(find bb -name pm_pc_zc_test.exe | head -1)
-          timeout 120 "$t" "$(cygpath -w out/pm_pushcore.dll)" "$(cygpath -w out/stub)"
+          timeout 120 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)"
       - uses: actions/upload-artifact@v4
         with: { name: bridge-win64, path: out, retention-days: 7 }
 
