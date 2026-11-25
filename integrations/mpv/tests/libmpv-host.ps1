@@ -51,5 +51,5 @@ while ((Get-Date) -lt $deadline) {
 }
 [LibMpvHost]::mpv_terminate_destroy($ctx)
 Write-Host "end of file: $reason"
-if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log | Select-String -Pattern 'pushmpc|d3d11vpp|vapoursynth|lua|Can.t load|script' | Select-Object -First 25 | ForEach-Object { "  $($_.Line)" } }
+if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log | Select-String -Pattern 'pushmpc|d3d11vpp|vapoursynth|Can.t load|error|fail|lavfi|\]\[e\]|\]\[f\]' | Select-Object -First 25 | ForEach-Object { "  $($_.Line)" } }
 exit $(if ($reason -eq 'eof') { 0 } else { 1 })

@@ -336,8 +336,15 @@ jobs:
           }
           foreach ($d in @("$env:ProgramFiles\Plex\Plex", "$env:ProgramFiles\Plex\Plex HTPC")) {
             if (-not (Test-Path "$d\libmpv-2.dll")) { continue }
+            # baseline: the same host without our script (does this libmpv play the generated source here at all?)
+            $b = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll "$d\libmpv-2.dll" -Options "msg-level=all=info" 2>&1 | Out-String
+            $brc = $LASTEXITCODE; Write-Host $b
             $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll "$d\libmpv-2.dll" -Options "scripts=$lua|script-opts=pushmpc-mode=vsr,pushmpc-scaling=nvidia" 2>&1 | Out-String
             $rc = $LASTEXITCODE; Write-Host $r
+            if ($brc -ne 0) {
+              Write-Host "::notice title=$(Split-Path $d -Leaf) libmpv baseline::the libmpv cannot play the generated source here either (baseline exit $brc): the vsr soft-failure check is not conclusive on this runner"
+              continue
+            }
             "$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr): host exit $rc (0 = played to the end: a failing d3d11vpp on WARP must not stop playback)" | Tee-Object -Append $out
             Write-Host "::notice title=$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr)::host exit $rc; $((($r -split "`n") -match 'd3d11vpp|super resolution|pushmpc') -join ' | ')"
             if ($rc -ne 0) { Write-Host "::error::playback in Plex's libmpv did not reach the end with pushmpc.lua in vsr mode"; exit 1 }
