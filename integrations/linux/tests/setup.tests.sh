@@ -22,7 +22,7 @@ check '1002:744c:AMD Radeon RX 7900 XTX' 'AMD Radeon RX 7900 XTX (RADV NAVI31)' 
 check '1002:73bf:AMD Radeon RX 6800 XT' '' 0 Linux 'family RX 6000' 'portable: the CPU engine'
 check '8086:56a0:Intel Arc A770' 'Intel(R) Arc(tm) A770 Graphics (DG2)' 0 Linux 'family Intel' 'portable: the GPU engine on Intel'
 check '106b:0:Apple M4' '' 0 Darwin 'family Apple' 'apple: VideoToolbox frame interpolation' 'Capture mode: not available on macOS'
-check '' '' 0 Linux 'family none' 'portable: the CPU engine' 'Capture mode: not available on Linux'
+check 'none' '' 0 Linux 'family none' 'portable: the CPU engine' 'Capture mode: not available on Linux'
 # the pmml runtime installed: ml before portable
 mkdir -p "$home/.local/share/pushmpc/pmml/graphs"; : > "$home/.local/share/pushmpc/pmml/graphs/synth-yuv.onnx"
 check '1002:744c:AMD Radeon RX 7900 XTX' 'AMD Radeon RX 7900 XTX (RADV NAVI31)' 0 Linux 'ml: PushFlow (RIFE) through pmml'

@@ -234,8 +234,9 @@ jobs:
           grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ux
-          mpv /tmp/clip.mp4 --length=3 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 >/dev/null 2>&1 || true
-          grep -h 'backend: ' /tmp/vslog-ux/*.log | head -2
+          mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv.txt 2>&1 || true
+          grep -iE "config file|vapoursynth|pushmpc|user filter|error" /tmp/mpv.txt | head -30
+          grep -h 'backend: ' /tmp/vslog-ux/*.log 2>/dev/null | head -2 || true
           grep -q 'portable: output YUV.*(x2)' /tmp/vslog-ux/*.log || { echo '::error::mpv did not run the plugin'; exit 1; }
           rm -r $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/setup.sh uninstall | tee /tmp/uninstall.txt

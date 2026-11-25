@@ -52,6 +52,7 @@ recorded() { [ -f "$sstate" ] && grep -q -F -x "$*" "$sstate"; }
 # gpu_vendor (hex, lower case), gpu_device, gpu_name; the one pushcore / the GPU engine would take: NVIDIA, AMD, Intel
 detect_gpu() {
     gpu_vendor=''; gpu_device=''; gpu_name=''; gpu_src=''
+    [ "${PUSHMPC_TEST_GPU:-}" = none ] && { gpu_src=PUSHMPC_TEST_GPU; return; }
     if [ -n "${PUSHMPC_TEST_GPU:-}" ]; then
         gpu_vendor=$(printf '%s' "$PUSHMPC_TEST_GPU" | cut -d: -f1 | tr 'A-F' 'a-f')
         gpu_device=$(printf '%s' "$PUSHMPC_TEST_GPU" | cut -d: -f2 | tr 'A-F' 'a-f')
@@ -66,7 +67,8 @@ detect_gpu() {
     for d in /sys/class/drm/card[0-9]*/device; do
         [ -r "$d/vendor" ] || continue
         v=$(sed 's/^0x//' "$d/vendor" | tr 'A-F' 'a-f'); dv=$(sed 's/^0x//' "$d/device" 2>/dev/null | tr 'A-F' 'a-f')
-        case $v in 10de) r=0 ;; 1002) r=1 ;; 8086) r=2 ;; *) r=8 ;; esac
+        # virtual display adapters (Hyper-V, QEMU, VMware, virtio, VirtualBox) are no GPU
+        case $v in 10de) r=0 ;; 1002) r=1 ;; 8086) r=2 ;; 1414|1234|15ad|1af4|80ee) continue ;; *) r=8 ;; esac
         [ "$r" -lt "$best" ] || continue
         best=$r; gpu_vendor=$v; gpu_device=$dv; gpu_src=sysfs
     done
