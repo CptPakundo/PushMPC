@@ -5,8 +5,10 @@
 // its CPU path. The network's final flows and blend mask are taken from the graph (the last two warps' flow inputs and
 // the sigmoid) and turned into PushFlow's grids, so the full-size rebuild and "flow once" are the same as with ONNX
 // Runtime. (PushFlow's own ONNX exports do not convert: pnnx refuses their batch-of-two warps.)
-// The network runs on the GPU; the colour conversion, the downscale and the full-size rebuild (synthCpu) run on the
-// CPU here, multithreaded. A Vulkan rebuild sharing ncnn's VkDevice is the next step.
+// On Vulkan the network and the full-size rebuild (pmml.Rebuild, ncnn_rebuild.cpp: PushFlowReconstruct as a second
+// net on the same VkDevice) run on the GPU: the flows and the mask stay in device memory between the two nets, the
+// full-size frames go up once per pair and only the finished picture comes back. The colour conversion and the
+// downscale run on the CPU. PMML_NCNN_CPU_REBUILD=1 (and the CPU path) rebuild with synthCpu instead.
 #include "internal.h"
 
 #if __has_include(<ncnn/net.h>)
@@ -16,7 +18,13 @@
 #include <gpu.h>
 #include <net.h>
 #endif
+#if __has_include(<ncnn/datareader.h>)
+#include <ncnn/datareader.h>
+#else
+#include <datareader.h>
+#endif
 
+#include "ncnn_rebuild.h"
 #include "ncnn_warp.h"
 
 #include <algorithm>
@@ -30,11 +38,28 @@ namespace pmml::detail {
 
 namespace {
 
+// weights of a net that has none (the rebuild net): ncnn still wants a model load to create the pipelines
+class EmptyReader : public ncnn::DataReader {
+public:
+    int scan(const char*, void*) const override { return 0; }
+    size_t read(void* buf, size_t size) const override { std::memset(buf, 0, size); return size; }
+};
+
 int threadsHint() { return int(std::max(1u, std::thread::hardware_concurrency())); }
 
 class NcnnInterpolator final : public Interpolator {
 public:
-    ~NcnnInterpolator() override { net_.clear(); }
+    ~NcnnInterpolator() override {
+#if NCNN_VULKAN
+        faVk_.release(); fbVk_.release(); vf0_.release(); vf1_.release(); vm_.release();
+        rebuild_.clear();
+#endif
+        net_.clear();
+#if NCNN_VULKAN
+        delete blobAlloc_;
+        delete stagingAlloc_;
+#endif
+    }
 
     bool init(const Options& o, std::string* err) {
         o_ = o;
@@ -58,12 +83,34 @@ public:
         }
         net_.register_custom_layer("rife.Warp", RifeWarpCreator);
         if (net_.load_param((stem + ".param").c_str()) != 0 || net_.load_model((stem + ".bin").c_str()) != 0) { if (err) *err = "ncnn cannot load " + stem; return false; }
+#if NCNN_VULKAN
+        const char* cpuRebuild = std::getenv("PMML_NCNN_CPU_REBUILD");
+        gpuRebuild_ = vulkan && !(cpuRebuild && std::string(cpuRebuild) == "1");
+        if (gpuRebuild_) {
+            const ncnn::VulkanDevice* vkdev = net_.vulkan_device();
+            blobAlloc_ = new ncnn::VkBlobAllocator(vkdev);
+            stagingAlloc_ = new ncnn::VkStagingAllocator(vkdev);
+            rebuild_.opt = net_.opt;
+            rebuild_.set_vulkan_device(o.backend.device);
+            rebuild_.register_custom_layer("pmml.Rebuild", PushFlowRebuildCreator);
+            EmptyReader empty;
+            if (rebuild_.load_param_mem(kPushFlowRebuildParam) != 0 || rebuild_.load_model(empty) != 0) { if (err) *err = "ncnn: the rebuild net did not load"; return false; }
+            for (ncnn::Layer* l : rebuild_.layers())
+                if (auto* r = dynamic_cast<PushFlowRebuild*>(l)) rebuildLayer_ = r;
+            if (!rebuildLayer_) { if (err) *err = "ncnn: no pmml.Rebuild layer"; return false; }
+            rebuildLayer_->nw = n_.w; rebuildLayer_->nh = n_.h;
+            vkOpt_ = net_.opt;
+            vkOpt_.blob_vkallocator = blobAlloc_;
+            vkOpt_.workspace_vkallocator = blobAlloc_;
+            vkOpt_.staging_vkallocator = stagingAlloc_;
+        }
+#endif
         rgbA_.resize(size_t(3) * o.width * o.height);
         rgbB_.resize(rgbA_.size());
         out_.resize(rgbA_.size());
         std::ostringstream d;
         d << "pmml " << kVersion << " ncnn " << (vulkan ? "Vulkan on " + device_ : std::string("CPU")) << "; PushFlow " << o.tier << " network " << n_.w << "x" << n_.h
-          << " (padded " << n_.padW << "x" << n_.padH << ") for " << o.width << "x" << o.height << ", rebuild on the CPU";
+          << " (padded " << n_.padW << "x" << n_.padH << ") for " << o.width << "x" << o.height << (gpuRebuild_ ? ", rebuild on the GPU" : ", rebuild on the CPU");
         describe_ = d.str();
         return true;
     }
@@ -84,6 +131,20 @@ public:
                     for (int x = 0; x < n_.padW; ++x)
                         small_[(size_t(f * 3 + c) * n_.padH + y) * n_.padW + x] = tmp[(size_t(c) * n_.h + std::min(y, n_.h - 1)) * n_.w + std::min(x, n_.w - 1)];
         }
+#if NCNN_VULKAN
+        if (gpuRebuild_) {   // the full-size frames go up once per pair
+            ncnn::Mat fa(o_.width, o_.height, 3), fb(o_.width, o_.height, 3);
+            const size_t plane = size_t(o_.width) * o_.height;
+            for (int c = 0; c < 3; ++c) {
+                std::memcpy(fa.channel(c), &rgbA_[size_t(c) * plane], plane * 4);
+                std::memcpy(fb.channel(c), &rgbB_[size_t(c) * plane], plane * 4);
+            }
+            ncnn::VkCompute cmd(net_.vulkan_device());
+            cmd.record_upload(fa, faVk_, vkOpt_);
+            cmd.record_upload(fb, fbVk_, vkOpt_);
+            if (cmd.submit_and_wait() != 0) { if (err) *err = "ncnn: frame upload failed"; return false; }
+        }
+#endif
         stats_.packMs = nowMs() - t0;
         return true;
     }
@@ -91,6 +152,37 @@ public:
     bool render(float t, const OutFrame& out, std::string* err) override {
         const bool once = phases_ > 1;
         const float tn = once ? o_.tRef : t;
+        if (netT_ != tn) {
+            const double t0 = nowMs();
+            const size_t cells = size_t(n_.padW) * n_.padH;
+            ncnn::Mat in0(n_.padW, n_.padH, 3), in1(n_.padW, n_.padH, 3), in2(n_.padW, n_.padH, 1);
+            for (int c = 0; c < 3; ++c) {
+                std::memcpy(in0.channel(c), &small_[size_t(c) * cells], cells * 4);
+                std::memcpy(in1.channel(c), &small_[size_t(c + 3) * cells], cells * 4);
+            }
+            in2.fill(tn);
+            ncnn::Extractor ex = net_.create_extractor();
+            ex.input("in0", in0);
+            ex.input("in1", in1);
+            ex.input("in2", in2);
+#if NCNN_VULKAN
+            if (gpuRebuild_) {   // the flows and the mask stay on the GPU for the rebuild net
+                ex.set_blob_vkallocator(blobAlloc_);
+                ex.set_workspace_vkallocator(blobAlloc_);
+                ex.set_staging_vkallocator(stagingAlloc_);
+                ncnn::VkCompute cmd(net_.vulkan_device());
+                if (ex.extract(flow0_.c_str(), vf0_, cmd) != 0 || ex.extract(flow1_.c_str(), vf1_, cmd) != 0 || ex.extract(mask_name_.c_str(), vm_, cmd) != 0 ||
+                    cmd.submit_and_wait() != 0) { if (err) *err = "ncnn extract (Vulkan) failed"; return false; }
+                if (vf0_.w != n_.padW || vf0_.h != n_.padH || vm_.w != n_.padW || vm_.h != n_.padH) {
+                    if (err) *err = "unexpected ncnn output shapes (" + std::to_string(vf0_.w) + "x" + std::to_string(vf0_.h) + ")";
+                    return false;
+                }
+                stats_.netMs = nowMs() - t0;
+                ++stats_.networkRuns;
+                netT_ = tn;
+            }
+#endif
+        }
         if (netT_ != tn) {
             const double t0 = nowMs();
             const size_t cells = size_t(n_.padW) * n_.padH;
@@ -130,6 +222,28 @@ public:
         }
         const double t0 = nowMs();
         const float s0 = once ? t / o_.tRef : 1.f, s1 = once ? (1.f - t) / (1.f - o_.tRef) : 1.f;
+#if NCNN_VULKAN
+        if (gpuRebuild_) {
+            rebuildLayer_->s0 = s0; rebuildLayer_->s1 = s1;
+            ncnn::Extractor ex = rebuild_.create_extractor();
+            ex.set_blob_vkallocator(blobAlloc_);
+            ex.set_workspace_vkallocator(blobAlloc_);
+            ex.set_staging_vkallocator(stagingAlloc_);
+            ex.input("fa", faVk_); ex.input("fb", fbVk_); ex.input("f0", vf0_); ex.input("f1", vf1_); ex.input("m", vm_);
+            ncnn::VkCompute cmd(net_.vulkan_device());
+            ncnn::VkMat vout;
+            ncnn::Mat picture;
+            if (ex.extract("out", vout, cmd) != 0) { if (err) *err = "ncnn rebuild failed"; return false; }
+            cmd.record_download(vout, picture, vkOpt_);
+            if (cmd.submit_and_wait() != 0 || picture.w != o_.width || picture.h != o_.height || picture.c != 3) { if (err) *err = "ncnn rebuild download failed"; return false; }
+            const size_t plane = size_t(o_.width) * o_.height;
+            for (int c = 0; c < 3; ++c) std::memcpy(&out_[size_t(c) * plane], picture.channel(c), plane * 4);
+            rgbToPlanes(out_.data(), o_.format, o_.colour, o_.width, o_.height, out);
+            stats_.synthMs = nowMs() - t0;
+            ++stats_.synthRuns;
+            return true;
+        }
+#endif
         synthCpu(rgbA_.data(), rgbB_.data(), o_.width, o_.height, g0_.data(), g1_.data(), mask_.data(), n_, affine_, s0, s1, out_.data(), threadsHint());
         rgbToPlanes(out_.data(), o_.format, o_.colour, o_.width, o_.height, out);
         stats_.synthMs = nowMs() - t0;
@@ -172,6 +286,15 @@ private:
     }
 
     std::string flow0_, flow1_, mask_name_;
+    bool gpuRebuild_ = false;
+#if NCNN_VULKAN
+    ncnn::Net rebuild_;
+    PushFlowRebuild* rebuildLayer_ = nullptr;
+    ncnn::VkBlobAllocator* blobAlloc_ = nullptr;
+    ncnn::VkStagingAllocator* stagingAlloc_ = nullptr;
+    ncnn::Option vkOpt_;
+    ncnn::VkMat faVk_, fbVk_, vf0_, vf1_, vm_;
+#endif
     Options o_;
     ModelFiles model_;
     NetworkSize n_;
