@@ -1,0 +1,25 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: PushFPS's duplicate test (portable/core Dedup.h, compareForDuplicate) on the quarter-size
+// luma (pyramid level 2): per 4x4 block the mean absolute difference; the largest block mean and the total go to the
+// stats buffer (atomics, fixed point: block mean x 1024, total as an integer sum).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, r8ui) uniform readonly uimage2D prevQ;
+layout(binding = 1, r8ui) uniform readonly uimage2D curQ;
+layout(binding = 2, std430) buffer Stats { uint maxBlock1024; uint total; uint pad0, pad1; } st;
+layout(push_constant) uniform PC { int w, h; } pc;
+void main()
+{
+    ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+    int bw = (pc.w + 3) / 4, bh = (pc.h + 3) / 4;
+    if (b.x >= bw || b.y >= bh) return;
+    uint sum = 0u, count = 0u;
+    for (int y = b.y * 4; y < min(b.y * 4 + 4, pc.h); ++y)
+        for (int x = b.x * 4; x < min(b.x * 4 + 4, pc.w); ++x) {
+            int d = int(imageLoad(prevQ, ivec2(x, y)).r) - int(imageLoad(curQ, ivec2(x, y)).r);
+            sum += uint(abs(d));
+            ++count;
+        }
+    atomicAdd(st.total, sum);
+    atomicMax(st.maxBlock1024, uint(float(sum) / float(count) * 1024.0 + 0.5));
+}

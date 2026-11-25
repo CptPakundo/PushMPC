@@ -88,9 +88,32 @@ inline std::string ReadSetting(const char* name)
 struct PortableSettings {
     bool enable = true;
     int smoother = 0;     // 0 Auto, 1 off, 2..8
-    int quality = 1;      // 0 fast, 1 balanced
+    int quality = -1;     // -1 Auto (CPU: balanced; GPU: high), 0 fast, 1 balanced, 2 high (8 px vectors at full size)
     int threads = 0;      // 0 = all hardware threads (at most 16)
+    std::string device;   // PortableDevice: "" / auto (the best Vulkan GPU), cpu (the CPU engine), a number or a part of a name
+    std::string upscaler = "auto";   // Upscaler: auto | nis | fsr | off (RTX means auto here)
+    std::string target = "screen";   // UpscaleTarget: screen | 1440p | 4k | 5k
+    int dedup = -1;       // Dedup: -1 Auto (on), 0 off, 1 on
+    int subtitleHold = -1;   // SubtitleHold: -1 Auto (on in the portable engine), 0 off, 1 on
+    std::string motion = "auto";     // PortableMotion: auto | blocks | nvof
 };
+inline int ParseQuality(const std::string& v, int def)
+{
+    const std::string q = LowerAscii(TrimAscii(v));
+    if (q == "fast" || q == "0") return 0;
+    if (q == "balanced" || q == "1") return 1;
+    if (q == "high" || q == "2") return 2;
+    if (q == "auto") return -1;
+    return def;
+}
+inline int ParseTri(const std::string& v, int def)
+{
+    const std::string s = LowerAscii(TrimAscii(v));
+    if (s == "auto") return -1;
+    if (s == "on" || s == "1" || s == "true" || s == "yes") return 1;
+    if (s == "off" || s == "0" || s == "false" || s == "no") return 0;
+    return def;
+}
 inline int ParseSmoother(const std::string& v, int def)
 {
     const std::string s = LowerAscii(TrimAscii(v));
@@ -114,8 +137,13 @@ template <class Get> PortableSettings LoadPortableSettings(Get&& get)
     PortableSettings s;
     s.enable = ParseBool(get("Enable"), true);
     s.smoother = ParseSmoother(get("Smoother"), 0);
-    const std::string q = LowerAscii(TrimAscii(get("PortableQuality")));
-    s.quality = q == "fast" || q == "0" ? 0 : 1;
+    s.quality = ParseQuality(get("PortableQuality"), -1);
+    s.device = TrimAscii(get("PortableDevice"));
+    if (const std::string u = LowerAscii(TrimAscii(get("Upscaler"))); !u.empty()) s.upscaler = u;
+    if (const std::string t = LowerAscii(TrimAscii(get("UpscaleTarget"))); !t.empty()) s.target = t;
+    s.dedup = ParseTri(get("Dedup"), -1);
+    s.subtitleHold = ParseTri(get("SubtitleHold"), -1);
+    if (const std::string m = LowerAscii(TrimAscii(get("PortableMotion"))); !m.empty()) s.motion = m;
     const int t = std::atoi(get("PortableThreads").c_str());
     s.threads = t > 0 && t <= 64 ? t : 0;
     return s;
