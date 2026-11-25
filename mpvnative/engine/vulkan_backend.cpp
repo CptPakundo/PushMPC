@@ -150,6 +150,7 @@ public:
         if (slot < 0) return PMENG_ERROR;
         pool->ticket = itk;
         m_last = itk;
+        if (m_hostSync && !m_eng.Wait(itk, err)) return PMENG_ERROR;   // diagnostics: PUSHMPC_VK_SYNC=1
 
         const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_prevSlot >= 0;
         if (!contiguous) ResetHistory();
@@ -225,6 +226,7 @@ public:
         if (!m_eng.Export(it.out, rec, sync, tk, err)) { m_eng.ReleaseOut(it.out); return PMENG_ERROR; }
         pool->ticket = tk;
         m_last = tk;
+        if (m_hostSync && !m_eng.Wait(tk, err)) return PMENG_ERROR;
         ++m_written;
         if (it.info.generated) ++m_generated;
         return PMENG_OK;
@@ -384,6 +386,7 @@ private:
         return true;
     }
 
+    bool m_hostSync = std::getenv("PUSHMPC_VK_SYNC") && std::getenv("PUSHMPC_VK_SYNC")[0] == '1';
     std::shared_ptr<Context> m_ctx;
     Engine m_eng;
     CutGuard m_guard;

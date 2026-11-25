@@ -47,7 +47,7 @@ if "$FF" -v info -y -i "$T/clip10.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$T/ff
     result ffmpeg-10bit-hdr-tags PASS; else tail -5 "$T/ff-10.log"; result ffmpeg-10bit-hdr-tags FAIL; fi
 
 # 3. engine missing -> pass-through (the video keeps playing)
-if PUSHMPC_ENGINE=/nonexistent "$FF" -v info -y -i "$T/clip.mkv" -vf "pushmpc=engine=/nonexistent/x" -c:v ffv1 "$T/ff-pass.mkv" > "$T/ff-pass.log" 2>&1 \
+if PUSHMPC_ENGINE=/nonexistent "$FF" -v info -y -i "$T/clip.mkv" -vf "pushmpc=engine=no-such-engine-module" -c:v ffv1 "$T/ff-pass.mkv" > "$T/ff-pass.log" 2>&1 \
    && [ "$(count "$T/ff-pass.mkv")" = "$N" ]; then result passthrough-without-engine PASS; else echo "pass-through: $(count "$T/ff-pass.mkv" 2>&1) frames of $N"; tail -8 "$T/ff-pass.log"; result passthrough-without-engine FAIL; fi
 grep -i "passes through" "$T/ff-pass.log" | head -2
 
@@ -63,6 +63,9 @@ if [ "$OS" = linux ]; then
         "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 24 \
             -vf "format=nv12,hwupload,pushmpc=smoother=1,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk1.mkv" > "$T/ff-vk1.log" 2>&1
         "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 vs source: /"
+        "$FF" -v info -i "$T/ff-vk1.mkv" -i "$T/clip.mkv" -lavfi "[0]trim=start_frame=1,setpts=PTS-STARTPTS,format=yuv420p[a];[1]setpts=PTS-STARTPTS,format=yuv420p[b];[a][b]psnr=shortest=1" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 frame n vs source n-1: /"
+        PUSHMPC_VK_SYNC=1 "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 24 -vf "format=nv12,hwupload,pushmpc=smoother=1,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk1s.mkv" > "$T/ff-vk1s.log" 2>&1
+        "$FF" -v info -i "$T/ff-vk1s.mkv" -i "$T/clip.mkv" -lavfi "[0]format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - 2>&1 | grep -o "PSNR y:.*" | tail -1 | sed "s/^/vulkan x1 with host waits vs source: /"
         for f in clip ff-vk1; do "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 100 + 300)) -N 16 | sed "s/^/$f Y row 100: /"; "$FF" -v error -i "$T/$f.mkv" -frames:v 1 -f rawvideo -pix_fmt nv12 - | od -An -tu1 -j $((640 * 360 + 640 * 50 + 300)) -N 16 | sed "s/^/$f UV row 50: /"; done
         "$FF" -v error -y -i "$T/ff-vk1.mkv" -frames:v 1 "$T/vk1-frame0.png"; "$FF" -v error -y -i "$T/clip.mkv" -frames:v 1 "$T/src-frame0.png"
         "$FF" -v error -y -i "$T/ff-vk.mkv" -vf "select='lt(n,4)'" -vsync 0 "$T/vk2-%d.png"
