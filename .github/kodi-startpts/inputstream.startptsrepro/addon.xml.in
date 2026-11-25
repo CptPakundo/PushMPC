@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon id="inputstream.startptsrepro" version="0.0.1" name="startpts repro" provider-name="repro">
+  <requires>@ADDON_DEPENDS@
+  </requires>
+  <extension point="kodi.inputstream" name="startptsrepro" extension="mkv" tags="false" listitemprops=""
+             library_@ADDON_PLATFORM@="@ADDON_LIBRARY@"/>
+  <extension point="xbmc.addon.metadata">
+    <platform>@ADDON_PLATFORM@</platform>
+    <summary lang="en_GB">Reproduces SeekTime(startpts == nullptr) reaching an inputstream add-on</summary>
+  </extension>
+</addon>

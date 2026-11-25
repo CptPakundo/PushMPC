@@ -1,0 +1,92 @@
+# Minimal reproduction for a Kodi bug report: Kodi's thumbnail extraction (CDVDFileInfo) calls
+# CDVDDemux::SeekTime(ms, true) with startpts == nullptr; CInputStreamAddon forwards it to an add-on without IPOSTIME,
+# and kodi-dev-kit's ADDON_DemuxSeekTime binds *startpts to the add-on's double& parameter.
+# The add-on (.github/kodi-startpts/inputstream.startptsrepro, ~70 lines) is built against Kodi 22.0 RC2's dev kit and
+# run in the official Windows builds (portable mode, WARP): 22.0 RC2 and the newest master nightly.
+name: kodi-startpts-addon-repro
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/kodi-startpts-repro']
+    paths: ['.github/workflows/kodi-startpts-addon-repro.yml', '.github/kodi-startpts/addon_repro.py',
+            '.github/kodi-startpts/inputstream.startptsrepro/**']
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [rc2, nightly]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Build inputstream.startptsrepro (Kodi 22.0 RC2 dev kit)
+        shell: bash
+        run: |
+          git clone -q --depth 1 --filter=blob:none --sparse --branch 22.0rc2-Piers https://github.com/xbmc/xbmc "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+          src=.github/kodi-startpts/inputstream.startptsrepro
+          cmake -S $src -B "$RUNNER_TEMP/b" -A x64 -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include"
+          cmake --build "$RUNNER_TEMP/b" --config Release
+          mkdir -p /c/kodi/portable_data/addons out
+          cp -r "$RUNNER_TEMP/b/addon/inputstream.startptsrepro" /c/kodi/portable_data/addons/
+          ls -l /c/kodi/portable_data/addons/inputstream.startptsrepro; cat /c/kodi/portable_data/addons/inputstream.startptsrepro/addon.xml
+      - name: Kodi (official build, unpacked; portable mode)
+        shell: bash
+        run: |
+          if [ "${{ matrix.build }}" = rc2 ]; then
+            url="https://mirrors.kodi.tv/releases/windows/win64/kodi-22.0-Piers_rc2-x64.exe"
+          else
+            exe=$(curl -fsSL --retry 3 "https://mirrors.kodi.tv/nightlies/windows/win64/master/" |
+                  grep -oE 'KodiSetup-[0-9]{8}-[0-9a-f]+-master-x64\.exe' | sort -u | sort -t- -k2,2 | tail -1)
+            url="https://mirrors.kodi.tv/nightlies/windows/win64/master/$exe"
+          fi
+          echo "$url" | tee out/kodi-url.txt
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.exe" "$url"
+          sha256sum "$RUNNER_TEMP/kodi.exe" | tee out/kodi-sha256.txt
+          7z x -y -o/c/kodi "$RUNNER_TEMP/kodi.exe" > /dev/null
+          rm -rf '/c/kodi/$PLUGINSDIR' '/c/kodi/uninstall.exe'
+      - name: Test clip (ffmpeg testsrc)
+        shell: bash
+        run: |
+          z="ffmpeg-n8.1-latest-win64-gpl-shared-8.1"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ff.zip" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$z.zip"
+          7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ff.zip" > /dev/null
+          mkdir -p /c/clips
+          "$RUNNER_TEMP/$z/bin/ffmpeg.exe" -hide_banner -loglevel error -f lavfi -i testsrc=size=640x360:rate=24 -t 10 \
+            -c:v libx264 -pix_fmt yuv420p C:/clips/testsrc.mkv
+      - name: Reproduce
+        shell: pwsh
+        run: python .github/kodi-startpts/addon_repro.py --kodi C:\kodi\kodi.exe --home C:\kodi\portable_data --clip C:/clips/testsrc.mkv --out out
+      - name: Crash dump stack (cdb, if the image has it)
+        if: always()
+        shell: pwsh
+        run: |
+          $cdb = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $dmps = Get-ChildItem out -Filter *.dmp -ErrorAction SilentlyContinue
+          if (-not $dmps) { "no dump"; exit 0 }
+          if (-not $cdb) { "no cdb on this image"; exit 0 }
+          foreach ($d in $dmps) {
+            & $cdb.FullName -z $d.FullName -y "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols" `
+              -c ".ecxr; r; kn 30; q" | Tee-Object "out/$($d.BaseName)-cdb.txt"
+          }
+      - name: Windows application event log
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'} -MaxEvents 5 -ErrorAction SilentlyContinue |
+            Format-List TimeCreated, Message | Out-String -Width 300 | Tee-Object out/eventlog.txt
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          { echo '```'; cat out/report.txt; grep -hE 'startptsrepro|DVDFileInfo|Thread .*(start|terminating)|exception|crash' out/start2-kodi.log | tail -30; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-startpts-addon-${{ matrix.build }}
+          path: out
