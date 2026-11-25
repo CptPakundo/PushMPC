@@ -798,8 +798,13 @@ private:
         const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
         // Kodi 22 takes P010 from add-ons: 10-bit pictures go out in the same layout as Kodi's own decoders give its
         // renderers (Kodi 21 only has planar formats); the engine works planar, so they are packed at the end
-        const p010 = PM_KODI22 && m_bits > 8;
-        picture.videoFormat = p010 ? VIDEOCODEC_FORMAT_P010 : m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
+#if PM_KODI22
+        const bool p010 = m_bits > 8;
+        picture.videoFormat = p010 ? VIDEOCODEC_FORMAT_P010 : VIDEOCODEC_FORMAT_I420;
+#else
+        const bool p010 = false;
+        picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
+#endif
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
         picture.planeOffsets[0] = 0;
