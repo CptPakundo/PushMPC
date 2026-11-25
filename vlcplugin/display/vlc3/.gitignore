@@ -1,0 +1,7 @@
+# VLC 3.0.24 sources: fetched by fetch-vlc-sources.sh, never kept here
+/COPYING.LIB
+/modules/**
+!/modules/
+!/modules/video_output/
+!/modules/video_output/win32/
+!/modules/video_output/win32/pm_nis_d3d11.*

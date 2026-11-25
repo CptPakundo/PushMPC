@@ -113,9 +113,10 @@ if(WIN32)
 endif()
 
 # ---- Windows: PushMPC's fork of VLC 3.0.24's Direct3D 11 output (display/vlc3, LGPL-2.1+) with NIS upscaling on any
-# GPU: libpushmpc_d3d11_plugin.dll (vout=pushmpc_d3d11). NIS 1.0.3 (MIT) from vsplugin/third_party/nis; its HLSL is
+# GPU: libpushmpc_d3d11_plugin.dll (vout=pushmpc_d3d11); the VLC sources come from fetch-vlc-sources.sh (tarball +
+# PushMPC patch). NIS 1.0.3 (MIT) from vsplugin/third_party/nis; its HLSL is
 # embedded at build time and compiled at run time with the system's d3dcompiler_47.dll.
-if(WIN32)
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/win32/direct3d11.c")   # display/vlc3/fetch-vlc-sources.sh first
   set(D3 "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules")
   set(NISDIR "${VS}/third_party/nis")
   file(READ "${NISDIR}/NIS_Scaler.h" _nis_src)

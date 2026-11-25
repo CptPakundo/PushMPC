@@ -1,0 +1,320 @@
+--- a/modules/video_output/win32/direct3d11.c
++++ b/modules/video_output/win32/direct3d11.c
+@@ -74,10 +74,13 @@
+ #define UPSCALE_MODE_TEXT N_("Video Upscaling Mode")
+ #define UPSCALE_MODE_LONGTEXT N_("Select the upscaling mode for video.")
+ 
++/* PushMPC: "auto" = the GPU's own Super Resolution (RTX / Intel VSR) where the driver has it, else NIS; "nis" = NVIDIA
++ * Image Scaling on any GPU (compute shaders) */
+ static const char *const ppsz_upscale_mode[] = {
+-    "linear", "point", "processor", "super" };
++    "linear", "point", "processor", "super", "nis", "auto" };
+ static const char *const ppsz_upscale_mode_text[] = {
+-    N_("Linear Sampler"), N_("Point Sampler"), N_("Video Processor"), N_("Super Resolution") };
++    N_("Linear Sampler"), N_("Point Sampler"), N_("Video Processor"), N_("Super Resolution"),
++    N_("NVIDIA Image Scaling (any GPU)"), N_("Auto (Super Resolution, else NIS)") };
+ 
+ #define HDR_MODE_TEXT N_("HDR Output Mode")
+ #define HDR_MODE_LONGTEXT N_("Use HDR output even if the source is SDR.")
+@@ -87,28 +90,28 @@
+ static const char *const ppsz_hdr_mode_text[] = {
+     N_("Auto"), N_("Never out HDR"), N_("Always output HDR"), N_("Generate HDR from SDR") };
+ 
++/* PushMPC: VLC 3.0.24's Direct3D 11 output with an upscaler for every GPU (NIS), as its own module "pushmpc_d3d11"
++ * (vout=pushmpc_d3d11); options renamed so they do not collide with VLC's own direct3d11 module, whose winrt-* values
++ * this module still reads */
+ vlc_module_begin ()
+-    set_shortname("Direct3D11")
+-    set_description(N_("Direct3D11 video output"))
++    set_shortname("PushMPC Direct3D11")
++    set_description(N_("PushMPC Direct3D11 video output (VLC's, with NIS upscaling on any GPU)"))
+     set_help(D3D11_HELP)
+     set_category(CAT_VIDEO)
+     set_subcategory(SUBCAT_VIDEO_VOUT)
+ 
+-    add_bool("direct3d11-hw-blending", true, HW_BLENDING_TEXT, HW_BLENDING_LONGTEXT, true)
++    add_bool("pushmpc-d3d11-hw-blending", true, HW_BLENDING_TEXT, HW_BLENDING_LONGTEXT, true)
+ 
+-    add_integer("winrt-d3dcontext",    0x0, NULL, NULL, true) /* ID3D11DeviceContext* */
+-        change_volatile()
+-    add_integer("winrt-swapchain",     0x0, NULL, NULL, true) /* IDXGISwapChain1*     */
+-        change_volatile()
+-
+-    add_string("d3d11-upscale-mode", "linear", UPSCALE_MODE_TEXT, UPSCALE_MODE_LONGTEXT, false)
++    add_string("pushmpc-d3d11-upscale", "auto", UPSCALE_MODE_TEXT, UPSCALE_MODE_LONGTEXT, false)
+         change_string_list(ppsz_upscale_mode, ppsz_upscale_mode_text)
++    add_float_with_range("pushmpc-d3d11-sharpness", 0.5, 0.0, 1.0, N_("NIS sharpness"),
++                         N_("0 = no sharpening, 0.5 = NIS's default, 1 = strongest"), false)
+ 
+-    add_string("d3d11-hdr-mode", "auto", HDR_MODE_TEXT, HDR_MODE_LONGTEXT, false)
++    add_string("pushmpc-d3d11-hdr", "auto", HDR_MODE_TEXT, HDR_MODE_LONGTEXT, false)
+         change_string_list(ppsz_hdr_mode, ppsz_hdr_mode_text)
+ 
+-    set_capability("vout display", 300)
+-    add_shortcut("direct3d11")
++    set_capability("vout display", 0)
++    add_shortcut("pushmpc_d3d11")
+     set_callbacks(Open, Close)
+ vlc_module_end ()
+ 
+@@ -118,6 +121,8 @@
+     upscale_PointSampler,
+     upscale_VideoProcessor,
+     upscale_SuperResolution,
++    upscale_Nis,       /* PushMPC */
++    upscale_Auto,      /* PushMPC: Super Resolution, else NIS */
+ };
+ 
+ enum d3d11_hdr
+@@ -352,7 +357,7 @@
+     vd->info.has_double_click     = true;
+     vd->info.has_pictures_invalid = vd->info.is_slow;
+ 
+-    if (var_InheritBool(vd, "direct3d11-hw-blending") &&
++    if (var_InheritBool(vd, "pushmpc-d3d11-hw-blending") &&
+         vd->sys->d3dregion_format != NULL)
+     {
+         vd->sys->pSubpictureChromas[0] = vd->sys->d3dregion_format->fourcc;
+@@ -637,7 +642,7 @@
+     ID3D11Texture2D* pDepthStencil;
+     ID3D11Texture2D* pBackBuffer;
+     UINT window_width, window_height;
+-    bool proc_upscale = sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution;
++    bool proc_upscale = sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution || sys->upscaleMode == upscale_Nis;
+     if ((sys->sys.pf_GetWindowSize != GetWinRTSize && !proc_upscale)
+     || !sys->sys.pf_GetWindowSize(&sys->sys, &window_width, &window_height))
+     {
+@@ -921,7 +926,7 @@
+     RECT before_dest_clipped = sys->sys.rect_dest_clipped;
+     RECT before_dest         = sys->sys.rect_dest;
+ 
+-    if (sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution)
++    if (sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution || sys->upscaleMode == upscale_Nis)
+         switch (query) {
+         case VOUT_DISPLAY_CHANGE_DISPLAY_FILLED:
+         case VOUT_DISPLAY_CHANGE_ZOOM:
+@@ -1669,12 +1674,35 @@
+ static void InitScaleProcessor(vout_display_t *vd)
+ {
+     vout_display_sys_t *sys = vd->sys;
+-    if (sys->upscaleMode != upscale_VideoProcessor && sys->upscaleMode != upscale_SuperResolution)
++    if (sys->upscaleMode != upscale_VideoProcessor && sys->upscaleMode != upscale_SuperResolution &&
++        sys->upscaleMode != upscale_Nis && sys->upscaleMode != upscale_Auto)
+         return;
+ 
+-    sys->scaleProc = D3D11_UpscalerCreate(VLC_OBJECT(vd), &sys->d3d_dev, sys->quad_fmt.i_chroma,
+-                                          sys->upscaleMode == upscale_SuperResolution,
+-                                          &sys->picQuad.formatInfo);
++    /* PushMPC: Auto tries the driver's Super Resolution first (RTX VSR, Intel VSR), then NIS */
++    if (sys->upscaleMode != upscale_Nis)
++    {
++        const d3d_format_t *keep = sys->picQuad.formatInfo;
++        sys->scaleProc = D3D11_UpscalerCreate(VLC_OBJECT(vd), &sys->d3d_dev, sys->quad_fmt.i_chroma,
++                                              sys->upscaleMode != upscale_VideoProcessor,
++                                              &sys->picQuad.formatInfo);
++        if (sys->scaleProc == NULL)
++            sys->picQuad.formatInfo = keep;
++        else if (sys->upscaleMode == upscale_Auto)
++            sys->upscaleMode = upscale_SuperResolution;
++    }
++    /* NIS reads the decoder's own textures: hardware-decoded (opaque) pictures only; CPU pictures keep VLC's quad */
++    if (sys->scaleProc == NULL && (sys->upscaleMode == upscale_Nis || sys->upscaleMode == upscale_Auto) &&
++        is_d3d11_opaque(sys->quad_fmt.i_chroma))
++    {
++        const d3d_format_t *keep = sys->picQuad.formatInfo;
++        sys->scaleProc = D3D11_UpscalerCreateNis(VLC_OBJECT(vd), &sys->d3d_dev,
++                                                 var_InheritFloat(vd, "pushmpc-d3d11-sharpness"),
++                                                 &sys->picQuad.formatInfo);
++        if (sys->scaleProc == NULL)
++            sys->picQuad.formatInfo = keep;
++        else
++            sys->upscaleMode = upscale_Nis;
++    }
+     if (sys->scaleProc == NULL)
+         sys->upscaleMode = upscale_LinearSampler;
+ 
+@@ -1687,7 +1715,7 @@
+     vout_display_sys_t *sys = vd->sys;
+     IDXGIFactory2 *dxgifactory;
+ 
+-    char *psz_hdr = var_InheritString(vd, "d3d11-hdr-mode");
++    char *psz_hdr = var_InheritString(vd, "pushmpc-d3d11-hdr");
+     sys->hdrMode = HdrModeFromString(VLC_OBJECT(vd), psz_hdr);
+     free(psz_hdr);
+ 
+@@ -1758,7 +1786,7 @@
+ 
+     D3D11SetColorSpace(vd);
+ 
+-    char *psz_upscale = var_InheritString(vd, "d3d11-upscale-mode");
++    char *psz_upscale = var_InheritString(vd, "pushmpc-d3d11-upscale");
+     if (strcmp("linear", psz_upscale) == 0)
+         sys->upscaleMode = upscale_LinearSampler;
+     else if (strcmp("point", psz_upscale) == 0)
+@@ -1767,6 +1795,10 @@
+         sys->upscaleMode = upscale_VideoProcessor;
+     else if (strcmp("super", psz_upscale) == 0)
+         sys->upscaleMode = upscale_SuperResolution;
++    else if (strcmp("nis", psz_upscale) == 0)
++        sys->upscaleMode = upscale_Nis;
++    else if (strcmp("auto", psz_upscale) == 0)
++        sys->upscaleMode = upscale_Auto;
+     else
+     {
+         msg_Warn(vd, "unknown upscale mode %s, using linear sampler", psz_upscale);
+@@ -1801,7 +1833,7 @@
+             return err;
+     }
+ 
+-    if (sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution)
++    if (sys->upscaleMode == upscale_VideoProcessor || sys->upscaleMode == upscale_SuperResolution || sys->upscaleMode == upscale_Nis)
+         sys->sys.src_fmt = &sys->quad_fmt;
+ 
+     if ( sys->picQuad.formatInfo->formatTexture != DXGI_FORMAT_R8G8B8A8_UNORM &&
+--- a/modules/video_output/win32/d3d11_scaler.cpp
++++ b/modules/video_output/win32/d3d11_scaler.cpp
+@@ -16,6 +16,7 @@
+ #include <assert.h>
+ 
+ #include "d3d11_scaler.h"
++#include "pm_nis_d3d11.h"   /* PushMPC: NIS for every GPU */
+ #ifdef HAVE_AMF_SCALER
+ #include "../../hw/amf/amf_helper.h"
+ #include <AMF/components/HQScaler.h>
+@@ -41,6 +42,11 @@
+     ComPtr<ID3D11VideoProcessorOutputView>  outputView;
+     ID3D11ShaderResourceView                *SRVs[D3D11_MAX_SHADER_VIEW] = {};
+     picture_sys_t                           picsys{};
++    /* PushMPC: the NIS path (no video processor needed) */
++    struct pm_nis                   *nis = nullptr;
++    float                           sharpness = 0.5f;
++    d3d11_device_t                  *nis_dev = nullptr;
++    video_format_t                  srcfmt{};
+ 
+ #ifdef HAVE_AMF_SCALER
+     vlc_amf_context                 amf = {};
+@@ -276,6 +282,42 @@
+ 
+     scaleProc->usable = false;
+ 
++    if (scaleProc->nis)
++    {
++        /* PushMPC: NIS into a window-size texture; the quad then draws it 1:1 */
++        ID3D11Texture2D *tex = nullptr;
++        ID3D11ShaderResourceView *srv = nullptr;
++        if (PM_NisResize(vd, scaleProc->nis, d3d_dev, out_width, out_height, &tex, &srv) != VLC_SUCCESS)
++            return VLC_EGENERIC;
++        ReleaseSRVs(scaleProc);
++        for (size_t i = 0; i < ARRAY_SIZE(scaleProc->SRVs); i++)
++        {
++            scaleProc->SRVs[i] = i == 0 ? srv : nullptr;
++            if (scaleProc->SRVs[i])
++                scaleProc->SRVs[i]->AddRef();
++        }
++        if (scaleProc->picsys.context)
++        {
++            scaleProc->picsys.context->Release();
++            scaleProc->picsys.context = nullptr;
++        }
++        scaleProc->picsys.texture[0] = tex;
++        for (size_t i = 0; i < ARRAY_SIZE(scaleProc->picsys.resourceView); i++)
++            scaleProc->picsys.resourceView[i] = scaleProc->SRVs[i];
++        scaleProc->picsys.formatTexture = DXGI_FORMAT_R8G8B8A8_UNORM;
++        scaleProc->picsys.context = d3d_dev->d3dcontext;
++        scaleProc->picsys.context->AddRef();
++        scaleProc->Width = out_width;
++        scaleProc->Height = out_height;
++        scaleProc->srcfmt = *fmt;
++        /* NIS only upscales; a window smaller than the video keeps VLC's own quad */
++        scaleProc->usable = place.width >= fmt->i_visible_width && place.height >= fmt->i_visible_height;
++        scaleProc->upscaling = scaleProc->usable;
++        msg_Dbg(vd, "PushMPC NIS: %ux%u -> %ux%u in a %ux%u output%s", fmt->i_visible_width, fmt->i_visible_height,
++                place.width, place.height, out_width, out_height, scaleProc->usable ? "" : " (not upscaling: VLC's quad)");
++        return VLC_SUCCESS;
++    }
++
+ #ifdef HAVE_AMF_SCALER
+     if (!scaleProc->amf_scaler)
+ #endif
+@@ -634,6 +676,11 @@
+ void D3D11_UpscalerDestroy(d3d11_scaler *scaleProc)
+ {
+     ReleaseSRVs(scaleProc);
++    if (scaleProc->nis)
++    {
++        PM_NisDestroy(scaleProc->nis);
++        scaleProc->nis = nullptr;
++    }
+ 
+     // D3D11_UpscalerUpdate() AddRefs the context stored in picsys.
+     // Release the final retained reference when destroying the scaler.
+@@ -689,10 +736,57 @@
+     return VLC_SUCCESS;
+ }
+ 
++/* PushMPC: the NIS scaler, for any GPU (the video processor's super resolution is NVIDIA / Intel / AMD only) */
++d3d11_scaler *D3D11_UpscalerCreateNis(vlc_object_t *vd, d3d11_device_t *d3d_dev, float sharpness, const d3d_format_t **out_fmt)
++{
++    const d3d_format_t *fmt = nullptr;   /* RGBA8: always shader-readable; no video processor support needed */
++    for (const d3d_format_t *f = GetRenderFormatList(); f->name != nullptr; ++f)
++        if (f->formatTexture == DXGI_FORMAT_R8G8B8A8_UNORM && f->fourcc == VLC_CODEC_RGBA) { fmt = f; break; }
++    if (fmt == nullptr)
++    {
++        msg_Warn(vd, "PushMPC NIS: no RGBA output format");
++        return nullptr;
++    }
++    d3d11_scaler *scaleProc = new (std::nothrow) d3d11_scaler;
++    if (unlikely(scaleProc == nullptr))
++        return nullptr;
++    scaleProc->nis = PM_NisCreate(vd, d3d_dev);
++    if (scaleProc->nis == nullptr)
++    {
++        delete scaleProc;
++        return nullptr;
++    }
++    scaleProc->sharpness = sharpness;
++    scaleProc->nis_dev = d3d_dev;
++    scaleProc->d3d_fmt = fmt;
++    *out_fmt = fmt;
++    return scaleProc;
++}
++
++bool D3D11_UpscalerIsNis(const d3d11_scaler *scaleProc)
++{
++    return scaleProc->nis != nullptr;
++}
++
+ int D3D11_UpscalerScale(vlc_object_t *vd, d3d11_scaler *scaleProc, picture_sys_t *p_sys)
+ {
+     HRESULT hr;
+ 
++    if (scaleProc->nis)
++    {
++        int count = 0;
++        if (p_sys->formatTexture == DXGI_FORMAT_NV12 || p_sys->formatTexture == DXGI_FORMAT_P010 ||
++            p_sys->formatTexture == DXGI_FORMAT_P016)
++            count = 2;
++        else
++            while (count < 3 && p_sys->resourceView[count]) count++;
++        if (p_sys->formatTexture != DXGI_FORMAT_NV12 && p_sys->formatTexture != DXGI_FORMAT_P010 &&
++            p_sys->formatTexture != DXGI_FORMAT_P016 && count != 3 && count != 1)
++            return VLC_EGENERIC;
++        return PM_NisProcess(vd, scaleProc->nis, scaleProc->nis_dev, p_sys->resourceView, count,
++                             &scaleProc->srcfmt, &scaleProc->place, scaleProc->sharpness);
++    }
++
+ #ifdef HAVE_AMF_SCALER
+     if (scaleProc->amf_scaler)
+     {
+--- a/modules/video_output/win32/d3d11_scaler.h
++++ b/modules/video_output/win32/d3d11_scaler.h
+@@ -27,6 +27,9 @@
+                          const vout_display_cfg_t *);
+ int D3D11_UpscalerScale(vlc_object_t *, struct d3d11_scaler *, picture_sys_t *);
+ bool D3D11_UpscalerUsed(const struct d3d11_scaler *);
++/* PushMPC: NIS (any GPU) */
++struct d3d11_scaler *D3D11_UpscalerCreateNis(vlc_object_t *, d3d11_device_t *, float sharpness, const d3d_format_t **);
++bool D3D11_UpscalerIsNis(const struct d3d11_scaler *);
+ struct picture_sys_t *D3D11_UpscalerGetOutput(struct d3d11_scaler *);
+ void D3D11_UpscalerGetSRV(const struct d3d11_scaler *, ID3D11ShaderResourceView *SRV[D3D11_MAX_SHADER_VIEW]);
+ void D3D11_UpscalerGetSize(const struct d3d11_scaler *, unsigned *i_width, unsigned *i_height);

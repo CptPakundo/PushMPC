@@ -99,6 +99,10 @@ jobs:
           curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
           echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
           7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk" >/dev/null
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-src, key: vlc-src-3.0.24 }
+      - name: VLC 3.0.24 sources for the Direct3D 11 output fork (release tarball, SHA-256 checked, PushMPC patch applied)
+        run: sh vlcplugin/display/vlc3/fetch-vlc-sources.sh ~/vlc-src
       - name: Cross build (plugin, engine test, CSV test display)
         run: |
           set -eux
