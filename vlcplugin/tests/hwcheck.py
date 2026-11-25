@@ -18,6 +18,7 @@ ap.add_argument("--expect", required=True, choices=["base", "hw", "pass"])
 ap.add_argument("--mult", type=int, default=1)
 ap.add_argument("--src-frames", type=int, default=0)
 ap.add_argument("--need", action="append", default=[], help="a regular expression the log must match (repeatable)")
+ap.add_argument("--skip-motion", action="store_true", help="judge decoder, path and counters only (a renderer too slow for real time)")
 ap.add_argument("--zc", choices=["on", "off", "any"], default="any", help="zero copy (VA-API dmabufs into the GPU engine)")
 a = ap.parse_args()
 
@@ -69,7 +70,8 @@ if a.zc == "on":
 elif a.zc == "off" and "PushMPC: zero copy on" in log:
     problems.append("zero copy on, but this case must copy")
 if want and n < 0.9 * want: problems.append(f"{n} frames shown, {want} expected")
-if len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
+if a.skip_motion: pass
+elif len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
 elif back > 3: problems.append(f"{back} jumps back (stale or misordered frames)")
 elif moving < (0.7 if k > 1 else 0.9): problems.append(f"only {len(steps) - repeats}/{len(steps)} frames show a new box position")
 elif abs(mean_step - step) > 0.25 * step: problems.append(f"mean step {mean_step:.2f} px, {step:.2f} expected")

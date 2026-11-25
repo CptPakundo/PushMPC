@@ -287,7 +287,10 @@ uninstall_one() {
 if [ "$TARGET" = auto ]; then TARGETS="$(detect_targets)"; else TARGETS="$TARGET"; fi
 case "$ACTION" in
   install)   [ -n "$TARGETS" ] || { echo "no supported VLC found (distro VLC, Flathub org.videolan.VLC, VLC.app)" >&2; exit 1; }
-             for t in $TARGETS; do install_one "$t"; [ "$HWTEST" = 1 ] && [ "$OS" != Darwin ] && selftest_hw "$t"; done ;;
+             for t in $TARGETS; do
+               install_one "$t"
+               if [ "$HWTEST" = 1 ] && [ "$OS" != Darwin ]; then selftest_hw "$t"; fi
+             done ;;
   selftest-hw) for t in $TARGETS; do selftest_hw "$t"; done ;;
   uninstall) for t in ${TARGETS:-native flatpak macos}; do uninstall_one "$t"; done ;;
   status)    for t in $TARGETS; do paths_for "$t"; say "$t: plugin $(ls "$DIR"/libpushmpc_plugin.* 2>/dev/null || echo missing); video-filter=$(vlcrc_get "$RC" core video-filter)"; done ;;

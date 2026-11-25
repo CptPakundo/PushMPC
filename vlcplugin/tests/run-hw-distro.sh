@@ -28,14 +28,25 @@ cases='va_base va_x4 va_x8_noout va_noderive_x4 va_broken_x4'
 envx=""
 case "$mode" in
   full) cases='' ;;                                   # every VA-API case, the HEVC Main 10 clip too
-  desktop) cases='va_base va_x4 va_zc_x2 va_zc_x2_sync va10_zc_x2 va_zc_noexport_x2 va_zc_novk_x2 vagl_base vagl_x2 vagl_broken_x2 vagl_zc_x2'
+  desktop) cases='va_base va_x4 va_zc_x2 va_zc_x2_sync va10_zc_x2_sync va_zc_noexport_x2 va_zc_novk_x2 vagl_base vagl_x2 vagl_broken_x2 vagl_zc_x2'
            envx='ZC=1 GL=1' ;;
 esac
 run_as() { su tester -c "$1"; }
 wrap=""
 [ "$mode" = desktop ] && wrap="xvfb-run -a -s '-screen 0 1280x720x24'"
+interop=0
 if [ "$mode" = desktop ]; then
-  run_as "xvfb-run -a sh -c 'eglinfo -B 2>/dev/null | head -20; eglinfo 2>/dev/null | grep -o EGL_EXT_image_dma_buf_import | head -1'" || true
+  # VLC's GL interop needs EGL_EXT_image_dma_buf_import on the X11 platform (egl_x11), not just on another platform
+  if run_as "xvfb-run -a sh -c 'eglinfo 2>/dev/null'" > /tmp/eglinfo.txt 2>&1; then :; fi
+  awk '/^X11 platform/ {p = 1; next} /^[A-Za-z].* platform/ {p = 0} p' /tmp/eglinfo.txt > /tmp/egl-x11.txt
+  cp /tmp/eglinfo.txt res/eglinfo-$label.txt
+  grep -E "EGL driver name|EGL client APIs|OpenGL core profile renderer" /tmp/egl-x11.txt | head -4
+  if grep -q EGL_EXT_image_dma_buf_import /tmp/egl-x11.txt; then interop=1; echo "EGL on X11 (Xvfb) imports dmabufs: the GL interop cases run"
+  else
+    echo "::warning::EGL on X11 (Xvfb) does not advertise EGL_EXT_image_dma_buf_import here: no VA-API GL interop in CI; the interop cases are skipped and the installer's fallback tier is tested instead"
+    cases="${cases//vagl_base/}"; cases="${cases//vagl_x2/}"; cases="${cases//vagl_broken_x2/}"; cases="${cases//vagl_zc_x2/}"
+    envx='ZC=1'
+  fi
 fi
 rc=0
 run_as "set -e; d=\$HOME/.local/share/pushmpc/vlc; mkdir -p \$d; cp art/plugin-linux/*.so \$d/; \
@@ -64,8 +75,13 @@ if [ "$mode" = full ]; then
   echo "--- a driver that loses uploads -> software decoding"
   selftest '^failed' none 'PMNULL_BROKEN=1' '' || rc=1
 else
-  echo "--- self-test with a display: VLC's OpenGL interop passes -> the user's own avcodec-hw (VLC's default)"
-  selftest '^ok interop vaapi' default '' 'xvfb-run -a' || rc=1
+  if [ $interop = 1 ]; then
+    echo "--- self-test with a display: VLC's OpenGL interop passes -> the user's own avcodec-hw (VLC's default)"
+    selftest '^ok interop vaapi' default '' 'xvfb-run -a' || rc=1
+  else
+    echo "--- self-test with a display but no GL interop here: the interop tier fails cleanly, the DRM decoder tier passes"
+    selftest '^ok direct vaapi_drm' vaapi_drm '' 'xvfb-run -a' || rc=1
+  fi
   echo "--- no surface export (no GL interop) -> the DRM decoder tier: avcodec-hw=vaapi_drm"
   selftest '^ok direct vaapi_drm' vaapi_drm 'PMNULL_EXPORT=0' 'xvfb-run -a' || rc=1
   echo "--- a driver that loses uploads -> software decoding"

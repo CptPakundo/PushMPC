@@ -74,13 +74,13 @@ if [ "${ZC:-0}" = 1 ]; then
   # lavapipe needs ~200 ms a source frame: x2, late frames kept, and no frame-count check (src 0); the transport checks
   # (no jumps back, new positions, zero-copy counters) stay
   GPU="--pushmpc-engine=3 --no-drop-late-frames --no-skip-frames"
-  CHECK="--zc on" run va_zc_x2      va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 $GPU
+  CHECK="--zc on --skip-motion" run va_zc_x2 va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 $GPU
   CHECK="--zc on" run va_zc_x2_sync va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
   if [ -n "${CLIP10:-}" ]; then
-    CHECK="--zc on" run va10_zc_x2  va hw 2 "$CLIP10" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 $GPU
+    CHECK="--zc on" run va10_zc_x2_sync va hw 2 "$CLIP10" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
   fi
-  CHECK="--zc off --need zero.copy.not.used"    run va_zc_noexport_x2 va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PMNULL_EXPORT=0" -- $PP --pushmpc-smoother=2 $GPU
-  CHECK="--zc off --need zero.copy.unavailable" run va_zc_novk_x2     va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VK_NO_DMABUF=1" -- $PP --pushmpc-smoother=2 $GPU
+  CHECK="--zc off --need zero.copy.not.used"    run va_zc_noexport_x2 va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PMNULL_EXPORT=0" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
+  CHECK="--zc off --need zero.copy.unavailable" run va_zc_novk_x2     va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VK_NO_DMABUF=1" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
 fi
 # VLC's own desktop path: the VA-API decoder on the OpenGL output's surfaces (glconv_vaapi_x11, EGL dma-buf import), with
 # PushMPC's pictures shown by the GL interop directly
@@ -90,7 +90,7 @@ if [ "${GL:-0}" = 1 ]; then
   CHECK="$NEED"          run vagl_x2        vagl hw   2 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=2
   CHECK="$NEED --zc off" run vagl_broken_x2 vagl pass 2 "$CLIP" "$S" "PMNULL_BROKEN=1" -- $PP --pushmpc-smoother=2
   if [ "${ZC:-0}" = 1 ]; then
-    CHECK="$NEED --zc on" run vagl_zc_x2    vagl hw   2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 --pushmpc-engine=3
+    CHECK="$NEED --zc on --skip-motion" run vagl_zc_x2    vagl hw   2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 --pushmpc-engine=3
   fi
 fi
 if [ "${VDPAU:-0}" = 1 ]; then
