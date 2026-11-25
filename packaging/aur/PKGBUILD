@@ -33,8 +33,9 @@ package() {
   install -dm755 "$pkgdir/usr/lib/vapoursynth"
   ln -s ../pushmpc/pushmpc_vs.so "$pkgdir/usr/lib/vapoursynth/pushmpc_vs.so"
   install -Dm755 "PushMPC-$pkgver/integrations/mpv/mpv-integration.sh" "$pkgdir/usr/share/pushmpc/mpv-integration.sh"
+  install -Dm755 "PushMPC-$pkgver/integrations/linux/vs-python-link.sh" "$pkgdir/usr/share/pushmpc/vs-python-link.sh"
   install -dm755 "$pkgdir/usr/bin"
-  printf '#!/bin/sh\n# PushMPC: puts the PushMPC block into your mpv.conf (install), takes it out again (uninstall), shows it (status)\nexec sh /usr/share/pushmpc/mpv-integration.sh "${1:-install}" --script /usr/lib/pushmpc/pushmpc.vpy\n' > "$pkgdir/usr/bin/pushmpc-setup"
+  printf '#!/bin/sh\n# PushMPC: puts the PushMPC block into your mpv.conf (install), takes it out again (uninstall), shows it (status)\n[ "${1:-install}" = install ] && sh /usr/share/pushmpc/vs-python-link.sh\nexec sh /usr/share/pushmpc/mpv-integration.sh "${1:-install}" --script /usr/lib/pushmpc/pushmpc.vpy\n' > "$pkgdir/usr/bin/pushmpc-setup"
   chmod 755 "$pkgdir/usr/bin/pushmpc-setup"
   install -Dm644 "PushMPC-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

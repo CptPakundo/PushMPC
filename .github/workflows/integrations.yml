@@ -415,7 +415,8 @@ jobs:
         run: |
           set -eu
           export HOME=/tmp/home-arch; mkdir -p $HOME/.config/mpv; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
-          snap() { (cd $HOME && find . -type f | LC_ALL=C sort | xargs -r sha256sum); }
+          # dconf's cache (written when gsettings runs without a session bus) is not a setting: left out
+          snap() { (cd $HOME && find . -type f ! -path './.cache/dconf/*' | LC_ALL=C sort | xargs -r sha256sum); }
           snap > /tmp/before.txt
           tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
@@ -626,6 +627,7 @@ jobs:
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           PUSHMPC_VS_LOG_DIR=/tmp/vslog-aur mpv /tmp/clip.mp4 --length=2 --no-audio --o=/tmp/aur.mkv --of=matroska --ovc=ffv1 2>&1 | tail -5
           grep -h 'portable: output' /tmp/vslog-aur/*.log | tee -a /tmp/aur.txt
+          grep -q 'portable: output' /tmp/vslog-aur/*.log
           pushmpc-setup uninstall; test ! -e $HOME/.config/mpv/mpv.conf
           { echo '## aur'; echo; echo '```'; cat /tmp/aur.txt; pacman -Qi pushmpc | head -12; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
