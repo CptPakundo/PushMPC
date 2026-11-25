@@ -1,0 +1,265 @@
+# VLC 3.0.x feasibility spike: can a third-party video filter module in the vout's STATIC chain
+# (shortcut "postproc") output more frames than it receives, change the output size, and receive D3D11 textures?
+# Builds vlcplugin/spike/pushspike.c (a frame multiplier + a CSV "pushdump" vout display) against:
+#   - Linux: Ubuntu 24.04's libvlccore-dev (VLC 3.0.20), tested with the distro VLC and, optionally, the Flathub VLC;
+#   - Windows: the official VLC 3.0.x win64 7z (its sdk/ folder), cross-compiled with mingw-w64, tested with that VLC;
+#   - macOS (dispatch input, 10x minutes while private): the VLC.app cask, headers from the same SDK.
+# Runs headless (dummy interface, pushdump vout) and summarises frame counts and timestamps per case.
+name: vlc-spike
+
+on:
+  # push on the track branch only (a dispatch needs the file on main first); "[macos]" in the commit message adds macOS
+  push:
+    branches: ['track/vlc']
+    paths: ['vlcplugin/spike/run-*.sh', '.github/workflows/vlc-spike.yml']
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'Also run the macOS job (costs 10x minutes while the repo is private)'
+        type: boolean
+        default: false
+      flatpak:
+        description: 'Also test the Flathub VLC (org.videolan.VLC) on Linux'
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VLC_WIN_VERSION: '3.0.24'
+
+jobs:
+  clip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Test clip (synthetic, public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps)
+        run: |
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg >/dev/null
+          ffmpeg -hide_banner -loglevel error -filter_complex \
+            "testsrc2=s=320x180:r=24:d=4[a];smptebars=s=320x180:r=24:d=2[b];[a][b]concat=n=2:v=1[v]" \
+            -map '[v]' -c:v libx264 -pix_fmt yuv420p -g 48 -bf 2 clip.mkv
+          ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,width,height,r_frame_rate -of default=nw=1 clip.mkv | tee clip.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: clip, path: 'clip.*', retention-days: 5 }
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache VLC win64 7z (SDK headers + import library)
+        uses: actions/cache@v4
+        with:
+          path: ~/vlc-dl
+          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
+      - name: Fetch VLC win64 ${{ env.VLC_WIN_VERSION }} (official mirror, SHA-256 from videolan.org)
+        run: |
+          set -eu
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
+          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
+          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
+      - name: Toolchains (libvlccore-dev, mingw-w64)
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y libvlccore-dev gcc-mingw-w64-x86-64 p7zip-full >/dev/null
+          pkg-config --modversion vlc-plugin; pkg-config --cflags --libs vlc-plugin
+      - name: Build Linux plugin (VLC 3.0.x, libvlccore-dev)
+        run: |
+          set -eux
+          mkdir -p out/linux
+          # export both plug-in entry names (Debian/Ubuntu t64 builds: __3_0_0ft64; upstream/Flatpak: __3_0_0f)
+          if grep -q '3_0_0ft64' /usr/include/vlc/plugins/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
+          gcc -std=gnu11 -O2 -Wall -fPIC -shared -DMODULE_STRING='"pushspike"' -DPM_ALT_ENTRY=$alt $(pkg-config --cflags vlc-plugin) \
+            vlcplugin/spike/pushspike.c -o out/linux/libpushspike_plugin.so $(pkg-config --libs vlc-plugin)
+          nm -D out/linux/libpushspike_plugin.so | grep vlc_entry
+          objdump -T out/linux/libpushspike_plugin.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Build Windows plugin (mingw-w64 against the official SDK)
+        run: |
+          set -eux
+          7z x -y -o"$RUNNER_TEMP/vlcwin" ~/vlc-dl/vlc-${VLC_WIN_VERSION}-win64.7z "vlc-${VLC_WIN_VERSION}/sdk" >/dev/null
+          sdk="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk"
+          ls "$sdk" "$sdk/lib" "$sdk/include/vlc" | head -40
+          mkdir -p out/win64
+          x86_64-w64-mingw32-gcc -std=gnu11 -O2 -Wall -shared -D__PLUGIN__ -DMODULE_STRING='"pushspike"' \
+            -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushspike_plugin.dll \
+            -L"$sdk/lib" -lvlccore -static-libgcc
+          x86_64-w64-mingw32-objdump -p out/win64/libpushspike_plugin.dll | grep -E "DLL Name|vlc_entry" | head
+      - uses: actions/upload-artifact@v4
+        with: { name: plugins, path: out, retention-days: 5 }
+
+  linux:
+    needs: [clip, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: VLC (Ubuntu 24.04 packages)
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base >/dev/null
+          cvlc --version 2>/dev/null | head -1
+      - name: Spike cases (distro VLC, VLC_PLUGIN_PATH, no root, no cache-gen)
+        run: |
+          mkdir -p ~/.local/share/pushspike && cp art/plugins/linux/libpushspike_plugin.so ~/.local/share/pushspike/
+          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
+          bash vlcplugin/spike/run-cases.sh
+      - name: Real displays under Xvfb (gl on llvmpipe, xcb_x11)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get -qq install -y --no-install-recommends xvfb vlc-plugin-video-output libgl1-mesa-dri >/dev/null
+          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux-display \
+                 VOUTS="gl xcb_x11" HWARGS="--avcodec-hw=none" LABEL="Linux, Ubuntu VLC"
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/spike/run-display.sh
+      - name: Flathub VLC (org.videolan.VLC) with the same plugin through VLC_PLUGIN_PATH
+        if: ${{ github.event_name == 'push' || inputs.flatpak }}
+        timeout-minutes: 20
+        run: |
+          set -u
+          sudo apt-get -qq install -y flatpak >/dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.videolan.VLC >/dev/null 2>&1 || { echo "::warning::flatpak install failed"; exit 0; }
+          flatpak info --user org.videolan.VLC | head -12
+          d=~/.var/app/org.videolan.VLC/pushspike; mkdir -p "$d" && cp art/plugins/linux/libpushspike_plugin.so "$d/"
+          cp art/clip/clip.mkv ~/.var/app/org.videolan.VLC/clip.mkv
+          echo "--- does the sandboxed VLC see the plugin? (VLC_PLUGIN_PATH=$d)"
+          flatpak run --user --env=VLC_PLUGIN_PATH="$d" --command=sh org.videolan.VLC -c \
+            'echo "env: $VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; ldd "$VLC_PLUGIN_PATH"/libpushspike_plugin.so; ls /app/lib/vlc/plugins | head; ldd --version | head -1' || true
+          flatpak run --user --env=VLC_PLUGIN_PATH="$d" org.videolan.VLC -I dummy -vv --list 2>&1 | grep -iE "pushspike|pushdump|browsing|cannot load|plugins.dat|error" | head -20 || true
+          echo "--- extension point: the same plugin through /app/lib/vlc/plugins/extra (org.videolan.VLC.Plugin)"
+          flatpak run --user --command=sh org.videolan.VLC -c 'ls -la /app/lib/vlc/plugins/extra /app/share/vlc/extra 2>&1 | head' || true
+          # the app's command is vlc, so VLC stays empty and the wrapper is the whole command
+          export VLC="" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv OUT=res/flatpak \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Flathub VLC" \
+                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 scale2 vlcrc_m4" \
+                 VLC_WRAP="flatpak run --user --env=VLC_PLUGIN_PATH=$d org.videolan.VLC"
+          bash vlcplugin/spike/run-cases.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-linux, path: res, retention-days: 7 }
+
+  windows:
+    needs: [clip, build]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults: { run: { shell: bash } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: Cache VLC win64 7z
+        uses: actions/cache@v4
+        with:
+          path: ~/vlc-dl
+          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
+      - name: VLC ${{ env.VLC_WIN_VERSION }} (portable 7z, official, SHA-256 checked)
+        run: |
+          set -eu
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
+          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
+          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" >/dev/null
+          ls "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}" | head
+      - name: Spike cases (official VLC, per-user plugin dir via VLC_PLUGIN_PATH, no admin, no cache-gen)
+        run: |
+          d="$LOCALAPPDATA/pushspike"; mkdir -p "$d" && cp art/plugins/win64/libpushspike_plugin.dll "$d/"
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clip/clip.mkv \
+                 OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt | tr -d '\r') PY=python \
+                 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64" D3D11=1
+          bash vlcplugin/spike/run-cases.sh
+          grep -hE "D3D11 opaque picture|d3d11va|D3D11VA" res/windows/d3d11_m4.log | head -12 || true
+      - name: Real displays (direct3d11 and direct3d9 on WARP, glwin32)
+        timeout-minutes: 10
+        run: |
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$LOCALAPPDATA/pushspike")" \
+                 CLIP=art/clip/clip.mkv OUT=res/windows-display VOUTS="direct3d11 direct3d9 glwin32" HWARGS="--avcodec-hw=none" \
+                 RCARGS="--rc-quiet" LABEL="Windows, VLC ${VLC_WIN_VERSION}"
+          bash vlcplugin/spike/run-display.sh
+      - name: direct3d11 display (real vout on the runner's WARP adapter) with d3d11va and the static filter
+        run: |
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" VLC_PLUGIN_PATH="$(cygpath -w "$LOCALAPPDATA/pushspike")"
+          mkdir -p res
+          timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --file-logging --logfile=res/direct3d11.log --log-verbose=2 \
+            --vout=direct3d11 --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=4 art/clip/clip.mkv || true
+          grep -iE "pushspike|d3d11va|direct3d11|as static|Using D3D11|adapter|late|lost" res/direct3d11.log | head -40 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-windows, path: res, retention-days: 7 }
+
+  macos:
+    if: ${{ inputs.macos || contains(github.event.head_commit.message, '[macos]') }}
+    needs: [clip, build]
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: brew-vlc-cask-v1
+      - name: Cache VLC win64 7z (headers)
+        uses: actions/cache@v4
+        with:
+          path: ~/vlc-dl
+          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
+      - name: VLC.app (Homebrew cask) and SDK headers
+        run: |
+          set -eu
+          brew install --cask vlc >/dev/null
+          /Applications/VLC.app/Contents/MacOS/VLC --version 2>/dev/null | head -1 || true
+          codesign -dv --entitlements - /Applications/VLC.app 2>&1 | grep -iE "flags|runtime|library|TeamIdentifier|disable" || true
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64/$f"
+          brew install p7zip >/dev/null 2>&1 || true
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk/include" >/dev/null
+      - name: Build macOS plugin (Apple clang, symbols resolved from VLC's libvlccore at load)
+        run: |
+          set -eux
+          mkdir -p out/mac
+          clang -std=gnu11 -O2 -Wall -dynamiclib -undefined dynamic_lookup -arch arm64 -D__PLUGIN__ -DMODULE_STRING='"pushspike"' \
+            -I"$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c \
+            -o out/mac/libpushspike_plugin.dylib
+          codesign -s - -f out/mac/libpushspike_plugin.dylib
+          file out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/VLC
+      - name: Spike cases (VLC_PLUGIN_PATH, ad-hoc signed plugin outside the bundle)
+        run: |
+          d=~/Library/Application\ Support/pushspike; mkdir -p "$d" && cp out/mac/libpushspike_plugin.dylib "$d/"
+          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, VLC.app cask" \
+                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 named_m2 scale2 vlcrc_m4" \
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
+          bash vlcplugin/spike/run-cases.sh
+          grep -ihE "pushspike|library validation|code signature|not valid|dlopen|cannot load" res/macos/pp_m2.log | head -20 || true
+      - name: Real display (macosx vout in the runner's GUI session)
+        timeout-minutes: 8
+        run: |
+          d=~/Library/Application\ Support/pushspike
+          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos-display \
+                 VOUTS="macosx" HWARGS="--codec=avcodec,none --avcodec-hw=none" LABEL="macOS, VLC.app cask"
+          bash vlcplugin/spike/run-display.sh
+      - name: Same plugin inside the bundle (plugins dir; CI only, breaks the bundle signature)
+        run: |
+          cp out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/plugins/ || true
+          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR=/nonexistent CLIP=art/clip/clip.mkv OUT=res/macos-bundle \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, plugin inside VLC.app" CASES="pp_m2" \
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
+          bash vlcplugin/spike/run-cases.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-macos, path: res, retention-days: 7 }
