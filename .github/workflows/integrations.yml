@@ -27,7 +27,7 @@ on:
         description: 'run id of a release.yml dry run (artifact pushmpc-release); empty = the newest one that still has it'
         default: ''
   push:
-    branches: ['track/integrations', 'track/integrations-2']
+    branches: ['track/integrations', 'track/integrations-2', 'track/integrations-3']
     paths:
       - 'integrations/**'
       - 'packaging/**'
