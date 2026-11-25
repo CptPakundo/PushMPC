@@ -3,9 +3,11 @@
 #
 # Backends (pushmpc.SelectBackend picks one; user_data backend=... or the Backend setting overrides Auto):
 #   nvidia    pushcore: RTX Video Super Resolution, NVIDIA frame generation, the scene-cut guard (Windows, RTX).
+#   apple     Apple's VideoToolbox ML frame interpolation (+ super resolution up to 1080p sources) on Apple silicon,
+#             macOS 26+ (frame-rate conversion on 15.4+); user_data apple_sr=off|2|4, apple_fi=lowlatency|frc.
 #   rife      vs-rife-ncnn-vulkan (core.rife), when you have it installed (any Vulkan GPU). Never downloaded by PushMPC.
 #   portable  PushFPS's motion-compensated frame generation on the CPU (any GPU, Windows, Linux, macOS).
-# Auto: nvidia on an RTX GPU with pushcore, else rife when installed, else portable.
+# Auto: nvidia on an RTX GPU with pushcore, else apple when the Mac offers it, else rife when installed, else portable.
 #
 # user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments, e.g.
 #   smoother=4,sharper=2,chroma=420        backend=portable,portable_threads=8        backend=rife,rife_model=46

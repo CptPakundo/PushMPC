@@ -1,0 +1,20 @@
+{
+  "name": "PushMPC",
+  "identifier": "com.pushmpc.iina",
+  "version": "0.6.0",
+  "description": "Sharper upscaling (FSR 1, RAVU-Lite, FSRCNNX shaders picked for your Mac's chip) and judder-free smooth motion (display-resample) for IINA. Frame generation itself needs the PushMPC filter in mpv.",
+  "author": {
+    "name": "PushMPC",
+    "url": "https://github.com/CptPakundo/PushMPC"
+  },
+  "entry": "main.js",
+  "preferencesPage": "preferences.html",
+  "preferenceDefaults": {
+    "quality": "auto",
+    "content": "live",
+    "motion": true,
+    "tscale": "oversample"
+  },
+  "permissions": ["show-osd", "file-system"],
+  "allowedDomains": []
+}

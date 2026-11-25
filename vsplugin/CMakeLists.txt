@@ -4,12 +4,14 @@
 #                  synthetic frames (no VapourSynth, no GPU);
 #   sched_test     Windows: scheduling, rates, reuse, bandwidth, Auto glue;
 #   core_test      Windows: the D3D11 host and the pipeline against the stub on WARP.
-# Backends: nvidia (pushcore, Windows only) and portable (PushFPS's portable core, third_party/pushfps-portable, GPL-3)
+# Backends: nvidia (pushcore, Windows only), apple (VideoToolbox, macOS; engines/apple) and portable (PushFPS's portable core, third_party/pushfps-portable, GPL-3)
 # are compiled in; rife is a script preset in pushmpc.vpy. The plugin needs VapourSynth's SDK headers (VapourSynth4.h,
 # VSHelper4.h, LGPL) in third_party/vapoursynth; without them only the stub and the tests are built.
 # The same tree builds with MSVC on Windows, gcc / clang on Linux and clang on macOS:
 #   cmake -S vsplugin -B vsplugin/build -DCMAKE_BUILD_TYPE=Release && cmake --build vsplugin/build && ctest --test-dir vsplugin/build
 cmake_minimum_required(VERSION 3.21)
+# macOS: 13.3 for std::format's floating point (to_chars), like Homebrew's vapoursynth; ignored elsewhere
+set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "minimum macOS")
 project(PushMpcVsPlugin CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -50,6 +52,25 @@ set_target_properties(portable_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE
 target_link_libraries(portable_test PRIVATE pmvs_portable)
 add_test(NAME portable_test COMMAND portable_test)
 
+# the VideoToolbox backend (engines/apple): its Apple-free parts are tested on every OS; the engine itself is
+# Objective-C++ and macOS only (PUSHMPC_APPLE, on by default there)
+add_executable(apple_test tests/apple_test.cpp)
+set_target_properties(apple_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(apple_test PRIVATE engines/apple src)
+add_test(NAME apple_test COMMAND apple_test)
+option(PUSHMPC_APPLE "VideoToolbox backend (macOS only)" ${APPLE})
+if(APPLE AND PUSHMPC_APPLE)
+  enable_language(OBJCXX)
+  add_library(pmvs_apple STATIC engines/apple/apple_engine.mm)
+  target_include_directories(pmvs_apple PUBLIC engines/apple)
+  target_compile_options(pmvs_apple PRIVATE -fobjc-arc)
+  target_link_libraries(pmvs_apple PUBLIC "-framework Foundation" "-framework CoreFoundation" "-framework CoreVideo" "-framework CoreMedia" "-framework VideoToolbox")
+  # the engine on this Mac: probe report, then synthetic clips through every chain it offers (CI: macos-15, macos-26)
+  add_executable(apple_vt_test tests/apple_vt_test.cpp)
+  set_target_properties(apple_vt_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  target_link_libraries(apple_vt_test PRIVATE pmvs_apple)
+endif()
+
 if(WIN32)
   # the stub pushcore.dll (same exports as the real one; CPU blend, runs on WARP)
   add_library(pushcore_stub SHARED stub/pushcore_stub.cpp)
@@ -77,11 +98,18 @@ if(EXISTS "${VAPOURSYNTH_SDK}/VapourSynth4.h")
   if(WIN32)
     list(APPEND PMVS_SOURCES src/corehost.cpp)
   endif()
+  if(APPLE AND PUSHMPC_APPLE)
+    list(APPEND PMVS_SOURCES src/apple_vs.cpp)
+  endif()
   add_library(pushmpc_vs SHARED ${PMVS_SOURCES})
   set_target_properties(pushmpc_vs PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${PMVS_BIN}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PMVS_BIN}"
                                               LIBRARY_OUTPUT_DIRECTORY "${PMVS_BIN}" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${PMVS_BIN}")
   target_include_directories(pushmpc_vs PRIVATE src "${VAPOURSYNTH_SDK}" "${PUSHMPC_CORE_INCLUDE}")
   target_link_libraries(pushmpc_vs PRIVATE pmvs_portable)
+  if(APPLE AND PUSHMPC_APPLE)
+    target_link_libraries(pushmpc_vs PRIVATE pmvs_apple)
+    target_compile_definitions(pushmpc_vs PRIVATE PUSHMPC_APPLE=1)
+  endif()
   if(WIN32)
     target_include_directories(pushmpc_vs PRIVATE "${PUSHMPC_FILTER_SRC}")
     target_link_libraries(pushmpc_vs PRIVATE d3d11 dxgi d3dcompiler user32 advapi32 shell32 ole32)

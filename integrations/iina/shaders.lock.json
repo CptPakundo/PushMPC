@@ -1,0 +1,56 @@
+{
+  "note": "GLSL user shaders the PushMPC IINA plugin bundles. IINA renders through OpenGL 4.1 (no compute shaders), so only fragment / textureGather shaders are listed; build.py refuses any file with //!COMPUTE. Each file is fetched from an immutable URL (a commit, a gist revision or a release asset) and checked against its git blob SHA-1 (gitBlobSha1, what GitHub's API reports for the file) or SHA-256. Licences: FSR (MIT, AMD FidelityFX port), RAVU (LGPL-3.0), FSRCNNX (GPL-3.0); all compatible with PushMPC's GPL-3.0. The licence text stays in each file's header and is listed in SHADER-LICENSES.txt inside the package.",
+  "shaders": [
+    {
+      "name": "FSR.glsl",
+      "what": "AMD FidelityFX Super Resolution 1.0.2 (EASU upscale + RCAS sharpen), mpv port by agyild",
+      "licence": "MIT",
+      "source": "https://gist.github.com/agyild/82219c545228d70c5604f865ce0b0ce5",
+      "url": "https://gist.githubusercontent.com/agyild/82219c545228d70c5604f865ce0b0ce5/raw/f1794d720013ccd9c5c86a0f20fddd71e0375f94/FSR.glsl",
+      "gitBlobSha1": "f1794d720013ccd9c5c86a0f20fddd71e0375f94",
+      "size": 16217
+    },
+    {
+      "name": "ravu-lite-ar-r3.hook",
+      "what": "RAVU-Lite anti-ringing, radius 3 (textureGather variant), by bjin",
+      "licence": "LGPL-3.0",
+      "source": "https://github.com/bjin/mpv-prescalers",
+      "url": "https://raw.githubusercontent.com/bjin/mpv-prescalers/b3f0a59d68f33b7162051ea5970a5169558f0ea2/gather/ravu-lite-ar-r3.hook",
+      "gitBlobSha1": "eaad3ccf55759dd80a523984112499117040b80f",
+      "size": 127727
+    },
+    {
+      "name": "ravu-lite-ar-r4.hook",
+      "what": "RAVU-Lite anti-ringing, radius 4 (textureGather variant), by bjin",
+      "licence": "LGPL-3.0",
+      "source": "https://github.com/bjin/mpv-prescalers",
+      "url": "https://raw.githubusercontent.com/bjin/mpv-prescalers/b3f0a59d68f33b7162051ea5970a5169558f0ea2/gather/ravu-lite-ar-r4.hook",
+      "gitBlobSha1": "fc5280e62993df85a3f154899a2ec89508265f88",
+      "size": 242021
+    },
+    {
+      "name": "FSRCNNX_x2_8-0-4-1.glsl",
+      "what": "FSRCNNX x2, 8 filters (fast CNN luma upscaler), by igv",
+      "licence": "GPL-3.0",
+      "source": "https://github.com/igv/FSRCNN-TensorFlow",
+      "url": "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/FSRCNNX_x2_8-0-4-1.glsl",
+      "sha256": "TODO-FIRST-RUN",
+      "size": 71296
+    },
+    {
+      "name": "FSRCNNX_x2_16-0-4-1.glsl",
+      "what": "FSRCNNX x2, 16 filters (higher quality CNN luma upscaler), by igv",
+      "licence": "GPL-3.0",
+      "source": "https://github.com/igv/FSRCNN-TensorFlow",
+      "url": "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/FSRCNNX_x2_16-0-4-1.glsl",
+      "sha256": "TODO-FIRST-RUN",
+      "size": 246868
+    }
+  ],
+  "presets": {
+    "light":    { "live": ["FSR.glsl"],                 "anime": ["FSR.glsl"],             "what": "FSR 1 (EASU + RCAS): cheapest, base M1 / M2" },
+    "balanced": { "live": ["ravu-lite-ar-r3.hook"],     "anime": ["ravu-lite-ar-r3.hook"], "what": "RAVU-Lite r3: base M3 and newer" },
+    "high":     { "live": ["FSRCNNX_x2_8-0-4-1.glsl"],  "anime": ["ravu-lite-ar-r4.hook"], "what": "FSRCNNX 8 (live action) / RAVU-Lite r4 (anime): Pro chips" },
+    "ultra":    { "live": ["FSRCNNX_x2_16-0-4-1.glsl"], "anime": ["ravu-lite-ar-r4.hook"], "what": "FSRCNNX 16 (live action) / RAVU-Lite r4 (anime): Max / Ultra chips, M4 Pro and newer Pro chips" }
+  }
+}

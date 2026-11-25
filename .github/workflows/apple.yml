@@ -1,0 +1,276 @@
+# The Apple side of PushMPC on hosted runners (manual runs only: macOS minutes cost 10x while the repo is private).
+#   iina      (ubuntu)   the IINA plugin: Info.json and preference checks, the pinned shaders fetched and hash-checked,
+#                        linted for IINA's OpenGL 4.1 (no compute passes), JavaScript checked with node, packed as
+#                        .iinaplgz (artifact).
+#   vt        (macos-15 with Xcode 26.3, macos-26)
+#                        the VapourSynth plugin with the VideoToolbox backend: unit tests, the VideoToolbox probe and
+#                        the engine on synthetic clips (apple_vt_test), then pushmpc_vs.dylib built with the pinned
+#                        VapourSynth wheel's headers and run through vspipe with backend=apple: frame count, rate,
+#                        size, frame kinds, and which backend really ran (apple when this runner's VM offers the ML
+#                        effects, else the portable fallback, which must still give the right output).
+#   homebrew  (macos-15) the formula (packaging/homebrew/pushmpc.rb) from a local tap with the checkout's tarball:
+#                        brew install --build-from-source, brew test, then Homebrew's mpv in encode mode through the
+#                        installed filter on a short public clip (frame count x2), and pushmpc-setup's exact undo.
+name: apple
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'jobs to run: all | iina | vt | homebrew | vt,homebrew ...'
+        required: false
+        default: 'all'
+
+concurrency:
+  group: apple-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iina:
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'iina')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/iina-shaders
+          key: iina-shaders-${{ hashFiles('integrations/iina/shaders.lock.json') }}
+      - name: Validate the plugin folder
+        run: python3 integrations/iina/build.py validate
+      - name: Fetch, verify, lint the shaders and pack the plugin
+        timeout-minutes: 5
+        run: python3 integrations/iina/build.py build --cache "$RUNNER_TEMP/iina-shaders" --out "$RUNNER_TEMP/iina" --allow-unpinned
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iina-plugin
+          path: ${{ runner.temp }}/iina/*.iinaplgz
+
+  vt:
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'vt')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            xcode: /Applications/Xcode_26.3.app/Contents/Developer   # the macOS 26 SDK (low-latency effects) on a macOS 15 VM
+          - os: macos-26
+            xcode: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PUSHMPC_VS_LOG_DIR: ${{ runner.temp }}/vslogs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Machine, toolchain and GPU
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          [ -n "${{ matrix.xcode }}" ] && [ -d "${{ matrix.xcode }}" ] && echo "DEVELOPER_DIR=${{ matrix.xcode }}" >> "$GITHUB_ENV" && export DEVELOPER_DIR="${{ matrix.xcode }}"
+          sw_vers; uname -m; sysctl -n machdep.cpu.brand_string hw.model
+          xcodebuild -version; echo "SDK $(xcrun --sdk macosx --show-sdk-version) at $(xcrun --sdk macosx --show-sdk-path)"
+          ls -d /Applications/Xcode*.app | tr '\n' ' '; echo
+          system_profiler SPDisplaysDataType | sed -n 1,20p || true
+
+      - name: Build (VideoToolbox engine, unit tests)
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON
+          cmake --build build --target apple_test portable_test apple_vt_test --parallel
+
+      - name: Unit tests
+        timeout-minutes: 5
+        run: ctest --test-dir build -R "apple_test|portable_test" --output-on-failure
+
+      - name: VideoToolbox probe and engine on synthetic clips
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build/apple_vt_test | tee "$RUNNER_TEMP/apple_vt_test.txt"
+          r=$(grep -o 'APPLE_VT_RESULT=[a-z]*' "$RUNNER_TEMP/apple_vt_test.txt" | cut -d= -f2)
+          echo "APPLE_VT=$r" >> "$GITHUB_ENV"
+          echo "::notice title=VideoToolbox on ${{ matrix.os }}::$(grep '^apple probe' "$RUNNER_TEMP/apple_vt_test.txt" | head -1 | cut -c1-900)"
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Pinned VapourSynth wheel, then pushmpc_vs.dylib with the apple backend
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['macos']['url'])")
+          sha=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['macos']['sha256'])")
+          whl="$RUNNER_TEMP/$(basename "$url")"
+          curl -fsSL --retry 3 --max-time 120 -o "$whl" "$url"
+          got=$(python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest().upper())" "$whl")
+          [ "$got" = "$(echo "$sha" | tr a-f A-F)" ] || { echo "::error::SHA-256 mismatch for $url: $got"; exit 1; }
+          python -m pip install --no-deps "$whl"
+          pkg=$(python -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON
+          cmake --build build --target pushmpc_vs --parallel
+          otool -L vsplugin/bin/pushmpc_vs.dylib
+          nm -gU vsplugin/bin/pushmpc_vs.dylib | grep -i VapourSynthPluginInit2
+          vsp=$(command -v vspipe || true); [ -n "$vsp" ] || vsp="$pkg/vspipe"
+          echo "PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.dylib" >> "$GITHUB_ENV"; echo "VSPIPE=$vsp" >> "$GITHUB_ENV"
+
+      - name: pushmpc.Enhance(backend=apple) through VapourSynth
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PUSHMPC_VS_LOG_DIR"
+          cat > "$RUNNER_TEMP/check.py" <<'PY'
+          import os, glob, runpy, vapoursynth as vs
+          k = int(os.environ["PUSHMPC_TEST_K"]); sr = os.environ.get("PUSHMPC_TEST_SR", "off")
+          runpy.run_path("vsplugin/tests/ci/apple_clip.vpy")
+          clip = vs.get_output(0)
+          clip = clip.clip if hasattr(clip, "clip") else clip
+          print("frames", clip.num_frames, "fps", clip.fps, "size", clip.width, "x", clip.height, clip.format.name)
+          assert clip.num_frames == 48 * k, clip.num_frames
+          assert clip.fps.numerator * 1001 == 24000 * k * clip.fps.denominator, clip.fps
+          kinds = {}
+          for i in range(clip.num_frames):
+              f = clip.get_frame(i)
+              assert "_DurationNum" in f.props, (i, dict(f.props))
+              kinds[f.props.get("PushMPCFrameKind", -1)] = kinds.get(f.props.get("PushMPCFrameKind", -1), 0) + 1
+          print("frame kinds (0 real, 1 generated, 2 repeated):", kinds)
+          log = "".join(open(p).read() for p in sorted(glob.glob(os.path.join(os.environ["PUSHMPC_VS_LOG_DIR"], "*.log"))))
+          ran = "apple" if "apple: output YUV" in log else ("portable" if "portable: output YUV" in log else "none")
+          print("backend that ran:", ran)
+          with open(os.environ["GITHUB_ENV"], "a") as e: e.write(f"RAN_{k}_{os.environ.get('PUSHMPC_TEST_BITS','8')}_{sr}={ran}\n")
+          if ran == "apple":
+              want_w = 1280 * (int(sr) if sr in ("2", "4") else 1)
+              if sr in ("2", "4") and clip.width == 1280: print("super resolution was not offered: source size kept")
+              else: assert clip.width == want_w, (clip.width, want_w)
+              assert kinds.get(1, 0) > 0, "no generated frames"
+          if os.environ.get("APPLE_VT") == "ok":
+              assert ran == "apple", "VideoToolbox works on this runner (apple_vt_test) but the plugin did not use it"
+          PY
+          for cfg in "2 8 off" "4 8 off" "2 10 off" "2 8 2"; do
+            set -- $cfg
+            rm -f "$PUSHMPC_VS_LOG_DIR"/*.log
+            echo "=== k=$1 bits=$2 sr=$3"
+            PUSHMPC_TEST_K=$1 PUSHMPC_TEST_BITS=$2 PUSHMPC_TEST_SR=$3 python "$RUNNER_TEMP/check.py"
+            grep -h -E "backend|apple|portable:" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-400 | head -20
+          done
+          echo "=== vspipe --info (Auto backend)"
+          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" --info vsplugin/tests/ci/apple_clip.vpy
+          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" vsplugin/tests/ci/apple_clip.vpy -- > /dev/null
+          echo "::notice title=apple backend on ${{ matrix.os }}::apple_vt_test=$APPLE_VT; k2/8-bit ran ${RAN_2_8_off:-?}; k4 ${RAN_4_8_off:-?}; 10-bit ${RAN_2_10_off:-?}; sr2 ${RAN_2_8_2:-?}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apple-vt-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/apple_vt_test.txt
+            ${{ runner.temp }}/vslogs
+            vsplugin/bin/pushmpc_vs.dylib
+
+  homebrew:
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'homebrew')
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ANALYTICS: '1'
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+      # a public 10 s 720p H.264 clip (Big Buck Bunny, CC BY 3.0, Blender Foundation)
+      CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
+      CLIP_SHA256: TODO-FIRST-RUN
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew/downloads
+            ${{ runner.temp }}/clip
+          key: brew-mpv-${{ runner.os }}-v1
+
+      - name: Homebrew mpv (bottles) and its VapourSynth
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew --version
+          brew install mpv
+          brew deps mpv | grep -x vapoursynth
+          brew info --json=v2 vapoursynth | python3 -c "import json,sys; f=json.load(sys.stdin)['formulae'][0]; print('vapoursynth', f['versions']['stable'], 'deps', f['dependencies'])"
+          mpv --version | head -2
+          mpv --vf=help | grep -i vapoursynth
+          "$(brew --prefix vapoursynth)/bin/vspipe" --version
+
+      - name: The formula from a local tap, built from the checkout's tarball
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/pushmpc-ci.tar.gz"
+          git archive --format=tar.gz --prefix=PushMPC-ci/ HEAD > "$tgz"
+          sha=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
+          brew tap-new --no-git pushmpc/local
+          tap=$(brew --repository pushmpc/local)
+          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" <<'PY'
+          import re, sys
+          tgz, sha, out = sys.argv[1:4]
+          f = open("packaging/homebrew/pushmpc.rb").read()
+          f = re.sub(r'^  url ".*"$', f'  url "file://{tgz}"\n  version "0.6.0-ci"', f, count=1, flags=re.M)
+          f = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', f, count=1, flags=re.M)
+          open(out, "w").write(f)
+          PY
+          grep -n -E '^  (url|version|sha256) ' "$tap/Formula/pushmpc.rb"
+          brew install --build-from-source --verbose pushmpc/local/pushmpc
+          brew test --verbose pushmpc/local/pushmpc
+          brew audit --formula pushmpc/local/pushmpc || echo "::warning::brew audit reported issues (see log)"
+          brew list --verbose pushmpc/local/pushmpc
+
+      - name: VapourSynth autoloads the plugin; the apple backend through Homebrew's vspipe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/brewlogs"; mkdir -p "$PUSHMPC_VS_LOG_DIR"
+          vspipe="$(brew --prefix vapoursynth)/bin/vspipe"
+          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$vspipe" --info vsplugin/tests/ci/apple_clip.vpy
+          grep -h -E "backend|apple" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-400 | head
+
+      - name: Homebrew mpv in encode mode through pushmpc-setup's mpv.conf (public clip)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clip"; clip="$RUNNER_TEMP/clip/bbb.mp4"
+          [ -f "$clip" ] || curl -fsSL --retry 3 --max-time 120 -o "$clip" "$CLIP_URL"
+          got=$(shasum -a 256 "$clip" | cut -d' ' -f1 | tr a-f A-F)
+          case "$CLIP_SHA256" in TODO*) echo "::warning::test clip not pinned yet: sha256 $got ($(wc -c < "$clip") bytes)";;
+            *) [ "$got" = "$CLIP_SHA256" ] || { echo "::error::clip SHA-256 $got != $CLIP_SHA256"; exit 1; };; esac
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
+          pushmpc-setup install
+          cat "$HOME/.config/mpv/mpv.conf"
+          src=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,r_frame_rate,width,height -of csv=p=0 "$clip")
+          echo "source: $src"
+          mpv "$clip" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --msg-level=all=info,vapoursynth=v 2>&1 | tail -25
+          out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
+          echo "output: $out"
+          srcn=$(echo "$src" | awk -F, '{print $NF}'); outn=$(echo "$out" | awk -F, '{print $NF}')
+          log=$(cat "$HOME/Library/Logs/PushMPC/"*.log 2>/dev/null || true)
+          echo "$log" | grep -E "backend|apple|portable:" | cut -c1-400 | head -20
+          [ "$outn" -ge $((2 * srcn - 4)) ] && [ "$outn" -le $((2 * srcn + 2)) ] || { echo "::error::mpv output has $outn frames for $srcn source frames (want about x2)"; exit 1; }
+          echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
+          pushmpc-setup uninstall
+          [ ! -e "$HOME/.config/mpv/mpv.conf" ] || { echo "::error::mpv.conf left behind"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homebrew-logs
+          path: |
+            ${{ runner.temp }}/brewlogs
+            ${{ runner.temp }}/home/Library/Logs/PushMPC

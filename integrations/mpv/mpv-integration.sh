@@ -22,7 +22,8 @@
 #              key names to verify on a real install).
 #   Haruna     has no documented switch for ~/.config/mpv/mpv.conf; to verify on a real install (its own settings are
 #              ~/.config/haruna/haruna.conf).
-#   IINA       reads the folder above only with Settings > Advanced > "Use config directory" on (~/.config/mpv).
+#   IINA       reads the folder above only with Settings > Advanced > "Use config directory" on (~/.config/mpv), but
+#              its own libmpv is built without VapourSynth: the PushMPC IINA plugin (integrations/iina) is its route.
 #   Flatpak / Snap players have their own config folder and may lack VapourSynth: reported, not changed.
 # Environment for tests: HOME and XDG_CONFIG_HOME as usual; PUSHMPC_OS=linux|darwin overrides uname; PUSHMPC_NO_PATH=1
 # skips the PATH search for players.
@@ -196,7 +197,7 @@ players() {
     [ -d "$HOME/snap/mpv" ] && say "player: Snap mpv: its own config folder, may lack VapourSynth (not changed)"
     if [ "$os" = darwin ]; then
         if [ -d /Applications/IINA.app ] || [ -d "$HOME/Applications/IINA.app" ]; then
-            say "player: IINA: turn on Settings > Advanced > 'Use config directory' (it reads $(dirname "$conf"))"
+            say "player: IINA: its own libmpv has no VapourSynth, so it cannot run this filter; use the PushMPC IINA plugin (shaders + smooth motion) instead"
         else
             say "note: IINA reads $(dirname "$conf") only with Settings > Advanced > 'Use config directory' on"
         fi

@@ -3,10 +3,13 @@
 //
 //   nvidia    pushcore (Windows, RTX): RTX VSR, NVIDIA VFG and the other methods, the scene-cut guard. The R1 path.
 //   portable  PushFPS's portable core on the CPU (engines/portable): any GPU, Windows, Linux, macOS.
+//   apple     Apple's VideoToolbox ML frame interpolation and super resolution (macOS on Apple silicon; engines/apple),
+//             when this Mac offers an interpolator; else portable.
 //   rife      a script preset: pushmpc.vpy chains vs-rife-ncnn-vulkan (core.rife) when the user has it installed. The
 //             plugin never downloads it; it only reports whether the script found it.
 //
-// Auto: an NVIDIA RTX GPU with pushcore present -> nvidia; otherwise rife when available; otherwise portable.
+// Auto: an NVIDIA RTX GPU with pushcore present -> nvidia; otherwise apple when this Mac offers it; otherwise rife when
+// available; otherwise portable.
 #pragma once
 #include <algorithm>
 #include <cctype>
@@ -17,8 +20,8 @@
 
 namespace pmvs {
 
-enum class BackendKind { Nvidia, Portable, Rife };
-inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : "portable"; }
+enum class BackendKind { Nvidia, Portable, Rife, Apple };
+inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : k == BackendKind::Apple ? "apple" : "portable"; }
 
 // what the probe found. gpuFamily: pushcore_capabilities' family (PushMpcAuto.h GpuFamily: 1 RTX 50, 2 RTX 40,
 // 3 RTX 30, 4 RTX 20, 5 GTX, 6.. AMD / Intel / other; 0 unknown)
@@ -27,6 +30,9 @@ struct BackendProbe {
     bool pushcoreLoaded = false;  // pushcore.dll loaded and pushcore_capabilities answered
     uint32_t gpuFamily = 0;
     bool rifeAvailable = false;   // the script found core.rife
+    bool appleBuilt = false;      // this build has the VideoToolbox backend (macOS)
+    bool appleAvailable = false;  // ... and this Mac offers a VideoToolbox interpolator (apple::Probe)
+    std::string appleWhy;         // what the probe found
     std::string gpuName;
 };
 inline bool IsRtxFamily(uint32_t f) { return f >= 1 && f <= 4; }
@@ -47,14 +53,20 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         return r;
     }
     if (requested == "portable") { r.kind = BackendKind::Portable; r.why = "portable (your setting)"; return r; }
+    if (requested == "apple") {
+        if (p.appleAvailable) { r.kind = BackendKind::Apple; r.why = "apple (your setting)"; }
+        else { r.kind = BackendKind::Portable; r.why = std::string("apple asked for, but ") + (p.appleBuilt ? "this Mac offers no VideoToolbox interpolator (" + p.appleWhy + ")" : "this build has no VideoToolbox backend (macOS only)") + ": portable"; }
+        return r;
+    }
     if (requested == "rife") {
         if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "rife (your setting)"; }
         else { r.kind = BackendKind::Portable; r.why = "rife asked for, but vs-rife-ncnn-vulkan (core.rife) is not installed: portable"; }
         return r;
     }
-    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia, portable or rife (got '" + requested + "')"; return r; }
+    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia, apple, portable or rife (got '" + requested + "')"; return r; }
     if (nvidiaOk) { r.kind = BackendKind::Nvidia; r.why = "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia"; return r; }
     std::string not_nv = !p.nvidiaBuilt ? "no pushcore backend in this build" : !p.pushcoreLoaded ? "pushcore is not present" : gpu + " is not an NVIDIA RTX GPU";
+    if (p.appleAvailable) { r.kind = BackendKind::Apple; r.why = "Auto: " + not_nv + "; this Mac offers " + p.appleWhy + ": apple"; return r; }
     if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is installed: rife"; return r; }
     r.kind = BackendKind::Portable;
     r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is not installed: portable (CPU)";
