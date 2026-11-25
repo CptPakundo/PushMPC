@@ -1,0 +1,30 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: AMD FidelityFX Super Resolution 1 EASU (edge-adaptive spatial upsampling) on the luma
+// plane: the unchanged MIT-licensed ffx_fsr1.h of the FidelityFX SDK 1.1.4 (third_party/fidelityfx-fsr1), 32-bit
+// path. All three of EASU's colour gathers read the luma (the R channel of a one-channel image), so its own luma
+// estimate is the video's luma. RCAS (rcas.comp) sharpens the result.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;            // linear, clamp to edge
+layout(binding = 1, r16) uniform writeonly image2D dst;
+layout(push_constant) uniform PC { uvec4 con0, con1, con2, con3; ivec2 outSize; } pc;
+
+#define FFX_GPU 1
+#define FFX_GLSL 1
+#define FFX_HALF 0
+#define FFX_FSR_EASU_FLOAT 1
+#include "ffx_core.h"
+FfxFloat32x4 FsrEasuRF(FfxFloat32x2 p) { return textureGather(src, p, 0); }
+FfxFloat32x4 FsrEasuGF(FfxFloat32x2 p) { return textureGather(src, p, 0); }
+FfxFloat32x4 FsrEasuBF(FfxFloat32x2 p) { return textureGather(src, p, 0); }
+#include "fsr1/ffx_fsr1.h"
+
+void main()
+{
+    uvec2 ip = gl_GlobalInvocationID.xy;
+    if (ip.x >= uint(pc.outSize.x) || ip.y >= uint(pc.outSize.y)) return;
+    FfxFloat32x3 c;
+    ffxFsrEasuFloat(c, ip, pc.con0, pc.con1, pc.con2, pc.con3);
+    imageStore(dst, ivec2(ip), vec4(clamp(c.r, 0.0, 1.0)));
+}

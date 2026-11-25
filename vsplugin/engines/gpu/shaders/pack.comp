@@ -1,0 +1,65 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: an upscaled frame into the readback buffer at the source's bit depth. Luma from the
+// upscaler's output (NIS, or FSR1 EASU + RCAS); chroma from the frame at its own size, Catmull-Rom bicubic, with the
+// chroma siting of MPEG-2 / H.264 / HEVC video (horizontally on the even luma columns, vertically between the rows).
+// One invocation packs 4 (8-bit) or 2 (16-bit) samples of a row.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D upY;   // output size, normalised 0..1
+layout(binding = 1) uniform sampler2D midU;  // source chroma size, normalised 0..1
+layout(binding = 2) uniform sampler2D midV;
+layout(binding = 3, std430) writeonly buffer OutW { uint ow[]; };
+layout(push_constant) uniform PC {
+    int OW, OH, OCW, OCH;
+    int SW, SH, SCW, SCH;
+    int plane, bps, pitchY, pitchC;
+    int offU, offV;
+    float maxV;
+} pc;
+
+float cubic(sampler2D s, float x, float y, ivec2 size)
+{
+    float xf = floor(x), yf = floor(y);
+    float fx = x - xf, fy = y - yf;
+    vec4 wx = vec4(((-0.5 * fx + 1.0) * fx - 0.5) * fx, (1.5 * fx - 2.5) * fx * fx + 1.0, ((-1.5 * fx + 2.0) * fx + 0.5) * fx, (0.5 * fx - 0.5) * fx * fx);
+    vec4 wy = vec4(((-0.5 * fy + 1.0) * fy - 0.5) * fy, (1.5 * fy - 2.5) * fy * fy + 1.0, ((-1.5 * fy + 2.0) * fy + 0.5) * fy, (0.5 * fy - 0.5) * fy * fy);
+    float sum = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        int yy = clamp(int(yf) - 1 + j, 0, size.y - 1);
+        float row = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            int xx = clamp(int(xf) - 1 + i, 0, size.x - 1);
+            row += wx[i] * texelFetch(s, ivec2(xx, yy), 0).r;
+        }
+        sum += wy[j] * row;
+    }
+    return clamp(sum, 0.0, 1.0);
+}
+
+void main()
+{
+    const int per = 4 / pc.bps;
+    const int gx = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    const int w = pc.plane == 0 ? pc.OW : pc.OCW, h = pc.plane == 0 ? pc.OH : pc.OCH;
+    const int x0 = gx * per;
+    if (x0 >= w || y >= h) return;
+    if (pc.plane == 0) {
+        uint word = 0u;
+        for (int k = 0; k < per && x0 + k < w; ++k)
+            word |= uint(floor(texelFetch(upY, ivec2(x0 + k, y), 0).r * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
+        ow[(y * pc.pitchY + x0 * pc.bps) >> 2] = word;
+        return;
+    }
+    const float rx = float(pc.SW) / float(pc.OW), ry = float(pc.SH) / float(pc.OH);
+    const ivec2 cs = ivec2(pc.SCW, pc.SCH);
+    // source chroma coordinates (sample index space) of this output chroma sample
+    float sy = (float(2 * y + 1) * ry) * 0.5 - 0.5;
+    uint wu = 0u, wv = 0u;
+    for (int k = 0; k < per && x0 + k < w; ++k) {
+        float sx = ((float(2 * (x0 + k)) + 0.5) * rx - 0.5) * 0.5;
+        wu |= uint(floor(cubic(midU, sx, sy, cs) * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
+        wv |= uint(floor(cubic(midV, sx, sy, cs) * pc.maxV + 0.5)) << uint(k * 8 * pc.bps);
+    }
+    ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
+    ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+}

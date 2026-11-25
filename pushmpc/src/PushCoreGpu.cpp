@@ -493,7 +493,7 @@ struct PushCore {
     }
 
     // PushFPS's simple video page (qml/Veyra/WatchPage.qml) on a fresh install, switch by switch (see
-    // settings-and-runtime.md for the evidence): the bridge starts from EnhancementSettings{} with nrRuntime Ampere, in
+    // measured): the bridge starts from EnhancementSettings{} with nrRuntime Ampere, in
     // List chain mode (runtimeOrder = nullopt); "smoother" sets multiplier (the FG node on) and content Auto; "sharper"
     // sr on with the current videoSrQuality (standard RTX VSR family); "AI picture enhancement" turns the list's NR
     // node on with its default parameters (one layer: flat fields, nrLayerCount 0) and PushQuickSetup's look writes
@@ -697,7 +697,7 @@ struct PushCore {
     }
 
     // The frame generation methods to try, in order, with a multiplier cap each: the asked-for one first, then the
-    // next best this GPU can run (gpu-best-results.md section 1), and at the end no frame generation (the open must
+    // next best this GPU can run, and at the end no frame generation (the open must
     // not fail because of one backend: the rest of the picture work still runs).
     std::vector<std::pair<uint32_t, uint32_t>> fallbackChain() const {
         std::vector<std::pair<uint32_t, uint32_t>> c;
@@ -999,7 +999,7 @@ struct PushCore {
     // "reduced group": a presentable midpoint instead of a whole-group hole, history kept), 2 = no generated frame
     // (history kept; for VFG PushFPS turns a budget Seed into exactly this Skip). A predictive version after
     // EngineController::admitFg (deadline vs predicted GPU cost) was tried first: its cost predictions were too
-    // pessimistic under other GPU load and halved the rate at 1.0x where nothing would have been late; see HANDOFF.
+    // pessimistic under other GPU load and halved the rate at 1.0x where nothing would have been late; measured in the release tests.
     // The measured stage costs are still collected and logged ("fg-admission") for diagnosis.
     Clock::time_point lastAdmitLog{};
     struct AdmitContext { bool clock = false; int32_t level = 0; double queuedMs = 0; };

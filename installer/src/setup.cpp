@@ -193,9 +193,33 @@ std::vector<MpvPlayer> DetectMpvFamily() {
     }
     for (auto& d : { JoinPath(la, L"Programs\\mpv"), JoinPath(pf, L"mpv"), JoinPath(up, L"scoop\\apps\\mpv\\current"), JoinPath(up, L"scoop\\apps\\mpv-git\\current") })
         add(L"mpv", JoinPath(d, L"mpv.exe"));
+    const bool anyMpv = !out.empty();   // a plain mpv: the external player for Kodi and the shims
+    for (auto& d : { JoinPath(la, L"Programs\\mpv.net"), JoinPath(pf, L"mpv.net"), JoinPath(up, L"scoop\\apps\\mpv.net\\current") }) add(L"mpv.net", JoinPath(d, L"mpvnet.exe"));
     for (auto& d : { JoinPath(pf, L"SMPlayer"), JoinPath(pf86, L"SMPlayer") }) add(L"SMPlayer", JoinPath(d, L"smplayer.exe"));
     for (auto& d : { JoinPath(pf, L"mpc-qt"), JoinPath(la, L"Programs\\mpc-qt"), JoinPath(pf86, L"mpc-qt") }) add(L"MPC-QT", JoinPath(d, L"mpc-qt.exe"));
+    // external-player hosts: set up only when a plain mpv is there (mpv-integration.ps1 does the same)
+    std::wstring ad = env(L"APPDATA");
+    for (auto& d : { JoinPath(pf, L"Kodi"), JoinPath(pf86, L"Kodi") }) if (FileExists(JoinPath(d, L"kodi.exe"))) { out.push_back({ anyMpv ? L"Kodi" : L"Kodi (needs mpv)", JoinPath(d, L"kodi.exe") }); break; }
+    if (FileExists(JoinPath(ad, L"jellyfin-mpv-shim\\conf.json"))) out.push_back({ anyMpv ? L"Jellyfin MPV Shim" : L"Jellyfin MPV Shim (needs mpv)", JoinPath(ad, L"jellyfin-mpv-shim") });
+    if (FileExists(JoinPath(ad, L"plex-mpv-shim\\conf.json"))) out.push_back({ anyMpv ? L"Plex-MPV-Shim" : L"Plex-MPV-Shim (needs mpv)", JoinPath(ad, L"plex-mpv-shim") });
+    if (DirExists(JoinPath(la, L"Jellyfin Desktop\\profiles"))) out.push_back({ L"Jellyfin Desktop", JoinPath(la, L"Jellyfin Desktop") });   // its libmpv has VapourSynth
     return out;
+}
+// PotPlayer x64 (filter priority list in HKCU\Software\DAUM\PotPlayerMini64; the script's Find-PotPlayerExe rules)
+MpcHc DetectPotPlayer() {
+    MpcHc m;
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\DAUM\\PotPlayerMini64", 0, KEY_READ, &k) == ERROR_SUCCESS) { m.settings = true; RegCloseKey(k); }
+    std::vector<std::wstring> cands;
+    for (HKEY root : { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE }) {
+        std::wstring e = RegGetStr(root, L"Software\\DAUM\\PotPlayer64", L"ProgramPath");
+        if (!e.empty()) cands.push_back(e);
+    }
+    wchar_t pf[MAX_PATH]{};
+    for (const wchar_t* var : { L"ProgramW6432", L"ProgramFiles" })
+        if (GetEnvironmentVariableW(var, pf, MAX_PATH)) cands.push_back(JoinPath(pf, L"DAUM\\PotPlayer\\PotPlayerMini64.exe"));
+    for (auto& c : cands) if (c.size() > 19 && _wcsicmp(c.c_str() + c.size() - 19, L"PotPlayerMini64.exe") == 0 && FileExists(c)) { m.exe = c; m.version = FileVersionOf(c); break; }
+    return m;
 }
 std::wstring GpuName() {
     IDXGIFactory1* f = nullptr;
@@ -454,9 +478,10 @@ Result RunOp(Op op, bool autoUpdates) {
                 op == Op::Install ? L"install" : op == Op::Repair ? L"repair" : op == Op::Update ? L"update" : L"uninstall", g_installDir.c_str(),
                 opt.sandbox ? L" (sandbox)" : L"", opt.dryRun ? L" (dry run)" : L"");
     {   // round 2: which players are here (the script adds PushMPC to each one found)
-        const MpcHc hc = DetectMpcHc(), be = DetectMpcBe();
+        const MpcHc hc = DetectMpcHc(), be = DetectMpcBe(), pot = DetectPotPlayer();
         Log::Write(L"players: MPC-HC " + (hc.exe.empty() ? std::wstring(L"not found") : hc.version + L" (" + hc.exe + L")") +
-                   L", MPC-BE " + (be.exe.empty() ? std::wstring(L"not found") : be.version + L" (" + be.exe + L")"));
+                   L", MPC-BE " + (be.exe.empty() ? std::wstring(L"not found") : be.version + L" (" + be.exe + L")") +
+                   L", PotPlayer " + (pot.exe.empty() ? std::wstring(L"not found") : pot.exe));
         std::wstring mf;
         for (auto& m : DetectMpvFamily()) mf += (mf.empty() ? L"" : L", ") + m.player + L" (" + m.exe + L")";
         Log::Write(L"mpv-family players: " + (mf.empty() ? std::wstring(L"none") : mf) + (g_payload.vsplugin ? L"" : L"; this setup has no mpv route component"));
@@ -477,8 +502,8 @@ Result RunOp(Op op, bool autoUpdates) {
 bool EnsurePlayersClosed(HWND owner) {
     if (opt.sandbox || opt.dryRun) return true;   // nothing in MPC-HC or MPC-BE is touched then
     while (!FindPlayerProcesses().empty()) {
-        if (opt.quiet) { Log::Write(L"MPC-HC or MPC-BE is running: closing it"); if (ClosePlayersGracefully(20000)) return true; Log::Write(L"the player did not close"); return false; }
-        int a = MessageBoxW(owner, L"MPC-HC (or MPC-BE) is running. It must be closed during setup, because it saves its settings when it closes.\r\n\r\n"
+        if (opt.quiet) { Log::Write(L"MPC-HC, MPC-BE or PotPlayer is running: closing it"); if (ClosePlayersGracefully(20000)) return true; Log::Write(L"the player did not close"); return false; }
+        int a = MessageBoxW(owner, L"MPC-HC, MPC-BE or PotPlayer is running. It must be closed during setup, because it saves its settings when it closes.\r\n\r\n"
                                    L"Close it now? Anything playing stops; the player keeps your position if \"Remember file position\" is on.",
                             L"PushMPC setup", MB_OKCANCEL | MB_ICONINFORMATION);
         if (a != IDOK) return false;
@@ -505,7 +530,8 @@ Result g_result;
 MpcHc g_mpc, g_mpcBe;
 std::vector<MpvPlayer> g_mpvs;
 std::wstring g_gpu;
-bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_mpvs.empty(); }
+MpcHc g_pot;
+bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.exe.empty() && g_mpvs.empty(); }
 HBRUSH g_white = nullptr;
 
 HWND C(int id) { return GetDlgItem(g_wnd, id); }
@@ -560,8 +586,9 @@ void ShowPage(Page p) {
             std::wstring w;
             if (!g_mpc.exe.empty()) w += L"MPC-HC " + g_mpc.version + L" found: " + g_mpc.exe + (g_mpc.settings ? L"" : L"\r\nMPC-HC has not saved settings yet: start and close it once before setup, so PushMPC can be added to it.");
             if (!g_mpcBe.exe.empty()) w += (w.empty() ? L"" : L"\r\n") + std::wstring(L"MPC-BE ") + g_mpcBe.version + L" found: " + g_mpcBe.exe + L" (PushMPC is added to it and its video decoder is set to D3D11 copy-back)";
+            if (!g_pot.exe.empty()) w += (w.empty() ? L"" : L"\r\n") + std::wstring(L"PotPlayer found: ") + g_pot.exe + L" (PushMPC is added to its filter list; choose MPC Video Renderer and a copy-back decoder in PotPlayer)";
             for (auto& m : g_mpvs) {
-                std::wstring how = m.player == L"MPC-QT" ? L"manual setup, see docs\\players-mpv.md"
+                std::wstring how = m.player.find(L"needs mpv") != std::wstring::npos ? L"install mpv (shinchiro build) first, then run setup again"
                                  : !g_payload.vsplugin ? L"not supported by this release yet"
                                  : L"preview: PushMPC is added through VapourSynth once its runtime is installed";
                 w += (w.empty() ? L"" : L"\r\n") + m.player + L" found: " + m.exe + L" (" + how + L")";
@@ -852,7 +879,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
             else { std::string u = Narrow(s); WriteFile(out, u.data(), DWORD(u.size()), &n, nullptr); }
         });
         Op op = opt.uninstall ? Op::Uninstall : opt.update ? Op::Update : (g_installed ? Op::Repair : Op::Install);
-        if (!EnsurePlayersClosed(nullptr)) { Log::Write(L"MPC-HC or MPC-BE is running: close it and run setup again."); return 5; }
+        if (!EnsurePlayersClosed(nullptr)) { Log::Write(L"MPC-HC, MPC-BE or PotPlayer is running: close it and run setup again."); return 5; }
         Result r = RunOp(op, RegGetDword(HKEY_CURRENT_USER, UpdateKey(), L"Enabled", 1) != 0);
         return r.ok ? 0 : r.cancelled ? 1223 : 1;
     }
@@ -868,6 +895,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g_white = CreateSolidBrush(RGB(255, 255, 255));
     g_mpc = DetectMpcHc();
     g_mpcBe = DetectMpcBe();
+    g_pot = DetectPotPlayer();
     g_mpvs = DetectMpvFamily();
     g_gpu = GpuName();
 

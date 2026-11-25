@@ -1,0 +1,50 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: NVIDIA hardware optical flow (VK_NV_optical_flow) as the motion source. The flow engine
+// gives one vector per 4x4 (or 1x1 / 2x2 / 8x8) pixels in S10.5 fixed point (here read as two 16-bit integers, 1/32 px);
+// this pass makes the engine's own field from it: per block of `bs` pixels the mean vector of the grid cells inside it,
+// then the matched and the zero-motion error on the full-size luma, so the scene-cut rule and the cut guard work as
+// with the block matcher (mefinal.comp's counts).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, std430) readonly buffer Flow { int fl[]; };   // gw x gh cells, (x, y) int16 packed in one word
+layout(binding = 1, r8ui) uniform readonly uimage2D A;
+layout(binding = 2, r8ui) uniform readonly uimage2D B;
+layout(binding = 3, std430) writeonly buffer Field { vec2 field[]; };
+layout(binding = 4, std430) writeonly buffer Cost { float cost[]; };
+layout(binding = 5, std430) buffer Stats { uint unexplained; uint costSum256; uint blocks; uint pad; } st;
+layout(push_constant) uniform PC { int w, h, bx, by, bs, gw, gh, grid; float cutFloor, cutRatio; } pc;
+
+vec2 cell(int i, int j)
+{
+    int v = fl[clamp(j, 0, pc.gh - 1) * pc.gw + clamp(i, 0, pc.gw - 1)];
+    int x = (v << 16) >> 16, y = v >> 16;   // sign-extended low / high halves
+    return vec2(float(x), float(y)) / 32.0;
+}
+
+void main()
+{
+    ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+    if (b.x >= pc.bx || b.y >= pc.by) return;
+    const int x0 = b.x * pc.bs, y0 = b.y * pc.bs;
+    const int c0x = x0 / pc.grid, c0y = y0 / pc.grid, n = max(1, pc.bs / pc.grid);
+    vec2 v = vec2(0.0);
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) v += cell(c0x + i, c0y + j);
+    v /= float(n * n);
+    const int idx = b.y * pc.bx + b.x;
+    field[idx] = v;
+    const ivec2 d = ivec2(floor(v + 0.5)), hi = ivec2(pc.w - 1, pc.h - 1);
+    uint sm = 0u, sz = 0u, cnt = 0u;
+    for (int y = y0; y < min(y0 + pc.bs, pc.h); ++y)
+        for (int x = x0; x < min(x0 + pc.bs, pc.w); ++x) {
+            int a = int(imageLoad(A, ivec2(x, y)).r);
+            sm += uint(abs(a - int(imageLoad(B, clamp(ivec2(x, y) + d, ivec2(0), hi)).r)));
+            sz += uint(abs(a - int(imageLoad(B, ivec2(x, y)).r)));
+            ++cnt;
+        }
+    const float c = float(sm) / float(max(cnt, 1u)), z = float(sz) / float(max(cnt, 1u));
+    cost[idx] = c;
+    if (c > pc.cutFloor && c > pc.cutRatio * z) atomicAdd(st.unexplained, 1u);
+    atomicAdd(st.costSum256, uint(c * 256.0 + 0.5));
+    atomicAdd(st.blocks, 1u);
+}

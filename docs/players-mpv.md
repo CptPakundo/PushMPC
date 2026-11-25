@@ -1,4 +1,4 @@
-# PushMPC in mpv, SMPlayer and MPC-QT
+# PushMPC in mpv and mpv-based players
 
 PushMPC's engine also runs outside MPC-HC, as a VapourSynth filter (`pushmpc.Enhance`) for players built on mpv. It is
 the same engine as in MPC-HC (RTX Video Super Resolution, NVIDIA frame generation and the other frame generation
@@ -13,8 +13,14 @@ methods, the scene-cut guard, the colour chain), with the same settings and the 
 | Player | How | Setup |
 |---|---|---|
 | mpv (Windows builds with VapourSynth, e.g. shinchiro's) | `vf=vapoursynth` in `mpv.conf` | automatic |
+| mpv.net | the same block in mpv.net's own `mpv.conf` (its bundled libmpv has VapourSynth) | automatic |
 | SMPlayer (with its bundled mpv) | extra mpv options in SMPlayer's settings | automatic (experimental) |
-| MPC-QT | libmpv; does not read `mpv.conf` | by hand, see below |
+| MPC-QT | libmpv; its Options > Tweaks "mpv options file" | automatic |
+| Kodi | Kodi's own player has no filter hook: videos play in mpv as Kodi's external player (`playercorefactory.xml`) | automatic when mpv is installed |
+| Jellyfin MPV Shim, Plex-MPV-Shim | their bundled mpv has no VapourSynth on Windows: they are switched to the installed mpv (`conf.json` `mpv_ext`) with the block in their `mpv.conf` | automatic when mpv is installed |
+| Jellyfin Desktop 2.x | its libmpv (shinchiro's build on Windows) reads `mpv.conf` in each profile folder | automatic |
+| Plex for Windows, legacy Emby Theater | libmpv without VapourSynth: a VapourSynth line would stop playback | not set up (use Plex-MPV-Shim) |
+| Stremio | its built-in mpv resets the video filters itself | by hand: play in mpv, see below |
 | SVP's own mpv | | left alone: SVP manages it. Do not run both filters at once |
 
 The mpv build must include VapourSynth support. Most Windows builds do; `mpv --vf=help` lists `vapoursynth` when it is
@@ -50,6 +56,10 @@ again after installing one):
    Your `mpv.conf` is first copied to `mpv.conf.pushmpc-backup`. Uninstalling removes the block. If you did not change
    the file since, it is then byte-identical to the backup.
 
+Before it changes an mpv's settings, the installer runs that mpv once with the filter on a generated picture. If the
+filter cannot start (for example VSScript.dll is not found), mpv would refuse to play every file, so that mpv (and Kodi or
+a shim that would start it) is left unchanged and setup says why.
+
 To switch the filter off for one session, use `mpv --vf-remove=@pushmpc`, or bind a key in `input.conf`:
 `P vf toggle @pushmpc`.
 
@@ -58,17 +68,47 @@ To switch the filter off for one session, use `mpv --vf-remove=@pushmpc`, or bin
 The installer appends the same options to SMPlayer's *Preferences → Advanced → Options* field
 (`mplayer_additional_options` in `smplayer.ini`). Start SMPlayer once before installing, so that the file exists.
 
-### MPC-QT (by hand)
+### mpv.net
 
-MPC-QT uses libmpv and does not read `mpv.conf`. If your MPC-QT build has an mpv options field in its settings, add:
+mpv.net reads its own folder, `%APPDATA%\mpv.net\mpv.conf` (or `portable_config\mpv.conf` next to `mpvnet.exe`). The
+installer puts the same block there, with the same backup.
 
-```
-vf-append=@pushmpc:vapoursynth=file=[%LOCALAPPDATA%/PushMPC/vsplugin/pushmpc.vpy]
-hwdec=auto-copy
-hr-seek-framedrop=no
-```
+### MPC-QT
 
-Write the real path in place of `%LOCALAPPDATA%`. Its bundled libmpv must also have VapourSynth support.
+MPC-QT uses libmpv and does not read `mpv.conf`, but it can load an options file (Options > Tweaks > "mpv options
+file"). The installer turns that on and points it at `%LOCALAPPDATA%\PushMPC\mpc-qt-mpv.conf`, which holds the block.
+If you already use an options file, the block goes into yours instead. MPC-QT must be closed during setup (it saves its
+settings, `%APPDATA%\mpc-qt\settings.json`, when it closes); uninstalling puts both settings back. MPC-QT splits that
+file at spaces, so the path of `pushmpc.vpy` must not contain one.
+
+### Kodi
+
+Kodi's own player cannot take a video filter. When mpv is installed, the installer makes mpv Kodi's external player
+for videos: `%APPDATA%\Kodi\userdata\playercorefactory.xml` gets a player "PushMPC mpv" (fullscreen) and a rule that
+sends every video to it, both between `PushMPC managed` comments. Your own players and rules stay. mpv then plays with
+its `mpv.conf`, so PushMPC runs. Kodi's interface is not shown while mpv plays; closing mpv returns to Kodi.
+Uninstalling removes the marked parts (and the file, if PushMPC created it).
+
+### Jellyfin MPV Shim and Plex-MPV-Shim
+
+Their bundled mpv has no VapourSynth on Windows. When mpv is installed, the installer sets `mpv_ext` = true and
+`mpv_ext_path` = that mpv in the shim's `conf.json` (`%APPDATA%\jellyfin-mpv-shim` or `%APPDATA%\plex-mpv-shim`), and
+puts the block in the `mpv.conf` beside it. Close the shim first. Uninstalling puts both files back.
+
+### Jellyfin Desktop
+
+Jellyfin Desktop 2.x plays through libmpv (on Windows the same shinchiro build as mpv, with VapourSynth) and reads an
+`mpv.conf` in each profile folder: `%LOCALAPPDATA%\Jellyfin Desktop\profiles\<id>\` on Windows,
+`~/.local/share/jellyfin-desktop/profiles/<id>/` on Linux. The installer puts the block into each profile's `mpv.conf`
+(created when there is none) and takes it out again on uninstall. Run setup again after adding a profile. The Flatpak
+build has its own mpv and is left alone.
+
+### Stremio (by hand)
+
+Stremio's built-in mpv sets its video filter list itself whenever the display state changes, so a filter in a config
+file does not last. Play in mpv instead: in Stremio, Settings > Player > "Play in external player" (choose mpv), or
+copy the stream link and open it in mpv (where your Stremio version has no such setting). mpv then runs PushMPC as set
+up above.
 
 ## Settings
 
@@ -127,7 +167,7 @@ one for you:
 |---|---|---|---|
 | `nvidia` | PushMPC's engine (everything above) | Windows, NVIDIA RTX | best; GPU |
 | `rife` | vs-rife-ncnn-vulkan, **if you have it installed** (PushMPC never downloads it) | any Vulkan GPU: AMD, Intel, Apple (MoltenVK), NVIDIA | very good; GPU, heavy at 4K |
-| `portable` | PushFPS's motion-compensated frame generation, on the CPU | anything: Windows with AMD or Intel, Linux, macOS | simpler; CPU-bound (see below) |
+| `portable` | PushFPS's motion-compensated frame generation on the GPU through Vulkan (any vendor; MoltenVK on macOS), with NIS or FSR1 upscaling; on the CPU when there is no Vulkan GPU | anything: Windows with AMD or Intel, Linux, macOS | good; light on a GPU, CPU-bound without one (see below) |
 
 **Auto:** an NVIDIA RTX GPU with PushMPC's engine installed gets `nvidia`; otherwise `rife` when the `rife` plugin is
 loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=portable` (or `rife`, `nvidia`) to the
@@ -135,16 +175,28 @@ loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=po
 
 ### What the portable backend does
 
-- Motion both ways between two real frames, PushFPS's scene-cut rule (no blend across a cut: the nearer real frame is
-  shown), and the generated frames at 1/k, 2/k, ... between them.
-- The output keeps the source's format and colour (YUV 4:2:0, 8 or 10 bit, SDR or HDR). Real frames are passed through
-  unchanged. No upscaling, no RTX features.
+- **Engine.** On the best Vulkan GPU it finds (a discrete card first), the GPU engine runs; without one (or with
+  `PortableDevice = cpu`) the CPU engine. The log says which, and why; every frame carries `PushMPCEngine` = `gpu` or `cpu`.
+- Motion both ways between two real frames: PushFPS's block matcher on the GPU (8 px vectors from the full-size picture by
+  default), or, if you ask for it with `motion=nvof`, NVIDIA's optical-flow hardware (`VK_NV_optical_flow`; on an RTX 5090 it
+  measured slower and not better than the block matcher, so it is not the default). Scene cuts: PushFPS's rule plus PushMPC's guard (no blend across a cut: the nearer real frame is shown). The
+  generated frames sit at 1/k, 2/k, ... between the real ones.
+- **Anime on twos and threes (Dedup, on by default):** a repeated frame is recognised (PushFPS's rule) and the generated
+  frames are spread between the different drawings, so a drawing held for two or three frames moves smoothly instead of
+  stepping. The plugin looks two source frames ahead for this (`dedup=0` turns it off).
+- **Subtitle Hold (on by default in this engine):** burned-in subtitles stay sharp and in place while the picture behind
+  them moves (PushFPS's rule; `subtitle_hold=0` turns it off). Soft subtitles are drawn by mpv afterwards anyway.
+- **Upscaling (GPU engine):** to the screen when mpv passes its size (or `target=1440p|4K|5K`), with NVIDIA Image Scaling (NIS) by
+  default or AMD FSR1 (`upscaler=fsr`); `upscaler=off` leaves scaling to mpv. Chroma is scaled bicubic.
+- The output keeps the source's format and colour (YUV 4:2:0, 8 or 10 bit, SDR or HDR). Without upscaling, real frames
+  are passed through unchanged. No RTX features.
+- **Auto and the GPU.** The plugin times one source frame and one generated frame on the GPU at the video's size and
+  picks the largest multiplier the display wants that fits in 60% of a source frame's time.
 - **Auto and the CPU.** When the script loads, the plugin times one motion estimation and one generated frame at the
   video's size, then picks the largest multiplier the display wants that fits in 60% of a source frame's time. Above
   1080p, Auto goes no higher than x2. On a 16-thread desktop CPU, 1080p at 24 fps gets about x2; 4K stays at x1 (the
   CPU is too slow for 4K). `smoother=4` forces x4 even when the CPU cannot keep up (mpv then drops frames). The log
   records the measurement and the choice.
-- A GPU version of the portable engine (Vulkan compute) is planned. It is not part of this preview.
 
 ### With the rife backend
 
@@ -159,22 +211,37 @@ Same setup as above (`mpv-integration.ps1`). Auto picks `rife` when it is instal
 
 ### Linux
 
-You need mpv built with VapourSynth (`mpv --vf=help` lists `vapoursynth`), VapourSynth itself (API 4, R55 or newer),
-the plugin `pushmpc_vs.so` and `pushmpc.vpy` in `~/.local/share/pushmpc/vsplugin/`. Then:
+Download `pushmpc-linux-x86_64-<version>.tar.gz` (or `-aarch64-`), unpack it and run its installer as your user (no
+administrator password; nothing outside your home folder changes):
 
 ```sh
-sh mpv-integration.sh install     # adds the PushMPC block to ~/.config/mpv/mpv.conf (backup kept)
-sh mpv-integration.sh status      # what is set up, conflicts, which players were found
-sh mpv-integration.sh uninstall   # removes it; restores the original byte for byte when you changed nothing else
+sh install.sh                               # set up every player found
+sh ~/.local/share/pushmpc/install.sh status
+sh ~/.local/share/pushmpc/install.sh uninstall   # puts every changed file back
 ```
 
-- **mpv:** reads `~/.config/mpv/mpv.conf` (or `$XDG_CONFIG_HOME/mpv`).
-- **Celluloid:** turn on Preferences > Config Files > "Load mpv configuration file" and choose `~/.config/mpv/mpv.conf`.
-- **Haruna:** not documented whether it reads `mpv.conf`; if it does not, put the block's options into Haruna's own mpv
-  settings.
-- **SMPlayer and MPC-QT:** as on Windows (SMPlayer's mpv options; MPC-QT by hand).
-- **Flatpak and Snap players** have their own config folder and often lack VapourSynth. The script reports them and
-  leaves them alone.
+mpv needs VapourSynth. Arch, Manjaro and EndeavourOS build mpv with it (Arch users can also use the AUR package
+`pushmpc` and run `pushmpc-setup`). **Ubuntu, Debian and Mint build mpv without it**: the installer then offers, once,
+to install mpv from Flathub for your user (`io.mpv.Mpv`, which bundles VapourSynth; about 400 MB the first time). Answer
+ahead with `--flatpak yes` or `--flatpak no`. A Flathub mpv that PushMPC installed is removed again by the uninstall
+(`--keep-flatpak-mpv` keeps it).
+
+What the installer sets up, each with a backup:
+
+- **mpv** (only when it has VapourSynth): the block in `~/.config/mpv/mpv.conf`. With VapourSynth R73 or newer the
+  installer also runs `vapoursynth config`, which tells VapourSynth's script library inside mpv where Python is
+  (`~/.config/vapoursynth/vapoursynth.toml`; without it mpv stops with "Python executable and library path couldn't be
+  determined").
+- **Flathub mpv**: the block in `~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf`, and a Flatpak override that lets it read
+  `~/.local/share/pushmpc` (read-only). Its settings file is `~/.var/app/io.mpv.Mpv/config/pushmpc/settings.ini`.
+- **Celluloid:** its "Load mpv configuration file" setting, pointed at `~/.config/mpv/mpv.conf`.
+- **Haruna:** startup custom commands (Settings > Custom commands, `PushMPC_1` to `PushMPC_4`) that add the filter.
+- **SMPlayer:** its mpv options (`~/.config/smplayer/smplayer.ini`; start SMPlayer once first).
+- **MPC-QT:** its "mpv options file" (`~/.config/mpc-qt/settings.json`).
+- **Jellyfin MPV Shim, Plex-MPV-Shim:** the block in the `mpv.conf` beside their `conf.json`.
+- **Kodi** (native package): mpv, or the Flathub mpv, as Kodi's external player for videos.
+- Celluloid, Haruna, SMPlayer and MPC-QT use the system's mpv library, so they need the distribution's mpv to have
+  VapourSynth. Flatpak versions of these players and Flatpak Kodi cannot load the plugin and are left alone.
 - Settings: `~/.config/pushmpc/settings.ini` with the same names as on Windows, for example:
 
   ```ini

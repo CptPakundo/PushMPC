@@ -1,0 +1,134 @@
+# The Apple checks that need real Apple silicon (bare metal: the Neural Engine and the scaler that hosted VMs lack).
+# Runs on a SELF-HOSTED runner labelled apple-metal: a rented Mac (Scaleway Mac mini M4 or AWS mac-m4.metal) set up
+# with scripts/apple-metal-runner.sh. Manual runs only; nothing here runs on GitHub's hosted runners.
+#   probe      what VideoToolbox offers on this Mac (formats, sizes, the editing-grade model, Metal), macOS 27 size
+#              queries when present
+#   engine     apple_vt_test with every chain asserted to RUN (no "unavailable" allowed), pushmpc-apple parity (Metal
+#              against the references), the editing-grade model download, then the benchmark matrix (720p / 1080p,
+#              x2 / x4 / x8, each super-resolution kind) written to bench.csv: the ladder thresholds come from it
+#   recovery   the 10-bit path on a 10-bit source: x420 listed or not, recovery vs plain 8-bit (banding metric)
+#   mpv        Homebrew mpv through the formula: the VSScript Lua helper, encode mode with the apple backend (must not
+#              fall back), the ArtCNN gpu-next profile in a real window session
+#   iina       IINA (release DMG) with the bridge: VideoToolbox frames through the apple engine, zero copy
+name: apple-metal
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'probe | engine | recovery | mpv | iina | all'
+        required: false
+        default: 'all'
+
+concurrency:
+  group: apple-metal
+  cancel-in-progress: false
+
+jobs:
+  metal:
+    runs-on: [self-hosted, macOS, ARM64, apple-metal]
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_ANALYTICS: '1'
+      PUSHMPC_VS_LOG_DIR: ${{ github.workspace }}/out/vslogs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Machine
+        shell: bash
+        run: |
+          sw_vers; sysctl -n machdep.cpu.brand_string hw.model hw.memsize
+          system_profiler SPDisplaysDataType | sed -n 1,25p
+          xcodebuild -version; xcrun --sdk macosx --show-sdk-version
+          mkdir -p out/vslogs
+
+      - name: Build (engine, tools, models)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON
+          cmake --build build --target apple_test apple_vt_test pushmpc_apple artcnn_ref --parallel
+          ./build/apple_test
+          python3 vsplugin/tools/artcnn_tool.py fetch --out "$RUNNER_TEMP/artcnn"
+          mkdir -p "$RUNNER_TEMP/models"
+          for m in C4F16 C4F32; do python3 vsplugin/tools/artcnn_tool.py pmnn "$RUNNER_TEMP/artcnn/ArtCNN_$m.onnx" "$RUNNER_TEMP/models/ArtCNN_$m.pmnn"; done
+          echo "PUSHMPC_MODELS=$RUNNER_TEMP/models" >> "$GITHUB_ENV"
+
+      - name: Probe
+        if: inputs.jobs == 'all' || contains(inputs.jobs, 'probe')
+        shell: bash
+        run: ./build/pushmpc-apple probe | tee out/probe.txt
+
+      - name: Engine (every chain must run), Metal parity, model download, benchmarks
+        if: inputs.jobs == 'all' || contains(inputs.jobs, 'engine')
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/pushmpc-apple parity "$PUSHMPC_MODELS" | tee out/parity.txt
+          ./build/pushmpc-apple model-status | tee out/model.txt || true
+          ./build/pushmpc-apple model-download 1200 | tee -a out/model.txt || echo "::warning::model download did not finish"
+          ./build/apple_vt_test | tee out/apple_vt_test.txt
+          grep -q "APPLE_VT_RESULT=ok" out/apple_vt_test.txt || { echo "::error::VideoToolbox did not run on bare metal"; exit 1; }
+          if grep -q "not available:" out/apple_vt_test.txt; then echo "::warning::some chains are not offered here (see apple_vt_test.txt)"; fi
+          echo "w,h,k,sr,ms_per_source_frame,ladder" > out/bench.csv
+          for size in "1280 720" "1920 1080"; do
+            for k in 2 4 8; do
+              for sr in off editing artcnn32 artcnn16 lowlatency; do
+                set -- $size
+                line=$(PUSHMPC_BENCH_SR=$sr ./build/pushmpc-apple bench $1 $2 $k 23.976 2>&1 | tee -a out/bench.txt | grep BENCH_RESULT || true)
+                [ -n "$line" ] && echo "$1,$2,$k,$sr,$(echo "$line" | sed -E 's/.*ms=([0-9.]+) ladder=([0-9]+).*/\1,\2/')" >> out/bench.csv
+              done
+            done
+          done
+          cat out/bench.csv
+
+      - name: 10-bit recovery on a real interpolator
+        if: inputs.jobs == 'all' || contains(inputs.jobs, 'recovery')
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -E "low-latency interpolation .*formats" out/probe.txt || ./build/pushmpc-apple probe | grep -E "low-latency interpolation .*formats"
+          # apple_vt_test's "LL x2 10-bit PQ" chain reports the format and whether the recovery ran
+          grep -A6 "LL x2 10-bit PQ" out/apple_vt_test.txt || true
+
+      - name: Homebrew mpv with the formula (VSScript helper, apple backend, ArtCNN profile)
+        if: inputs.jobs == 'all' || contains(inputs.jobs, 'mpv')
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install mpv vapoursynth > /dev/null
+          tgz="$RUNNER_TEMP/pushmpc-metal.tar.gz"; git archive --format=tar.gz --prefix=PushMPC-ci/ HEAD > "$tgz"
+          brew tap-new --no-git pushmpc/metal 2>/dev/null || true
+          tap=$(brew --repository pushmpc/metal)
+          sed -E "s|^  url \".*\"$|  url \"file://$tgz\"\n  version \"0.6.0-metal\"|; s|^  sha256 \".*\"$|  sha256 \"$(shasum -a 256 "$tgz" | cut -d' ' -f1)\"|" packaging/homebrew/pushmpc.rb > "$tap/Formula/pushmpc.rb"
+          brew reinstall --build-from-source pushmpc/metal/pushmpc
+          PUSHMPC_NO_PROMPT=1 pushmpc-setup install
+          unset VSSCRIPT_PATH
+          mpv --no-audio --frames=240 --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 av://lavfi:testsrc2=size=1920x1080:rate=24000/1001:duration=10 --include="$HOME/.config/mpv/mpv.conf" 2>&1 | tail -20
+          grep -h "apple: output\|portable: output\|apple:" "$HOME/Library/Logs/PushMPC/"*.log | tail -20
+          grep -q "apple: output" "$HOME/Library/Logs/PushMPC/"*.log || { echo "::error::mpv fell back from the apple backend on bare metal"; exit 1; }
+          pushmpc-setup uninstall
+
+      - name: IINA with the bridge (VideoToolbox frames, apple engine)
+        if: inputs.jobs == 'all' || contains(inputs.jobs, 'iina')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          brew install ffmpeg mpv > /dev/null
+          cmake -S vsplugin -B build -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$(brew --prefix ffmpeg)/include" -DMPV_INCLUDE="$(brew --prefix mpv)/include"
+          cmake --build build --target pushmpc_iina --parallel
+          mkdir -p "$RUNNER_TEMP/iina"; gh release download --repo iina/iina --pattern '*.dmg' --dir "$RUNNER_TEMP/iina" --clobber
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/iina-mnt" "$(ls "$RUNNER_TEMP"/iina/*.dmg | head -1)" > /dev/null
+          clang -O2 -I"$(brew --prefix mpv)/include" -Wl,-rpath,"$RUNNER_TEMP/iina-mnt/IINA.app/Contents/Frameworks" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
+          ./build/iina_bridge_host "$RUNNER_TEMP/iina-mnt/IINA.app/Contents/Frameworks/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 | tee out/iina.txt || true
+          cat "$HOME/Library/Logs/PushMPC/iina-bridge.log" | tail -30 || true
+          hdiutil detach "$RUNNER_TEMP/iina-mnt" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apple-metal-results
+          path: out

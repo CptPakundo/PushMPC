@@ -42,6 +42,9 @@
 using namespace pmvs;
 
 namespace pmvs { void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why); }
+#ifdef PUSHMPC_APPLE
+namespace pmvs { void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why); bool AppleAvailable(std::string& why); }
+#endif
 #if PMVS_HAVE_PMML
 namespace pmvs {
 void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why);
@@ -479,6 +482,10 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
 #ifdef _WIN32
     if (lreq == "auto" || lreq == "nvidia") ProbeNvidia(in, a, p);
 #endif
+#ifdef PUSHMPC_APPLE
+    p.appleBuilt = true;
+    if (lreq == "auto" || lreq == "apple") p.appleAvailable = AppleAvailable(p.appleWhy);
+#endif
 #if PMVS_HAVE_PMML
     p.mlBuilt = true;
     if (lreq == "auto" || lreq == "ml") p.mlAvailable = MlRuntimePresent(MlRuntimeDir(forScript ? nullptr : in, a));
@@ -506,6 +513,9 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);
+#ifdef PUSHMPC_APPLE
+    if (c.kind == BackendKind::Apple) return AppleCreate(in, out, core, a, node, c.why);
+#endif
 #if PMVS_HAVE_PMML
     if (c.kind == BackendKind::Ml) return MlCreate(in, out, core, a, node, c.why);
 #endif
@@ -519,7 +529,7 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
 #endif
 }
 
-// pushmpc.SelectBackend([backend, rife, core_dir, runtime_dir]) -> {backend: "nvidia"|"portable"|"rife", why}
+// pushmpc.SelectBackend([backend, rife, core_dir, runtime_dir]) -> {backend: "nvidia"|"apple"|"portable"|"rife", why}
 void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const VSAPI* a)
 {
     const BackendChoice c = Choose(in, core, a, true);
@@ -540,7 +550,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "fg_method:data:opt;vrr:data:opt;upscaler:data:opt;target:data:opt;vsr_style:data:opt;cleanup_strength:data:opt;on_battery:data:opt;subtitle_hold:data:opt;"
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
-        "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;"
+        "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
+        "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;"
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;", "backend:data;why:data;", SelectCreate, nullptr, plugin);

@@ -3,9 +3,11 @@
 #
 # Backends (pushmpc.SelectBackend picks one; user_data backend=... or the Backend setting overrides Auto):
 #   nvidia    pushcore: RTX Video Super Resolution, NVIDIA frame generation, the scene-cut guard (Windows, RTX).
+#   apple     Apple's VideoToolbox ML frame interpolation (+ super resolution up to 1080p sources) on Apple silicon,
+#             macOS 26+ (frame-rate conversion on 15.4+); user_data apple_sr=off|2|4, apple_fi=lowlatency|frc.
 #   rife      vs-rife-ncnn-vulkan (core.rife), when you have it installed (any Vulkan GPU). Never downloaded by PushMPC.
 #   portable  PushFPS's motion-compensated frame generation on the CPU (any GPU, Windows, Linux, macOS).
-# Auto: nvidia on an RTX GPU with pushcore, else rife when installed, else portable.
+# Auto: nvidia on an RTX GPU with pushcore, else apple when the Mac offers it, else rife when installed, else portable.
 #
 # user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments, e.g.
 #   smoother=4,sharper=2,chroma=420        backend=portable,portable_threads=8        backend=rife,rife_model=46
@@ -62,9 +64,9 @@ for _kv in str(_ud).split(","):
     if "=" in _kv:
         _k, _v = _kv.split("=", 1)
         _k, _v = _k.strip(), _v.strip()
-        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms"):
+        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms", "display_w", "display_h"):
             _args[_k] = int(_v)
-        elif _k == "display_fps":
+        elif _k in ("display_fps", "sharpness"):
             _args[_k] = float(_v)
         elif _k:
             _args[_k] = _v
@@ -72,6 +74,13 @@ for _kv in str(_ud).split(","):
 _dfps = globals().get("display_fps", 0) or 0
 if _dfps > 1 and "display_fps" not in _args:
     _args["display_fps"] = float(_dfps)
+# mpv 0.36+ also passes the display size (display_res: [w, h]): the GPU engine upscales to it (Upscaler, UpscaleTarget)
+_dres = globals().get("display_res")
+try:
+    if _dres and len(_dres) >= 2 and int(_dres[0]) > 0 and "display_w" not in _args:
+        _args["display_w"], _args["display_h"] = int(_dres[0]), int(_dres[1])
+except (TypeError, ValueError):
+    pass
 
 def _text(v):
     return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)

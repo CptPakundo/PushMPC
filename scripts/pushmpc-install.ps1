@@ -16,9 +16,11 @@
     -NoMpcBe (no MPC-BE change); MPC-BE steps alone against a fake root:
     pushmpc-install.ps1 mpcbe-apply|mpcbe-remove -InstallDir <scratch> -MpcBeRegRoot <HKCU:\...> -MpcBeExe <fake mpc-be64.exe>
                         -MpcBeBackupKey <HKCU:\...> [-DryRun]
+    -NoPotPlayer (no PotPlayer change); PotPlayer steps alone against a fake root:
+    pushmpc-install.ps1 potplayer-apply|potplayer-remove -InstallDir <scratch> -PotRegRoot <HKCU:\...> -PotPlayerExe <fake PotPlayerMini64.exe> [-DryRun]
     -NoMpv (no mpv / SMPlayer change); the mpv route alone against a fake root (mpv-integration.ps1 -Root):
     pushmpc-install.ps1 mpv-apply|mpv-remove -StageDir <stage> -InstallDir <root>\AppData\Local\PushMPC -MpvRoot <root> [-DryRun]
-  mpv route (players-all.md R1/R3, preview): the optional "vsplugin" component (pushmpc_vs.dll, pushmpc.vpy,
+  mpv route (preview): the optional "vsplugin" component (pushmpc_vs.dll, pushmpc.vpy,
     mpv-integration.ps1, vapoursynth-pin.json) is staged only when pushmpc_vs.dll is built. Install adds it, fetches the
     VapourSynth runtime pinned in vapoursynth-pin.json (skipped while the pins say TODO) and runs
     mpv-integration.ps1 -Action Install -RuntimeOnPath, only when mpv or SMPlayer is found; uninstall reverses it.
@@ -52,7 +54,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'mpv-apply', 'mpv-remove')]
+    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'potplayer-apply', 'potplayer-remove', 'mpv-apply', 'mpv-remove')]
     [string]$Action,
     [string]$StageDir = '',
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'PushMPC'),
@@ -81,6 +83,10 @@ param(
     [string]$MpcBeRegRoot = 'HKCU:\Software\MPC-BE',
     [string]$MpcBeExe = '',
     [string]$MpcBeBackupKey = 'HKCU:\Software\PushMPC\MpcBeBackup',
+    [switch]$NoPotPlayer,
+    [string]$PotRegRoot = 'HKCU:\Software\DAUM\PotPlayerMini64',
+    [string]$PotPlayerExe = '',
+    [string]$PotLavPath = '',
     # mpv route: skip it; tests: a fake root for mpv-integration.ps1 (-Root); stage: the plugin build; the runtime pins
     [switch]$NoMpv,
     [string]$MpvRoot = '',
@@ -153,7 +159,7 @@ function Resolve-GpuVendor {
 }
 $GpuVendor = Resolve-GpuVendor
 $Runtime = $Packages[$GpuVendor]
-# What pushcore loads from the runtime root (see settings-and-runtime.md, "Runtime files"). Paths relative to the
+# What pushcore loads from the runtime root. Paths relative to the
 # package's root folder (the one holding veyra_qml_ui.exe). Required files must be in the package; the folders in
 # $RuntimeDirs are taken whole when the package has them.
 $RuntimeFilesByVendor = @{
@@ -1874,6 +1880,192 @@ function Restore-MpcBeDecoder {
     elseif ($null -ne $old) { New-ItemProperty -Path $MpcBeDecoderKey -Name HwDecoder -Value ([int]$old) -PropertyType DWord -Force | Out-Null; Info "MPC-BE: MPC Video Decoder hardware mode restored ($old)" }
     Remove-Item -Path $MpcBeBackupKey -Recurse -Force
 }
+# ------------------------------------------------------------------------------------------------ PotPlayer
+# PotPlayer (x64, PotPlayerMini64.exe) keeps its settings in HKCU\Software\DAUM\PotPlayerMini64 unless
+# PotPlayerMini64.ini exists next to the exe (INI mode: the user adds the filter by hand, see docs\user-guide.md).
+# Its filter priority list ("Filter control > Filter priority (overall)") is Override\NNNN (4 digits, read in order;
+# the last subkey holds only Type = -2, the end marker) with Type (1 = filter file, Path), Name, CLSID, Disabled,
+# FilterType (0 = Prefer), Merit, MeritHi and mod0000... (media types: major type and subtype GUIDs in turn). The layout
+# is checked on a hosted runner against a real PotPlayer (integrations.yml, job potplayer): with this entry PotPlayer
+# loads PushMpcFilter.ax into its graph. Install adds the entry in front of the end marker; uninstall removes it, moves
+# the later entries down and puts the end marker back where it was, so the key is as before. SVP's VapourSynth entry
+# (when present and enabled) is disabled and enabled again on uninstall. PotPlayer must be closed (it rewrites its
+# settings when it closes). The renderer (MPC Video Renderer) and the decoder (copy-back) stay the user's choice:
+# Setup tells them (docs\user-guide.md, PotPlayer).
+# Tests: -PotRegRoot (a fake root), -PotPlayerExe (a fake PotPlayerMini64.exe that counts as installed); actions
+# potplayer-apply / potplayer-remove run only these steps.
+$PotOverride = Join-Path $PotRegRoot 'Override'
+$PotEndType = -2
+function Get-PotPlayerProcesses { @(Get-Process -Name 'PotPlayerMini64', 'PotPlayer64', 'PotPlayerMini', 'PotPlayer' -ErrorAction SilentlyContinue) }
+function Find-PotPlayerExe {
+    if ($PotPlayerExe) { if (Test-Path -LiteralPath $PotPlayerExe -PathType Leaf) { return $PotPlayerExe }; return '' }
+    foreach ($root in @('HKCU:', 'HKLM:')) {
+        foreach ($k in @("$root\Software\DAUM\PotPlayer64", "$root\Software\DAUM\PotPlayer")) {
+            $pp = (Get-ItemProperty -Path $k -Name ProgramPath -ErrorAction SilentlyContinue).ProgramPath
+            if ($pp -and (Test-Path -LiteralPath $pp -PathType Leaf) -and $pp -match '64\.exe$') { return $pp }
+        }
+        foreach ($u in @("$root\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
+            if (-not (Test-Path $u)) { continue }
+            foreach ($k in (Get-ChildItem $u -ErrorAction SilentlyContinue)) {
+                $pr = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+                if ($pr.PSObject.Properties['DisplayName'] -and $pr.DisplayName -like 'PotPlayer*' -and $pr.PSObject.Properties['UninstallString'] -and $pr.UninstallString) {
+                    $d = Split-Path -Parent ($pr.UninstallString.Trim('"'))
+                    $p = Join-Path $d 'PotPlayerMini64.exe'; if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+                }
+            }
+        }
+    }
+    foreach ($pf in @($env:ProgramW6432, $env:ProgramFiles) | Where-Object { $_ }) {
+        $p = Join-Path $pf 'DAUM\PotPlayer\PotPlayerMini64.exe'; if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return ''
+}
+function Get-PotEntries {
+    if (-not (Test-Path $PotOverride)) { return @() }
+    @(Get-ChildItem $PotOverride | Where-Object { $_.PSChildName -match '^\d{4}$' } | Sort-Object PSChildName | ForEach-Object {
+        $p = Get-ItemProperty $_.PSPath
+        $t = if ($p.PSObject.Properties['Type']) { [int64]$p.Type } else { $null }
+        if ($null -ne $t -and $t -gt 2147483647) { $t -= 4294967296 }   # a DWORD read back unsigned (Windows PowerShell)
+        [pscustomobject]@{ Key = $_.PSPath; Name = $_.PSChildName; Props = $p; End = ($t -eq $PotEndType); Clsid = $(if ($p.PSObject.Properties['CLSID']) { [string]$p.CLSID } else { '' }) } })
+}
+function Set-PotPlayerEntry($state) {
+    if ($NoPotPlayer) { Info 'PotPlayer skipped (-NoPotPlayer)'; return }
+    $exe = Find-PotPlayerExe
+    if (-not $exe) { Info 'PotPlayer is not installed: nothing changed for it'; return }
+    $ini = Join-Path (Split-Path -Parent $exe) 'PotPlayerMini64.ini'
+    if (Test-Path -LiteralPath $ini) {
+        Warn "PotPlayer keeps its settings in $ini (INI mode): add PushMPC Filter by hand (Preferences > Filter control > Filter priority (overall) > Add external filter, Prefer); see docs\user-guide.md."
+        return
+    }
+    $ax = Join-Path $InstallDir 'filter\PushMpcFilter.ax'
+    $entries = Get-PotEntries
+    $ours = $entries | Where-Object { $_.Clsid -eq $FilterClsid } | Select-Object -First 1
+    $created = -not (Test-Path $PotOverride)
+    if ($ours) { $key = $ours.Key; $name = $ours.Name; Info "PotPlayer filter priority: updating entry $name" }
+    else {
+        $end = $entries | Where-Object End | Select-Object -First 1
+        if ($end) {
+            $name = $end.Name; $key = $end.Key
+            $endName = '{0:D4}' -f ([int]$end.Name + 1)
+            if ($DryRun) { Dry "would move the end marker $($end.Name) -> $endName" }
+            else {
+                if (Test-Path (Join-Path $PotOverride $endName)) { Remove-Item (Join-Path $PotOverride $endName) -Recurse -Force }
+                Rename-Item -Path $end.Key -NewName $endName
+            }
+        } else {
+            $n = 0; while ($entries | Where-Object { $_.Name -eq ('{0:D4}' -f $n) }) { $n++ }
+            $name = '{0:D4}' -f $n; $key = Join-Path $PotOverride $name; $endName = '{0:D4}' -f ($n + 1)
+            if ($DryRun) { Dry "would write the end marker $endName" }
+            else { $ek = Join-Path $PotOverride $endName; New-Item -Path $ek -Force | Out-Null; New-ItemProperty $ek -Name Type -PropertyType DWord -Value $PotEndType -Force | Out-Null }
+        }
+        Info "PotPlayer filter priority: adding entry $name"
+    }
+    $vids = '{73646976-0000-0010-8000-00AA00389B71}'
+    $types = @($vids, '{3231564E-0000-0010-8000-00AA00389B71}', $vids, '{30313050-0000-0010-8000-00AA00389B71}')   # NV12, P010
+    if ($DryRun) { Dry "would write $key (PushMPC Filter, file $ax, Prefer, NV12/P010)" }
+    else {
+        if (Test-Path $key) { Remove-Item $key -Recurse -Force }
+        New-Item -Path $key -Force | Out-Null
+        New-ItemProperty $key -Name Type -PropertyType DWord -Value 1 -Force | Out-Null           # a filter file
+        New-ItemProperty $key -Name Disabled -PropertyType DWord -Value 0 -Force | Out-Null
+        New-ItemProperty $key -Name Name -PropertyType String -Value 'PushMPC Filter' -Force | Out-Null
+        New-ItemProperty $key -Name CLSID -PropertyType String -Value $FilterClsid -Force | Out-Null
+        New-ItemProperty $key -Name Path -PropertyType String -Value $ax -Force | Out-Null
+        for ($i = 0; $i -lt $types.Count; $i++) { New-ItemProperty $key -Name ('mod{0:D4}' -f $i) -PropertyType String -Value $types[$i] -Force | Out-Null }
+        New-ItemProperty $key -Name FilterType -PropertyType DWord -Value 0 -Force | Out-Null     # Prefer
+        New-ItemProperty $key -Name Merit -PropertyType DWord -Value 0x00200001 -Force | Out-Null
+        New-ItemProperty $key -Name MeritHi -PropertyType DWord -Value 0 -Force | Out-Null
+    }
+    Set-StateValue $state 'potEntry' $name
+    if ($created -and -not (Get-StateValue $state 'potOverrideCreated')) { Set-StateValue $state 'potOverrideCreated' $true }
+    $vs = $entries | Where-Object { $_.Clsid -eq $VapourSynthClsid -and $_.Props.PSObject.Properties['Disabled'] -and [int64]$_.Props.Disabled -eq 0 }
+    foreach ($e in $vs) {
+        Warn "SVP's VapourSynth Filter in PotPlayer (entry $($e.Name)) is disabled: SVP's interpolation and PushMPC's frame generation would stack."
+        if ($DryRun) { Dry "would set $($e.Key) Disabled=1" } else { Set-ItemProperty $e.Key -Name Disabled -Value 1 }
+        Set-StateValue $state 'potDisabledVapourSynth' $e.Name
+    }
+    Set-PotPlayerLav $state
+    Info 'PotPlayer: choose MPC Video Renderer (Preferences > Video > Video renderer) for PushMPC to process video.'
+}
+# LAV Video as PotPlayer's decoder (a Prefer entry in the same list, after PushMPC's): LAV hands HDR mastering data and
+# MaxCLL to the filter as side data, which PotPlayer's built-in decoder does not. Only when LAV Filters is installed
+# (registered) and the list has no LAV Video entry of the user's; removed again on uninstall. -PotLavPath overrides the
+# registered path (tests).
+$PotLavClsid = '{EE30215D-164F-4A92-A4EB-9D4C13390F9F}'
+function Find-LavVideo {
+    if ($PotLavPath -eq 'none') { return '' }
+    if ($PotLavPath) { return $PotLavPath }
+    foreach ($root in @('HKCU:\Software\Classes', 'HKLM:\Software\Classes')) {
+        $v = (Get-ItemProperty -Path "$root\CLSID\$PotLavClsid\InprocServer32" -ErrorAction SilentlyContinue).'(default)'
+        if ($v -and (Test-Path -LiteralPath $v)) { return $v }
+    }
+    return ''
+}
+function Set-PotPlayerLav($state) {
+    $entries = Get-PotEntries
+    if ($entries | Where-Object { $_.Clsid -eq $PotLavClsid }) { if (-not (Get-StateValue $state 'potLavEntry')) { Info 'PotPlayer: your LAV Video entry is kept as it is' }; return }
+    $lav = Find-LavVideo
+    if (-not $lav) { Info 'PotPlayer: LAV Filters is not installed. With LAV Video as its decoder PotPlayer passes HDR mastering data to PushMPC: install LAV Filters (github.com/Nevcairiel/LAVFilters), then run setup again.'; return }
+    $end = $entries | Where-Object End | Select-Object -First 1
+    if (-not $end) { return }
+    $name = $end.Name; $key = $end.Key; $endName = '{0:D4}' -f ([int]$end.Name + 1)
+    $vids = '{73646976-0000-0010-8000-00AA00389B71}'
+    $subs = @('{34363248-0000-0010-8000-00AA00389B71}', '{31435641-0000-0010-8000-00AA00389B71}', '{43564548-0000-0010-8000-00AA00389B71}', '{31435648-0000-0010-8000-00AA00389B71}',
+              '{31305641-0000-0010-8000-00AA00389B71}', '{30395056-0000-0010-8000-00AA00389B71}', '{E06D8026-DB46-11CF-B4D1-00805F6CBBEA}', '{31435657-0000-0010-8000-00AA00389B71}')   # H264 AVC1 HEVC HVC1 AV01 VP90 MPEG2 WVC1
+    if ($DryRun) { Dry "would add LAV Video ($lav) as PotPlayer's decoder (entry $name, Prefer)"; return }
+    if (Test-Path (Join-Path $PotOverride $endName)) { Remove-Item (Join-Path $PotOverride $endName) -Recurse -Force }
+    Rename-Item -Path $key -NewName $endName
+    $key = Join-Path $PotOverride $name
+    New-Item -Path $key -Force | Out-Null
+    New-ItemProperty $key -Name Type -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty $key -Name Disabled -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty $key -Name Name -PropertyType String -Value 'LAV Video Decoder' -Force | Out-Null
+    New-ItemProperty $key -Name CLSID -PropertyType String -Value $PotLavClsid -Force | Out-Null
+    New-ItemProperty $key -Name Path -PropertyType String -Value $lav -Force | Out-Null
+    $i = 0; foreach ($sub in $subs) { New-ItemProperty $key -Name ('mod{0:D4}' -f $i) -PropertyType String -Value $vids -Force | Out-Null; New-ItemProperty $key -Name ('mod{0:D4}' -f ($i + 1)) -PropertyType String -Value $sub -Force | Out-Null; $i += 2 }
+    New-ItemProperty $key -Name FilterType -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty $key -Name Merit -PropertyType DWord -Value 0x00800003 -Force | Out-Null
+    New-ItemProperty $key -Name MeritHi -PropertyType DWord -Value 0 -Force | Out-Null
+    Set-StateValue $state 'potLavEntry' $name
+    Info "PotPlayer: LAV Video ($lav) set as its decoder (entry $name, Prefer): HDR mastering data reaches PushMPC"
+}
+function Remove-PotPlayerEntry($state) {
+    $entries = Get-PotEntries
+    $gone = @()
+    $lavName = Get-StateValue $state 'potLavEntry'
+    foreach ($e in ($entries | Where-Object { $_.Clsid -eq $FilterClsid -or ($lavName -and $_.Name -eq $lavName -and $_.Clsid -eq $PotLavClsid) })) {
+        if ($DryRun) { Dry "would remove $($e.Key)" } else { Remove-Item $e.Key -Recurse -Force }
+        $gone += $e.Name
+        Info "PotPlayer filter priority: entry $($e.Name) ($($e.Props.Name)) removed"
+    }
+    $vsName = Get-StateValue $state 'potDisabledVapourSynth'
+    if ($gone.Count) {
+        if ((Get-StateValue $state 'potOverrideCreated') -and -not ($entries | Where-Object { -not $_.End -and $gone -notcontains $_.Name })) {
+            if ($DryRun) { Dry "would remove $PotOverride (PushMPC created it)" } else { Remove-Item $PotOverride -Recurse -Force }
+            Info 'PotPlayer filter priority: the list PushMPC created is removed'
+        } else {
+            # PotPlayer reads the entries until the end marker: the later ones (and the marker) move down to close the gap
+            $next = 0
+            foreach ($e in $entries) {
+                if ($gone -contains $e.Name) { continue }
+                $want = '{0:D4}' -f $next; $next++
+                if ($e.Name -ne $want) {
+                    if ($DryRun) { Dry "would renumber $($e.Name) -> $want" } else { Rename-Item -Path $e.Key -NewName $want }
+                    if ($vsName -eq $e.Name) { $vsName = $want }
+                }
+            }
+        }
+    }
+    if ($vsName) {
+        $k = Join-Path $PotOverride $vsName
+        $p = Get-ItemProperty $k -ErrorAction SilentlyContinue
+        if ($p -and $p.PSObject.Properties['CLSID'] -and $p.CLSID -eq $VapourSynthClsid -and [int64]$p.Disabled -eq 1) {
+            if ($DryRun) { Dry "would set $k Disabled=0" } else { Set-ItemProperty $k -Name Disabled -Value 0 }
+            Info "SVP's VapourSynth Filter in PotPlayer enabled again (this installer had disabled it)"
+        }
+    }
+}
+
 function Register-Filter([string]$ax, [switch]$Unregister) {
     if ($NoRegister) { Info "regsvr32 skipped (-NoRegister): $ax"; return }
     $rargs = @("/s"); if ($Unregister) { $rargs += "/u" }
@@ -2081,6 +2273,7 @@ switch ($Action) {
         Show-Selection $StageDir
         if (-not $DryRun -and -not $NoMpcHc -and (Get-MpcHcProcesses).Count) { Fail 'MPC-HC is running. Close it, then run the installer again (MPC-HC also rewrites its settings when it closes).' }
         if (-not $DryRun -and -not $NoMpcBe -and (Get-MpcBeProcesses).Count) { Fail 'MPC-BE is running. Close it, then run the installer again (MPC-BE also rewrites its settings when it closes).' }
+        if (-not $DryRun -and -not $NoPotPlayer -and (Get-PotPlayerProcesses).Count) { Fail 'PotPlayer is running. Close it, then run the installer again (PotPlayer also rewrites its settings when it closes).' }
         Progress 2 'Preparing the runtime'
         Step "Installing to $InstallDir"
         if (-not $DryRun) { New-Item -ItemType Directory -Force $InstallDir, (Join-Path $InstallDir 'logs') | Out-Null }
@@ -2117,6 +2310,8 @@ switch ($Action) {
         if ($NoMpcHc) { Info 'MPC Video Renderer settings skipped (-NoMpcHc)' } else { Set-MpcVrHdr }
         Step 'MPC-BE'
         Set-MpcBeEntry $state
+        Step 'PotPlayer'
+        Set-PotPlayerEntry $state
         Step 'mpv, SMPlayer, MPC-QT (preview)'
         Install-MpvRoute $state
         # the updater: <InstallDir>\PushMpcUpdater.exe (the filter starts "--auto" at most once a day) and the logon
@@ -2239,6 +2434,7 @@ switch ($Action) {
     'uninstall' {
         if (-not $DryRun -and -not $NoMpcHc -and (Get-MpcHcProcesses).Count) { Fail 'MPC-HC is running. Close it first.' }
         if (-not $DryRun -and -not $NoMpcBe -and (Get-MpcBeProcesses).Count) { Fail 'MPC-BE is running. Close it first.' }
+        if (-not $DryRun -and -not $NoPotPlayer -and (Get-PotPlayerProcesses).Count) { Fail 'PotPlayer is running. Close it first.' }
         $state = Read-State
         $ax = Join-Path $InstallDir 'filter\PushMpcFilter.ax'
         Progress 5 'Restoring the MPC-HC settings'
@@ -2255,6 +2451,7 @@ switch ($Action) {
         if ($NoMpcHc) { Info 'MPC-HC and MPC Video Renderer settings left as they are (-NoMpcHc)' }
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
+        if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
         Uninstall-MpvRoute $state
         # the updater and its logon task
         Progress 40 'Removing the updater'
@@ -2352,6 +2549,9 @@ switch ($Action) {
             if ($e) { Info "MPC-BE entry: $($e.Name) (enabled $($e.Props.Enabled), load type $($e.Props.LoadType): 0 = Prefer)" } else { Info 'MPC-BE entry: none' }
             Info "MPC-BE decoder HwDecoder: $((Get-ItemProperty -Path $MpcBeDecoderKey -Name HwDecoder -ErrorAction SilentlyContinue).HwDecoder) (2 = D3D11 copy-back)"
         }
+        $pot = Find-PotPlayerExe
+        if (-not $pot) { Info 'PotPlayer: not installed' }
+        else { $e = Get-PotEntries | Where-Object { $_.Clsid -eq $FilterClsid }; if ($e) { Info "PotPlayer entry: $($e.Name) (disabled $($e.Props.Disabled), filter type $($e.Props.FilterType): 0 = Prefer)" } else { Info 'PotPlayer entry: none' } }
         $vs = Join-Path $InstallDir 'vsplugin'
         if (Read-Manifest $vs) {
             $line = Component-Summary $vs; $bad = Test-ComponentFiles $vs -Hash:$Verify; if ($bad) { $line += " - PROBLEM: $bad" }
@@ -2379,6 +2579,19 @@ switch ($Action) {
         if (-not $DryRun) { New-Item -ItemType Directory -Force $InstallDir | Out-Null }
         $state = Read-State
         Set-MpcBeEntry $state
+        Write-State $state
+    }
+    'potplayer-apply' {
+        # test path: only the PotPlayer steps of install (state.json in -InstallDir)
+        if (-not $DryRun) { New-Item -ItemType Directory -Force $InstallDir | Out-Null }
+        $state = Read-State
+        Set-PotPlayerEntry $state
+        Write-State $state
+    }
+    'potplayer-remove' {
+        $state = Read-State
+        Remove-PotPlayerEntry $state
+        foreach ($n in @('potEntry', 'potOverrideCreated', 'potDisabledVapourSynth', 'potLavEntry')) { if ($state.PSObject.Properties[$n]) { $state.PSObject.Properties.Remove($n) } }
         Write-State $state
     }
     'mpcbe-remove' {
