@@ -703,8 +703,19 @@ struct Engine::Impl {
             if (i) t.push_back(NowMs() - t0);
         }
         srHaveLast = false; srLastSrc = srLastOut = Buf();
+        if (!Plausible(d, 50, 125)) { err = "the upscaled frame is empty (the effect did not really run)"; return false; }
         if (ms) *ms = Median(t);
         return true;
+    }
+    // the centre luma sample of a synthetic self-test output (8-bit scale) lies in [lo, hi]
+    static bool Plausible(const Buf& b, int lo, int hi)
+    {
+        Locked l(b.ref, true);
+        if (!l.Ok()) return false;
+        const int x = l.v.width / 2, y = l.v.height / 2;
+        const uint8_t* row = l.v.data[0] + y * l.v.stride[0];
+        const int v = l.v.bytes == 1 ? row[x] : int(detail::Rd16(row, x) >> 8);
+        return v >= lo && v <= hi;
     }
     bool SelfTestFlow(std::string& err, double* ms)
     {
@@ -744,7 +755,13 @@ struct Engine::Impl {
             const double t0 = NowMs();
             if (!RunFi(av, bv, a16, b16, 0, 417083, phases, out, recover ? &rec : nullptr, i > 0, &e, err)) { if (err.empty()) err = ErrText(e); flowValid = false; return false; }
             if (i) t.push_back(NowMs() - t0);
-            if (i == 0 && rgb && !Convert(out[0], srcPool, err)) { flowValid = false; return false; }
+            if (i == 0) {
+                // the output must hold a picture: a VM can accept the call (or a command-buffer submission, which reports
+                // no error at all) and leave the destination untouched
+                Buf check = recover ? (rec.empty() ? Buf() : rec[0]) : (rgb ? Convert(out[0], srcPool, err) : out[0]);
+                if (!check) { flowValid = false; if (err.empty()) err = "no output"; return false; }
+                if (!Plausible(check, 55, 135)) { flowValid = false; err = "the generated frame is empty (the effect did not really run)"; return false; }
+            }
         }
         flowValid = false;
         if (ms) *ms = Median(t);

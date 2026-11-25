@@ -71,8 +71,9 @@ static void Run(const char* name, int w, int h, int bits, int k, const char* sr,
     e.log = [](const std::string& m) { std::printf("    log: %s\n", m.c_str()); };
     Config c; c.width = w; c.height = h; c.bits = bits; c.k = k; c.sr = sr; c.fi = fi; c.srcFps = 23.976;
     std::string err, info;
-    if (!e.Configure(c, err, info)) { ++g_unavailable; std::printf("    not available: %s\n", err.c_str()); return; }
-    ++g_configured;
+    if (!e.Configure(c, err, info)) { if (vt) ++g_unavailable; std::printf("    not available: %s\n", err.c_str()); return; }
+    if (info.rfind("no interpolation + ArtCNN", 0) == 0) vt = false;   // Metal only: says nothing about VideoToolbox
+    if (vt) ++g_configured;
     std::printf("    chain: %s\n", info.c_str());
     const int ow = e.OutWidth(), oh = e.OutHeight(), scale = ow / w;
     CHECK(ow == w * scale && oh == h * scale && (scale == 1 || scale == 2 || scale == 4), "%s: output %dx%d", name, ow, oh);

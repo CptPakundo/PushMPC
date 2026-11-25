@@ -120,9 +120,9 @@ jobs:
           brew install ffmpeg mpv > /dev/null
           cmake -S vsplugin -B build -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$(brew --prefix ffmpeg)/include" -DMPV_INCLUDE="$(brew --prefix mpv)/include"
           cmake --build build --target pushmpc_iina --parallel
-          clang -O2 -I"$(brew --prefix mpv)/include" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
           mkdir -p "$RUNNER_TEMP/iina"; gh release download --repo iina/iina --pattern '*.dmg' --dir "$RUNNER_TEMP/iina" --clobber
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/iina-mnt" "$(ls "$RUNNER_TEMP"/iina/*.dmg | head -1)" > /dev/null
+          clang -O2 -I"$(brew --prefix mpv)/include" -Wl,-rpath,"$RUNNER_TEMP/iina-mnt/IINA.app/Contents/Frameworks" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
           ./build/iina_bridge_host "$RUNNER_TEMP/iina-mnt/IINA.app/Contents/Frameworks/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 | tee out/iina.txt || true
           cat "$HOME/Library/Logs/PushMPC/iina-bridge.log" | tail -30 || true
           hdiutil detach "$RUNNER_TEMP/iina-mnt" || true

@@ -98,7 +98,7 @@ jobs:
           grep -E 'define LIBAVUTIL_VERSION_MAJOR|define LIBAVFILTER_VERSION_MAJOR' "$ffi"/libavutil/version_major.h "$ffi"/libavfilter/version_major.h || true
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$ffi" -DMPV_INCLUDE="$mpvi"
           cmake --build build --target pushmpc_iina --parallel
-          clang -O2 -I"$mpvi" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
+          clang -O2 -I"$mpvi" -Wl,-rpath,"$IINA_FW" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
           nm -gU build/pushmpc-iina.so | grep mpv_open_cplugin
       - name: The bridge inside IINA's libmpv (headless)
         timeout-minutes: 5
@@ -148,7 +148,7 @@ jobs:
         continue-on-error: true   # first runs report only (mpv output levels on llvmpipe to be confirmed)
         run: |
           set -euo pipefail
-          sudo apt-get install -y -qq mpv xvfb > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq mpv xvfb > /dev/null
           python3 -m pip install --quiet numpy pillow
           xvfb-run -a python3 vsplugin/tests/ci/artcnn_mpv_check.py "$RUNNER_TEMP/ArtCNN_C4F16_fragment.glsl" "$RUNNER_TEMP/ArtCNN_C4F16.pmnn" ./build/artcnn_ref
       - uses: actions/upload-artifact@v4
@@ -395,9 +395,11 @@ jobs:
           # variable from mpv's own environment at file-loaded (after every script's top level ran)
           mkdir -p "$RUNNER_TEMP/probe"
           printf '%s\n' 'local ok = pcall(require, "ffi")' \
-            'mp.register_event("file-loaded", function() print("PUSHMPC_PROBE ffi=" .. tostring(ok) .. " VSSCRIPT_PATH=" .. tostring(os.getenv("VSSCRIPT_PATH"))); mp.command("quit") end)' \
+            'mp.register_event("file-loaded", function() mp.msg.info("PUSHMPC_PROBE ffi=" .. tostring(ok) .. " VSSCRIPT_PATH=" .. tostring(os.getenv("VSSCRIPT_PATH"))); mp.command("quit") end)' \
             > "$RUNNER_TEMP/probe/probe.lua"
-          mpv --no-video --no-audio --idle=no --script="$RUNNER_TEMP/probe/probe.lua" av://lavfi:testsrc=d=1 2>&1 | grep PUSHMPC_PROBE | tee "$RUNNER_TEMP/probe.txt" || true
+          mpv --vo=null --ao=null --idle=no --msg-level=all=info --script="$RUNNER_TEMP/probe/probe.lua" av://lavfi:testsrc=d=1 > "$RUNNER_TEMP/probe-all.txt" 2>&1 || true
+          tail -25 "$RUNNER_TEMP/probe-all.txt"
+          grep PUSHMPC_PROBE "$RUNNER_TEMP/probe-all.txt" > "$RUNNER_TEMP/probe.txt" || true
           grep -q "ffi=true VSSCRIPT_PATH=/" "$RUNNER_TEMP/probe.txt" || { echo "::error::the Lua helper did not set VSSCRIPT_PATH inside mpv"; exit 1; }
           ls "$(brew --prefix pushmpc)/share/pushmpc/shaders" "$(brew --prefix pushmpc)/share/pushmpc/mpv"
           src=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,r_frame_rate,width,height -of csv=p=0 "$clip")
