@@ -1,0 +1,105 @@
+name: xefg-spike
+
+# SP6: XeSS frame generation through a headless IDXGISwapChain4 shim, smoke-tested on WARP.
+on:
+  push:
+    paths:
+      - pushmpc/tools/xefg_headless_spike.cpp
+      - pushmpc/tools/xefg_headless_spike.cmd
+      - tests/xess-fg-manual.ps1
+      - .github/workflows/xefg-spike.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  XESS_TAG: v3.0.2
+  XESS_ZIP: XeSS_SDK_3.0.2.zip
+  XESS_ZIP_SHA256: 88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990
+  # libxess_fg.dll inside that SDK; the MFG unlock byte tables are audited for exactly this build.
+  XEFG_DLL_SHA256: EC5E0C65E075570C6EDE72618BB666D0BE0C2E10B2EA9762C0FE8CB8E375AB27
+
+jobs:
+  warp:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+
+      - name: Fetch XeSS SDK (official release, pinned)
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $d = "$env:RUNNER_TEMP\xess"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          gh release download $env:XESS_TAG -R intel/xess -p $env:XESS_ZIP -D $d
+          $h = (Get-FileHash "$d\$env:XESS_ZIP" -Algorithm SHA256).Hash
+          Write-Host "XeSS SDK $env:XESS_TAG $env:XESS_ZIP sha256=$h"
+          if ($h -ne $env:XESS_ZIP_SHA256.ToUpper()) { throw "XeSS SDK hash mismatch (expected $env:XESS_ZIP_SHA256)" }
+          Expand-Archive "$d\$env:XESS_ZIP" "$d\sdk"
+          $hdr = Get-ChildItem "$d\sdk" -Recurse -Filter xefg_swapchain_d3d12.h | Select-Object -First 1
+          $root = $hdr.Directory.Parent.Parent.FullName
+          Write-Host "XeSS root: $root"
+          foreach ($n in 'libxess_fg.dll','libxell.dll') {
+            $f = Get-ChildItem $root -Recurse -Filter $n | Select-Object -First 1
+            Write-Host "$n version=$($f.VersionInfo.FileVersion) sha256=$((Get-FileHash $f.FullName).Hash)"
+          }
+          $fg = (Get-FileHash (Get-ChildItem $root -Recurse -Filter libxess_fg.dll | Select-Object -First 1).FullName).Hash
+          if ($fg -ne $env:XEFG_DLL_SHA256) { Write-Host "::warning::libxess_fg.dll differs from the audited build; MFG unlock will refuse" }
+          "XESS_ROOT=$root" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build spike
+        timeout-minutes: 10
+        shell: cmd
+        run: call pushmpc\tools\xefg_headless_spike.cmd "%XESS_ROOT%" "%RUNNER_TEMP%\spike"
+
+      - name: Adapter info
+        timeout-minutes: 2
+        shell: pwsh
+        run: Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, VideoModeDescription, CurrentRefreshRate
+
+      - name: Run WARP 2X (320x180)
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\spike\xefg_headless_spike.exe" --warp --interp 1 --width 320 --height 180 --square 40 --speed 4,1 --frames 16 --fps 0 --timing-frames 8 --verbose-calls 3 --out "$env:RUNNER_TEMP\out\warp-2x-320" | Select-String 'REPORT|XEFG\[(WARN|ERROR)\]|SHIM ' | Select-Object -First 400
+          Write-Host "exit=$LASTEXITCODE"
+          exit $LASTEXITCODE
+
+      - name: Run WARP 4X with MFG unlock (320x180)
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\spike\xefg_headless_spike.exe" --warp --interp 3 --width 320 --height 180 --square 40 --speed 4,1 --frames 16 --fps 0 --timing-frames 8 --verbose-calls 3 --out "$env:RUNNER_TEMP\out\warp-4x-320" | Select-String 'REPORT (unlock|runtime|init|phase1|sanity|timing|SUMMARY|SPIKE)|XEFG\[(WARN|ERROR)\]' | Select-Object -First 200
+          Write-Host "exit=$LASTEXITCODE"
+          exit $LASTEXITCODE
+
+      - name: Run WARP 2X (640x360)
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\spike\xefg_headless_spike.exe" --warp --interp 1 --frames 16 --fps 0 --timing-frames 8 --verbose-calls 3 --out "$env:RUNNER_TEMP\out\warp-2x-640" | Select-String 'REPORT (init|phase1|sanity|pacing shim|timing|SUMMARY|SPIKE)|XEFG\[(WARN|ERROR)\]' | Select-Object -First 200
+          Write-Host "exit=$LASTEXITCODE"
+          exit $LASTEXITCODE
+
+      - name: Tester script smoke (WARP)
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: pwsh
+        run: ./tests/xess-fg-manual.ps1 -Tool "$env:RUNNER_TEMP\spike\xefg_headless_spike.exe" -OutDir "$env:RUNNER_TEMP\out\manual" -Sizes 320x180 -Interp 1 -Frames 12 -TimingFrames 8 -Warp
+
+      - name: Upload reports and PNGs
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: xefg-spike-warp
+          path: ${{ runner.temp }}/out
+          if-no-files-found: warn
