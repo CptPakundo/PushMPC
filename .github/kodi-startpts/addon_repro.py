@@ -67,6 +67,15 @@ def launch(tag, body):
     <setting id="services.webserverauthentication">false</setting>
 </settings>
 """)
+    # a video source for the clip's folder (JSON-RPC Files.* only answers for files inside a source)
+    folder = os.path.dirname(os.path.abspath(a.clip)) + os.sep
+    write(os.path.join(ud, "sources.xml"), f"""<sources>
+    <video>
+        <default pathversion="1"></default>
+        <source><name>clips</name><path pathversion="1">{folder}</path><allowsharing>true</allowsharing></source>
+    </video>
+</sources>
+""")
     p = subprocess.Popen([a.kodi, "-p"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     say(f"== {tag}")
     t = time.time() + 150
