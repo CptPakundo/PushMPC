@@ -197,6 +197,26 @@ jobs:
           gcc -O2 -Wall mpvnative/tests/d3d11_warp_harness.c -o "$R/d3d11_warp_harness.exe" $(pkg-config --cflags --libs libavfilter libavutil) -ld3d11 -ldxgi -ldxguid -luuid
           export PATH="$R/PushMPC-mpv-windows:$PATH" PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
           "$R/d3d11_warp_harness.exe" "$(cygpath -m "$PWD/build-engine/stub")"
+      - name: Setup's entry point (pushmpc-native.ps1) into a temporary folder
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $from = Join-Path $env:RUNNER_TEMP 'PushMPC-mpv-windows'; $dest = Join-Path $env:RUNNER_TEMP 'native-install'
+          Copy-Item mpvnative/install/pushmpc-native.ps1 $from
+          $env:PUSHMPC_ENGINE = ''
+          $r = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') install -From $from -Dest $dest -Opts 'smoother=2' -Hwdec no -Json | ConvertFrom-Json
+          Write-Host "install: $($r | ConvertTo-Json -Compress)"
+          if ($r.state -ne 'installed') { throw 'install failed' }
+          $clip = Join-Path $env:RUNNER_TEMP 't\clip.mkv'; $out = Join-Path $env:RUNNER_TEMP 't\native-install.mkv'
+          & (Join-Path $dest 'mpv.com') $clip "--o=$out" --of=matroska --ovc=ffv1 --no-audio 2>&1 | Select-String 'pushmpc|filter' | Select-Object -First 3
+          $n = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $out
+          $src = & (Join-Path $from 'ffprobe.exe') -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $clip
+          Write-Host "frames through the installed config: $n (source $src)"
+          if ([int]$n -lt 2 * [int]$src - 4) { throw 'the installed config did not double the frame rate' }
+          $s = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') status -Dest $dest -Json | ConvertFrom-Json
+          Write-Host "status: $($s | ConvertTo-Json -Compress)"
+          & pwsh -File (Join-Path $from 'pushmpc-native.ps1') uninstall -Dest $dest -Json
+          if (Test-Path $dest) { Get-ChildItem $dest -Recurse | Select-Object -First 10 | Out-String | Write-Host; throw 'uninstall left files behind' }
       - name: mpv on a window (d3d11 on WARP, hwupload -> pushmpc -> d3d11 interop), best effort
         shell: msys2 {0}
         continue-on-error: true
@@ -259,13 +279,13 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
-        # the first and the last release of each branch (a point release can bump the micro version: 7.1 is 10.4.100,
-        # 7.1.5 is 10.5.100); same versions give the same file name
-        tag: [n6.0, n6.0.1, n6.1, n6.1.6, n7.0, n7.0.3, n7.1, n7.1.5, n8.0, n8.0.3, n8.1, n8.1.3, n9.0, n9.0.2, n9.1]
+        # every pinned tag of the branch (point releases can bump the micro version: 7.1 is 10.4.100, 7.1.5 is 10.5.100)
+        branch: [n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CCACHE_DIR: /home/runner/pm-ccache-hook
+      CCACHE_MAXSIZE: 1G
     steps:
       - uses: actions/checkout@v4
       - name: Packages
@@ -273,18 +293,13 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: /home/runner/pm-ccache-hook
-          key: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.tag }}-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/hook/pushmpc_hook_glue.c') }}
-          restore-keys: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.tag }}-
-      - name: FFmpeg ${{ matrix.tag }} (pinned) and its private libavfilter
-        run: |
-          commit=$(python3 -c "import json,sys;print([b['commit'] for b in json.load(open('mpvnative/pins.json'))['hookBranches'] if b['tag']==sys.argv[1]][0])" "${{ matrix.tag }}")
-          s="$RUNNER_TEMP/ffmpeg"
-          git clone -q --depth 1 -b "${{ matrix.tag }}" https://git.ffmpeg.org/ffmpeg.git "$s"
-          [ "$(git -C "$s" rev-parse HEAD)" = "$commit" ] || { echo "::error::${{ matrix.tag }}: commit mismatch"; exit 1; }
-          bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hooklib"
+          key: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/hook/pushmpc_hook_glue.c', 'mpvnative/pins.json') }}
+          restore-keys: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-
+      - name: Every tag of FFmpeg ${{ matrix.branch }} (pinned) and its private libavfilter
+        run: bash mpvnative/hook/build-hook-branch.sh "${{ matrix.branch }}" "$RUNNER_TEMP/ffmpeg" "$RUNNER_TEMP/hooklib"
       - uses: actions/upload-artifact@v4
         with:
-          name: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-${{ matrix.tag }}
+          name: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-${{ matrix.branch }}
           path: ${{ runner.temp }}/hooklib/*.so
           retention-days: 7
 
@@ -327,6 +342,8 @@ jobs:
           cp build-engine/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
       - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
         run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
+      - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
+        run: sh mpvnative/install/test-install.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-install"
       - name: Debian 13's mpv (FFmpeg 7.1)
         timeout-minutes: 15
         run: |

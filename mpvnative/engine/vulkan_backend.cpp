@@ -27,6 +27,8 @@
 #include "vk_context.h"
 #include "pme_import.h"
 #include "pme_export.h"
+#include "pme_thumb.h"
+#include "transitions.h"
 
 namespace pme {
 namespace {
@@ -52,6 +54,7 @@ public:
         const VkDevice d = m_ctx->Dev();
         for (auto& kv : m_views) vkDestroyImageView(d, kv.second, nullptr);
         for (auto& dp : m_pools) if (dp.pool) vkDestroyDescriptorPool(d, dp.pool, nullptr);
+        for (auto& tb : m_thumbRing) m_ctx->Destroy(tb.buf);
         for (Pipe* p : { &m_import, &m_export }) {
             if (p->p) vkDestroyPipeline(d, p->p, nullptr);
             if (p->pl) vkDestroyPipelineLayout(d, p->pl, nullptr);
@@ -104,6 +107,7 @@ public:
         m_k = std::clamp(pk.k, 1, 8);
         m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
         m_holdOn = m_k > 1 && ParseBool(Opt(o, "subtitle_hold", ReadSetting("SubtitleHold")), false);
+        m_transitions = m_k > 1 && ParseBool(Opt(o, "transitions", ReadSetting("TransitionRules")), true);
         const int look = m_dedup ? 2 : 0;
         if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots) {   // a settle can release (lookahead + 1) x k outputs
             c.outSlots = std::min(needOuts, 28);
@@ -137,6 +141,8 @@ public:
         VkImageView in[3] = {};
         for (uint32_t p = 0; p < np; ++p)
             if (!(in[p] = View(src.vk[p], PlaneFormat(p, two), VK_IMAGE_USAGE_SAMPLED_BIT))) return PMENG_ERROR;
+        ThumbBuf* thumb = m_transitions ? NextThumb() : nullptr;
+        if (m_transitions && !thumb) return PMENG_ERROR;
         VkDescriptorSet set = VK_NULL_HANDLE;
         Pool* pool = NextPool();
         if (!pool) return PMENG_ERROR;
@@ -159,12 +165,14 @@ public:
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_import.pl, 0, 1, &set, 0, nullptr);
             vkCmdPushConstants(cb, m_import.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
             vkCmdDispatch(cb, uint32_t((t.w + 15) / 16), uint32_t((t.h + 7) / 8), 1);
+            if (thumb && !RecordThumb(cb, *pool, t, *thumb, e)) return false;
             return true;
         };
         uint64_t itk = 0;
         const int slot = m_eng.Import(rec, sync, err, &itk);
         if (slot < 0) return PMENG_ERROR;
         pool->ticket = itk;
+        if (thumb) { thumb->src = int64_t(m_seq); thumb->ticket = itk; }
         m_lastTicket = itk;
         if (m_hostSync && !m_eng.Wait(itk, err)) return PMENG_ERROR;   // diagnostics: PUSHMPC_VK_SYNC=1
 
@@ -263,11 +271,11 @@ public:
     }
     std::string Stats() override
     {
-        char b[480];
+        char b[600];
         const auto& t = m_eng.Times();
-        std::snprintf(b, sizeof(b), "portable-vulkan: %llu sources (%llu duplicates), %llu outputs (%llu generated, %llu held), %llu cuts, %llu pairs with Subtitle Hold; import %.2f ms, motion %.2f ms (means)",
+        std::snprintf(b, sizeof(b), "portable-vulkan: %llu sources (%llu duplicates), %llu outputs (%llu generated, %llu held), %llu cuts, %llu flashes held, %llu dissolves blended, %llu pairs with Subtitle Hold; import %.2f ms, motion %.2f ms (means)",
                       (unsigned long long)m_seq, (unsigned long long)m_dups, (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_holds,
-                      (unsigned long long)m_cuts, (unsigned long long)m_heldPairs,
+                      (unsigned long long)m_cuts, (unsigned long long)m_flashes, (unsigned long long)m_linear, (unsigned long long)m_heldPairs,
                       t.uploads ? t.uploadMs / double(t.uploads) : 0.0, t.pairs ? t.meMs / double(t.pairs) : 0.0);
         return b;
     }
@@ -275,9 +283,69 @@ public:
 private:
     struct Item { pmeng_out_info info; int out; };
     struct Pool { VkDescriptorPool pool = VK_NULL_HANDLE; uint64_t ticket = 0; };
+    struct ThumbBuf { Buffer buf; int64_t src = -1; uint64_t ticket = 0; int tw = 0, th = 0, rowWords = 0; };
 
     struct PairInfo { int id = -1; int cut = 0; bool pending = false; };
 
+    // the next thumbnail buffer of the ring (its last use finished; sized at the first use)
+    ThumbBuf* NextThumb()
+    {
+        ThumbBuf& tb = m_thumbRing[m_nextThumb];
+        m_nextThumb = (m_nextThumb + 1) % m_thumbRing.size();
+        if (tb.ticket && !m_eng.Wait(tb.ticket, err)) return nullptr;
+        if (tb.src >= 0 && !m_thumbs.count(tb.src)) ThumbFromBuf(tb);   // keep what an older pair may still ask for
+        tb.src = -1; tb.ticket = 0;
+        if (!tb.buf.buf) {
+            tb.tw = std::max(1, m_w / 8); tb.th = std::max(1, m_h / 8); tb.rowWords = (tb.tw + 3) / 4;
+            if (!m_ctx->CreateBuffer(VkDeviceSize(tb.rowWords) * VkDeviceSize(tb.th) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, tb.buf, err)) return nullptr;
+        }
+        return &tb;
+    }
+    bool RecordThumb(VkCommandBuffer cb, Pool& pool, const SlotTarget& t, const ThumbBuf& tb, std::string& e)
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (!Alloc(pool, m_thumbPipe, set, e)) return false;
+        VkDescriptorImageInfo ii{ m_sampler, t.yv, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorBufferInfo bi{ tb.buf.buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w[2] = {};
+        for (int i = 0; i < 2; ++i) { w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = set; w[i].dstBinding = uint32_t(i); w[i].descriptorCount = 1; }
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &ii;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[1].pBufferInfo = &bi;
+        vkUpdateDescriptorSets(m_ctx->Dev(), 2, w, 0, nullptr);
+        struct { int tw, th, rowWords, shift; float kRaw; } pc{ tb.tw, tb.th, tb.rowWords, std::max(0, m_bits - 8), m_bits > 8 ? 65535.f : 255.f };
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_thumbPipe.p);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_thumbPipe.pl, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, m_thumbPipe.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cb, uint32_t((tb.rowWords * tb.th + 63) / 64), 1, 1);
+        return true;
+    }
+    void ThumbFromBuf(const ThumbBuf& tb)
+    {
+        Thumb t;
+        t.w = tb.tw; t.h = tb.th;
+        t.px.resize(size_t(t.w) * size_t(t.h));
+        const uint8_t* p = static_cast<const uint8_t*>(tb.buf.map);
+        double sum = 0;
+        for (int y = 0; y < t.h; ++y)
+            for (int x = 0; x < t.w; ++x) { const uint8_t v = p[size_t(y) * size_t(tb.rowWords) * 4 + size_t(x)]; t.px[size_t(y) * size_t(t.w) + size_t(x)] = v; sum += v; }
+        t.mean = sum / double(t.px.size());
+        m_thumbs[tb.src] = std::move(t);
+    }
+    // the thumbnail of source frame s, or null (not imported yet, or too old)
+    const Thumb* ThumbAt(int64_t s)
+    {
+        if (auto it = m_thumbs.find(s); it != m_thumbs.end()) return &it->second;
+        for (auto& tb : m_thumbRing)
+            if (tb.src == s) {
+                if (tb.ticket && !m_eng.Wait(tb.ticket, err)) return nullptr;
+                ThumbFromBuf(tb);
+                return &m_thumbs[s];
+            }
+        return nullptr;
+    }
     // a seek or gap: every queued output and picture forgotten
     void Drop()
     {
@@ -287,6 +355,7 @@ private:
         m_holdChain = {};
         m_holdOf.clear();
         m_hold.Reset();
+        m_thumbs.clear();
         for (auto& [key, p] : m_pairs) m_eng.ReleasePair(p.id);
         m_pairs.clear();
         m_lastPair = -1; m_lastPairKey = { -1, -1 };
@@ -325,8 +394,11 @@ private:
         if (!it->second.pending) { out = it->second; return true; }
         PairStats st;
         if (!m_eng.EstimateEnd(it->second.id, st, err)) return false;
-        PairInfo pi; pi.id = it->second.id; pi.cut = m_guard.Decide(st);
-        if (pi.cut) ++m_cuts;
+        PairInfo pi; pi.id = it->second.id;
+        pi.cut = m_transitions ? DecidePair(m_guard, st, m_rules, ThumbAt(d0 - 1), ThumbAt(d0), ThumbAt(d1), ThumbAt(d1 + 1)) : m_guard.Decide(st);
+        if (pi.cut == 3) ++m_flashes;
+        if (pi.cut == 4) ++m_linear;
+        if (pi.cut == 1 || pi.cut == 2) ++m_cuts;
         if (m_holdOn && !pi.cut) {
             auto ha = m_holdOf.find(d0), hb = m_holdOf.find(d1);
             if (ha != m_holdOf.end() && hb != m_holdOf.end()) {
@@ -387,7 +459,8 @@ private:
             } else {
                 PairInfo pi;
                 if (!PairFor(sh.d0, sh.d1, pi)) return false;
-                const int mode = pi.cut ? (sh.t < 0.5f ? 1 : 2) : 0;   // a cut: the nearer real frame, never a morph
+                // 1, 2 cuts and 3 flashes: the nearer real frame (never a morph); 4 a dissolve or fade: the plain linear blend
+                const int mode = pi.cut == 4 ? 3 : pi.cut ? (sh.t < 0.5f ? 1 : 2) : 0;
                 if (!m_eng.Generate(pi.id, sh.t, mode, o, tk, err)) return false;
                 info.generated = 1;
             }
@@ -410,6 +483,7 @@ private:
             if (it->first < front && !used && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
             else ++it;
         }
+        for (auto it = m_thumbs.begin(); it != m_thumbs.end();) { if (it->first < front - 2) it = m_thumbs.erase(it); else ++it; }
         for (auto it = m_holdOf.begin(); it != m_holdOf.end();) {
             if (it->first < front - 1) { it->second.wait(); it = m_holdOf.erase(it); }
             else ++it;
@@ -510,6 +584,7 @@ private:
         const VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SI = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SB = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         if (!MakePipe(m_import, kSpv_pme_import, sizeof(kSpv_pme_import), { CIS, CIS, CIS, SI, SI, SI }, 32, e)) return false;
         if (!MakePipe(m_export, kSpv_pme_export, sizeof(kSpv_pme_export), { SB, SI, SI, SI }, 52, e)) return false;
+        if (!MakePipe(m_thumbPipe, kSpv_pme_thumb, sizeof(kSpv_pme_thumb), { CIS, SB }, 20, e)) return false;
         VkSamplerCreateInfo s{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         s.magFilter = s.minFilter = VK_FILTER_NEAREST; s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         s.addressModeU = s.addressModeV = s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -558,10 +633,16 @@ private:
     SubtitleHoldYuv m_hold;
     std::shared_future<std::shared_ptr<const HoldFrameYuv>> m_holdChain;
     std::map<int64_t, std::shared_future<std::shared_ptr<const HoldFrameYuv>>> m_holdOf;
-    uint64_t m_dups = 0, m_holds = 0, m_heldPairs = 0;
+    uint64_t m_dups = 0, m_holds = 0, m_heldPairs = 0, m_flashes = 0, m_linear = 0;
+    // transition rules (dissolves / fades blended, flashes held) on GPU thumbnails read back, a few KB per frame
+    bool m_transitions = false;
+    TransitionRules m_rules;
+    std::array<ThumbBuf, 12> m_thumbRing;
+    size_t m_nextThumb = 0;
+    std::map<int64_t, Thumb> m_thumbs;
     uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_lastTicket = 0;
     std::deque<Item> m_q;
-    Pipe m_import, m_export;
+    Pipe m_import, m_export, m_thumbPipe;
     VkSampler m_sampler = VK_NULL_HANDLE;
     std::vector<Pool> m_pools;
     size_t m_nextPool = 0;
