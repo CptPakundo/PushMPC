@@ -16,7 +16,8 @@
 #   win-packaging   winget validate (Setup's SHA-256 from the CI release), Scoop: schema + a real install/uninstall
 #   setup-graph     the x64 Setup silently on windows-2025 and on windows-11-arm (Prism): structure, registration,
 #                   MPC-HC x64 with MPC Video Renderer must create the filter (its log), uninstall
-# CI artifacts reused (inputs): the release dry run (Setup, zips) and the vsplugin run (pushmpc_vs.dll).
+# win-build makes the filter and pushmpc_vs.dll from this commit; the Setup jobs take the newest release.yml dry run's
+# artifact (skipped with a notice when there is none).
 name: integrations
 
 on:
@@ -203,7 +204,8 @@ jobs:
           $good = Test-PmVapourSynth $E $mpv $env:VSSCRIPT_DIR
           "without the runtime: $($bad.Result) ($($bad.Message)); with it: $($good.Result) ($($good.Message))" | Tee-Object -Append "$env:RUNNER_TEMP\players.txt"
           Write-Host "::notice title=Windows VapourSynth self-test::without the runtime $($bad.Result) ($($bad.Message)); with it $($good.Result)"
-          if ($good.Result -ne 0 -or $bad.Result -ne 1) { Write-Host '::error::self-test: expected 1 without the runtime and 0 with it'; exit 1 }      - name: Install (mpv-integration.ps1, real profile of the runner)
+          if ($good.Result -ne 0 -or $bad.Result -ne 1) { Write-Host '::error::self-test: expected 1 without the runtime and 0 with it'; exit 1 }
+      - name: Install (mpv-integration.ps1, real profile of the runner)
         run: |
           . ./integrations/mpv/mpv-integration.ps1
           $rows = Invoke-PmMpvIntegration -Action Install -RuntimeOnPath
