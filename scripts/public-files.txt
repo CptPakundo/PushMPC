@@ -44,3 +44,6 @@ integrations/mpv/**
 scripts/vapoursynth-pin.json
 scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
+scripts/nvidia-vfx-pin.json
+scripts/nvidia-vfx-wheel.py
+scripts/nvidia-vfx-fetch.sh

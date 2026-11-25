@@ -1,0 +1,101 @@
+# NVIDIA Video Effects runtime (`nvidia-vfx` wheels from pypi.nvidia.com) for PushMPC's NVIDIA backends, on hosted
+# runners (no NVIDIA GPU on any of them):
+#   probe          ubuntu-24.04: fetch the three pinned wheels by SHA-256 (pin + the index's own hash), list every member
+#                  with SHA-256 / size, dump the SDK headers' selectors, the ELF/PE imports, the VFG fatbin census.
+#   windows-hash   windows-2022: the Windows x64 wheel's VFX files against what pushmpc-install.ps1 pins today from
+#                  Veyra's runtime package ($RuntimeFileHashesNvidia): which files are byte-identical.
+# The Linux build and structural tests of the vsplugin backend are in vsplugin-nvidia-linux.yml.
+name: nvidia-vfx
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['track/nvidia-linux']
+    paths: ['scripts/nvidia-vfx-*', '.github/workflows/nvidia-vfx.yml']
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/wheels
+          key: nvidia-vfx-wheels-${{ hashFiles('scripts/nvidia-vfx-pin.json') }}
+      - name: Index hashes (0.2.0.0)
+        run: python3 -I scripts/nvidia-vfx-wheel.py index 0.2.0.0
+      - name: Fetch, list, headers, imports
+        run: |
+          set -euo pipefail
+          for p in linux_x86_64 win_amd64 win_arm64; do
+            w=$(python3 -I scripts/nvidia-vfx-wheel.py fetch $p ~/wheels)
+            echo "::group::$p members"; python3 -I scripts/nvidia-vfx-wheel.py list "$w" --json "members-$p.json"; echo "::endgroup::"
+            echo "::group::$p headers"; python3 -I scripts/nvidia-vfx-wheel.py headers "$w"; echo "::endgroup::"
+            rm -rf "x-$p"; python3 -I scripts/nvidia-vfx-wheel.py extract "$w" "x-$p" --all
+          done
+          echo "::group::Linux ELF: SONAME, NEEDED, RUNPATH, CUDA driver imports"
+          find x-linux_x86_64 -name '*.so*' -type f | sort | while read -r f; do
+            echo "== $f ($(stat -c %s "$f") bytes)"
+            readelf -d "$f" | grep -E 'SONAME|NEEDED|RUNPATH|RPATH' || true
+            nm -D --undefined-only "$f" 2>/dev/null | grep -E ' (cu[A-Z]|dlopen|dlsym|NvVFX|NvCV)' | awk '{print "   U " $2}' | sort -u | head -80 || true
+            nm -D --defined-only "$f" 2>/dev/null | grep -E ' (NvVFX_|NvCV|NVSDK_NGX)' | awk '{print "   T " $3}' | sort -u | head -80 || true
+            readelf -S -W "$f" | grep -E 'nv_fatbin|nvFatBin' || true
+          done
+          echo "::endgroup::"
+          echo "::group::Windows PE imports (x64)"
+          find x-win_amd64 -iname '*.dll' | sort | while read -r f; do echo "== $f"; objdump -p "$f" 2>/dev/null | grep -E 'DLL Name|cuModuleLoadData|cuDeviceGetAttribute|cuGetProcAddress' | head -40 || true; done
+          echo "::endgroup::"
+          echo "::group::other files (models, licences, metadata)"
+          find x-linux_x86_64 -type f ! -name '*.so*' | sort | head -100
+          cat x-linux_x86_64/*.dist-info/METADATA | head -60 || true
+          echo "::endgroup::"
+      - name: VFG fatbin census (SM89 ELF entries the Ampere compat would retarget)
+        run: |
+          python3 -I - <<'PY'
+          import glob, struct
+          for f in glob.glob("x-linux_x86_64/**/*VideoFrameGeneration*", recursive=True) + glob.glob("x-win_amd64/**/*VideoFrameGeneration*.dll", recursive=True):
+              b = open(f, "rb").read()
+              p, n, sms, bad = 0, 0, {}, 0
+              while True:
+                  p = b.find(b"\x50\xed\x55\xba\x01\x00\x10\x00", p)
+                  if p < 0: break
+                  size = struct.unpack_from("<Q", b, p + 8)[0]
+                  q, end = p + 16, p + 16 + size
+                  while q + 64 <= end:
+                      kind, ver, hdr, nbytes = struct.unpack_from("<HHIQ", b, q)
+                      if ver != 0x101 or hdr < 64 or hdr > 4096: bad += 1; break
+                      sm = struct.unpack_from("<I", b, q + 28)[0]
+                      key = (kind, sm, hdr == 64 and b[q + hdr:q + hdr + 4] == b"\x7fELF" and struct.unpack_from("<I", b, q + hdr + 48)[0])
+                      sms[key] = sms.get(key, 0) + 1
+                      q += hdr + nbytes
+                  n += 1; p = end if end > p else p + 8
+              print(f, "fatbins", n, "malformed", bad)
+              for (kind, sm, flags), c in sorted(sms.items()):
+                  print(f"   kind {kind} ({'elf' if kind == 2 else 'ptx'}) sm {sm} e_flags {hex(flags) if flags else '-'}: {c}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-vfx-members
+          path: members-*.json
+
+  windows-hash:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/wheels
+          key: nvidia-vfx-wheel-win64-${{ hashFiles('scripts/nvidia-vfx-pin.json') }}
+      - name: Windows x64 wheel vs $RuntimeFileHashesNvidia
+        shell: bash
+        run: |
+          set -euo pipefail
+          w=$(python -I scripts/nvidia-vfx-wheel.py fetch win_amd64 ~/wheels)
+          python -I scripts/nvidia-vfx-wheel.py compare "$w" scripts/pushmpc-install.ps1 | tee compare.md
+          cat compare.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-hash-compare
+          path: compare.md

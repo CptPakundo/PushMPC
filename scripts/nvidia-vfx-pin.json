@@ -1,0 +1,29 @@
+{
+  "note": "NVIDIA Video Effects runtime (VFX SDK 1.3.0.0: VideoFrameGeneration, RTX VSR = VideoSuperRes over nvngx_vsr 1.8.3, TrueHDR = RTX Video HDR) from NVIDIA's own PyPI index. PushMPC never redistributes these files: the installer downloads the exact wheel below, checks its SHA-256 (the index publishes the same hash) and extracts only the listed files, each checked against its own SHA-256 and size. The per-file lists were produced on GitHub's runners by .github/workflows/nvidia-vfx.yml (job probe). NVIDIA's licence: NvidiaProprietary (the user accepts it at install, as with the Windows runtime).",
+  "package": "nvidia-vfx",
+  "version": "0.2.0.0",
+  "sdkVersion": "1.3.0.0",
+  "index": "https://pypi.nvidia.com/nvidia-vfx/",
+  "minDriver": { "linux": "570.190", "windows": "570.65" },
+  "installDir": { "linux": "~/.local/share/pushmpc/nvidia-vfx", "windows": "%LOCALAPPDATA%\\PushMPC\\runtime\\nvidia-vfx" },
+  "wheels": {
+    "linux_x86_64": {
+      "wheel": "nvidia_vfx-0.2.0.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.2.0.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "0252866A7B798A6F92C8543443D88F716E8C5BBC6A7DDD77A2754728DADA9FA8",
+      "files": []
+    },
+    "win_amd64": {
+      "wheel": "nvidia_vfx-0.2.0.0-cp312-abi3-win_amd64.whl",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.2.0.0-cp312-abi3-win_amd64.whl",
+      "sha256": "CEBAA12411F7E22B39293205C5C4D07B8073D14CA1E0E7727EE4375207A36445",
+      "files": []
+    },
+    "win_arm64": {
+      "wheel": "nvidia_vfx-0.2.0.0-cp312-abi3-win_arm64.whl",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.2.0.0-cp312-abi3-win_arm64.whl",
+      "sha256": "74300E3E7DFD0DD8683F4C13340CC2B15D26FB3C53F74CBCD6C1102A75F7D42D",
+      "files": []
+    }
+  }
+}
