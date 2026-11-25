@@ -67,14 +67,17 @@ Setup finds your players and your graphics card, picks the engine and sets every
 | **VLC 3** | 🧪 | 🧪 | 🧪 | PushMPC's VLC module (Setup installs it when the download includes it) |
 | **Kodi** | 🆕 | 🆕 | | videos play in mpv as Kodi's external player |
 | **Stremio** 5.0.28+ | 🆕 | | | through its mpv config file setting |
-| **Plex** for Windows / HTPC | 🧪 | | | frame generation through capture mode; RTX / Intel video super resolution inside Plex once its mpv supports it |
+| **Plex** for Windows / HTPC | 🧪 | | | Setup puts a VapourSynth-enabled mpv library into Plex (tested Plex versions; Plex's own is kept and put back); other versions: capture mode |
 | **Jellyfin** Desktop, Jellyfin / Plex MPV Shim | 🆕 | 🆕 | | VapourSynth filter in their mpv |
 | **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 fallback | | | capture mode: PushFPS's window capture of the player |
 
 **Capture mode** is the fallback for players PushMPC cannot plug into. Setup turns it on only when it finds such a
-player (Start menu > *PushMPC Capture (fallback)*). It adds about 50-60 ms of delay, opens a second window over the
-player, and cannot show DRM-protected video. On first use it installs PushFPS, after asking. Windows only: PushFPS's
-Linux and macOS builds have no window capture.
+player (Start menu > *PushMPC Capture (fallback)*): it opens PushFPS's window capture straight on the running player.
+It adds about 50-60 ms of delay (set the player's audio delay to about +80 ms if the sound comes early), opens a second
+window over the player, and cannot show DRM-protected video. On first use it installs a PushFPS of its own inside
+PushMPC's folder, after asking; a PushFPS you installed is never used or changed. On Linux and macOS, PushFPS reads
+cameras, not windows: the [OBS virtual camera workaround](docs/user-guide.md#capture-on-linux-and-macos-workaround)
+feeds it; a capture host of PushMPC's own is on the roadmap.
 
 | GPU | Frame generation (Auto's order) | Upscaling |
 |---|---|---|
@@ -86,7 +89,7 @@ Linux and macOS builds have no window capture.
 | **Radeon RX 6000 / 7000** | PushFlow, FSR 3.1, AMD FRC | FSR 4.1 INT8 (RX 6000: AMD FSR SDK 2.4, offered by Setup) |
 | **Intel Arc**, **Snapdragon X** | PushFlow, FSR 3.1 | NIS |
 | **Linux**: NVIDIA RTX | NVIDIA VFG (NVIDIA's Video Effects, after you accept NVIDIA's licence; RTX 20: the GPU engine) | RTX VSR |
-| **Linux**: any Vulkan GPU | PushMPC's GPU engine (motion-compensated, scene-cut guard); PushFlow where the pmml runtime is installed | NIS, ArtCNN |
+| **Linux**: any Vulkan GPU | PushFlow (RIFE) through pmml: OpenVINO on Intel, MIGraphX on AMD with ROCm; else PushMPC's GPU engine (motion-compensated, scene-cut guard) | NIS, ArtCNN |
 | **macOS**: Apple silicon | VideoToolbox frame interpolation (macOS 26), else the GPU engine on Metal | VideoToolbox super resolution, ArtCNN |
 
 If your GPU can run a feature, you get it: community unlocks and ports are on by default. Auto measures your GPU while
@@ -172,6 +175,12 @@ to it by itself if a new one fails to load. Stable and Beta channels; turn it of
 No. PushMPC brings its own copy of PushFPS's engine and Veyra's runtime. If PushFPS or Veyra is installed with the same
 files, Setup reuses them instead of downloading.
 </details>
+
+## 🗺️ Roadmap (after the first release)
+
+- A capture host of PushMPC's own for Linux and macOS (PipeWire portal / ScreenCaptureKit, zero copy, HDR), so capture
+  mode gets PushMPC's best engines there too.
+- PushMPC's own VapourSynth-enabled mpv library for Plex, in place of the community build Setup uses today.
 
 ## 📚 More
 

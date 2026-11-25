@@ -91,7 +91,21 @@ $ci = Join-Path $Scratch 'capinstall'
 Test-That (Test-Path (Join-Path $sm 'PushMPC Capture (fallback).lnk')) 'capture enable: Start menu entry'
 $st = Get-Content (Join-Path $ci 'capture\capture.json') -Raw | ConvertFrom-Json
 Test-That ($st.enabled -and @($st.players).Count -eq 2) "capture state: $(@($st.players) -join ', ')"
-& $ps -NoProfile -ExecutionPolicy Bypass -File $cap launch -InstallDir $ci -DryRun -PushFpsDir (Join-Path $Scratch 'no-pushfps') | Out-Host
+$o = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $cap launch -InstallDir $ci -DryRun -Machine -PushFpsDir (Join-Path $Scratch 'no-pushfps'))
+Test-That (($o -join ' ') -match 'would ask, then install PushFPS') "capture launch without its PushFPS: asks first ($($o -join ' | '))"
+# the player's window opened directly (a stand-in PushFPS 4.5.3 and a charmap window as the player)
+$fake = Join-Path $Scratch 'fake-pushfps'; New-Item -ItemType Directory -Force $fake | Out-Null
+Copy-Item "$env:SystemRoot\System32\notepad.exe" (Join-Path $fake 'PushFPS.exe'); Set-Content (Join-Path $fake 'PushFPS-VERSION.txt') 'PushFPS 4.5.3'
+$np = $null; try { $np = Start-Process (Join-Path $env:SystemRoot 'System32\charmap.exe') -PassThru; Start-Sleep 3; $np.Refresh() } catch { }
+if ($np -and -not $np.HasExited -and $np.MainWindowHandle -and $np.MainWindowHandle -ne [IntPtr]::Zero) {
+    $o = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $cap launch -InstallDir $ci -DryRun -Machine -PushFpsDir $fake -Player charmap)
+    $uri = "screen:0:$([uint64]$np.MainWindowHandle.ToInt64()):0:0:2:0:0:0:0"
+    Test-That (($o -join ' ') -match [regex]::Escape("--page min $uri")) "capture launch: the player's window as the last argument ($($o -join ' | '))"
+    Set-Content (Join-Path $fake 'PushFPS-VERSION.txt') 'PushFPS 9.9.9'
+    $o = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $cap launch -InstallDir $ci -DryRun -Machine -PushFpsDir $fake -Player charmap)
+    Test-That (($o -join ' ') -match '--dialog screen' -and ($o -join ' ') -notmatch 'screen:0:') "capture launch with an untested PushFPS: the window picker ($($o -join ' | '))"
+} else { Write-Host 'skip window start checks: no desktop window on this machine' }
+if ($np) { Stop-Process -Id $np.Id -Force -ErrorAction SilentlyContinue }
 & $ps -NoProfile -ExecutionPolicy Bypass -File $cap disable -InstallDir $ci -StartMenu $sm
 Test-That (-not (Test-Path $sm) -and -not (Test-Path (Join-Path $ci 'capture'))) 'capture disable: entry and folder removed'
 

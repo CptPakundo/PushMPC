@@ -16,7 +16,9 @@
                                         and pmml.txt as install does, e.g. after a GPU change)
   What install does on its own, with no questions: every player it finds gets PushMPC's native route (MPC-HC, MPC-BE,
     PotPlayer; the mpv family through mpv-integration.ps1, Stremio and Plex included; VLC when the build has the VLC
-    module), Auto's engine choice is logged and saved as auto-plan.json, PushFlow's pmml.txt is written from it, AMD
+    module), PushFlow's runtime for this GPU goes into <InstallDir>\pmml (pmml-fetch.ps1 by ml-runtime-pin.json:
+    TensorRT-RTX on RTX, OpenVINO on Intel; -Pmml No declines it), Auto's engine choice is logged and saved as
+    auto-plan.json, PushFlow's pmml.txt is written from it, AMD
     FSR SDK 2.4 is fetched on Radeon RX 6000 / 7000 / 9000 (-FidelityFx Package declines it), and capture mode
     (pushmpc-capture.ps1, PushFPS's window capture) is switched on only for players without a native route
     (-Capture Auto|On|Off). -NoVlc skips VLC. Tests: PUSHMPC_TEST_GPU="<vendor>:<device>:<name>" stands in for the GPU.
@@ -117,9 +119,18 @@ param(
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$Capture = 'Auto',
     [string]$CaptureStartMenu = '',
+    # tests: the folder that holds Plex\Plex HTPC and Plex\Plex (default %ProgramFiles%)
+    [string]$PlexRoot = '',
     # the pmml runtime folder (PushFlow on other ONNX Runtime EPs); default: PMML_RUNTIME, HKCU MlRuntime, <InstallDir>\pmml
     [string]$PmmlRuntime = '',
     [switch]$Apply,
+    # PushFlow's runtime for this GPU (pmml: TensorRT-RTX on RTX, OpenVINO on Intel) into <InstallDir>\pmml: Auto | No
+    [ValidateSet('Auto', 'No')]
+    [string]$Pmml = 'Auto',
+    # Plex HTPC / Plex for Windows: a VapourSynth-enabled libmpv in Plex's folder (pushmpc-plex.ps1; asks for
+    # administrator permission): Auto (tested Plex versions) | No
+    [ValidateSet('Auto', 'No')]
+    [string]$PlexSwap = 'Auto',
     [switch]$KeepSettings,
     [switch]$Verify,
     # build outputs for "stage" (default: this repository's build folders; PUSHMPC_BUILD_DIR overrides the build tree)
@@ -1514,7 +1525,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -2371,8 +2382,47 @@ function Test-Nvofa($g, [string]$fam) {
 # the pmml runtime (PushFlow on other ONNX Runtime EPs; optional): -PmmlRuntime, PMML_RUNTIME, HKCU MlRuntime, <InstallDir>\pmml
 function Find-PmmlRuntime {
     $c = @($PmmlRuntime, $env:PMML_RUNTIME, (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime, (Join-Path $InstallDir 'pmml'))
-    foreach ($d in $c) { if ($d -and (Test-Path -LiteralPath (Join-Path $d 'graphs\synth-yuv.onnx'))) { return $d } }
+    # pushcore needs ONNX Runtime and the EP (ort\core); the mpv route's ml backend also its graphs
+    foreach ($d in $c) { if ($d -and ((Test-Path -LiteralPath (Join-Path $d 'ort\core\onnxruntime.dll')) -or (Test-Path -LiteralPath (Join-Path $d 'graphs\synth-yuv.onnx')))) { return $d } }
     return ''
+}
+# The pmml runtime Setup installs for this GPU (the quality path for PushFlow; default on, -Pmml No declines it):
+# TensorRT-RTX on an NVIDIA RTX card, OpenVINO on Intel. Every other GPU keeps PushFlow on DirectML, pushcore's own
+# zero-copy session: Radeon (the AMD GPU EP is not published as a plugin EP; MIGraphX is Linux / ROCm only),
+# GeForce GTX (TensorRT-RTX needs RTX), Snapdragon (QNN's NPU path for PushFlow is not built yet).
+function Get-PmmlEps([string]$fam) {
+    switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } default { return @() } }
+}
+function Get-PmmlFetchFiles { foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) { $s = Join-Path $d 'pmml-fetch.ps1'; $p = Join-Path $d 'ml-runtime-pin.json'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath $p)) { return @($s, $p) } }; return @() }
+function Install-PmmlRuntime($state) {
+    $dir = Join-Path $InstallDir 'pmml'
+    $fam = Get-GpuFamily (Get-GpuInfo)
+    $eps = @(Get-PmmlEps $fam)
+    $ours = [bool](Get-StateValue $state 'pmmlInstalled')
+    if ($Pmml -eq 'No' -or -not $eps.Count) {
+        Info $(if ($Pmml -eq 'No') { 'PushFlow runtime: not installed (-Pmml No); PushFlow runs on DirectML' } else { "PushFlow runtime: none needed for $fam (PushFlow runs on DirectML, pushcore's own session)" })
+        if ($ours -and (Test-Path -LiteralPath $dir)) { if ($DryRun) { Dry "would remove $dir" } else { Remove-Item -LiteralPath $dir -Recurse -Force; $state.PSObject.Properties.Remove('pmmlInstalled'); Info "removed $dir" } }
+        return
+    }
+    $ff = @(Get-PmmlFetchFiles)
+    if (-not $ff.Count) { Warn 'PushFlow runtime: pmml-fetch.ps1 / ml-runtime-pin.json not found: not installed'; return }
+    $pins = Get-Content -LiteralPath $ff[1] -Raw | ConvertFrom-Json
+    $want = (@("ort/core $($pins.onnxruntime.core.version)") + @($eps | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
+    $have = ''
+    if (Test-Path -LiteralPath (Join-Path $dir 'fetched.json')) {
+        try { $f = Get-Content -LiteralPath (Join-Path $dir 'fetched.json') -Raw | ConvertFrom-Json; $have = (@($f.ort.PSObject.Properties | ForEach-Object { "ort/$($_.Name) $($_.Value.version)" }) + @($f.eps.PSObject.Properties | ForEach-Object { "eps/$($_.Name) $($_.Value.version)" })) -join ', ' } catch { }
+    }
+    if ($have -eq $want) { Info "PushFlow runtime ($want) is already installed"; if (-not $DryRun) { Set-StateValue $state 'pmmlInstalled' $want }; return }
+    Info "PushFlow runtime for $fam`: $want (ONNX Runtime and the EP from nuget.org / pypi.org, pinned by SHA-256)"
+    Progress 93 'Installing PushFlow''s runtime for this GPU'
+    if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors core -Eps $($eps -join ',')"; return }
+    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform 'win-x64' -Flavors core -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
+    $rc = $LASTEXITCODE
+    foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|cached|skip|pmml-fetch)') { Info "  $l" } }
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'download\pmml') -Recurse -Force -ErrorAction SilentlyContinue
+    if ($rc -ne 0) { Warn "PushFlow runtime not installed (pmml-fetch exit $rc): PushFlow runs on DirectML; run Repair to try again"; return }
+    Set-StateValue $state 'pmmlInstalled' $want
+    Info "PushFlow runtime installed in $dir"
 }
 # PushFlow's EP for pushcore: the pmml Auto benchmark's measurement when this card has one (pmml-autobench.json: the
 # backend with the fastest network among the candidates that ran), else pmml's order without a measurement (trt-rtx,
@@ -2394,6 +2444,8 @@ function Get-PmmlChoice([string]$rt, [string]$fam, $g) {
         } catch { }
     }
     if ($fam -like 'RTX*' -and (Test-Path -LiteralPath (Join-Path $rt 'eps\trt-rtx\ep.json'))) { return @{ backend = 'ort:core:trt-rtx:0'; why = 'NVIDIA RTX with the TensorRT-RTX EP installed (pmml''s order without a measurement: trt-rtx before dml)' } }
+    # Intel: OpenVINO's GPU plugin uses the XMX engines DirectML does not reach (Auto's default table for Arc / Xe)
+    if ($fam -eq 'Intel' -and (Test-Path -LiteralPath (Join-Path $rt 'eps\openvino\ep.json'))) { return @{ backend = 'ort:core:openvino:0'; why = 'Intel GPU with the OpenVINO EP installed (Auto''s default for Arc / Xe: OpenVINO uses the XMX engines)' } }
     return @{ backend = ''; why = 'pmml''s order without a measurement keeps DirectML on this GPU' }
 }
 # The plan: one row per route, plus what Setup offers (FSR SDK 2.4) and pmml.txt
@@ -2515,6 +2567,31 @@ function Uninstall-VlcRoute($state) {
     foreach ($l in (& $ps -NoProfile -ExecutionPolicy Bypass -File $s -Action Uninstall -PluginDir $d 2>&1)) { Info "VLC: $l" }
     if ((Test-Path -LiteralPath $d) -and -not @(Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object Name -ne 'pushmpc-vlc.ps1').Count) { Remove-Item -LiteralPath $d -Recurse -Force }
     $state.PSObject.Properties.Remove('vlcRoute')
+}
+
+# ------------------------------------------------------------------------------------------------ Plex (libmpv swap)
+function Get-PlexScript { foreach ($p in @((Join-Path $InstallDir 'filter\pushmpc-plex.ps1'), (Join-Path $StageDir 'filter\pushmpc-plex.ps1'), (Join-Path $here 'pushmpc-plex.ps1'))) { if ($p -and (Test-Path -LiteralPath $p)) { return $p } }; return '' }
+function Install-PlexRoute($state) {
+    $s = Get-PlexScript
+    if (-not $s) { return }
+    if ($PlexSwap -eq 'No') { Info 'Plex: libmpv swap declined (-PlexSwap No): capture mode gives Plex frame generation'; return }
+    if ($NoMpv) { Info 'Plex skipped (-NoMpv)'; return }
+    if (-not (Read-Manifest (Join-Path $StageDir 'vsplugin'))) { Info 'Plex: this build has no mpv route (vsplugin): Plex is not changed'; return }
+    $a = @{ InstallDir = $InstallDir; Machine = $Machine; DryRun = $DryRun }
+    if ($PlexRoot) { $a.PlexRoot = $PlexRoot }
+    if ($NoTask) { $a.NoTask = $true }
+    & $s apply @a
+    if (Test-Path -LiteralPath (Join-Path $InstallDir 'plex\plex.json')) { Set-StateValue $state 'plexSwap' (Get-Date).ToString('s') }
+}
+function Uninstall-PlexRoute($state) {
+    if (-not (Get-StateValue $state 'plexSwap') -and -not (Test-Path -LiteralPath (Join-Path $InstallDir 'plex'))) { return }
+    $s = Get-PlexScript
+    if (-not $s) { Warn "pushmpc-plex.ps1 not found: Plex's own libmpv is not put back (its backup is in $InstallDir\plex\backup)"; return }
+    $a = @{ InstallDir = $InstallDir; Machine = $Machine; DryRun = $DryRun }
+    if ($PlexRoot) { $a.PlexRoot = $PlexRoot }
+    if ($NoTask) { $a.NoTask = $true }
+    & $s restore @a
+    if ($state.PSObject.Properties['plexSwap']) { $state.PSObject.Properties.Remove('plexSwap') }
 }
 
 # ------------------------------------------------------------------------------------------------ capture mode (fallback)
@@ -2657,10 +2734,14 @@ switch ($Action) {
         Set-MpcBeEntry $state
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
+        Step 'Plex (frame generation through a VapourSynth-enabled libmpv)'
+        Install-PlexRoute $state
         Step 'mpv, SMPlayer, MPC-QT, Stremio, Plex, Jellyfin, Kodi'
         Install-MpvRoute $state
         Step 'VLC'
         $vlcOk = Install-VlcRoute $state
+        Step 'PushFlow runtime for this GPU (pmml)'
+        Install-PmmlRuntime $state
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
         Step 'Auto: the engine for this PC'
         Progress 96 'Choosing the engine'
@@ -2812,6 +2893,7 @@ switch ($Action) {
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
+        Uninstall-PlexRoute $state
         Uninstall-MpvRoute $state
         Uninstall-VlcRoute $state
         if ((Get-StateValue $state 'capture') -or (Test-Path (Join-Path $InstallDir 'capture'))) { Invoke-Capture 'disable' }
@@ -2842,7 +2924,8 @@ switch ($Action) {
             }
         }
         Progress 60 'Removing the files'
-        foreach ($d in @('filter', 'core', 'runtime', 'previous', 'staging', 'download')) {
+        # pmml: the PushFlow runtime Setup installed (a folder someone else put there stays)
+        foreach ($d in @('filter', 'core', 'runtime', 'previous', 'staging', 'download') + @(if (Get-StateValue $state 'pmmlInstalled') { 'pmml' })) {
             $p = Join-Path $InstallDir $d
             if (Test-Path $p) { if ($DryRun) { Dry "would remove $p" } else { Remove-Item $p -Recurse -Force } }
         }

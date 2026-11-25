@@ -67,7 +67,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # the VLC module for the release (vlc-plugin.yml: built and tested there); the build and Linux jobs take its
+  # artifacts. A failure there leaves VLC out of the release (Setup then covers VLC with capture mode), nothing else.
+  vlc:
+    uses: ./.github/workflows/vlc-plugin.yml
+
   build:
+    needs: [vlc]
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 100
     defaults:
@@ -437,6 +444,11 @@ jobs:
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object FullName -match '\\x64\\' | Sort-Object FullName | Select-Object -Last 1
           "PUSHMPC_CODESIGN=`"$($signtool.FullName)`" sign /f `"$pfx`" /p `"$env:PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `"{file}`"" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      # the VLC module (vlc-plugin.yml, this run): staged as the optional vlc component, so Setup installs it when VLC is
+      # found
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: plugin-win64, path: '${{ runner.temp }}/vlc-win64' }
       - name: Stage and package (Setup, component zips, release.json + signature)
         timeout-minutes: 20
         env:
@@ -447,7 +459,9 @@ jobs:
           $pre = @{}; if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @{ Prerelease = $true } }
           # RC2 F1: a core without NVIDIA optical flow is never packaged silently: stage refuses it (-RequireNvof) unless dry run
           $nvofReq = @{}; if ('${{ inputs.dry_run }}' -ne 'true') { $nvofReq = @{ RequireNvof = $true } }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq
+          $vlc = @{}; $vd = "$env:RUNNER_TEMP\vlc-win64\libpushmpc_plugin.dll"
+          if (Test-Path $vd) { $vlc = @{ VlcPlugin = $vd } } else { Write-Host '::warning title=VLC module::no plugin-win64 artifact: the release has no VLC component' }
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {
@@ -544,6 +558,8 @@ jobs:
   # The Linux downloads: pushmpc-linux-<arch>-<version>.tar.gz (setup.sh, install.sh, the VapourSynth plugin built in
   # manylinux_2_28 with static libstdc++, as integrations.yml builds and tests it), attached to the release
   linux:
+    needs: [vlc]
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -571,10 +587,32 @@ jobs:
           pkg=$($PY -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
           mkdir -p vsplugin/third_party/vapoursynth
           cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+      # the VLC module and its hardware-decoding self-test clip (vlc-plugin.yml, this run; x86_64 builds only)
+      - uses: actions/download-artifact@v4
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        with: { name: plugin-linux, path: vlc-linux }
+      - uses: actions/download-artifact@v4
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        with: { name: clips, path: vlc-clips }
+      # the ml backend (PushFlow through pmml): ONNX Runtime's C API headers (pinned) for the build, pmml's graphs for setup.sh
+      - name: pmml headers and graphs
+        run: |
+          set -eu
+          PY=/opt/python/cp312-cp312/bin/python
+          arch=x64; [ "${{ matrix.arch }}" = aarch64 ] && arch=arm64
+          $PY -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-$arch --out /tmp/pmml-rt --cache /tmp/pmml-dl --flavors core --headers
+          $PY -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 numpy==1.26.4
+          /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs
+          ls /tmp/pmml-graphs
       - name: Plugin and tarball
         run: |
           set -eu
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          export PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs
+          if [ -f vlc-linux/libpushmpc_plugin.so ]; then export PUSHMPC_VLC_PLUGIN=$PWD/vlc-linux/libpushmpc_plugin.so; else echo "::warning title=VLC module::no plugin-linux artifact for ${{ matrix.arch }}: the tarball has no vlc/"; fi
+          for c in vlc-clips/hwclip.mkv vlc-clips/clips/hwclip.mkv; do [ -f "$c" ] && export PUSHMPC_VLC_SELFTEST_CLIP=$PWD/$c && break; done
           cmake --build build --target pushmpc_vs portable_test --parallel
           ./build/portable_test | tail -3
           ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)

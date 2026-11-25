@@ -226,7 +226,9 @@ std::vector<OtherPlayer> DetectOtherPlayers(bool vlcModule) {
     std::wstring st = first({ JoinPath(la, L"Programs\\Stremio\\stremio-shell-ng.exe"), JoinPath(pf, L"Stremio\\stremio-shell-ng.exe"), JoinPath(la, L"Programs\\Stremio\\stremio.exe"), JoinPath(pf, L"Stremio\\stremio.exe") });
     if (!st.empty()) out.push_back({ L"Stremio", st, false, L"through its mpv config file (Stremio 5.0.28 and newer; older versions: capture mode)" });
     for (auto& d : { JoinPath(pf, L"Plex\\Plex"), JoinPath(pf, L"Plex\\Plex HTPC") })
-        if (FileExists(JoinPath(d, L"libmpv-2.dll"))) out.push_back({ d.find(L"HTPC") != std::wstring::npos ? L"Plex HTPC" : L"Plex", d, true, L"video super resolution inside Plex; frame generation through capture mode (fallback)" });
+        if (FileExists(JoinPath(d, L"libmpv-2.dll")) || FileExists(JoinPath(d, L"mpv-2.dll")))
+            out.push_back({ d.find(L"HTPC") != std::wstring::npos ? L"Plex HTPC" : L"Plex", d, false,
+                            L"frame generation through a VapourSynth-enabled mpv library in Plex (tested Plex versions; others: capture mode)" });
     struct P { const wchar_t* name; std::vector<const wchar_t*> rel; };
     const std::vector<P> probes = { P{ L"KMPlayer 64X", { L"KMPlayer 64X\\KMPlayer64.exe" } }, P{ L"GOM Player", { L"GRETECH\\GomPlayer\\GOM.exe", L"GRETECH\\GOMPlayer\\GOM.exe" } },
                                     P{ L"Emby Theater", { L"Emby Theater\\Emby.Theater.exe", L"Emby-Theater\\Emby.Theater.exe" } } };
@@ -373,6 +375,10 @@ std::wstring ScratchDir() { return JoinPath(TempDir(), Format(L"PushMPC-Setup-%l
 // AMD FSR SDK 2.4 (FSR 4.1 INT8 upscaling on Radeon RX 6000 / 7000 / 9000): offered on the welcome page, on by default
 // (unlocks are on unless the user says no); unchecked = the runtime package's SDK 2.3 set (-FidelityFx Package)
 std::atomic<bool> g_fsrSdk{ true };
+// PushFlow's runtime for this GPU (pmml: TensorRT-RTX on RTX, OpenVINO on Intel), on by default (-Pmml No when unchecked)
+std::atomic<bool> g_pmml{ true };
+// Plex: frame generation through a VapourSynth-enabled libmpv in Plex's folder, on by default (-PlexSwap No when unchecked)
+std::atomic<bool> g_plexSwap{ true };
 
 Result DoInstall(Op op, bool autoUpdates) {
     Result res;
@@ -423,7 +429,8 @@ Result DoInstall(Op op, bool autoUpdates) {
     UiProgress(scriptLo, L"Installing");
     fail.clear();
     if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
-    rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package"), scriptLo, 98, nullptr, fail);
+    rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package") + (g_pmml ? L"" : L" -Pmml No") +
+                   (g_plexSwap ? L"" : L" -PlexSwap No"), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -559,7 +566,7 @@ bool EnsurePlayersClosed(HWND owner) {
 enum Page { PWelcome, PMaintenance, PLicence, PProgress, PFinish };
 enum Ctl {
     IDC_TITLE = 100, IDC_SUBTITLE, IDC_BODY, IDC_WARN, IDC_AUTOUPD, IDC_LICENCE, IDC_ACCEPT, IDC_R_REPAIR, IDC_R_UPDATE, IDC_R_UNINSTALL,
-    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK, IDC_FSRSDK
+    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK, IDC_FSRSDK, IDC_PMML, IDC_PLEX
 };
 HFONT g_font = nullptr, g_titleFont = nullptr, g_boldFont = nullptr;
 int g_dpi = 96;
@@ -575,6 +582,15 @@ std::wstring g_gpu;
 MpcHc g_pot;
 bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.exe.empty() && g_mpvs.empty() && g_others.empty(); }
 // a Radeon that FSR SDK 2.4's FSR 4.1 INT8 upscaler serves (RX 6000 / 7000 / 9000; pushcore's familyOf digit rule)
+// PushFlow's runtime pmml installs for this GPU and its download size (pushmpc-install.ps1 Get-PmmlEps; the sizes are
+// the pinned archives': ONNX Runtime 149 MB plus the EP), or empty when PushFlow stays on DirectML
+std::wstring PmmlOffer() {
+    std::wstring n = g_gpu; for (auto& c : n) c = wchar_t(towupper(c));
+    if (n.find(L"NVIDIA") != std::wstring::npos && n.find(L"RTX") != std::wstring::npos) return L"TensorRT-RTX, about 255 MB";
+    if (n.find(L"INTEL") != std::wstring::npos) return L"OpenVINO, about 220 MB";
+    return L"";
+}
+bool PlexFound() { for (auto& o : g_others) if (o.player.rfind(L"Plex", 0) == 0) return true; return false; }
 bool FsrSdkGpu() {
     std::wstring n = g_gpu; for (auto& c : n) c = wchar_t(towupper(c));
     if (n.find(L"RADEON") == std::wstring::npos && n.find(L"AMD") == std::wstring::npos) return false;
@@ -655,6 +671,9 @@ void ShowPage(Page p) {
         Show(IDC_WARN, true);
         Show(IDC_AUTOUPD, true);
         Show(IDC_FSRSDK, FsrSdkGpu());
+        if (!PmmlOffer().empty()) SetText(IDC_PMML, L"Download PushFlow's faster runtime for this graphics card (" + PmmlOffer() + L", from nuget.org / pypi.org, checked by SHA-256)");
+        Show(IDC_PMML, !PmmlOffer().empty());
+        Show(IDC_PLEX, PlexFound());
         SetText(IDC_NEXT, L"Next");
         break;
     }
@@ -721,6 +740,8 @@ void Layout() {
         MoveWindow(C(IDC_WARN), m, top + S(180), W - 2 * m, S(70), TRUE);
         MoveWindow(C(IDC_AUTOUPD), m, top + S(254), W - 2 * m, S(22), TRUE);
         MoveWindow(C(IDC_FSRSDK), m, top + S(276), W - 2 * m, S(22), TRUE);
+        MoveWindow(C(IDC_PMML), m, top + S(298), W - 2 * m, S(22), TRUE);
+        MoveWindow(C(IDC_PLEX), m, top + S(320), W - 2 * m, S(22), TRUE);
         break;
     case PMaintenance:
         MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(22), TRUE);
@@ -799,6 +820,8 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         (void)lic;
         mk(L"BUTTON", L"I accept the licence terms", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_ACCEPT);
         Button_SetCheck(mk(L"BUTTON", L"Fetch AMD FSR SDK 2.4 for FSR 4.1 upscaling on this Radeon (AMD's signed files, checked by SHA-256)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Download PushFlow's faster runtime for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Plex: frame generation through a VapourSynth-enabled mpv library (Plex's own is kept and put back; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UNINSTALL);
@@ -847,6 +870,8 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BACK: if (g_page == PLicence) ShowPage(g_installed ? PMaintenance : PWelcome); return 0;
         case IDC_ACCEPT: if (g_page == PLicence) EnableWindow(C(IDC_NEXT), Button_GetCheck(C(IDC_ACCEPT)) == BST_CHECKED); return 0;
         case IDC_FSRSDK: g_fsrSdk = Button_GetCheck(C(IDC_FSRSDK)) == BST_CHECKED; return 0;
+        case IDC_PMML: g_pmml = Button_GetCheck(C(IDC_PMML)) == BST_CHECKED; return 0;
+        case IDC_PLEX: g_plexSwap = Button_GetCheck(C(IDC_PLEX)) == BST_CHECKED; return 0;
         case IDCANCEL:
         case IDC_CANCEL:
             if (g_busy) {
@@ -968,7 +993,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
     RegisterClassExW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT r{ 0, 0, S(620), S(460) };
+    RECT r{ 0, 0, S(620), S(510) };
     AdjustWindowRect(&r, style, FALSE);
     int ww = r.right - r.left, wh = r.bottom - r.top;
     std::wstring title = opt.sandbox ? L"PushMPC setup (sandbox test)" : L"PushMPC setup";

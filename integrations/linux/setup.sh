@@ -6,9 +6,14 @@
 #                     Jellyfin Desktop, Kodi (mpv as its external player), NVIDIA's Video Effects (Linux, licence step)
 #   pushmpc-vlc.sh    VLC 3 (native, Flathub, Snap), when this download has the VLC module (vlc/)
 #   kodi/install.sh   the Kodi add-on, when this download has it (kodi/)
+#   pmml              PushFlow (RIFE) on the GPU for the mpv route: ONNX Runtime and the EP for this GPU (TensorRT-RTX on an
+#                     NVIDIA RTX card, OpenVINO on Intel, MIGraphX on AMD with ROCm installed) fetched by pmml's own
+#                     fetch_runtime.py and ml-runtime-pin.json (official sources, SHA-256 checked), PushFlow's models from
+#                     PushFPS's release (pinned), pmml's graphs from this download, into .../pushmpc/pmml (default on;
+#                     --no-pmml declines it; needs python3)
 #   macOS             Homebrew's pushmpc-setup (mpv, IINA) and the VLC module
 #
-#   sh setup.sh [install]  [--yes] [--dry-run] [--flatpak ask|yes|no] [--nvidia-vfx ask|yes|no]
+#   sh setup.sh [install]  [--yes] [--dry-run] [--flatpak ask|yes|no] [--nvidia-vfx ask|yes|no] [--no-pmml]
 #   sh setup.sh uninstall  [--keep-flatpak-mpv]
 #   sh setup.sh plan       the engine Auto starts with, per player route (no change)
 #   sh setup.sh status
@@ -23,13 +28,14 @@ set -u
 
 action=install
 case ${1:-} in install|uninstall|status|plan) action=$1; shift ;; esac
-pass=''; yes=0; dry=0
+pass=''; yes=0; dry=0; nopmml=0
 while [ $# -gt 0 ]; do
     case $1 in
         --flatpak|--nvidia-vfx) pass="$pass $1 $2"; shift 2 ;;
         --yes|-y) yes=1; pass="$pass --yes"; shift ;;
         --dry-run) dry=1; pass="$pass --dry-run"; shift ;;
         --keep-flatpak-mpv) pass="$pass $1"; shift ;;
+        --no-pmml) nopmml=1; shift ;;
         -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "setup.sh: unknown option $1" >&2; exit 2 ;;
     esac
@@ -193,6 +199,75 @@ do_vlc() {
     printf '%s\n' "$out" | sed 's/^/  /'
     if [ "$rc" = 0 ]; then record vlc; else say "  VLC's installer failed (exit $rc): VLC not changed"; fi
 }
+# PushFlow's models: from PushFPS's release zip (the same files and pins as the Windows Setup takes)
+PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip
+PF_ZIP_SHA=8466ab7187d9ad7f8db7ac54582e3482ffa4e75d3ff97b28e434816b8fa7ff31
+pmml_eps() {   # the ONNX Runtime flavors and EPs for this GPU: "<flavors> <eps>", or nothing
+    case $fam in
+        'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') [ "$nvprop" = 1 ] && echo "core trt-rtx" ;;
+        Intel) echo "core openvino" ;;
+        'RX 9000'|'RX 7000'|'RX 6000'|'RX 5000'|Radeon) [ -d /opt/rocm ] && echo "migraphx -" ;;
+    esac
+}
+do_pmml() {
+    [ "$os" = Darwin ] && return 0
+    sel=$(pmml_eps)
+    if [ -z "$sel" ]; then say "PushFlow runtime: none for this GPU ($fam): the GPU engine interpolates"; return 0; fi
+    if [ "$nopmml" = 1 ]; then say "PushFlow runtime: declined (--no-pmml)"; return 0; fi
+    py=$(command -v python3 || true)
+    if [ -z "$py" ]; then say "PushFlow runtime: needs python3 for its fetch (not found): not installed"; return 0; fi
+    for need in pmml/fetch_runtime.py pmml/ml-runtime-pin.json pmml/graphs/synth-yuv.onnx; do
+        [ -f "$here/$need" ] || { say "PushFlow runtime: this download has no $need: not installed"; return 0; }
+    done
+    flv=${sel%% *}; ep=${sel#* }; [ "$ep" = - ] && ep=''
+    arch=x64; case $(uname -m) in aarch64|arm64) arch=arm64 ;; esac
+    say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
+    if [ "$dry" = 1 ]; then say "  would: python3 fetch_runtime.py --platform linux-$arch --flavors $flv${ep:+ --eps $ep} --out $pm/pmml"; return 0; fi
+    mkdir -p "$pm"; dl=$pm/pmml-download; rm -rf "$pm/pmml.part"
+    out=$("$py" -I "$here/pmml/fetch_runtime.py" --pin "$here/pmml/ml-runtime-pin.json" --platform "linux-$arch" --out "$pm/pmml.part" --cache "$dl" \
+            --flavors "$flv" ${ep:+--eps "$ep"} 2>&1); rc=$?
+    printf '%s\n' "$out" | grep -E '^(ok|skip|fetch|cached|::error)' | sed 's/^/  /'
+    if [ "$rc" != 0 ]; then
+        say "  the fetch failed: PushFlow runtime not installed (the GPU engine interpolates)"; rm -rf "$pm/pmml.part" "$dl"; return 0
+    fi
+    # PushFlow's models (pushflow-fast / -quality with the grid and mask outputs) out of PushFPS's release zip
+    if ! "$py" -I - "$PF_ZIP_URL" "$PF_ZIP_SHA" "$dl" "$pm/pmml.part/models" "$here/pmml/ml-runtime-pin.json" <<'PY'
+import hashlib, json, sys, urllib.request, zipfile, pathlib
+url, want, cache, dest, pin = sys.argv[1:6]
+cache = pathlib.Path(cache); cache.mkdir(parents=True, exist_ok=True); dest = pathlib.Path(dest); dest.mkdir(parents=True, exist_ok=True)
+z = cache / url.rsplit("/", 1)[1]
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
+    return h.hexdigest()
+if not (z.exists() and sha(z) == want):
+    req = urllib.request.Request(url, headers={"User-Agent": "pushmpc-setup/1"})
+    with urllib.request.urlopen(req, timeout=600) as r, open(z, "wb") as f:
+        while True:
+            b = r.read(1 << 20)
+            if not b: break
+            f.write(b)
+if sha(z) != want: sys.exit("PushFPS's release zip does not match its pinned SHA-256")
+models = json.load(open(pin))["models"]["pushflow"]
+need = {models[r]["file"]: models[r]["sha256"] for r in ("fast", "quality")}
+with zipfile.ZipFile(z) as a:
+    for n in a.namelist():
+        base = n.rsplit("/", 1)[-1]
+        if "/runtime/experimental/pushflow/" not in n.replace("\\", "/"): continue
+        if base in need or base in ("models.json", "RIFE_LICENSE.txt"):
+            out = dest / base
+            out.write_bytes(a.read(n))
+for f, s in need.items():
+    if not (dest / f).exists() or sha(dest / f) != s: sys.exit(f"{f}: missing or not the pinned model")
+print("ok      models: " + ", ".join(sorted(need)))
+PY
+    then say "  PushFlow's models could not be taken from PushFPS's release: PushFlow runtime not installed"; rm -rf "$pm/pmml.part" "$dl"; return 0; fi
+    cp -R "$here/pmml/graphs" "$pm/pmml.part/graphs"
+    rm -rf "$pm/pmml" "$dl"; mv "$pm/pmml.part" "$pm/pmml"
+    record pmml
+    say "  PushFlow runtime installed in $pm/pmml (the mpv route's ml backend finds it there)"
+}
 do_kodi_addon() {
     [ -f "$here/kodi/install.sh" ] || return 0
     have kodi || [ -d "$HOME/.kodi" ] || { have flatpak && flatpak info tv.kodi.Kodi >/dev/null 2>&1; } || return 0
@@ -226,6 +301,7 @@ case $action in
         fi
         do_vlc
         do_kodi_addon
+        do_pmml
         # the plan again: NVIDIA's files may have arrived in the meantime
         make_plan; write_plan
         if [ "$dry" = 0 ]; then mkdir -p "$pm"; [ "$here/setup.sh" = "$pm/setup.sh" ] || cp "$here/setup.sh" "$pm/setup.sh"; fi
@@ -237,6 +313,7 @@ case $action in
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; sh "$pm/kodi-installer/install.sh" uninstall | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
+        if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
         if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
         if [ -f "$pm/install.sh" ]; then
             # shellcheck disable=SC2086
