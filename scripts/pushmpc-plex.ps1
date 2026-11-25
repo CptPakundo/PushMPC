@@ -105,7 +105,9 @@ function Get-OurLibmpv {
     $x = Join-Path $PlexDir 'extract'
     if (Test-Path -LiteralPath $x) { Remove-Item -LiteralPath $x -Recurse -Force }
     New-Item -ItemType Directory -Force $x | Out-Null
-    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $arc -C $x 2>$null
+    $ErrorActionPreference = 'Continue'   # Windows PowerShell 5.1 turns a native tool's stderr into a terminating error
+    try { & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $arc -C $x 2>&1 | Out-Null } catch { }
+    $ErrorActionPreference = 'Stop'
     $found = Get-ChildItem -LiteralPath $x -Recurse -Filter 'libmpv-2.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $found) {
         $sz = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
@@ -146,10 +148,18 @@ public static class PmMpv {
 '@
 [PmMpv]::Run('$($dll.Replace("'", "''"))')
 "@
+    # from a file (a -Command argument loses its double quotes on the way to the child), in a child process
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $out = & $ps -NoProfile -NonInteractive -Command $code 2>&1 | Select-Object -Last 1
-    if ("$out" -like 'OK *') { return '' }
-    return "self-test: $out"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "pushmpc-libmpv-test-$PID.ps1"
+    $outFile = "$tmp.out"
+    [IO.File]::WriteAllText($tmp, $code, (New-Object System.Text.UTF8Encoding($true)))
+    try {
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`"") -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError "$outFile.err"
+        $out = @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue) | Where-Object { "$_".Trim() } | Select-Object -Last 1
+        if (-not $out) { $out = (@(Get-Content -LiteralPath "$outFile.err" -ErrorAction SilentlyContinue) | Select-Object -First 2) -join ' ' }
+    } finally { Remove-Item -LiteralPath $tmp, $outFile, "$outFile.err" -Force -ErrorAction SilentlyContinue }
+    if ("$out" -like 'OK *') { Info "libmpv self-test: $out"; return '' }
+    return "self-test: $out (exit $($p.ExitCode))"
 }
 function Register-Check {
     if ($NoTask -or $DryRun) { return }

@@ -2735,13 +2735,13 @@ switch ($Action) {
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
         Step 'Plex (frame generation through a VapourSynth-enabled libmpv)'
-        Install-PlexRoute $state
+        try { Install-PlexRoute $state } catch { Warn "Plex: not changed ($($_.Exception.Message))" }
         Step 'mpv, SMPlayer, MPC-QT, Stremio, Plex, Jellyfin, Kodi'
         Install-MpvRoute $state
         Step 'VLC'
         $vlcOk = Install-VlcRoute $state
         Step 'PushFlow runtime for this GPU (pmml)'
-        Install-PmmlRuntime $state
+        try { Install-PmmlRuntime $state } catch { Warn "PushFlow runtime: not installed ($($_.Exception.Message)); PushFlow runs on DirectML" }
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
         Step 'Auto: the engine for this PC'
         Progress 96 'Choosing the engine'
@@ -2754,7 +2754,7 @@ switch ($Action) {
         $mpvRows = @(if (-not $NoMpv -and (Get-MpvIntegrationScript)) { Invoke-MpvIntegration 'Detect' })
         $cap = @(Find-CaptureOnlyPlayers $mpvRows)
         if (-not $vlcOk) { $cap += 'VLC (no VLC module in this build)' }
-        Install-CaptureRoute $state $cap
+        try { Install-CaptureRoute $state $cap } catch { Warn "Capture mode: not set up ($($_.Exception.Message))" }
         # the updater: <InstallDir>\PushMpcUpdater.exe (the filter starts "--auto" at most once a day) and the logon
         # task \PushMPC\Apply pending update (installs a downloaded update when MPC-HC is not running)
         $upd = Join-Path $InstallDir 'filter\PushMpcUpdater.exe'
@@ -2893,7 +2893,7 @@ switch ($Action) {
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
-        Uninstall-PlexRoute $state
+        try { Uninstall-PlexRoute $state } catch { Warn "Plex: its own libmpv was not put back ($($_.Exception.Message)); the backup is in $InstallDir\plex\backup" }
         Uninstall-MpvRoute $state
         Uninstall-VlcRoute $state
         if ((Get-StateValue $state 'capture') -or (Test-Path (Join-Path $InstallDir 'capture'))) { Invoke-Capture 'disable' }
