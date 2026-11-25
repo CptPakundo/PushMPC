@@ -1,9 +1,9 @@
 #!/bin/bash
 # mac_pixel_test.sh: PushMPC's macOS OpenGL output fork (pushmpc_macosx) against VLC's own macosx output, on the screen of
-# the runner's logged-in GUI session. A 320x180 still is shown 4x (--zoom=4) and the screen is captured:
+# the runner's logged-in GUI session. A 320x180 still is shown fullscreen (upscaled to the screen) and captured:
 #   - pushmpc_macosx with upscaling off must match VLC's macosx output (the fork changes nothing else);
 #   - with FSR it must be different, keep the mean level, and have sharper edges than VLC's bilinear.
-# The video window is found as the area that differs from a capture of the desktop without VLC.
+# The picture is letterboxed at a known place (fullscreen, not macOS's native fullscreen space).
 # env: VLC (the VLC binary), PLUGDIR (folder with the plugin), OUT; INTF (default: minimal_macosx, then macosx).
 set -u
 OUT=${OUT:-res/mac-pixel}
@@ -29,20 +29,24 @@ png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 
 open(sys.argv[1], "wb").write(png)
 EOF
 screencapture -x -t bmp "$OUT/desktop.bmp" || { echo "::error::screencapture failed"; exit 1; }
+# VLC's macosx interface asks about metadata retrieval on its first run (VLCMainWindow.m, key VLCFirstRun): answer it
+defaults write org.videolan.vlc VLCFirstRun -date "2026-01-01 00:00:00 +0000"
 grab() {   # $1 = name, $2 = interface, rest = VLC options
     local name=$1 intf=$2; shift 2
-    "$VLC" -I "$intf" --no-audio --no-video-title-show --no-osd --zoom=4 --image-duration=10 --play-and-exit \
-        --no-metadata-network-access -vv "$@" "$OUT/still.png" > "$OUT/$name.log" 2>&1 &
+    # fullscreen (not macOS's native fullscreen space): the picture is letterboxed at a known place on the screen
+    "$VLC" -I "$intf" --no-audio --no-video-title-show --no-osd --fullscreen --no-macosx-nativefullscreenmode \
+        --image-duration=12 --play-and-exit --no-metadata-network-access -vv "$@" "$OUT/still.png" > "$OUT/$name.log" 2>&1 &
     local pid=$!
-    sleep 6
+    sleep 8
     screencapture -x -t bmp "$OUT/$name.bmp"
     kill $pid 2>/dev/null; sleep 1; kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
-    grep -hE 'using vout display module|using interface module|PushMPC FSR|vout display error|passing over' "$OUT/$name.log" | sort | uniq -c
+    grep -hE 'using vout display module|using interface module|PushMPC FSR|vout display error|passing over|cannot|failed' "$OUT/$name.log" | sort | uniq -c | head -12
 }
 ok=""
 for intf in ${INTF:-minimal_macosx macosx}; do
     echo "== interface $intf"
     grab stock "$intf" --vout=macosx
+    cp "$OUT/stock.log" "$OUT/stock-$intf.log"; cp "$OUT/stock.bmp" "$OUT/stock-$intf.bmp"
     if grep -q 'using vout display module "macosx"' "$OUT/stock.log"; then ok=$intf; break; fi
 done
 [ -n "$ok" ] || { echo "::error::VLC's macosx output did not open with either interface (logs in $OUT)"; tail -30 "$OUT/stock.log"; exit 1; }
@@ -69,14 +73,16 @@ def load(n):
     return w, h, px
 w, h, desk = load("desktop")
 _, _, stock = load("stock"); _, _, off = load("off"); _, _, fsr = load("fsr")
-# the video window: where the stock capture differs from the desktop
-xs, ys = [], []
-for y in range(0, h, 2):
-    for x in range(0, w, 2):
-        if sum(abs(a - b) for a, b in zip(stock[y][x], desk[y][x])) > 30: xs.append(x); ys.append(y)
-if not xs: print("::error::the stock capture shows no window (screen recording blocked?)"); sys.exit(1)
-x0, x1, y0, y1 = min(xs) + 8, max(xs) - 8, min(ys) + 8, max(ys) - 8
-print(f"screen {w}x{h}, video area {x0}..{x1} x {y0}..{y1}")
+# fullscreen: the 16:9 picture is letterboxed in the middle of the screen
+s = min(w / 320, h / 180)
+vw, vh = int(320 * s), int(180 * s)
+x0, y0 = (w - vw) // 2 + 8, (h - vh) // 2 + 8
+x1, y1 = x0 + vw - 16, y0 + vh - 16
+print(f"screen {w}x{h}, picture area {x0}..{x1} x {y0}..{y1} ({s:.2f}x)")
+def red(p): # the still's red block must be where the picture is (else the capture shows something else)
+    c = p[y0 - 8 + vh * 3 // 16][x0 - 8 + vw * 3 // 16]
+    return c[0] > c[1] + 80 and c[0] > c[2] + 80
+if not red(stock): print(f"::error::the stock capture does not show the picture at the expected place"); sys.exit(1)
 def region(p): return [c for y in range(y0, y1) for x in range(x0, x1) for c in p[y][x]]
 S, O, F = region(stock), region(off), region(fsr)
 def stats(a, b):
