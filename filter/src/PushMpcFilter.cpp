@@ -4324,6 +4324,7 @@ void CPushMpcFilter::LoadLearned()
             bench = num(std::format(L"PfNext{}", t), m_costs.pfNext[t], nullptr, 0.1, 500) && bench;
         }
         m_costs.pfBenched = bench;
+        if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
         Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p",
             Narrow(m_gpuName), m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
             m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080));
@@ -4644,13 +4645,16 @@ void CPushMpcFilter::AutoLoop()
         if (tick % 30 == 0) SaveLearned();
         const pm::Source src = SourceInfo();
         pm::Choice c;
+        bool weakPf = false;   // a weak GPU with PushFlow installed (its speed test decides PushFlow vs FSR FG)
         {
             pm::Costs costs; pm::Gpu g;
             { std::lock_guard<std::mutex> lk(m_autoLock); costs = m_costs; g = m_gpu; m_display = d; }
+            weakPf = pm::IsWeakGpu(g.family, g.name) && g.has(pm::kCapPushFlow);
             c = pm::Decide(s, src, d, costs, g);
         }
         PublishNotes(s, c);
-        if (c.multiplier >= 2 && c.fgMethod == pm::FgMethod::PushFlow) MaybeBenchPushFlow(m_oi.width ? m_oi.width : c.outW, m_oi.height ? m_oi.height : c.outH);
+        // the speed test also runs on the cold start of a weak GPU (FSR FG first): its result decides PushFlow vs FSR FG
+        if (c.multiplier >= 2 && (c.fgMethod == pm::FgMethod::PushFlow || weakPf)) MaybeBenchPushFlow(m_oi.width ? m_oi.width : c.outW, m_oi.height ? m_oi.height : c.outH);
         // the live lines of the page: rate, GPU time, what runs (method, quality, cut guard), VRR, where Auto stopped
         const int64_t q = Qpc();
         const uint64_t del = m_delivered.load();

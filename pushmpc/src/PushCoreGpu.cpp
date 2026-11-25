@@ -24,6 +24,7 @@
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
+#include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
 #include "veyra/pipeline/Rdna3NrBackend.h"
@@ -246,6 +247,26 @@ bool findAdapter(uint64_t luid, DXGI_ADAPTER_DESC1& out) {
     return false;
 }
 
+// The user-mode driver version of the adapter ("32.0.15.9140"), the key of the self-test cache (pushmpc/unlocks.h)
+std::wstring driverVersionOf(const LUID& luid) {
+    ComPtr<IDXGIFactory4> f;
+    ComPtr<IDXGIAdapter> a;
+    LARGE_INTEGER v{};
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f))) || FAILED(f->EnumAdapterByLuid(luid, IID_PPV_ARGS(&a))) ||
+        FAILED(a->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v))) return L"unknown";
+    return std::format(L"{}.{}.{}.{}", HIWORD(v.HighPart), LOWORD(v.HighPart), HIWORD(v.LowPart), LOWORD(v.LowPart));
+}
+// T5b unlock: RTX VSR on GTX 16 (TU116 / TU117, compute capability 7.5: nvngx_vsr ships complete sm_75 kernels; the only
+// gate is NGX's feature table). Eligible when the files are there; on only after its self-test passed on this adapter
+// and driver (tests\gtx16-vsr-manual.ps1 runs pushmpc\tools\vsr_gate_probe and records the result), or forced on.
+// Off switch PUSHMPC_DISABLE_GTX16VSR=1 / Unlocks\Gtx16Vsr = 0. The decision goes to the log and to reason[RTX_VSR].
+pmu::UnlockDecision gtx16VsrDecision(const DXGI_ADAPTER_DESC1& d, bool files) {
+    std::wstring src;
+    const pmu::UnlockMode mode = pmu::ReadUnlockMode(pmu::Unlock::Gtx16Vsr, &src);
+    const pmu::SelfTest t = pmu::ReadSelfTest(pmu::Unlock::Gtx16Vsr, pmu::SelfTestKey(d.VendorId, d.DeviceId, driverVersionOf(d.AdapterLuid)));
+    return pmu::DecideUnlock(pmu::Unlock::Gtx16Vsr, mode, files, L"nvngx_vsr.dll is not installed", t, false, src);
+}
+
 void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeDir, PushCoreCaps& c) {
     const std::wstring name = d.Description;
     const uint32_t v = d.VendorId, fam = familyOf(v, name);
@@ -279,7 +300,18 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         "FSR 4 ML frame generation needs an AMD RX 9000", "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)");
     set(PUSHCORE_CAP_AMDFRC, amd || fileExists(system32() / L"amfrt64.dll"), veyra::gfx::AmfFrcBackend::runtimeInstalled(),
         "needs AMD's driver (AMF runtime)", "AMD's AMF runtime is not installed");
-    set(PUSHCORE_CAP_RTX_VSR, nvidia && rtx, fileExists(runtimeDir / L"nvngx_vsr.dll"), "needs an NVIDIA RTX card", "nvngx_vsr.dll is not installed");
+    const bool vsrFiles = fileExists(runtimeDir / L"nvngx_vsr.dll");
+    const bool gtx16 = nvidia && !rtx && pmu::IsGtx16(v, d.DeviceId, name);
+    if (gtx16) {
+        // hardware: the card can run it through the unlock (unless switched off); available: files + the unlock is on
+        const pmu::UnlockDecision u = gtx16VsrDecision(d, vsrFiles);
+        const std::string why = narrow(u.why);
+        veyra::log::info("pushcore", std::format("unlock {}", why));
+        const bool off = pmu::ReadUnlockMode(pmu::Unlock::Gtx16Vsr) == pmu::UnlockMode::Off;
+        set(PUSHCORE_CAP_RTX_VSR, !off, vsrFiles && u.on, why.c_str(), vsrFiles ? why.c_str() : "nvngx_vsr.dll is not installed");
+    } else {
+        set(PUSHCORE_CAP_RTX_VSR, nvidia && rtx, vsrFiles, "needs an NVIDIA RTX card (GTX 16: unlock Gtx16Vsr after its self-test)", "nvngx_vsr.dll is not installed");
+    }
     set(PUSHCORE_CAP_VSR_FAMILIES, nvidia && rtx, veyra::pipeline::VfxSrBackend::runtimeAvailable(rt), "needs an NVIDIA RTX card",
         "the Video Effects VideoSuperRes files are not installed");
     set(PUSHCORE_CAP_FSR_SR, true, fsrLoader && fileExists(fsr / L"amd_fidelityfx_upscaler_dx12.dll"), "",

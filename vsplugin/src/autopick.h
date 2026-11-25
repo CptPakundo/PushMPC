@@ -129,6 +129,7 @@ inline void LoadLearned(pm::Costs& c, const std::wstring& gpuName)
             bench = num(std::format(L"PfNext{}", t), c.pfNext[t], nullptr, 0.1, 500) && bench;
         }
         c.pfBenched = bench;
+        pm::ApplyMeasuredCard(c);
     }
     RegCloseKey(k);
 }
