@@ -1,5 +1,5 @@
 /*
- * pushspike: PushMPC's VLC 3.0.x feasibility spike (track T3, internal test module).
+ * pushspike: PushMPC's VLC 3.0.x feasibility spike (test module).
  *
  * Two submodules in one plugin:
  *   1. a "video filter" that registers the shortcuts "pushspike" and "postproc" with a score above VLC's own

@@ -1,6 +1,6 @@
 # PushMPC for VLC 3.0.x (vlcplugin/): builds libpushmpc_plugin for Linux, Windows (MinGW cross build) and macOS, runs
 # the engine test, then plays synthetic clips headless in the distro VLC, the official Windows VLC, the Flathub VLC
-# and (dispatch input / "[macos]" in the commit message: 10x minutes while private) VLC.app, counting frames and
+# and VLC.app (Homebrew cask), counting frames and
 # timestamps with a CSV display, and checks real video outputs (OpenGL and X11 under Xvfb, Direct3D on WARP, macosx).
 name: vlc-plugin
 
@@ -14,6 +14,10 @@ on:
         description: 'Also run the macOS job (10x minutes while the repo is private)'
         type: boolean
         default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   VLC_WIN_VERSION: '3.0.24'
@@ -197,7 +201,7 @@ jobs:
             LABEL='${{ matrix.image }} distro VLC' CASES='base x2 x4 x8' bash vlcplugin/tests/run-module.sh" | tee distro.txt
           grep -q '^PASS {"case": "x4"' distro.txt || { echo "::error::x4 failed in ${{ matrix.image }}"; exit 1; }
 
-  # Snap VLC (critic claim 2a): the wrapper leaves VLC_PLUGIN_PATH alone and runs vlc --config=$SNAP_USER_COMMON/vlcrc;
+  # Snap VLC: the wrapper leaves VLC_PLUGIN_PATH alone and runs vlc --config=$SNAP_USER_COMMON/vlcrc;
   # does the confined VLC load a plugin from ~/snap/vlc/common (AppArmor: mmap-exec allowed there?)
   snap-spike:
     needs: [clips, build-linux]
@@ -281,7 +285,7 @@ jobs:
         with: { name: results-windows, path: res, retention-days: 7 }
 
   macos:
-    if: ${{ inputs.macos || contains(github.event.head_commit.message, '[macos]') }}
+    # public repository: standard macOS runners are free, so macOS runs on every push
     needs: [clips]
     runs-on: macos-15
     timeout-minutes: 30

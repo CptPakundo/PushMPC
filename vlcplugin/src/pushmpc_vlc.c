@@ -1,7 +1,7 @@
 /*
  * PushMPC for VLC 3.0.x: frame generation in VLC's video output.
  *
- * Where it sits (see track-vlc notes and vlcplugin/README.md): VLC 3.0.x builds two filter chains in the video output.
+ * Where it sits: VLC 3.0.x builds two filter chains in the video output.
  * Only the STATIC chain may output more pictures than it receives (extra pictures are linked through
  * picture->p_next and drained one per display), and VLC puts a filter there only by name: "postproc" (every 3.0.x),
  * "amf_frc" (3.0.22+) and the deinterlacer (src/video_output/video_output.c, ThreadChangeFilters). So the filter is a

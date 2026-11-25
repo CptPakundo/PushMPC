@@ -1,4 +1,4 @@
-# VLC 3.0.x feasibility spike (track T3): can a third-party video filter module in the vout's STATIC chain
+# VLC 3.0.x feasibility spike: can a third-party video filter module in the vout's STATIC chain
 # (shortcut "postproc") output more frames than it receives, change the output size, and receive D3D11 textures?
 # Builds vlcplugin/spike/pushspike.c (a frame multiplier + a CSV "pushdump" vout display) against:
 #   - Linux: Ubuntu 24.04's libvlccore-dev (VLC 3.0.20), tested with the distro VLC and, optionally, the Flathub VLC;
@@ -22,6 +22,10 @@ on:
         description: 'Also test the Flathub VLC (org.videolan.VLC) on Linux'
         type: boolean
         default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   VLC_WIN_VERSION: '3.0.24'
