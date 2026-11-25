@@ -170,7 +170,8 @@ st_run() {
     snap)    set -- snap run vlc ;;
   esac
   if [ "$interop" = 1 ]; then
-    set -- "$@" --vout=gl --window=xcb_window --width=160 --height=90 --no-video-deco --no-embedded-video
+    # X11 or XWayland, as the Qt interface uses (with WAYLAND_DISPLAY set, VLC would pick its Wayland window instead)
+    set -- env -u WAYLAND_DISPLAY "$@" --vout=gl --width=160 --height=90 --no-video-deco --no-embedded-video
   else
     set -- "$@" --vout=dummy
   fi

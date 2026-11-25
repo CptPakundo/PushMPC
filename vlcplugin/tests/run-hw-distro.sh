@@ -28,7 +28,7 @@ cases='va_base va_x4 va_x8_noout va_noderive_x4 va_broken_x4'
 envx=""
 case "$mode" in
   full) cases='' ;;                                   # every VA-API case, the HEVC Main 10 clip too
-  desktop) cases='va_base va_x4 va_zc_x4 va_zc_x4_sync va10_zc_x4 va_zc_noexport_x4 va_zc_novk_x4 vagl_base vagl_x2 vagl_broken_x2 vagl_zc_x2'
+  desktop) cases='va_base va_x4 va_zc_x2 va_zc_x2_sync va10_zc_x2 va_zc_noexport_x2 va_zc_novk_x2 vagl_base vagl_x2 vagl_broken_x2 vagl_zc_x2'
            envx='ZC=1 GL=1' ;;
 esac
 run_as() { su tester -c "$1"; }

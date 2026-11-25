@@ -440,6 +440,7 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
     picture_t *ca = pm_hw_cpu_picture(sys->hw), *cb = pm_hw_cpu_picture(sys->hw);
     char err[200] = "";
     bool ok = false;
+    picture_t *cr = NULL;
     if (a && b && ca && cb) {
         const int w = (int)sys->wfmt.i_visible_width, h = (int)sys->wfmt.i_visible_height;
         for (int p = 0; p < 3; p++)
@@ -450,6 +451,17 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
                     if (sys->bps == 1) row[x] = (uint8_t)v; else ((uint16_t *)row)[x] = (uint16_t)v;
                 }
             }
+        /* the reference: the same frames through the copy path (the engine's own rounding is not the transport's) */
+        cr = pm_hw_cpu_picture(sys->hw);
+        if (cr) {
+            pm_yuv ya; pm_yuv_out yr;
+            PlanesIn(ca, &sys->wfmt, sys->bps, &ya);
+            PlanesOut(cr, &sys->wfmt, sys->bps, &yr);
+            if (pm_engine_push(sys->eng, &ya, 0, err, sizeof(err)) == 0 && pm_engine_push(sys->eng, &ya, 1, err, sizeof(err)) == 0)
+                pm_engine_generate(sys->eng, 0.5f, &yr);
+            pm_engine_forget(sys->eng);
+            err[0] = 0;
+        }
         pm_dmabuf da, db;
         if (pm_hw_upload(sys->hw, ca, a) != 0) snprintf(err, sizeof(err), "pattern upload failed");
         else if (pm_hw_export(sys->hw, a, &da) != 0) snprintf(err, sizeof(err), "the driver does not export surfaces (vaExportSurfaceHandle)");
@@ -458,13 +470,13 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
             else {
                 if (pm_engine_push_dmabuf(sys->eng, &da, 0, err, sizeof(err)) == 0 && pm_engine_push_dmabuf(sys->eng, &da, 1, err, sizeof(err)) == 0 &&
                     pm_engine_generate_dmabuf(sys->eng, 0.5f, &db, err, sizeof(err)) == 0) {
-                    if (pm_hw_download(sys->hw, b, cb) != 0) snprintf(err, sizeof(err), "read back failed");
+                    if (!cr || pm_hw_download(sys->hw, b, cb) != 0) snprintf(err, sizeof(err), "read back failed");
                     else {
                         int maxd = 0;
                         for (int p = 0; p < 3; p++)
                             for (int y = 0; y < (p ? (h + 1) / 2 : h); y++)
                                 for (int x = 0; x < (p ? (w + 1) / 2 : w); x++) {
-                                    const uint8_t *ra = ca->p[p].p_pixels + (size_t)y * ca->p[p].i_pitch, *rb = cb->p[p].p_pixels + (size_t)y * cb->p[p].i_pitch;
+                                    const uint8_t *ra = cr->p[p].p_pixels + (size_t)y * cr->p[p].i_pitch, *rb = cb->p[p].p_pixels + (size_t)y * cb->p[p].i_pitch;
                                     const int va = sys->bps == 1 ? ra[x] : ((const uint16_t *)ra)[x], vb = sys->bps == 1 ? rb[x] : ((const uint16_t *)rb)[x];
                                     if (abs(va - vb) > maxd) maxd = abs(va - vb);
                                 }
@@ -477,6 +489,7 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
             pm_hw_dmabuf_close(&da);
         }
     } else snprintf(err, sizeof(err), "no surface for the round trip");
+    if (cr) picture_Release(cr);
     if (a) picture_Release(a);
     if (b) picture_Release(b);
     if (ca) picture_Release(ca);
