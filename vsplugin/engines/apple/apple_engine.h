@@ -2,10 +2,12 @@
 // (VTFrameProcessor) on Apple silicon. C++ interface; the implementation is Objective-C++ (apple_engine.mm, macOS only).
 //
 // What runs, per machine (Probe() decides at run time; nothing is assumed from the OS version alone):
-//   interpolation   VTLowLatencyFrameInterpolation (macOS 26+; "for real-time processing"): k - 1 frames per source
-//                   pair from one call, on its 2^x phase grid (apple_convert.h MakePlan); it lists '420v' only. Else
-//                   VTFrameRateConversion (macOS 15.4+; any phase, editing grade, quality "normal" so it has a chance
-//                   to keep up); it lists RGhA only, so frames go YUV -> RGhA -> YUV through VTPixelTransferSession.
+//   interpolation   VTLowLatencyFrameInterpolation (macOS 26+; "for real-time processing") gives 2^x - 1 phases
+//                   per call (x = 1: 0.5, x = 2: quarters): x2 and x4 are native (it lists '420v' only). x3, x5..x7
+//                   use VTFrameRateConversion (macOS 15.4+; any phase, editing grade, quality "normal"; it lists RGhA
+//                   only, so frames go YUV -> RGhA -> YUV through VTPixelTransferSession). x8 tries the low-latency
+//                   eighth grid (x = 3, an unlock macOS 26 accepts) first. Last resort: the low-latency grid with
+//                   phases rounded to it (apple_convert.h MakePlan). Each candidate must pass its self-test.
 //   self-test       Configure runs each effect once on synthetic frames: a Mac (or VM) that lists an effect but cannot
 //                   run it makes Configure fail, and the plugin falls back to the portable backend.
 //   super res.      VTLowLatencySuperResolutionScaler (macOS 26+), factor 2 (or 4 when asked), applied to every output

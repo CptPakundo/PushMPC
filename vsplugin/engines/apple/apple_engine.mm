@@ -238,7 +238,7 @@ std::string ProbeReport()
 #ifdef PMVS_VT_LL
         if (@available(macOS 26.0, *)) {
             for (auto& s : sizes) {
-                for (int x = 1; x <= 3; ++x) {
+                for (int x = 1; x <= 4; ++x) {
                     VTLowLatencyFrameInterpolationConfiguration* fi = [[VTLowLatencyFrameInterpolationConfiguration alloc] initWithFrameWidth:s[0] frameHeight:s[1] numberOfInterpolatedFrames:x];
                     r += Fmt("  low-latency interpolation %dx%d, %d interpolated: %s\n", s[0], s[1], x, fi ? ("formats " + FormatList(Formats(fi.frameSupportedPixelFormats))).c_str() : "nil (not offered)");
                 }
@@ -254,6 +254,9 @@ std::string ProbeReport()
             r += Fmt("  low-latency super resolution: minimum %dx%d, maximum %dx%d\n", int(mn.width), int(mn.height), int(mx.width), int(mx.height));
         }
 #endif
+        // SP5 (second-opinion-engines.md 3a): isSupported, and the size queries per spatial scale factor
+        r += Fmt("  SP5: low-latency interpolation isSupported=%d, super resolution isSupported=%d; size queries (maximumDimension / "
+                 "maximumPixelCount, macOS 27 API): %s\n", int(c.lowLatencyFI), int(c.lowLatencySR), c.sizeQueries ? "present" : ("absent on " + c.os).c_str());
         if (c.sizeQueries)
             for (int f : { 1, 2 })
                 r += Fmt("  macOS 27: low-latency interpolation, scale %d: max dimension %ld, max pixels %ld; super resolution x%d: max dimension %ld\n", f,
@@ -517,7 +520,10 @@ struct Engine::Impl {
         if (rgb) { av = Convert(a, vtSrcPool, err); bv = Convert(b, vtSrcPool, err); if (!av || !bv) return false; }
         NSError* e = nil;
         std::vector<Buf> out;
-        if (!RunFi(av, bv, 0, 417083, { 0.5f }, out, false, &e)) { err = ErrText(e); return false; }
+        // the phases this configuration will really ask for (an x = 3 grid is an unlock: it must run, not only be listed)
+        const PhasePlan plan = fi == Fi::LowLatency ? MakePlan(cfg.k, exponent) : MakePlan(cfg.k, 0, true);
+        const std::vector<float> phases = plan.phases.empty() ? std::vector<float>{ 0.5f } : plan.phases;
+        if (!RunFi(av, bv, 0, 417083, phases, out, false, &e)) { err = ErrText(e); return false; }
         if (rgb && !Convert(out[0], srcPool, err)) return false;
         return true;
     }
@@ -549,44 +555,66 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
         auto joined = [&] { std::string n; for (auto& s : notes) if (!s.empty()) n += (n.empty() ? "" : "; ") + s; return n; };
         auto has = [](const std::vector<uint32_t>& l, uint32_t f) { return std::find(l.begin(), l.end(), f) != l.end(); };
 
-        // ---- interpolation
-        if (d.cfg.k >= 2) {
-            const bool wantLL = fiMode != "frc", wantFrc = fiMode != "lowlatency";
+        // ---- interpolation. The low-latency interpolator offers 2^x - 1 phases (x = 1: 0.5; x = 2: quarters), so
+        // x2 and x4 are native. Other multipliers use frame-rate conversion (any phase) when it runs here. x8 first
+        // tries the low-latency x = 3 grid (eighths: macOS 26 accepts it, beyond Apple's quarter-phase example) and
+        // keeps it only if it really runs. The last resort is the low-latency eighth or quarter grid with the phases
+        // rounded to it. Every candidate must pass a self-test on synthetic frames with the phases it will use.
+        const uint32_t yuvPref = c.bits > 8 ? (c.colour.fullRange ? kxf20 : kx420) : (c.colour.fullRange ? k420f : k420v);
+        auto pickFiFormat = [&]() -> bool {
+            const uint32_t f = PickFormat(d.fiFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
+            d.rgb = false;
+            if (f) { d.fmt = d.vtFmt = f; return true; }
+            if (has(d.fiFormats, kRGhA)) { d.rgb = true; d.vtFmt = kRGhA; d.fmt = yuvPref; d.fmtLossy = false; return true; }
+            return false;
+        };
+        auto endFi = [&] { if (@available(macOS 15.4, *)) { if (d.fiProc) [d.fiProc endSession]; } d.fiProc = nil; d.fi = Fi::None; };
+        // one candidate: its configuration and session, formats, pools, self-test
+        auto tryFi = [&](Fi kind, int x) -> bool {
+            const std::string name = kind == Fi::LowLatency ? Fmt("low-latency interpolation (grid 1/%d)", 1 << x) : std::string("frame-rate conversion");
+            id cfgObj = nil;
+            if (kind == Fi::LowLatency) {
+                if (!caps.lowLatencyFI) { notes.push_back("low-latency interpolation not supported here"); return false; }
 #ifdef PMVS_VT_LL
-            if (wantLL && caps.lowLatencyFI) {
                 if (@available(macOS 26.0, *)) {
-                    for (int x = ExponentFor(d.cfg.k); x >= 1 && d.fi == Fi::None; --x) {
-                        VTLowLatencyFrameInterpolationConfiguration* fc = [[VTLowLatencyFrameInterpolationConfiguration alloc] initWithFrameWidth:w frameHeight:h numberOfInterpolatedFrames:x];
-                        if (!fc) { notes.push_back(Fmt("low-latency interpolation with %d interpolated frames: not offered for %dx%d", x, w, h)); continue; }
-                        VTFrameProcessor* p = [[VTFrameProcessor alloc] init];
-                        NSError* e = nil;
-                        if (![p startSessionWithConfiguration:fc error:&e]) { notes.push_back("low-latency interpolation: startSession failed: " + ErrText(e)); break; }
-                        d.fiProc = p; d.fi = Fi::LowLatency; d.exponent = x;
-                        d.fiFormats = Formats(fc.frameSupportedPixelFormats);
-                        d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes;
-                    }
+                    VTLowLatencyFrameInterpolationConfiguration* fc = [[VTLowLatencyFrameInterpolationConfiguration alloc] initWithFrameWidth:w frameHeight:h numberOfInterpolatedFrames:x];
+                    if (fc) { d.fiFormats = Formats(fc.frameSupportedPixelFormats); d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes; }
+                    cfgObj = fc;
                 }
-            } else if (wantLL) notes.push_back("low-latency interpolation not supported here");
 #endif
-            if (d.fi == Fi::None && wantFrc && caps.frc) {
+            } else {
+                if (!caps.frc) { notes.push_back("frame-rate conversion not supported here"); return false; }
                 if (@available(macOS 15.4, *)) {
                     VTFrameRateConversionConfiguration* fc = [[VTFrameRateConversionConfiguration alloc] initWithFrameWidth:w frameHeight:h usePrecomputedFlow:NO
                         qualityPrioritization:VTFrameRateConversionConfigurationQualityPrioritizationNormal revision:VTFrameRateConversionConfiguration.defaultRevision];
-                    if (!fc) notes.push_back(Fmt("frame-rate conversion: not offered for %dx%d", w, h));
-                    else {
-                        VTFrameProcessor* p = [[VTFrameProcessor alloc] init];
-                        NSError* e = nil;
-                        if (![p startSessionWithConfiguration:fc error:&e]) notes.push_back("frame-rate conversion: startSession failed: " + ErrText(e));
-                        else {
-                            d.fiProc = p; d.fi = Fi::Frc; d.exponent = ExponentFor(d.cfg.k);
-                            d.fiFormats = Formats(fc.frameSupportedPixelFormats);
-                            d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes;
-                        }
-                    }
+                    if (fc) { d.fiFormats = Formats(fc.frameSupportedPixelFormats); d.fiSrcAttrs = fc.sourcePixelBufferAttributes; d.fiDstAttrs = fc.destinationPixelBufferAttributes; }
+                    cfgObj = fc;
                 }
-            } else if (d.fi == Fi::None && wantFrc) notes.push_back("frame-rate conversion not supported here");
+            }
+            if (!cfgObj) { notes.push_back(name + Fmt(": not offered for %dx%d", w, h)); return false; }
+            NSError* e = nil;
+            VTFrameProcessor* p = nil;
+            if (@available(macOS 15.4, *)) p = [[VTFrameProcessor alloc] init];
+            if (!p || ![p startSessionWithConfiguration:cfgObj error:&e]) { notes.push_back(name + ": startSession failed: " + ErrText(e)); return false; }
+            d.fiProc = p; d.fi = kind; d.exponent = kind == Fi::LowLatency ? x : ExponentFor(d.cfg.k);
+            std::string perr;
+            if (!pickFiFormat()) { notes.push_back(name + " lists no format we can feed (" + FormatList(d.fiFormats) + ")"); endFi(); return false; }
+            d.srFactor = 0; d.outW = w; d.outH = h;
+            if (!d.MakePools(perr)) { notes.push_back(name + ": " + perr); endFi(); return false; }
+            if (!d.SelfTestFi(perr)) { notes.push_back(name + " is listed but does not run here (self-test: " + perr + ")"); endFi(); return false; }
+            return true;
+        };
+        if (d.cfg.k >= 2) {
+            const int k = d.cfg.k;
+            std::vector<std::pair<Fi, int>> order;
+            if (fiMode == "frc") order = { { Fi::Frc, 0 } };
+            else if (fiMode == "lowlatency") { for (int x = std::min(ExponentFor(k), 3); x >= 1; --x) order.push_back({ Fi::LowLatency, x }); }
+            else if (k == 2 || k == 4) order = { { Fi::LowLatency, k == 2 ? 1 : 2 }, { Fi::Frc, 0 } };
+            else if (k == 8) order = { { Fi::LowLatency, 3 }, { Fi::Frc, 0 }, { Fi::LowLatency, 2 } };
+            else order = { { Fi::Frc, 0 }, { Fi::LowLatency, 3 }, { Fi::LowLatency, 2 } };
+            for (auto& o : order) if (tryFi(o.first, o.second)) break;
             if (d.fi == Fi::None) {
-                err = "no VideoToolbox interpolator for " + std::to_string(w) + "x" + std::to_string(h) + (notes.empty() ? std::string() : ": " + joined()) + " (" + caps.detail + ")";
+                err = "no VideoToolbox interpolator runs for " + std::to_string(w) + "x" + std::to_string(h) + " x" + std::to_string(k) + (notes.empty() ? std::string() : ": " + joined()) + " (" + caps.detail + ")";
                 return false;
             }
         }
@@ -632,13 +660,8 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
             d.srProc = nil; d.srFactor = 0;
         };
 
-        // ---- pixel formats: the interpolator's own 4:2:0 format, else RGhA with our YUV format around it
-        const uint32_t yuvPref = c.bits > 8 ? (c.colour.fullRange ? kxf20 : kx420) : (c.colour.fullRange ? k420f : k420v);
+        // ---- pixel formats: the interpolator's (chosen above); super resolution must share our YUV format
         if (d.fi != Fi::None) {
-            const uint32_t f = PickFormat(d.fiFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
-            if (f) d.fmt = d.vtFmt = f;
-            else if (has(d.fiFormats, kRGhA)) { d.rgb = true; d.vtFmt = kRGhA; d.fmt = yuvPref; d.fmtLossy = false; }
-            else { err = "the VideoToolbox interpolator lists no format we can feed (" + FormatList(d.fiFormats) + ")"; return false; }
             if (d.srFactor && !has(d.srFormats, d.fmt)) {
                 const uint32_t sf = d.rgb ? PickFormat(d.srFormats, c.bits, c.colour.fullRange) : 0;
                 if (sf) d.fmt = sf;
@@ -658,11 +681,6 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
             if (d.fi == Fi::None) { err = "VideoToolbox super resolution does not run here: " + terr; return false; }
             d.outW = w; d.outH = h;
             if (!d.MakePools(err)) return false;
-        }
-        if (d.fi != Fi::None && !d.SelfTestFi(terr)) {
-            err = std::string(d.fi == Fi::LowLatency ? "low-latency interpolation" : "frame-rate conversion") + " is listed but does not run here (self-test: " + terr + ")" +
-                  (notes.empty() ? std::string() : "; " + joined()) + " (" + caps.detail + ")";
-            return false;
         }
         d.stats = Stats();
         d.ladder.Init(c.srcFps, d.srFactor > 0, d.fi == Fi::LowLatency ? d.exponent : d.fi == Fi::Frc ? 2 : 0);

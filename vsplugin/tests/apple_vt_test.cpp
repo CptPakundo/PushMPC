@@ -137,7 +137,8 @@ int main()
     if (c.lowLatencyFI) {
         Run("LL x2 8-bit", 1280, 720, 8, 2, "off", "lowlatency");
         Run("LL x4 8-bit", 1280, 720, 8, 4, "off", "lowlatency");
-        Run("LL x5 8-bit (grid 1/16)", 1280, 720, 8, 5, "off", "lowlatency");
+        Run("LL x8 8-bit (grid 1/8, unlock)", 1280, 720, 8, 8, "off", "lowlatency");
+        Run("auto x3 (FRC, else LL eighths)", 1280, 720, 8, 3, "off", "auto");
         Run("LL x2 10-bit PQ", 1280, 720, 10, 2, "off", "lowlatency");
         Run("LL x2 1080p", 1920, 1080, 8, 2, "off", "lowlatency");
     }
