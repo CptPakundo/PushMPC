@@ -1,0 +1,689 @@
+# Player integrations and packaging (track T4) on hosted runners, no GPU:
+#   win-writers     every config writer against fake roots (mpv-integration, mpv/MPC-BE/PotPlayer steps of pushmpc-install)
+#   win-players     real portable players with the plugin (portable backend): mpv (shinchiro), mpv.net, MPC-QT, Kodi
+#                   (external player), a Jellyfin MPV Shim config; install, play, byte-exact uninstall
+#   potplayer       a real PotPlayer: the filter entry pushmpc-install writes must make PotPlayer load the filter;
+#                   registry before / after; uninstall restores the filter list exactly (layout research variants too)
+#   linux-build     pushmpc_vs.so in manylinux_2_28 (x86_64, aarch64 on ubuntu-24.04-arm), static libstdc++, GLIBC
+#                   check, unit tests, vspipe through the pinned VapourSynth wheel, the release tarball
+#   linux-sh        install.sh and mpv-integration.sh tests (fake HOME, stub players) under sh and dash
+#   linux-arch      Arch: install.sh into a fresh HOME, mpv encode mode through the installed block (frame count x2,
+#                   plugin log), byte-exact uninstall; Celluloid, Haruna, SMPlayer, MPC-QT under Xvfb with the plugin log
+#   linux-fedora    Fedora's mpv: VapourSynth or not, and install.sh's answer either way
+#   linux-flatpak   Ubuntu: the distro mpv lacks VapourSynth -> Flathub io.mpv.Mpv (user), override, encode mode in
+#                   the sandbox, byte-exact uninstall; Flatpak extension point check
+#   aur             PKGBUILD built with makepkg as a normal user in archlinux, namcap, pacman -U, autoload check
+#   win-packaging   winget validate (Setup's SHA-256 from the CI release), Scoop: schema + a real install/uninstall
+#   arm64-windows   windows-11-arm: the x64 Setup under Prism (silent), structure, registration, MPC-HC x64 + filter log
+# CI artifacts reused (inputs): the release dry run (Setup, zips) and the vsplugin run (pushmpc_vs.dll).
+name: integrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run:
+        description: 'run id of a release.yml dry run (artifact pushmpc-release)'
+        default: '45233609124'
+      vsplugin_run:
+        description: 'run id of a vsplugin.yml run (artifact pushmpc_vs-windows-x64)'
+        default: '45233589154'
+  push:
+    branches: ['track/integrations']
+    paths:
+      - 'integrations/**'
+      - 'packaging/**'
+      - 'scripts/pushmpc-install.ps1'
+      - 'scripts/test-*-install.ps1'
+      - '.github/workflows/integrations.yml'
+
+concurrency:
+  group: integrations-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RELEASE_RUN: ${{ inputs.release_run || '45233609124' }}
+  VSPLUGIN_RUN: ${{ inputs.vsplugin_run || '45233589154' }}
+  CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
+
+jobs:
+  # ---------------------------------------------------------------------------------------------------- Windows
+  win-writers:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: mpv-integration.ps1 (fake roots)
+        shell: pwsh
+        run: pwsh -File integrations/mpv/tests/mpv-integration.tests.ps1
+      - name: pushmpc-install.ps1 mpv route (fake roots)
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-mpv-install.ps1; exit $LASTEXITCODE
+      - name: pushmpc-install.ps1 MPC-BE steps (fake registry root)
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-mpcbe-install.ps1; exit $LASTEXITCODE
+      - name: pushmpc-install.ps1 PotPlayer steps (fake registry root)
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-potplayer-install.ps1; exit $LASTEXITCODE
+
+  win-players:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults: { run: { shell: pwsh } }
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc_vs-windows-x64, path: '${{ runner.temp }}/vsdll', run-id: '${{ env.VSPLUGIN_RUN }}', github-token: '${{ github.token }}' }
+      - uses: actions/cache@v4
+        with: { path: '${{ runner.temp }}/dl', key: win-players-dl-v1-${{ hashFiles('scripts/vapoursynth-pin.json') }} }
+      - name: Plugin, pinned VapourSynth runtime, test clip (the layout PushMPC installs)
+        timeout-minutes: 10
+        run: |
+          $dl = "$env:RUNNER_TEMP\dl"; New-Item -ItemType Directory $dl -Force | Out-Null
+          $pin = Get-Content scripts/vapoursynth-pin.json -Raw | ConvertFrom-Json
+          function Fetch($url, $sha) { $f = Join-Path $dl (Split-Path $url -Leaf); if (-not (Test-Path $f)) { Invoke-WebRequest $url -OutFile $f }
+            if ($sha -and (Get-FileHash $f).Hash -ne $sha.ToUpper()) { throw "SHA-256 mismatch $url" }; return $f }
+          $pm = "$env:LOCALAPPDATA\PushMPC"; $rt = "$pm\vapoursynth"; $vsp = "$pm\vsplugin"
+          New-Item -ItemType Directory $rt, $vsp -Force | Out-Null
+          tar -xf (Fetch $pin.python.url $pin.python.sha256) -C $rt; tar -xf (Fetch $pin.vapoursynth.url $pin.vapoursynth.sha256) -C $rt
+          $sp = Join-Path $rt $pin.vapoursynth.wheelTo; New-Item -ItemType Directory $sp -Force | Out-Null
+          foreach ($w in Get-ChildItem (Join-Path $rt $pin.vapoursynth.wheel)) { tar -xf $w.FullName -C $sp }
+          foreach ($p in Get-ChildItem $rt -Filter 'python*._pth') { Add-Content $p.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
+          Copy-Item "$env:RUNNER_TEMP\vsdll\pushmpc_vs.dll" $vsp; Copy-Item vsplugin/scripts/pushmpc.vpy $vsp
+          $vss = (Get-ChildItem $rt -Recurse -Filter VSScript.dll | Select-Object -First 1).DirectoryName
+          "VSSCRIPT_DIR=$vss" >> $env:GITHUB_ENV
+          $clip = Fetch $env:CLIP_URL ''
+          "CLIP=$clip" >> $env:GITHUB_ENV
+          Write-Host "runtime $vss; clip $clip ($((Get-Item $clip).Length) bytes)"
+      - name: Players (portable builds from their official releases)
+        timeout-minutes: 10
+        run: |
+          $dl = "$env:RUNNER_TEMP\dl"; $pin = Get-Content scripts/vapoursynth-pin.json -Raw | ConvertFrom-Json
+          $log = "$env:RUNNER_TEMP\players.txt"
+          # shinchiro mpv (pinned) where PushMPC looks for it
+          $f = Join-Path $dl (Split-Path $pin.mpvForCi.url -Leaf); if (-not (Test-Path $f)) { Invoke-WebRequest $pin.mpvForCi.url -OutFile $f }
+          if ((Get-FileHash $f).Hash -ne $pin.mpvForCi.sha256) { throw 'mpv sha' }
+          7z x $f "-o$env:LOCALAPPDATA\Programs\mpv" -y | Out-Null
+          "mpv: $($pin.mpvForCi.tag)" | Tee-Object -Append $log
+          # mpv.net (latest release, portable zip)
+          $rel = gh api repos/mpvnet-player/mpv.net/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match 'portable.*x64.*\.zip$|x64.*portable.*\.zip$' } | Select-Object -First 1
+          if (-not $a) { $a = $rel.assets | Where-Object { $_.name -match '\.zip$' -and $_.name -notmatch 'arm' } | Select-Object -First 1 }
+          $f = Join-Path $dl $a.name; if (-not (Test-Path $f)) { Invoke-WebRequest $a.browser_download_url -OutFile $f }
+          $d = "$env:LOCALAPPDATA\Programs\mpv.net"; 7z x $f "-o$d" -y | Out-Null
+          $exe = Get-ChildItem $d -Recurse -Filter mpvnet.exe | Select-Object -First 1
+          if ($exe.DirectoryName -ne $d) { Get-ChildItem $exe.DirectoryName | Move-Item -Destination $d -Force }
+          "mpv.net: $($rel.tag_name) $($a.name) sha256 $((Get-FileHash $f).Hash)" | Tee-Object -Append $log
+          Get-ChildItem $d -Filter '*mpv*.dll' | ForEach-Object { "  mpv.net libmpv: $($_.Name) $($_.Length)" | Tee-Object -Append $log }
+          # MPC-QT (latest release, portable zip)
+          $rel = gh api repos/mpc-qt/mpc-qt/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match 'win-x64.*\.zip$' } | Select-Object -First 1
+          $f = Join-Path $dl $a.name; if (-not (Test-Path $f)) { Invoke-WebRequest $a.browser_download_url -OutFile $f }
+          $d = "$env:LOCALAPPDATA\Programs\mpc-qt"; 7z x $f "-o$d" -y | Out-Null
+          $exe = Get-ChildItem $d -Recurse -Filter mpc-qt.exe | Select-Object -First 1
+          if ($exe.DirectoryName -ne $d) { Get-ChildItem $exe.DirectoryName | Move-Item -Destination $d -Force }
+          Remove-Item "$d\portable.txt" -ErrorAction SilentlyContinue
+          "MPC-QT: $($rel.tag_name) $($a.name) sha256 $((Get-FileHash $f).Hash)" | Tee-Object -Append $log
+          # Kodi (latest stable Windows x64 installer from the official mirror, silent NSIS install)
+          try {
+            $idx = (Invoke-WebRequest 'https://mirrors.kodi.tv/releases/windows/win64/' -UseBasicParsing).Links.href | Where-Object { $_ -match '^kodi-[\d.]+-\w+-x64\.exe$' } | Sort-Object { [version](($_ -replace '^kodi-([\d.]+)-.*', '$1')) } | Select-Object -Last 1
+            $f = Join-Path $dl $idx; if (-not (Test-Path $f)) { Invoke-WebRequest "https://mirrors.kodi.tv/releases/windows/win64/$idx" -OutFile $f }
+            $p = Start-Process $f -ArgumentList '/S' -PassThru; if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'Kodi installer timed out' }
+            "Kodi: $idx sha256 $((Get-FileHash $f).Hash), installer exit $($p.ExitCode)" | Tee-Object -Append $log
+          } catch { "Kodi: not installed ($_)" | Tee-Object -Append $log }
+      - name: Seed user settings (to prove the exact restore)
+        run: |
+          $seed = @{
+            "$env:APPDATA\mpv\mpv.conf" = "# mine`r`nvolume=70`r`n"
+            "$env:APPDATA\mpv.net\mpv.conf" = "keep-open=no`r`n"
+            "$env:APPDATA\mpc-qt\settings.json" = "{`n    `"playerOpenMode`": 0,`n    `"tweaksMpvOptionsFileChkBox`": false,`n    `"tweaksMpvOptionsFilePath`": `"`"`n}`n"
+            "$env:APPDATA\jellyfin-mpv-shim\conf.json" = "{`n    `"mpv_ext`": false,`n    `"mpv_ext_path`": null`n}"
+          }
+          foreach ($k in $seed.Keys) { New-Item -ItemType Directory (Split-Path $k) -Force | Out-Null; [IO.File]::WriteAllText($k, $seed[$k]) }
+          $files = @($seed.Keys) + @("$env:APPDATA\Kodi\userdata\playercorefactory.xml", "$env:APPDATA\jellyfin-mpv-shim\mpv.conf", "$env:LOCALAPPDATA\PushMPC\mpc-qt-mpv.conf")
+          $snap = foreach ($f in $files) { if (Test-Path $f) { "$f=$((Get-FileHash $f).Hash)" } else { "$f=absent" } }
+          $snap += "PATH=" + [Environment]::GetEnvironmentVariable('Path', 'User')
+          $snap | Set-Content "$env:RUNNER_TEMP\before.txt"
+          $files -join "`n" | Set-Content "$env:RUNNER_TEMP\files.txt"
+      - name: Install (mpv-integration.ps1, real profile of the runner)
+        run: |
+          . ./integrations/mpv/mpv-integration.ps1
+          $rows = Invoke-PmMpvIntegration -Action Install -RuntimeOnPath
+          $rows | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Tee-Object "$env:RUNNER_TEMP\install.txt"
+          $want = 'mpv (shinchiro build)', 'mpv.net', 'MPC-QT', 'Jellyfin MPV Shim'
+          $fails = 0
+          foreach ($w in $want) { $r = $rows | Where-Object Player -eq $w; if (-not $r -or $r.Result -ne 'installed') { Write-Host "::error::$w not installed: $($r.Result) $($r.Note)"; $fails++ } }
+          if (Test-Path "$env:ProgramFiles\Kodi\kodi.exe") { if (($rows | Where-Object Player -eq 'Kodi').Result -ne 'installed') { Write-Host '::error::Kodi not installed'; $fails++ } }
+          Get-Content "$env:APPDATA\mpv\mpv.conf"; Get-Content "$env:APPDATA\mpc-qt\settings.json"; Get-Content "$env:APPDATA\jellyfin-mpv-shim\conf.json"
+          if (Test-Path "$env:APPDATA\Kodi\userdata\playercorefactory.xml") { Get-Content "$env:APPDATA\Kodi\userdata\playercorefactory.xml" }
+          exit $fails
+      - name: Play through the plugin in each player
+        timeout-minutes: 8
+        run: |
+          $env:PATH = "$env:VSSCRIPT_DIR;$env:PATH"
+          $res = [ordered]@{}
+          function Test-Player([string]$name, [scriptblock]$start, [int]$wait = 30) {
+            $logDir = "$env:RUNNER_TEMP\vslog-$($name -replace '\W', '')"; New-Item -ItemType Directory $logDir -Force | Out-Null
+            $env:PUSHMPC_VS_LOG_DIR = $logDir
+            $p = & $start
+            $deadline = (Get-Date).AddSeconds($wait)
+            while ((Get-Date) -lt $deadline) { Start-Sleep 2; $t = (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue | Get-Content -Raw) -join "`n"; if ($t -match 'portable: output|portable: x1|backend: ') { Start-Sleep 4; break } }
+            if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
+            Get-Process mpv, mpvnet, mpc-qt, kodi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            $t = (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue | Get-Content -Raw) -join "`n"
+            $ok = $t -match 'backend: '
+            $line = ($t -split "`n" | Where-Object { $_ -match 'backend: |portable: output|portable: x1|create failed' } | Select-Object -First 3) -join ' | '
+            $script:res[$name] = "$(if ($ok) { 'PLUGIN RAN' } else { 'no plugin log' }): $line"
+            Write-Host "== $name : $($script:res[$name])"
+          }
+          Test-Player 'mpv' { Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=4', "`"$env:CLIP`"" -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\mpv-out.txt" -RedirectStandardError "$env:RUNNER_TEMP\mpv-err.txt" }
+          Get-Content "$env:RUNNER_TEMP\mpv-out.txt", "$env:RUNNER_TEMP\mpv-err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 15
+          Test-Player 'mpv.net' { Start-Process "$env:LOCALAPPDATA\Programs\mpv.net\mpvnet.exe" -ArgumentList '--ao=null', "`"$env:CLIP`"" -PassThru }
+          Test-Player 'MPC-QT' { Start-Process "$env:LOCALAPPDATA\Programs\mpc-qt\mpc-qt.exe" -ArgumentList "`"$env:CLIP`"" -PassThru }
+          if (Test-Path "$env:ProgramFiles\Kodi\kodi.exe") { Test-Player 'Kodi (external mpv)' { Start-Process "$env:ProgramFiles\Kodi\kodi.exe" -ArgumentList "`"$env:CLIP`"" -PassThru } 60 }
+          $res.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" } | Tee-Object "$env:RUNNER_TEMP\play.txt"
+          @('## win-players', '', '```') + (Get-Content "$env:RUNNER_TEMP\players.txt") + @('') + (Get-Content "$env:RUNNER_TEMP\play.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          if ($res['mpv'] -notmatch '^PLUGIN RAN') { Write-Host '::error::mpv did not run the plugin'; exit 1 }
+      - name: Uninstall restores every file exactly
+        if: always()
+        run: |
+          . ./integrations/mpv/mpv-integration.ps1
+          Invoke-PmMpvIntegration -Action Uninstall | Format-Table -AutoSize -Wrap | Out-String -Width 300
+          $files = Get-Content "$env:RUNNER_TEMP\files.txt"
+          $snap = foreach ($f in $files) { if (Test-Path $f) { "$f=$((Get-FileHash $f).Hash)" } else { "$f=absent" } }
+          $snap += "PATH=" + [Environment]::GetEnvironmentVariable('Path', 'User')
+          $diff = Compare-Object (Get-Content "$env:RUNNER_TEMP\before.txt") $snap
+          if ($diff) { $diff | Format-Table -AutoSize | Out-String -Width 300; Write-Host '::error::uninstall did not restore exactly'; exit 1 }
+          Write-Host "all $($files.Count) files and the user PATH are as before"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: win-players-logs, path: "${{ runner.temp }}/vslog-*\n${{ runner.temp }}/*.txt" }
+
+  potplayer:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+      - uses: actions/cache@v4
+        with: { path: '${{ runner.temp }}/dl', key: potplayer-dl-v1 }
+      - name: PotPlayer (official installer, silent), the filter (CI release), test clip
+        timeout-minutes: 10
+        run: |
+          $dl = "$env:RUNNER_TEMP\dl"; New-Item -ItemType Directory $dl -Force | Out-Null
+          $f = "$dl\PotPlayerSetup64.exe"; Invoke-WebRequest 'https://t1.daumcdn.net/potplayer/PotPlayer/Version/Latest/PotPlayerSetup64.exe' -OutFile $f
+          $sig = Get-AuthenticodeSignature $f
+          if ($sig.Status -ne 'Valid') { throw "PotPlayer installer signature: $($sig.Status)" }
+          "PotPlayer installer sha256 $((Get-FileHash $f).Hash), signed by $($sig.SignerCertificate.Subject)" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+          $p = Start-Process $f -ArgumentList '/S' -PassThru; if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'installer timed out' }
+          $exe = "$env:ProgramFiles\DAUM\PotPlayer\PotPlayerMini64.exe"; if (-not (Test-Path $exe)) { throw 'PotPlayerMini64.exe not found' }
+          "POT_EXE=$exe" >> $env:GITHUB_ENV
+          # the filter where PushMPC installs it, registered per user like Setup does
+          $fz = Get-ChildItem "$env:RUNNER_TEMP\release" -Filter 'PushMPC-filter-*.zip' | Select-Object -First 1
+          $fd = "$env:LOCALAPPDATA\PushMPC\filter"; New-Item -ItemType Directory $fd -Force | Out-Null; Expand-Archive $fz.FullName $fd -Force
+          $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$fd\PushMpcFilter.ax`"" -Wait -PassThru
+          "filter $($fz.Name) registered: exit $($r.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+          $c = "$dl\clip.mp4"; if (-not (Test-Path $c)) { Invoke-WebRequest $env:CLIP_URL -OutFile $c }; "CLIP=$c" >> $env:GITHUB_ENV
+      - name: First run (PotPlayer writes its settings), then the filter list before PushMPC
+        run: |
+          $p = Start-Process $env:POT_EXE -PassThru; Start-Sleep 15
+          if (-not $p.HasExited) { [void]$p.CloseMainWindow(); if (-not $p.WaitForExit(15000)) { $p.Kill() } }
+          reg export 'HKCU\Software\DAUM\PotPlayerMini64' "$env:RUNNER_TEMP\pot-before.reg" /y | Out-Null
+          if (Test-Path 'HKCU:\Software\DAUM\PotPlayerMini64\Override') { reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-before.reg" /y | Out-Null } else { 'absent' | Set-Content "$env:RUNNER_TEMP\override-before.reg" }
+          (Get-ChildItem 'HKCU:\Software\DAUM\PotPlayerMini64' | ForEach-Object PSChildName) -join ', ' | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+      - name: Layout variants (research) and the product's entry, each played once
+        timeout-minutes: 12
+        run: |
+          $ov = 'HKCU:\Software\DAUM\PotPlayerMini64\Override'
+          $logs = "$env:LOCALAPPDATA\PushMPC\logs"
+          function Reset-Override { Remove-Item $ov -Recurse -Force -ErrorAction SilentlyContinue; if ((Get-Content "$env:RUNNER_TEMP\override-before.reg" -Raw).Trim() -ne 'absent') { reg import "$env:RUNNER_TEMP\override-before.reg" 2>&1 | Out-Null } }
+          function Play([string]$tag) {
+            Remove-Item "$logs\filter-*.log" -ErrorAction SilentlyContinue
+            $p = Start-Process $env:POT_EXE -ArgumentList "`"$env:CLIP`"" -PassThru; Start-Sleep 20
+            $mods = try { (Get-Process -Id $p.Id).Modules | Where-Object ModuleName -like 'PushMpc*' | ForEach-Object ModuleName } catch { @("modules: $_") }
+            $flog = Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue
+            $first = if ($flog) { (Get-Content $flog[0].FullName -TotalCount 6) -join ' / ' } else { '' }
+            if (-not $p.HasExited) { [void]$p.CloseMainWindow(); if (-not $p.WaitForExit(15000)) { $p.Kill() } }
+            $ok = [bool]($mods -match 'PushMpcFilter') -or [bool]$flog
+            "$tag : $(if ($ok) { 'LOADED' } else { 'not loaded' }) (modules: $($mods -join ','); filter logs: $(@($flog).Count)) $first" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+            return $ok
+          }
+          # A: the product (pushmpc-install.ps1 potplayer-apply)
+          Reset-Override
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-install.ps1 potplayer-apply 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+          reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-product.reg" /y | Out-Null
+          $okA = Play 'A product entry (Override, Type 1 file, FilterType 0)'
+          reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-after-potplayer-closed.reg" /y | Out-Null
+          "OK_A=$okA" >> $env:GITHUB_ENV
+          # research variants (only to learn the layout; the product uses A)
+          $entry = (Get-ChildItem $ov | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' } | Select-Object -First 1)
+          if ($entry) {
+            $n = $entry.PSChildName
+            New-Item "HKCU:\Software\DAUM\PotPlayerMini64\Override_Settings" -Force | Out-Null
+            Copy-Item $ov "HKCU:\Software\DAUM\PotPlayerMini64\Override_Settings_tmp" -Recurse -Force -ErrorAction SilentlyContinue
+            reg copy 'HKCU\Software\DAUM\PotPlayerMini64\Override' 'HKCU\Software\DAUM\PotPlayerMini64\Override_Settings' /s /f | Out-Null
+            Remove-Item "HKCU:\Software\DAUM\PotPlayerMini64\Override_Settings_tmp" -Recurse -Force -ErrorAction SilentlyContinue
+            Play 'B entry in Override and Override_Settings' | Out-Null
+            Remove-Item 'HKCU:\Software\DAUM\PotPlayerMini64\Override_Settings' -Recurse -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty "$ov\$n" -Name FilterType -Value 2; Play 'C FilterType 2' | Out-Null
+            Set-ItemProperty "$ov\$n" -Name FilterType -Value 1; Play 'D FilterType 1 (expected: blocked)' | Out-Null
+            Set-ItemProperty "$ov\$n" -Name FilterType -Value 0
+          }
+          # what PotPlayer itself writes for filters: names in its binaries
+          $dir = Split-Path $env:POT_EXE
+          $names = foreach ($bin in @(Get-ChildItem $dir -Filter 'PotPlayer*.dll') + @(Get-Item $env:POT_EXE)) {
+            $t = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($bin.FullName))
+            [regex]::Matches($t, '[A-Za-z0-9_\\]{4,40}') | ForEach-Object Value | Where-Object { $_ -match '^(Override|FilterType|MeritHi|VideoRen|VideoDec|DXVA|CopyBack|UseD3D11|HWDec|H264Dec|HEVCDec)' } }
+          ($names | Sort-Object -Unique) -join ', ' | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+      - name: Uninstall restores the filter list exactly
+        if: always()
+        run: |
+          Get-Process PotPlayerMini64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-install.ps1 potplayer-remove 2>&1
+          if (Test-Path 'HKCU:\Software\DAUM\PotPlayerMini64\Override') { reg export 'HKCU\Software\DAUM\PotPlayerMini64\Override' "$env:RUNNER_TEMP\override-after.reg" /y | Out-Null } else { 'absent' | Set-Content "$env:RUNNER_TEMP\override-after.reg" }
+          $same = (Get-Content "$env:RUNNER_TEMP\override-before.reg" -Raw) -eq (Get-Content "$env:RUNNER_TEMP\override-after.reg" -Raw)
+          "filter list restored exactly: $same" | Tee-Object -Append "$env:RUNNER_TEMP\pot.txt"
+          @('## potplayer', '', '```') + (Get-Content "$env:RUNNER_TEMP\pot.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
+          if (-not $same) { Write-Host '::error::the Override key differs after uninstall'; exit 1 }
+          if ($env:OK_A -ne 'True') { Write-Host '::error::PotPlayer did not load the filter from the product entry'; exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: potplayer-layout, path: "${{ runner.temp }}/*.reg\n${{ runner.temp }}/pot.txt\n${{ runner.temp }}/pushmpc-logs" }
+
+  # ---------------------------------------------------------------------------------------------------- Linux
+  linux-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, image: 'quay.io/pypa/manylinux_2_28_x86_64', wheel: linux }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, image: 'quay.io/pypa/manylinux_2_28_aarch64', wheel: linuxArm64 }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned VapourSynth wheel (SDK headers, libvapoursynth, vspipe)
+        run: |
+          set -eu
+          PY=/opt/python/cp312-cp312/bin/python
+          url=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['url'])")
+          sha=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['sha256'])")
+          curl -fsSL --retry 3 -o /tmp/vs.whl "$url"
+          echo "$(echo "$sha" | tr A-F a-f)  /tmp/vs.whl" | sha256sum -c -
+          $PY -m pip install --no-deps /tmp/vs.whl
+          pkg=$($PY -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+          echo "VSPKG=$pkg" >> "$GITHUB_ENV"
+      - name: Build (static libstdc++ / libgcc: loads on glibc >= 2.28 hosts and in the Flatpak runtime)
+        run: |
+          set -eu
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake --build build --target pushmpc_vs portable_test --parallel
+          ./build/portable_test | tail -3
+          so=vsplugin/bin/pushmpc_vs.so
+          echo "--- dynamic dependencies"; objdump -p "$so" | grep NEEDED
+          max=$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sort -t. -k2,2n -k3,3n -u | tail -1)
+          echo "highest GLIBC symbol version: $max"
+          objdump -p "$so" | grep NEEDED | grep -q 'libstdc++' && { echo "::error::libstdc++ is linked dynamically"; exit 1; }
+          case $max in GLIBC_2.2[0-8]|GLIBC_2.1*|GLIBC_2.[0-9]) ;; *) echo "::error::needs $max (> 2.28)"; exit 1 ;; esac
+      - name: The plugin through VapourSynth's Python API (portable backend, x4; every frame rendered)
+        run: |
+          set -eu
+          export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_TEST_K=4
+          /opt/python/cp312-cp312/bin/python - <<'PY'
+          import runpy, vapoursynth as vs
+          runpy.run_path("vsplugin/tests/ci/portable_clip.vpy")
+          c = vs.get_output(0); c = c.clip if hasattr(c, "clip") else c
+          assert c.num_frames == 192 and c.fps.numerator == 96000 and c.fps.denominator == 1001, (c.num_frames, c.fps)
+          for i in range(c.num_frames):
+              assert "_DurationNum" in c.get_frame(i).props
+          print("python API:", c.num_frames, "frames at", c.fps, "rendered, version", vs.core.version_number())
+          PY
+      - name: Release tarball
+        run: |
+          set -eu
+          git config --global --add safe.directory "$PWD"
+          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} 0.6.0
+          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-0.6.0.tar.gz
+      - uses: actions/upload-artifact@v4
+        with: { name: 'pushmpc-linux-${{ matrix.arch }}', path: dist/ }
+
+  linux-sh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -qq dash >/dev/null
+      - name: install.sh (fake HOME, stub players) under sh and dash
+        run: |
+          sh integrations/linux/tests/install.tests.sh
+          sed 's|sh "$pkg/install.sh"|dash "$pkg/install.sh"|' integrations/linux/tests/install.tests.sh > integrations/linux/tests/_dash.sh
+          grep -q 'dash "$pkg/install.sh"' integrations/linux/tests/_dash.sh
+          dash integrations/linux/tests/_dash.sh
+      - name: mpv-integration.sh (fake HOME) under sh and dash
+        run: |
+          sh integrations/mpv/tests/mpv-integration.tests.sh
+          sed 's|sh "$tool"|dash "$tool"|g' integrations/mpv/tests/mpv-integration.tests.sh > integrations/mpv/tests/_dash.sh && dash integrations/mpv/tests/_dash.sh
+
+  linux-arch:
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: /var/cache/pacman/pkg, key: arch-pkg-v1 }
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-linux-x86_64, path: dist }
+      - name: Packages (mpv requires vapoursynth on Arch), test clip
+        timeout-minutes: 15
+        run: |
+          pacman -Syu --noconfirm --needed mpv vapoursynth ffmpeg xorg-server-xvfb mesa dbus celluloid haruna smplayer >/dev/null
+          pacman -Si mpc-qt >/dev/null 2>&1 && pacman -S --noconfirm --needed mpc-qt >/dev/null || echo "mpc-qt: not in the Arch repositories (AUR only)"
+          pacman -Q mpv vapoursynth celluloid haruna smplayer mpc-qt 2>&1 | tee /tmp/versions.txt
+          curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - name: install.sh into a fresh HOME, mpv encode mode through the installed block
+        run: |
+          set -eu
+          export HOME=/tmp/home-arch; mkdir -p $HOME/.config/mpv; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
+          snap() { (cd $HOME && find . -type f | LC_ALL=C sort | xargs -r sha256sum); }
+          snap > /tmp/before.txt
+          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+          head -n 8 $HOME/.config/mpv/mpv.conf
+          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
+          mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 --msg-level=all=info,vapoursynth=v 2>&1 | tail -20
+          src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
+          out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/out.mkv)
+          echo "source frames (4 s): $src, output frames: $out"
+          cat /tmp/vslog-arch/*.log | head -20
+          grep -q 'portable: output YUV' /tmp/vslog-arch/*.log
+          [ "$out" -ge $((src * 18 / 10)) ] || { echo "::error::expected about 2x $src frames, got $out"; exit 1; }
+          echo "ARCH_FRAMES=$src->$out" >> "$GITHUB_ENV"
+          rm $HOME/.config/pushmpc/settings.ini; rmdir $HOME/.config/pushmpc
+          sh $HOME/.local/share/pushmpc/install.sh uninstall
+          snap > /tmp/after.txt
+          diff /tmp/before.txt /tmp/after.txt && echo "HOME restored byte for byte"
+      - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
+        timeout-minutes: 8
+        run: |
+          set -u
+          export HOME=/tmp/home-fe; mkdir -p $HOME/.config/smplayer
+          printf '[advanced]\nmplayer_additional_options=\n' > $HOME/.config/smplayer/smplayer.ini
+          export GSETTINGS_BACKEND=keyfile XDG_RUNTIME_DIR=/tmp/xdg-run; mkdir -p $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR
+          useradd -m pmtest 2>/dev/null || true
+          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install-fe.txt
+          gsettings list-keys io.github.celluloid-player.Celluloid | grep mpv-config || echo "Celluloid schema keys not found"
+          gsettings get io.github.celluloid-player.Celluloid mpv-config-enable; gsettings get io.github.celluloid-player.Celluloid mpv-config-file
+          cat $HOME/.config/haruna/custom-commands.conf 2>/dev/null | head -8
+          grep mplayer_additional_options $HOME/.config/smplayer/smplayer.ini
+          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          export QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 QTWEBENGINE_DISABLE_SANDBOX=1
+          res=/tmp/frontends.txt; : > $res
+          for p in celluloid haruna smplayer mpc-qt; do
+            command -v $p >/dev/null || { echo "$p: not installed" >> $res; continue; }
+            export PUSHMPC_VS_LOG_DIR=/tmp/vslog-$p; mkdir -p $PUSHMPC_VS_LOG_DIR
+            timeout 40 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x720x24' $p /tmp/clip.mp4 > /tmp/$p.out 2>&1 &
+            pid=$!
+            for i in $(seq 1 35); do sleep 1; grep -qs 'backend: ' $PUSHMPC_VS_LOG_DIR/*.log && break; done
+            kill $pid 2>/dev/null; pkill -f "$p /tmp/clip.mp4" 2>/dev/null; pkill mpv 2>/dev/null; sleep 1
+            if grep -qs 'backend: ' $PUSHMPC_VS_LOG_DIR/*.log; then echo "$p: PLUGIN RAN ($(grep -h -m1 'portable: output' $PUSHMPC_VS_LOG_DIR/*.log))" >> $res
+            else echo "$p: no plugin log; last output: $(tail -n 3 /tmp/$p.out | tr '\n' ' ')" >> $res; fi
+          done
+          cat $res
+          rm -r $HOME/.config/pushmpc
+          sh $HOME/.local/share/pushmpc/install.sh uninstall
+          { echo '## linux-arch'; echo; echo '```'; cat /tmp/versions.txt; echo "mpv encode: ${ARCH_FRAMES:-}"; cat $res; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-arch-logs, path: "/tmp/vslog-*\n/tmp/*.txt\n/tmp/*.out" }
+
+  linux-fedora:
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: /var/cache/libdnf5, key: fedora-dnf-v1 }
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-linux-x86_64, path: dist }
+      - name: Fedora's mpv
+        timeout-minutes: 12
+        run: |
+          echo keepcache=True >> /etc/dnf/dnf.conf
+          dnf -y -q install mpv ffmpeg-free tar gzip findutils >/dev/null || dnf -y -q install mpv tar gzip findutils
+          rpm -q mpv libmpv 2>&1 | tee /tmp/versions.txt
+          if mpv --no-config --vf=help 2>/dev/null | grep -q vapoursynth; then echo "FEDORA_VS=1" >> "$GITHUB_ENV"; echo "Fedora mpv: VapourSynth yes" | tee -a /tmp/versions.txt
+          else echo "FEDORA_VS=0" >> "$GITHUB_ENV"; echo "Fedora mpv: VapourSynth NO" | tee -a /tmp/versions.txt; fi
+          curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - name: install.sh (the answer for this mpv), mpv encode mode when it has VapourSynth
+        run: |
+          set -eu
+          export HOME=/tmp/home-fedora; mkdir -p $HOME
+          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+          if [ "$FEDORA_VS" = 1 ]; then
+            dnf -y -q install vapoursynth-libs >/dev/null 2>&1 || true
+            mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+            export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
+            mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | tail -10
+            grep -q 'portable: output YUV' /tmp/vslog-fedora/*.log
+          else
+            grep -q 'has no VapourSynth' /tmp/install.txt
+            grep -q 'no player can use it yet' /tmp/install.txt
+          fi
+          sh $HOME/.local/share/pushmpc/install.sh uninstall
+          { echo '## linux-fedora'; echo; echo '```'; cat /tmp/versions.txt; tail -n 4 /tmp/install.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  linux-flatpak:
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-linux-x86_64, path: dist }
+      - uses: actions/cache@v4
+        with: { path: ~/.local/share/flatpak, key: flatpak-io.mpv.Mpv-v1 }
+      - name: Ubuntu's mpv (no VapourSynth expected), flatpak, test clip
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq mpv flatpak ffmpeg >/dev/null
+          dpkg -s mpv | grep -E '^(Version|Depends)' | tee /tmp/versions.txt
+          mpv --no-config --vf=help | grep -q vapoursynth && echo "Ubuntu mpv: VapourSynth yes" | tee -a /tmp/versions.txt || echo "Ubuntu mpv: VapourSynth NO" | tee -a /tmp/versions.txt
+          curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - name: install.sh --flatpak yes (Flathub mpv for the user), encode mode inside the sandbox
+        timeout-minutes: 15
+        run: |
+          set -eu
+          snap() { (cd $HOME && find .config .var .local/share/flatpak/overrides -type f 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum); }
+          had=0; flatpak info --user io.mpv.Mpv >/dev/null 2>&1 && had=1
+          snap > /tmp/before.txt
+          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak yes | tee /tmp/install.txt
+          flatpak info --user io.mpv.Mpv | grep -E 'Version|Runtime' | tee -a /tmp/versions.txt
+          echo "--- extension points of io.mpv.Mpv:"; flatpak info --user --show-metadata io.mpv.Mpv | grep -A3 '^\[Extension' | tee -a /tmp/versions.txt || echo "none" | tee -a /tmp/versions.txt
+          flatpak override --user --show io.mpv.Mpv
+          cat ~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf | head -6
+          mkdir -p ~/.var/app/io.mpv.Mpv/config/pushmpc; printf 'Smoother=2\n' > ~/.var/app/io.mpv.Mpv/config/pushmpc/settings.ini
+          mkdir -p /tmp/fpout
+          flatpak run --filesystem=/tmp --env=PUSHMPC_VS_LOG_DIR=/tmp/vslog-flatpak io.mpv.Mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/fpout/out.mkv --of=matroska --ovc=ffv1 2>&1 | tail -20 || true
+          cat /tmp/vslog-flatpak/*.log 2>/dev/null | head -20 || true
+          src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
+          out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/fpout/out.mkv 2>/dev/null || echo 0)
+          echo "Flatpak mpv encode: source $src frames, output $out frames" | tee -a /tmp/versions.txt
+          rm -r ~/.var/app/io.mpv.Mpv/config/pushmpc
+          sh ~/.local/share/pushmpc/install.sh uninstall --keep-flatpak-mpv
+          snap > /tmp/after.txt
+          # the Flathub mpv was kept for the cache, so its own app folder (created on first run) is not compared
+          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\)' /tmp/after.txt > /tmp/after2.txt || true
+          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\)' /tmp/before.txt > /tmp/before2.txt || true
+          diff /tmp/before2.txt /tmp/after2.txt && echo "config and override restored byte for byte" | tee -a /tmp/versions.txt
+          { echo '## linux-flatpak'; echo; echo '```'; cat /tmp/versions.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          grep -q 'portable: output YUV' /tmp/vslog-flatpak/*.log || { echo "::error::the plugin did not run inside the Flatpak mpv"; exit 1; }
+          [ "$out" -ge $((src * 18 / 10)) ] || { echo "::error::expected about 2x $src frames, got $out"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-flatpak-logs, path: "/tmp/vslog-flatpak\n/tmp/*.txt" }
+
+  aur:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: src }
+      - uses: actions/cache@v4
+        with: { path: /var/cache/pacman/pkg, key: aur-pkg-v1 }
+      - name: Build tools, a normal user for makepkg
+        timeout-minutes: 10
+        run: |
+          pacman -Syu --noconfirm --needed base-devel cmake mpv vapoursynth namcap git >/dev/null
+          useradd -m builder
+      - name: makepkg (source tarball made from this commit, as the GitHub tag archive would be), namcap, install
+        run: |
+          set -eu
+          ver=$(sed -n 's/^pkgver=//p' src/packaging/aur/PKGBUILD)
+          b=/home/builder/pkg; mkdir -p $b
+          cp src/packaging/aur/PKGBUILD src/packaging/aur/pushmpc.install $b/
+          git -C src archive --format=tar.gz --prefix="PushMPC-$ver/" -o "$b/pushmpc-$ver.tar.gz" HEAD
+          chown -R builder $b
+          su builder -c "cd $b && makepkg --printsrcinfo > .SRCINFO && makepkg -f --noconfirm" 2>&1 | tail -25
+          cat $b/.SRCINFO
+          namcap $b/PKGBUILD || true
+          namcap $b/pushmpc-$ver-*.pkg.tar.zst || true
+          pacman -U --noconfirm $b/pushmpc-$ver-*.pkg.tar.zst
+          pacman -Ql pushmpc
+          python -c "import vapoursynth as vs; c = vs.core; print('autoloaded:', hasattr(c, 'pushmpc'), [f.name for f in c.pushmpc.functions()] if hasattr(c, 'pushmpc') else '')" | tee /tmp/aur.txt
+          grep -q 'autoloaded: True' /tmp/aur.txt
+          export HOME=/tmp/home-aur; mkdir -p $HOME; unset XDG_CONFIG_HOME XDG_DATA_HOME
+          pushmpc-setup install; grep -q 'vf-append=@pushmpc:vapoursynth=file=\[/usr/share/pushmpc/pushmpc.vpy\]' $HOME/.config/mpv/mpv.conf
+          pushmpc-setup uninstall; test ! -e $HOME/.config/mpv/mpv.conf
+          { echo '## aur'; echo; echo '```'; cat /tmp/aur.txt; pacman -Qi pushmpc | head -12; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------------- packaging, ARM64
+  win-packaging:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+      - name: winget validate (Setup's SHA-256 from the CI release)
+        timeout-minutes: 10
+        run: |
+          $m = "$env:RUNNER_TEMP\winget"; Copy-Item packaging/winget/PushMPC.PushMPC/0.6.0 $m -Recurse
+          $sha = (Get-FileHash "$env:RUNNER_TEMP\release\PushMPC-Setup.exe").Hash
+          (Get-Content "$m\PushMPC.PushMPC.installer.yaml" -Raw) -replace '0{64}', $sha | Set-Content "$m\PushMPC.PushMPC.installer.yaml" -NoNewline
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -Force -Scope CurrentUser | Out-Null
+            Install-Module Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery
+            Repair-WinGetPackageManager -AllUsers -Latest
+          }
+          winget --version
+          winget validate --manifest $m --disable-interactivity; $rc = $LASTEXITCODE
+          "winget validate exit $rc (Setup sha256 $sha)" | Tee-Object "$env:RUNNER_TEMP\pack.txt"
+          if ($rc -ne 0 -and $rc -ne -1978335192) { exit 1 }   # 0x8A150068: validation succeeded with warnings
+      - name: Scoop - schema, then a real install / uninstall from a local copy of the release
+        timeout-minutes: 20
+        run: |
+          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin | Out-Null
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          $schema = "$env:USERPROFILE\scoop\apps\scoop\current\schema.json"
+          $ok = Test-Json -Json (Get-Content packaging/scoop/pushmpc.json -Raw) -SchemaFile $schema
+          "scoop schema: $ok" | Tee-Object -Append "$env:RUNNER_TEMP\pack.txt"
+          if (-not $ok) { exit 1 }
+          # serve the CI release on localhost and point the manifest at it
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\release" -Filter 'PushMPC-?.*.zip' | Where-Object Name -notmatch '-(filter|core|vsplugin)-' | Select-Object -First 1
+          $job = Start-Job { param($d) python -m http.server 8765 --directory $d } -ArgumentList $zip.DirectoryName
+          Start-Sleep 3
+          $j = Get-Content packaging/scoop/pushmpc.json -Raw | ConvertFrom-Json
+          $j.architecture.'64bit'.url = "http://127.0.0.1:8765/$($zip.Name)"; $j.architecture.'64bit'.hash = (Get-FileHash $zip.FullName).Hash.ToLower()
+          $j | ConvertTo-Json -Depth 10 | Set-Content "$env:RUNNER_TEMP\pushmpc.json"
+          scoop install "$env:RUNNER_TEMP\pushmpc.json" 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\pack.txt"
+          $installed = Test-Path "$env:LOCALAPPDATA\PushMPC\filter\PushMpcFilter.ax"
+          $reg = Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}\InprocServer32'
+          "scoop install: filter installed $installed, registered $reg" | Tee-Object -Append "$env:RUNNER_TEMP\pack.txt"
+          scoop uninstall pushmpc 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\pack.txt"
+          $gone = -not (Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}')
+          "scoop uninstall: registration removed $gone" | Tee-Object -Append "$env:RUNNER_TEMP\pack.txt"
+          Stop-Job $job -ErrorAction SilentlyContinue
+          @('## win-packaging', '', '```') + (Get-Content "$env:RUNNER_TEMP\pack.txt" | Select-Object -Last 40) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          if (-not ($installed -and $reg -and $gone)) { exit 1 }
+
+  arm64-windows:
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    defaults: { run: { shell: pwsh } }
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ env.RELEASE_RUN }}', github-token: '${{ github.token }}' }
+      - name: MPC-HC x64 (official installer, silent) for the graph check
+        timeout-minutes: 10
+        run: |
+          "OS arch: $env:PROCESSOR_ARCHITECTURE; $((Get-CimInstance Win32_OperatingSystem).Caption) $((Get-CimInstance Win32_OperatingSystem).Version)" | Tee-Object "$env:RUNNER_TEMP\arm.txt"
+          $rel = gh api repos/clsid2/mpc-hc/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match '\.x64\.exe$' } | Select-Object -First 1
+          $f = "$env:RUNNER_TEMP\$($a.name)"; Invoke-WebRequest $a.browser_download_url -OutFile $f
+          $p = Start-Process $f -ArgumentList '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES' -PassThru; $p.WaitForExit(300000) | Out-Null
+          "MPC-HC $($rel.tag_name) ($($a.name)), installer exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          $exe = "$env:ProgramFiles\MPC-HC\mpc-hc64.exe"; if (-not (Test-Path $exe)) { throw 'mpc-hc64.exe missing' }
+          # first start writes its registry settings (Setup adds PushMPC to them)
+          $m = Start-Process $exe -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          Invoke-WebRequest $env:CLIP_URL -OutFile "$env:RUNNER_TEMP\clip.mp4"
+      - name: PushMPC-Setup.exe /S (x64 under Prism)
+        timeout-minutes: 20
+        run: |
+          $setup = "$env:RUNNER_TEMP\release\PushMPC-Setup.exe"
+          $p = Start-Process $setup -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"; if (-not $p.WaitForExit(1100000)) { $p.Kill(); throw 'Setup timed out' }
+          Get-Content "$env:RUNNER_TEMP\setup-out.txt" | Select-Object -Last 40
+          "Setup exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          Get-ChildItem "$env:LOCALAPPDATA\PushMPC\logs" -Filter 'setup*.log' -ErrorAction SilentlyContinue | Get-Content | Select-Object -Last 40
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-install.ps1" status -Verify 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          $reg = (Get-ItemProperty 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}\InprocServer32' -ErrorAction SilentlyContinue).'(default)'
+          "filter registered: $reg" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          "regsvr32 in System32 is $(if ((Get-Item "$env:SystemRoot\System32\regsvr32.exe").VersionInfo) { 'present' })" | Out-Null
+      - name: MPC-HC x64 plays the clip; the filter must be created (its log)
+        timeout-minutes: 5
+        run: |
+          $logs = "$env:LOCALAPPDATA\PushMPC\logs"
+          Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters' -ErrorAction SilentlyContinue | ForEach-Object { $q = Get-ItemProperty $_.PSPath; "MPC-HC filter entry $($_.PSChildName): $($q.Name) enabled $($q.Enabled)" } | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"", '/play' -PassThru; Start-Sleep 25
+          if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          $f = Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue
+          "filter logs: $(@($f).Count)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          if ($f) { Get-Content $f[0].FullName -TotalCount 25 | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
+          "ARM_FILTER=$([bool]$f)" >> $env:GITHUB_ENV
+      - name: Uninstall (Setup --uninstall --quiet)
+        if: always()
+        run: |
+          $s = "$env:LOCALAPPDATA\PushMPC\PushMPC-Setup.exe"
+          if (Test-Path $s) { $p = Start-Process $s -ArgumentList '--uninstall', '--quiet' -PassThru; $p.WaitForExit(300000) | Out-Null; "uninstall exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
+          "registration left: $(Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          @('## arm64-windows', '', '```') + (Get-Content "$env:RUNNER_TEMP\arm.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
+          if ($env:ARM_FILTER -ne 'True') { Write-Host '::error::MPC-HC x64 under Prism did not create the filter'; exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: arm64-windows-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs" }
