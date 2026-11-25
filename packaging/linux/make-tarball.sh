@@ -8,11 +8,12 @@
 #     LICENSE, README.txt
 #   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version>      (run from the repository root)
 set -eu
-so=$1; out=$2; arch=$3; ver=$4
+so=$1; arch=$3; ver=$4
+mkdir -p "$2"; out=$(cd "$2" && pwd)
 name=pushmpc-linux-$arch-$ver
 tmp=$(mktemp -d)
 d=$tmp/$name
-mkdir -p "$d/vsplugin" "$out"
+mkdir -p "$d/vsplugin"
 install -m 755 integrations/linux/install.sh "$d/install.sh"
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"

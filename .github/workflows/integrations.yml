@@ -14,7 +14,8 @@
 #                   the sandbox, byte-exact uninstall; Flatpak extension point check
 #   aur             PKGBUILD built with makepkg as a normal user in archlinux, namcap, pacman -U, autoload check
 #   win-packaging   winget validate (Setup's SHA-256 from the CI release), Scoop: schema + a real install/uninstall
-#   arm64-windows   windows-11-arm: the x64 Setup under Prism (silent), structure, registration, MPC-HC x64 + filter log
+#   setup-graph     the x64 Setup silently on windows-2025 and on windows-11-arm (Prism): structure, registration,
+#                   MPC-HC x64 with MPC Video Renderer must create the filter (its log), uninstall
 # CI artifacts reused (inputs): the release dry run (Setup, zips) and the vsplugin run (pushmpc_vs.dll).
 name: integrations
 
@@ -172,9 +173,10 @@ jobs:
             $logDir = "$env:RUNNER_TEMP\vslog-$($name -replace '\W', '')"; New-Item -ItemType Directory $logDir -Force | Out-Null
             $env:PUSHMPC_VS_LOG_DIR = $logDir
             $p = & $start
-            $deadline = (Get-Date).AddSeconds($wait)
-            while ((Get-Date) -lt $deadline) { Start-Sleep 2; $t = Read-Logs $logDir; if ($t -match 'portable: output|portable: x1|backend: ') { Start-Sleep 4; break } }
+            # the plugin's log is locked while the player runs: wait, stop the player, then read it
+            if ($p) { [void]$p.WaitForExit($wait * 1000) }
             if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
+            Start-Sleep 2
             Get-Process mpv, mpvnet, mpc-qt, kodi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             $t = Read-Logs $logDir
             $ok = $t -match 'backend: '
@@ -573,10 +575,23 @@ jobs:
           namcap $b/pushmpc-$ver-*.pkg.tar.zst || true
           pacman -U --noconfirm $b/pushmpc-$ver-*.pkg.tar.zst
           pacman -Ql pushmpc
-          python -c "import vapoursynth as vs; c = vs.core; print('autoloaded:', hasattr(c, 'pushmpc'), [f.name for f in c.pushmpc.functions()] if hasattr(c, 'pushmpc') else '')" | tee /tmp/aur.txt
-          grep -q 'autoloaded: True' /tmp/aur.txt
+          python - <<'PY' 2>&1 | tee /tmp/aur.txt
+          import vapoursynth as vs
+          c = vs.core
+          print("VapourSynth", c.version_number(), "autoloaded:", hasattr(c, "pushmpc"))
+          if not hasattr(c, "pushmpc"):
+              c.std.LoadPlugin("/usr/lib/pushmpc/pushmpc_vs.so")
+          print("loaded:", hasattr(c, "pushmpc"), [f.name for f in c.pushmpc.functions()])
+          PY
+          grep -q 'loaded: True' /tmp/aur.txt
           export HOME=/tmp/home-aur; mkdir -p $HOME; unset XDG_CONFIG_HOME XDG_DATA_HOME
-          pushmpc-setup install; grep -q 'vf-append=@pushmpc:vapoursynth=file=\[/usr/share/pushmpc/pushmpc.vpy\]' $HOME/.config/mpv/mpv.conf
+          pushmpc-setup install; grep -q 'vf-append=@pushmpc:vapoursynth=file=\[/usr/lib/pushmpc/pushmpc.vpy\]' $HOME/.config/mpv/mpv.conf
+          # mpv through the packaged setup (encode mode, x2)
+          pacman -S --noconfirm --needed ffmpeg >/dev/null
+          curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          PUSHMPC_VS_LOG_DIR=/tmp/vslog-aur mpv /tmp/clip.mp4 --length=2 --no-audio --o=/tmp/aur.mkv --of=matroska --ovc=ffv1 2>&1 | tail -5
+          grep -h 'portable: output' /tmp/vslog-aur/*.log | tee -a /tmp/aur.txt
           pushmpc-setup uninstall; test ! -e $HOME/.config/mpv/mpv.conf
           { echo '## aur'; echo; echo '```'; cat /tmp/aur.txt; pacman -Qi pushmpc | head -12; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -633,8 +648,13 @@ jobs:
           @('## win-packaging', '', '```') + (Get-Content "$env:RUNNER_TEMP\pack.txt" | Select-Object -Last 40) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           if (-not ($installed -and $reg -and $gone)) { exit 1 }
 
-  arm64-windows:
-    runs-on: windows-11-arm
+  # the x64 Setup silently on x64 (baseline) and on ARM64 under Prism, then MPC-HC x64 with MPC Video Renderer on WARP
+  setup-graph:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults: { run: { shell: pwsh } }
     env:
@@ -679,8 +699,12 @@ jobs:
         timeout-minutes: 5
         run: |
           $logs = "$env:LOCALAPPDATA\PushMPC\logs"
-          Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters' -ErrorAction SilentlyContinue | ForEach-Object { $q = Get-ItemProperty $_.PSPath; "MPC-HC filter entry $($_.PSChildName): $($q.Name) enabled $($q.Enabled)" } | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | ForEach-Object { $q = Get-ItemProperty $_.PSPath; "MPC-HC filter entry $($_.PSChildName): $($q.Name) enabled $($q.Enabled)" } | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          # MPC Video Renderer (DSVidRen 14), which PushMPC needs downstream
+          Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name DSVidRen -Value 14 -Type DWord
+          "MPC Video Renderer registered: $((Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\CLSID\{71F080AA-8661-4093-B15E-4F6903E77D0A}\InprocServer32' -ErrorAction SilentlyContinue).'(default)')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"", '/play' -PassThru; Start-Sleep 25
+          try { $m.Refresh(); "MPC-HC window: '$($m.MainWindowTitle)'; modules: $(((Get-Process -Id $m.Id).Modules | Where-Object { $_.ModuleName -match 'PushMpc|MpcVideoRenderer|LAV' } | ForEach-Object ModuleName) -join ', ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" } catch { "modules: $_" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
           if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           $f = Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue
           "filter logs: $(@($f).Count)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
@@ -692,9 +716,9 @@ jobs:
           $s = "$env:LOCALAPPDATA\PushMPC\PushMPC-Setup.exe"
           if (Test-Path $s) { $p = Start-Process $s -ArgumentList '--uninstall', '--quiet' -PassThru; $p.WaitForExit(300000) | Out-Null; "uninstall exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
           "registration left: $(Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
-          @('## arm64-windows', '', '```') + (Get-Content "$env:RUNNER_TEMP\arm.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          @('## setup-graph ${{ matrix.os }}', '', '```') + (Get-Content "$env:RUNNER_TEMP\arm.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
-          if ($env:ARM_FILTER -ne 'True') { Write-Host '::error::MPC-HC x64 under Prism did not create the filter'; exit 1 }
+          if ($env:ARM_FILTER -ne 'True') { Write-Host '::error::MPC-HC x64 did not create the filter'; exit 1 }
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: arm64-windows-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs" }
+        with: { name: 'setup-graph-logs-${{ matrix.os }}', path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs" }

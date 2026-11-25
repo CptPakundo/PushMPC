@@ -52,10 +52,12 @@ leaves them out).
 |---|---|---|
 | MPC-HC (x64) | full, tested | adds "PushMPC Filter" to External Filters (Prefer); MPC Video Renderer HDR options |
 | MPC-BE (x64) | automatic; setup's changes checked against MPC-BE 1.9.3 in CI, playback not yet tested in MPC-BE | the same, plus MPC Video Decoder set to D3D11 copy-back |
-| mpv, SMPlayer | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in `mpv.conf` (SMPlayer: its options), plus a VapourSynth runtime; see [mpv, SMPlayer and MPC-QT](players-mpv.md) |
-| MPC-QT | preview, manual setup | nothing ([steps](players-mpv.md#mpc-qt-by-hand)) |
+| PotPlayer (x64) | automatic; checked in CI with a real PotPlayer (it loads the filter), playback with a GPU not yet tested | adds "PushMPC Filter" to its filter priority list (Prefer); renderer and decoder are your choice (see below) |
+| mpv, mpv.net, SMPlayer, MPC-QT | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in their settings, plus a VapourSynth runtime; see [mpv and mpv-based players](players-mpv.md) |
+| Kodi, Jellyfin MPV Shim, Plex-MPV-Shim | preview, when mpv is installed | they play through mpv (Kodi's external player; the shims' external mpv) |
+| Stremio | by hand | nothing: its built-in mpv resets video filters; [play in mpv](players-mpv.md#stremio-by-hand) |
+| Zoom Player | by hand, untested | nothing ([steps](#zoom-player-by-hand)) |
 | SVP's own mpv | | left alone (SVP manages it) |
-| PotPlayer (x64) | manual setup, **untested** | nothing (see below) |
 
 PushMPC needs MPC Video Renderer in D3D11 mode after it, and a decoder before it that delivers its frames in system
 memory (copy-back). With another renderer, or a decoder in native hardware mode, the player still plays, without
@@ -78,15 +80,19 @@ Options > External Filters > Add Filter > "PushMPC Filter", Prefer; and Options 
 > hardware decoding: D3D11 copy-back. 32-bit MPC-BE cannot load the 64-bit filter. MPC-HC's and MPC-BE's MPC Video
 Renderer share one registration and one settings key: the copy installed last is the one both players use.
 
-### Using PushMPC with PotPlayer (manual setup)
+### PotPlayer
 
-**Untested.** These steps come from PotPlayer's documentation and community guides, not from a test on a real
-install. PotPlayer is closed source and changes often, so menu names may differ. Install PushMPC with setup first (it
-registers the filter for your user), then in PotPlayer:
+Setup finds PotPlayer x64 (`Program Files\DAUM\PotPlayer`) and adds "PushMPC Filter" to its filter priority list
+(`HKCU\Software\DAUM\PotPlayerMini64\Override`, Prefer, NV12 and P010 inputs), in front of the list's end marker. A
+real PotPlayer on a CI runner loads the filter from that entry. SVP's VapourSynth entry, if enabled, is disabled (and
+enabled again on uninstall). Uninstalling removes the entry and leaves the list exactly as it was. Close PotPlayer
+before setup: it saves its settings when it closes. If PotPlayer keeps its settings in `PotPlayerMini64.ini` (INI mode),
+setup changes nothing and says so: add the filter by hand (step 1 below).
 
-1. **Filter.** Preferences (F5) > Filter Control > Filter Priority (Overall) > Add external filter, pick
-   `%LOCALAPPDATA%\PushMPC\filter\PushMpcFilter.ax` (or Add registered filter > "PushMPC Filter"), and set it to
-   **Prefer**.
+The renderer and the decoder stay your choice, because they change how PotPlayer plays everything else too:
+
+1. **Filter (INI mode only).** Preferences (F5) > Filter Control > Filter Priority (Overall) > Add external filter,
+   pick `%LOCALAPPDATA%\PushMPC\filter\PushMpcFilter.ax`, and set it to **Prefer**.
 2. **Renderer.** Preferences > Video > Video Renderer: **MPC Video Renderer**. PotPlayer does not bundle it: install
    MPC Video Renderer (for example the copy that comes with MPC-HC or MPC-BE) and select it. With PotPlayer's built-in
    Direct3D 11 renderer, EVR or madVR, PushMPC passes the video through unchanged.
@@ -97,8 +103,21 @@ registers the filter for your user), then in PotPlayer:
 
 Known limits: PushMPC cannot ask PotPlayer to reopen a file (an interlaced file or a lost graphics device then shows
 the source frames unprocessed); whether PotPlayer's built-in decoder passes HDR10 metadata on to a filter is unknown;
-the G-SYNC button covers MPC-HC and MPC-BE only. Uninstalling PushMPC does not remove the PotPlayer entry: remove it in
-Filter Priority by hand.
+the G-SYNC button covers MPC-HC and MPC-BE only.
+
+### Zoom Player (by hand)
+
+**Untested.** Zoom Player (MAX or Free, 64-bit) is a DirectShow player like MPC-HC, so the same filter works when MPC
+Video Renderer draws the video and the decoder copies back:
+
+1. Install PushMPC with setup (it registers the filter for your user).
+2. Options (Ctrl+O) > Advanced Options > Playback > Filter Control: add "PushMPC Filter" as a custom (preferred) video
+   filter.
+3. Video renderer: MPC Video Renderer (install it, for example the copy that comes with MPC-HC). With other renderers
+   PushMPC passes the video through.
+4. Decoder: LAV Video or Zoom Player's decoder in a copy-back hardware mode (or software).
+
+Remove the filter there again when you uninstall PushMPC.
 
 ## GPUs
 
