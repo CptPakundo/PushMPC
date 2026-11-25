@@ -126,17 +126,19 @@ vs_config() {
     # load another copy (e.g. /usr/lib/libvapoursynth-script.so). VSScript looks up the library it was loaded from,
     # so the same Python entry is added under that library's path too.
     if [ -f "$t" ] && have mpv; then
-        vs_lib=$(ldd "$(command -v mpv)" 2>/dev/null | sed -n 's/^.*=> \(\/[^ ]*\(vsscript\|vapoursynth-script\)[^ ]*\) .*$/\1/p' | head -n 1)
-        # mpv usually opens it at run time (dlopen), so it is not in ldd's list: the one the loader would find
-        [ -n "$vs_lib" ] || vs_lib=$( { /sbin/ldconfig -p 2>/dev/null || ldconfig -p 2>/dev/null; } | sed -n 's/^.*=> \(\/.*lib\(vapoursynth-script\|vsscript\)\.so[^ ]*\)$/\1/p' | head -n 1)
-        if [ -n "$vs_lib" ]; then
-            key=$(readlink -f "$vs_lib" | sed 's#/lib64/#/lib/#')
-            rest=$(grep '^"' "$t" | tail -n 1 | sed 's/^"[^"]*"//')
-            if [ -n "$rest" ] && ! grep -qF "\"$key\"" "$t" && ! grep -qF "\"$vs_lib\"" "$t"; then
+        rest=$(grep '^"' "$t" | tail -n 1 | sed 's/^"[^"]*"//')
+        # every VSScript library on the system (the one mpv links or opens is among them), each under its own path, as
+        # written (VSScript compares the path it was loaded from, /lib64/ folded into /lib/) and resolved
+        for vs_lib in $( { ldd "$(command -v mpv)" 2>/dev/null; /sbin/ldconfig -p 2>/dev/null || ldconfig -p 2>/dev/null; } | grep -o '/[^ ]*lib\(vapoursynth-script\|vsscript\)\.so[^ ]*' ) \
+                      $(find /usr/lib /usr/lib64 /usr/local/lib -maxdepth 4 \( -name 'libvapoursynth-script.so*' -o -name 'libvsscript.so*' \) 2>/dev/null); do
+            for key in "$vs_lib" "$(readlink -f "$vs_lib")"; do
+                key=$(printf '%s' "$key" | sed 's#/lib64/#/lib/#')
+                [ -n "$rest" ] && [ -n "$key" ] || continue
+                grep -qF "\"$key\"" "$t" && continue
                 printf '"%s"%s\n' "$key" "$rest" >> "$t"
-                say "  VapourSynth: the same Python entry for mpv's VSScript ($key)"
-            fi
-        fi
+                say "  VapourSynth: the same Python entry for $key"
+            done
+        done
     fi
     if [ -f "$t" ] && [ "$(sha "$t")" != "$before" ]; then mark_written "$t"; record "file|vsconfig|$t"; say "  VapourSynth: Python registered for VSScript ($t)"
     else rm -f "$t.pushmpc-backup"; [ -f "$t.pushmpc-absent" ] && { how=$(cat "$t.pushmpc-absent"); rm -f "$t.pushmpc-absent"; [ "$how" = created-dir ] && rmdir "$(dirname "$t")" 2>/dev/null; }; fi

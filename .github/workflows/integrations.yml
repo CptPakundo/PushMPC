@@ -419,7 +419,8 @@ jobs:
           snap > /tmp/before.txt
           tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
-          head -n 8 $HOME/.config/mpv/mpv.conf
+          head -n 8 $HOME/.config/mpv/mpv.conf || true
+          echo "::notice title=arch VSScript::$(grep -i vapoursynth /tmp/install.txt | tr '\n' ' ') libs: $(find /usr/lib -maxdepth 4 \( -name 'libvsscript.so*' -o -name 'libvapoursynth-script.so*' \) 2>/dev/null | tr '\n' ' ') toml: $(head -c 600 $HOME/.config/vapoursynth/vapoursynth.toml 2>/dev/null | tr '\n' ' ')"
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
           echo "--- VSScript's Python link"
@@ -428,7 +429,7 @@ jobs:
           ldconfig -p | grep -i 'vapoursynth\|vsscript' || true
           pacman -Ql vapoursynth | grep -E '\.so|bin/' | head || true
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
-          ls /tmp/vslog-arch/ 2>/dev/null; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
+          ls /tmp/vslog-arch/ 2>/dev/null || true; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
           echo "--- encode mode"
           mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           cat /tmp/vslog-arch/*.log | head -20
@@ -513,6 +514,8 @@ jobs:
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
             mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv-fedora.txt 2>&1 || true
             grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error|fail' /tmp/mpv-fedora.txt | head -30; tail -n 15 /tmp/mpv-fedora.txt
+            find /usr/lib /usr/lib64 -maxdepth 4 \( -name 'libvsscript.so*' -o -name 'libvapoursynth-script.so*' \) 2>/dev/null | tee /tmp/vslibs.txt || true
+            echo "::notice title=fedora libs::$(tr '\n' ' ' < /tmp/vslibs.txt)"
             echo "::notice title=fedora mpv::$(grep -i 'vapoursynth\]\|VapourSynth:' /tmp/mpv-fedora.txt /tmp/install.txt | tail -3 | tr '\n' ' ') toml: $(head -c 400 $HOME/.config/vapoursynth/vapoursynth.toml 2>/dev/null | tr '\n' ' ') mpv libs: $(ldd $(command -v mpv) | grep -i vapoursynth | tr '\n' ' ')"
             grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-fedora/*.log | tee -a /tmp/versions.txt
             grep -q 'portable: output YUV' /tmp/vslog-fedora/*.log

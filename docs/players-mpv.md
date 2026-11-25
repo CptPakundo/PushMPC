@@ -18,6 +18,8 @@ methods, the scene-cut guard, the colour chain), with the same settings and the 
 | MPC-QT | libmpv; its Options > Tweaks "mpv options file" | automatic |
 | Kodi | Kodi's own player has no filter hook: videos play in mpv as Kodi's external player (`playercorefactory.xml`) | automatic when mpv is installed |
 | Jellyfin MPV Shim, Plex-MPV-Shim | their bundled mpv has no VapourSynth on Windows: they are switched to the installed mpv (`conf.json` `mpv_ext`) with the block in their `mpv.conf` | automatic when mpv is installed |
+| Jellyfin Desktop 2.x | its libmpv (shinchiro's build on Windows) reads `mpv.conf` in each profile folder | automatic |
+| Plex for Windows, legacy Emby Theater | libmpv without VapourSynth: a VapourSynth line would stop playback | not set up (use Plex-MPV-Shim) |
 | Stremio | its built-in mpv resets the video filters itself | by hand: play in mpv, see below |
 | SVP's own mpv | | left alone: SVP manages it. Do not run both filters at once |
 
@@ -88,6 +90,14 @@ Uninstalling removes the marked parts (and the file, if PushMPC created it).
 Their bundled mpv has no VapourSynth on Windows. When mpv is installed, the installer sets `mpv_ext` = true and
 `mpv_ext_path` = that mpv in the shim's `conf.json` (`%APPDATA%\jellyfin-mpv-shim` or `%APPDATA%\plex-mpv-shim`), and
 puts the block in the `mpv.conf` beside it. Close the shim first. Uninstalling puts both files back.
+
+### Jellyfin Desktop
+
+Jellyfin Desktop 2.x plays through libmpv (on Windows the same shinchiro build as mpv, with VapourSynth) and reads an
+`mpv.conf` in each profile folder: `%LOCALAPPDATA%\Jellyfin Desktop\profiles\<id>\` on Windows,
+`~/.local/share/jellyfin-desktop/profiles/<id>/` on Linux. The installer puts the block into each profile's `mpv.conf`
+(created when there is none) and takes it out again on uninstall. Run setup again after adding a profile. The Flatpak
+build has its own mpv and is left alone.
 
 ### Stremio (by hand)
 

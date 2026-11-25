@@ -202,6 +202,7 @@ std::vector<MpvPlayer> DetectMpvFamily() {
     for (auto& d : { JoinPath(pf, L"Kodi"), JoinPath(pf86, L"Kodi") }) if (FileExists(JoinPath(d, L"kodi.exe"))) { out.push_back({ anyMpv ? L"Kodi" : L"Kodi (needs mpv)", JoinPath(d, L"kodi.exe") }); break; }
     if (FileExists(JoinPath(ad, L"jellyfin-mpv-shim\\conf.json"))) out.push_back({ anyMpv ? L"Jellyfin MPV Shim" : L"Jellyfin MPV Shim (needs mpv)", JoinPath(ad, L"jellyfin-mpv-shim") });
     if (FileExists(JoinPath(ad, L"plex-mpv-shim\\conf.json"))) out.push_back({ anyMpv ? L"Plex-MPV-Shim" : L"Plex-MPV-Shim (needs mpv)", JoinPath(ad, L"plex-mpv-shim") });
+    if (DirExists(JoinPath(la, L"Jellyfin Desktop\\profiles"))) out.push_back({ L"Jellyfin Desktop", JoinPath(la, L"Jellyfin Desktop") });   // its libmpv has VapourSynth
     return out;
 }
 // PotPlayer x64 (filter priority list in HKCU\Software\DAUM\PotPlayerMini64; the script's Find-PotPlayerExe rules)

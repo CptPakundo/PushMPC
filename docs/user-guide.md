@@ -54,6 +54,7 @@ leaves them out).
 | MPC-BE (x64) | automatic; setup's changes checked against MPC-BE 1.9.3 in CI, playback not yet tested in MPC-BE | the same, plus MPC Video Decoder set to D3D11 copy-back |
 | PotPlayer (x64) | automatic; checked in CI with a real PotPlayer (it loads the filter), playback with a GPU not yet tested | adds "PushMPC Filter" to its filter priority list (Prefer); renderer and decoder are your choice (see below) |
 | mpv, mpv.net, SMPlayer, MPC-QT | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in their settings, plus a VapourSynth runtime; see [mpv and mpv-based players](players-mpv.md) |
+| Jellyfin Desktop | preview | the VapourSynth filter in each profile's `mpv.conf` |
 | Kodi, Jellyfin MPV Shim, Plex-MPV-Shim | preview, when mpv is installed | they play through mpv (Kodi's external player; the shims' external mpv) |
 | Stremio | by hand | nothing: its built-in mpv resets video filters; [play in mpv](players-mpv.md#stremio-by-hand) |
 | Zoom Player | by hand, untested | nothing ([steps](#zoom-player-by-hand)) |
@@ -89,7 +90,12 @@ enabled again on uninstall). Uninstalling removes the entry and leaves the list 
 before setup: it saves its settings when it closes. If PotPlayer keeps its settings in `PotPlayerMini64.ini` (INI mode),
 setup changes nothing and says so: add the filter by hand (step 1 below).
 
-The renderer and the decoder stay your choice, because they change how PotPlayer plays everything else too:
+When LAV Filters is installed, setup also adds **LAV Video Decoder** to the same list (Prefer, after PushMPC), so
+PotPlayer decodes with LAV, which passes HDR mastering data and MaxCLL on to PushMPC (PotPlayer's built-in decoder
+does not; PushMPC still sees PQ/HLG and BT.2020 from the stream itself). A LAV entry of your own is left as it is.
+Without LAV Filters, setup says so; install it from github.com/Nevcairiel/LAVFilters and run setup again.
+
+The renderer stays your choice, because it changes how PotPlayer plays everything else too:
 
 1. **Filter (INI mode only).** Preferences (F5) > Filter Control > Filter Priority (Overall) > Add external filter,
    pick `%LOCALAPPDATA%\PushMPC\filter\PushMpcFilter.ax`, and set it to **Prefer**.
