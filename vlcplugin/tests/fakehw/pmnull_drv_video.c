@@ -13,6 +13,10 @@
  *   PMNULL_PITCH=odd    odd pitches and padded plane offsets
  *   PMNULL_BROKEN=1     uploads are silently lost (mapped derived images are a copy that is never written back,
  *                       vaPutImage does nothing): a driver whose writes do not reach the surface
+ *   PMNULL_EXPORT=0     no vaExportSurfaceHandle (by default surfaces live in memfds and export as DRM PRIME 2 dmabufs
+ *                       through /dev/udmabuf, linear, when that device can be opened)
+ *   PMNULL_SHOWLOG=f    append the box position of every surface a reader exports without write access (VLC's GL
+ *                       interop, i.e. what is displayed, in that order) to the CSV f
  *   PMNULL_LOG=1        log calls to stderr
  * Licence: MIT.
  */
@@ -24,6 +28,12 @@
 #include <pthread.h>
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_drmcommon.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <linux/udmabuf.h>
 #ifndef VA_RT_FORMAT_YUV420_10
 # define VA_RT_FORMAT_YUV420_10 0x00000100
 #endif
@@ -41,6 +51,8 @@ typedef struct {
     int bpc;                    /* bytes per sample: 1 or 2 */
     uint32_t pitch, off_uv, size;
     uint8_t *data;
+    int memfd;                  /* exportable surfaces live in a memfd (dmabuf through /dev/udmabuf), else -1 */
+    size_t mapsize;
 } surf_t;
 typedef struct {
     VABufferType type;
@@ -49,6 +61,9 @@ typedef struct {
     int owned;                  /* else it aliases a surface (derived image) */
     uint8_t *shadow;            /* PMNULL_BROKEN: a mapped derived image is a copy */
     VAImageID image;
+    int memfd;                  /* derived image: the surface's memfd (for vaAcquireBufferHandle), else -1 */
+    size_t memsize;
+    int handle;                 /* the dmabuf handed out by vaAcquireBufferHandle, else -1 */
 } buf_t;
 typedef struct { VAImage img; VASurfaceID derived_from; } img_t;
 typedef struct { VAProfile profile; VAEntrypoint ep; unsigned rt; } cfg_t;
@@ -57,7 +72,8 @@ typedef struct { VAConfigID cfg; int w, h; VASurfaceID target; uint64_t pictures
 typedef struct {
     pthread_mutex_t lock;
     void *obj[6][MAXOBJ];
-    int derive, putimage, getimage, oddpitch, broken, log;
+    int derive, putimage, getimage, oddpitch, broken, log, exportable;
+    unsigned shown;
 } drv_t;
 
 #define LOG(d, ...) do { if ((d)->log) { fprintf(stderr, "pmnull: " __VA_ARGS__); fputc('\n', stderr); } } while (0)
@@ -85,6 +101,12 @@ static int EnvOn(const char *n, int def)
     if (!v || !*v) return def;
     return !(v[0] == '0' || v[0] == 'n' || v[0] == 'N');
 }
+static void SurfFree(surf_t *s)
+{
+    if (s->memfd >= 0) { munmap(s->data, s->mapsize); close(s->memfd); }
+    else free(s->data);
+    free(s);
+}
 
 static const VAProfile kProfiles[] = { VAProfileH264ConstrainedBaseline, VAProfileH264Main, VAProfileH264High,
                                        VAProfileHEVCMain, VAProfileHEVCMain10 };
@@ -102,7 +124,7 @@ static VAStatus Terminate(VADriverContextP ctx)
         for (int i = 0; i < MAXOBJ; i++) {
             void *p = d->obj[k][i];
             if (!p) continue;
-            if (k == K_SURF) free(((surf_t *)p)->data);
+            if (k == K_SURF) { SurfFree((surf_t *)p); continue; }
             if (k == K_BUF) { if (((buf_t *)p)->owned) free(((buf_t *)p)->data); free(((buf_t *)p)->shadow); }
             free(p);
         }
@@ -193,8 +215,22 @@ static surf_t *SurfNew(drv_t *d, int w, int h, uint32_t fourcc)
     const uint32_t hy = (uint32_t)((h + 1) & ~1);
     s->off_uv = s->pitch * hy + (d->oddpitch ? s->pitch * 3 + 40 : 0);
     s->size = s->off_uv + s->pitch * (hy / 2);
-    s->data = malloc(s->size);
-    if (!s->data) { free(s); return NULL; }
+    s->memfd = -1;
+    if (d->exportable) {
+        const size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+        s->mapsize = (s->size + pg - 1) / pg * pg;
+        s->memfd = memfd_create("pmnull-surface", MFD_ALLOW_SEALING | MFD_CLOEXEC);
+        if (s->memfd < 0 || ftruncate(s->memfd, (off_t)s->mapsize) != 0 || fcntl(s->memfd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
+            if (s->memfd >= 0) close(s->memfd);
+            free(s);
+            return NULL;
+        }
+        s->data = mmap(NULL, s->mapsize, PROT_READ | PROT_WRITE, MAP_SHARED, s->memfd, 0);
+        if (s->data == MAP_FAILED) { close(s->memfd); free(s); return NULL; }
+    } else {
+        s->data = malloc(s->size);
+        if (!s->data) { free(s); return NULL; }
+    }
     /* a dark grey, not zero: an untouched surface is visibly different from a decoded one */
     if (s->bpc == 1) { memset(s->data, 16, s->off_uv); memset(s->data + s->off_uv, 128, s->size - s->off_uv); }
     else {
@@ -220,8 +256,8 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned format, unsigned 
         surf_t *s = SurfNew(d, (int)w, (int)h, fourcc);
         out[i] = s ? ObjAdd(d, K_SURF, s) : VA_INVALID_ID;
         if (out[i] == VA_INVALID_ID) {
-            if (s) { free(s->data); free(s); }
-            for (unsigned j = 0; j < i; j++) { surf_t *t = ObjGet(d, K_SURF, out[j]); ObjDel(d, K_SURF, out[j]); if (t) { free(t->data); free(t); } }
+            if (s) SurfFree(s);
+            for (unsigned j = 0; j < i; j++) { surf_t *t = ObjGet(d, K_SURF, out[j]); ObjDel(d, K_SURF, out[j]); if (t) SurfFree(t); }
             pthread_mutex_unlock(&d->lock);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -241,7 +277,7 @@ static VAStatus DestroySurfaces(VADriverContextP ctx, VASurfaceID *list, int num
     for (int i = 0; i < num; i++) {
         surf_t *s = ObjGet(d, K_SURF, list[i]);
         ObjDel(d, K_SURF, list[i]);
-        if (s) { free(s->data); free(s); }
+        if (s) SurfFree(s);
     }
     pthread_mutex_unlock(&d->lock);
     return VA_STATUS_SUCCESS;
@@ -304,7 +340,7 @@ static VAStatus CreateBuffer(VADriverContextP ctx, VAContextID c, VABufferType t
     drv_t *d = D(ctx);
     buf_t *b = calloc(1, sizeof(*b));
     if (!b) return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    b->type = type; b->size = size; b->num = num ? num : 1; b->owned = 1; b->image = VA_INVALID_ID;
+    b->type = type; b->size = size; b->num = num ? num : 1; b->owned = 1; b->image = VA_INVALID_ID; b->memfd = -1; b->handle = -1;
     b->data = malloc((size_t)size * b->num + 1);
     if (!b->data) { free(b); return VA_STATUS_ERROR_ALLOCATION_FAILED; }
     if (data) memcpy(b->data, data, (size_t)size * b->num);
@@ -359,6 +395,7 @@ static VAStatus DestroyBuffer(VADriverContextP ctx, VABufferID id)
     ObjDel(d, K_BUF, id);
     pthread_mutex_unlock(&d->lock);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (b->handle >= 0) close(b->handle);
     if (b->owned) free(b->data);
     free(b->shadow);
     free(b);
@@ -468,12 +505,13 @@ static VAStatus ImageNew(drv_t *d, uint32_t fourcc, int w, int h, uint8_t *alias
     if (!g) {                                /* layout of a fresh image: as a surface of that size */
         surf_t *s = SurfNew(d, w, h, fourcc);
         if (!s) return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        tmp = *s; free(s->data); free(s); g = &tmp;
+        tmp = *s; SurfFree(s); g = &tmp;
     }
     buf_t *b = calloc(1, sizeof(*b));
     img_t *im = calloc(1, sizeof(*im));
     if (!b || !im) { free(b); free(im); return VA_STATUS_ERROR_ALLOCATION_FAILED; }
     b->type = VAImageBufferType; b->size = g->size; b->num = 1;
+    b->memfd = like ? like->memfd : -1; b->memsize = like ? like->mapsize : 0; b->handle = -1;
     if (alias) { b->data = alias; b->owned = 0; }
     else {
         b->data = calloc(1, g->size); b->owned = 1;
@@ -580,6 +618,103 @@ static VAStatus PutImage(VADriverContextP ctx, VASurfaceID sid, VAImageID iid, i
     return st;
 }
 
+/* DRM PRIME 2 export: a udmabuf over the surface's memfd, linear; separate layers (R8 + GR88, R16 + GR1616) or one
+ * composed layer (NV12 / P010) */
+#define PM_FOURCC(a, b, c, e) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(e) << 24))
+static VAStatus ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID sid, uint32_t mem_type, uint32_t flags, void *descriptor)
+{
+    drv_t *d = D(ctx);
+    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    pthread_mutex_lock(&d->lock);
+    surf_t *s = ObjGet(d, K_SURF, sid);
+    pthread_mutex_unlock(&d->lock);
+    if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
+    if (s->memfd < 0) return VA_STATUS_ERROR_UNIMPLEMENTED;
+    const int dev = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+    if (dev < 0) return VA_STATUS_ERROR_OPERATION_FAILED;
+    struct udmabuf_create c = { .memfd = (uint32_t)s->memfd, .flags = UDMABUF_FLAGS_CLOEXEC, .offset = 0, .size = s->mapsize };
+    const int fd = ioctl(dev, UDMABUF_CREATE, &c);
+    close(dev);
+    if (fd < 0) return VA_STATUS_ERROR_OPERATION_FAILED;
+    VADRMPRIMESurfaceDescriptor *o = descriptor;
+    memset(o, 0, sizeof(*o));
+    const int ten = s->fourcc == VA_FOURCC_P010;
+    o->fourcc = s->fourcc; o->width = (uint32_t)s->w; o->height = (uint32_t)s->h;
+    o->num_objects = 1;
+    o->objects[0].fd = fd; o->objects[0].size = (uint32_t)s->mapsize; o->objects[0].drm_format_modifier = 0;   /* linear */
+    if (!(flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS)) {   /* separate unless composed is asked for (VLC's GL interop passes 0) */
+        o->num_layers = 2;
+        o->layers[0].drm_format = ten ? PM_FOURCC('R', '1', '6', ' ') : PM_FOURCC('R', '8', ' ', ' ');
+        o->layers[0].num_planes = 1; o->layers[0].object_index[0] = 0; o->layers[0].offset[0] = 0; o->layers[0].pitch[0] = s->pitch;
+        o->layers[1].drm_format = ten ? PM_FOURCC('G', 'R', '3', '2') : PM_FOURCC('G', 'R', '8', '8');
+        o->layers[1].num_planes = 1; o->layers[1].object_index[0] = 0; o->layers[1].offset[0] = s->off_uv; o->layers[1].pitch[0] = s->pitch;
+    } else {
+        o->num_layers = 1;
+        o->layers[0].drm_format = ten ? PM_FOURCC('P', '0', '1', '0') : PM_FOURCC('N', 'V', '1', '2');
+        o->layers[0].num_planes = 2;
+        o->layers[0].offset[1] = s->off_uv; o->layers[0].pitch[0] = o->layers[0].pitch[1] = s->pitch;
+    }
+    /* PMNULL_SHOWLOG=<csv>: what a reader exporting without write access (VLC's GL interop, at display) gets, in that order:
+     * the box's x centroid (the CSV display's cx column, for hwcheck.py) */
+    const char *showlog = getenv("PMNULL_SHOWLOG");
+    if (showlog && *showlog && !(flags & VA_EXPORT_SURFACE_WRITE_ONLY)) {
+        double sx = 0, cnt = 0;
+        for (int y = 0; y < s->h; y++)
+            for (int x = 0; x < s->w; x++) {
+                const uint8_t *row = s->data + (size_t)y * s->pitch;
+                const unsigned v = s->bpc == 1 ? row[x] : (((unsigned)row[2 * x] | ((unsigned)row[2 * x + 1] << 8)) >> 8);
+                if (v > 128) { sx += x; cnt += 1; }
+            }
+        pthread_mutex_lock(&d->lock);
+        FILE *lf = fopen(showlog, "a");
+        if (lf) {
+            if (ftell(lf) == 0) fprintf(lf, "n,cx
+");
+            fprintf(lf, "%u,%.2f
+", d->shown++, cnt ? sx / cnt : -1.0);
+            fclose(lf);
+        }
+        pthread_mutex_unlock(&d->lock);
+    }
+    LOG(d, "ExportSurfaceHandle %#x -> fd %d (%s)", sid, fd, (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) ? "composed" : "separate layers");
+    return VA_STATUS_SUCCESS;
+}
+
+/* vaAcquireBufferHandle (DRM PRIME) for derived images, as VLC's GL interop probes its pool: a udmabuf over the
+ * surface's memfd */
+static VAStatus AcquireBufferHandle(VADriverContextP ctx, VABufferID id, VABufferInfo *info)
+{
+    drv_t *d = D(ctx);
+    pthread_mutex_lock(&d->lock);
+    buf_t *b = ObjGet(d, K_BUF, id);
+    pthread_mutex_unlock(&d->lock);
+    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (b->memfd < 0 || !(info->mem_type & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)) return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    if (b->handle < 0) {
+        const int dev = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+        if (dev < 0) return VA_STATUS_ERROR_OPERATION_FAILED;
+        struct udmabuf_create c = { .memfd = (uint32_t)b->memfd, .flags = UDMABUF_FLAGS_CLOEXEC, .offset = 0, .size = b->memsize };
+        b->handle = ioctl(dev, UDMABUF_CREATE, &c);
+        close(dev);
+        if (b->handle < 0) return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    info->handle = (uintptr_t)b->handle;
+    info->type = VAImageBufferType;
+    info->mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
+    info->mem_size = b->memsize;
+    return VA_STATUS_SUCCESS;
+}
+static VAStatus ReleaseBufferHandle(VADriverContextP ctx, VABufferID id)
+{
+    drv_t *d = D(ctx);
+    pthread_mutex_lock(&d->lock);
+    buf_t *b = ObjGet(d, K_BUF, id);
+    pthread_mutex_unlock(&d->lock);
+    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (b->handle >= 0) { close(b->handle); b->handle = -1; }
+    return VA_STATUS_SUCCESS;
+}
+
 /* what libva requires to exist; none of it is used by decoders */
 static VAStatus QuerySubpictureFormats(VADriverContextP ctx, VAImageFormat *l, unsigned *flags, unsigned *n)
 { (void)ctx; (void)l; (void)flags; *n = 0; return VA_STATUS_SUCCESS; }
@@ -623,6 +758,7 @@ VAStatus PM_INIT(VADriverContextP ctx)
     d->log = EnvOn("PMNULL_LOG", 0);
     const char *pitch = getenv("PMNULL_PITCH");
     d->oddpitch = pitch && !strcmp(pitch, "odd");
+    d->exportable = EnvOn("PMNULL_EXPORT", 1) && access("/dev/udmabuf", R_OK | W_OK) == 0;
     ctx->pDriverData = d;
     ctx->version_major = VA_MAJOR_VERSION;
     ctx->version_minor = VA_MINOR_VERSION;
@@ -676,8 +812,13 @@ VAStatus PM_INIT(VADriverContextP ctx)
     v->vaQueryDisplayAttributes = QueryDisplayAttributes;
     v->vaGetDisplayAttributes = GetDisplayAttributes;
     v->vaSetDisplayAttributes = SetDisplayAttributes;
-    LOG(d, "init (libva %d.%d), derive %d, putimage %d, getimage %d, odd pitch %d, broken %d", VA_MAJOR_VERSION,
-        VA_MINOR_VERSION, d->derive, d->putimage, d->getimage, d->oddpitch, d->broken);
+    if (d->exportable) {
+        v->vaExportSurfaceHandle = ExportSurfaceHandle;
+        v->vaAcquireBufferHandle = AcquireBufferHandle;
+        v->vaReleaseBufferHandle = ReleaseBufferHandle;
+    }
+    LOG(d, "init (libva %d.%d), derive %d, putimage %d, getimage %d, odd pitch %d, broken %d, export %d", VA_MAJOR_VERSION,
+        VA_MINOR_VERSION, d->derive, d->putimage, d->getimage, d->oddpitch, d->broken, d->exportable);
     return VA_STATUS_SUCCESS;
 }
 #if VA_MINOR_VERSION != 0

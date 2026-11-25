@@ -236,6 +236,8 @@ struct filter_sys_t {
     pm_hw *hw;                 /* Linux VA-API / VDPAU: the hardware format kept on both sides (pm_hw.h) */
     bool hw_ready, hw_failed;
     uint64_t hw_down_fail, hw_up_fail, hw_no_surface;
+    bool zc_hw;                /* VA-API zero copy: surfaces as dmabufs into the GPU engine and back (no CPU copies) */
+    uint64_t zc_in, zc_out, zc_fail;
     pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
     bool zc;                   /* pc runs on VLC's D3D11 device with 'DX11'/'DX10' pictures (no download) */
     uint64_t zc_fallback;      /* generated pictures pushcore did not deliver in time (the real frame copied in) */
@@ -273,6 +275,107 @@ static void JobUpload(struct filter_sys_t *sys, pm_job *j, int i)
     vlc_mutex_lock(&j->lock);
     j->failed[i] = true;
     vlc_mutex_unlock(&j->lock);
+}
+/* the engine's input: the surface as a dmabuf (VA-API zero copy), else its CPU planes; a surface that does not export
+ * goes through the copy path for that frame */
+static int EnginePush(struct filter_sys_t *sys, picture_t *src, bool contiguous, char *err, size_t n)
+{
+    if (sys->zc_hw) {
+        pm_dmabuf d;
+        if (pm_hw_export(sys->hw, src, &d) == 0) {
+            const int r = pm_engine_push_dmabuf(sys->eng, &d, contiguous, err, n);
+            pm_hw_dmabuf_close(&d);
+            if (r == 0) { sys->zc_in++; return 0; }
+        }
+        sys->zc_fail++;
+        picture_t *c = pm_hw_cpu_picture(sys->hw);
+        if (!c || pm_hw_download(sys->hw, src, c) != 0) { if (c) picture_Release(c); snprintf(err, n, "surface unreadable"); return -1; }
+        pm_yuv y;
+        PlanesIn(c, &sys->wfmt, sys->bps, &y);
+        const int r = pm_engine_push(sys->eng, &y, contiguous, err, n);
+        picture_Release(c);
+        return r;
+    }
+    pm_yuv y;
+    PlanesIn(src, &sys->wfmt, sys->bps_w, &y);
+    return pm_engine_push(sys->eng, &y, contiguous, err, n);
+}
+/* a generated frame straight into an output surface (zero copy), else into a CPU picture and uploaded */
+static int EngineGenerateHw(struct filter_sys_t *sys, float t, picture_t *out)
+{
+    char err[200];
+    pm_dmabuf d;
+    if (pm_hw_export(sys->hw, out, &d) == 0) {
+        const int r = pm_engine_generate_dmabuf(sys->eng, t, &d, err, sizeof(err));
+        pm_hw_dmabuf_close(&d);
+        if (r == 0) { sys->zc_out++; return 0; }
+    }
+    sys->zc_fail++;
+    picture_t *c = pm_hw_cpu_picture(sys->hw);
+    if (!c) return -1;
+    pm_yuv_out o;
+    PlanesOut(c, &sys->wfmt, sys->bps, &o);
+    pm_engine_generate(sys->eng, t, &o);
+    const int r = pm_hw_upload(sys->hw, c, out);
+    picture_Release(c);
+    return r;
+}
+/* zero copy is used only after a round trip through it: a pattern into a pool surface (the proven copy path), twice
+ * into the engine as a dmabuf, the frame half-way (= the pattern) out into a second surface, read back, compared */
+static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
+{
+    const char *why = "";
+    if (!sys->eng || !OptInt(f, CFG "zerocopy", 1)) return;
+    if (!pm_engine_dmabuf_ok(sys->eng, &why)) { msg_Info(f, "PushMPC: zero copy unavailable (%s): the hardware path copies", why); return; }
+    picture_t *a = pm_hw_new_picture(sys->hw), *b = pm_hw_new_picture(sys->hw);
+    picture_t *ca = pm_hw_cpu_picture(sys->hw), *cb = pm_hw_cpu_picture(sys->hw);
+    char err[200] = "";
+    bool ok = false;
+    if (a && b && ca && cb) {
+        const int w = (int)sys->wfmt.i_visible_width, h = (int)sys->wfmt.i_visible_height;
+        for (int p = 0; p < 3; p++)
+            for (int y = 0; y < (p ? (h + 1) / 2 : h); y++) {
+                uint8_t *row = ca->p[p].p_pixels + (size_t)y * ca->p[p].i_pitch;
+                for (int x = 0; x < (p ? (w + 1) / 2 : w); x++) {
+                    const unsigned v = 16u + (unsigned)((x * 3 + y * 5 + p * 40) % 200);
+                    if (sys->bps == 1) row[x] = (uint8_t)v; else ((uint16_t *)row)[x] = (uint16_t)v;
+                }
+            }
+        pm_dmabuf da, db;
+        if (pm_hw_upload(sys->hw, ca, a) != 0) snprintf(err, sizeof(err), "pattern upload failed");
+        else if (pm_hw_export(sys->hw, a, &da) != 0) snprintf(err, sizeof(err), "the driver does not export surfaces (vaExportSurfaceHandle)");
+        else {
+            if (pm_hw_export(sys->hw, b, &db) != 0) snprintf(err, sizeof(err), "the driver does not export surfaces (vaExportSurfaceHandle)");
+            else {
+                if (pm_engine_push_dmabuf(sys->eng, &da, 0, err, sizeof(err)) == 0 && pm_engine_push_dmabuf(sys->eng, &da, 1, err, sizeof(err)) == 0 &&
+                    pm_engine_generate_dmabuf(sys->eng, 0.5f, &db, err, sizeof(err)) == 0) {
+                    if (pm_hw_download(sys->hw, b, cb) != 0) snprintf(err, sizeof(err), "read back failed");
+                    else {
+                        int maxd = 0;
+                        for (int p = 0; p < 3; p++)
+                            for (int y = 0; y < (p ? (h + 1) / 2 : h); y++)
+                                for (int x = 0; x < (p ? (w + 1) / 2 : w); x++) {
+                                    const uint8_t *ra = ca->p[p].p_pixels + (size_t)y * ca->p[p].i_pitch, *rb = cb->p[p].p_pixels + (size_t)y * cb->p[p].i_pitch;
+                                    const int va = sys->bps == 1 ? ra[x] : ((const uint16_t *)ra)[x], vb = sys->bps == 1 ? rb[x] : ((const uint16_t *)rb)[x];
+                                    if (abs(va - vb) > maxd) maxd = abs(va - vb);
+                                }
+                        ok = maxd <= 1;
+                        if (!ok) snprintf(err, sizeof(err), "the round trip differs by up to %d", maxd);
+                    }
+                }
+                pm_hw_dmabuf_close(&db);
+            }
+            pm_hw_dmabuf_close(&da);
+        }
+    } else snprintf(err, sizeof(err), "no surface for the round trip");
+    if (a) picture_Release(a);
+    if (b) picture_Release(b);
+    if (ca) picture_Release(ca);
+    if (cb) picture_Release(cb);
+    pm_engine_forget(sys->eng);
+    sys->zc_hw = ok;
+    if (ok) msg_Info(f, "PushMPC: zero copy on (VA-API surfaces as dmabufs into the GPU engine and back)");
+    else msg_Info(f, "PushMPC: zero copy not used (%s): the hardware path copies", err);
 }
 /* pushcore hands out generated frames by pts: route each into the job's picture with that time, in display order */
 typedef struct { struct filter_sys_t *sys; pm_job *j; bool filled[16]; pm_pc_out dst; pm_pc_tex tex; } pc_route;
@@ -410,8 +513,7 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
                 if (pmx_poll(sys->pc, 0, RouteDest, RouteDone, &r, err, sizeof(err)) <= 0) break;
         }
     } else {
-        PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
-        if (pm_engine_push(sys->eng, &src, j->contiguous, err, sizeof(err)) != 0)
+        if (EnginePush(sys, j->src, j->contiguous, err, sizeof(err)) != 0)
             pm_engine_forget(sys->eng);
         const bool pair = pm_engine_have_pair(sys->eng);
         for (int i = 0; i < j->n; i++) {
@@ -419,10 +521,14 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
             const bool stop = j->cancel;
             vlc_mutex_unlock(&j->lock);
             if (stop || !pair) break;
-            pm_yuv_out dst;
-            PlanesOut(JobDst(j, i), &sys->wfmt, sys->bps_w, &dst);
-            pm_engine_generate(sys->eng, j->t[i], &dst);
-            JobUpload(sys, j, i);
+            if (sys->zc_hw) {           /* straight into the output surface */
+                if (EngineGenerateHw(sys, j->t[i], j->outs[i]) != 0) { vlc_mutex_lock(&j->lock); j->failed[i] = true; vlc_mutex_unlock(&j->lock); }
+            } else {
+                pm_yuv_out dst;
+                PlanesOut(JobDst(j, i), &sys->wfmt, sys->bps_w, &dst);
+                pm_engine_generate(sys->eng, j->t[i], &dst);
+                JobUpload(sys, j, i);
+            }
             vlc_mutex_lock(&j->lock);
             j->done = i + 1;
             vlc_cond_broadcast(&j->cond);
@@ -549,8 +655,10 @@ static picture_t *HwIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
         sys->wfmt = *pm_hw_work_format(sys->hw);
         sys->hw_ready = true;
         msg_Info(f, "PushMPC: hw path ok, x%d (%s)", sys->k, pm_hw_describe(sys->hw));
+        ZcProbe(f, sys);
     }
     pm_hw_anchor(sys->hw, cur);
+    if (sys->zc_hw) return cur;      /* zero copy: the engine imports the surface itself */
     picture_t *c = pm_hw_cpu_picture(sys->hw);
     if (!c || pm_hw_download(sys->hw, cur, c) != 0) {
         if (c) picture_Release(c);
@@ -616,7 +724,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
                 picture_t *o = NewOut(f, sys);
                 if (!o) break;
                 picture_t *st = NULL;
-                if (sys->hw && !(st = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
+                if (sys->hw && !sys->zc_hw && !(st = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
                 picture_CopyProperties(o, prev);
                 o->date = prev->date + dt * (i + 1) / sys->k;
                 o->b_force = false;
@@ -659,15 +767,13 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     }
     WorkerIdle(sys, false);     /* synchronous mode below; the engine must not be shared */
 
-    pm_yuv src;
-    PlanesIn(work, &sys->wfmt, sys->bps, &src);
 
     picture_t *prev = sys->prev;
     sys->prev = cur;
     mtime_t dt = prev ? cur->date - prev->date : 0;
     const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
     char err[160] = "";
-    const int pushed = pm_engine_push(sys->eng, &src, contiguous, err, sizeof(err));
+    const int pushed = EnginePush(sys, work, contiguous, err, sizeof(err));
     if (work != cur) picture_Release(work);        /* the engine keeps its own copy */
     if (pushed != 0) {
         msg_Warn(f, "engine: %s", err);
@@ -688,11 +794,15 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             picture_t *o = NewOut(f, sys);
             if (!o) break;
             picture_t *dstpic = o;
-            if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
             picture_CopyProperties(o, prev);
-            pm_yuv_out dst;
-            PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
-            pm_engine_generate(sys->eng, (float)j / (float)sys->k, &dst);
+            if (sys->zc_hw) {           /* straight into the output surface */
+                if (EngineGenerateHw(sys, (float)j / (float)sys->k, o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; }
+            } else {
+                if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
+                pm_yuv_out dst;
+                PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
+                pm_engine_generate(sys->eng, (float)j / (float)sys->k, &dst);
+            }
             if (dstpic != o) {
                 const int up = pm_hw_upload(sys->hw, dstpic, o);
                 picture_Release(dstpic);
@@ -966,8 +1076,9 @@ static void Close(vlc_object_t *obj)
     }
     if (sys->hw) {
         msg_Info(f, "PushMPC: hardware path %s: %s; surface read failures %" PRIu64 ", upload failures %" PRIu64
-                 ", no free surface %" PRIu64, sys->hw_ready ? "used" : sys->hw_failed ? "unavailable" : "not started",
-                 pm_hw_describe(sys->hw), sys->hw_down_fail, sys->hw_up_fail, sys->hw_no_surface);
+                 ", no free surface %" PRIu64 "; zero copy %s (in %" PRIu64 ", out %" PRIu64 ", fell back %" PRIu64 ")",
+                 sys->hw_ready ? "used" : sys->hw_failed ? "unavailable" : "not started", pm_hw_describe(sys->hw),
+                 sys->hw_down_fail, sys->hw_up_fail, sys->hw_no_surface, sys->zc_hw ? "on" : "off", sys->zc_in, sys->zc_out, sys->zc_fail);
         pm_hw_release(sys->hw);
     }
     if (sys->download) filter_chain_Delete(sys->download);

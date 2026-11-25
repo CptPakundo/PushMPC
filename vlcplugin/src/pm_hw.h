@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <vlc_common.h>
 #include <vlc_picture.h>
+#include "pm_engine.h"   /* pm_dmabuf */
 
 typedef struct pm_hw pm_hw;
 
@@ -44,6 +45,10 @@ void pm_hw_anchor(pm_hw *h, picture_t *src);
 const char *pm_hw_describe(const pm_hw *h);
 /* the number of pool surfaces (before pm_hw_bind; 4..48) */
 void pm_hw_set_pool_size(pm_hw *h, int n);
+/* VA-API: the surface of a source or output picture as a dmabuf (DRM PRIME 2, separate layers) for the zero-copy path
+ * (pm_engine_push_dmabuf / pm_engine_generate_dmabuf); 0 = ok, then pm_hw_dmabuf_close. VDPAU has no export. */
+int pm_hw_export(pm_hw *h, picture_t *pic, pm_dmabuf *out);
+void pm_hw_dmabuf_close(pm_dmabuf *d);
 /* the filter is done; the pool goes away with the last output picture */
 void pm_hw_release(pm_hw *h);
 

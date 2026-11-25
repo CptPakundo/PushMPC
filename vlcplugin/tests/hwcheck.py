@@ -17,6 +17,8 @@ ap.add_argument("case"); ap.add_argument("csv"); ap.add_argument("log")
 ap.add_argument("--expect", required=True, choices=["base", "hw", "pass"])
 ap.add_argument("--mult", type=int, default=1)
 ap.add_argument("--src-frames", type=int, default=0)
+ap.add_argument("--need", action="append", default=[], help="a regular expression the log must match (repeatable)")
+ap.add_argument("--zc", choices=["on", "off", "any"], default="any", help="zero copy (VA-API dmabufs into the GPU engine)")
 a = ap.parse_args()
 
 rows = []
@@ -58,6 +60,14 @@ if a.expect == "hw":
 elif a.expect == "pass":
     if "hardware path unavailable" not in log: problems.append("PushMPC did not report the failed round trip")
     if "PushMPC: hw path ok" in log: problems.append("PushMPC used a driver that loses uploads")
+for rx in a.need:
+    if not re.search(rx, log): problems.append(f"log lacks /{rx}/")
+if a.zc == "on":
+    if "PushMPC: zero copy on" not in log: problems.append("zero copy not on")
+    zm = re.findall(r"zero copy on (in (d+), out (d+), fell back (d+))", log)
+    if zm and (int(zm[-1][0]) == 0 or (a.expect == "hw" and k > 1 and int(zm[-1][1]) == 0)): problems.append(f"zero copy counters {zm[-1]}")
+elif a.zc == "off" and "PushMPC: zero copy on" in log:
+    problems.append("zero copy on, but this case must copy")
 if want and n < 0.9 * want: problems.append(f"{n} frames shown, {want} expected")
 if len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
 elif back > 3: problems.append(f"{back} jumps back (stale or misordered frames)")

@@ -1,0 +1,32 @@
+#version 450
+// PushMPC (VLC, zero copy): one plane of an imported VA-API surface (luma R8 / R16, chroma RG8 / RG16 layers) into the
+// GPU engine's planar staging layout (rows of width x bytes per sample, packed; 4 samples (8-bit) or 2 (16-bit) per
+// word). P010's samples carry the value in their top 10 bits: shift 6. GPL-3.0-or-later.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D texY;
+layout(binding = 1) uniform sampler2D texUV;
+layout(std430, binding = 2) writeonly buffer Planar { uint words[]; };
+layout(push_constant) uniform P { int plane; int w; int h; int bps; uint wordOff; int shift; float scale; int nwords; } pc;
+
+uint fetchv(int x, int y)
+{
+    float v;
+    if (pc.plane == 0) v = texelFetch(texY, ivec2(x, y), 0).r;
+    else { vec4 t = texelFetch(texUV, ivec2(x, y), 0); v = pc.plane == 1 ? t.r : t.g; }
+    return uint(v * pc.scale + 0.5) >> uint(pc.shift);
+}
+
+void main()
+{
+    const int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.nwords) return;
+    const int per = 4 / pc.bps;
+    uint word = 0u;
+    for (int k = 0; k < per; ++k) {
+        const int s = i * per + k;
+        const int y = s / pc.w, x = s - y * pc.w;
+        const uint v = y < pc.h ? fetchv(x, y) : 0u;
+        word |= (pc.bps == 1 ? (v & 0xffu) : (v & 0xffffu)) << uint(k * 8 * pc.bps);
+    }
+    words[pc.wordOff + uint(i)] = word;
+}

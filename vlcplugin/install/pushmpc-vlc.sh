@@ -20,10 +20,11 @@
 #        [avcodec]  avcodec-hw=none on Linux to start with (software decoding always keeps PushMPC on)
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
 #   4. Linux: the hardware self-test. PushMPC keeps VA-API / VDPAU pictures on the GPU (its own surfaces on the
-#      decoder's device, after a round-trip check of the driver). The installer plays a 2 s clip
-#      (pushmpc-selftest.mkv, next to this script) headless through VA-API, then VDPAU, with PushMPC on; only when
-#      PushMPC reports its hardware path working and generating there does the user's own avcodec-hw setting come back
-#      (hardware decoding with PushMPC on). Otherwise software decoding stays: the automatic off switch. The result is
+#      decoder's device, after a round-trip check of the driver). The installer plays a 2 s clip (pushmpc-selftest.mkv,
+#      next to this script) with PushMPC on: with a display, through VLC's OpenGL output and its VA-API / VDPAU interop
+#      in a small window (the GUI's own path; pass: the user's own avcodec-hw comes back); else, or if that fails,
+#      headless through VLC's DRM VA-API decoder, then VDPAU (pass: avcodec-hw is set to that decoder). Otherwise
+#      software decoding stays: the automatic off switch. The result is
 #      kept in <plugin folder>/hw-selftest.txt; "selftest-hw" runs it again (e.g. after a driver update).
 # Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so a Lua interface script (pushmpc_boot.lua, lua-intf + extraintf=luaintf)
 # loads the plugin and hands it VLC's postproc slot after checking VLC's layout (or changes nothing). Switch it off in VLC:
@@ -157,7 +158,48 @@ EOF
   say "PushMPC for VLC installed ($tgt): plugin in $DIR, settings in $RC"
 }
 
-# selftest_hw <target>: the hardware self-test (see the header). Never fails the install.
+# st_run <hw> <interop 0|1>: one self-test playback; 0 = PushMPC's hardware path worked and generated frames. Sets
+# st_result. Interop: VLC's OpenGL output in a small window on the user's own display (DISPLAY: X11 or XWayland, as the
+# Qt interface uses), so the real driver's GL interop is what is tested; otherwise headless (no display involved).
+st_run() {
+  hw="$1"; interop="$2"
+  rm -f "$log"
+  case "$tgt" in
+    native)  set -- env VLC_PLUGIN_PATH="$DIR" "${VLC_BIN:-vlc}" --pushmpc-smoother=2 ;;
+    flatpak) set -- flatpak run "$APPID" --pushmpc-smoother=2 ;;
+    snap)    set -- snap run vlc ;;
+  esac
+  if [ "$interop" = 1 ]; then
+    set -- "$@" --vout=gl --window=xcb_window --width=160 --height=90 --no-video-deco --no-embedded-video
+  else
+    set -- "$@" --vout=dummy
+  fi
+  st_rc=0
+  timeout 45 "$@" -I dummy --no-audio --play-and-exit --no-video-title-show --avcodec-hw="$hw" \
+    --video-filter=postproc:pushmpc_out --file-logging --logfile="$log" --log-verbose=2 "$cdir/pushmpc-selftest.mkv" \
+    >/dev/null 2>&1 || st_rc=$?
+  st_result="$hw: no hardware decoding"
+  [ -f "$log" ] || return 1
+  grep -q "for hardware decoding" "$log" || return 1
+  if [ "$interop" = 1 ] && ! grep -qE 'using glconv module "glconv_(vaapi|vdpau)' "$log"; then
+    st_result="$hw: decoded, but the OpenGL output has no hardware interop here"; return 1
+  fi
+  gen="$(sed -n 's/.*PushMPC: close, in=[0-9]* out=[0-9]* generated=\([0-9]*\).*/\1/p' "$log" | tail -1)"
+  if grep -q "PushMPC: hw path ok" "$log" && ! grep -q "hardware path unavailable" "$log" && [ "$st_rc" = 0 ] && [ "${gen:-0}" -gt 0 ]; then
+    st_result="$(grep -o 'PushMPC: hw path ok.*' "$log" | head -1)"
+    grep -q "PushMPC: zero copy on" "$log" && st_result="$st_result; zero copy"
+    return 0
+  fi
+  st_result="$hw: $(grep -o 'hardware path unavailable.*' "$log" | head -1)"; [ "$st_rc" = 0 ] || st_result="$st_result (VLC exit $st_rc)"
+  return 1
+}
+
+# selftest_hw <target>: the hardware self-test (see the header). Never fails the install. Tiers:
+#   1. with a display: VA-API, then VDPAU, through VLC's OpenGL output with its hardware interop (the GUI's own path)
+#      -> pass: the user's own avcodec-hw comes back (VLC picks the decoder as it always does)
+#   2. headless: VA-API through VLC's DRM decoder (VLC downloads for the display), then VDPAU with X
+#      -> pass: avcodec-hw is set to that decoder explicitly (the path that was proven)
+#   3. neither: avcodec-hw=none (software decoding keeps PushMPC on)
 selftest_hw() {
   tgt="$1"; paths_for "$tgt"
   [ "$tgt" = macos ] && return 0
@@ -173,39 +215,39 @@ selftest_hw() {
   conf="$DIR/pushmpc.conf"
   # the snap has no registered PushMPC options (the Lua bootstrap): x2 goes through its pushmpc.conf for the test
   if [ "$tgt" = snap ]; then cp -f "$conf" "$conf.selftest" 2>/dev/null || : > "$conf.selftest"; printf 'smoother=2\n' >> "$conf"; fi
-  result="no hardware decoder took the clip"; ok=""
-  for hw in vaapi_drm vdpau; do
-    [ "$hw" = vdpau ] && [ -z "${DISPLAY:-}" ] && continue   # VLC's VDPAU decoder needs X11
-    rm -f "$log"
-    case "$tgt" in
-      native)  set -- env VLC_PLUGIN_PATH="$DIR" "${VLC_BIN:-vlc}" --pushmpc-smoother=2 ;;
-      flatpak) set -- flatpak run "$APPID" --pushmpc-smoother=2 ;;
-      snap)    set -- snap run vlc ;;
-    esac
-    rc=0
-    timeout 45 "$@" -I dummy --no-audio --play-and-exit --no-video-title-show --vout=dummy --avcodec-hw="$hw" \
-      --video-filter=postproc:pushmpc_out --file-logging --logfile="$log" --log-verbose=2 "$cdir/pushmpc-selftest.mkv" \
-      >/dev/null 2>&1 || rc=$?
-    [ -f "$log" ] || continue
-    grep -q "for hardware decoding" "$log" || continue
-    gen="$(sed -n 's/.*PushMPC: close, in=[0-9]* out=[0-9]* generated=\([0-9]*\).*/\1/p' "$log" | tail -1)"
-    if grep -q "PushMPC: hw path ok" "$log" && ! grep -q "hardware path unavailable" "$log" && [ "$rc" = 0 ] && [ "${gen:-0}" -gt 0 ]; then
-      ok="$hw"; result="$(grep -o 'PushMPC: hw path ok.*' "$log" | head -1)"; break
-    fi
-    result="$hw: $(grep -o 'hardware path unavailable.*' "$log" | head -1)"; [ "$rc" = 0 ] || result="$result (VLC exit $rc)"
-  done
+  tier=""; ok=""; result="no hardware decoder took the clip"; notes=""
+  if [ -n "${DISPLAY:-}" ]; then
+    say "hardware self-test ($tgt): a small VLC window opens for a few seconds (the test of VLC's own display path)"
+    for hw in vaapi vdpau; do
+      if st_run "$hw" 1; then tier=interop; ok="$hw"; result="$st_result"; break; fi
+      notes="$notes; $st_result"
+    done
+  fi
+  if [ -z "$tier" ]; then
+    for hw in vaapi_drm vdpau; do
+      [ "$hw" = vdpau ] && [ -z "${DISPLAY:-}" ] && continue   # VLC's VDPAU decoder needs X11
+      if st_run "$hw" 0; then tier=direct; ok="$hw"; result="$st_result"; break; fi
+      notes="$notes; $st_result"
+    done
+  fi
   [ "$tgt" = snap ] && mv -f "$conf.selftest" "$conf"
   rm -f "$cdir/pushmpc-selftest.mkv"
-  if [ -n "$ok" ]; then
+  now="$(date -u +%Y-%m-%dT%H:%MZ 2>/dev/null)"
+  if [ "$tier" = interop ]; then
     old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
     # the user's own setting comes back (one that was already "none" stays: their choice)
     if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi
-    printf 'ok %s %s\n%s\n' "$ok" "$(date -u +%Y-%m-%dT%H:%MZ 2>/dev/null)" "$result" > "$state"
-    say "hardware self-test ($tgt): passed through $ok; hardware decoding is on with PushMPC ($result)"
+    printf 'ok interop %s %s\n%s\n' "$ok" "$now" "$result" > "$state"
+    say "hardware self-test ($tgt): passed through $ok with VLC's OpenGL interop; hardware decoding is on with PushMPC ($result)"
+  elif [ "$tier" = direct ]; then
+    old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
+    if [ "$old" = none ]; then vlcrc_set "$RC" avcodec avcodec-hw none; else vlcrc_set "$RC" avcodec avcodec-hw "$ok"; fi
+    printf 'ok direct %s %s\n%s\n%s\n' "$ok" "$now" "$result" "${notes#; }" > "$state"
+    say "hardware self-test ($tgt): passed through $ok (decoder only, VLC copies for the display); avcodec-hw=$ok ($result)"
   else
     vlcrc_set "$RC" avcodec avcodec-hw none
-    printf 'failed %s\n%s\n' "$(date -u +%Y-%m-%dT%H:%MZ 2>/dev/null)" "$result" > "$state"
-    say "hardware self-test ($tgt): not passed ($result); software decoding stays on"
+    printf 'failed %s\n%s\n' "$now" "${notes#; }" > "$state"
+    say "hardware self-test ($tgt): not passed (${notes#; }); software decoding stays on"
   fi
   return 0
 }

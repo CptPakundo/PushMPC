@@ -32,6 +32,17 @@ typedef struct {
 #define PM_VA_FOURCC_NV12 0x3231564E
 #define PM_VA_FOURCC_P010 0x30313050
 #define PM_VA_INVALID_ID 0xffffffffu
+/* va_drmcommon.h: VADRMPRIMESurfaceDescriptor (vaExportSurfaceHandle, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) */
+typedef struct {
+    uint32_t fourcc, width, height, num_objects;
+    struct { int fd; uint32_t size; uint64_t drm_format_modifier; } objects[4];
+    uint32_t num_layers;
+    struct { uint32_t drm_format, num_planes, object_index[4], offset[4], pitch[4]; } layers[4];
+} pmVADRMPRIMESurfaceDescriptor;
+#define PM_VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 0x40000000
+#define PM_VA_EXPORT_SURFACE_READ_WRITE 0x0003
+#define PM_VA_EXPORT_SURFACE_SEPARATE_LAYERS 0x0004
+
 /* libva's VADisplayContext starts with this magic (va_backend.h: VA_DISPLAY_MAGIC) */
 #define PM_VA_DISPLAY_MAGIC 0x56414430
 

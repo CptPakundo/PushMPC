@@ -13,6 +13,7 @@
 
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <dlfcn.h>
+#include <unistd.h>
 #include <stdatomic.h>
 #include <vlc_picture_pool.h>
 #include "pm_hw_va.h"
@@ -37,6 +38,7 @@ static struct {
     int (*MaxNumImageFormats)(pmVADisplay);
     const char *(*QueryVendorString)(pmVADisplay);
     const char *(*ErrorStr)(pmVAStatus);
+    pmVAStatus (*ExportSurfaceHandle)(pmVADisplay, pmVAGenericID, uint32_t, uint32_t, void *);   /* libva >= 2.1; may be NULL */
 } va;
 
 /* ---- VLC's libvlc_vdpau (hw/vdpau/vlc_vdpau.h), already loaded when VDPAU pictures exist */
@@ -76,6 +78,7 @@ static bool LoadVa(void)
                     L(CreateSurfaces, "vaCreateSurfaces") && L(DestroySurfaces, "vaDestroySurfaces") &&
                     L(QueryImageFormats, "vaQueryImageFormats") && L(MaxNumImageFormats, "vaMaxNumImageFormats") &&
                     L(QueryVendorString, "vaQueryVendorString") && L(ErrorStr, "vaErrorStr");
+        if (va.ok) *(void **)&va.ExportSurfaceHandle = Sym(h, "vaExportSurfaceHandle");
 #undef L
         }
     }
@@ -641,6 +644,41 @@ int pm_hw_bind(pm_hw *h, picture_t *first, char *why, size_t n)
     return ok;
 }
 
+int pm_hw_export(pm_hw *h, picture_t *pic, pm_dmabuf *out)
+{
+    memset(out, 0, sizeof(*out));
+    for (int i = 0; i < 4; i++) out->fd[i] = -1;
+    if (h->kind != HW_VA || !va.ExportSurfaceHandle || !pic->context) return -1;
+    pmVAGenericID surf;
+    if (VaSurfaceOf(pic, &surf) != 0 || va.SyncSurface(h->dpy, surf) != 0) return -1;
+    pmVADRMPRIMESurfaceDescriptor d;
+    memset(&d, 0, sizeof(d));
+    if (va.ExportSurfaceHandle(h->dpy, surf, PM_VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                               PM_VA_EXPORT_SURFACE_READ_WRITE | PM_VA_EXPORT_SURFACE_SEPARATE_LAYERS, &d) != 0) return -1;
+    out->nobjects = (int)(d.num_objects < 4 ? d.num_objects : 4);
+    for (int i = 0; i < out->nobjects; i++) {
+        out->fd[i] = d.objects[i].fd; out->size[i] = d.objects[i].size; out->modifier[i] = d.objects[i].drm_format_modifier;
+    }
+    out->width = (int)h->fmt.i_visible_width; out->height = (int)h->fmt.i_visible_height; out->bits = h->bits;
+    if (d.num_layers != 2 || d.layers[0].num_planes != 1 || d.layers[1].num_planes != 1) { pm_hw_dmabuf_close(out); return -1; }
+    out->nlayers = 2;
+    for (int l = 0; l < 2; l++) {
+        out->layer[l].drm_format = d.layers[l].drm_format;
+        out->layer[l].object = (int)d.layers[l].object_index[0];
+        out->layer[l].offset = d.layers[l].offset[0];
+        out->layer[l].pitch = d.layers[l].pitch[0];
+    }
+    /* the visible area must start at the surface's origin (the GPU shaders read and write from 0, 0) */
+    if (h->fmt.i_x_offset || h->fmt.i_y_offset) { pm_hw_dmabuf_close(out); return -1; }
+    return 0;
+}
+
+void pm_hw_dmabuf_close(pm_dmabuf *d)
+{
+    for (int i = 0; i < d->nobjects && i < 4; i++) if (d->fd[i] >= 0) close(d->fd[i]);
+    d->nobjects = 0;
+}
+
 const char *pm_hw_describe(const pm_hw *h) { return h->desc; }
 void pm_hw_set_pool_size(pm_hw *h, int n) { h->pool_size = n < 4 ? 4 : n > MAX_SLOTS ? MAX_SLOTS : n; }
 
@@ -657,4 +695,6 @@ void pm_hw_anchor(pm_hw *h, picture_t *src) { (void)h; (void)src; }
 const char *pm_hw_describe(const pm_hw *h) { (void)h; return ""; }
 void pm_hw_set_pool_size(pm_hw *h, int n) { (void)h; (void)n; }
 void pm_hw_release(pm_hw *h) { (void)h; }
+int pm_hw_export(pm_hw *h, picture_t *pic, pm_dmabuf *out) { (void)h; (void)pic; memset(out, 0, sizeof(*out)); return -1; }
+void pm_hw_dmabuf_close(pm_dmabuf *d) { (void)d; }
 #endif
