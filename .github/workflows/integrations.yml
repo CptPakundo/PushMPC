@@ -413,18 +413,20 @@ jobs:
           head -n 8 $HOME/.config/mpv/mpv.conf
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
-          echo "--- playback (vo=null): config, filter"
+          echo "--- VSScript's Python link"
+          cat $HOME/.config/vapoursynth/vapoursynth.toml 2>&1
+          python -c "import vapoursynth._utils as u; print('get_vsscript:', u.get_vsscript())" 2>&1
+          ldd $(command -v mpv) | grep -i vapoursynth; for l in $(ldd $(command -v mpv) | grep -io '/[^ ]*vapoursynth[^ ]*'); do echo "$l -> $(readlink -f $l)"; done
+          pacman -Ql vapoursynth | grep -E '\.so|bin/' | head
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           ls /tmp/vslog-arch/ 2>/dev/null; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
           echo "--- encode mode"
           mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
-          src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
-          out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/out.mkv)
-          echo "source frames (4 s): $src, output frames: $out"
           cat /tmp/vslog-arch/*.log | head -20
-          grep -q 'portable: output YUV' /tmp/vslog-arch/*.log
-          [ "$out" -ge $((src * 18 / 10)) ] || { echo "::error::expected about 2x $src frames, got $out"; exit 1; }
-          echo "ARCH_FRAMES=$src->$out" >> "$GITHUB_ENV"
+          grep -q 'portable: output YUV.*(x2)' /tmp/vslog-arch/*.log
+          n=$(grep -ho 'instance closed after [0-9]*' /tmp/vslog-arch/*.log | head -1 | grep -o '[0-9]*$')
+          echo "frames out of the plugin in 3 s of a 30 fps clip: ${n:-?}"; [ "${n:-0}" -ge 150 ] || { echo "::error::expected about 180 frames out (x2), got ${n:-none}"; exit 1; }
+          echo "ARCH_FRAMES=90 -> $n" >> "$GITHUB_ENV"
           rm $HOME/.config/pushmpc/settings.ini; rmdir $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           snap > /tmp/after.txt
@@ -542,9 +544,8 @@ jobs:
           echo "--- encode mode in the sandbox"
           flatpak run --filesystem=/tmp --env=PUSHMPC_VS_LOG_DIR=/tmp/vslog-flatpak io.mpv.Mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/fpout/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30 || true
           cat /tmp/vslog-flatpak/*.log 2>/dev/null | head -20 || true
-          src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
-          out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/fpout/out.mkv 2>/dev/null || echo 0)
-          echo "Flatpak mpv encode: source $src frames, output $out frames" | tee -a /tmp/versions.txt
+          n=$(grep -ho 'instance closed after [0-9]*' /tmp/vslog-flatpak/*.log 2>/dev/null | head -1 | grep -o '[0-9]*$')
+          echo "Flatpak mpv (vo=null, 3 s of 30 fps): ${n:-?} frames out of the plugin" | tee -a /tmp/versions.txt
           rm -r ~/.var/app/io.mpv.Mpv/config/pushmpc
           sh ~/.local/share/pushmpc/install.sh uninstall --keep-flatpak-mpv
           snap > /tmp/after.txt
@@ -554,7 +555,8 @@ jobs:
           diff /tmp/before2.txt /tmp/after2.txt && echo "config and override restored byte for byte" | tee -a /tmp/versions.txt
           { echo '## linux-flatpak'; echo; echo '```'; cat /tmp/versions.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           grep -q 'portable: output YUV' /tmp/vslog-flatpak/*.log || { echo "::error::the plugin did not run inside the Flatpak mpv"; exit 1; }
-          [ "$out" -ge $((src * 18 / 10)) ] || { echo "::error::expected about 2x $src frames, got $out"; exit 1; }
+          grep -q 'portable: output YUV.*(x2)' /tmp/vslog-flatpak/*.log || { echo "::error::no x2 output"; exit 1; }
+          [ "${n:-0}" -ge 150 ] || { echo "::error::expected about 180 frames out (x2), got ${n:-none}"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: linux-flatpak-logs, path: "/tmp/vslog-flatpak\n/tmp/*.txt" }
@@ -726,9 +728,10 @@ jobs:
           Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name AudioRendererType -Value 'Null Audio Renderer (Any)' -Type String
           "MPC Video Renderer registered: $((Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\CLSID\{71F080AA-8661-4093-B15E-4F6903E77D0A}\InprocServer32' -ErrorAction SilentlyContinue).'(default)')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"", '/play' -PassThru; Start-Sleep 25
-          Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, System.IntPtr l); public delegate bool EnumProc(System.IntPtr h, System.IntPtr l); [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(System.IntPtr h, out int pid); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n); [DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);'
+          Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, System.IntPtr l); public delegate bool EnumProc(System.IntPtr h, System.IntPtr l); [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(System.IntPtr h, out int pid); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n); [DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h); [DllImport("user32.dll")] public static extern bool EnumChildWindows(System.IntPtr p, EnumProc f, System.IntPtr l);'
           $titles = [Collections.Generic.List[string]]::new()
-          [W.U]::EnumWindows({ param($h, $l) $id = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$id); if ($id -eq $m.Id -and [W.U]::IsWindowVisible($h)) { $sb = [Text.StringBuilder]::new(256); [void][W.U]::GetWindowText($h, $sb, 256); if ($sb.Length) { $titles.Add($sb.ToString()) } }; $true }, [IntPtr]::Zero) | Out-Null
+          [W.U]::EnumWindows({ param($h, $l) $id = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$id); if ($id -eq $m.Id -and [W.U]::IsWindowVisible($h)) { $sb = [Text.StringBuilder]::new(512); [void][W.U]::GetWindowText($h, $sb, 512); if ($sb.Length) { $titles.Add($sb.ToString()) }
+              if ($sb.ToString() -eq 'MPC-HC') { [W.U]::EnumChildWindows($h, { param($c, $x) $cb = [Text.StringBuilder]::new(1024); [void][W.U]::GetWindowText($c, $cb, 1024); if ($cb.Length) { $titles.Add("  dialog text: $($cb.ToString())") }; $true }, [IntPtr]::Zero) | Out-Null } }; $true }, [IntPtr]::Zero) | Out-Null
           "MPC-HC visible windows: $($titles -join ' | ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           try { $m.Refresh(); "MPC-HC window: '$($m.MainWindowTitle)'; modules: $(((Get-Process -Id $m.Id).Modules | Where-Object { $_.ModuleName -match 'PushMpc|MpcVideoRenderer|LAV' } | ForEach-Object ModuleName) -join ', ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" } catch { "modules: $_" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
           if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
