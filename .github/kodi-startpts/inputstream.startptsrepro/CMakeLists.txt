@@ -3,6 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(inputstream_startptsrepro CXX)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded) # static CRT: the dev kit's Windows headers clash with the DLL CRT
 set(KODI_DEVKIT "" CACHE PATH "kodi-dev-kit/include")
 file(STRINGS "${KODI_DEVKIT}/kodi/versions.h" _ver REGEX "^#define ADDON_(GLOBAL|INSTANCE)_VERSION_[A-Z]+(_MIN|_XML_ID)? ")
 foreach(l ${_ver})
