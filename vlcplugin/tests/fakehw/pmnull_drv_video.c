@@ -198,8 +198,8 @@ static surf_t *SurfNew(drv_t *d, int w, int h, uint32_t fourcc)
     /* a dark grey, not zero: an untouched surface is visibly different from a decoded one */
     if (s->bpc == 1) { memset(s->data, 16, s->off_uv); memset(s->data + s->off_uv, 128, s->size - s->off_uv); }
     else {
-        for (uint32_t i = 0; i + 1 < s->off_uv; i += 2) { s->data[i] = (16 << 6) & 0xff; s->data[i + 1] = (16 << 6) >> 8; }
-        for (uint32_t i = s->off_uv; i + 1 < s->size; i += 2) { s->data[i] = (128 << 6) & 0xff; s->data[i + 1] = (128 << 6) >> 8; }
+        for (uint32_t i = 0; i + 1 < s->off_uv; i += 2) { s->data[i] = (64 << 6) & 0xff; s->data[i + 1] = (64 << 6) >> 8; }
+        for (uint32_t i = s->off_uv; i + 1 < s->size; i += 2) { s->data[i] = (512 << 6) & 0xff; s->data[i + 1] = (512 << 6) >> 8; }
     }
     return s;
 }
@@ -378,14 +378,14 @@ static void DrawPattern(surf_t *s, uint64_t n)
             const int on = y >= y0 && y < y0 + box && x >= x0 && x < x0 + box;
             const unsigned v = on ? 235 : 16;
             if (s->bpc == 1) row[x] = (uint8_t)v;
-            else { const unsigned w = v << 6; row[2 * x] = (uint8_t)(w & 0xff); row[2 * x + 1] = (uint8_t)(w >> 8); }
+            else { const unsigned w = (v << 2) << 6;   /* the 8-bit level as a 10-bit value, in P010's high bits */ row[2 * x] = (uint8_t)(w & 0xff); row[2 * x + 1] = (uint8_t)(w >> 8); }
         }
     }
     for (int y = 0; y < (s->h + 1) / 2; y++) {
         uint8_t *row = s->data + s->off_uv + (size_t)y * s->pitch;
         for (int x = 0; x < s->w; x++) {          /* w/2 pairs of (U, V) */
             if (s->bpc == 1) row[x] = 128;
-            else { const unsigned w = 128u << 6; row[2 * x] = (uint8_t)(w & 0xff); row[2 * x + 1] = (uint8_t)(w >> 8); }
+            else { const unsigned w = 512u << 6; row[2 * x] = (uint8_t)(w & 0xff); row[2 * x + 1] = (uint8_t)(w >> 8); }
         }
     }
 }
