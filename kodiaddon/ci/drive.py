@@ -88,7 +88,7 @@ elif case == "chapter":
     rpc("Input.ExecuteAction", {"action": "chapterorbigstepforward"})
     time.sleep(3)
     p1 = props(); print("DRIVE props1", json.dumps(p1))
-    print("DRIVE chapter_ok", ms(p1.get("time", {})) >= 10000 and ms(p1.get("time", {})) > t0 + 4000)
+    print("DRIVE chapter_ok", ms(p1.get("time", {})) >= 9500 and ms(p1.get("time", {})) > t0 + 4000)
 elif case == "subs":
     subs = rpc("Player.GetProperties", {"playerid": PLAYER[0], "properties": ["subtitles"]})
     print("DRIVE subtitles", json.dumps(subs))

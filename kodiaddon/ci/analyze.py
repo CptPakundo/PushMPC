@@ -102,10 +102,14 @@ drops = sum(1 for l in lines if "dropped in output" in l)
 notes.append(f"VideoPlayer 'dropped in output': {drops}")
 
 # --- drive
-for key in ("seek_ok", "chapter_ok", "subs_ok", "audio_ok"):
+for key in ("seek_ok", "chapter_ok", "audio_ok"):
     m = re.search(r"DRIVE " + key + r" (True|False)", drive)
     if m:
         res[key] = m.group(1) == "True"
+# subtitles: Kodi's JSON-RPC lists no subtitle streams in this setup even for its own player (subs_kodi), so the check is
+# that Kodi opened the add-on's subtitle stream and libass made a track from it
+if re.search(r"DRIVE subs_ok", drive):
+    res["subs"] = "Creating new ASS track" in text or "CDVDOverlayCodec" in text
 if "DRIVE: playing" not in drive and drive_path != "-":
     res["playing"] = False
 audio = any("Creating audio thread" in l or "CVideoPlayerAudio::OpenStream" in l for l in lines)
@@ -116,7 +120,7 @@ notes += ["ERROR: " + e.split("ERROR <general>:", 1)[-1].strip() for e in errors
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
-required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs_ok", "audio_ok", "playing") if x in res]
+required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
 ok = all(res.get(x) for x in required)
 with open(summary, "a", encoding="utf-8") as f:
     f.write(f"### {case}: {'PASS' if ok else 'FAIL'}\n")

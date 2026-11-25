@@ -29,6 +29,9 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -177,6 +180,30 @@ double StreamFps(const AVStream* st, int& rate, int& scale)
     if (r.num <= 0 || r.den <= 0) { rate = scale = 0; return 0.0; }
     rate = r.num; scale = r.den;
     return av_q2d(r);
+}
+
+// The hardware decoder device, created on a worker thread with a time limit: Kodi also creates add-on decoders on its
+// GUI thread (stream-detail probes of HDR files, DVDFileInfo GetDetailsFromFrame), and a D3D11/DXGI device created on
+// the thread that owns the window can wait for window messages that thread is not pumping. On timeout: software.
+bool CreateHwDevice(AVHWDeviceType type, AVBufferRef*& out)
+{
+    struct State { std::mutex mu; std::condition_variable cv; bool done = false; AVBufferRef* dev = nullptr; bool abandoned = false; };
+    auto st = std::make_shared<State>();
+    std::thread([st, type] {
+        AVBufferRef* dev = nullptr;
+        if (av_hwdevice_ctx_create(&dev, type, nullptr, nullptr, 0) < 0) dev = nullptr;
+        std::lock_guard<std::mutex> lk(st->mu);
+        if (st->abandoned) { av_buffer_unref(&dev); return; }
+        st->dev = dev; st->done = true; st->cv.notify_all();
+    }).detach();
+    std::unique_lock<std::mutex> lk(st->mu);
+    if (!st->cv.wait_for(lk, std::chrono::milliseconds(1500), [&] { return st->done; })) {
+        st->abandoned = true;
+        Log(ADDON_LOG_WARNING, "hardware decoder device: no answer in 1.5 s, software decoding");
+        return false;
+    }
+    out = st->dev;
+    return out != nullptr;
 }
 
 class CPushVideoCodec;
@@ -366,6 +393,7 @@ public:
     bool DemuxSeekTime(double timeMs, bool backwards, double& startpts) override
     {
         if (!m_fmt) return false;
+        Log(ADDON_LOG_DEBUG, "seek to %.0f ms", timeMs);
         const int64_t target = int64_t(timeMs * 1000.0) + m_startUs;
         const int r = av_seek_frame(m_fmt, -1, target, backwards ? AVSEEK_FLAG_BACKWARD : 0);
         if (r < 0) {
@@ -618,6 +646,7 @@ public:
         if (!m_ctx) return false;
         if (m_drained) { avcodec_flush_buffers(m_ctx); m_drained = false; }
         if (!packet.pData || packet.iSize <= 0) return true;
+        if (m_packets++ < 3) Log(ADDON_LOG_DEBUG, "packet %d in (%d bytes)", m_packets, packet.iSize);
         av_packet_unref(m_pkt);
         m_pkt->data = packet.pData;
         m_pkt->size = packet.iSize;
@@ -692,7 +721,7 @@ private:
 #endif
         if (std::getenv("PUSHMPC_NO_HWDEC")) return;
         AVBufferRef* dev = nullptr;
-        if (av_hwdevice_ctx_create(&dev, type, nullptr, nullptr, 0) < 0) return;
+        if (!CreateHwDevice(type, dev)) return;
         for (int i = 0;; ++i) {
             const AVCodecHWConfig* c = avcodec_get_hw_config(m_ctx->codec, i);
             if (!c) break;
@@ -932,6 +961,7 @@ private:
     bool m_havePrev = false;
     std::deque<Out> m_queue;
     unsigned long long m_emitted = 0, m_generated = 0;
+    int m_packets = 0;
 };
 
 ADDON_STATUS CPushInputStream::CreateInstance(const kodi::addon::IInstanceInfo& instance, KODI_ADDON_INSTANCE_HDL& hdl)
