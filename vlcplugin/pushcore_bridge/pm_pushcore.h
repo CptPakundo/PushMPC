@@ -53,6 +53,24 @@ __declspec(dllexport) void pm_pc_close(pm_pc *pc);
 /* one line: what runs (pushcore's description and the Auto decision) */
 __declspec(dllexport) const char *pm_pc_describe(pm_pc *pc);
 
+/* Zero copy (VLC's Direct3D 11 hardware decoding, 'DX11' / 'DX10' pictures): pushcore runs on the player's own D3D11
+ * device and reads the decoder's texture slices; each generated frame is converted to NV12 / P010 on that device and
+ * copied into a texture slice of the player's (a picture of VLC's pool). context_mutex is VLC's lock on the immediate
+ * context (GUID_CONTEXT_MUTEX, may be NULL); every use of the context here holds it, and the conversion runs in its
+ * own device context state, so VLC's pipeline state is untouched. */
+typedef struct pm_pc_tex { void *texture; unsigned slice; } pm_pc_tex;   /* ID3D11Texture2D *, array slice */
+typedef const pm_pc_tex *(*pm_pc_dest_tex_fn)(void *user, int64_t pts100ns);
+__declspec(dllexport) pm_pc *pm_pc_open_d3d11(const pm_pc_cfg *cfg, void *d3d11_device, void *context_mutex, int *k, char *err, size_t errsize);
+__declspec(dllexport) int pm_pc_push_d3d11(pm_pc *pc, void *texture, unsigned slice, int64_t pts100ns, int discontinuity, char *err, size_t errsize);
+__declspec(dllexport) int pm_pc_poll_d3d11(pm_pc *pc, uint32_t timeout_ms, pm_pc_dest_tex_fn dest, pm_pc_done_fn done, void *user, char *err, size_t errsize);
+/* a generated picture pushcore did not deliver in time: the real frame copied into it, on the GPU */
+__declspec(dllexport) int pm_pc_copy_d3d11(pm_pc *pc, void *src, unsigned src_slice, void *dst, unsigned dst_slice);
+typedef int (*pm_pc_copy_d3d11_fn)(pm_pc *, void *, unsigned, void *, unsigned);
+
+typedef pm_pc *(*pm_pc_open_d3d11_fn)(const pm_pc_cfg *, void *, void *, int *, char *, size_t);
+typedef int (*pm_pc_push_d3d11_fn)(pm_pc *, void *, unsigned, int64_t, int, char *, size_t);
+typedef int (*pm_pc_poll_d3d11_fn)(pm_pc *, uint32_t, pm_pc_dest_tex_fn, pm_pc_done_fn, void *, char *, size_t);
+
 typedef pm_pc *(*pm_pc_open_fn)(const pm_pc_cfg *, int *, char *, size_t);
 typedef int (*pm_pc_push_fn)(pm_pc *, const pm_pc_planes *, int64_t, int, char *, size_t);
 typedef int (*pm_pc_poll_fn)(pm_pc *, uint32_t, pm_pc_dest_fn, pm_pc_done_fn, void *, char *, size_t);

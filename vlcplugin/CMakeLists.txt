@@ -159,6 +159,12 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
   target_compile_options(pm_nis_test PRIVATE "SHELL:-include winsock2.h")
   target_link_libraries(pm_nis_test PRIVATE d3d11 dxgi uuid ws2_32)
   target_link_options(pm_nis_test PRIVATE -static)
+
+  # the filter's zero-copy path reads VLC's D3D11 pictures: its layout copy against VLC 3.0.24's own headers (compile only)
+  add_library(pm_d3d11_layout_check OBJECT tests/pm_d3d11_layout_check.c)
+  target_include_directories(pm_d3d11_layout_check PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}" "${D3}/../include")
+  target_compile_definitions(pm_d3d11_layout_check PRIVATE __PLUGIN__ MODULE_STRING="pm_check" HAVE_ID3D11VIDEODECODER
+                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS)
 endif()
 
 # ---- Linux: PushMPC's fork of VLC 3.0.24's OpenGL output (display/vlc3, LGPL-2.1+) with FSR 1 upscaling on any GPU:
@@ -170,7 +176,7 @@ if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modul
   add_library(pushmpc_gl_plugin SHARED ${GLD}/display.c ${GLD}/vout_helper.c ${GLD}/fragment_shaders.c ${GLD}/converter_sw.c
               ${GLD}/pm_glscale.c)
   set_target_properties(pushmpc_gl_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_gl_plugin")
-  target_include_directories(pushmpc_gl_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${GLD}")
+  target_include_directories(pushmpc_gl_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${GLD}" "${GLD}/../../../include")
   if(PM_GL_INCLUDE)
     target_include_directories(pushmpc_gl_plugin PRIVATE "${PM_GL_INCLUDE}")
   endif()

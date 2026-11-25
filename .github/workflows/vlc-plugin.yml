@@ -303,6 +303,12 @@ jobs:
           cp "$(find bb -name pm_pushcore.dll | head -1)" out/
           cp "$(find bs vsplugin/bin -name pushcore.dll 2>/dev/null | head -1)" out/stub/
           ls -la out out/stub
+      - name: Zero copy (pushcore on the player's D3D11 device, texture slices in and out) on WARP with the stub core
+        shell: bash
+        run: |
+          set -u
+          t=$(find bb -name pm_pc_zc_test.exe | head -1)
+          timeout 120 "$t" "$(cygpath -w out/pm_pushcore.dll)" "$(cygpath -w out/stub)"
       - uses: actions/upload-artifact@v4
         with: { name: bridge-win64, path: out, retention-days: 7 }
 
