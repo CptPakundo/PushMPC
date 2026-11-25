@@ -1,0 +1,118 @@
+# Intel VPL AI frame interpolation / super resolution probe (VplFi, VplSr): build and structural run.
+# Hosted runners have no Intel GPU, so the expected result is a clean "unsupported" with the dispatcher loaded and the
+# implementations enumerated (none, or a software one, which the JSON then lists with what it advertises).
+# Sources: libvpl (Intel's dispatcher) from its GitHub release tag, FFmpeg (synthetic test clip) from Gyan's GitHub
+# release mirror; both pinned by version + SHA-256 below.
+name: vpl-probe
+on:
+  push:
+    paths:
+      - 'pushmpc/tools/vpl_ai_probe.cpp'
+      - 'pushmpc/tools/vpl_ai_probe/**'
+      - 'tests/intel-vpl-manual.ps1'
+      - '.github/workflows/vpl-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LIBVPL_TAG: v2.17.0
+  LIBVPL_COMMIT: d77f9195cf495b937631607333288fd917ae8939
+  LIBVPL_SHA256: TOFU
+  FFMPEG_VERSION: 7.1.1
+  FFMPEG_SHA256: TOFU
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 3
+
+      - name: Fetch and verify libvpl and FFmpeg
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = "$env:RUNNER_TEMP\dl"; New-Item -ItemType Directory -Force $d | Out-Null
+          function Fetch($url, $file, $pin, $what) {
+            Invoke-WebRequest -Uri $url -OutFile $file
+            $h = (Get-FileHash $file -Algorithm SHA256).Hash
+            "$what $url sha256 $h (pinned $pin)"
+            if ($pin -eq 'TOFU') { "::warning::$what is not pinned yet: sha256 $h" }
+            elseif ($h -ne $pin.ToUpperInvariant()) { throw "SHA-256 mismatch for $what : $h" }
+          }
+          Fetch "https://github.com/intel/libvpl/archive/refs/tags/$env:LIBVPL_TAG.tar.gz" "$d\libvpl.tar.gz" $env:LIBVPL_SHA256 "libvpl $env:LIBVPL_TAG"
+          Fetch "https://github.com/GyanD/codexffmpeg/releases/download/$env:FFMPEG_VERSION/ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip" "$d\ffmpeg.zip" $env:FFMPEG_SHA256 "FFmpeg $env:FFMPEG_VERSION essentials"
+          tar -xzf "$d\libvpl.tar.gz" -C $d
+          Expand-Archive "$d\ffmpeg.zip" -DestinationPath $d
+          $bin = (Get-ChildItem $d -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "VPLSRC=$((Get-ChildItem $d -Directory -Filter 'libvpl-*' | Select-Object -First 1).FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # the archive must hold the tagged commit's tree: compare one file with the commit's raw copy
+          $src = (Get-ChildItem $d -Directory -Filter 'libvpl-*' | Select-Object -First 1).FullName
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/intel/libvpl/$env:LIBVPL_COMMIT/api/vpl/mfxdefs.h" -OutFile "$d\mfxdefs.h"
+          if ((Get-FileHash "$d\mfxdefs.h").Hash -ne (Get-FileHash "$src\api\vpl\mfxdefs.h").Hash) { throw "libvpl archive does not match commit $env:LIBVPL_COMMIT" }
+          "libvpl archive matches commit $env:LIBVPL_COMMIT (api/vpl/mfxdefs.h)"
+          Select-String -Path "$src\api\vpl\mfxdefs.h" -Pattern 'define MFX_VERSION_M(AJOR|INOR) '
+
+      - name: Build libvpl dispatcher (static, static CRT)
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S $env:VPLSRC -B "$env:RUNNER_TEMP\vplb" -A x64 -DBUILD_SHARED_LIBS=OFF -DUSE_MSVC_STATIC_RUNTIME=ON -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DINSTALL_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\vpl"
+          if ($LASTEXITCODE) { throw "libvpl configure failed" }
+          cmake --build "$env:RUNNER_TEMP\vplb" --config Release --target install
+          if ($LASTEXITCODE) { throw "libvpl build failed" }
+          Get-ChildItem "$env:RUNNER_TEMP\vpl" -Recurse -Include *.lib,VPLConfig*.cmake | ForEach-Object { $_.FullName.Substring($env:RUNNER_TEMP.Length) }
+
+      - name: Build vpl_ai_probe
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S pushmpc/tools/vpl_ai_probe -B build-probe -A x64 -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP\vpl" -DVPL_PROBE_REQUIRE_VPL=ON
+          if ($LASTEXITCODE) { throw "configure failed" }
+          cmake --build build-probe --config Release
+          if ($LASTEXITCODE) { throw "build failed" }
+          $exe = "build-probe\Release\vpl_ai_probe.exe"
+          "probe sha256 $((Get-FileHash $exe).Hash)"
+          & dumpbin /dependents $exe 2>$null | Select-String '\.dll'
+
+      - name: Run the probe (no Intel GPU expected)
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ffmpeg -hide_banner -version | Select-Object -First 1
+          & build-probe\Release\vpl_ai_probe.exe --out probe-out --seconds 3 --timeout 780
+          $code = $LASTEXITCODE
+          "probe exit code $code"
+          $j = Get-Content probe-out\vpl_ai_probe.json -Raw | ConvertFrom-Json
+          "status=$($j.status) builtWithVpl=$($j.builtWithVpl) headerApi=$($j.headerApiVersion) intelAdapter=$($j.intelAdapterPresent) implementations=$(@($j.implementations).Count)"
+          foreach ($i in @($j.implementations)) { "impl #$($i.index) $($i.impl) $($i.implName) API $($i.apiVersion) vendor $($i.vendorId) VAFI=$($i.advertisesVAFI) VASR=$($i.advertisesVASR) filters=$(@($i.vppFilters) -join ',')" }
+          foreach ($m in @($j.material)) { "material $($m.label): blend $($m.fiBaselines.blend.psnrY) dB, repeat $($m.fiBaselines.repeat.psnrY) dB, codec $($m.fiBaselines.calibrationInputVsTruth.psnrY) dB; SR bilinear $($m.srBaselines.bilinear.psnrY) lanczos $($m.srBaselines.lanczos.psnrY) dB" }
+          "VplFi: $($j.VplFi)"
+          "VplSr: $($j.VplSr)"
+          # structural check: the probe ran to the end, used the real dispatcher, and reported a clean verdict
+          if ($code -ne 0) { throw "probe exit code $code" }
+          if ($j.status -ne 'done' -or -not $j.builtWithVpl) { throw "structural check failed" }
+          if ($j.VplFi -notmatch '^(supported|unsupported: .+)$' -or $j.VplSr -notmatch '^(supported|unsupported: .+)$') { throw "verdict missing" }
+          if (@($j.material).Count -lt 2 -or -not $j.material[0].fiBaselines.blend.psnrY) { throw "test material / baselines missing" }
+          "STRUCTURAL CHECK PASS"
+
+      - name: Upload probe and report
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpl-ai-probe
+          path: |
+            build-probe/Release/vpl_ai_probe.exe
+            probe-out/vpl_ai_probe.json
+            probe-out/summary.txt
+            tests/intel-vpl-manual.ps1
+          retention-days: 30
