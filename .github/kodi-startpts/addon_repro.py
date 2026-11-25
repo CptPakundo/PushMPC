@@ -115,7 +115,11 @@ def start2(p):
                                          "properties": ["thumbnail", "streamdetails"]}, timeout=30)
         say("Files.GetFileDetails", json.dumps(d))
         thumb = ((d or {}).get("result") or {}).get("filedetails", {}).get("thumbnail", "")
-        if thumb and p.poll() is None:
+        if not thumb:
+            # the generated-thumbnail URL Kodi uses for a video file (CTextureUtils::GetWrappedImageURL(path, "video"))
+            thumb = "image://video@" + urllib.parse.quote(os.path.abspath(a.clip), safe="") + "/"
+        say("thumbnail url", thumb)
+        if p.poll() is None:
             url = "http://127.0.0.1:8080/image/" + urllib.parse.quote(thumb, safe="")
             try:
                 with urllib.request.urlopen(url, timeout=30) as r:
