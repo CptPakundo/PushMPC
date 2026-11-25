@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory() as d:
     cmd = ["mpv", "--no-config", "--msg-level=all=warn", "--demuxer=rawvideo", "--demuxer-rawvideo-mp-format=gray",
            f"--demuxer-rawvideo-w={w}", f"--demuxer-rawvideo-h={h}", "--demuxer-rawvideo-fps=1", "--pause",
            f"--geometry={2 * w}x{2 * h}", "--keepaspect=no", "--keepaspect-window=no", "--border=no",
-           "--vo=gpu", "--gpu-api=opengl", "--video-output-levels=full", "--dither-depth=no", "--scale=bilinear", "--cscale=bilinear",
+           "--vo=gpu", "--gpu-api=opengl", "--gpu-context=x11egl", "--video-output-levels=full", "--dither-depth=no", "--scale=bilinear", "--cscale=bilinear",
            "--osd-level=0", f"--glsl-shaders={glsl}", f"--script={lua}", "--screenshot-format=png", raw]
     subprocess.run(cmd, check=True, timeout=120)
     if not os.path.isfile(shot):
