@@ -139,15 +139,17 @@ jobs:
           $rt = "$env:RUNNER_TEMP\pmml"; New-Item -ItemType Directory "$rt\graphs", "$rt\eps\trt-rtx" -Force | Out-Null
           Set-Content "$rt\graphs\synth-yuv.onnx" 'stub'; Set-Content "$rt\eps\trt-rtx\ep.json" '{"name": "trt-rtx"}'
           $env:PMML_RUNTIME = $rt
-          $wps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; Remove-Item Env:PSModulePath
+          # Setup's Windows PowerShell 5.1 must not inherit pwsh's module path (as from Explorer); this step keeps its own
+          $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
           $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"
+          $env:PSModulePath = $keep
           if (-not $p.WaitForExit(1400000)) { $p.Kill(); throw 'Setup timed out' }
           "Setup exit $($p.ExitCode)" | Tee-Object -Append $log
           $sl = Get-ChildItem "$env:LOCALAPPDATA\PushMPC\logs" -Filter 'setup*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
           $text = Get-Content $sl.FullName -Raw
           ($text -split "`r?`n" | Select-String -Pattern 'GPU:|Engine for|PushFlow''s ONNX|pmml.txt|AMD FSR SDK|found|Capture mode|Players without|VLC|KMPlayer|MPC-HC|Auto''s starting' | ForEach-Object Line) | Tee-Object -Append $log
           $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
-          $pmml = Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue
+          $pmml = [string](Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue)
           $cap = Get-Content "$env:LOCALAPPDATA\PushMPC\capture\capture.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
           $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk"
           $mpc = [bool](Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' })
@@ -158,7 +160,7 @@ jobs:
           if ($p.ExitCode -ne 0) { $bad += "Setup exit $($p.ExitCode)" }
           if ($text -notmatch 'Engine for MPC-HC / MPC-BE / PotPlayer: pushcore: NVIDIA VFG') { $bad += 'no engine choice in the Setup log' }
           if ($plan.family -ne 'RTX 40') { $bad += "auto-plan.json family $($plan.family)" }
-          if ($pmml -notmatch '(?m)^backend=ort:core:trt-rtx:0') { $bad += 'pmml.txt not written with the TensorRT-RTX EP' }
+          if (-not ($pmml -match '(?m)^backend=ort:core:trt-rtx:0')) { $bad += 'pmml.txt not written with the TensorRT-RTX EP' }
           if (-not $cap -or -not (@($cap.players) -match 'KMPlayer') -or -not (@($cap.players) -match '^VLC')) { $bad += 'capture mode not on for KMPlayer and VLC' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
@@ -178,12 +180,12 @@ jobs:
           foreach ($k in 'MPC-HC', 'VideoLAN') {
             reg export "HKCU\Software\$k" "$s\after-$k.reg" /y 2>$null | Out-Null
             $b = if (Test-Path "$s\before-$k.reg") { Get-Content "$s\before-$k.reg" } else { @() }; $a = if (Test-Path "$s\after-$k.reg") { Get-Content "$s\after-$k.reg" } else { @() }
-            $d = Compare-Object $b $a; if ($d) { $bad += "HKCU\Software\$k differs: $(($d | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
+            if (($b -join "`n") -ne ($a -join "`n")) { $d = Compare-Object @($b + '') @($a + ''); $bad += "HKCU\Software\$k differs: $(($d | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
           }
           (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\after-env.txt"
-          if (Compare-Object (Get-Content "$s\before-env.txt") (Get-Content "$s\after-env.txt")) { $bad += 'HKCU\Environment differs' }
+          if ((@(Get-Content "$s\before-env.txt") -join "`n") -ne (@(Get-Content "$s\after-env.txt") -join "`n")) { $bad += 'HKCU\Environment differs' }
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\after-vlc.txt"
-          if (Compare-Object @(Get-Content "$s\before-vlc.txt") @(Get-Content "$s\after-vlc.txt")) { $bad += 'VLC settings differ' }
+          if ((@(Get-Content "$s\before-vlc.txt") -join "`n") -ne (@(Get-Content "$s\after-vlc.txt") -join "`n")) { $bad += 'VLC settings differ' }
           foreach ($k in 'HKCU:\Software\PushMPC', 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC') { if (Test-Path $k) { $bad += "left: $k" } }
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
           $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)

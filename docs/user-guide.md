@@ -12,7 +12,7 @@ Setup asks nothing else. It:
 - picks the engine Auto starts with for your graphics card and writes it to the log and to `auto-plan.json` (the same
   rules as the players' Auto; `pushmpc-install.ps1 autoplan` shows it again, `autoplan -Apply` redoes it after a GPU
   change);
-- chooses the ONNX Runtime execution provider for PushFlow (`runtime\experimental\pushflow\pmml.txt`) when the pmml
+- chooses the ONNX Runtime execution provider for PushFlow (`runtime\runtime\experimental\pushflow\pmml.txt`) when the pmml
   runtime is installed: TensorRT-RTX on an NVIDIA RTX card, or the provider pmml's benchmark measured fastest on this
   card; DirectML otherwise;
 - on a Radeon RX 6000 / 7000 / 9000 fetches AMD FSR SDK 2.4 (FSR 4.1 INT8 upscaling; AMD's signed files, pinned). The

@@ -2413,7 +2413,7 @@ function Get-AutoPlan {
         'other' { 'NIS' }
         default { '' }
     }
-    $pushflow = Test-Path -LiteralPath (Join-Path $InstallDir 'runtime\experimental\pushflow')
+    $pushflow = Test-Path -LiteralPath (Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel)
     $rt = Find-PmmlRuntime
     $pm = Get-PmmlChoice $rt $fam $g
     $hwGpu = $fam -ne 'none'
@@ -2440,10 +2440,11 @@ function Show-AutoPlan($p) {
     Info "PushFlow's ONNX Runtime EP: $(if ($p.pmmlBackend) { $p.pmmlBackend } else { 'DirectML' }) ($($p.pmmlWhy))"
     Info "AMD FSR SDK 2.4: $($p.fsrSdk240)"
 }
-# pmml.txt beside PushFlow's models (runtime\experimental\pushflow): pushcore reads runtime= and backend= from it
-# (patches/pushfps-4.5.3-pushmpc.patch, pmmlChoice); without it, or with dml, PushFlow runs on its own DirectML session.
+# pmml.txt beside PushFlow's models (<InstallDir>\runtime\runtime\experimental\pushflow: the runtime component keeps the
+# package's runtime\ folder): pushcore reads runtime= and backend= from it (patches/pushfps-4.5.3-pushmpc.patch,
+# pmmlChoice); without it, or with dml, PushFlow runs on its own DirectML session.
 function Write-PmmlChoice($p, $state) {
-    $dir = Join-Path $InstallDir 'runtime\experimental\pushflow'
+    $dir = Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel
     $file = Join-Path $dir 'pmml.txt'
     if (-not $p.pmmlBackend) {
         if (Test-Path -LiteralPath $file) { if ($DryRun) { Dry "would remove $file" } else { Remove-Item -LiteralPath $file -Force; Info 'pmml.txt removed (DirectML is the choice now)' } }

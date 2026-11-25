@@ -54,7 +54,7 @@ Test-That ($p['fsrSdk240'] -like 'offered, declined*') "RX 6000 with -FidelityFx
 
 # 2. pmml.txt: a fake install (PushFlow's folder) and a fake pmml runtime with the TensorRT-RTX EP
 $id = Join-Path $Scratch 'install'
-$pf = Join-Path $id 'runtime\experimental\pushflow'
+$pf = Join-Path $id 'runtime\runtime\experimental\pushflow'
 $rt = Join-Path $Scratch 'pmml'
 New-Item -ItemType Directory -Force $pf, (Join-Path $rt 'graphs'), (Join-Path $rt 'eps\trt-rtx') | Out-Null
 Set-Content (Join-Path $rt 'graphs\synth-yuv.onnx') 'stub'
