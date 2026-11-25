@@ -726,7 +726,12 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
     out->height = outlink->h;
     out->sample_aspect_ratio = outlink->sample_aspect_ratio;
     out->pts = gen ? p0 * s->K + av_rescale(d * s->K, oi->subframe, m) : p1 * s->K;
-    out->duration = av_rescale(d * s->K, 1, m);
+    s->last_out_dur = av_rescale(d * s->K, 1, m);
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 30, 100)   /* AVFrame.duration (FFmpeg 6.0) */
+    out->duration = s->last_out_dur;
+#else
+    out->pkt_duration = s->last_out_dur;
+#endif
     if (gen) {
         static const enum AVFrameSideDataType per_frame[] = { AV_FRAME_DATA_A53_CC, AV_FRAME_DATA_SEI_UNREGISTERED,
                                                               AV_FRAME_DATA_AFD };
@@ -774,7 +779,6 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
     }
 
     s->last_out_pts = out->pts;
-    s->last_out_dur = out->duration;
     s->frames_out++;
     if (gen)
         s->generated++;

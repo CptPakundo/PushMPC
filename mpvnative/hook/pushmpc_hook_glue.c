@@ -14,6 +14,7 @@
 #include "libavutil/version.h"
 #include "avfilter.h"
 
+#if LIBAVFILTER_VERSION_MAJOR >= 9
 typedef struct PushmpcSysApi {
     int (*segment_parse)(AVFilterGraph *graph, const char *graph_str, int flags, AVFilterGraphSegment **seg);
     int (*segment_apply)(AVFilterGraphSegment *seg, int flags, AVFilterInOut **inputs, AVFilterInOut **outputs);
@@ -21,6 +22,9 @@ typedef struct PushmpcSysApi {
     AVFilterContext *(*alloc_filter)(AVFilterGraph *graph, const AVFilter *filter, const char *name);
     void (*filter_free)(AVFilterContext *filter);
 } PushmpcSysApi;
+#else
+typedef struct PushmpcSysApi PushmpcSysApi;   /* graph strings are not hooked below FFmpeg 6.0 */
+#endif
 
 unsigned avfilter_pushmpc_avutil_built(void);
 unsigned avfilter_pushmpc_avutil_built(void) { return LIBAVUTIL_VERSION_INT; }
