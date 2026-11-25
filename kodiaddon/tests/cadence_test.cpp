@@ -109,8 +109,7 @@ static void KodiEngine(int upscale)
     auto e = pmk::OpenEngine(c, why);
     CHECK(e != nullptr);
     if (!e) return;
-    std::printf("kodi engine: %s [%s]
-", e->Describe().c_str(), why.c_str());
+    std::printf("kodi engine: %s [%s]\n", e->Describe().c_str(), why.c_str());
     const char* req = std::getenv("PM_REQUIRE_GPU");
     if (req && req[0] == '1') CHECK(e->IsGpu());
     const int ow = e->OutWidth(), oh = e->OutHeight();
@@ -128,8 +127,7 @@ static void KodiEngine(int upscale)
             if (ow == W) {
                 const double cpos = BoxCentre(y.data()), want = 40 + 8 * f - 4 + 24;
                 CHECK(std::fabs(cpos - want) <= 3.0);
-                if (f == 5) std::printf("kodi engine: box at t=0.5 %.2f (expected %.2f)
-", cpos, want);
+                if (f == 5) std::printf("kodi engine: box at t=0.5 %.2f (expected %.2f)\n", cpos, want);
             }
             if (upscale && e->IsGpu()) CHECK(e->Real(false, o, err));
         }
@@ -140,8 +138,7 @@ static void KodiEngine(int upscale)
     CHECK(e->PairIsCut());
     std::string kwhy;
     const int k = e->DecideK(0, 23.976, 120.0, kwhy);
-    std::printf("kodi engine: Auto on 120 Hz: x%d (%s)
-", k, kwhy.c_str());
+    std::printf("kodi engine: Auto on 120 Hz: x%d (%s)\n", k, kwhy.c_str());
     CHECK(k >= 1 && k <= 5);
 }
 
