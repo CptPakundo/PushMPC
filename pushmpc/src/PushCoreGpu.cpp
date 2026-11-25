@@ -349,6 +349,8 @@ struct PushCore {
     bool fgFellBack = false, cutGuardOn = false;
     uint64_t cutBase = 0;                    // cuts of graphs torn down (the guard's count restarts with each graph)
     std::atomic<uint64_t> cutsSeen{0};       // cuts the guard held so far (PushCoreStats.cutGuardCuts)
+    std::atomic<uint32_t> subtitleState{0}, subtitlePixels{0};   // PushFPS Subtitle Hold (PushCoreStats), read on the submit thread
+    uint32_t subtitlePoll = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
 
@@ -595,9 +597,9 @@ struct PushCore {
         if (settings.videoHdrPeak >= 400 && settings.videoHdrPeak <= 2000) s.videoHdr.peakNits = settings.videoHdrPeak;   // PushMPC's HDR boost
         order.reset();
         if (const auto e = s.validate(); !e.empty()) { fail("PushMPC settings invalid: " + e); return false; }
-        veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}",
+        veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}, Subtitle Hold {}",
             s.sr, s.videoSrQuality, int(s.srTarget), fgName(tryFg), s.multiplier, s.vfgQuality, s.nr, nrRuntimeName(s.nrRuntime), s.model.tone, s.model.structure,
-            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only"));
+            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold ? "on" : "off"));
         return true;
     }
 
@@ -719,9 +721,9 @@ struct PushCore {
         return c;
     }
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
-    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true;
+    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false;
     int buildGraph() {
-        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0;
+        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = 8; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
@@ -776,6 +778,12 @@ struct PushCore {
         r.stillImage = false; r.exportJob = false; r.liveSource = false; r.uncompressedSource = false;
         r.nvidiaAdapter = ctx.adapter().isNvidia; r.amdNr = ctx.adapter().vendorId == 0x1002;   // AMD: NR on the AMD runtimes
         r.nodeOrder = options.nodeOrder ? &*options.nodeOrder : nullptr;
+        // PushFPS Crosshair Hold / Subtitle Hold: process-wide switches PushFPS's UI sets (PushOverlay.h), read by
+        // describeStages. Crosshair Hold is never for video; Subtitle Hold follows PushMPC's setting, set right before each
+        // graph is described (instances in one process describe their graphs one at a time, under the open / reload path).
+        veyra::pipeline::overlay::setWanted(false);
+        veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && settings.subtitleHold != 0);
+        subtitleState.store(0, std::memory_order_relaxed); subtitlePixels.store(0, std::memory_order_relaxed);
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
@@ -1153,6 +1161,12 @@ struct PushCore {
         ++submittedCount; ++st.submitted;
         st.submitCpuMs += msSince(t0);
         collectTimings();
+        // PushFPS Subtitle Hold: its state and the pixels it held, about twice a second at 24 fps (the pixel count reads
+        // the pass's own mapped sample; PushOverlayPass::harvest runs on this thread in update(), so it is read here too)
+        if (graph && (++subtitlePoll % 12) == 0) {
+            subtitleState.store(uint32_t(graph->subtitleHoldState()), std::memory_order_relaxed);
+            subtitlePixels.store(graph->subtitleHoldPixels(), std::memory_order_relaxed);
+        }
         return PUSHCORE_OK;
     }
 
@@ -1333,8 +1347,8 @@ struct PushCore {
         using namespace veyra;
         if (!graph) return fail("not open");
         const auto t = Clock::now();
-        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard)) {
-            veyra::log::info("pushcore", "frame generation method, upscaler or cut guard changed: graph rebuild");
+        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles)) {
+            veyra::log::info("pushcore", "frame generation method, upscaler, cut guard or Subtitle Hold changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
         engine::EnhancementSettings s;
@@ -1477,7 +1491,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -1611,6 +1625,8 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.srMethod = core->runSr;
     core->st.cutGuardActive = core->cutGuardOn ? 1u : 0u;
     core->st.cutGuardCuts = core->cutsSeen.load(std::memory_order_relaxed);
+    core->st.subtitleHoldState = core->subtitleState.load(std::memory_order_relaxed);
+    core->st.subtitleHoldPixels = core->subtitlePixels.load(std::memory_order_relaxed);
     std::snprintf(core->st.fgNote, sizeof(core->st.fgNote), "%s", core->fgNote.c_str());
     std::memcpy(s, &core->st, size);
     return PUSHCORE_OK;

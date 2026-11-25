@@ -30,6 +30,8 @@
 #include <cmath>
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <cwctype>
 #include <format>
 #include <string>
@@ -608,8 +610,41 @@ inline double BitsPerPixel(double bitsPerSecond, UINT w, UINT h, double fps, DWO
 // display every 2 s (pm::Display::operator== includes vrr), so a toggle re-runs the decision once.
 // Windows' own "Variable refresh rate" switch (DirectXUserGlobalSettings VRROptimizeEnable) only lets older DirectX 11
 // games use VRR; MPC Video Renderer presents with a flip-model swap chain that does not need it. It is logged.
-// Other vendors: no public per-window state (AMD's ADL FreeSync query is not used): fixed refresh is assumed, and said so.
+// AMD (since PushFPS 4.5.3's PushFreeSync.h / PushAmdAdl.h, the same queries): AMD's Display Library (System32
+// atiadlxx.dll) gives the display's FreeSync capability and whether FreeSync is switched on in AMD Software. It cannot
+// say whether a flip is shown in VRR right now and has no per-program scope, so the NVIDIA rule's driver default is
+// used: VRR counts as active when FreeSync is on and usable in the applied mode and MPC-HC's window covers its monitor
+// (FreeSync engages for fullscreen flip presentation). Also asked when NVAPI does not know the display (a display on
+// an AMD card next to an NVIDIA one). Intel and others: no public state: fixed refresh is assumed, and said so.
 struct VrrProbe { bool known = false, active = false, possible = false, caps = false; int mode = -1, request = -1, scope = 1; std::wstring how; };
+// AMD FreeSync as ADL answers it (PushFPS PushFreeSync.h pushFreeSyncFrom): capStatus / stateStatus ADL return codes
+// (0 = ADL_OK; a display without FreeSync makes the driver refuse the capability query), caps the capability bits
+// (ADL_FREESYNC_CAP_DISPLAYSUPPORTED 1<<2, ADL_FREESYNC_CAP_CURRENTMODESUPPORTED 1<<3), useCases the use cases
+// FreeSync is switched on for (0 = off)
+struct FreeSyncState { bool supported = false, usableInMode = false, switchedOn = false; };
+inline FreeSyncState FreeSyncFrom(int capStatus, int caps, int stateStatus, int useCases)
+{
+    FreeSyncState s;
+    if (capStatus != 0) return s;
+    s.supported = (caps & (1 << 2)) != 0;
+    s.usableInMode = (caps & (1 << 3)) != 0;
+    s.switchedOn = s.supported && s.usableInMode && stateStatus == 0 && useCases != 0;
+    return s;
+}
+// the AMD decision (separate so the headless check can run it): the NVIDIA rule with the driver default scope
+inline void VrrDecideAmd(VrrProbe& p, const FreeSyncState& f, bool fullscreen)
+{
+    p.known = true;
+    p.caps = f.supported && f.usableInMode;
+    p.possible = f.switchedOn;
+    p.scope = f.switchedOn ? 1 : 0;   // the NVIDIA driver default, fullscreen only
+    p.active = f.switchedOn && fullscreen;
+    if (p.active) p.how = L"FreeSync for this window (AMD driver: on, player fullscreen)";
+    else if (!f.supported) p.how = L"the monitor has no FreeSync (AMD driver)";
+    else if (!f.usableInMode) p.how = L"FreeSync is not available in this display mode (AMD driver)";
+    else if (!f.switchedOn) p.how = L"FreeSync is off in AMD Software";
+    else p.how = L"FreeSync engages in fullscreen and the player is windowed (AMD driver)";
+}
 inline constexpr int kNvVrrScopeDefault = 1;   // the driver default of both values: fullscreen only
 // the effective G-SYNC scope from the profile's two values (-1 = not set anywhere: driver default)
 inline int VrrScope(int mode, int request)
@@ -691,13 +726,114 @@ inline void DrsRead(NvQuery q, const std::wstring& exe, int& mode, int& request)
     }
     destroy(session);
 }
+// AMD Display Library, as PushFPS's PushAmdAdl.h: structure layouts and entry points from AMD's public ADL interface
+// (GPUOpen display-library adl_structures.h / adl_defines.h, MIT; no SDK file shipped). System32 copy only, pinned,
+// one context; read only. PUSHMPC_NO_AMD_ADL=1 (or PushFPS's VEYRA_NO_AMD_ADL=1) skips it.
+namespace adl {
+struct Adapter {
+    int size, index; char udid[256]; int bus, device, function, vendor;
+    char adapterName[256], displayName[256]; int present, exist;
+    char driverPath[256], driverPathExt[256], pnp[256]; int osDisplayIndex;
+};
+struct Display {
+    int logical, physical, logicalAdapter, physicalAdapter, controller;
+    char name[256], manufacturer[256]; int type, outputType, connector, mask, value;
+};
+struct Cap { int caps, minMicroHz, maxMicroHz; unsigned char label; char reserved[3]; int reservedEx[4]; };
+static_assert(sizeof(Adapter) == 1572 && sizeof(Display) == 552 && sizeof(Cap) == 32, "ADL layouts");
+struct Library {
+    using Alloc = void*(__stdcall*)(int);
+    using Create = int(__cdecl*)(Alloc, int, void**);
+    using Count = int(__cdecl*)(void*, int*);
+    using Adapters = int(__cdecl*)(void*, Adapter*, int);
+    using Displays = int(__cdecl*)(void*, int, int*, Display**, int);
+    using GetCap = int(__cdecl*)(void*, int, int, Cap*);
+    using GetState = int(__cdecl*)(void*, int, int, int*, int*, int*, int*);
+    void* context = nullptr; Count count = nullptr; Adapters adapters = nullptr; Displays displays = nullptr;
+    GetCap getCap = nullptr; GetState getState = nullptr;
+    bool ready() const { return context && count && adapters && displays && getCap && getState; }
+};
+inline void* __stdcall Allocate(int size) { return size > 0 ? std::malloc(size_t(size)) : nullptr; }
+inline const Library& Lib()
+{
+    static const Library lib = [] {
+        Library l;
+        wchar_t skip[4]{};
+        if ((GetEnvironmentVariableW(L"PUSHMPC_NO_AMD_ADL", skip, 4) && skip[0] == L'1') || (GetEnvironmentVariableW(L"VEYRA_NO_AMD_ADL", skip, 4) && skip[0] == L'1')) return l;
+        wchar_t sys[MAX_PATH]{};
+        const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) return l;
+        HMODULE m = LoadLibraryExW((std::wstring(sys) + L"\\atiadlxx.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!m) return l;
+        HMODULE pinned = nullptr; GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(m), &pinned);
+        auto create = reinterpret_cast<Library::Create>(GetProcAddress(m, "ADL2_Main_Control_Create"));
+        Library t;
+        t.count = reinterpret_cast<Library::Count>(GetProcAddress(m, "ADL2_Adapter_NumberOfAdapters_Get"));
+        t.adapters = reinterpret_cast<Library::Adapters>(GetProcAddress(m, "ADL2_Adapter_AdapterInfo_Get"));
+        t.displays = reinterpret_cast<Library::Displays>(GetProcAddress(m, "ADL2_Display_DisplayInfo_Get"));
+        t.getCap = reinterpret_cast<Library::GetCap>(GetProcAddress(m, "ADL2_Display_FreeSync_Cap"));
+        t.getState = reinterpret_cast<Library::GetState>(GetProcAddress(m, "ADL2_Display_FreeSyncState_Get"));
+        if (!create || !t.count || !t.adapters || !t.displays || !t.getCap || !t.getState) return l;
+        void* context = nullptr;
+        if (create(&Allocate, 1, &context) != 0 || !context) return l;   // 1 = connected adapters only
+        t.context = context;
+        return t;
+    }();
+    return lib;
+}
+// FreeSync of the display with this GDI name (MONITORINFOEXW::szDevice); false = the AMD driver does not know it
+inline bool QueryFreeSync(const wchar_t* gdiDevice, FreeSyncState& out)
+{
+    const Library& lib = Lib();
+    if (!lib.ready() || !gdiDevice || !gdiDevice[0]) return false;
+    char device[CCHDEVICENAME * 2]{};
+    if (!WideCharToMultiByte(CP_ACP, 0, gdiDevice, -1, device, int(sizeof(device)), nullptr, nullptr)) return false;
+    int count = 0;
+    if (lib.count(lib.context, &count) != 0 || count <= 0 || count > 64) return false;
+    std::vector<Adapter> list(static_cast<size_t>(count));
+    for (auto& a : list) { std::memset(&a, 0, sizeof(a)); a.size = int(sizeof(Adapter)); }
+    if (lib.adapters(lib.context, list.data(), int(sizeof(Adapter)) * count) != 0) return false;
+    for (auto& a : list) {
+        a.displayName[sizeof(a.displayName) - 1] = 0;
+        if (std::strcmp(a.displayName, device) != 0) continue;
+        int n = 0; Display* info = nullptr; int display = -1;
+        if (lib.displays(lib.context, a.index, &n, &info, 0) == 0 && info && n > 0 && n <= 64)
+            for (int i = 0; i < n; ++i)
+                if (info[i].logicalAdapter == a.index && (info[i].value & 0x3) == 0x3) { display = info[i].logical; break; }   // connected | mapped
+        std::free(info);
+        if (display < 0) continue;
+        Cap cap{}; int useCases = 0, defaults = 0, minHz = 0, maxHz = 0;
+        const int capStatus = lib.getCap(lib.context, a.index, display, &cap);
+        const int stateStatus = capStatus == 0 ? lib.getState(lib.context, a.index, display, &useCases, &defaults, &minHz, &maxHz) : capStatus;
+        out = FreeSyncFrom(capStatus, cap.caps, stateStatus, useCases);
+        return true;
+    }
+    return false;
+}
+}  // namespace adl
 }  // namespace detail
+inline bool WindowFullscreen(HWND wnd, const MONITORINFOEXW& mi)
+{
+    RECT wr{};
+    return wnd && GetWindowRect(wnd, &wr) && wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+}
+// AMD FreeSync for the window's display; false = the AMD driver does not know it
+inline bool ProbeFreeSync(HWND wnd, const MONITORINFOEXW& mi, VrrProbe& p)
+{
+    FreeSyncState f;
+    if (!detail::adl::QueryFreeSync(mi.szDevice, f)) return false;
+    VrrDecideAmd(p, f, WindowFullscreen(wnd, mi));
+    return true;
+}
 inline VrrProbe ProbeVrr(HWND wnd, const MONITORINFOEXW& mi, bool nvidia)
 {
     VrrProbe p;
-    if (!nvidia) { p.how = L"not detected on this GPU (no public VRR state outside NVIDIA's driver): fixed refresh assumed"; return p; }
+    if (!nvidia) {
+        if (ProbeFreeSync(wnd, mi, p)) return p;
+        p.how = L"not detected on this GPU (no NVIDIA or AMD driver answered for this display): fixed refresh assumed"; return p;
+    }
     auto q = detail::NvApi();
-    if (!q) { p.how = L"NVAPI unavailable: fixed refresh assumed"; return p; }
+    if (!q) { if (ProbeFreeSync(wnd, mi, p)) return p; p.how = L"NVAPI unavailable: fixed refresh assumed"; return p; }
     auto idByName = reinterpret_cast<int(__cdecl*)(const char*, uint32_t*)>(q(0xAE457190));
     struct Info { uint32_t version, flags, reserved[4]; };
     auto getVrr = reinterpret_cast<int(__cdecl*)(uint32_t, Info*)>(q(0xDF8FDA57));
@@ -707,7 +843,7 @@ inline VrrProbe ProbeVrr(HWND wnd, const MONITORINFOEXW& mi, bool nvidia)
     char name[CCHDEVICENAME * 2]{};
     WideCharToMultiByte(CP_ACP, 0, mi.szDevice, -1, name, int(sizeof(name)), nullptr, nullptr);
     uint32_t id = 0;
-    if (!idByName || !getVrr || idByName(name, &id) != 0) { p.how = L"NVAPI does not know this display: fixed refresh assumed"; return p; }
+    if (!idByName || !getVrr || idByName(name, &id) != 0) { if (ProbeFreeSync(wnd, mi, p)) return p; p.how = L"NVAPI does not know this display: fixed refresh assumed"; return p; }
     Info info{}; info.version = uint32_t(sizeof(Info)) | (1u << 16);
     if (getVrr(id, &info) != 0) { p.how = L"NVAPI VRR query failed: fixed refresh assumed"; return p; }
     p.known = true;

@@ -19,9 +19,9 @@ matches its pinned SHA-256, else downloaded at install time.
 
 | Source | Pinned | Gives |
 |---|---|---|
-| `Veyra-2.1.9-NVIDIA-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `4225ECB1...C79F362` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
-| `Veyra-2.1.9-AMD-win64-portable.zip` (Veyra's release v2.1.9) | zip SHA-256 `F7113DB0...C2BF377` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
-| `PushFPS-4.4.0-win64.zip` (PushFPS's release v4.4.0), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
+| `Veyra-2.2.1-NVIDIA-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `E09150D1...544386B` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
+| `Veyra-2.2.1-AMD-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `B6440744...0077BF8` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
+| `PushFPS-4.5.3-win64.zip` (PushFPS's release v4.5.3), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
 | `VapourSynth64-Portable-R82.zip` (VapourSynth's release R82) and `python-3.12.10-embed-amd64.zip` (python.org), only for the mpv route | each zip's SHA-256 (`scripts/vapoursynth-pin.json`) | the VapourSynth runtime in `%LOCALAPPDATA%\PushMPC\vapoursynth` (R82's wheel unpacked to `lib\site-packages`) |
 
 ## Install
@@ -87,9 +87,9 @@ The per-user task `\PushMPC\Apply pending update` (at logon, least privilege, no
 `release.json` (schema 3) lists `filter` and `core` as PushMPC's zips (URL relative to the release + SHA-256) and the
 runtime only as a **reference** to Veyra's package, one per GPU vendor:
 
-    { "name": "runtime", "vendor": "NVIDIA", "format": "veyra-package", "version": "veyra-2.1.9-nvidia", "subset": "3",
-      "asset": "Veyra-2.1.9-NVIDIA-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo",
-      "tag": "v2.1.9", "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.1.9/...", "sha256": "..." }
+    { "name": "runtime", "vendor": "NVIDIA", "format": "veyra-package", "version": "veyra-2.2.1-nvidia", "subset": "3",
+      "asset": "Veyra-2.2.1-NVIDIA-win64-portable.zip", "repository": "https://github.com/Likely7/Veyra-NRVideo",
+      "tag": "v2.2.1", "url": "https://github.com/Likely7/Veyra-NRVideo/releases/download/v2.2.1/...", "sha256": "..." }
 
 Both the updater and `pushmpc-install.ps1 update -ReleaseManifest release.json` refuse a runtime entry that is not
 such a reference (format `veyra-package` and a GitHub release URL). The runtime is prepared again only when the package
