@@ -21,6 +21,10 @@
 
 namespace pmvs::nvl {
 
+// the pair's optical flow for GpuGuard::Test (outside the class: GCC wants nested default initialisers complete before a
+// default argument uses the type)
+struct GuardFlow { uint32_t flags = 0; CUdeviceptr forward = 0, cost = 0, backward = 0; uint32_t flowPitch = 0, costPitch = 0, gridW = 0, gridH = 0, extentW = 0, extentH = 0; };
+
 class GpuGuard {
 public:
     struct Params {   // PushMpcCutGuard::Params defaults + SceneCadenceAnalyzer's fixed thresholds
@@ -47,7 +51,7 @@ public:
     // compare = false after a reset (no valid previous: never a cut, the state's references are cleared)
     // the pair's optical flow (NVIDIA hardware, at the source size): vectors from the current frame to the previous one
     // ("forward" in the shader's words), its 8-bit cost, the other direction; flags as the shader's flowFlags (0 = none)
-    struct Flow { uint32_t flags = 0; CUdeviceptr forward = 0, cost = 0, backward = 0; uint32_t flowPitch = 0, costPitch = 0, gridW = 0, gridH = 0, extentW = 0, extentH = 0; };
+    using Flow = GuardFlow;
     bool Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, unsigned parity, bool compare, std::string& err, const Flow& flow = Flow());
     // device words the output kernel reads (non-zero = hold): hard cut of the pair whose current frame has `parity`,
     // and "hard or soft" (the frames up to the pair's midpoint)
