@@ -137,6 +137,10 @@ __attribute__((visibility("default"))) int luaopen_pushmpc_boot(void *L)
     (void)L;
     const char *off = getenv("PUSHMPC_SNAP_BOOT");
     if (off && off[0] == '0') { fprintf(stderr, "PushMPC snap boot: off (PUSHMPC_SNAP_BOOT=0)\n"); return 0; }
+    /* CI only: the snap's launcher overwrites VDPAU_DRIVER_PATH; a test VDPAU driver gets in through this variable
+     * (libvdpau reads it when a decoder opens, after this runs). Without the variable nothing changes. */
+    const char *vdp = getenv("PUSHMPC_TEST_VDPAU_DRIVER_PATH");
+    if (vdp && *vdp) { setenv("VDPAU_DRIVER_PATH", vdp, 1); fprintf(stderr, "PushMPC snap boot: VDPAU_DRIVER_PATH=%s (test)\n", vdp); }
     static bool done;
     if (done) return 0;
     done = true;

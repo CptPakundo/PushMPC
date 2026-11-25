@@ -78,6 +78,10 @@ public:
     void Destroy(Buffer& b);
     void Destroy(Image& i);
     bool FormatOk(VkFormat f, VkFormatFeatureFlags need) const;
+    // dmabuf import (VK_EXT_external_memory_dma_buf + VK_EXT_image_drm_format_modifier) is enabled on this device
+    bool Dmabuf() const { return m_dmabuf; }
+    bool QueueFamilyForeign() const { return m_foreign; }   // VK_EXT_queue_family_foreign
+    int MemType(uint32_t bits, VkMemoryPropertyFlags want) const { return MemoryType(bits, want); }
 
 private:
     Context() = default;
@@ -99,6 +103,7 @@ private:
     std::mutex m_queueLock;
     bool m_external = false;
     ExternalDevice m_ext;
+    bool m_dmabuf = false, m_foreign = false;
 };
 
 // load the Vulkan library once per process; false with the reason when there is none

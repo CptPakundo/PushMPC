@@ -17,6 +17,9 @@
 #ifdef PMVS_GPU
 #include "gpu_backend.h"   // CutGuard, CalibrateGpu
 #endif
+#ifdef PM_DMABUF
+#include "pm_dmabuf_vk.h"  // zero copy: VA-API dmabufs into and out of the GPU engine
+#endif
 
 struct pm_engine {
     bool gpu = false;
@@ -29,6 +32,11 @@ struct pm_engine {
     bool cut = false;
     pm_engine_stats st{};
     std::string device;
+#ifdef PM_DMABUF
+    std::unique_ptr<pmdb::DmabufIO> db;   // made on first use
+    bool dbTried = false;
+    std::string dbWhy;
+#endif
 #endif
 };
 
@@ -252,4 +260,103 @@ extern "C" int pm_engine_decide_k(int smoother, double src_fps, double display_h
     const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs);
     SetErr(why, whysize, k.why);
     return k.k;
+}
+
+// ---- zero copy (pm_engine.h): VA-API dmabufs straight into the GPU engine and back
+#ifdef PM_DMABUF
+static bool DbReady(pm_engine *e)
+{
+    if (!e->gpu) { e->dbWhy = "the CPU engine runs (no Vulkan device)"; return false; }
+    if (e->bits != 8 && e->bits != 10) { e->dbWhy = "only 8-bit (NV12) and 10-bit (P010) surfaces"; return false; }
+    if (!e->dbTried) {
+        e->dbTried = true;
+        auto db = std::make_unique<pmdb::DmabufIO>();
+        if (db->Init(e->g->Ctx(), e->dbWhy)) e->db = std::move(db);
+    }
+    return e->db != nullptr;
+}
+#endif
+
+extern "C" int pm_engine_dmabuf_ok(const pm_engine *e, const char **why)
+{
+#ifdef PM_DMABUF
+    pm_engine *m = const_cast<pm_engine *>(e);
+    const bool ok = DbReady(m);
+    if (why) *why = ok ? "" : m->dbWhy.c_str();
+    return ok ? 1 : 0;
+#else
+    (void)e;
+    if (why) *why = "this build has no zero-copy path (Linux, the GPU engine and the SPIR-V of vk/*.comp)";
+    return 0;
+#endif
+}
+
+extern "C" int pm_engine_push_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, char *err, size_t errsize)
+{
+#ifdef PM_DMABUF
+    if (!DbReady(e)) { SetErr(err, errsize, e->dbWhy); return -1; }
+    std::string why;
+    pmdb::Imported im;
+    if (!e->db->Import(*src, false, im, why)) { SetErr(err, errsize, why); return -1; }
+    if (!contiguous) GpuForget(e);
+    uint64_t ticket = 0;
+    const int slot = e->g->UploadWith([&](VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc &d, std::string &er) {
+        return e->db->RecordIn(cb, im, d, er); }, ticket, why);
+    // the import lives until the upload has run
+    std::string werr;
+    if (ticket) e->g->Wait(ticket, werr);
+    e->db->Recycle();
+    e->db->Release(im);
+    if (slot < 0) { SetErr(err, errsize, why); GpuForget(e); return -1; }
+    e->st.pushed++;
+    if (e->slotCur < 0) { e->slotCur = slot; return 0; }
+    pmvs::gpu::PairStats ps;
+    const int pair = e->g->Estimate(e->slotCur, slot, e->pair, ps, why);
+    if (e->pair >= 0) e->g->ReleasePair(e->pair);
+    if (e->slotPrev >= 0) e->g->ReleaseSlot(e->slotPrev);
+    e->slotPrev = e->slotCur;
+    e->slotCur = slot;
+    e->pair = pair;
+    if (pair < 0) { SetErr(err, errsize, why); return -1; }
+    e->cut = e->guard.Decide(ps) != 0;
+    e->st.pairs++;
+    if (e->cut) e->st.cuts++;
+    e->st.me_ms += (ps.ms - e->st.me_ms) / double(e->st.pairs);
+    return 0;
+#else
+    (void)e; (void)src; (void)contiguous;
+    SetErr(err, errsize, "no zero-copy path in this build");
+    return -1;
+#endif
+}
+
+extern "C" int pm_engine_generate_dmabuf(pm_engine *e, float t, const pm_dmabuf *dst, char *err, size_t errsize)
+{
+#ifdef PM_DMABUF
+    if (!DbReady(e)) { SetErr(err, errsize, e->dbWhy); return -1; }
+    if (e->pair < 0) { SetErr(err, errsize, "no pair yet"); return -1; }
+    std::string why;
+    pmdb::Imported im;
+    if (!e->db->Import(*dst, true, im, why)) { SetErr(err, errsize, why); return -1; }
+    const int mode = e->cut ? (t < 0.5f ? 1 : 2) : 0;   // a cut: the nearer real frame, as pm_engine_generate
+    int out = -1;
+    uint64_t ticket = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = e->g->GenerateWith(e->pair, t, mode, [&](VkCommandBuffer cb, const pmvs::gpu::Engine::PackedDesc &d, std::string &er) {
+        return e->db->RecordOut(cb, im, d, er); }, out, ticket, why);
+    std::string werr;
+    const bool waited = ticket && e->g->Wait(ticket, werr);
+    if (out >= 0) e->g->ReleaseOut(out);
+    e->db->Recycle();
+    e->db->Release(im);
+    if (!ok || !waited) { SetErr(err, errsize, ok ? werr : why); return -1; }
+    e->st.generated++;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    e->st.gen_ms += (ms - e->st.gen_ms) / double(e->st.generated);
+    return 0;
+#else
+    (void)e; (void)t; (void)dst;
+    SetErr(err, errsize, "no zero-copy path in this build");
+    return -1;
+#endif
 }

@@ -1,0 +1,34 @@
+#version 450
+// PushMPC (VLC, zero copy): a finished frame from the GPU engine's packed readback slot (rows of `pitch` bytes, samples
+// of 1 or 2 bytes) into an imported VA-API surface: luma into the R8 / R16 layer, Cb and Cr together into the RG8 / RG16
+// layer (P010: the value in the top 10 bits, shift 6). Built twice: 8-bit and with -DB16. GPL-3.0-or-later.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer Packed { uint words[]; };
+#ifdef B16
+layout(r16, binding = 1) writeonly uniform image2D outY;
+layout(rg16, binding = 2) writeonly uniform image2D outUV;
+#else
+layout(r8, binding = 1) writeonly uniform image2D outY;
+layout(rg8, binding = 2) writeonly uniform image2D outUV;
+#endif
+layout(push_constant) uniform P { int plane; int w; int h; int bps; uint off0; uint off1; int pitch; int shift; float scale; } pc;
+
+uint sampleAt(uint a)
+{
+    const uint wv = words[a >> 2];
+    return pc.bps == 1 ? (wv >> ((a & 3u) * 8u)) & 0xffu : (wv >> ((a & 2u) * 8u)) & 0xffffu;
+}
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.w || p.y >= pc.h) return;
+    const uint rel = uint(p.y * pc.pitch + p.x * pc.bps);
+    if (pc.plane == 0) {
+        imageStore(outY, p, vec4(float(sampleAt(pc.off0 + rel) << uint(pc.shift)) / pc.scale, 0.0, 0.0, 1.0));
+    } else {
+        const float u = float(sampleAt(pc.off0 + rel) << uint(pc.shift)) / pc.scale;
+        const float v = float(sampleAt(pc.off1 + rel) << uint(pc.shift)) / pc.scale;
+        imageStore(outUV, p, vec4(u, v, 0.0, 1.0));
+    }
+}

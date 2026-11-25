@@ -341,6 +341,16 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
             fOf.pNext = &fSync2; f12.pNext = &fOf;
         } else ofFam = -1;
     }
+    // dmabuf import (zero-copy hosts: VA-API surfaces in VLC), when the driver has it; PUSHMPC_VK_NO_DMABUF=1 leaves it out
+    const char* noDb = std::getenv("PUSHMPC_VK_NO_DMABUF");
+    if (!(noDb && noDb[0] == '1') && HasDeviceExt(m_phys, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+        HasDeviceExt(m_phys, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) && HasDeviceExt(m_phys, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME)) {
+        exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        exts.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        exts.push_back(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+        m_dmabuf = true;
+        if (HasDeviceExt(m_phys, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) { exts.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME); m_foreign = true; }
+    }
     VkDeviceQueueCreateInfo qis[2] = { qi, qi };
     uint32_t qCount = 1;
     if (ofFam >= 0 && uint32_t(ofFam) != m_family) { qis[1].queueFamilyIndex = uint32_t(ofFam); qCount = 2; }

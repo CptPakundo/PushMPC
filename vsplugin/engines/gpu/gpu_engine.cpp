@@ -128,6 +128,7 @@ struct Engine::Impl {
     std::vector<Pair> pairs;
     std::vector<Buffer> sweep1, sweep2;   // per level
     Buffer staging[2]; uint64_t stagingUse[2] = { 0, 0 }; int nextStaging = 0;
+    Buffer gpuPlanar; uint64_t gpuPlanarUse = 0;   // UploadWith's device-memory staging (made on first use)
     VkDeviceSize stOffU = 0, stOffV = 0;
     Buffer readback; VkDeviceSize outStride = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0;
     Buffer rectBuf;   // ReadRect's host buffer (grown on demand)
@@ -256,6 +257,7 @@ void Engine::Impl::Free()
     sweep1.clear(); sweep2.clear();
     for (auto& b : staging) ctx->Destroy(b);
     ctx->Destroy(rectBuf);
+    ctx->Destroy(gpuPlanar);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
     for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
     FreeOf();
@@ -667,6 +669,85 @@ int Engine::Upload(const YuvView& v, std::string& err)
     I.times.uploads++;
     I.times.uploadMs += NowMs() - t0;
     return slot;
+}
+
+int Engine::UploadWith(const std::function<bool(VkCommandBuffer, const PlanarDesc&, std::string&)>& rec, uint64_t& ticket, std::string& err)
+{
+    Impl& I = *m;
+    ticket = 0;
+    int slot = -1;
+    for (size_t i = 0; i < I.slots.size(); ++i) if (!I.slots[i].used) { slot = int(i); break; }
+    if (slot < 0) { err = "GPU engine: no free picture slot"; return -1; }
+    const double t0 = NowMs();
+    const VkDeviceSize cSz = VkDeviceSize(I.cw) * VkDeviceSize(I.ch) * VkDeviceSize(I.bps);
+    if (!I.gpuPlanar.buf && !I.ctx->CreateBuffer(I.stOffV + Align(cSz, 4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, I.gpuPlanar, err)) return -1;
+    if (!I.WaitValue(I.gpuPlanarUse, err)) return -1;
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return -1;
+    PlanarDesc d;
+    d.buffer = I.gpuPlanar.buf; d.offU = I.stOffU; d.offV = I.stOffV;
+    d.width = I.cfg.width; d.height = I.cfg.height; d.cw = I.cw; d.ch = I.ch; d.bps = I.bps;
+    if (!rec(j.cb, d, err)) { I.Submit(j, err); return -1; }   // submitted empty: the job's buffer is recycled in order
+    I.Barrier(j.cb);
+    Impl::Slot& s = I.slots[size_t(slot)];
+    const Image* planes[3] = { &s.y, &s.u, &s.v };
+    for (int p = 0; p < 3; ++p) {
+        VkBufferImageCopy r{};
+        r.bufferOffset = p == 0 ? 0 : p == 1 ? I.stOffU : I.stOffV;
+        r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        r.imageExtent = { uint32_t(planes[p]->w), uint32_t(planes[p]->h), 1 };
+        vkCmdCopyBufferToImage(j.cb, I.gpuPlanar.buf, planes[p]->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    }
+    I.Barrier(j.cb);
+    struct { int w, h, shift; float kRaw; } p0{ I.cfg.width, I.cfg.height, std::max(0, I.cfg.bits - 8), I.kRaw };
+    if (!Impl::Bind(I, j, PPyr0).Img(0, s.y.view).Img(1, s.pyr[0].view).Run(&p0, uint32_t((I.cfg.width + 15) / 16), uint32_t((I.cfg.height + 7) / 8), err)) return -1;
+    for (int l = 1; l < I.levels; ++l) {
+        I.Barrier(j.cb);
+        struct { int sw, sh, dw, dh; } pd{ I.lw[size_t(l - 1)], I.lh[size_t(l - 1)], I.lw[size_t(l)], I.lh[size_t(l)] };
+        if (!Impl::Bind(I, j, PPyrDown).Img(0, s.pyr[size_t(l - 1)].view).Img(1, s.pyr[size_t(l)].view).Run(&pd, uint32_t((pd.dw + 15) / 16), uint32_t((pd.dh + 7) / 8), err)) return -1;
+    }
+    if (s.pyrF.img) {
+        struct { int w, h; } pb{ I.cfg.width, I.cfg.height };
+        if (!Impl::Bind(I, j, PBlur).Img(0, s.pyr[0].view).Img(1, s.pyrF.view).Run(&pb, uint32_t((pb.w + 15) / 16), uint32_t((pb.h + 7) / 8), err)) return -1;
+    }
+    const uint64_t val = I.Submit(j, err);
+    if (!val) return -1;
+    I.gpuPlanarUse = val;
+    s.used = true; s.lastUse = val;
+    I.times.uploads++;
+    I.times.uploadMs += NowMs() - t0;
+    ticket = val;
+    return slot;
+}
+
+bool Engine::GenerateWith(int pair, float t, int mode, const std::function<bool(VkCommandBuffer, const PackedDesc&, std::string&)>& rec,
+                          int& out, uint64_t& ticket, std::string& err)
+{
+    Impl& I = *m;
+    out = I.FreeOut();
+    ticket = 0;
+    if (out < 0) { err = "GPU engine: no free readback slot"; return false; }
+    Impl::Pair& pr = I.pairs[size_t(pair)];
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return false;
+    const bool up = I.cfg.upscaler != Upscaler::None;
+    const int sa = mode == 2 ? pr.b : pr.a, sb = mode == 1 ? pr.a : pr.b;
+    if (!I.Interp(j, sa, sb, &pr, t, mode == 2 ? 1 : mode, up ? 1 : 0, out, err)) { I.Submit(j, err); return false; }
+    if (up && !I.UpscaleAndPack(j, out, err)) { I.Submit(j, err); return false; }
+    I.Barrier(j.cb);
+    PackedDesc d;
+    d.buffer = I.readback.buf; d.offset = I.outStride * VkDeviceSize(out); d.offU = I.offU; d.offV = I.offV;
+    d.pitchY = I.pitchY; d.pitchC = I.pitchC; d.width = I.outW; d.height = I.outH; d.cw = I.ocw; d.ch = I.och; d.bps = I.bps;
+    const bool recOk = rec(j.cb, d, err);
+    ticket = I.Submit(j, err);
+    if (!ticket) return false;
+    pr.lastUse = ticket;
+    I.outUsed[size_t(out)] = true;
+    I.times.outputs++;
+    return recOk;
 }
 
 bool Engine::Duplicate(int prevSlot, int slot, DedupStats& st, std::string& err)
