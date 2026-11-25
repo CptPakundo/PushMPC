@@ -61,6 +61,14 @@ target_compile_options(pushcore_session_edit PRIVATE /utf-8)
 target_include_directories(pushcore_session_edit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
 target_link_libraries(pushcore_session_edit PRIVATE veyra_engine ${FFMPEG_LIBRARIES})
 
+# Test tool: PushFlow end to end on a D3D12 device (WARP on CI) with the network on DirectML or on pmml
+# (VEYRA_PUSHFLOW_PMML), the generated frame read back for a pixel comparison (.github/workflows/release.yml).
+add_executable(pushflow_pmml_check tools/pushflow_pmml_check.cpp)
+target_compile_features(pushflow_pmml_check PRIVATE cxx_std_20)
+target_compile_options(pushflow_pmml_check PRIVATE /utf-8)
+target_include_directories(pushflow_pmml_check PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(pushflow_pmml_check PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d12 dxgi)
+
 # The AMD HIP self-test child (PushFPS's AmdHipPreflight; PushFPS.exe --amd-hip-preflight): shipped in core\ next to
 # pushcore.dll, which points AmdHipPreflight at it on AMD GPUs (RX 9000 NR, lmxxf).
 add_executable(pushcore_hip_preflight tools/pushcore_hip_preflight.cpp)
