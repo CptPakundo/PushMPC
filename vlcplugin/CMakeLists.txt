@@ -134,17 +134,20 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
                              "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
   target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
                              _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
-  target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations)
+  target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations
+    # vlc_threads.h calls poll(), which VLC's own tree declares in its compat layer: Winsock's WSAPoll for the C++ files
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include winsock2.h>" "$<$<COMPILE_LANGUAGE:CXX>:-Dpoll=WSAPoll>")
   if(VLC_CORE_LIB)
     target_link_libraries(pushmpc_d3d11_plugin PRIVATE "${VLC_CORE_LIB}")
   endif()
-  target_link_libraries(pushmpc_d3d11_plugin PRIVATE uuid gdi32 ole32 user32 dxgi d3d11)
+  target_link_libraries(pushmpc_d3d11_plugin PRIVATE uuid gdi32 ole32 user32 dxgi d3d11 ws2_32)
   target_link_options(pushmpc_d3d11_plugin PRIVATE -static -static-libgcc -static-libstdc++)
 
   # the NIS upscaler on WARP without VLC (CI)
   add_executable(pm_nis_test display/tests/pm_nis_test.cpp ${D3}/video_output/win32/pm_nis_d3d11.cpp)
   target_include_directories(pm_nis_test PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/video_output/win32" "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
-  target_compile_definitions(pm_nis_test PRIVATE _WIN32_WINNT=0x0601 COBJMACROS)
-  target_link_libraries(pm_nis_test PRIVATE d3d11 dxgi uuid)
+  target_compile_definitions(pm_nis_test PRIVATE _WIN32_WINNT=0x0601 COBJMACROS poll=WSAPoll)
+  target_compile_options(pm_nis_test PRIVATE "SHELL:-include winsock2.h")
+  target_link_libraries(pm_nis_test PRIVATE d3d11 dxgi uuid ws2_32)
   target_link_options(pm_nis_test PRIVATE -static)
 endif()
