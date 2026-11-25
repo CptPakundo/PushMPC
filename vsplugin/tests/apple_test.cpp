@@ -7,7 +7,10 @@
 //    hard cut to another picture and a cut between two pans are;
 //  - the phase plans (k = 2..8 on the 2^x grid; FRC exact; cut / off plans) and their worst phase error;
 //  - Auto's multiplier and super-resolution decisions, the step-down ladder;
-//  - backend selection with the apple backend (backend.h).
+//  - backend selection with the apple backend (backend.h);
+//  - apple_nn.h: the .pmnn parser and the ArtCNN float reference (padding, ReLU, long skip, DCR depth-to-space, clip),
+//    the 10-bit recovery (a PQ gradient pan through a simulated 8-bit interpolator), the super-resolution order and the
+//    real-time check.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +19,7 @@
 #include <string>
 #include <vector>
 #include "apple_convert.h"
+#include "apple_nn.h"
 #include "backend.h"
 
 using namespace pmvs;
@@ -283,6 +287,115 @@ static void TestSelection()
     c = SelectBackend("metal", mac); CHECK(!c.ok, "unknown backend is an error");
 }
 
+static void PutU32(std::vector<uint8_t>& v, uint32_t x) { for (int i = 0; i < 4; ++i) v.push_back(uint8_t(x >> (8 * i))); }
+static void PutF32(std::vector<uint8_t>& v, float f) { uint32_t x; std::memcpy(&x, &f, 4); PutU32(v, x); }
+static std::vector<uint8_t> Serialize(const NnModel& m)
+{
+    std::vector<uint8_t> v = { 'P', 'M', 'N', 'N' };
+    PutU32(v, 1); PutU32(v, uint32_t(m.layers.size()));
+    for (auto& l : m.layers) {
+        PutU32(v, uint32_t(l.cin)); PutU32(v, uint32_t(l.cout)); PutU32(v, l.flags); PutF32(v, l.lo); PutF32(v, l.hi);
+        for (float f : l.w) PutF32(v, f);
+        for (float f : l.b) PutF32(v, f);
+    }
+    return v;
+}
+
+static void TestNn()
+{
+    // layer 0: 1 -> 4, channel c = 0.1 (c + 1) * centre tap, saved as the skip; layer 1: 4 -> 4, all-ones 3x3 on
+    // channel 0 only into output channel 0 (tests the zero padding), ReLU on a negative bias for channel 3;
+    // layer 2: 4 -> 4 identity + the skip, final (depth-to-space, clip to [0, 1])
+    NnModel m;
+    NnLayer a; a.cin = 1; a.cout = 4; a.flags = NnLayer::kSaveSkip; a.w.assign(36, 0); a.b.assign(4, 0);
+    for (int c = 0; c < 4; ++c) a.w[size_t(c) * 9 + 4] = 0.1f * float(c + 1);
+    NnLayer b; b.cin = 4; b.cout = 4; b.flags = NnLayer::kRelu; b.w.assign(144, 0); b.b = { 0, 0, 0, -5 };
+    for (int t = 0; t < 9; ++t) b.w[size_t(0 * 4 + 0) * 9 + size_t(t)] = 1.0f;
+    for (int c = 1; c < 4; ++c) b.w[size_t(c * 4 + c) * 9 + 4] = 1.0f;
+    NnLayer f; f.cin = 4; f.cout = 4; f.flags = NnLayer::kFinal | NnLayer::kAddSkip; f.w.assign(144, 0); f.b.assign(4, 0);
+    for (int c = 0; c < 4; ++c) f.w[size_t(c * 4 + c) * 9 + 4] = 1.0f;
+    m.layers = { a, b, f };
+    const auto bytes = Serialize(m);
+    NnModel p; std::string err;
+    CHECK(p.Parse(bytes.data(), bytes.size(), err), "parse: %s", err.c_str());
+    CHECK(p.layers.size() == 3 && p.Parameters() == m.Parameters(), "parsed sizes");
+    NnModel bad; auto trunc = bytes; trunc.resize(trunc.size() - 3);
+    CHECK(!bad.Parse(trunc.data(), trunc.size(), err), "truncated file refused");
+    const int w = 5, h = 4;
+    std::vector<float> in(size_t(w * h), 1.0f), out(size_t(4 * w * h));
+    NnReference(p, in.data(), w, h, out.data(), 2);
+    auto at = [&](int x, int y) { return out[size_t(y) * size_t(2 * w) + size_t(x)]; };
+    // interior pixel (2, 1): channel 0 = 9 taps x 0.1 + skip 0.1 = 1.0 (clip); channel 1 = 0.2 + 0.2; channel 2 =
+    // 0.3 + 0.3; channel 3 = relu(0.4 - 5) = 0, + skip 0.4
+    CHECK(std::fabs(at(4, 2) - 1.0f) < 1e-5f, "DCR (0,0) = channel 0 (clipped): %f", at(4, 2));
+    CHECK(std::fabs(at(5, 2) - 0.4f) < 1e-5f, "DCR (0,1) = channel 1: %f", at(5, 2));
+    CHECK(std::fabs(at(4, 3) - 0.6f) < 1e-5f, "DCR (1,0) = channel 2: %f", at(4, 3));
+    CHECK(std::fabs(at(5, 3) - 0.4f) < 1e-5f, "DCR (1,1) = channel 3 after ReLU + skip: %f", at(5, 3));
+    // corner (0, 0): channel 0 sees 4 taps (zero padding): 0.4 + skip 0.1
+    CHECK(std::fabs(at(0, 0) - 0.5f) < 1e-5f, "zero padding at the corner: %f", at(0, 0));
+    std::vector<float> o2 = out; o2[7] += 0.01f;
+    const double ps = PsnrUnit(out.data(), o2.data(), out.size());
+    CHECK(ps > 55 && ps < 70, "PSNR of one small difference: %.2f", ps);
+}
+
+static void TestRecovery()
+{
+    // a smooth 10-bit gradient (codes 300..360 over 256 px: banding territory) panning 3.5 px per frame
+    const int w = 256, h = 16;
+    const double pan = 3.5;
+    auto truth = [&](double x) { return 300.0 + 60.0 * std::clamp(x, 0.0, double(w - 1)) / double(w - 1); };
+    auto plane = [&](double shift) {
+        Plane16 p; p.w = w; p.h = h; p.v.resize(size_t(w * h));
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) p.v[size_t(y * w + x)] = uint16_t(std::lround(truth(x - shift)));
+        return p;
+    };
+    const Plane16 A = plane(0), B = plane(pan);
+    for (float t : { 0.25f, 0.5f, 0.75f }) {
+        Plane16 T = plane(pan * t), G8; G8.w = w; G8.h = h; G8.v.resize(T.v.size());
+        for (size_t i = 0; i < T.v.size(); ++i) G8.v[i] = uint16_t(To8(T.v[i]));   // an ideal 8-bit interpolator
+        std::vector<float> fx(size_t(w * h), float(pan)), fy(size_t(w * h), 0.f);
+        Plane16 R, R0;
+        RecoverTenBitPlane(A, B, G8, fx, fy, t, R);
+        RecoverTenBitPlane(A, B, G8, {}, {}, t, R0);   // no flow
+        double e8 = 0, er = 0, e0 = 0; int maxr = 0, n = 0;
+        for (int y = 2; y < h - 2; ++y) for (int x = 8; x < w - 8; ++x) {
+            const size_t i = size_t(y * w + x);
+            e8 += std::fabs(4.0 * G8.v[i] - T.v[i]); er += std::fabs(double(R.v[i]) - T.v[i]); e0 += std::fabs(double(R0.v[i]) - T.v[i]);
+            maxr = std::max(maxr, std::abs(int(R.v[i]) - int(T.v[i]))); ++n;
+        }
+        e8 /= n; er /= n; e0 /= n;
+        std::printf("recovery t=%.2f: mean error 8-bit %.3f, recovered %.3f (no flow %.3f), max %d codes\n", t, e8, er, e0, maxr);
+        CHECK(er < 0.6 * e8, "t=%.2f: recovered mean error %.3f codes vs plain 8-bit %.3f", t, er, e8);
+        CHECK(maxr <= 2, "t=%.2f: recovered max error %d codes", t, maxr);
+        CHECK(e0 <= e8 + 0.5, "t=%.2f: without flow never much worse than 8-bit (%.3f vs %.3f)", t, e0, e8);
+    }
+    CHECK(Residual(1023) == 3 && Residual(2) == -2 && Residual(1) == 1 && To8(1023) == 255, "residual range");
+}
+
+static void TestSrOrder()
+{
+    SrInputs in; in.w = 1920; in.h = 1080; in.editing = true; in.artcnn32 = in.artcnn16 = true;
+    auto r = DecideSrOrder(in);
+    CHECK(r.order.size() == 3 && r.order[0].kind == SrKind::Editing && r.order[1].kind == SrKind::ArtCnn32, "live: editing first: %s", r.why.c_str());
+    in.anime = true; r = DecideSrOrder(in);
+    CHECK(r.order.size() == 3 && r.order[0].kind == SrKind::ArtCnn32 && r.order[2].kind == SrKind::Editing, "anime: ArtCNN first: %s", r.why.c_str());
+    in.anime = false; in.editingModel = 0; r = DecideSrOrder(in);
+    CHECK(r.wantModelDownload && !r.order.empty() && r.order[0].kind == SrKind::ArtCnn32, "model missing: download asked, ArtCNN now: %s", r.why.c_str());
+    in.editingModel = 1; r = DecideSrOrder(in);
+    CHECK(!r.wantModelDownload && !r.order.empty() && r.order[0].kind == SrKind::ArtCnn32 && r.why.find("downloading") != std::string::npos, "downloading: %s", r.why.c_str());
+    in.editingModel = 2; in.w = 3840; in.h = 2160; r = DecideSrOrder(in);
+    CHECK(r.order.empty(), "4K source: no SR: %s", r.why.c_str());
+    SrInputs sd; sd.w = 640; sd.h = 360; sd.llFactors = { 2, 4 }; sd.llMaxDim2 = 960;
+    r = DecideSrOrder(sd); CHECK(r.order.size() == 1 && r.order[0].kind == SrKind::LowLatency, "only LL: %s", r.why.c_str());
+    sd.mode = "off"; r = DecideSrOrder(sd); CHECK(r.order.empty(), "off");
+    sd.mode = "4"; r = DecideSrOrder(sd); CHECK(r.order.size() == 1 && r.order[0].factor == 4, "x4 asked: LL x4");
+    SrInputs e; e.w = 1280; e.h = 720; e.editing = true; e.artcnn16 = true; e.mode = "artcnn";
+    r = DecideSrOrder(e); CHECK(r.order.size() == 1 && r.order[0].kind == SrKind::ArtCnn16, "artcnn asked");
+    double cost = 0;
+    CHECK(FitsRealTime(8, 10, 2, 2, 23.976, &cost) && std::fabs(cost - 28) < 1e-9, "x2 at 24 fps: 28 ms fits");
+    CHECK(!FitsRealTime(12, 10, 2, 4, 23.976), "x4 with 12 ms SR does not fit");
+}
+
 int main()
 {
     TestConversion();
@@ -291,6 +404,9 @@ int main()
     TestPlans();
     TestDecisions();
     TestSelection();
+    TestNn();
+    TestRecovery();
+    TestSrOrder();
     std::printf("apple_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

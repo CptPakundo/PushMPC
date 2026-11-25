@@ -4,7 +4,15 @@
 - builds `pushmpc_vs` against Homebrew's `vapoursynth`, with the VideoToolbox backend on macOS;
 - installs the plugin into VapourSynth's autoload folder;
 - installs `pushmpc.vpy` and `pushmpc-setup`;
-- depends on Homebrew's `mpv`, which is built with VapourSynth because it depends on the `vapoursynth` formula.
+- depends on Homebrew's `mpv`, which is built with VapourSynth because it depends on the `vapoursynth` formula;
+- installs a LuaJIT-FFI helper into Homebrew mpv's global scripts folder (`$(brew --prefix)/etc/mpv/scripts/
+  pushmpc-vsscript.lua`) that sets `VSSCRIPT_PATH` inside mpv, because Homebrew's mpv cannot find VapourSynth's VSScript
+  library on its own. No launchctl, no LaunchAgent; inert once PushMPC is uninstalled;
+- converts the pinned ArtCNN weights (MIT) into the Metal engine's `.pmnn` files and fragment-shader GLSL, installs the
+  upstream compute GLSL and an mpv profile (`pushmpc-artcnn`: gpu-next, Vulkan) that `pushmpc-setup install` includes
+  (`--no-artcnn` leaves it out);
+- on macOS builds `pushmpc-apple` (probe, Apple's one-time super-resolution model download, benchmarks) and the IINA
+  bridge `lib/pushmpc/pushmpc-iina.so`.
 
 Once the tap repository `homebrew-pushmpc` exists (a public action, so it waits for the go-ahead), users run:
 

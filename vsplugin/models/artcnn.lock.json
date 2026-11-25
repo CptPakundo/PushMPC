@@ -1,0 +1,13 @@
+{
+  "note": "ArtCNN (Artoriuz/ArtCNN, MIT licence, compatible with PushMPC's GPL-3.0) luma doublers PushMPC uses on macOS: the ONNX files are converted by vsplugin/tools/artcnn_tool.py into .pmnn weights for the Metal engine (apple backend) and into fragment-shader GLSL for OpenGL-only renderers (IINA's GL 4.1, any GL-only mpv); the upstream compute GLSL is used as-is by the mpv gpu-next / Vulkan profile. Every file is fetched from an immutable commit URL and checked against its SHA-256 (and git blob SHA-1). ArtCNN is trained on anime / art content: Auto uses it first for anime, and for live action only when VideoToolbox's editing-grade super resolution is not available.",
+  "repository": "https://github.com/Artoriuz/ArtCNN",
+  "commit": "0837e5326e710f49e2ab0a8d995da0708047442e",
+  "licence": "MIT",
+  "copyright": "Copyright (c) 2024 Joao Chrisostomo, Kacper Michajlow",
+  "files": [
+    { "name": "ArtCNN_C4F16.onnx", "path": "ONNX/ArtCNN_C4F16.onnx", "gitBlobSha1": "5a3ad6b10dfd4fc66e9e1b0840be412ac22154ee", "sha256": "7A6436299B8C757DBB7084AC39A25C310DB1941133E73D1EE3E74C8B3BDDC1CA", "size": 51559 },
+    { "name": "ArtCNN_C4F32.onnx", "path": "ONNX/ArtCNN_C4F32.onnx", "gitBlobSha1": "b872620ef29651da8f5277004d06dc2f9c68a7f3", "sha256": "B1A1130469A0538D4484FC3D6CA39854EF3906A3A01DF8799997B6ED0408F6EA", "size": 193085 },
+    { "name": "ArtCNN_C4F16.glsl", "path": "GLSL/ArtCNN_C4F16.glsl", "gitBlobSha1": "4086dce92db6c1d9d81d3e396aa94d35a1e389a8", "sha256": "03D0B3D31CB82C898A94A46663021A3E8F02C5A21D69C5CFDF0208DE4BFD453E", "size": 212905 },
+    { "name": "ArtCNN_C4F32.glsl", "path": "GLSL/ArtCNN_C4F32.glsl", "gitBlobSha1": "00a487233c1d77a35b7084d395efcbde21fbffef", "sha256": "F773BCE6CF5FE7E5E5D599A695EDD40DF5CD7A20C3D08C4D164D07591D5BEAD3", "size": 761029 }
+  ]
+}

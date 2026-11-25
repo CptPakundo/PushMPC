@@ -1,5 +1,5 @@
 {
-  "note": "GLSL user shaders the PushMPC IINA plugin bundles. IINA renders through OpenGL 4.1 (no compute shaders), so only fragment / textureGather shaders are listed; build.py refuses any file with //!COMPUTE. Each file is fetched from an immutable URL (a commit, a gist revision or a release asset) and checked against its git blob SHA-1 (gitBlobSha1, what GitHub's API reports for the file) or SHA-256. Licences: FSR (MIT, AMD FidelityFX port), RAVU (LGPL-3.0), FSRCNNX (GPL-3.0); all compatible with PushMPC's GPL-3.0. The licence text stays in each file's header and is listed in SHADER-LICENSES.txt inside the package.",
+  "note": "GLSL user shaders the PushMPC IINA plugin bundles. IINA renders through OpenGL 4.1 (no compute shaders), so only fragment / textureGather shaders are listed; build.py refuses any file with //!COMPUTE. Each file is fetched from an immutable URL (a commit, a gist revision or a release asset) and checked against its git blob SHA-1 (gitBlobSha1, what GitHub's API reports for the file) or SHA-256. ArtCNN (MIT) is not listed here: build.py generates it as fragment passes from the ONNX weights pinned in vsplugin/models/artcnn.lock.json (upstream ships ArtCNN only as compute shaders). Licences: FSR (MIT, AMD FidelityFX port), RAVU (LGPL-3.0), FSRCNNX (GPL-3.0); all compatible with PushMPC's GPL-3.0. The licence text stays in each file's header and is listed in SHADER-LICENSES.txt inside the package.",
   "shaders": [
     {
       "name": "FSR.glsl",
@@ -50,7 +50,7 @@
   "presets": {
     "light":    { "live": ["FSR.glsl"],                 "anime": ["FSR.glsl"],             "what": "FSR 1 (EASU + RCAS): cheapest, base M1 / M2" },
     "balanced": { "live": ["ravu-lite-ar-r3.hook"],     "anime": ["ravu-lite-ar-r3.hook"], "what": "RAVU-Lite r3: base M3 and newer" },
-    "high":     { "live": ["FSRCNNX_x2_8-0-4-1.glsl"],  "anime": ["ravu-lite-ar-r4.hook"], "what": "FSRCNNX 8 (live action) / RAVU-Lite r4 (anime): Pro chips" },
-    "ultra":    { "live": ["FSRCNNX_x2_16-0-4-1.glsl"], "anime": ["ravu-lite-ar-r4.hook"], "what": "FSRCNNX 16 (live action) / RAVU-Lite r4 (anime): Max / Ultra chips, M4 Pro and newer Pro chips" }
+    "high":     { "live": ["FSRCNNX_x2_8-0-4-1.glsl"],  "anime": ["ArtCNN_C4F16_fragment.glsl"], "what": "FSRCNNX 8 (live action) / ArtCNN C4F16 as fragment passes (anime): Pro chips" },
+    "ultra":    { "live": ["FSRCNNX_x2_16-0-4-1.glsl"], "anime": ["ArtCNN_C4F32_fragment.glsl"], "what": "FSRCNNX 16 (live action) / ArtCNN C4F32 as fragment passes (anime): Max / Ultra chips, M4 Pro and newer Pro chips" }
   }
 }

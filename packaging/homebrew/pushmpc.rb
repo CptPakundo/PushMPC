@@ -19,8 +19,27 @@ class Pushmpc < Formula
   depends_on "cmake" => :build
   depends_on "pkgconf" => :build
   # Homebrew's mpv is built with VapourSynth (it depends on the vapoursynth formula)
+  depends_on "ffmpeg" # headers for the IINA bridge (mpv depends on it anyway)
   depends_on "mpv"
   depends_on "vapoursynth"
+
+  # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
+  resource "artcnn-c4f16-onnx" do
+    url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/ONNX/ArtCNN_C4F16.onnx"
+    sha256 "7a6436299b8c757dbb7084ac39a25c310db1941133e73d1ee3e74c8b3bddc1ca"
+  end
+  resource "artcnn-c4f32-onnx" do
+    url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/ONNX/ArtCNN_C4F32.onnx"
+    sha256 "b1a1130469a0538d4484fc3d6ca39854ef3906a3a01df8799997b6ed0408f6ea"
+  end
+  resource "artcnn-c4f16-glsl" do
+    url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/GLSL/ArtCNN_C4F16.glsl"
+    sha256 "03d0b3d31cb82c898a94a46663021a3e8f02c5a21d69c5cfdf0208de4bfd453e"
+  end
+  resource "artcnn-c4f32-glsl" do
+    url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/GLSL/ArtCNN_C4F32.glsl"
+    sha256 "f773bce6cf5fe7e5e5d599a695edd40df5cd7a20c3d08c4d164d07591d5bead3"
+  end
 
   # the Python that Homebrew's vapoursynth is built for (its plugin folder lives in that Python's site-packages)
   def vs_python
@@ -47,8 +66,12 @@ class Pushmpc < Formula
     ohai "VapourSynth headers: #{inc}"
 
     apple = OS.mac? ? "ON" : "OFF"
-    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", *std_cmake_args
+    # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers;
+    # it refuses to patch anything when IINA's FFmpeg majors differ from these
+    bridge = OS.mac? ? ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}"] : []
+    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", *bridge, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
+    system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
@@ -57,66 +80,148 @@ class Pushmpc < Formula
     plugin = Dir["vsplugin/bin/pushmpc_vs.*"].reject { |f| f.end_with?(".pdb") }.first
     (prefix/vs_site_packages/"vapoursynth/plugins").install plugin
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
+    libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
+    (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
+
+    # ArtCNN (MIT): the pinned ONNX files become the Metal engine's .pmnn weights (next to the plugin, where the
+    # apple backend looks first) and fragment-shader GLSL (OpenGL-only renderers); the upstream compute GLSL is used
+    # by the gpu-next / Vulkan profile below. vsplugin/models/artcnn.lock.json has the same pins.
+    py = Formula[vs_python].opt_bin/"python#{vs_python.delete_prefix("python@")}"
+    models = prefix/vs_site_packages/"vapoursynth/plugins/pushmpc-models"
+    models.mkpath
+    (pkgshare/"shaders").mkpath
+    %w[C4F16 C4F32].each do |m|
+      resource("artcnn-#{m.downcase}-onnx").stage do
+        system py, "-I", buildpath/"vsplugin/tools/artcnn_tool.py", "pmnn", "ArtCNN_#{m}.onnx", models/"ArtCNN_#{m}.pmnn"
+        system py, "-I", buildpath/"vsplugin/tools/artcnn_tool.py", "glsl", "ArtCNN_#{m}.onnx",
+               pkgshare/"shaders/ArtCNN_#{m}_fragment.glsl", "--name", "ArtCNN #{m}"
+      end
+      resource("artcnn-#{m.downcase}-glsl").stage { (pkgshare/"shaders").install "ArtCNN_#{m}.glsl" }
+    end
+    # the mpv profile: ArtCNN in mpv's own renderer (gpu-next; Vulkan for compute shaders: MoltenVK on macOS). It only
+    # runs when mpv upscales luma by more than 1.3x, so it never doubles our own super resolution.
+    api = OS.mac? ? "gpu-api=vulkan\ngpu-context=macvk\n" : ""
+    (pkgshare/"mpv").mkpath
+    (pkgshare/"mpv/pushmpc-artcnn.conf").write <<~CONF
+      # PushMPC: ArtCNN luma doubler in mpv's gpu-next renderer (included from the PushMPC block in mpv.conf)
+      [pushmpc-artcnn]
+      profile-desc=PushMPC: ArtCNN C4F16 luma doubler (gpu-next, Vulkan compute)
+      vo=gpu-next
+      #{api}glsl-shaders-append=#{opt_pkgshare}/shaders/ArtCNN_C4F16.glsl
+      [pushmpc-artcnn32]
+      profile-desc=PushMPC: ArtCNN C4F32 luma doubler (stronger GPUs)
+      vo=gpu-next
+      #{api}glsl-shaders-append=#{opt_pkgshare}/shaders/ArtCNN_C4F32.glsl
+      [default]
+      profile=pushmpc-artcnn
+    CONF
 
     # Homebrew's mpv (0.41+) dlopen()s the VSScript library (libvsscript.dylib) by leaf name, but Homebrew's
     # vapoursynth keeps it inside its virtualenv, and dyld's fallback search is only /usr/lib: mpv's vf=vapoursynth
-    # fails ("Failed to load VapourSynth VSScript library"). mpv honours VSSCRIPT_PATH, so pushmpc-setup sets it for
-    # the login session (launchctl setenv, which apps started from Finder, the Dock and new Terminal windows inherit)
-    # and at every login (a LaunchAgent), and takes both out again on uninstall.
+    # fails ("Failed to load VapourSynth VSScript library"). mpv honours VSSCRIPT_PATH, so a LuaJIT-FFI script in
+    # Homebrew mpv's global scripts folder (<prefix>/etc/mpv/scripts: mpv is built with --sysconfdir=<prefix>/etc and
+    # LuaJIT) sets it inside mpv itself. mpv runs every script's top level before it opens the first file (loadfile.c
+    # waits until all clients are initialised), and vf_vapoursynth reads the variable later, at filter init. No
+    # launchctl, no LaunchAgent, nothing for other apps. With --no-config / --load-scripts=no, set VSSCRIPT_PATH
+    # yourself.
     vs_real = formula_opt_prefix("vapoursynth").realpath
     # VapourSynth R7x+ names it libvsscript (mpv tries libvsscript first, then libvapoursynth-script)
     vsscript = Dir["#{vs_real}/**/lib{vsscript,vapoursynth-script}.{dylib,so}"].min_by(&:length)
     opoo "no VSScript library in vapoursynth: #{Dir["#{vs_real}/**/*.{dylib,so}"].join(", ")}" unless vsscript
     vsscript_opt = vsscript ? formula_opt_prefix("vapoursynth")/Pathname(vsscript).relative_path_from(vs_real) : ""
     ohai "VSScript library: #{vsscript_opt}"
+    (pkgshare/"mpv/pushmpc-vsscript.lua").write <<~LUA
+      -- PushMPC (Homebrew): tells mpv's vf=vapoursynth where Homebrew's VSScript library is. Inert when PushMPC or
+      -- VapourSynth is uninstalled, or when VSSCRIPT_PATH is already set.
+      local lib = "#{vsscript_opt}"
+      local marker = "#{opt_pkgshare}/pushmpc.vpy"
+      local function exists(p) local f = io.open(p, "rb"); if f then f:close(); return true end; return false end
+      if lib ~= "" and not os.getenv("VSSCRIPT_PATH") and exists(lib) and exists(marker) then
+        local ok, ffi = pcall(require, "ffi")
+        if ok then
+          ffi.cdef("int setenv(const char *name, const char *value, int overwrite);")
+          ffi.C.setenv("VSSCRIPT_PATH", lib, 0)
+          mp.msg.verbose("PushMPC: VSSCRIPT_PATH=" .. lib)
+        else
+          mp.msg.warn("PushMPC: mpv's Lua has no FFI (not LuaJIT); set VSSCRIPT_PATH=" .. lib .. " yourself")
+        end
+      end
+    LUA
     (bin/"pushmpc-setup").write <<~SH
       #!/bin/sh
-      # pushmpc-setup [install|uninstall|status] [mpv-integration.sh options]: PushMPC in ~/.config/mpv/mpv.conf, and
-      # (macOS) VSSCRIPT_PATH for the login session and every login, so Homebrew's mpv finds VapourSynth.
+      # pushmpc-setup [install|uninstall|status] [--no-artcnn] [mpv-integration.sh options]
+      #   install    PushMPC in ~/.config/mpv/mpv.conf (a managed block: the filter, plus the ArtCNN gpu-next profile
+      #              unless --no-artcnn), makes sure Homebrew mpv's global VSScript helper script is in place, and on
+      #              macOS 26 offers Apple's one-time super-resolution model download (pushmpc-apple model-download)
+      #   uninstall  takes the block out (mpv.conf comes back byte for byte) and removes the LaunchAgent of earlier
+      #              PushMPC test builds, if any
       action=${1:-install}
       [ $# -gt 0 ] && shift
-      vsscript="#{vsscript_opt}"
+      artcnn=1
+      n=$#
+      while [ "$n" -gt 0 ]; do
+        a=$1; shift; n=$((n - 1))
+        if [ "$a" = --no-artcnn ]; then artcnn=0; else set -- "$@" "$a"; fi
+      done
+      script_dir="#{HOMEBREW_PREFIX}/etc/mpv/scripts"
+      helper="#{opt_pkgshare}/mpv/pushmpc-vsscript.lua"
+      tool="#{opt_libexec}/pushmpc-apple"
       agent="$HOME/Library/LaunchAgents/com.pushmpc.vsscript.plist"
-      if [ "$(uname -s)" = Darwin ] && [ -n "$vsscript" ]; then
-        case $action in
-          install)
-            mkdir -p "$HOME/Library/LaunchAgents"
-            cat > "$agent" <<PLIST
-      <?xml version="1.0" encoding="UTF-8"?>
-      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-      <plist version="1.0"><dict>
-        <key>Label</key><string>com.pushmpc.vsscript</string>
-        <key>ProgramArguments</key><array><string>/bin/launchctl</string><string>setenv</string><string>VSSCRIPT_PATH</string><string>$vsscript</string></array>
-        <key>RunAtLoad</key><true/>
-      </dict></plist>
-      PLIST
-            if launchctl setenv VSSCRIPT_PATH "$vsscript" 2>/dev/null; then echo "VSSCRIPT_PATH=$vsscript (this session and every login)"
-            else echo "VSSCRIPT_PATH set from the next login (launchctl setenv failed here); now: export VSSCRIPT_PATH=$vsscript"; fi ;;
-          uninstall)
-            if [ -f "$agent" ]; then
-              rm -f "$agent"
-              [ "$(launchctl getenv VSSCRIPT_PATH 2>/dev/null)" = "$vsscript" ] && launchctl unsetenv VSSCRIPT_PATH 2>/dev/null
-              echo "VSSCRIPT_PATH: LaunchAgent removed"
-            fi ;;
-          status)
-            echo "VSSCRIPT_PATH: session '$(launchctl getenv VSSCRIPT_PATH 2>/dev/null)', LaunchAgent $([ -f "$agent" ] && echo present || echo absent)" ;;
-        esac
-      fi
+      case $action in
+        install)
+          if ! cmp -s "$helper" "$script_dir/pushmpc-vsscript.lua"; then
+            mkdir -p "$script_dir" && cp "$helper" "$script_dir/pushmpc-vsscript.lua" && echo "VSScript helper: $script_dir/pushmpc-vsscript.lua"
+          fi
+          if [ "$(uname -s)" = Darwin ] && [ -x "$tool" ]; then
+            case $("$tool" model-status 2>/dev/null) in
+              "download required"*)
+                if [ -t 0 ] && [ -z "${PUSHMPC_NO_PROMPT:-}" ]; then
+                  printf "VideoToolbox's editing-grade super resolution (1080p to 4K) needs Apple's one-time model download. Download now? [Y/n] "
+                  read -r ans
+                  case $ans in
+                    n*|N*) echo "skipped (Auto starts it in the background later; AppleSrModelDownload=never turns that off)" ;;
+                    *) "$tool" model-download 900 || true ;;
+                  esac
+                fi ;;
+            esac
+          fi
+          if [ "$artcnn" = 1 ]; then
+            exec /bin/sh "#{opt_libexec}/mpv-integration.sh" install --script "#{opt_pkgshare}/pushmpc.vpy" --extra "include=\\"#{opt_pkgshare}/mpv/pushmpc-artcnn.conf\\"" "$@"
+          fi ;;
+        uninstall)
+          if [ -f "$agent" ]; then
+            rm -f "$agent"
+            launchctl unsetenv VSSCRIPT_PATH 2>/dev/null
+            echo "removed the LaunchAgent of an earlier PushMPC test build"
+          fi ;;
+        status)
+          echo "VSScript helper: $([ -f "$script_dir/pushmpc-vsscript.lua" ] && echo "$script_dir/pushmpc-vsscript.lua" || echo absent)"
+          [ -x "$tool" ] && echo "editing-grade super-resolution model: $("$tool" model-status 2>/dev/null)" ;;
+      esac
       exec /bin/sh "#{opt_libexec}/mpv-integration.sh" "$action" --script "#{opt_pkgshare}/pushmpc.vpy" "$@"
     SH
+  end
+
+  def post_install
+    # the global helper (see install). A file in etc survives upgrades; it is inert once PushMPC is uninstalled.
+    (etc/"mpv/scripts").mkpath
+    cp pkgshare/"mpv/pushmpc-vsscript.lua", etc/"mpv/scripts/pushmpc-vsscript.lua"
   end
 
   def caveats
     <<~EOS
       To use PushMPC in mpv (and in IINA with "Use config directory" and a VapourSynth-enabled libmpv), run:
         pushmpc-setup install
-      It also sets VSSCRIPT_PATH (this login session and a LaunchAgent for later logins): Homebrew's mpv
-      cannot find VapourSynth's VSScript library on its own. Terminals already open need:
-        export VSSCRIPT_PATH="$(launchctl getenv VSSCRIPT_PATH)"
+      Homebrew's mpv finds VapourSynth through a small global mpv script (#{HOMEBREW_PREFIX}/etc/mpv/scripts/
+      pushmpc-vsscript.lua; it does nothing once PushMPC is uninstalled). mpv started with --no-config or
+      --load-scripts=no needs VSSCRIPT_PATH set by hand.
+      pushmpc-setup also adds the ArtCNN gpu-next profile (Vulkan; --no-artcnn leaves it out) and, on macOS 26,
+      offers Apple's one-time download of VideoToolbox's editing-grade super-resolution model.
       Before `brew uninstall pushmpc`, run `pushmpc-setup uninstall` (your mpv.conf comes back byte for byte).
       Settings: ~/.config/pushmpc/settings.ini (Smoother=auto|off|2..8, Backend=auto|apple|portable,
-      AppleSuperResolution=auto|off|2|4). Logs: ~/Library/Logs/PushMPC.
+      AppleSuperResolution=auto|off|2|4|editing|artcnn|lowlatency, Content=live|anime, AppleTenBit=auto|off,
+      AppleSrModelDownload=auto|never). Logs: ~/Library/Logs/PushMPC.
       For IINA's own player, see the PushMPC IINA plugin (integrations/iina in the repository).
     EOS
   end
@@ -133,5 +238,8 @@ class Pushmpc < Formula
     assert_match(/Frames:\s+48/, info)
     assert_match(%r{FPS:\s+48000/1001}, info)
     assert_match "share/pushmpc/pushmpc.vpy", shell_output("#{bin}/pushmpc-setup status --conf #{testpath}/mpv.conf")
+    assert_path_exists prefix/vs_site_packages/"vapoursynth/plugins/pushmpc-models/ArtCNN_C4F16.pmnn"
+    refute_match "//!COMPUTE", (pkgshare/"shaders/ArtCNN_C4F16_fragment.glsl").read
+    assert_match "ffi.C.setenv", (pkgshare/"mpv/pushmpc-vsscript.lua").read
   end
 end

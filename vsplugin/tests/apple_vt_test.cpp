@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include "apple_engine.h"
+#include "apple_metal.h"
 
 using namespace pmvs::apple;
 
@@ -63,7 +64,7 @@ static double Centroid(const Pic& p)
     return n > 0 ? sx / n : -1;
 }
 
-static void Run(const char* name, int w, int h, int bits, int k, const char* sr, const char* fi)
+static void Run(const char* name, int w, int h, int bits, int k, const char* sr, const char* fi, bool vt = true)
 {
     std::printf("--- %s: %dx%d %d-bit, x%d, sr=%s, fi=%s\n", name, w, h, bits, k, sr, fi);
     Engine e;
@@ -149,6 +150,11 @@ int main()
     if (c.lowLatencySR) {
         Run("SR x2 only", 640, 360, 8, 1, "2", "auto");
         if (c.AnyInterpolation()) Run("FI x2 + SR x2", 640, 360, 8, 2, "2", "auto");
+    }
+    // ArtCNN on Metal (no VideoToolbox: runs in a VM too) when the weights are found (PUSHMPC_MODELS)
+    if (!FindModel("ArtCNN_C4F16").empty()) {
+        Run("ArtCNN x2 only (Metal)", 640, 360, 8, 1, "artcnn16", "auto", false);
+        Run("ArtCNN x2, 10-bit (Metal)", 640, 360, 10, 1, "artcnn16", "auto", false);
     }
     // a VM may list the effects and fail their self-test: then every chain is unavailable and the plugin falls back
     std::printf("APPLE_VT_RESULT=%s\n", g_fail ? "failed" : g_configured ? "ok" : "unavailable");

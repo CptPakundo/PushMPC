@@ -2,9 +2,11 @@
 // (engines/apple) behind the same Pipeline as the other backends (schedule.h). Output: the source's format (YUV 4:2:0,
 // same bits, same colour) at k x the rate, at 2x (or 4x) the size with super resolution. Real frames without super
 // resolution are copied unchanged. When this Mac cannot run the configuration, the portable backend takes over.
-// Settings: platform.h (~/.config/pushmpc/settings.ini: Smoother, AppleSuperResolution, AppleInterpolation), then the
-// plugin arguments (smoother, apple_sr, apple_fi).
+// Settings: platform.h (~/.config/pushmpc/settings.ini: Smoother, AppleSuperResolution = auto|off|2|4|editing|artcnn|
+// artcnn32|artcnn16|lowlatency, AppleInterpolation, Content = live|anime (Auto's upscaler order), AppleSrModelDownload =
+// auto|never, AppleTenBit = auto|off), then the plugin arguments (smoother, apple_sr, apple_fi).
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -254,6 +256,13 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
     apple::Config c;
     c.width = vi->width; c.height = vi->height; c.bits = vi->format.bitsPerSample; c.k = ak.k; c.sr = sr; c.fi = fi; c.srcFps = srcFps;
     c.colour.fullRange = false;
+    {
+        std::string content = ReadSetting("Content");
+        for (auto& ch : content) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        c.anime = content == "anime";
+        if (const std::string md = ReadSetting("AppleSrModelDownload"); !md.empty()) c.modelDownload = md;
+        if (const std::string tb = ReadSetting("AppleTenBit"); !tb.empty()) c.tenBit = tb;
+    }
     d->be.engine.log = [](const std::string& m) { Log(m); };
     std::string err, info;
     if (!d->be.engine.Configure(c, err, info)) {

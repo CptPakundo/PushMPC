@@ -3,7 +3,9 @@
 # macOS and takes it out again exactly. The POSIX counterpart of mpv-integration.ps1 (same block, same backups).
 #
 #   mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered 4]
-#                      [--concurrent 2] [--dry-run]
+#                      [--concurrent 2] [--extra <mpv.conf line>]... [--dry-run]
+#   --extra adds a line inside the managed block (global options only, e.g. include="<file>"; the Homebrew formula's
+#   pushmpc-setup adds the ArtCNN gpu-next profile this way). Uninstall removes it with the block.
 #
 # What it changes (install), with a backup and an exact restore (uninstall):
 #   ${XDG_CONFIG_HOME:-~/.config}/mpv/mpv.conf (mpv on Linux and macOS; Celluloid and IINA can read the same file, see
@@ -34,13 +36,15 @@ END_MARK='# <<< PushMPC managed'
 
 action=${1:-}
 [ $# -gt 0 ] && shift
-script=''; conf=''; buffered=4; concurrent=2; dry=0
+script=''; conf=''; buffered=4; concurrent=2; dry=0; extra=''
 while [ $# -gt 0 ]; do
     case $1 in
         --script) script=$2; shift 2 ;;
         --conf) conf=$2; shift 2 ;;
         --buffered) buffered=$2; shift 2 ;;
         --concurrent) concurrent=$2; shift 2 ;;
+        --extra) extra="$extra$2
+"; shift 2 ;;
         --dry-run) dry=1; shift ;;
         *) echo "mpv-integration.sh: unknown option $1" >&2; exit 2 ;;
     esac
@@ -80,6 +84,9 @@ block() {
     printf '%s%s' "$BEGIN_MARK" "$nl"
     printf 'vf-append=%s%s' "$(vf_option)" "$nl"
     printf 'hwdec=auto-copy%shr-seek-framedrop=no%sinterpolation=no%s' "$nl" "$nl" "$nl"
+    if [ -n "$extra" ]; then
+        printf '%s' "$extra" | while IFS= read -r x; do [ -n "$x" ] && printf '%s%s' "$x" "$nl"; done
+    fi
     printf '%s%s' "$END_MARK" "$nl"
 }
 line_ending() { if [ -f "$1" ] && [ "$(tr -dc '\r' < "$1" | wc -c | tr -d ' ')" != 0 ]; then echo crlf; else echo lf; fi; }
@@ -223,5 +230,5 @@ case $action in
     install) install_conf; players ;;
     uninstall) uninstall_conf ;;
     status) status ;;
-    *) echo "usage: mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered N] [--concurrent N] [--dry-run]" >&2; exit 2 ;;
+    *) echo "usage: mpv-integration.sh install|uninstall|status [--script <pushmpc.vpy>] [--conf <mpv.conf>] [--buffered N] [--concurrent N] [--extra LINE]... [--dry-run]" >&2; exit 2 ;;
 esac

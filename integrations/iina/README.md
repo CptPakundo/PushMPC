@@ -1,15 +1,29 @@
 # PushMPC for IINA
 
-IINA plays video through its own copy of libmpv, and that copy is built without VapourSynth. So IINA cannot load the
-PushMPC filter (`pushmpc.Enhance`), and it has no frame generation. This plugin gives IINA the best picture it can
-manage without a different libmpv:
+IINA plays video through its own copy of libmpv, and that copy is built without VapourSynth, so IINA cannot load the
+PushMPC filter (`pushmpc.Enhance`). Two tiers:
+
+- **Frame generation and super resolution inside IINA (the bridge).** `brew install pushmpc` also installs
+  `pushmpc-iina.so`, an mpv C plugin. IINA 1.5.1's libmpv has C plugins enabled and IINA's entitlements turn library
+  validation off, so the plugin loads it with `load-script`. It patches libmpv's imports of a few public libavfilter
+  functions (`av_buffersrc_add_frame`, `av_buffersink_get_frame_flags`, ...) so that one marked no-op filter,
+  `vf=@pushmpc:lavfi=[null@pushmpc]`, runs PushMPC's apple engine: VideoToolbox interpolation and super resolution, or
+  ArtCNN on Metal, zero copy on IINA's VideoToolbox frames. IINA.app is not modified (no re-signing, IINA's updates
+  keep working). When the bridge cannot run (IINA's FFmpeg major changed, an arm64e build, no Homebrew package), the
+  filter passes frames through unchanged and the shader tier below applies. Log: `~/Library/Logs/PushMPC/iina-bridge.log`.
+  Status: built and smoke-tested in CI inside IINA's own libmpv on a VM (portable engine); the VideoToolbox path
+  needs a real Mac (see the internal test plan).
+- **Shaders only**, when the bridge is off or missing:
 
 - **Upscaling shaders, picked for your chip.** IINA renders through OpenGL 4.1, so only fragment and textureGather
   shaders work, not compute shaders.
   - Light: FSR 1. Default on base M1 and M2.
   - Balanced: RAVU-Lite r3. Default on base M3 and newer.
-  - High: FSRCNNX 8, or RAVU-Lite r4 for anime. Default on Pro chips.
-  - Ultra: FSRCNNX 16, or RAVU-Lite r4 for anime. Default on Max, Ultra, and M4 or newer Pro chips.
+  - High: FSRCNNX 8, or ArtCNN C4F16 for anime. Default on Pro chips.
+  - Ultra: FSRCNNX 16, or ArtCNN C4F32 for anime. Default on Max, Ultra, and M4 or newer Pro chips.
+
+  ArtCNN (MIT) ships upstream only as compute shaders. `build.py` generates fragment-pass versions from the pinned
+  ONNX weights (`vsplugin/tools/artcnn_tool.py`), so they run on IINA's OpenGL 4.1.
 
   A shader runs only when the video is drawn larger than its own size.
 - **Smooth motion:** `video-sync=display-resample`, `interpolation` and `tscale=oversample`. Each frame stays on screen
@@ -47,13 +61,8 @@ CI runs both (`.github/workflows/apple.yml`, job `iina`).
 Shader licences: FSR port MIT, RAVU LGPL-3.0, FSRCNNX GPL-3.0. All are compatible with PushMPC's GPL-3.0. Each file
 keeps its own header, and the package lists them in `SHADER-LICENSES.txt`.
 
-## Later: IINA with a VapourSynth-enabled libmpv (not implemented)
+## Not pursued: swapping IINA's libmpv
 
-Swapping IINA's `IINA.app/Contents/Frameworks/libmpv.2.dylib` for Homebrew's (which has VapourSynth) is SVP's route.
-It would let IINA run the full PushMPC filter, including the VideoToolbox backend. It has costs:
-- it breaks IINA's code signature, which then needs an ad-hoc re-sign;
-- the ABI can drift with every IINA update;
-- IINA's updater overwrites the swap.
-
-A cleaner fix would be upstream: IINA's `deps-buildscripts` building mpv with `-Dvapoursynth=enabled`, linked weakly.
-Both routes are listed in the internal plan as later work.
+Swapping `IINA.app/Contents/Frameworks/libmpv.2.dylib` for a VapourSynth-enabled one (SVP's route) breaks IINA's code
+signature, drifts with every IINA update and is undone by IINA's updater. The bridge above reaches the same engine
+without touching the bundle.

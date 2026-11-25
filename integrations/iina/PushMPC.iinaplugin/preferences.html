@@ -17,8 +17,8 @@
       <option value="off">Off</option>
       <option value="light">Light: FSR 1</option>
       <option value="balanced">Balanced: RAVU-Lite r3</option>
-      <option value="high">High: FSRCNNX 8 / RAVU-Lite r4 (anime)</option>
-      <option value="ultra">Ultra: FSRCNNX 16 / RAVU-Lite r4 (anime)</option>
+      <option value="high">High: FSRCNNX 8 / ArtCNN C4F16 (anime)</option>
+      <option value="ultra">Ultra: FSRCNNX 16 / ArtCNN C4F32 (anime)</option>
     </select>
     <p class="help">Auto: base M1/M2 Light, base M3 and newer Balanced, Pro High, Max/Ultra and M4-or-newer Pro Ultra. Shaders run only when the video is drawn larger than its own size.</p>
   </div>
@@ -28,6 +28,10 @@
       <option value="live">Live action</option>
       <option value="anime">Anime</option>
     </select>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" data-pref-key="framegen" data-type="bool"> Frame generation and super resolution (PushMPC engine inside IINA)</label>
+    <p class="help">Needs PushMPC from Homebrew (brew install pushmpc), which installs the pushmpc-iina bridge: Apple's VideoToolbox interpolation and super resolution (or ArtCNN on Metal) run inside IINA's own player, without changing IINA.app. Off, or when the bridge is not installed: the shader and smooth-motion settings below apply.</p>
   </div>
   <div class="row">
     <label><input type="checkbox" data-pref-key="motion" data-type="bool"> Smooth motion (video-sync=display-resample + interpolation)</label>

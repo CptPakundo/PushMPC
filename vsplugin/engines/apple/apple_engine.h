@@ -10,9 +10,16 @@
 //                   phases rounded to it (apple_convert.h MakePlan). Each candidate must pass its self-test.
 //   self-test       Configure runs each effect once on synthetic frames: a Mac (or VM) that lists an effect but cannot
 //                   run it makes Configure fail, and the plugin falls back to the portable backend.
-//   super res.      VTLowLatencySuperResolutionScaler (macOS 26+), factor 2 (or 4 when asked), applied to every output
-//                   frame after interpolation (interpolating at the source size is cheaper, and the low-latency
-//                   interpolator's size limit is the tighter one).
+//   super res.      applied to every output frame after interpolation, in presentation order. Candidates, best first
+//                   (apple_convert.h DecideSrOrder; each must pass a self-test and a real-time benchmark in Configure):
+//                   VTSuperResolutionScaler (macOS 26, editing grade, temporal, up to 1920x1080 video; it takes the
+//                   pair's VTOpticalFlow, computed once per pair and shared with frame-rate conversion and the 10-bit
+//                   recovery; one-time model download through Apple's API, started in the background), ArtCNN C4F32 /
+//                   C4F16 on Metal (apple_metal.h; first for anime), VTLowLatencySuperResolutionScaler (x2 / x4,
+//                   small sizes).
+//   10-bit          when the low-latency interpolator lists only 8-bit formats and the source has more bits, the
+//                   generated frames get their 2 lost bits back on Metal (apple_nn.h RecoverTenBitPlane), in the same
+//                   command buffer as the VideoToolbox call. Frame-rate conversion (half float) stays the exact path.
 //   cuts            our thumbnail guard (apple_convert.h): a cut pair is never interpolated.
 //   real time       apple_convert.h Ladder: steps down (super resolution -> plain VTPixelTransfer scale, then fewer
 //                   phases, then none) when a pair keeps taking longer than the source frame interval.
@@ -36,7 +43,10 @@ struct Caps {
     bool lowLatencyFI = false;     // VTLowLatencyFrameInterpolationConfiguration.isSupported (macOS 26+)
     bool lowLatencySR = false;     // VTLowLatencySuperResolutionScalerConfiguration.isSupported (macOS 26+)
     bool frc = false;              // VTFrameRateConversionConfiguration.isSupported (macOS 15.4+)
-    bool superResolution = false;  // VTSuperResolutionScalerConfiguration.isSupported (macOS 26+; editing grade, not used yet)
+    bool superResolution = false;  // VTSuperResolutionScalerConfiguration.isSupported (macOS 26+; editing grade)
+    bool opticalFlow = false;      // VTOpticalFlowConfiguration.isSupported (macOS 15.4+)
+    bool commandBuffer = false;    // VTFrameProcessor processWithCommandBuffer:parameters: exists
+    std::string metal;             // the Metal device ("" = none)
     bool sizeQueries = false;      // maximumDimensionForSpatialScaleFactor: exists (macOS 27+)
     std::string os, chip, sdk;     // "macOS 26.1 (25B78)", "Apple M4 Pro", the SDK the build used
     std::string detail;            // one line per item, for logs and the CI probe
@@ -56,8 +66,20 @@ struct Config {
     std::string fi = "auto";       // interpolator: auto (low latency, else FRC) | lowlatency | frc
     double srcFps = 23.976;
     Colour colour;                 // a guess until the first frame says otherwise
+    bool anime = false;            // content hint for Auto's upscaler order (ArtCNN first for anime)
+    std::string modelDownload = "auto";   // the editing-grade super-resolution model: auto (background download) | never
+    std::string tenBit = "auto";   // 10-bit recovery for an 8-bit-only interpolator: auto | off
 };
-struct Stats { uint64_t pairs = 0, cuts = 0, generated = 0, vtCalls = 0, vtErrors = 0, fiErrors = 0, srErrors = 0; double pairMs = 0; int ladder = 0; };
+struct Stats {
+    uint64_t pairs = 0, cuts = 0, generated = 0, vtCalls = 0, vtErrors = 0, fiErrors = 0, srErrors = 0, flowCalls = 0, flowErrors = 0, recovered = 0;
+    double pairMs = 0; int ladder = 0;
+    double benchFiMs = 0, benchSrMs = 0, benchFlowMs = 0;   // Configure's measurements (per call)
+};
+// the editing-grade super-resolution model (Apple's one-time download). status: -1 not available here, 0 download
+// required, 1 downloading, 2 ready. Download: starts it (asynchronous) and returns at once; wait > 0 waits up to that
+// many seconds, printing progress through log.
+int SrModelStatus(int width = 1920, int height = 1080, float* percent = nullptr);
+bool SrModelDownload(double waitSeconds, const std::function<void(const std::string&)>& log, std::string& err);
 
 class Engine {
 public:
@@ -76,13 +98,16 @@ public:
     // pts: the source frame's time in 100 ns units (only has to increase)
     bool Process(const PlanarView& v, const Colour& colour, int64_t pts, bool contiguous, const std::vector<PlanarOut>& gen, const PlanarOut& cur,
                  bool& havePair, std::string& err);
+    // the same on CVPixelBuffers (the IINA bridge: VideoToolbox-decoded frames, zero copy when the format matches).
+    // gen / cur receive retained buffers (CVPixelBufferRelease them); cur is the input itself when nothing changes it
+    bool ProcessBuffer(void* pixelBuffer, const Colour& colour, int64_t pts, bool contiguous, std::vector<void*>& gen, void*& cur, bool& havePair, std::string& err);
     void Forget();                 // a seek
     bool LastPairWasCut() const;
     const Stats& Stat() const;
     std::string Describe() const;  // the active chain, the ladder level
     std::function<void(const std::string&)> log;   // ladder steps, VideoToolbox errors (optional)
+    struct Impl;                   // (public only so the implementation's helpers can name it)
 private:
-    struct Impl;
     std::unique_ptr<Impl> m;
 };
 

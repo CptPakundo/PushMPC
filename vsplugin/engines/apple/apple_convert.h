@@ -281,6 +281,93 @@ inline SrChoice DecideSr(std::string mode, int w, int h, const std::vector<float
     return r;
 }
 
+// ------------------------------------------------------------------------------------------------ super-resolution order
+// The upscalers the apple backend can run, best first (second-opinion-apple.md section 1):
+//   Editing     VTSuperResolutionScaler (macOS 26; editing grade, temporal, takes the pair's optical flow; video up to
+//               1920x1080 on macOS; needs a one-time model download through Apple's API)
+//   ArtCnn32/16 ArtCNN C4F32 / C4F16 on Metal (MIT weights, tools/artcnn_tool.py; trained on anime / art)
+//   LowLatency  VTLowLatencySuperResolutionScaler (macOS 26; a video-conferencing model; small sizes only)
+// Auto: live action Editing > ArtCNN 32 > ArtCNN 16 > LowLatency; anime ArtCNN 32 > ArtCNN 16 > Editing > LowLatency.
+// Each candidate must also pass its self-test and keep real time (Configure benchmarks it); the first that does wins.
+enum class SrKind { None, Editing, ArtCnn32, ArtCnn16, LowLatency };
+inline const char* SrKindName(SrKind k)
+{
+    switch (k) {
+    case SrKind::Editing: return "VideoToolbox super resolution (editing grade)";
+    case SrKind::ArtCnn32: return "ArtCNN C4F32 on Metal";
+    case SrKind::ArtCnn16: return "ArtCNN C4F16 on Metal";
+    case SrKind::LowLatency: return "VideoToolbox low-latency super resolution";
+    default: return "none";
+    }
+}
+struct SrCandidate { SrKind kind = SrKind::None; int factor = 0; };
+struct SrInputs {
+    std::string mode = "auto";       // auto | off | 2 | 4 | editing | artcnn | artcnn32 | artcnn16 | lowlatency
+    int w = 0, h = 0;
+    bool anime = false;
+    bool editing = false;            // VTSuperResolutionScalerConfiguration.isSupported
+    std::vector<float> editingFactors;
+    int editingModel = 2;            // 0 download required, 1 downloading, 2 ready
+    bool artcnn32 = false, artcnn16 = false;   // Metal device + weights found
+    std::vector<float> llFactors;    // what the low-latency scaler offers for this size
+    int llMaxDim2 = 0, llMaxDim4 = 0;
+};
+struct SrOrderResult { std::vector<SrCandidate> order; std::string why; bool wantModelDownload = false; };
+inline SrOrderResult DecideSrOrder(const SrInputs& in)
+{
+    SrOrderResult r;
+    std::string mode = in.mode;
+    for (auto& c : mode) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (!mode.empty() && mode[0] == 'x') mode = mode.substr(1);
+    if (mode.empty()) mode = "auto";
+    char b[240];
+    if (mode == "off" || mode == "0" || mode == "1" || mode == "false") { r.why = "super resolution off (your setting)"; return r; }
+    auto has = [](const std::vector<float>& v, float f) { return std::find(v.begin(), v.end(), f) != v.end(); };
+    const bool fitsEditing = in.w <= 1920 && in.h <= 1080;
+    const bool editingOk = in.editing && fitsEditing && (in.editingFactors.empty() || has(in.editingFactors, 2.0f));
+    auto llFits = [&](int f) { const int m = f == 4 ? in.llMaxDim4 : in.llMaxDim2; return has(in.llFactors, float(f)) && (m <= 0 || std::max(in.w, in.h) <= m); };
+    auto addEditing = [&](int f) {
+        if (!in.editing || !fitsEditing || (!in.editingFactors.empty() && !has(in.editingFactors, float(f)))) return;
+        if (in.editingModel != 2) { r.wantModelDownload = in.editingModel == 0; return; }
+        r.order.push_back({ SrKind::Editing, f });
+    };
+    auto addArt = [&] { if (in.artcnn32) r.order.push_back({ SrKind::ArtCnn32, 2 }); if (in.artcnn16) r.order.push_back({ SrKind::ArtCnn16, 2 }); };
+    auto addLl = [&](int f) { if (llFits(f)) r.order.push_back({ SrKind::LowLatency, f }); };
+    if (mode == "editing") { addEditing(2); r.why = "super resolution: editing grade (your setting)"; }
+    else if (mode == "artcnn") { addArt(); r.why = "super resolution: ArtCNN (your setting)"; }
+    else if (mode == "artcnn32") { if (in.artcnn32) r.order.push_back({ SrKind::ArtCnn32, 2 }); r.why = "super resolution: ArtCNN C4F32 (your setting)"; }
+    else if (mode == "artcnn16") { if (in.artcnn16) r.order.push_back({ SrKind::ArtCnn16, 2 }); r.why = "super resolution: ArtCNN C4F16 (your setting)"; }
+    else if (mode == "lowlatency") { addLl(2); r.why = "super resolution: low latency (your setting)"; }
+    else if (mode == "4") { addEditing(4); addLl(4); r.why = "super resolution x4 (your setting)"; }
+    else if (mode == "2" || mode == "auto") {
+        if (mode == "auto" && (in.w > 1920 || in.h > 1088)) { snprintf(b, sizeof(b), "Auto: %dx%d is above 1080p: no super resolution", in.w, in.h); r.why = b; return r; }
+        if (in.anime) { addArt(); addEditing(2); }
+        else { addEditing(2); addArt(); }
+        addLl(2);
+        snprintf(b, sizeof(b), "%s: %s content, %dx%d", mode == "auto" ? "Auto" : "x2 (your setting)", in.anime ? "anime" : "live-action", in.w, in.h);
+        r.why = b;
+    } else { r.why = "super resolution: unknown setting '" + in.mode + "': off"; return r; }
+    if (r.wantModelDownload) r.why += "; the editing-grade model is not downloaded yet (it downloads in the background; used from the next video)";
+    else if (in.editing && fitsEditing && in.editingModel == 1) r.why += "; the editing-grade model is downloading";
+    if (r.order.empty()) r.why += ": nothing offered here: off";
+    else {
+        r.why += ": try";
+        for (auto& c : r.order) { snprintf(b, sizeof(b), " %s x%d,", SrKindName(c.kind), c.factor); r.why += b; }
+        r.why.pop_back();
+    }
+    (void)editingOk;
+    return r;
+}
+// Configure's real-time check: per source frame the chain runs one interpolation call (fiMs, for all phases), the
+// optical flow (flowMs) and k super-resolution calls (srMs each); it must fit Ladder's share of the frame interval
+inline bool FitsRealTime(double srMs, double fiMs, double flowMs, int k, double srcFps, double* costOut = nullptr)
+{
+    const double budget = 1000.0 / (srcFps > 0 ? srcFps : 23.976) * 0.85;
+    const double cost = srMs * double(std::max(1, k)) + fiMs + flowMs;
+    if (costOut) *costOut = cost;
+    return cost <= budget;
+}
+
 // ------------------------------------------------------------------------------------------------ step-down ladder
 // Each pair's processing time against the source frame interval. After kOverRun pairs in a row over budget it steps
 // down once: 0 full -> 1 super resolution replaced by a plain scale (if it was on) -> 2 one interpolated phase (0.5;

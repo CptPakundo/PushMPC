@@ -46,3 +46,5 @@ scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
 packaging/homebrew/**
 integrations/iina/**
+vsplugin/tools/**
+vsplugin/models/**
