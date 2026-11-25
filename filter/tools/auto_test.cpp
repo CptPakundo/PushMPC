@@ -1,6 +1,7 @@
 // Headless check of the Auto rules (no GPU): prints the decision for a few sources, displays and GPU families.
 #include "../src/PushMpcAuto.h"
 #include "../src/PushMpcExtras.h"
+#include "../../pushmpc/include/pushmpc/unlocks.h"
 #include <cstdio>
 #include <random>
 using namespace pm;
@@ -27,6 +28,7 @@ static Gpu Family(uint32_t f, const wchar_t* name)
     for (auto& r : g.reason) r = L"not on this GPU";
     return g;
 }
+static uint32_t CoreFgFor(FgMethod m) { return uint32_t(int(m) - 1); }   // the filter's / vsplugin's mapping onto PUSHCORE_FG_*
 int main()
 {
     Display d4k{ L"4K 240", 239.96, 3840, 2160, false };
@@ -170,6 +172,89 @@ int main()
                         wcscmp(HostWindowClass(Host::MpcBe), L"MPC-BE") == 0 && wcscmp(HostWindowClass(Host::MpcHc), L"MediaPlayerClassicW") == 0 &&
                         HostCanReopen(Host::MpcBe) && !HostCanReopen(Host::PotPlayer) && HostWindowClass(Host::Other) == nullptr;
         wprintf(L"\n[host player] mpc-hc64 / MPC-BE64 / PotPlayerMini64 / other, window classes, reopen  [%ls]; this process: %ls\n", ok ? L"PASS" : L"FAIL", HostName());
+    }
+    // ---- T5b vendor paths: weak-GPU cold start, the measured card factor, the unlock gates
+    wprintf(L"\n[vendor paths] T5b\n");
+    {
+        int fails = 0;
+        auto check = [&](bool ok, const wchar_t* what, const std::wstring& detail = L"") { wprintf(L"  %-74ls [%ls]%ls%ls\n", what, ok ? L"PASS" : L"FAIL", detail.empty() ? L"" : L"  ", detail.c_str()); fails += ok ? 0 : 1; };
+        const Source film{ 1920, 1080, 23.976, false, 0.5 };
+        // weak GPUs: FSR FG on the cold start, then the speed test decides
+        check(IsWeakGpu(kGtx, L"GTX 1060") && IsWeakGpu(kRdna1, L"RX 5700") && IsWeakGpu(kIntel, L"Intel(R) Iris(R) Xe Graphics") && IsWeakGpu(kOtherGpu, L"Qualcomm(R) Adreno(TM) X1-85 GPU")
+              && !IsWeakGpu(kIntel, L"Intel(R) Arc(TM) B580 Graphics") && !IsWeakGpu(kRdna3, L"RX 7600") && !IsWeakGpu(kRtx20, L"RTX 2060"), L"IsWeakGpu: GTX, RX 5000, Xe iGPU, Adreno weak; Arc, RX 7000, RTX not");
+        Costs cold; cold.card = 6.0;
+        const Choice c0 = Decide({}, film, d60, cold, Family(kGtx, L"GTX 1060"));
+        check(c0.fgMethod == FgMethod::Fsr && c0.multiplier == 2 && c0.stoppedAt.find(L"cold start") != std::wstring::npos, L"GTX 1060 cold start, 60 Hz: FSR FG 2x (said so)", c0.smootherNote);
+        Costs fastPf = cold; fastPf.pfBenched = true; fastPf.pfFirst[0] = 9; fastPf.pfFirst[1] = 12; fastPf.pfFirst[2] = 25; fastPf.pfNext[0] = 7; fastPf.pfNext[1] = 9; fastPf.pfNext[2] = 22;
+        ApplyMeasuredCard(fastPf);
+        const Choice c1 = Decide({}, film, d60, fastPf, Family(kGtx, L"GTX 1660 SUPER"));
+        check(c1.fgMethod == FgMethod::PushFlow && c1.multiplier >= 2 && fastPf.cardMeasured, L"benched, PushFlow fits: PushFlow wins (measured card factor)", std::format(L"{} card {:.2f}", c1.smootherNote, fastPf.card));
+        Costs slowPf = cold; slowPf.pfBenched = true; for (int t = 0; t < 3; ++t) { slowPf.pfFirst[t] = 60 + 20 * t; slowPf.pfNext[t] = 50 + 20 * t; }
+        ApplyMeasuredCard(slowPf);
+        const Choice c2 = Decide({}, film, d60, slowPf, Family(kGtx, L"GTX 1050 Ti"));
+        check(c2.fgMethod == FgMethod::Fsr && c2.multiplier == 2, L"benched, PushFlow too slow: FSR FG 2x (by the benchmark)", c2.smootherNote + L" | " + c2.stoppedAt);
+        const Choice c3 = Decide({}, film, d60, cold, Family(kIntel, L"Intel(R) Arc(TM) A770 Graphics"));
+        check(c3.fgMethod == FgMethod::PushFlow, L"Arc (not weak): PushFlow first on the priors as before", c3.smootherNote);
+        Settings forced; forced.fgMethod = FgMethod::PushFlow;
+        const Choice c4 = Decide(forced, film, d60, cold, Family(kGtx, L"GTX 1060"));
+        check(c4.fgMethod == FgMethod::PushFlow || c4.multiplier < 2, L"the user's method wins over the cold-start order", c4.smootherNote);
+        Costs named; named.card = CardFactor(L"RX 7600", kRdna3);
+        check(!named.cardMeasured && std::fabs(named.card - 6.0) < 1e-9 && !ApplyMeasuredCard(named), L"no speed test yet: the name table stays (RX 7600 = 6.0)");
+        // RTX VSR on GTX 16 through the unlock: Auto picks it when the capability is available, with the GTX VSR prior
+        Gpu g16 = Family(kGtx, L"GTX 1660 Ti"); g16.available |= 1u << kCapRtxVsr;
+        const Choice c5 = Decide({}, film, d144, cold, g16);
+        check(c5.srMethod == Upscaler::Rtx && c5.sr, L"GTX 16 with the Gtx16Vsr capability: RTX VSR", c5.sharperNote);
+        // unlock decisions (pure)
+        using namespace pmu;
+        SelfTest none, pass, fail; pass.known = fail.known = true; pass.passed = true; fail.reason = L"output black";
+        auto d1 = DecideUnlock(Unlock::Gtx16Vsr, UnlockMode::Auto, true, L"", none);
+        check(!d1.on && d1.runSelfTest, L"Auto, eligible, no result: off, run the self-test", d1.why);
+        auto d2 = DecideUnlock(Unlock::Gtx16Vsr, UnlockMode::Auto, true, L"", pass);
+        check(d2.on && !d2.runSelfTest, L"Auto, self-test passed: on", d2.why);
+        auto d3 = DecideUnlock(Unlock::Gtx16Vsr, UnlockMode::Auto, true, L"", fail);
+        check(!d3.on && d3.why.find(L"output black") != std::wstring::npos, L"Auto, self-test failed: off, with the reason", d3.why);
+        auto d4 = DecideUnlock(Unlock::Gtx16Vsr, UnlockMode::Off, true, L"", pass, false, L"PUSHMPC_DISABLE_GTX16VSR=1");
+        check(!d4.on && d4.why.find(L"PUSHMPC_DISABLE_GTX16VSR") != std::wstring::npos, L"off switch beats a passed self-test", d4.why);
+        auto d5 = DecideUnlock(Unlock::Gtx16Vsr, UnlockMode::On, true, L"", fail);
+        check(d5.on && d5.why.find(L"FAILED") != std::wstring::npos, L"forced on (tester) even after a failed self-test, and said so", d5.why);
+        auto d6 = DecideUnlock(Unlock::ZludaVsr, UnlockMode::Auto, false, L"needs an RX 7000 or RX 9000", pass);
+        check(!d6.on && !d6.runSelfTest, L"not eligible: never on, no self-test", d6.why);
+        check(EnvName(Unlock::Gtx16Vsr) == L"PUSHMPC_DISABLE_GTX16VSR" && EnvName(Unlock::SubtitleHoldAuto) == L"PUSHMPC_DISABLE_SUBTITLEHOLDAUTO", L"off-switch environment names");
+        check(IsTu116(0x10DE, 0x2182) && IsTu117(0x10DE, 0x1F82) && !IsTu116(0x10DE, 0x2684) && IsGtx16(0x10DE, 0x0000, L"NVIDIA GeForce GTX 1660 Ti") && !IsGtx16(0x1002, 0x2182, L"x"),
+              L"GTX 16 by device ID (TU116 1660 Ti, TU117 1650) and by name; RTX 4090 not");
+        check(HasNvofa(0x10DE, 0x2182, false, L"") && !HasNvofa(0x10DE, 0x1F82, false, L"") && HasNvofa(0x10DE, 0x2684, true, L"") && !HasNvofa(0x10DE, 0x1B80, false, L"GTX 1080"),
+              L"NVOFA: TU116 yes, TU117 no, RTX yes, Pascal no");
+        check(ZludaEligibleFamily(6) && ZludaEligibleFamily(7) && !ZludaEligibleFamily(8) && !ZludaEligibleFamily(1), L"ZLUDA route: RX 9000 / 7000 only");
+        // the self-test cache round trip, on a scratch registry root (HKCU\Software\PushMPC-auto_test, deleted after)
+        {
+            RegBase() = L"Software\\PushMPC-auto_test";
+            const std::wstring key = SelfTestKey(0x10DE, 0x2182, L"32.0.15.9999");
+            WriteSelfTest(Unlock::Gtx16Vsr, key, true, L"auto_test");
+            const SelfTest a = ReadSelfTest(Unlock::Gtx16Vsr, key), b = ReadSelfTest(Unlock::Gtx16Vsr, SelfTestKey(0x10DE, 0x2182, L"32.0.15.1"));
+            RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\PushMPC-auto_test");
+            RegBase() = L"Software\\PushMPC";
+            check(a.known && a.passed && !b.known, L"self-test cache: same key read back, another driver is stale");
+        }
+        {   // NVOF FG (T5b item 6): GTX 16 with NVOFA picks it over FSR FG; a GTX 1650 (no NVOFA cap) keeps FSR FG; RTX 20 after PushFlow
+            Gpu g1660 = Family(kGtx, L"NVIDIA GeForce GTX 1660 Ti"); g1660.available |= 1u << kCapNvofFg;
+            const Choice n1 = Decide({}, film, d60, cold, g1660);
+            check(n1.fgMethod == FgMethod::Nvof && n1.multiplier == 2, L"GTX 1660 Ti cold start: NVOF FG 2x (NVIDIA flow hardware + FSR interpolation)", n1.smootherNote);
+            const Choice n2 = Decide({}, film, d60, cold, Family(kGtx, L"NVIDIA GeForce GTX 1650"));
+            check(n2.fgMethod == FgMethod::Fsr, L"GTX 1650 (no NVOFA): FSR FG", n2.smootherNote);
+            Gpu g2060 = Family(kRtx20, L"NVIDIA GeForce RTX 2060"); g2060.available |= 1u << kCapNvofFg;
+            Costs slow2060 = cold; slow2060.card = 8.0; slow2060.pfBenched = true; for (int t = 0; t < 3; ++t) { slow2060.pfFirst[t] = 70 + 10 * t; slow2060.pfNext[t] = 60 + 10 * t; }
+            const Choice n3 = Decide({}, film, d60, slow2060, g2060);
+            check(n3.fgMethod == FgMethod::Nvof, L"RTX 2060, PushFlow measured too slow: NVOF FG (before FSR FG)", n3.smootherNote + L" | " + n3.stoppedAt);
+            Settings fm; fm.fgMethod = FgMethod::Nvof;
+            check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
+            (void)fm;
+        }
+        {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
+            Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;
+            check(SubtitleHoldValue(a, true, true) == 2 && SubtitleHoldValue(a, false, true) == 0 && SubtitleHoldValue(a, true, false) == 0
+                  && SubtitleHoldValue(off, true, true) == 0 && SubtitleHoldValue(on, false, false) == 1, L"Subtitle Hold: Auto gated (2) only with the core's gate and the unlock on; Off/On manual");
+        }
+        wprintf(L"  vendor paths: %d failed\n", fails);
     }
     Display real = QueryDisplay(PlayerWindow());
     wprintf(L"this machine's primary display: %ls %.3f Hz %ux%u HDR %d VRR %d (%ls)\n", real.name.c_str(), real.refreshHz, real.width, real.height, real.hdr, real.vrr, real.vrrHow.c_str());

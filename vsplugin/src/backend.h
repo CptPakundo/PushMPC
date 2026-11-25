@@ -1,15 +1,20 @@
 // pushmpc.Enhance: which engine runs, and how far the CPU engine goes. Pure C++ (no VapourSynth, no OS headers):
 // portable_test checks every rule.
 //
-//   nvidia    pushcore (Windows, RTX), or the Video Effects runtime through CUDA (Linux, engines/nvidia-linux): RTX VSR, NVIDIA VFG and the other methods, the scene-cut guard. The R1 path.
+//   nvidia    pushcore (Windows, any DirectX 12 GPU; the name is historical, "pushcore" is accepted too): on NVIDIA RTX
+//             RTX VSR + NVIDIA VFG; on AMD / Intel / Snapdragon / GTX the methods pushcore has for that GPU (PushFlow,
+//             FSR 3.1 / FSR 4 frame generation, AMD FRC, FSR / NIS upscaling) with Auto's benchmark; the scene-cut guard.
+//             On Linux (and Windows on Arm) the Video Effects runtime through CUDA (engines/nvidia-linux): RTX VSR, VFG.
 //   portable  PushFPS's portable core on the CPU (engines/portable): any GPU, Windows, Linux, macOS.
 //   apple     Apple's VideoToolbox ML frame interpolation and super resolution (macOS on Apple silicon; engines/apple),
 //             when this Mac offers an interpolator; else portable.
 //   rife      a script preset: pushmpc.vpy chains vs-rife-ncnn-vulkan (core.rife) when the user has it installed. The
 //             plugin never downloads it; it only reports whether the script found it.
 //
-// Auto: an NVIDIA RTX GPU with pushcore present -> nvidia; otherwise apple when this Mac offers it; otherwise rife when
-// available; otherwise portable.
+// Auto: pushcore present and the GPU an NVIDIA RTX -> nvidia; pushcore present on any other DirectX 12 hardware GPU
+// with at least one GPU frame generation method installed (PushFlow, FSR FG, AMD FRC) -> nvidia (pushcore) as well;
+// otherwise apple when this Mac offers it; otherwise rife when available; otherwise portable. Off switch for the
+// non-RTX part: PUSHMPC_DISABLE_ANYGPUCORE=1 (BackendProbe.anyGpuDisabled), then such GPUs go on down the list.
 #pragma once
 #include <algorithm>
 #include <cctype>
@@ -36,8 +41,20 @@ struct BackendProbe {
     std::string gpuName;
     bool nvidiaNoFg = false;      // the nvidia backend runs but cannot generate frames here (Linux: RTX 20, or RTX 30 before
                                   // its self-test): it upscales, and interpolation comes from rife / portable before it
+    uint32_t capsAvailable = 0;   // pushcore_capabilities' available bits (PUSHCORE_CAP_*)
+    bool anyGpuDisabled = false;  // PUSHMPC_DISABLE_ANYGPUCORE=1: pushcore on RTX only (the old rule)
 };
 inline bool IsRtxFamily(uint32_t f) { return f >= 1 && f <= 4; }
+// a DirectX 12 hardware GPU pushcore knows (families 1..12; 0 = unknown / no hardware adapter)
+inline bool IsD3d12Family(uint32_t f) { return f >= 1 && f <= 12; }
+// PUSHCORE_CAP_PUSHFLOW 2, PUSHCORE_CAP_FSR_FG 3, PUSHCORE_CAP_AMDFRC 5 (pushcore_abi.h; this header has no OS includes)
+inline constexpr uint32_t kGpuFgCaps = (1u << 2) | (1u << 3) | (1u << 5);
+inline bool PushcoreUsable(const BackendProbe& p)
+{
+    if (!p.nvidiaBuilt || !p.pushcoreLoaded) return false;
+    if (IsRtxFamily(p.gpuFamily)) return true;
+    return !p.anyGpuDisabled && IsD3d12Family(p.gpuFamily) && (p.capsAvailable & kGpuFgCaps) != 0;
+}
 
 // interp: with kind nvidia, the interpolator the script chains before it ("rife" or "portable"; empty = nvidia does it)
 struct BackendChoice { BackendKind kind = BackendKind::Portable; bool ok = true; std::string why; std::string interp; };
@@ -47,8 +64,9 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
 {
     for (auto& c : requested) c = char(std::tolower(static_cast<unsigned char>(c)));
     BackendChoice r;
-    const bool nvidiaOk = p.nvidiaBuilt && p.pushcoreLoaded && IsRtxFamily(p.gpuFamily);
+    const bool nvidiaOk = PushcoreUsable(p);
     const std::string gpu = p.gpuName.empty() ? std::string("the GPU") : p.gpuName;
+    if (requested == "pushcore") requested = "nvidia";
     if (requested == "nvidia") {
         r.kind = BackendKind::Nvidia;   // as asked; when pushcore cannot run, its own error says why (the R1 behaviour)
         r.ok = p.nvidiaBuilt;
@@ -67,13 +85,18 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         else { r.kind = BackendKind::Portable; r.why = "rife asked for, but vs-rife-ncnn-vulkan (core.rife) is not installed: portable"; }
         return r;
     }
-    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia, apple, portable or rife (got '" + requested + "')"; return r; }
+    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia (pushcore), apple, portable or rife (got '" + requested + "')"; return r; }
     if (nvidiaOk) {
-        r.kind = BackendKind::Nvidia; r.why = "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia";
+        r.kind = BackendKind::Nvidia;
+        r.why = IsRtxFamily(p.gpuFamily) ? "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia"
+                                         : "Auto: pushcore is present and runs GPU frame generation on " + gpu + " (DirectX 12): nvidia (pushcore)";
         if (p.nvidiaNoFg) { r.interp = p.rifeAvailable ? "rife" : "portable"; r.why += " (upscaling; no NVIDIA frame generation on this GPU: " + r.interp + " interpolates)"; }
         return r;
     }
-    std::string not_nv = !p.nvidiaBuilt ? "no pushcore backend in this build" : !p.pushcoreLoaded ? "pushcore is not present" : gpu + " is not an NVIDIA RTX GPU";
+    std::string not_nv = !p.nvidiaBuilt ? "no pushcore backend in this build" : !p.pushcoreLoaded ? "pushcore is not present"
+                       : !IsD3d12Family(p.gpuFamily) ? gpu + " is not a DirectX 12 hardware GPU pushcore knows"
+                       : p.anyGpuDisabled ? gpu + " is not an NVIDIA RTX GPU (pushcore on other GPUs is switched off: PUSHMPC_DISABLE_ANYGPUCORE)"
+                       : gpu + " has no GPU frame generation method installed for pushcore (PushFlow, FSR FG, AMD FRC)";
     if (p.appleAvailable) { r.kind = BackendKind::Apple; r.why = "Auto: " + not_nv + "; this Mac offers " + p.appleWhy + ": apple"; return r; }
     if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is installed: rife"; return r; }
     r.kind = BackendKind::Portable;

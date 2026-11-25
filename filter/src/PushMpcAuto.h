@@ -61,7 +61,7 @@ struct Source {
 };
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
-enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapCount };
+enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg, kCapCount };
 struct Gpu {
     uint32_t family = kRtx50;          // default for the headless test: this machine
     uint32_t available = 0xFFFFFFFFu;  // bit per Cap
@@ -91,8 +91,22 @@ inline double CardFactor(const std::wstring& name, uint32_t family)
     return family == kRtx50 || family == kRtx40 ? 2.0 : family == kRtx30 ? 3.5 : 5.0;
 }
 
+// A GPU where PushFlow (RIFE) often cannot keep up and FSR 3.1 frame generation is the cold-start default (T5b item 2):
+// NVIDIA GTX (no tensor cores), RX 5000 and older Radeon, Intel integrated graphics (not Arc), other GPUs (Snapdragon
+// Adreno and the rest). Only the cold start is decided by this list: once PushFlow's speed test has run on the card
+// (Costs.pfBenched), the measured costs decide between PushFlow and FSR FG like everywhere else.
+inline bool IsWeakGpu(uint32_t family, const std::wstring& name)
+{
+    if (family == kGtx || family == kRdna1 || family == kAmdOther || family == kOtherGpu) return true;
+    if (family == kIntel) {
+        std::wstring a = name; for (auto& ch : a) ch = wchar_t(towupper(ch));
+        return a.find(L"ARC") == std::wstring::npos;   // "Intel(R) Arc(TM) B580" is discrete-class; "Iris Xe", "UHD", "Graphics" are not
+    }
+    return false;
+}
+
 // Frame generation methods as Auto sees them (index = FgMethod - 1 = PUSHCORE_FG_*)
-enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kFgKeys };
+enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kFgKeys };
 
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
@@ -108,6 +122,11 @@ struct Costs {
     double pfFirst[3] = { 4.49, 5.68, 11.96 }, pfNext[3] = { 3.15, 3.93, 11.40 };
     bool pfBenched = false;                         // replaced by PushFlowBench on this card (already absolute)
     double fsrFg = 4.2;                             // FSR 3.1 FG 2x incl. FidelityFX flow
+    // NVOF FG 2x: NVIDIA's optical-flow engine (fixed time per source frame, off the shaders; Turing's NVOFA about half
+    // the speed of Ampere+'s) + FSR 3.1's interpolation without its own flow (~60 % of fsrFg). RTX 5090, clip A 1080p ->
+    // 4K NIS, 2x: graph span 4.9-5.0 ms against FSR FG's 3.0 ms (T5b, 2026-11-25)
+    double nvofEngine = 2.0, nvofInterpShare = 0.6;
+    bool nvofTuring = false;                        // set by Decide for RTX 20 / GTX 16
     double frc = 6.7;                               // AMD FRC 2x
     double vsrUp[4] = { 0.61, 0.76, 1.59, 2.40 };   // RTX VSR standard 1080p -> 4K, median
     double vsrUpHb[4] = { 1.19, 1.80, 2.73, 4.40 }; // VFX "high bitrate" 16..19 (measured, gpu-best 4b)
@@ -122,9 +141,10 @@ struct Costs {
     double itm4k = 0.2;                             // PushMPC's inverse tone map in the filter (estimate)
     double guardScore = 0.3;                        // the cut guard's own test per source frame (scene score + Fourier-Mellin: 0.25-0.29 ms, round 5)
     double guardFlow = 1.0;                         // the cut guard's NVOF pass per source frame: +1.0 ms graph time at 1080p, RTX 5090 (round 4)
-    double card = 1.0;                              // CardFactor for the priors
+    double card = 1.0;                              // CardFactor for the priors (or the measured one, ApplyMeasuredCard)
+    bool cardMeasured = false;                      // card comes from this GPU's own speed test, not the name table
     double vsrScale = 1.0;                          // learned measured/prior ratio for VSR
-    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
+    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
 };
@@ -212,6 +232,7 @@ inline int FgKeyOf(FgMethod m, int quality)
     case FgMethod::PushFlow: return kKeyPfFast + std::clamp(quality, 0, 2);
     case FgMethod::Fsr: return kKeyFsr;
     case FgMethod::AmdFrc: return kKeyFrc;
+    case FgMethod::Nvof: return kKeyNvof;
     default: return kKeyVfgMed;
     }
 }
@@ -236,6 +257,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     }
     case FgMethod::Fsr: return c.fsrFg * pix * c.card;
     case FgMethod::AmdFrc: return c.frc * pix * c.card;
+    case FgMethod::Nvof: return c.nvofEngine * (c.nvofTuring ? 2.0 : 1.0) + c.fsrFg * c.nvofInterpShare * pix * c.card;
     default: return 0;
     }
 }
@@ -243,17 +265,42 @@ inline double FgCost(const Costs& c, FgMethod method, int quality, int m, double
 {
     return FgPrior(c, method, quality, m, pix) * c.fgScale[FgKeyOf(method, quality)];
 }
-// The order Auto tries the frame generation methods in, by GPU family
+inline std::vector<FgMethod> FgOrder(const Gpu& g);
+// The measured card factor (T5b item 11): where no per-method measurement exists, the priors scale with the card. The
+// name table (CardFactor) is a guess; PushFlow's speed test (pushcore_pushFlowBench, run once per card, cached in
+// HKCU\Software\PushMPC\Learned) is a measurement of this GPU's shader + ML throughput at the real size. Its Balanced
+// first-frame p95, normalised to 4K, against the RTX 5090's 5.68 ms, replaces the table once it exists.
+inline constexpr double kPfBalanced5090 = 5.68;
+inline bool ApplyMeasuredCard(Costs& c)
+{
+    if (!c.pfBenched || c.pfFirst[1] <= 0) return false;
+    c.card = std::clamp(c.pfFirst[1] / kPfBalanced5090, 0.25, 80.0);
+    c.cardMeasured = true;
+    return true;
+}
+// The order Auto tries the frame generation methods in, by GPU family. The weak GPUs
+// (IsWeakGpu) start with FSR 3.1 FG until PushFlow's speed test has measured the card (the cold start), then PushFlow
+// first again: Decide takes it only where its measured cost reaches 2x, else FSR FG (decided by the benchmark, never by a
+// fixed table).
+inline std::vector<FgMethod> FgOrder(const Gpu& g, const Costs& c)
+{
+    if (IsWeakGpu(g.family, g.name) && !c.pfBenched) return { FgMethod::Nvof, FgMethod::Fsr, FgMethod::PushFlow, FgMethod::AmdFrc };
+    return FgOrder(g);
+}
 inline std::vector<FgMethod> FgOrder(const Gpu& g)
 {
     switch (g.family) {
-    case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Fsr };
-    case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Fsr };
-    case kGtx: case kIntel: case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
+    // NVOF FG (NVIDIA's optical-flow hardware + FSR 3.1 interpolation) before FSR FG where the card has NVOFA: on held-out
+    // frames it measured 30.29 dB against FSR FG's 29.96 and PushFlow Fast's 28.82 (synthetic pan/zoom, 1080p 30 -> 60,
+    // RTX 5090, T5b), and its flow costs no shader time; Decide takes it only where it fits (else FSR FG)
+    case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    case kGtx: return { FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    case kIntel: case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
     default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon
     }
 }
-inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : kCapFrc; }
+inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : m == FgMethod::Nvof ? kCapNvofFg : kCapFrc; }
 // base quality, upgrade, and the fallback when the base cannot reach 2x (VFG: Medium -> High, Low; PushFlow: Balanced ->
 // Quality, Fast); the user's FG quality fixes it (PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 struct Tiers { int base, upgrade, fallback; };
@@ -270,9 +317,18 @@ inline const wchar_t* QualityName(FgMethod m, int q)
     return L"";
 }
 
-inline Choice Decide(const Settings& s, const Source& src, const Display& d, const Costs& c, const Gpu& g = Gpu{})
+inline Choice Decide(const Settings& s, const Source& src, const Display& d, const Costs& costsIn, const Gpu& g = Gpu{})
 {
     Choice r;
+    Costs c = costsIn;
+    // RTX VSR on GTX 16 (unlock Gtx16Vsr): no tensor cores, the HMMA work runs on the FP16 units at a fraction of the
+    // rate, so its prior is 4x the RTX card factor until the running graph has measured it (vsrScale learned)
+    if (g.family == kGtx && !c.learnedVsr) c.vsrScale *= 4.0;
+    c.nvofTuring = g.family == kGtx || g.family == kRtx20;
+    // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
+    // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
+    // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
+    if ((g.family == kRdna3 || g.family == kRdna2) && !c.learnedVsr) c.fsrSr *= 2.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
@@ -402,8 +458,9 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     };    auto chooseFg = [&](double base) {
         Pick p;
         if (s.smoother == kOff) { p.mult = 1; p.stop = L"off"; return p; }
-        std::vector<FgMethod> order = FgOrder(g);
+        std::vector<FgMethod> order = FgOrder(g, c);
         std::wstring notes;
+        if (IsWeakGpu(g.family, g.name) && !c.pfBenched && s.fgMethod == FgMethod::Auto) notes = L"cold start: FSR FG first until PushFlow's speed test has measured this GPU; ";
         if (s.fgMethod != FgMethod::Auto) {
             if (g.has(CapOf(s.fgMethod))) order.insert(order.begin(), s.fgMethod);
             else notes = std::format(L"{} not available ({}); ", FgMethodLabel(s.fgMethod), g.reason[CapOf(s.fgMethod)]);

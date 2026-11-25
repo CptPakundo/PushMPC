@@ -145,12 +145,24 @@ static void TestSelect()
     c = SelectBackend("", p); CHECK(c.kind == BackendKind::Nvidia, "empty = auto");
     p.rifeAvailable = true;
     c = SelectBackend("Auto", p); CHECK(c.kind == BackendKind::Nvidia, "RTX wins over rife: %s", c.why.c_str());
-    p.gpuFamily = 5;   // GTX: pushcore runs, but this is no RTX GPU
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife, "GTX -> rife: %s", c.why.c_str());
+    p.gpuFamily = 5;   // GTX without any GPU frame generation files: not usable -> rife
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife, "GTX, no FG files -> rife: %s", c.why.c_str());
+    p.capsAvailable = 1u << 3;   // FSR FG installed: pushcore on any DirectX 12 GPU (T5b item 1)
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Nvidia && c.why.find("DirectX 12") != std::string::npos, "GTX + FSR FG -> pushcore over rife: %s", c.why.c_str());
+    p.anyGpuDisabled = true;     // off switch: the old RTX-only rule
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Rife && c.why.find("PUSHMPC_DISABLE_ANYGPUCORE") != std::string::npos, "%s", c.why.c_str());
+    p.anyGpuDisabled = false; p.capsAvailable = 0;
     p.rifeAvailable = false;
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "GTX, no rife -> portable: %s", c.why.c_str());
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "GTX, no FG files, no rife -> portable: %s", c.why.c_str());
     p.gpuFamily = 7;   // RDNA 3
-    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("not an NVIDIA RTX") != std::string::npos, "%s", c.why.c_str());
+    c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("no GPU frame generation method") != std::string::npos, "%s", c.why.c_str());
+    for (uint32_t fam : { 6u, 7u, 8u, 9u, 11u, 12u }) {   // RDNA4..1, Intel, other (Snapdragon): PushFlow installed
+        p.gpuFamily = fam; p.capsAvailable = 1u << 2;
+        c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Nvidia, "family %u + PushFlow -> pushcore: %s", fam, c.why.c_str());
+    }
+    p.gpuFamily = 0; c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable, "unknown family (no hardware adapter) -> not pushcore: %s", c.why.c_str());
+    c = SelectBackend("pushcore", p); CHECK(c.ok && c.kind == BackendKind::Nvidia, "pushcore is an alias of nvidia");
+    p.gpuFamily = 7; p.capsAvailable = 0;
     p.gpuFamily = 1; p.pushcoreLoaded = false;   // RTX, but pushcore missing
     c = SelectBackend("auto", p); CHECK(c.kind == BackendKind::Portable && c.why.find("pushcore is not present") != std::string::npos, "%s", c.why.c_str());
     p.rifeAvailable = true;

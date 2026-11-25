@@ -46,6 +46,9 @@ integrations/mpv/**
 scripts/vapoursynth-pin.json
 scripts/export-public.ps1
 vsplugin/third_party/vapoursynth/**
+tests/**
+scripts/nvidia-vfx-pin.json
+scripts/nvidia-vfx-fetch.ps1
 integrations/linux/**
 packaging/**
 scripts/test-potplayer-install.ps1
@@ -57,3 +60,4 @@ scripts/nvidia-vfx-pin.json
 scripts/nvidia-vfx-wheel.py
 scripts/nvidia-vfx-fetch.sh
 scripts/slang-pin.json
+scripts/fidelityfx-fetch.ps1
