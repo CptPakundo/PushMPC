@@ -381,6 +381,7 @@ public:
             }
             const AVStream* st = m_fmt->streams[pkt->stream_index];
             if (st->discard == AVDISCARD_ALL) { av_packet_unref(pkt); continue; }
+            if (m_reads++ == 0) Log(ADDON_LOG_DEBUG, "first packet read");
             DEMUX_PACKET* dp = AllocateDemuxPacket(pkt->size);
             if (!dp) { av_packet_free(&pkt); return nullptr; }
             if (pkt->size) std::memcpy(dp->pData, pkt->data, size_t(pkt->size));
@@ -398,12 +399,14 @@ public:
     {
         if (!m_fmt) return false;
         Log(ADDON_LOG_DEBUG, "seek to %.0f ms", timeMs);
+        if (timeMs <= 0 && m_reads == 0) { startpts = 0; return true; }   // nothing read yet: already at the start
         const int64_t target = int64_t(timeMs * 1000.0) + m_startUs;
         const int r = av_seek_frame(m_fmt, -1, target, backwards ? AVSEEK_FLAG_BACKWARD : 0);
         if (r < 0) {
             Log(ADDON_LOG_WARNING, "seek to %.0f ms: %s", timeMs, FfErr(r).c_str());
             return false;
         }
+        Log(ADDON_LOG_DEBUG, "seek done");
         startpts = timeMs * 1000.0;
         return true;
     }
@@ -600,6 +603,7 @@ private:
     int m_k = 1;
     double m_fps = 0;
     int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
+    uint64_t m_reads = 0;
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
     AVColorPrimaries m_prim = AVCOL_PRI_UNSPECIFIED;
     AVColorSpace m_space = AVCOL_SPC_UNSPECIFIED;
