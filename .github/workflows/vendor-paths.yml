@@ -51,7 +51,7 @@ jobs:
         run: |
           cmd /c "repo\pushmpc\tools\vsr_gate_probe.cmd $env:GITHUB_WORKSPACE\dlss $env:RUNNER_TEMP\probe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Run vsr_gate_probe (no NVIDIA GPU: every route must fail cleanly)
+      - name: Run vsr_gate_probe (no NVIDIA GPU, every route must fail cleanly)
         timeout-minutes: 5
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\fake-runtime" | Out-Null
