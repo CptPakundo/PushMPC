@@ -282,7 +282,7 @@ jobs:
           bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hooklib"
       - uses: actions/upload-artifact@v4
         with:
-          name: hooklib-${{ matrix.runner }}-${{ matrix.tag }}
+          name: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-${{ matrix.tag }}
           path: ${{ runner.temp }}/hooklib/*.so
           retention-days: 7
 
@@ -305,7 +305,7 @@ jobs:
           mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
       - uses: actions/download-artifact@v4
         with:
-          pattern: hooklib-${{ matrix.runner }}-*
+          pattern: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-*
           path: ${{ runner.temp }}/hook
           merge-multiple: true
       - uses: actions/cache@v4
