@@ -1,0 +1,53 @@
+// kodi_engine: the add-on's engine interface. One source frame in, then the pictures of the pair (previous, current):
+// the previous frame itself (Real, through the upscaler when there is one) and generated frames at phase t.
+//
+// Backends, best first (OpenEngine picks; the CPU engine is always the fallback):
+//   gpu   the portable GPU engine (vsplugin/engines/gpu, Vulkan 1.2 compute; macOS through MoltenVK): PushFPS's block
+//         matcher, motion-compensated interpolation, the cut guard, NIS / FSR1 upscaling;
+//   cpu   PushFPS's portable core on the CPU (vsplugin/engines/portable through pm_engine.h): no upscaling.
+// Pictures are planar YUV 4:2:0, 8 bits or 16-bit containers (10 bits), as pm_engine.h describes.
+#pragma once
+#include <cstdint>
+#include <memory>
+#include <string>
+#include "pm_engine.h"
+
+namespace pmk {
+
+struct EngineCfg {
+    int width = 0, height = 0, bits = 8;
+    int threads = 0, quality = 1;      // quality: 0 fast, 1 balanced (CPU); the GPU engine uses its high setting at 1
+    int outWidth = 0, outHeight = 0;   // 0: source size; else the GPU upscaler's output (ignored by the CPU engine)
+    int upscaler = 0;                  // 0 none, 1 NIS, 2 FSR1
+    int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
+};
+
+struct EngineStats { uint64_t pushed = 0, pairs = 0, cuts = 0, generated = 0; double meMs = 0, genMs = 0; };
+
+class IEngine {
+public:
+    virtual ~IEngine() = default;
+    virtual std::string Describe() const = 0;
+    virtual bool IsGpu() const = 0;
+    virtual int OutWidth() const = 0;
+    virtual int OutHeight() const = 0;
+    // a new source frame; contiguous: it directly follows the previous one (else no pair until the next push)
+    virtual bool Push(const pm_yuv& src, bool contiguous, std::string& err) = 0;
+    virtual bool HavePair() const = 0;
+    virtual bool PairIsCut() const = 0;
+    // the previous frame of the pair at phase t (0 < t < 1); a cut pair gives the nearer real frame
+    virtual bool Generate(float t, const pm_yuv_out& out, std::string& err) = 0;
+    // the previous frame as it is, at the output size; false: the caller copies it itself (no upscaler)
+    virtual bool Real(bool current, const pm_yuv_out& out, std::string& err) = 0;   // current: the newest frame (the end of a clip)
+    virtual void Forget() = 0;
+    virtual EngineStats Stats() const = 0;
+    // Auto's multiplier for this engine (display refresh / source fps within the measured budget)
+    virtual int DecideK(int smoother, double srcFps, double displayHz, std::string& why) = 0;
+};
+
+// the best engine for cfg, or the CPU engine with the GPU's reason in why; null only when even the CPU one fails
+std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why);
+// does this build have the GPU engine
+bool GpuBuilt();
+
+} // namespace pmk

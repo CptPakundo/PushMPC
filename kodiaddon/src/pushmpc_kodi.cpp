@@ -25,7 +25,7 @@ extern "C" {
 }
 
 #include "cadence.h"
-#include "pm_engine.h"
+#include "kodi_engine.h"
 
 #include <algorithm>
 #include <atomic>
@@ -75,6 +75,7 @@ struct Settings {
     int upscale = 0;    // 0 Kodi's scaler, 2 = x2 in the add-on (test)
     int displayHz = 0;
     int threads = 0;
+    int engine = 0;     // 0 Auto (GPU, else CPU), 1 CPU, 2 GPU
     static Settings Read()
     {
         Settings s;
@@ -85,6 +86,7 @@ struct Settings {
         s.upscale = kodi::addon::GetSettingInt("upscale", 0);
         s.displayHz = kodi::addon::GetSettingInt("displayhz", 0);
         s.threads = kodi::addon::GetSettingInt("threads", 0);
+        s.engine = kodi::addon::GetSettingInt("engine", 0);
         return s;
     }
 };
@@ -269,13 +271,22 @@ public:
                 pmk::ReportedRate(rate, scale, m_k, r2, s2);
                 rate = r2; scale = s2;
                 info.SetFeatures(INPUTSTREAM_FEATURE_DECODE);
+#if !PM_KODI22
+                // Kodi 21 honours INPUTSTREAM_FEATURE_DECODE only inside its crypto-session branch
+                // (InputStreamAddon.cpp, 21.3-Omega l.538-551; Kodi 22 moved it out). A crypto session on the video
+                // stream is read by nothing but the video decoder, which is ours, and no packet carries crypto info.
+                kodi::addon::StreamCryptoSession crypto;
+                crypto.SetKeySystem(STREAM_CRYPTO_KEY_SYSTEM_CLEARKEY);
+                crypto.SetSessionId("pushmpc");
+                crypto.SetFlags(0);
+                info.SetCryptoSession(crypto);
+#endif
                 // Kodi refuses to open an add-on decoder for codecs outside its short list (CopyToInitData); our decoder
                 // takes the real codec from the demuxer, so such streams are announced under a name Kodi accepts.
                 info.SetCodecName(KodiAcceptsCodecName(p->codec_id) ? KodiDecoderName(p->codec_id) : std::string("vp8"));
                 info.SetCodecInternalName(std::string(avcodec_get_name(p->codec_id)) + " (PushMPC)");
-                const int up = m_settings.upscale == 2 ? 2 : 1;
-                info.SetWidth(uint32_t(p->width * up));
-                info.SetHeight(uint32_t(p->height * up));
+                info.SetWidth(uint32_t(m_outW));
+                info.SetHeight(uint32_t(m_outH));
             } else {
                 info.SetCodecName(KodiDecoderName(p->codec_id));
                 info.SetCodecInternalName(avcodec_get_name(p->codec_id));
@@ -400,12 +411,49 @@ public:
     double VideoFrameUs() const { return m_fps > 0 ? 1e6 / m_fps : 0.0; }
     int K() const { return m_k; }
     const Settings& Config() const { return m_settings; }
+    const pmk::EngineCfg& EngineConfig() const { return m_engineCfg; }
+    // the engine opened (and calibrated) for Auto, handed over to the decoder once
+    std::unique_ptr<pmk::IEngine> TakeEngine() { return std::move(m_engine); }
+    int OutWidth() const { return m_outW; }
+    int OutHeight() const { return m_outH; }
+
+    // Kodi tells the add-on the screen size before Open (CInputStreamAddon::DetectScreenResolution)
+    void SetVideoResolution(unsigned int width, unsigned int height) override { m_screenW = int(width); m_screenH = int(height); }
+    void SetVideoResolution(unsigned int width, unsigned int height, unsigned int, unsigned int) override
+    {
+        m_screenW = int(width); m_screenH = int(height);
+    }
 
 private:
     double ToUs(int64_t ts, AVRational tb) const
     {
         if (ts == AV_NOPTS_VALUE) return kNoPts;
         return double(av_rescale_q(ts, tb, kUs) - m_startUs);
+    }
+
+    // the upscaler and output size: Auto = NIS to the screen on the GPU engine, except on Windows, where Kodi's DXVA
+    // renderer can run RTX / Intel Video Super Resolution on the add-on's pictures (better than any shader upscaler)
+    void DecideUpscale(const AVStream* st, pmk::EngineCfg& c, std::string& why) const
+    {
+        const AVCodecParameters* p = st->codecpar;
+        int mode = m_settings.upscale;   // 0 Auto, 1 Kodi's scaler, 2 x2 (test), 3 NIS, 4 FSR1
+#if defined(_WIN32)
+        if (mode == 0) { why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)"; return; }
+#endif
+        if (mode == 0) mode = 3;
+        if (mode == 1 || mode == 2) { why = mode == 1 ? "upscaling: Kodi's video scaler (your setting)" : "upscaling: x2 in the add-on (test)"; return; }
+        if (m_screenW <= 0 || m_screenH <= 0) { why = "upscaling: screen size unknown: Kodi's video scaler"; return; }
+        const AVRational sar = st->sample_aspect_ratio.num ? st->sample_aspect_ratio : p->sample_aspect_ratio;
+        const double dar = double(p->width) / p->height * (sar.num > 0 && sar.den > 0 ? av_q2d(sar) : 1.0);
+        int ow = m_screenW, oh = int(std::lround(m_screenW / dar));
+        if (oh > m_screenH) { oh = m_screenH; ow = int(std::lround(m_screenH * dar)); }
+        ow &= ~1; oh &= ~1;
+        if (ow <= p->width * 11 / 10 && oh <= p->height * 11 / 10) { why = "upscaling: the screen is not larger than the video: none"; return; }
+        c.upscaler = mode == 4 ? 2 : 1;
+        // square pixels at the output: the upscaler also undoes anamorphic storage
+        c.outWidth = ow; c.outHeight = oh;
+        why = std::string("upscaling: ") + (mode == 4 ? "FSR1" : "NIS") + " to " + std::to_string(ow) + "x" + std::to_string(oh) +
+              (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
     }
 
     // does PushMPC decode the main video stream, and at which multiplier
@@ -434,18 +482,31 @@ private:
             return;
         }
         m_decode = true;
+        m_engineCfg = pmk::EngineCfg{};
+        m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 ? 10 : 8;
+        m_engineCfg.threads = m_settings.threads; m_engineCfg.quality = m_settings.quality;
+        m_engineCfg.backend = m_settings.engine;
+        std::string upWhy, engWhy;
+        DecideUpscale(st, m_engineCfg, upWhy);
+        m_engine = pmk::OpenEngine(m_engineCfg, engWhy);
         const double hz = m_settings.displayHz > 0 ? double(m_settings.displayHz) : pm_display_hz();
-        if (m_settings.smoother >= 9) {
+        if (!m_engine) {
+            why = "no engine (" + engWhy + "): x1";
+        } else if (m_settings.smoother >= 9) {
             m_k = std::min(m_settings.smoother, 16);
             why = "x" + std::to_string(m_k) + " (your setting)";
         } else {
-            char b[512] = {};
-            m_k = pm_engine_decide_k(m_settings.smoother, m_fps, hz, p->width, p->height, bits > 8 ? 10 : 8, m_settings.threads,
-                                     m_settings.quality, b, sizeof(b));
-            why = b;
+            m_k = std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why));
         }
-        Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz: %s", avcodec_get_name(p->codec_id), p->width,
-            p->height, bits, m_fps, hz, why.c_str());
+        const int up = m_settings.upscale == 2 ? 2 : 1;
+        m_outW = m_engine ? m_engine->OutWidth() * up : p->width * up;
+        m_outH = m_engine ? m_engine->OutHeight() * up : p->height * up;
+        if (m_engine && !m_engine->IsGpu() && m_engineCfg.upscaler) upWhy += "; the CPU engine has no upscaler: Kodi's video scaler";
+        Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz, screen %dx%d", avcodec_get_name(p->codec_id), p->width,
+            p->height, bits, m_fps, hz, m_screenW, m_screenH);
+        Log(ADDON_LOG_INFO, "engine: %s%s", m_engine ? m_engine->Describe().c_str() : "none", engWhy.empty() ? "" : (" [" + engWhy + "]").c_str());
+        Log(ADDON_LOG_INFO, "%s; output %dx%d", upWhy.c_str(), m_outW, m_outH);
+        Log(ADDON_LOG_INFO, "multiplier: %s", why.c_str());
     }
 
     Settings m_settings;
@@ -458,6 +519,9 @@ private:
     bool m_decode = false;
     int m_k = 1;
     double m_fps = 0;
+    int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
+    pmk::EngineCfg m_engineCfg;
+    std::unique_ptr<pmk::IEngine> m_engine;
 };
 
 // ===================================================================================================== the decoder
@@ -489,10 +553,10 @@ public:
         m_pkt = av_packet_alloc();
         m_k = std::max(1, m_in->K());
         m_frameUs = m_in->VideoFrameUs();
-        m_up = m_in->Config().upscale == 2 ? 2 : 1;
-        m_quality = m_in->Config().quality;
-        m_threads = m_in->Config().threads;
-        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %s", dec->name, m_hw ? " (hardware)" : "", m_k, m_up > 1 ? "x2 size" : "source size");
+        m_test2x = m_in->Config().upscale == 2;
+        m_cfg = m_in->EngineConfig();
+        m_engine = m_in->TakeEngine();
+        Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", dec->name, m_hw ? " (hardware)" : "", m_k, m_in->OutWidth(), m_in->OutHeight());
         return true;
     }
 
@@ -527,8 +591,12 @@ public:
                 if (drain && !m_drained) { avcodec_send_packet(m_ctx, nullptr); m_drained = true; continue; }
                 if (!drain) return VC_BUFFER;
             }
-            // end of the drained stream (or an error): the last held frame goes out alone, then EOF
-            if (m_havePrev) { m_queue.push_back(pmk::Slot{m_prevPts, 0.f, true}); m_havePrev = false; m_lastReal = m_prev; continue; }
+            // end of the drained stream (or an error): the last held frame goes out alone, then the end
+            if (m_havePrev) {
+                m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true});
+                m_havePrev = false;
+                continue;
+            }
             if (r == AVERROR_EOF || drain) { m_drained = true; return VC_EOF; }
             Log(ADDON_LOG_DEBUG, "avcodec_receive_frame: %s", FfErr(r).c_str());
             return VC_ERROR;
@@ -543,7 +611,7 @@ public:
         m_drained = false;
         m_queue.clear();
         m_havePrev = false;
-        if (m_engine) pm_engine_forget(m_engine);
+        if (m_engine) m_engine->Forget();
     }
 
 private:
@@ -559,6 +627,7 @@ private:
             data[0] = buf.data(); data[1] = data[0] + stride[0] * h; data[2] = data[1] + stride[1] * ch;
         }
     };
+    struct Out { pmk::Slot slot; int pic = 0; bool current = false; };   // current: the newest frame (end of the clip)
 
     void TryHardware()
     {
@@ -573,7 +642,7 @@ private:
         AVBufferRef* dev = nullptr;
         if (av_hwdevice_ctx_create(&dev, type, nullptr, nullptr, 0) < 0) return;
         for (int i = 0;; ++i) {
-            const AVCodecHWConfig* c = avcodec_get_hw_config(m_ctx->codec ? m_ctx->codec : avcodec_find_decoder(m_ctx->codec_id), i);
+            const AVCodecHWConfig* c = avcodec_get_hw_config(m_ctx->codec, i);
             if (!c) break;
             if ((c->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && c->device_type == type) {
                 m_hwFmt = c->pix_fmt;
@@ -604,9 +673,7 @@ private:
         }
         const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(f->format));
         const int bits = d && d->comp[0].depth > 8 ? 10 : 8;
-        if (!m_engine || f->width != m_w || f->height != m_h || bits != m_bits) {
-            if (!Setup(f->width, f->height, bits)) { av_frame_unref(m_frame); return; }
-        }
+        if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
         int64_t pts = f->best_effort_timestamp;
         if (pts == AV_NOPTS_VALUE) pts = m_havePrev ? m_prevPts + int64_t(m_frameUs > 0 ? m_frameUs : 41708) : 0;
 
@@ -616,37 +683,43 @@ private:
         av_frame_unref(m_sw);
 
         const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
-        char err[256] = {};
-        pm_yuv src{};
-        for (int i = 0; i < 3; ++i) { src.data[i] = m_pic[cur].data[i]; src.stride[i] = m_pic[cur].stride[i]; }
-        const bool pushed = m_k > 1 && pm_engine_push(m_engine, &src, contiguous ? 1 : 0, err, sizeof(err)) == 0;
+        bool pushed = false;
+        if (m_engine && (m_k > 1 || m_upscaled)) {
+            pm_yuv src{};
+            for (int i = 0; i < 3; ++i) { src.data[i] = m_pic[cur].data[i]; src.stride[i] = m_pic[cur].stride[i]; }
+            std::string err;
+            pushed = m_engine->Push(src, contiguous, err);
+            if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
+        }
         if (m_havePrev) {
-            const bool pair = pushed && pm_engine_have_pair(m_engine) != 0;
-            m_lastReal = m_prevSlot;
-            for (const pmk::Slot& s : pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair)) m_queue.push_back(s);
+            const bool pair = pushed && m_engine->HavePair();
+            for (const pmk::Slot& s : pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair)) m_queue.push_back(Out{s, m_prevSlot, false});
         }
         m_prevSlot = cur;
         m_prevPts = pts;
         m_havePrev = true;
-        m_prev = cur;
     }
 
-    bool Setup(int w, int h, int bits)
+    void Setup(int w, int h, int bits)
     {
-        if (m_engine) { pm_engine_close(m_engine); m_engine = nullptr; }
         if (m_sws) { sws_freeContext(m_sws); m_sws = nullptr; }
         if (m_swsOut) { sws_freeContext(m_swsOut); m_swsOut = nullptr; }
         m_w = w; m_h = h; m_bits = bits;
         const int bytes = bits > 8 ? 2 : 1;
         for (auto& p : m_pic) p.Alloc(w, h, bytes);
         m_gen.Alloc(w, h, bytes);
-        pm_engine_cfg cfg{};
-        cfg.width = w; cfg.height = h; cfg.bits = bits; cfg.threads = m_threads; cfg.quality = m_quality;
-        char err[256] = {};
-        m_engine = pm_engine_open(&cfg, err, sizeof(err));
-        if (!m_engine) { Log(ADDON_LOG_ERROR, "engine: %s", err); m_k = 1; }
+        if (!m_engine || w != m_cfg.width || h != m_cfg.height || bits != m_cfg.bits) {
+            // the stream changed size or depth mid-way (rare): a new engine for the new pictures
+            m_cfg.width = w; m_cfg.height = h; m_cfg.bits = bits;
+            m_engine.reset();
+            std::string why;
+            m_engine = pmk::OpenEngine(m_cfg, why);
+            if (!m_engine) { Log(ADDON_LOG_ERROR, "engine: %s", why.c_str()); m_k = 1; }
+        }
+        m_upscaled = m_engine && (m_engine->OutWidth() != w || m_engine->OutHeight() != h);
+        m_outW = (m_upscaled ? m_engine->OutWidth() : w) * (m_test2x ? 2 : 1);
+        m_outH = (m_upscaled ? m_engine->OutHeight() : h) * (m_test2x ? 2 : 1);
         m_havePrev = false;
-        return true;
     }
 
     AVPixelFormat EngineFmt() const { return m_bits > 8 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P; }
@@ -670,17 +743,11 @@ private:
 
     VIDEOCODEC_RETVAL Emit(VIDEOCODEC_PICTURE& picture)
     {
-        const pmk::Slot s = m_queue.front();
+        const Out q = m_queue.front();
         m_queue.pop_front();
-        const Planes* srcp = &m_pic[m_lastReal];
-        if (!s.real && m_engine) {
-            pm_yuv_out o{};
-            for (int i = 0; i < 3; ++i) { o.data[i] = m_gen.data[i]; o.stride[i] = m_gen.stride[i]; }
-            pm_engine_generate(m_engine, s.t, &o);
-            srcp = &m_gen;
-        }
+        const pmk::Slot& s = q.slot;
         const int bytes = m_bits > 8 ? 2 : 1;
-        const int ow = m_w * m_up, oh = m_h * m_up, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
+        const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
         picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
@@ -694,35 +761,52 @@ private:
         if (!GetFrameBuffer(picture)) return VC_ERROR;
         uint8_t* dst[4] = {picture.decodedData + picture.planeOffsets[0], picture.decodedData + picture.planeOffsets[1],
                            picture.decodedData + picture.planeOffsets[2], nullptr};
-        if (m_up == 1) {
-            for (int i = 0; i < 3; ++i) {
-                const int ph = i ? (m_h + 1) / 2 : m_h, pw = (i ? (m_w + 1) / 2 : m_w) * bytes;
-                av_image_copy_plane(dst[i], int(picture.stride[i]), srcp->data[i], int(srcp->stride[i]), pw, ph);
+        pm_yuv_out kodiOut{};
+        for (int i = 0; i < 3; ++i) { kodiOut.data[i] = dst[i]; kodiOut.stride[i] = ptrdiff_t(picture.stride[i]); }
+        std::string err;
+        bool done = false;
+        const Planes* srcp = &m_pic[q.pic];
+        if (!s.real && m_engine) {
+            if (!m_test2x) {
+                done = m_engine->Generate(s.t, kodiOut, err);   // straight into Kodi's buffer
+                if (done) ++m_generated;
+            } else {
+                pm_yuv_out g{};
+                for (int i = 0; i < 3; ++i) { g.data[i] = m_gen.data[i]; g.stride[i] = m_gen.stride[i]; }
+                if (m_engine->Generate(s.t, g, err)) { srcp = &m_gen; ++m_generated; }
             }
-        } else {
-            m_swsOut = sws_getCachedContext(m_swsOut, m_w, m_h, EngineFmt(), ow, oh, EngineFmt(), SWS_LANCZOS, nullptr, nullptr, nullptr);
-            const uint8_t* sp[4] = {srcp->data[0], srcp->data[1], srcp->data[2], nullptr};
-            int sl[4] = {int(srcp->stride[0]), int(srcp->stride[1]), int(srcp->stride[2]), 0};
-            int dl[4] = {int(picture.stride[0]), int(picture.stride[1]), int(picture.stride[2]), 0};
-            if (m_swsOut) sws_scale(m_swsOut, sp, sl, 0, m_h, dst, dl);
+        } else if (s.real && m_upscaled && !m_test2x) {
+            done = m_engine->Real(q.current, kodiOut, err);
+        }
+        if (!err.empty() && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
+        if (!done) {
+            if (!m_test2x && !m_upscaled) {
+                for (int i = 0; i < 3; ++i) {
+                    const int ph = i ? (m_h + 1) / 2 : m_h, pw = (i ? (m_w + 1) / 2 : m_w) * bytes;
+                    av_image_copy_plane(dst[i], int(picture.stride[i]), srcp->data[i], int(srcp->stride[i]), pw, ph);
+                }
+            } else {
+                m_swsOut = sws_getCachedContext(m_swsOut, m_w, m_h, EngineFmt(), ow, oh, EngineFmt(), SWS_LANCZOS, nullptr, nullptr, nullptr);
+                const uint8_t* sp[4] = {srcp->data[0], srcp->data[1], srcp->data[2], nullptr};
+                int sl[4] = {int(srcp->stride[0]), int(srcp->stride[1]), int(srcp->stride[2]), 0};
+                int dl[4] = {int(picture.stride[0]), int(picture.stride[1]), int(picture.stride[2]), 0};
+                if (m_swsOut) sws_scale(m_swsOut, sp, sl, 0, m_h, dst, dl);
+            }
         }
         ++m_emitted;
-        if (!s.real) ++m_generated;
         Log(ADDON_LOG_DEBUG, "out pts=%lld real=%d t=%.3f", static_cast<long long>(s.pts), s.real ? 1 : 0, double(s.t));
         if ((m_emitted % 600) == 0 && m_engine) {
-            pm_engine_stats st{};
-            pm_engine_stats_get(m_engine, &st);
+            const pmk::EngineStats st = m_engine->Stats();
             Log(ADDON_LOG_INFO, "%llu pictures out (%llu generated), cuts %llu, motion %.1f ms, generated frame %.1f ms",
                 static_cast<unsigned long long>(m_emitted), static_cast<unsigned long long>(m_generated),
-                static_cast<unsigned long long>(st.cuts), st.me_ms, st.gen_ms);
+                static_cast<unsigned long long>(st.cuts), st.meMs, st.genMs);
         }
         return VC_PICTURE;
     }
 
     void Teardown()
     {
-        if (m_engine) pm_engine_close(m_engine);
-        m_engine = nullptr;
+        m_engine.reset();
         if (m_sws) sws_freeContext(m_sws);
         if (m_swsOut) sws_freeContext(m_swsOut);
         m_sws = m_swsOut = nullptr;
@@ -742,15 +826,17 @@ private:
     bool m_drained = false;
     SwsContext* m_sws = nullptr;
     SwsContext* m_swsOut = nullptr;
-    pm_engine* m_engine = nullptr;
-    int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_up = 1, m_quality = 1, m_threads = 0;
+    pmk::EngineCfg m_cfg;
+    std::unique_ptr<pmk::IEngine> m_engine;
+    bool m_upscaled = false, m_test2x = false, m_warned = false;
+    int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_outW = 0, m_outH = 0;
     double m_frameUs = 0;
     Planes m_pic[2];
     Planes m_gen;
-    int m_prevSlot = 0, m_prev = 0, m_lastReal = 0;
+    int m_prevSlot = 0;
     int64_t m_prevPts = 0;
     bool m_havePrev = false;
-    std::deque<pmk::Slot> m_queue;
+    std::deque<Out> m_queue;
     unsigned long long m_emitted = 0, m_generated = 0;
 };
 

@@ -3,6 +3,8 @@
 // back, and checks every timestamp Kodi would receive, then a moving box through the real engine.
 #include "cadence.h"
 #include "pm_engine.h"
+#include "kodi_engine.h"
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -96,10 +98,59 @@ static void Engine()
     pm_engine_close(e);
 }
 
+// the same moving box through the add-on's engine interface: the GPU engine when there is a Vulkan device (CI: lavapipe
+// with PUSHMPC_VK_ALLOW_CPU=1; PM_REQUIRE_GPU=1 makes its absence a failure), else the CPU fallback
+static void KodiEngine(int upscale)
+{
+    pmk::EngineCfg c;
+    c.width = W; c.height = H; c.bits = 8; c.threads = 2; c.quality = 1;
+    if (upscale) { c.upscaler = 1; c.outWidth = W * 2; c.outHeight = H * 2; }
+    std::string why;
+    auto e = pmk::OpenEngine(c, why);
+    CHECK(e != nullptr);
+    if (!e) return;
+    std::printf("kodi engine: %s [%s]
+", e->Describe().c_str(), why.c_str());
+    const char* req = std::getenv("PM_REQUIRE_GPU");
+    if (req && req[0] == '1') CHECK(e->IsGpu());
+    const int ow = e->OutWidth(), oh = e->OutHeight();
+    if (upscale && e->IsGpu()) CHECK(ow == W * 2 && oh == H * 2);
+    std::vector<unsigned char> y(size_t(ow) * oh), u(size_t(ow / 2) * (oh / 2)), v(u.size());
+    pm_yuv_out o{{y.data(), u.data(), v.data()}, {ow, ow / 2, ow / 2}};
+    std::string err;
+    for (int f = 0; f < 6; ++f) {
+        Frame(f, 40 + 8 * f, 220);
+        pm_yuv s{{Y[f & 1], U[f & 1], V[f & 1]}, {W, W / 2, W / 2}};
+        CHECK(e->Push(s, f > 0, err));
+        if (f >= 2) {
+            CHECK(e->HavePair());
+            CHECK(e->Generate(0.5f, o, err));
+            if (ow == W) {
+                const double cpos = BoxCentre(y.data()), want = 40 + 8 * f - 4 + 24;
+                CHECK(std::fabs(cpos - want) <= 3.0);
+                if (f == 5) std::printf("kodi engine: box at t=0.5 %.2f (expected %.2f)
+", cpos, want);
+            }
+            if (upscale && e->IsGpu()) CHECK(e->Real(false, o, err));
+        }
+    }
+    std::memset(Y[0], 200, sizeof(Y[0]));
+    pm_yuv s{{Y[0], U[0], V[0]}, {W, W / 2, W / 2}};
+    CHECK(e->Push(s, true, err));
+    CHECK(e->PairIsCut());
+    std::string kwhy;
+    const int k = e->DecideK(0, 23.976, 120.0, kwhy);
+    std::printf("kodi engine: Auto on 120 Hz: x%d (%s)
+", k, kwhy.c_str());
+    CHECK(k >= 1 && k <= 5);
+}
+
 int main()
 {
     Schedule();
     Engine();
+    KodiEngine(0);
+    KodiEngine(1);
     std::printf(g_fail ? "cadence_test: %d failure(s)\n" : "cadence_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

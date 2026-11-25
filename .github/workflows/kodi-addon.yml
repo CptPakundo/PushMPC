@@ -98,9 +98,15 @@ jobs:
             echo "exported av* symbols (must be 0): $(nm -D --defined-only "$f" | grep -c ' av' || true)"
           fi
 
-      - name: Unit tests
+      - name: Unit tests (Linux: the GPU engine on lavapipe, required)
         shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
+          fi
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v4
         with:
@@ -121,6 +127,7 @@ jobs:
         with:
           name: addon-Linux-kodi${{ matrix.kodi }}
           path: addon
+      - uses: LABSN/sound-ci-helpers@v1
       - name: Flatpak, Xvfb, ffmpeg
         run: |
           sudo apt-get update -qq
@@ -141,7 +148,7 @@ jobs:
           home="$HOME/.var/app/tv.kodi.Kodi/data"
           mkdir -p "$home"
           xvfb-run -a -s "-screen 0 1280x720x24" dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
-            --kodi "flatpak run --user --branch=$BRANCH --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=x11" \
+            --kodi "flatpak run --user --branch=$BRANCH --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=x11" --gpu \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
             --clips "$RUNNER_TEMP/clips" --major ${{ matrix.kodi }} --out out --cases "${{ inputs.cases }}"
       - name: Summary
@@ -167,6 +174,7 @@ jobs:
         with:
           name: addon-Windows-kodi${{ matrix.kodi }}
           path: addon
+      - uses: LABSN/sound-ci-helpers@v1
       - name: Kodi (official build, unpacked; portable mode)
         shell: bash
         run: |

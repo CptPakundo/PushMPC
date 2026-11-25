@@ -4,23 +4,29 @@ usage: drive.py <case> <seconds>   (case: play, seek, chapter, subs)"""
 import json, socket, sys, time
 
 def rpc(method, params=None, timeout=5.0):
-    msg = {"jsonrpc": "2.0", "id": 1, "method": method}
+    """one request; Kodi also pushes notifications (Player.OnPlay ...) on the socket: skip them, return the reply"""
+    msg = {"jsonrpc": "2.0", "id": 7, "method": method}
     if params is not None:
         msg["params"] = params
+    dec = json.JSONDecoder()
     with socket.create_connection(("127.0.0.1", 9090), timeout=timeout) as s:
         s.sendall(json.dumps(msg).encode())
-        buf, depth = b"", 0
         s.settimeout(timeout)
+        buf = ""
         while True:
             c = s.recv(65536)
             if not c:
-                break
-            buf += c
-            try:
-                return json.loads(buf.decode())
-            except ValueError:
-                continue
-    return None
+                return None
+            buf += c.decode("utf-8", "replace")
+            while buf.strip():
+                buf = buf.lstrip()
+                try:
+                    obj, end = dec.raw_decode(buf)
+                except ValueError:
+                    break
+                buf = buf[end:]
+                if isinstance(obj, dict) and obj.get("id") == 7:
+                    return obj
 
 def props():
     r = rpc("Player.GetProperties", {"playerid": 1, "properties": ["time", "totaltime", "speed", "currentaudiostream",
@@ -31,6 +37,27 @@ def ms(t):
     return ((t.get("hours", 0) * 60 + t.get("minutes", 0)) * 60 + t.get("seconds", 0)) * 1000 + t.get("milliseconds", 0)
 
 case, secs = sys.argv[1], float(sys.argv[2])
+if case == "enable":
+    # first start: enable the add-on the supported way (an add-on copied in by hand is registered disabled)
+    deadline = time.time() + 150
+    while time.time() < deadline:
+        try:
+            r = rpc("Addons.SetAddonEnabled", {"addonid": "inputstream.pushmpc", "enabled": True})
+            if r is not None:
+                print("DRIVE enable", json.dumps(r))
+                time.sleep(2)
+                print("DRIVE details", json.dumps(rpc("Addons.GetAddonDetails", {"addonid": "inputstream.pushmpc", "properties": ["enabled", "version"]})))
+                break
+        except OSError:
+            pass
+        time.sleep(2)
+    else:
+        print("DRIVE: JSON-RPC never answered")
+    try:
+        rpc("Application.Quit")
+    except OSError:
+        pass
+    sys.exit(0)
 deadline = time.time() + 90
 while time.time() < deadline:
     try:

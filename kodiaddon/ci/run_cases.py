@@ -16,6 +16,7 @@ ap.add_argument("--major", type=int, required=True)
 ap.add_argument("--out", required=True)
 ap.add_argument("--cases", default="")
 ap.add_argument("--kill", default="", help="command that stops any leftover Kodi")
+ap.add_argument("--gpu", action="store_true", help="the GPU engine is expected (Vulkan present)")
 ap.add_argument("--play", type=float, default=14.0)
 a = ap.parse_args()
 here = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +30,9 @@ CASES = [
     ("h264_x4", "h264.mkv", {"smoother": 4}, 4, True, "640x360", "play"),
     ("h264_x5", "h264.mp4", {"smoother": 5}, 5, True, "640x360", "play"),
     ("h264_x10", "h264.mp4", {"smoother": 10}, 10, True, "640x360", "play"),
-    ("auto", "h264.mp4", {"smoother": 0}, 0, True, "640x360", "play"),
+    ("auto", "h264.mp4", {"smoother": 0}, 0, True, "*", "play"),
+    ("nis", "h264.mp4", {"smoother": 2, "upscale": 3}, 2, True, "up" if a.gpu else "640x360", "play"),
+    ("cpu_engine", "h264.mp4", {"smoother": 2, "engine": 1, "upscale": 1}, 2, True, "640x360", "play"),
     ("off", "h264.mp4", {"smoother": 1}, 1, True, "640x360", "play"),
     ("upscale2", "h264.mp4", {"smoother": 2, "upscale": 2}, 2, True, "1280x720", "play"),
     ("hevc_x2", "hevc.mkv", {"smoother": 2}, 2, True, "640x360", "play"),
@@ -96,7 +99,8 @@ def launch(args, seconds, drive_case=None, drive_out=None):
     time.sleep(2)
 
 # first start: Kodi registers the add-on (disabled, as for any add-on copied in by hand); enable it in the database
-launch([], 25, "play", os.path.join(a.out, "first-start.txt"))
+launch([], 25, "enable", os.path.join(a.out, "first-start.txt"))
+print(open(os.path.join(a.out, "first-start.txt"), encoding="utf-8", errors="replace").read(), flush=True)
 dbs = sorted(glob.glob(os.path.join(ud, "Database", "Addons*.db")))
 print("databases:", dbs, flush=True)
 if dbs:
@@ -118,7 +122,7 @@ if log:
 
 failed = []
 for name, clip, settings, k, decode, size, drive_case in CASES:
-    s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "displayhz": 0, "threads": 0}
+    s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": 0}
     s.update(settings)
     write(os.path.join(ud, "addon_data", "inputstream.pushmpc", "settings.xml"),
           "<settings version=\"2\">\n" + "".join(f"    <setting id=\"{k_}\">{v}</setting>\n" for k_, v in s.items()) + "</settings>\n")

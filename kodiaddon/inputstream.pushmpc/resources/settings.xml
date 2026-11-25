@@ -45,12 +45,27 @@
       </group>
       <group id="2" label="30005">
         <setting id="upscale" type="integer" label="30006" help="30106">
+          <level>1</level>
+          <default>0</default>
+          <constraints>
+            <options>
+              <option label="30032">0</option>
+              <option label="30030">1</option>
+              <option label="30033">3</option>
+              <option label="30034">4</option>
+              <option label="30031">2</option>
+            </options>
+          </constraints>
+          <control type="list" format="string"/>
+        </setting>
+        <setting id="engine" type="integer" label="30009" help="30109">
           <level>2</level>
           <default>0</default>
           <constraints>
             <options>
-              <option label="30030">0</option>
-              <option label="30031">2</option>
+              <option label="30040">0</option>
+              <option label="30041">1</option>
+              <option label="30042">2</option>
             </options>
           </constraints>
           <control type="list" format="string"/>

@@ -88,7 +88,7 @@ msgid "Balanced"
 msgstr ""
 
 msgctxt "#30030"
-msgid "Kodi's video scaler (recommended; RTX / Intel Video Super Resolution on Windows)"
+msgid "Kodi's video scaler (on Windows it can use RTX / Intel Video Super Resolution)"
 msgstr ""
 
 msgctxt "#30031"
@@ -112,7 +112,7 @@ msgid "Kodi 21 cannot take HDR pictures from an add-on, so HDR files always play
 msgstr ""
 
 msgctxt "#30106"
-msgid "Kodi's scaler runs on the GPU and is the better choice; the PushMPC option exists for testing."
+msgid "Auto: NIS on the GPU engine where the screen is larger than the video; on Windows Kodi's scaler, which can use RTX / Intel Video Super Resolution."
 msgstr ""
 
 msgctxt "#30107"
@@ -121,4 +121,36 @@ msgstr ""
 
 msgctxt "#30108"
 msgid "How many CPU threads the frame generator may use."
+msgstr ""
+
+msgctxt "#30009"
+msgid "Engine"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Auto (NIS on the GPU to the screen size; Windows: Kodi's scaler)"
+msgstr ""
+
+msgctxt "#30033"
+msgid "NIS to the screen size (GPU engine)"
+msgstr ""
+
+msgctxt "#30034"
+msgid "FSR1 to the screen size (GPU engine)"
+msgstr ""
+
+msgctxt "#30040"
+msgid "Auto (GPU, else CPU)"
+msgstr ""
+
+msgctxt "#30041"
+msgid "CPU"
+msgstr ""
+
+msgctxt "#30042"
+msgid "GPU (Vulkan) only"
+msgstr ""
+
+msgctxt "#30109"
+msgid "The GPU engine runs on any Vulkan 1.2 GPU and is much faster; the CPU engine is the fallback."
 msgstr ""
