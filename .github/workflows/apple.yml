@@ -254,7 +254,7 @@ jobs:
             *) [ "$got" = "$CLIP_SHA256" ] || { echo "::error::clip SHA-256 $got != $CLIP_SHA256"; exit 1; };; esac
           export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
           pushmpc-setup install
-          cat "$HOME/.config/mpv/mpv.conf"
+          cat "$HOME/.config/mpv/mpv.conf"; ls -la "$HOME/lib"
           src=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,r_frame_rate,width,height -of csv=p=0 "$clip")
           echo "source: $src"
           # mpv's encode mode did not apply ~/.config/mpv/mpv.conf in run 45593276787 (no vf): include the block's file
@@ -269,6 +269,7 @@ jobs:
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
           pushmpc-setup uninstall
           [ ! -e "$HOME/.config/mpv/mpv.conf" ] || { echo "::error::mpv.conf left behind"; exit 1; }
+          [ ! -e "$HOME/lib" ] || { echo "::error::~/lib left behind"; ls -la "$HOME/lib"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         if: always()
