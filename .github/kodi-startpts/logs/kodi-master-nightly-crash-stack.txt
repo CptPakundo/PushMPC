@@ -1,0 +1,112 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.016 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.187 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 30
+
+Microsoft (R) Windows Debugger Version 10.0.26100.9457 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [start2-kodi_crashlog-23.0-ALPHA1 Git_20261125-9d2a18a5c89-20261125-205337.dmp]
+User Mini Dump File: Only registers, stack and portions of memory are available
+
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*<symbol cache>*https://msdl.microsoft.com/download/symbols
+Symbol search path is: srv*<symbol cache>*https://msdl.microsoft.com/download/symbols
+Executable search path is: 
+Windows 10 Version 26100 MP (4 procs) Free x64
+Product: Server, suite: TerminalServer DataCenter SingleUserTS
+Edition build lab: 26100.1.amd64fre.ge_release.240331-1435
+Debug session time: Wed Nov 25 20:53:38.000 2026 (UTC + 0:00)
+System Uptime: 0 days 0:06:22.139
+Process Uptime: 0 days 0:00:07.000
+................................................................
+................................................................
+.
+This dump file has an exception of interest stored in it.
+The stored exception information can be accessed via .ecxr.
+(1b7c.1c1c): Access violation - code c0000005 (first/second chance not available)
+For analysis of this file, run !analyze -v
+ntdll!NtGetContextThread+0x14:
+00007ff8`117441a4 c3              ret
+0:038> cdb: Reading initial command '.ecxr; r; kn 30; q'
+*** WARNING: Unable to verify checksum for inputstream.startptsrepro.dll
+rax=0000000000000001 rbx=0000000000000000 rcx=e3987a58965b0000
+rdx=0000000000000000 rsi=00000232076a84a0 rdi=0000000000000000
+rip=00007fffea2f328d rsp=000000939b8ef900 rbp=0000000000000001
+ r8=000002327ca85c40  r9=0000000000000000 r10=000002327ca80000
+r11=000000939b8ef890 r12=0000000000000001 r13=0000023206b084c0
+r14=000000939b8efd20 r15=000000939b8f1220
+iopl=0         nv up ei pl nz na po nc
+cs=0033  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00010206
+inputstream_startptsrepro+0x328d:
+00007fff`ea2f328d 48c70300000000  mov     qword ptr [rbx],0 ds:00000000`00000000=????????????????
+Last set context:
+rax=0000000000000001 rbx=0000000000000000 rcx=e3987a58965b0000
+rdx=0000000000000000 rsi=00000232076a84a0 rdi=0000000000000000
+rip=00007fffea2f328d rsp=000000939b8ef900 rbp=0000000000000001
+ r8=000002327ca85c40  r9=0000000000000000 r10=000002327ca80000
+r11=000000939b8ef890 r12=0000000000000001 r13=0000023206b084c0
+r14=000000939b8efd20 r15=000000939b8f1220
+iopl=0         nv up ei pl nz na po nc
+cs=0033  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00010206
+inputstream_startptsrepro+0x328d:
+00007fff`ea2f328d 48c70300000000  mov     qword ptr [rbx],0 ds:00000000`00000000=????????????????
+*** WARNING: Unable to verify checksum for kodi.exe
+ # Child-SP          RetAddr               Call Site
+00 00000093`9b8ef900 00007ff6`0c8b8337     inputstream_startptsrepro+0x328d
+01 00000093`9b8ef940 00007ff6`0c8a4b53     kodi+0xfb8337
+02 00000093`9b8efa80 00007ff6`0c7d2ef0     kodi+0xfa4b53
+03 00000093`9b8efeb0 00007ff6`0c597581     kodi+0xed2ef0
+04 00000093`9b8f07d0 00007ff6`0c329cca     kodi+0xc97581
+05 00000093`9b8f0820 00007ff6`0c328c81     kodi+0xa29cca
+06 00000093`9b8f1180 00007ff6`0c324a57     kodi+0xa28c81
+07 00000093`9b8f1310 00007ff6`0bd10c51     kodi+0xa24a57
+08 00000093`9b8f1720 00007ff6`0bcf9df0     kodi+0x410c51
+09 00000093`9b8f1850 00007ff6`0bcf976d     kodi+0x3f9df0
+0a 00000093`9b8f2780 00007ff6`0ca7c98c     kodi+0x3f976d
+0b 00000093`9b8f2a50 00007ff6`0ca7cc76     kodi+0x117c98c
+0c 00000093`9b8f2d70 00007ff6`0c03d6b8     kodi+0x117cc76
+0d 00000093`9b8f3320 00007ff6`0c06be7e     kodi+0x73d6b8
+0e 00000093`9b8f3350 00007ff6`0c06c297     kodi+0x76be7e
+0f 00000093`9b8f33a0 00007ff6`0c068ec6     kodi+0x76c297
+10 00000093`9b8f3570 00007ff6`0dfc3ed6     kodi+0x768ec6
+11 00000093`9b8f3770 00007ff6`0dfc1d4b     kodi!PyInit_xbmcwsgi+0x146ca26
+12 00000093`9b8f37c0 00007ff6`0dfbf2ab     kodi!PyInit_xbmcwsgi+0x146a89b
+13 00000093`9b8f3840 00007ff6`0dfc17e6     kodi!PyInit_xbmcwsgi+0x1467dfb
+14 00000093`9b8f3870 00007ff8`0e6e37b0     kodi!PyInit_xbmcwsgi+0x146a336
+15 00000093`9b8ff950 00007ff8`1136dd37     ucrtbase!thread_start<unsigned int (__cdecl*)(void *),1>+0x30
+16 00000093`9b8ff980 00007ff8`1161f2bc     kernel32!BaseThreadInitThunk+0x17
+17 00000093`9b8ff9b0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'
