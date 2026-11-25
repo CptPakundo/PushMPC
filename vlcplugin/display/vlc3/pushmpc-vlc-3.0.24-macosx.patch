@@ -1,0 +1,36 @@
+--- a/modules/video_output/macosx.m
++++ b/modules/video_output/macosx.m
+@@ -69,16 +69,27 @@
+ /**
+  * Module declaration
+  */
++/* PushMPC: VLC 3.0.24's macOS OpenGL output with FSR 1 upscaling (opengl/pm_glscale.c), as its own module
++ * "pushmpc_macosx" (vout=pushmpc_macosx). It declares only its own options; "glconv" and the colour options stay VLC's
++ * macosx module's, which this module reads */
++#undef N_
++#define N_(str) (str)
++static const char *const pm_upscale_values[] = { "fsr", "off" };
++static const char *const pm_upscale_text[] = { N_("FSR 1 (any GPU)"), N_("Off (VLC's bilinear)") };
+ vlc_module_begin ()
+-    /* Will be loaded even without interface module. see voutgl.m */
+-    set_shortname ("Mac OS X")
+-    set_description (N_("Mac OS X OpenGL video output"))
++    set_shortname ("PushMPC Mac OS X")
++    set_description (N_("PushMPC Mac OS X OpenGL video output (VLC's, with FSR 1 upscaling)"))
+     set_category (CAT_VIDEO)
+     set_subcategory (SUBCAT_VIDEO_VOUT)
+-    set_capability ("vout display", 250)
++    set_capability ("vout display", 0)
+     set_callbacks (Open, Close)
+-    add_shortcut ("macosx", "vout_macosx")
+-    add_glopts ()
++    add_shortcut ("pushmpc_macosx")
++    add_string ("pushmpc-gl-upscale", "fsr", N_("Video upscaling"),
++                N_("fsr = AMD FidelityFX Super Resolution 1 (edge adaptive upscaling + sharpening), "
++                   "off = VLC's bilinear"), false)
++        change_string_list (pm_upscale_values, pm_upscale_text)
++    add_float_with_range ("pushmpc-gl-sharpness", 0.5, 0.0, 1.0, N_("FSR sharpness"),
++                          N_("0 = none, 1 = strongest"), false)
+ vlc_module_end ()
+ 
+ /**
