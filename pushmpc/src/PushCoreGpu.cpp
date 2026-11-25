@@ -999,7 +999,7 @@ struct PushCore {
     // "reduced group": a presentable midpoint instead of a whole-group hole, history kept), 2 = no generated frame
     // (history kept; for VFG PushFPS turns a budget Seed into exactly this Skip). A predictive version after
     // EngineController::admitFg (deadline vs predicted GPU cost) was tried first: its cost predictions were too
-    // pessimistic under other GPU load and halved the rate at 1.0x where nothing would have been late; see HANDOFF.
+    // pessimistic under other GPU load and halved the rate at 1.0x where nothing would have been late; measured in the release tests.
     // The measured stage costs are still collected and logged ("fg-admission") for diagnosis.
     Clock::time_point lastAdmitLog{};
     struct AdmitContext { bool clock = false; int32_t level = 0; double queuedMs = 0; };
