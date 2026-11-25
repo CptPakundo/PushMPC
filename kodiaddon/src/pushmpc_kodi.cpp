@@ -19,6 +19,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -32,7 +33,11 @@ extern "C" {
 #include <chrono>
 #include <condition_variable>
 #include <thread>
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -259,6 +264,7 @@ public:
             const bool reported = t == AVMEDIA_TYPE_VIDEO || t == AVMEDIA_TYPE_AUDIO || t == AVMEDIA_TYPE_SUBTITLE;
             m_fmt->streams[i]->discard = reported ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
         }
+        ExtractFonts();
         DecideVideo();
         return true;
     }
@@ -337,6 +343,22 @@ public:
             info.SetColorRange(static_cast<INPUTSTREAM_COLORRANGE>(p->color_range));
             info.SetColorPrimaries(static_cast<INPUTSTREAM_COLORPRIMARIES>(main ? m_prim : p->color_primaries));
             info.SetColorTransferCharacteristic(static_cast<INPUTSTREAM_COLORTRC>(main ? m_trc : p->color_trc));
+            if (main && m_hasMdm && m_mdm.has_primaries) {
+                kodi::addon::InputstreamMasteringMetadata md;
+                // FFmpeg orders the primaries R, G, B
+                md.SetPrimaryR_ChromaticityX(av_q2d(m_mdm.display_primaries[0][0])); md.SetPrimaryR_ChromaticityY(av_q2d(m_mdm.display_primaries[0][1]));
+                md.SetPrimaryG_ChromaticityX(av_q2d(m_mdm.display_primaries[1][0])); md.SetPrimaryG_ChromaticityY(av_q2d(m_mdm.display_primaries[1][1]));
+                md.SetPrimaryB_ChromaticityX(av_q2d(m_mdm.display_primaries[2][0])); md.SetPrimaryB_ChromaticityY(av_q2d(m_mdm.display_primaries[2][1]));
+                md.SetWhitePoint_ChromaticityX(av_q2d(m_mdm.white_point[0])); md.SetWhitePoint_ChromaticityY(av_q2d(m_mdm.white_point[1]));
+                if (m_mdm.has_luminance) { md.SetLuminanceMax(av_q2d(m_mdm.max_luminance)); md.SetLuminanceMin(av_q2d(m_mdm.min_luminance)); }
+                info.SetMasteringMetadata(md);
+            }
+            if (main && m_hasCll) {
+                kodi::addon::InputstreamContentlightMetadata cl;
+                cl.SetMaxCll(m_cll.MaxCLL);
+                cl.SetMaxFall(m_cll.MaxFALL);
+                info.SetContentLightMetadata(cl);
+            }
         } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
             info.SetStreamType(INPUTSTREAM_TYPE_AUDIO);
             info.SetCodecName(KodiDecoderName(p->codec_id));
@@ -498,6 +520,34 @@ private:
               (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
     }
 
+    // MKV font attachments, as Kodi's own demuxer handles them (DVDDemuxFFmpeg.cpp, AVMEDIA_TYPE_ATTACHMENT): written to
+    // special://temp/fonts/, the folder libass loads when Kodi opens the subtitle stream, so styled subtitles keep their fonts
+    void ExtractFonts()
+    {
+        static const char* kFontTypes[] = {"application/x-truetype-font", "application/vnd.ms-opentype", "application/x-font-ttf",
+                                           "application/x-font", "application/font-sfnt", "font/collection", "font/otf", "font/sfnt", "font/ttf"};
+        const std::string dir = "special://temp/fonts/";
+        int written = 0;
+        for (unsigned i = 0; i < m_fmt->nb_streams; ++i) {
+            const AVStream* st = m_fmt->streams[i];
+            if (st->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT || !st->codecpar->extradata || st->codecpar->extradata_size <= 0) continue;
+            const AVDictionaryEntry* mime = av_dict_get(st->metadata, "mimetype", nullptr, 0);
+            bool font = st->codecpar->codec_id == AV_CODEC_ID_TTF || st->codecpar->codec_id == AV_CODEC_ID_OTF;
+            for (const char* t : kFontTypes) if (mime && std::strcmp(mime->value, t) == 0) font = true;
+            const AVDictionaryEntry* name = av_dict_get(st->metadata, "filename", nullptr, 0);
+            if (!font || !name || !*name->value) continue;
+            std::string fn = name->value;
+            for (char& ch : fn) if (std::strchr("/\\:*?\"<>|", ch)) ch = '_';   // a legal file name, as Kodi makes it
+            if (written == 0) kodi::vfs::CreateDirectory(dir);
+            kodi::vfs::CFile out;
+            if (out.OpenFileForWrite(dir + fn, true)) {
+                if (out.Write(st->codecpar->extradata, size_t(st->codecpar->extradata_size)) == st->codecpar->extradata_size) ++written;
+                out.Close();
+            }
+        }
+        if (written) Log(ADDON_LOG_INFO, "fonts: %d attachment(s) written for the subtitles", written);
+    }
+
     // the transfer of the first decoded frame, for files whose container does not say (the codec's own VUI may):
     // reads from the start and seeks back
     AVColorTransferCharacteristic ProbeTransfer()
@@ -520,6 +570,12 @@ private:
                     while (avcodec_receive_frame(ctx, frm) >= 0) {
                         trc = frm->color_trc;
                         m_prim = frm->color_primaries; m_space = frm->colorspace;
+                        if (const AVFrameSideData* sd = av_frame_get_side_data(frm, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA)) {
+                            if (!m_hasMdm) { m_mdm = *reinterpret_cast<const AVMasteringDisplayMetadata*>(sd->data); m_hasMdm = true; m_mdmFromFrame = true; }
+                        }
+                        if (const AVFrameSideData* sd = av_frame_get_side_data(frm, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL)) {
+                            if (!m_hasCll) { m_cll = *reinterpret_cast<const AVContentLightMetadata*>(sd->data); m_hasCll = true; }
+                        }
                         if (trc == AVCOL_TRC_UNSPECIFIED) trc = AVCOL_TRC_RESERVED0;   // decoded, and really unspecified
                         av_frame_unref(frm);
                     }
@@ -550,10 +606,24 @@ private:
         const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(p->format));
         const int bits = d ? d->comp[0].depth : 8;
         AVColorTransferCharacteristic trc = p->color_trc;
-        if (trc == AVCOL_TRC_UNSPECIFIED && bits > 8 && m_settings.enabled) trc = ProbeTransfer();
+        if (const AVPacketSideData* sd = av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA)) {
+            m_mdm = *reinterpret_cast<const AVMasteringDisplayMetadata*>(sd->data); m_hasMdm = true;
+        }
+        if (const AVPacketSideData* sd = av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL)) {
+            m_cll = *reinterpret_cast<const AVContentLightMetadata*>(sd->data); m_hasCll = true;
+        }
+        // the first frame tells what the container does not: the transfer, and for HDR the mastering display / light level
+        if (m_settings.enabled && bits > 8 && (trc == AVCOL_TRC_UNSPECIFIED || (IsHdrTransfer(trc) && (!m_hasMdm || !m_hasCll)))) {
+            const AVColorTransferCharacteristic probed = ProbeTransfer();
+            if (trc == AVCOL_TRC_UNSPECIFIED) trc = probed;
+        }
         m_trc = trc;
         if (m_prim == AVCOL_PRI_UNSPECIFIED) m_prim = p->color_primaries;
         if (m_space == AVCOL_SPC_UNSPECIFIED) m_space = p->color_space;
+        if (m_hasMdm || m_hasCll)
+            Log(ADDON_LOG_INFO, "hdr metadata: mastering %s (max %.1f, min %.4f cd/m2)%s, MaxCLL %u, MaxFALL %u", m_hasMdm ? "yes" : "no",
+                m_hasMdm && m_mdm.has_luminance ? av_q2d(m_mdm.max_luminance) : 0.0, m_hasMdm && m_mdm.has_luminance ? av_q2d(m_mdm.min_luminance) : 0.0,
+                m_mdmFromFrame ? " from the first frame" : "", m_hasCll ? m_cll.MaxCLL : 0u, m_hasCll ? m_cll.MaxFALL : 0u);
         Log(ADDON_LOG_INFO, "colour: %s, %s, %s, %s range%s", av_color_transfer_name(trc), av_color_primaries_name(m_prim),
             av_color_space_name(m_space), av_color_range_name(p->color_range), trc != p->color_trc ? " (transfer from the first frame)" : "");
         if (!m_settings.enabled) why = "off in the add-on settings";
@@ -611,6 +681,9 @@ private:
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
     AVColorPrimaries m_prim = AVCOL_PRI_UNSPECIFIED;
     AVColorSpace m_space = AVCOL_SPC_UNSPECIFIED;
+    AVMasteringDisplayMetadata m_mdm{};
+    AVContentLightMetadata m_cll{};
+    bool m_hasMdm = false, m_hasCll = false, m_mdmFromFrame = false;
     pmk::EngineCfg m_engineCfg;
     std::unique_ptr<pmk::IEngine> m_engine;
 };
@@ -801,6 +874,7 @@ private:
         const int bytes = bits > 8 ? 2 : 1;
         for (auto& p : m_pic) p.Alloc(w, h, bytes);
         m_gen.Alloc(w, h, bytes);
+        ReleaseImports();
         if (!m_engine || w != m_cfg.width || h != m_cfg.height || bits != m_cfg.bits) {
             // the stream changed size or depth mid-way (rare): a new engine for the new pictures
             m_cfg.width = w; m_cfg.height = h; m_cfg.bits = bits;
@@ -853,6 +927,7 @@ private:
 #endif
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
+        CheckBufferPool(picture);   // before the layout: zero copy needs a renderer that takes dma-bufs
         picture.planeOffsets[0] = 0;
         picture.stride[0] = uint32_t(ow * bytes);
         if (p010) {
@@ -861,6 +936,13 @@ private:
             picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
             picture.planeOffsets[2] = 0;
             picture.decodedDataSize = size_t(picture.planeOffsets[1]) + size_t(picture.stride[1]) * size_t(och);
+        } else if (ZeroCopyLayout()) {
+            // the GPU engine's output layout, so the engine can write into Kodi's buffer in place (zero copy)
+            picture.stride[0] = uint32_t(m_layout.pitchY);
+            picture.stride[1] = picture.stride[2] = uint32_t(m_layout.pitchC);
+            picture.planeOffsets[1] = uint32_t(m_layout.offU);
+            picture.planeOffsets[2] = uint32_t(m_layout.offV);
+            picture.decodedDataSize = size_t(m_layout.size);
         } else {
             picture.stride[1] = picture.stride[2] = uint32_t(ocw * bytes);
             picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
@@ -869,6 +951,8 @@ private:
         }
         picture.pts = s.pts;
         if (!GetFrameBuffer(picture)) { Log(ADDON_LOG_WARNING, "Kodi gave no frame buffer"); return VC_ERROR; }
+        if (!KeepSysMemIfNeeded(picture)) return VC_ERROR;
+        const int zc = ZeroCopyTarget(picture);   // the imported Kodi buffer, or -1: copy path
         uint8_t* dst[4] = {};
         int ds[3] = {};
         if (p010) {
@@ -882,7 +966,13 @@ private:
         std::string err;
         bool done = false;
         const Planes* srcp = &m_pic[q.pic];
-        if (!s.real && m_engine) {
+        if (zc >= 0) {
+            done = s.real ? m_engine->RealInto(q.current, zc, err) : m_engine->GenerateInto(s.t, zc, err);
+            if (done) { ++m_zeroCopied; if (!s.real) ++m_generated; }
+            else { Log(ADDON_LOG_WARNING, "zero copy failed (%s): copy path from now on", err.c_str()); m_zcOff = true; err.clear(); }
+        }
+        if (done) {
+        } else if (!s.real && m_engine) {
             if (!m_test2x) {
                 done = m_engine->Generate(s.t, kodiOut, err);   // straight into Kodi's buffer
                 if (done) ++m_generated;
@@ -921,6 +1011,127 @@ private:
         return VC_PICTURE;
     }
 
+    // zero copy (Kodi 22 on Linux GBM/Wayland, GPU engine with dma-buf import): Kodi's frame buffers are dma-bufs
+    // (DRM-PRIME, get_frame_buffer_platform_handle); laid out like the engine's output, the engine writes into them
+    // directly. Anything unexpected switches to the copy path for good.
+    bool ZeroCopyLayout()
+    {
+#if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
+        if (!m_dmaOk || m_zcOff || !m_engine || !m_engine->IsGpu() || !m_engine->CanImport() || m_test2x || std::getenv("PUSHMPC_NO_ZERO_COPY")) return false;
+        return m_engine->Layout(m_layout);
+#else
+        return false;
+#endif
+    }
+    int ZeroCopyTarget(const VIDEOCODEC_PICTURE& picture)
+    {
+#if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
+        if (!ZeroCopyLayout()) return -1;
+        VIDEOCODEC_PLATFORM_BUFFER pb{};
+        if (!GetFrameBufferPlatformHandle(picture.videoBufferHandle, pb) || pb.type != VIDEOCODEC_PLATFORM_BUFFER_DRM_PRIME || !pb.handle) {
+            if (!m_zcNoted) { Log(ADDON_LOG_INFO, "zero copy: Kodi's frame buffers are system memory here (X11 or no dma-buf allocator): copy path"); m_zcNoted = true; }
+            m_zcOff = true;
+            return -1;
+        }
+        const auto* d = static_cast<const KODI_DRM_FRAME_DESCRIPTOR*>(pb.handle);
+        const bool layoutOk = d->nb_objects == 1 && d->objects[0].fd >= 0 && d->objects[0].size >= m_layout.size && d->nb_layers >= 1 &&
+                              d->layers[0].nb_planes == 3 && d->layers[0].planes[0].offset == 0 &&
+                              d->layers[0].planes[1].offset == m_layout.offU && d->layers[0].planes[2].offset == m_layout.offV &&
+                              int(d->layers[0].planes[0].pitch) == m_layout.pitchY && int(d->layers[0].planes[1].pitch) == m_layout.pitchC;
+        if (!layoutOk) {
+            Log(ADDON_LOG_WARNING, "zero copy: Kodi's dma-buf layout differs (objects %u, layers %u): copy path", d->nb_objects, d->nb_layers);
+            m_zcOff = true;
+            return -1;
+        }
+        const int fd = d->objects[0].fd;
+        struct stat st{};
+        if (fstat(fd, &st) != 0) { m_zcOff = true; return -1; }
+        const auto key = std::make_pair(uint64_t(st.st_dev), uint64_t(st.st_ino));
+        auto it = m_imports.find(key);
+        if (it != m_imports.end()) return it->second;
+        std::string err;
+        const int id = m_engine->Import(fd, d->objects[0].size, err);
+        if (id < 0) {
+            Log(ADDON_LOG_WARNING, "zero copy: import of Kodi's dma-buf failed (%s): copy path", err.c_str());
+            m_zcOff = true;
+            return -1;
+        }
+        if (m_imports.empty()) Log(ADDON_LOG_INFO, "zero copy: the engine writes into Kodi's dma-buf frame buffers");
+        m_imports[key] = id;
+        return id;
+#else
+        (void)picture;
+        return -1;
+#endif
+    }
+    // Kodi 22 on Wayland/GBM registers a dma-buf pool first in its buffer manager, so the add-on's frame buffers can be
+    // DRM-PRIME even though it asked for a CPU format. Kodi's GLES renderer takes those; its desktop-GL renderer does not
+    // (CLinuxRendererGL::UploadTexture crashes: Kodi issue 29344). So, unless Kodi renders with GLES, the dma-buf pool is
+    // configured with a decoy size once (the manager reuses a pool only for the same format and size), and every real
+    // request then comes from a system-memory pool. A dma-buf that still arrives is given back and asked for again.
+    static bool KodiRendersWithGles()
+    {
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (const char* e = std::getenv("PUSHMPC_KODI_DMABUF")) return e[0] == '1';
+        FILE* m = std::fopen("/proc/self/maps", "r");
+        if (!m) return false;
+        bool gles = false, gl = false;
+        char line[512];
+        while (std::fgets(line, sizeof(line), m)) {
+            if (std::strstr(line, "libGLESv2.so")) gles = true;
+            if (std::strstr(line, "libGL.so") || std::strstr(line, "libOpenGL.so") || std::strstr(line, "libGLX.so")) gl = true;
+        }
+        std::fclose(m);
+        return gles && !gl;
+#else
+        return false;
+#endif
+    }
+    void CheckBufferPool(const VIDEOCODEC_PICTURE& real)
+    {
+#if defined(__linux__) && !defined(__ANDROID__)   // Kodi 21 has the same dma-buf pool on Wayland/GBM
+        if (m_poolChecked) return;
+        m_poolChecked = true;
+        m_dmaOk = KodiRendersWithGles();
+        Log(ADDON_LOG_INFO, "frame buffers: %s", m_dmaOk ? "dma-buf allowed (Kodi renders with GLES)" : "system memory (Kodi's renderer cannot take dma-bufs from add-ons)");
+        if (m_dmaOk) return;
+        VIDEOCODEC_PICTURE d{};
+        d.videoFormat = real.videoFormat;
+        d.width = 16; d.height = 16;
+        d.stride[0] = 32; d.stride[1] = d.stride[2] = 16;
+        d.planeOffsets[0] = 0; d.planeOffsets[1] = 512; d.planeOffsets[2] = 768;
+        d.decodedDataSize = 4096;   // never a real picture's size
+        if (GetFrameBuffer(d)) ReleaseFrameBuffer(d.videoBufferHandle);
+#else
+        (void)real;
+#endif
+    }
+    bool KeepSysMemIfNeeded(VIDEOCODEC_PICTURE& picture)
+    {
+#if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
+        if (m_dmaOk) return true;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            VIDEOCODEC_PLATFORM_BUFFER pb{};
+            if (!GetFrameBufferPlatformHandle(picture.videoBufferHandle, pb) || pb.type != VIDEOCODEC_PLATFORM_BUFFER_DRM_PRIME) return true;
+            Log(ADDON_LOG_WARNING, "Kodi handed out a dma-buf frame buffer its renderer cannot take: asking for system memory");
+            ReleaseFrameBuffer(picture.videoBufferHandle);
+            picture.videoBufferHandle = nullptr;
+            picture.decodedDataSize += 4096;   // a size no dma-buf pool is configured for
+            if (!GetFrameBuffer(picture)) return false;
+        }
+        return true;
+#else
+        (void)picture;
+        return true;
+#endif
+    }
+
+    void ReleaseImports()
+    {
+        if (m_engine) for (auto& kv : m_imports) m_engine->ReleaseImport(kv.second);
+        m_imports.clear();
+    }
+
     // planar 10-bit (low bits) into Kodi's P010 buffer (high bits, U and V interleaved)
     void PackP010(const VIDEOCODEC_PICTURE& picture, int ow, int oh)
     {
@@ -940,6 +1151,8 @@ private:
 
     void Teardown()
     {
+        if (m_zeroCopied) Log(ADDON_LOG_INFO, "zero copy: %llu pictures written in place", static_cast<unsigned long long>(m_zeroCopied));
+        ReleaseImports();
         m_engine.reset();
         if (m_sws) sws_freeContext(m_sws);
         if (m_swsOut) sws_freeContext(m_swsOut);
@@ -968,6 +1181,10 @@ private:
     Planes m_pic[2];
     Planes m_gen;
     Planes m_packTmp;
+    pmk::OutLayout m_layout;
+    std::map<std::pair<uint64_t, uint64_t>, int> m_imports;
+    bool m_zcOff = false, m_zcNoted = false, m_poolChecked = false, m_dmaOk = false;
+    unsigned long long m_zeroCopied = 0;
     int m_packW = 0, m_packH = 0;
     int m_prevSlot = 0;
     int64_t m_prevPts = 0;

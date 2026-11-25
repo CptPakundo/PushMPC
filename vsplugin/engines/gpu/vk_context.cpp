@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // pushmpc.Enhance, portable GPU engine: the Vulkan device (see vk_context.h).
 #include "vk_context.h"
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -311,6 +315,13 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
             fOf.pNext = &fSync2; f12.pNext = &fOf;
         } else ofFam = -1;
     }
+#if !defined(_WIN32) && !defined(__APPLE__)
+    if (HasDeviceExt(m_phys, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) && HasDeviceExt(m_phys, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+        exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        exts.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        m_dmabuf = true;
+    }
+#endif
     VkDeviceQueueCreateInfo qis[2] = { qi, qi };
     uint32_t qCount = 1;
     if (ofFam >= 0 && uint32_t(ofFam) != m_family) { qis[1].queueFamilyIndex = uint32_t(ofFam); qCount = 2; }
@@ -319,7 +330,7 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
     di.queueCreateInfoCount = qCount; di.pQueueCreateInfos = qis;
     di.enabledExtensionCount = uint32_t(exts.size()); di.ppEnabledExtensionNames = exts.data();
     const VkResult r = vkCreateDevice(m_phys, &di, nullptr, &m_dev);
-    if (r != VK_SUCCESS) { err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
+    if (r != VK_SUCCESS) { m_dmabuf = false; err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
     volkLoadDevice(m_dev);
     vkGetDeviceQueue(m_dev, m_family, 0, &m_queue);
     if (ofFam >= 0 && vkCreateOpticalFlowSessionNV) { m_ofFamily = uint32_t(ofFam); vkGetDeviceQueue(m_dev, m_ofFamily, 0, &m_ofQueue); }
@@ -429,6 +440,46 @@ bool Context::CreateImage(int w, int h, VkFormat format, VkImageUsageFlags usage
     }
     out.format = format; out.w = w; out.h = h;
     return true;
+}
+
+bool Context::ImportDmaBuf(int fd, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out, std::string& err)
+{
+    out = {};
+#if !defined(_WIN32) && !defined(__APPLE__)
+    if (!m_dmabuf || !vkGetMemoryFdPropertiesKHR) { err = "dma-buf import not supported by " + m_info.name; return false; }
+    VkExternalMemoryBufferCreateInfo eb{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+    eb.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.pNext = &eb; bi.size = size; bi.usage = usage; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_dev, &bi, nullptr, &out.buf) != VK_SUCCESS) { err = "vkCreateBuffer (dma-buf) failed"; return false; }
+    VkMemoryRequirements mr{};
+    vkGetBufferMemoryRequirements(m_dev, out.buf, &mr);
+    VkMemoryFdPropertiesKHR fp{ VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR };
+    if (vkGetMemoryFdPropertiesKHR(m_dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fp) != VK_SUCCESS) {
+        err = "vkGetMemoryFdPropertiesKHR failed"; Destroy(out); return false;
+    }
+    int type = MemoryType(mr.memoryTypeBits & fp.memoryTypeBits, 0);
+    if (type < 0) { err = "no memory type can import this dma-buf"; Destroy(out); return false; }
+    const int dupFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (dupFd < 0) { err = "dup failed"; Destroy(out); return false; }
+    VkImportMemoryFdInfoKHR imp{ VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR };
+    imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; imp.fd = dupFd;
+    VkMemoryDedicatedAllocateInfo ded{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+    ded.buffer = out.buf; imp.pNext = &ded;
+    VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.pNext = &imp; ai.allocationSize = mr.size; ai.memoryTypeIndex = uint32_t(type);
+    if (vkAllocateMemory(m_dev, &ai, nullptr, &out.mem) != VK_SUCCESS) {
+        close(dupFd);   // not consumed on failure
+        err = "vkAllocateMemory (dma-buf import, " + std::to_string(mr.size) + " bytes) failed"; Destroy(out); return false;
+    }
+    if (vkBindBufferMemory(m_dev, out.buf, out.mem, 0) != VK_SUCCESS) { err = "vkBindBufferMemory (dma-buf) failed"; Destroy(out); return false; }
+    out.size = size;
+    return true;
+#else
+    (void)fd; (void)size; (void)usage;
+    err = "dma-buf import is Linux only";
+    return false;
+#endif
 }
 
 void Context::Destroy(Buffer& b)

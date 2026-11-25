@@ -146,6 +146,30 @@ public:
     }
     void Forget() override { ReleaseAll(); }
     EngineStats Stats() const override { return m_stats; }
+    bool Layout(OutLayout& l) const override
+    {
+        const pmvs::gpu::OutputLayout o = m_e.Layout();
+        l.pitchY = o.pitchY; l.pitchC = o.pitchC; l.offU = o.offU; l.offV = o.offV; l.size = o.stride;
+        return true;
+    }
+    bool CanImport() const override { return m_e.DmaBufImport(); }
+    int Import(int fd, uint64_t size, std::string& err) override { return m_e.ImportOutput(fd, size, err); }
+    void ReleaseImport(int id) override { m_e.ReleaseOutput(id); }
+    bool GenerateInto(float t, int id, std::string& err) override
+    {
+        if (m_pair < 0) { err = "no pair"; return false; }
+        uint64_t ticket = 0;
+        if (!m_e.GenerateInto(m_pair, t, m_cut ? (t < 0.5f ? 1 : 2) : 0, id, ticket, err) || !m_e.Wait(ticket, err)) return false;
+        ++m_stats.generated;
+        return true;
+    }
+    bool RealInto(bool current, int id, std::string& err) override
+    {
+        const int slot = current || m_prevSlot < 0 ? m_curSlot : m_prevSlot;
+        if (slot < 0) { err = "no picture"; return false; }
+        uint64_t ticket = 0;
+        return m_e.RealInto(slot, id, ticket, err) && m_e.Wait(ticket, err);
+    }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         static std::mutex mu;

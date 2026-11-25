@@ -22,6 +22,9 @@ struct EngineCfg {
     int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
 };
 
+// the GPU engine's output layout (packed rows); a player buffer laid out like this can be written in place
+struct OutLayout { int pitchY = 0, pitchC = 0; uint64_t offU = 0, offV = 0, size = 0; };
+
 struct EngineStats { uint64_t pushed = 0, pairs = 0, cuts = 0, generated = 0; double meMs = 0, genMs = 0; };
 
 class IEngine {
@@ -40,6 +43,14 @@ public:
     // the previous frame as it is, at the output size; false: the caller copies it itself (no upscaler)
     virtual bool Real(bool current, const pm_yuv_out& out, std::string& err) = 0;   // current: the newest frame (the end of a clip)
     virtual void Forget() = 0;
+    // zero copy (Linux, GPU engine with dma-buf import): the player's frame buffer (a dma-buf fd laid out as Layout())
+    // becomes the output; Import returns an id or -1 with the reason
+    virtual bool Layout(OutLayout&) const { return false; }
+    virtual bool CanImport() const { return false; }
+    virtual int Import(int /*fd*/, uint64_t /*size*/, std::string& err) { err = "no zero copy on this engine"; return -1; }
+    virtual void ReleaseImport(int /*id*/) {}
+    virtual bool GenerateInto(float /*t*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
+    virtual bool RealInto(bool /*current*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual EngineStats Stats() const = 0;
     // Auto's multiplier for this engine (display refresh / source fps within the measured budget)
     virtual int DecideK(int smoother, double srcFps, double displayHz, std::string& why) = 0;

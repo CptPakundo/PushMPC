@@ -113,6 +113,9 @@ public:
     virtual bool Record(VkCommandBuffer cb, const PairGpu& pair, float t, const SynthTarget& target, std::string& err) = 0;
 };
 
+// where an output frame lies in its buffer (packed rows): Y at 0, U at offU, V at offV; one output = stride bytes
+struct OutputLayout { int pitchY = 0, pitchC = 0; uint64_t offU = 0, offV = 0, stride = 0; };
+
 class Engine {
 public:
     Engine();
@@ -158,6 +161,15 @@ public:
     // after Wait: the frame into the caller's planes (the output size); the readback slot is free again
     void Read(int out, const YuvOut& o);
     void ReleaseOut(int out);
+
+    // zero copy (Linux): a player's dma-buf frame buffer imported as an output target laid out as Layout() says; the
+    // frame is written straight into it (no readback, no copy). ImportOutput returns an id, or -1 with the reason.
+    bool DmaBufImport() const;
+    OutputLayout Layout() const;
+    int ImportOutput(int fd, uint64_t size, std::string& err);
+    void ReleaseOutput(int id);
+    bool GenerateInto(int pair, float t, int mode, int output, uint64_t& ticket, std::string& err);
+    bool RealInto(int slot, int output, uint64_t& ticket, std::string& err);
 
     // gpu_test: a pair's fields from / to the CPU reference's MotionField
     bool InjectFields(int pair, const veyra::portable::MotionField& f, const veyra::portable::MotionField& k, std::string& err);

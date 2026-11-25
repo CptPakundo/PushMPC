@@ -33,7 +33,7 @@ def ts(line):
 # --- addon
 ours = [l for l in lines if "PushMPC:" in l]
 for l in ours:
-    if any(x in l for x in ("video:", "video stays", "decoder ", "engine:", "upscaling", "multiplier:")):
+    if any(x in l for x in ("video:", "video stays", "decoder ", "engine:", "upscaling", "multiplier:", "frame buffers:", "zero copy", "hdr metadata", "fonts:")):
         notes.append(l.split("PushMPC:", 1)[1].strip())
 has_decoder = any("PushMPC: decoder" in l for l in lines)
 kodi_codec = [l for l in lines if "Creating video codec" in l or "CAddonVideoCodec" in l and "Failed" in l]
@@ -117,10 +117,18 @@ notes.append(f"audio stream opened by Kodi: {audio}")
 errors = [l for l in lines if re.search(r"ERROR <general>.*(VideoPlayer|CAddonVideoCodec|InputStream|RenderManager|PushMPC)", l)]
 notes += ["ERROR: " + e.split("ERROR <general>:", 1)[-1].strip() for e in errors[:6]]
 
+if case == "fonts":
+    res["fonts"] = "fonts: 1 attachment(s) written" in text
+if case == "hdr10_x2" and decode:
+    res["hdrmeta"] = bool(re.search(r"hdr metadata: mastering yes \(max 1000\.0, min 0\.0001 cd/m2\).*MaxCLL 1000, MaxFALL 400", text))
+if case == "zerocopy":
+    # Kodi chose the frame buffers (dma-buf only when its renderer takes them); playback must work either way
+    res["buffers"] = "PushMPC: frame buffers:" in text
+    notes.append("zero copy used: " + str("zero copy: the engine writes into Kodi" in text))
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
-required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + (["buffers"] if "buffers" in res else []) + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
 ok = all(res.get(x) for x in required)
 with open(summary, "a", encoding="utf-8") as f:
     f.write(f"### {case}: {'PASS' if ok else 'FAIL'}\n")

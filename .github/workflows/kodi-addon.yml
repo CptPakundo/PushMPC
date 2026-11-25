@@ -103,15 +103,98 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            # zero copy test: udmabuf stands in for Kodi's dma-buf frame buffers
+            sudo modprobe udmabuf && sudo chmod 666 /dev/udmabuf || echo "no udmabuf on this kernel"
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
-          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|cadence_test|FAIL|Passed|Failed" || true
           ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v4
         with:
           name: addon-${{ runner.os }}-kodi${{ matrix.kodi }}
           path: build/addon
+
+  package:
+    # one folder per OS: kodi21/ and kodi22/ builds plus the installer (what the PushMPC Setup ships and passes as
+    # PUSHMPC_KODI_DIR); the installer's round trip runs on it
+    needs: build
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, name: Linux }
+          - { os: windows-latest, name: Windows }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: 'addon-${{ matrix.name }}-kodi21', path: pkg/kodi21 }
+      - uses: actions/download-artifact@v4
+        with: { name: 'addon-${{ matrix.name }}-kodi22', path: pkg/kodi22 }
+      - name: Assemble
+        shell: bash
+        run: |
+          cp kodiaddon/install/install.sh kodiaddon/install/install.ps1 pkg/
+          find pkg -maxdepth 3 | sort
+      - name: Installer round trip (Linux)
+        if: runner.os == 'Linux'
+        run: sh kodiaddon/tests/install-test.sh "$PWD/pkg"
+      - name: Installer round trip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./kodiaddon/tests/install-test.ps1 -Package "$PWD\pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pushmpc-kodi-${{ matrix.name }}
+          path: pkg
+
+  kodi-wayland:
+    # Kodi 22 on Wayland (headless Weston, Mesa) gets dma-buf frame buffers (udmabuf): the zero-copy case checks that
+    # the GPU engine writes into them in place
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: addon-Linux-kodi22, path: addon }
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Flatpak, Weston, ffmpeg, udmabuf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak weston ffmpeg dbus-x11 > /dev/null
+          sudo modprobe udmabuf && sudo chmod 666 /dev/udmabuf || echo "::warning::no udmabuf"
+          ls -l /dev/udmabuf /dev/dma_heap 2>&1 || true
+          flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Kodi 22 from Flathub beta
+        timeout-minutes: 20
+        run: flatpak install --user -y --noninteractive flathub-beta tv.kodi.Kodi//beta > /dev/null
+      - name: Clips
+        run: python3 kodiaddon/ci/gen_clips.py ffmpeg "$RUNNER_TEMP/clips"
+      - name: Play on Wayland
+        run: |
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          weston --backend=headless --renderer=gl --socket=wayland-pm --width=1280 --height=720 > "$RUNNER_TEMP/weston.log" 2>&1 &
+          sleep 3; cat "$RUNNER_TEMP/weston.log" | tail -5
+          export WAYLAND_DISPLAY=wayland-pm
+          home="$HOME/.var/app/tv.kodi.Kodi/data"; mkdir -p "$home"
+          dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
+            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu \
+            --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2"
+      - name: Summary
+        if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-wayland-logs
+          path: out
 
   kodi-linux:
     needs: build

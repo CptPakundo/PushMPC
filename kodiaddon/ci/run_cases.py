@@ -41,13 +41,16 @@ CASES = [
     ("mpeg2_x2", "mpeg2.ts", {"smoother": 2}, 2, True, "640x360", "play"),
     ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22, "640x360", "play"),
     ("hdr10_kodi", "hdr10.mkv", {"enabled": "false"}, 1, False, "640x360", "play"),   # the same file through Kodi alone
+    ("fonts", "styled.mkv", {"smoother": 2}, 2, True, "640x360", "subs"),
     ("seek", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "seek"),
     ("chapter", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "chapter"),
     ("disabled", "h264.mp4", {"enabled": "false"}, 1, False, "640x360", "play"),
 ]
+# run only when named (kodi-wayland): the GPU engine with Kodi's frame buffers, dma-buf or system memory
+EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2, True, "640x360", "play")]
 if a.cases:
     keep = set(a.cases.split(","))
-    CASES = [c for c in CASES if c[0] in keep]
+    CASES = [c for c in CASES + EXTRA if c[0] in keep]
 
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
