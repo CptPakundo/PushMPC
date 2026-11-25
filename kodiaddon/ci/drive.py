@@ -90,7 +90,7 @@ elif case == "chapter":
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE chapter_ok", ms(p1.get("time", {})) >= 10000 and ms(p1.get("time", {})) > t0 + 4000)
 elif case == "subs":
-    rpc("Player.SetSubtitle", {"playerid": PLAYER[0], "subtitle": "on"})
+    rpc("Player.SetSubtitle", {"playerid": PLAYER[0], "subtitle": 0, "enable": True})
     time.sleep(2)
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE subs_ok", bool(p1.get("subtitleenabled")) and bool(p1.get("currentsubtitle")))

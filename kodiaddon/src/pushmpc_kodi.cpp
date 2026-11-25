@@ -796,21 +796,38 @@ private:
         const pmk::Slot& s = q.slot;
         const int bytes = m_bits > 8 ? 2 : 1;
         const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
-        picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
+        // Kodi 22 takes P010 from add-ons: 10-bit pictures go out in the same layout as Kodi's own decoders give its
+        // renderers (Kodi 21 only has planar formats); the engine works planar, so they are packed at the end
+        const p010 = PM_KODI22 && m_bits > 8;
+        picture.videoFormat = p010 ? VIDEOCODEC_FORMAT_P010 : m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
-        picture.stride[0] = uint32_t(ow * bytes);
-        picture.stride[1] = picture.stride[2] = uint32_t(ocw * bytes);
         picture.planeOffsets[0] = 0;
-        picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
-        picture.planeOffsets[2] = picture.planeOffsets[1] + picture.stride[1] * uint32_t(och);
-        picture.decodedDataSize = size_t(picture.planeOffsets[2]) + size_t(picture.stride[2]) * size_t(och);
+        picture.stride[0] = uint32_t(ow * bytes);
+        if (p010) {
+            picture.stride[1] = uint32_t(ocw * 4);
+            picture.stride[2] = 0;
+            picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
+            picture.planeOffsets[2] = 0;
+            picture.decodedDataSize = size_t(picture.planeOffsets[1]) + size_t(picture.stride[1]) * size_t(och);
+        } else {
+            picture.stride[1] = picture.stride[2] = uint32_t(ocw * bytes);
+            picture.planeOffsets[1] = picture.stride[0] * uint32_t(oh);
+            picture.planeOffsets[2] = picture.planeOffsets[1] + picture.stride[1] * uint32_t(och);
+            picture.decodedDataSize = size_t(picture.planeOffsets[2]) + size_t(picture.stride[2]) * size_t(och);
+        }
         picture.pts = s.pts;
         if (!GetFrameBuffer(picture)) return VC_ERROR;
-        uint8_t* dst[4] = {picture.decodedData + picture.planeOffsets[0], picture.decodedData + picture.planeOffsets[1],
-                           picture.decodedData + picture.planeOffsets[2], nullptr};
+        uint8_t* dst[4] = {};
+        int ds[3] = {};
+        if (p010) {
+            if (m_packTmp.buf.empty() || m_packW != ow || m_packH != oh) { m_packTmp.Alloc(ow, oh, 2); m_packW = ow; m_packH = oh; }
+            for (int i = 0; i < 3; ++i) { dst[i] = m_packTmp.data[i]; ds[i] = int(m_packTmp.stride[i]); }
+        } else {
+            for (int i = 0; i < 3; ++i) { dst[i] = picture.decodedData + picture.planeOffsets[i]; ds[i] = int(picture.stride[i]); }
+        }
         pm_yuv_out kodiOut{};
-        for (int i = 0; i < 3; ++i) { kodiOut.data[i] = dst[i]; kodiOut.stride[i] = ptrdiff_t(picture.stride[i]); }
+        for (int i = 0; i < 3; ++i) { kodiOut.data[i] = dst[i]; kodiOut.stride[i] = ds[i]; }
         std::string err;
         bool done = false;
         const Planes* srcp = &m_pic[q.pic];
@@ -831,16 +848,17 @@ private:
             if (!m_test2x && !m_upscaled) {
                 for (int i = 0; i < 3; ++i) {
                     const int ph = i ? (m_h + 1) / 2 : m_h, pw = (i ? (m_w + 1) / 2 : m_w) * bytes;
-                    av_image_copy_plane(dst[i], int(picture.stride[i]), srcp->data[i], int(srcp->stride[i]), pw, ph);
+                    av_image_copy_plane(dst[i], ds[i], srcp->data[i], int(srcp->stride[i]), pw, ph);
                 }
             } else {
                 m_swsOut = sws_getCachedContext(m_swsOut, m_w, m_h, EngineFmt(), ow, oh, EngineFmt(), SWS_LANCZOS, nullptr, nullptr, nullptr);
                 const uint8_t* sp[4] = {srcp->data[0], srcp->data[1], srcp->data[2], nullptr};
                 int sl[4] = {int(srcp->stride[0]), int(srcp->stride[1]), int(srcp->stride[2]), 0};
-                int dl[4] = {int(picture.stride[0]), int(picture.stride[1]), int(picture.stride[2]), 0};
+                int dl[4] = {ds[0], ds[1], ds[2], 0};
                 if (m_swsOut) sws_scale(m_swsOut, sp, sl, 0, m_h, dst, dl);
             }
         }
+        if (p010) PackP010(picture, ow, oh);
         ++m_emitted;
         Log(ADDON_LOG_DEBUG, "out pts=%lld real=%d t=%.3f", static_cast<long long>(s.pts), s.real ? 1 : 0, double(s.t));
         if ((m_emitted % 600) == 0 && m_engine) {
@@ -850,6 +868,23 @@ private:
                 static_cast<unsigned long long>(st.cuts), st.meMs, st.genMs);
         }
         return VC_PICTURE;
+    }
+
+    // planar 10-bit (low bits) into Kodi's P010 buffer (high bits, U and V interleaved)
+    void PackP010(const VIDEOCODEC_PICTURE& picture, int ow, int oh)
+    {
+        const int ocw = (ow + 1) / 2, och = (oh + 1) / 2;
+        for (int y = 0; y < oh; ++y) {
+            const uint16_t* s = reinterpret_cast<const uint16_t*>(m_packTmp.data[0] + m_packTmp.stride[0] * y);
+            uint16_t* d = reinterpret_cast<uint16_t*>(picture.decodedData + picture.planeOffsets[0] + size_t(picture.stride[0]) * size_t(y));
+            for (int x = 0; x < ow; ++x) d[x] = uint16_t(s[x] << 6);
+        }
+        for (int y = 0; y < och; ++y) {
+            const uint16_t* u = reinterpret_cast<const uint16_t*>(m_packTmp.data[1] + m_packTmp.stride[1] * y);
+            const uint16_t* v = reinterpret_cast<const uint16_t*>(m_packTmp.data[2] + m_packTmp.stride[2] * y);
+            uint16_t* d = reinterpret_cast<uint16_t*>(picture.decodedData + picture.planeOffsets[1] + size_t(picture.stride[1]) * size_t(y));
+            for (int x = 0; x < ocw; ++x) { d[2 * x] = uint16_t(u[x] << 6); d[2 * x + 1] = uint16_t(v[x] << 6); }
+        }
     }
 
     void Teardown()
@@ -881,6 +916,8 @@ private:
     double m_frameUs = 0;
     Planes m_pic[2];
     Planes m_gen;
+    Planes m_packTmp;
+    int m_packW = 0, m_packH = 0;
     int m_prevSlot = 0;
     int64_t m_prevPts = 0;
     bool m_havePrev = false;

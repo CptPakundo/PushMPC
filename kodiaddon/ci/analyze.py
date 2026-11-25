@@ -115,7 +115,8 @@ notes += ["ERROR: " + e.split("ERROR <general>:", 1)[-1].strip() for e in errors
 
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
-required = ["addon", "pictures", "kodi", "render"] + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs_ok", "audio_ok", "playing") if x in res]
+# a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
+required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs_ok", "audio_ok", "playing") if x in res]
 ok = all(res.get(x) for x in required)
 with open(summary, "a", encoding="utf-8") as f:
     f.write(f"### {case}: {'PASS' if ok else 'FAIL'}\n")

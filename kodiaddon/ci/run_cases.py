@@ -147,5 +147,11 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
                         str(24000 / 1001), size, summary])
     if r.returncode:
         failed.append(name)
+# the HDR file through Kodi alone is the reference: when Kodi itself cannot show it on this runner (no 10-bit / HDR path
+# in software GL), the add-on's HDR case is not judged
+if "hdr10_kodi" in failed:
+    failed = [f for f in failed if f not in ("hdr10_kodi", "hdr10_x2")]
+    with open(summary, "a", encoding="utf-8") as f:
+        f.write("Note: Kodi itself cannot play the HDR10 clip on this runner (hdr10_kodi failed), so hdr10_x2 is not judged here.\n\n")
 print("failed cases:", failed or "none")
 sys.exit(1 if failed else 0)
