@@ -191,8 +191,8 @@ $RuntimeFiles = $RuntimeFilesByVendor[$GpuVendor]
 $RuntimeDirs = $RuntimeDirsByVendor[$GpuVendor]
 # Per-file SHA-256 and size of each package's subset (computed from the pinned packages; v2.1.9 AMD downloaded and verified
 # 2026-11-23; v2.2.1 NVIDIA read from the official package 2026-11-25: only avutil-61.dll / swscale-10.dll changed. The v2.2.1
-# AMD values are the v2.1.9 AMD ones with those two files from v2.2.1 NVIDIA: in v2.1.9 both packages had byte-identical root
-# FFmpeg files, and upstream reports 2.2.1's runtime\ unchanged. NOT yet checked on the AMD 2.2.1 package itself (CI): files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
+# AMD values were checked against the official AMD 2.2.1 package by .github/workflows/runtime-pins.yml (2026-11-25, 684 files,
+# run 45592417559): besides the two FFmpeg files, runtime\amd-nr-rdna3\veyra_amd_nr_worker.exe and its manifest changed. Files reused from an existing PushFPS / Veyra install, and files extracted from a package, must match.
 $RuntimeFileHashesAmd = @{
     'avutil-61.dll' = '4504BCCF90872875B21445D0AC121FF984D65F74CFCDAF61D1E333AABD9D4699 1224192'
     'msvcp140.dll' = '0F885B509A685D2BBFA652FED26B5FB31D88FBDAB0A978C641D1C7B8AA460AA9 557728'
