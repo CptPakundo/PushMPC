@@ -85,7 +85,7 @@ index 0f501aa8..ad0d5747 100644
  
  } // namespace veyra::pipeline
 diff --git a/include/veyra/pipeline/EnhanceGraph.h b/include/veyra/pipeline/EnhanceGraph.h
-index 3deeab3b..ba6a5b4e 100644
+index 3deeab3b..2f77591b 100644
 --- a/include/veyra/pipeline/EnhanceGraph.h
 +++ b/include/veyra/pipeline/EnhanceGraph.h
 @@ -55,6 +55,7 @@ struct NVSDK_NGX_Parameter;
@@ -124,7 +124,18 @@ index 3deeab3b..ba6a5b4e 100644
      bool hdrOutput() const { return desc_.hdrOutput; }
      // Whether the *source* is HDR (PQ/HLG ingress). The brightness curve is restricted
      // to real HDR sources: an SDR source has no true highlights, so the roll-off and
-@@ -971,6 +986,10 @@ private:
+@@ -850,6 +865,10 @@ public:
+     // PushFPS Subtitle Hold, as Crosshair Hold: 0 not asked, 1 running, 2 could not be made, 3 not with this method.
+     int subtitleHoldState() const { if(!pipeline::overlay::subtitlesWanted())return 0; if(subtitles_)return 1; if(!desc_.subtitleHold||!fgEnabled_||presentSinkFg())return 3; return 2; }
+     unsigned subtitleHoldPixels() { if(!subtitles_)return 0u; subtitles_->harvest(); return subtitles_->maskedPixels(); }
++    // PushMPC: Subtitle Hold under Auto composes only while burned-in text is found. Detection (the pass's update and
++    // maskedPixels) always runs; with compose off frame generation gets the real frame and nothing is laid back.
++    void setSubtitleCompose(bool on) { subtitleCompose_=on; }
++    bool subtitleCompose() const { return subtitleCompose_; }
+     int hudStillState() const { if(!desc_.hudStill)return 0; if(hudLock_&&hudLock_->stillActive())return 1; if(!fgEnabled_||presentSinkFg())return 3; return 2; }
+     // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
+     // an NGX feature, so it also works on non-NVIDIA adapters.
+@@ -971,6 +990,10 @@ private:
      bool initAmfFrc();
      bool initPushFlow();
      std::unique_ptr<VfgBackend> vfgBackend_;
@@ -135,7 +146,7 @@ index 3deeab3b..ba6a5b4e 100644
      // RTX 40 series: opens the Blackwell-only multi-frame gate in the mapped
      // DLSS-G runtime. Never touched on any other architecture.
      void applyAdaMfgUnlock();
-@@ -1059,6 +1078,8 @@ private:
+@@ -1059,6 +1082,8 @@ private:
      // (uncovered background). Only with flowRefine_; VEYRA_TEST_FLOW_CONSISTENCY=0 leaves
      // NVOF forward-only (photometric refinement). NR/SR never read it.
      bool flowConsistency_=false;
@@ -144,6 +155,14 @@ index 3deeab3b..ba6a5b4e 100644
      ComPtr<ID3D12Resource> nvofReverseTex_,nvofReverseCostTex_;
      // FidelityFX flow has no backward output: FlowClaim's previous-frame claims stand in
      // for the forward-backward check (same VEYRA_TEST_FLOW_CONSISTENCY switch).
+@@ -1275,6 +1300,7 @@ private:
+     std::unique_ptr<NisPass> nisPass_;  // PushFPS: NVIDIA Image Scaling SR
+     std::unique_ptr<PushHudLock> hudLock_;  // PushFPS: Live HUD Lock
+     std::unique_ptr<PushOverlayPass> overlay_;  // PushFPS: Crosshair Hold
++    bool subtitleCompose_=true;   // PushMPC: Subtitle Hold Auto gate (setSubtitleCompose)
+     std::unique_ptr<PushOverlayPass> subtitles_; // PushFPS: Subtitle Hold (fills overlay_'s input when both run)
+     bool initHudLock();
+     void composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity);
 diff --git a/include/veyra/pipeline/FramePacket.h b/include/veyra/pipeline/FramePacket.h
 index 772f1556..799b1aa1 100644
 --- a/include/veyra/pipeline/FramePacket.h
@@ -1626,7 +1645,7 @@ index 5c76c5f3..02aa97d4 100644
 +
  } // namespace veyra::runtime
 diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
-index 17c476a8..28c52d37 100644
+index 17c476a8..6b2db47d 100644
 --- a/src/pipeline/EnhanceGraph.cpp
 +++ b/src/pipeline/EnhanceGraph.cpp
 @@ -796,6 +796,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
@@ -1695,6 +1714,21 @@ index 17c476a8..28c52d37 100644
          mvecSource_="zero motion (no external flow consumer)";
          veyra::log::info("graph", "optical-flow session skipped: no external motion consumer");
          return true;
+@@ -1639,12 +1658,12 @@ bool EnhanceGraph::initCrosshairPass() {
+     return true;
+ }
+ ID3D12Resource* EnhanceGraph::fgInput(unsigned parity) const {
+-    return overlay_?overlay_->input(parity):subtitles_?subtitles_->input(parity):videoFrame_[parity].Get();
++    return overlay_?overlay_->input(parity):subtitles_&&subtitleCompose_?subtitles_->input(parity):videoFrame_[parity].Get();
+ }
+ void EnhanceGraph::composeOverlay(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned parity,float t){
+     if(overlay_&&overlay_->composes(generatedSlot)&&!overlay_->compose(list,tracker_,generatedSlot,parity,t))
+         veyra::log::warn("crosshair-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
+-    if(subtitles_&&subtitles_->composes(generatedSlot)&&!subtitles_->compose(list,tracker_,generatedSlot,parity,t))
++    if(subtitles_&&subtitleCompose_&&subtitles_->composes(generatedSlot)&&!subtitles_->compose(list,tracker_,generatedSlot,parity,t))
+         veyra::log::warn("subtitle-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
+ }
+ void EnhanceGraph::composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity){
 @@ -1675,10 +1694,55 @@ bool EnhanceGraph::initVfg()
      failedBackend_=engine::FailedBackend::Fg;
      vfgBackend_=std::make_unique<VfgBackend>();

@@ -1,0 +1,131 @@
+# T5b vendor paths: structural checks on hosted runners (no vendor GPU there).
+#   - auto_test (the Auto rules, including the [vendor paths] checks: weak-GPU cold start, measured card factor, unlock gates);
+#   - vsr_gate_probe (the Gtx16Vsr / ZludaVsr self-test tool): builds against NVIDIA's DLSS SDK (headers + static NGX
+#     library, the tag PushFPS pins) and runs on the runner, where every route must fail cleanly (no NVIDIA GPU);
+#   - the FidelityFX SDK releases: which upscaler DLL version each release ships and whether it carries the FSR 4 INT8
+#     provider (FSR 4.1 on RX 7000 / RX 6000), with SHA-256, so the runtime pin can move to it. Nothing third-party is
+#     uploaded (artifacts hold our logs only).
+name: vendor-paths
+on:
+  push:
+    paths: ['pushmpc/tools/vsr_gate_probe*', 'pushmpc/include/pushmpc/unlocks.h', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp', 'tests/gtx16-vsr-manual.ps1', 'tests/zluda-vsr-manual.ps1', 'scripts/nvidia-vfx-fetch.ps1', 'scripts/nvidia-vfx-pin.json', 'scripts/fidelityfx-fetch.ps1', 'scripts/pushmpc-install.ps1', 'pushmpc/src/PushCoreGpu.cpp', 'filter/src/PushMpcSettings.h', '.github/workflows/vendor-paths.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: repo }
+      - uses: ilammy/msvc-dev-cmd@v1
+        with: { arch: x64 }
+      - name: auto_test (Auto rules + vendor paths)
+        timeout-minutes: 5
+        run: |
+          cl /nologo /std:c++20 /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX repo\filter\tools\auto_test.cpp /Fe:auto_test.exe /link user32.lib advapi32.lib shell32.lib
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $out = .\auto_test.exe 2>&1 | Out-String
+          $out -split "`n" | Select-String -Pattern 'vendor paths|\[(PASS|FAIL)\]' | ForEach-Object { $_.Line }
+          if ($out -notmatch 'vendor paths: 0 failed') { Write-Host '::error::auto_test vendor paths failed'; exit 1 }
+      - name: DLSS SDK (the tag PushFPS pins)
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -e
+          TAG=$(git ls-remote --tags https://github.com/NVIDIA/DLSS.git | grep -o 'refs/tags/v310\.7\.0$' | head -1 | sed 's#refs/tags/##')
+          test -n "$TAG"
+          GIT_LFS_SKIP_SMUDGE=1 git clone -q --depth 1 --branch "$TAG" --filter=blob:none --sparse https://github.com/NVIDIA/DLSS.git dlss
+          git -C dlss sparse-checkout set include lib/Windows_x86_64/x64
+          git -C dlss lfs pull --include "lib/Windows_x86_64/x64/nvsdk_ngx_s.lib" || true
+          sha256sum dlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib
+      - name: Build vsr_gate_probe
+        timeout-minutes: 5
+        run: |
+          cmd /c "repo\pushmpc\tools\vsr_gate_probe.cmd $env:GITHUB_WORKSPACE\dlss $env:RUNNER_TEMP\probe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Run vsr_gate_probe (no NVIDIA GPU, every route must fail cleanly)
+        timeout-minutes: 5
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\fake-runtime" | Out-Null
+          & "$env:RUNNER_TEMP\probe\vsr_gate_probe.exe" --runtime "$env:RUNNER_TEMP\fake-runtime" --route all --out "$env:RUNNER_TEMP\probe-out" 2>&1 | Tee-Object -Variable log
+          $code = $LASTEXITCODE
+          Write-Host "exit $code"
+          if ($code -eq 0) { Write-Host '::error::a route passed on a runner without an NVIDIA GPU'; exit 1 }
+          if ($code -eq 1 -and -not ($log -match '^RESULT route=core') ) { Write-Host '::error::no RESULT lines'; exit 1 }
+          "STRUCTURAL CHECK PASS (exit $code)"
+          exit 0
+      - name: Tester scripts parse
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          foreach ($f in 'repo/tests/gtx16-vsr-manual.ps1', 'repo/tests/zluda-vsr-manual.ps1') {
+            $e = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e) | Out-Null
+            if ($e) { $e | ForEach-Object { Write-Host "::error::$f $_" }; exit 1 }
+            "$f parses"
+          }
+
+  fsr-sdk:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: FidelityFX SDK signed DLLs per tag (version, FSR 4 INT8 provider, SHA-256)
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          foreach ($tag in 'v2.4.0', 'v2.3.0') {
+            $d = Join-Path $env:RUNNER_TEMP "ffx-$tag"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch $tag --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git $d
+            git -C $d sparse-checkout set Kits/FidelityFX/signedbin
+            Get-ChildItem "$d/Kits/FidelityFX/signedbin" -Filter 'amd_fidelityfx_*_dx12.dll' | Where-Object { $_.Name -match 'upscaler|loader|framegeneration' } | ForEach-Object {
+              $s = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.FullName))
+              $int8 = $s.Contains('ffxProvider_FSR4_Int8') -or $s.Contains('FSR4-i8')
+              $gfx = ([regex]::Matches($s, 'gfx1[0-9]{3}') | ForEach-Object Value | Sort-Object -Unique) -join ' '
+              "{0} {1} version {2} size {3} sha256 {4} fsr4Int8Provider={5} gfx=[{6}]" -f $tag, $_.Name, $_.VersionInfo.FileVersion, $_.Length, (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $int8, $gfx
+            }
+            Remove-Item $d -Recurse -Force
+          }
+      - uses: actions/checkout@v4
+        with: { path: repo }
+      - name: fidelityfx-fetch.ps1 (the installer's FSR SDK 2.4.0 step) - pins, versions, AMD signature
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          ./repo/scripts/fidelityfx-fetch.ps1 -Dest "$env:RUNNER_TEMP\ffx240" -Cache "$env:RUNNER_TEMP\ffx240-cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem "$env:RUNNER_TEMP\ffx240" | ForEach-Object { "{0} {1} {2}" -f $_.Name, $_.VersionInfo.FileVersion, $_.Length }
+          Remove-Item "$env:RUNNER_TEMP\ffx240", "$env:RUNNER_TEMP\ffx240-cache" -Recurse -Force
+          ./repo/scripts/pushmpc-install.ps1 install -DryRun -Gpu AMD -NoMpv 2>&1 | Select-String 'FSR SDK|fidelityfx' | ForEach-Object { $_.Line }
+          exit 0
+
+  vfx-wheel:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: NVIDIA's wheel -> runtime\nvidia-vfg (nvidia-vfx-fetch.ps1), compared with pushmpc-install.ps1's pins
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $names = 'NVVideoEffects.dll','NVCVImage.dll','nvngxruntime.dll','cudart64_12.dll','nvVFXVideoFrameGeneration.dll','nvVFXVideoSuperRes.dll','nvngx_vsr.dll'
+          ./scripts/nvidia-vfx-fetch.ps1 -Dest "$env:RUNNER_TEMP\vfg" -Cache "$env:RUNNER_TEMP\cache" -Only $names -AcceptNvidiaLicense
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $src = Get-Content scripts/pushmpc-install.ps1 -Raw
+          $bad = 0
+          foreach ($n in $names) {
+            $m = [regex]::Match($src, ("'runtime\\nvidia-vfg\\" + [regex]::Escape($n) + "' = '([0-9A-F]{64}) (\d+)'"))
+            $h = (Get-FileHash "$env:RUNNER_TEMP\vfg\$n" -Algorithm SHA256).Hash
+            $ok = $m.Success -and $m.Groups[1].Value -eq $h
+            "{0,-32} wheel {1} installer pin {2} {3}" -f $n, $h.Substring(0, 16), $(if ($m.Success) { $m.Groups[1].Value.Substring(0, 16) } else { 'none' }), $(if ($ok) { 'same' } else { 'DIFFERENT' })
+            if (-not $ok) { $bad++ }
+          }
+          Remove-Item "$env:RUNNER_TEMP\vfg", "$env:RUNNER_TEMP\cache" -Recurse -Force
+          if ($bad) { Write-Host "::error::$bad file(s) differ"; exit 1 }
+          'all seven runtime\nvidia-vfg files from the wheel equal the installer pins'

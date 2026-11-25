@@ -68,6 +68,16 @@ param(
     [string]$ExperimentalExtras = 'Yes',   # unlocks and community ports are on by default (No leaves them out)
     [ValidateSet('Auto', 'NVIDIA', 'AMD')]
     [string]$Gpu = 'Auto',
+    # where the seven NVIDIA Video Effects files (runtime\nvidia-vfg) come from: Package = Veyra's runtime package (default;
+    # byte-identical to NVIDIA's wheel, no extra download), Wheel = NVIDIA's PyPI wheel (scripts\nvidia-vfx-fetch.ps1,
+    # pinned). The package's own copy missing: the wheel is used either way.
+    [ValidateSet('Package', 'Wheel')]
+    [string]$VfxSource = 'Package',
+    # AMD's FidelityFX DLLs: Package = the runtime package's SDK 2.3.0 set, Sdk240 = AMD FSR SDK 2.4.0 (upscaler 4.1.2: FSR 4.1 on
+    # RX 6000 too; scripts\fidelityfx-fetch.ps1, pinned, AMD-signed), Auto = Sdk240 on an AMD GPU unless the unlock Fsr4Int8 is
+    # switched off (PUSHMPC_DISABLE_FSR4INT8=1 or HKCU\Software\PushMPC\Unlocks Fsr4Int8 = 0)
+    [ValidateSet('Auto', 'Package', 'Sdk240')]
+    [string]$FidelityFx = 'Auto',
     # reuse an existing PushFPS / Veyra install's files as hard links (same volume) instead of copies
     [switch]$LinkExisting,
     # never reuse an existing install's files (always the package)
@@ -1276,6 +1286,21 @@ function Expand-RuntimeSubset([string]$zip, [string]$dest) {
             [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $out, $true)
             $got[$rel] = $true
         }
+        # NVIDIA's Video Effects files from NVIDIA's own wheel (pinned, the same SHA-256 as $RuntimeFileHashes): when asked
+        # for (-VfxSource Wheel) or when the package does not carry them
+        $vfx = @($RuntimeFiles | Where-Object { $_ -like 'runtime\nvidia-vfg\*' })
+        $vfxMissing = @($vfx | Where-Object { -not $got.ContainsKey($_) })
+        if ($vfx.Count -and ($VfxSource -eq 'Wheel' -or $vfxMissing.Count)) {
+            $fetch = Join-Path $PSScriptRoot 'nvidia-vfx-fetch.ps1'
+            if (-not (Test-Path $fetch)) { Fail "The runtime package lacks $($vfxMissing -join ', ') and nvidia-vfx-fetch.ps1 is not next to the installer." }
+            Step "NVIDIA Video Effects files from NVIDIA's PyPI wheel (pinned SHA-256)"
+            $names = @($vfx | ForEach-Object { Split-Path $_ -Leaf })
+            $cache = if ($PackageCache) { $PackageCache } else { Join-Path $InstallDir 'download' }
+            & $fetch -Dest (Join-Path $dest 'runtime\nvidia-vfg') -Cache $cache -Only $names -AcceptNvidiaLicense
+            if ($LASTEXITCODE -ne 0) { Fail "nvidia-vfx-fetch.ps1 failed (exit $LASTEXITCODE)." }
+            foreach ($r in $vfx) { $got[$r] = $true }
+            $script:RuntimeSource = "$($Runtime.Asset) + nvidia-vfx $VfxSource"
+        }
         foreach ($r in $RuntimeFiles) { if (-not $got.ContainsKey($r)) { Fail "The runtime package lacks $r." } }
         foreach ($r in $got.Keys) { if ($RuntimeFileHashes.ContainsKey($r) -and -not (Test-PinnedFile (Join-Path $dest $r) $RuntimeFileHashes[$r])) { Fail "$r does not match its pinned SHA-256." } }
     } finally { $z.Dispose() }
@@ -1315,9 +1340,30 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     Get-ChildItem $dest -Recurse -Directory | Sort-Object FullName -Descending | Where-Object { -not (Get-ChildItem $_.FullName -Force) } | Remove-Item -Force
     $extraNote = 'none'
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
+    Add-FidelityFxSdk $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
+}
+# AMD FSR SDK 2.4.0's signed DLLs over the package's 2.3.0 set (unlock Fsr4Int8; the self-test is the fetch script's pin,
+# version and AMD-signature check, recorded in HKCU\Software\PushMPC\SelfTest\Fsr4Int8). A failure keeps the package's set.
+function Add-FidelityFxSdk([string]$dest) {
+    $want = $FidelityFx
+    if ($want -eq 'Auto') {
+        $off = $env:PUSHMPC_DISABLE_FSR4INT8 -match '^(1|true|yes|on)$'
+        try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name Fsr4Int8 -ErrorAction Stop).Fsr4Int8 -eq 0) { $off = $true } } catch {}
+        $want = if ($GpuVendor -eq 'AMD' -and -not $off) { 'Sdk240' } else { 'Package' }
+        if ($GpuVendor -eq 'AMD' -and $off) { Info 'FSR SDK 2.4.0: switched off (unlock Fsr4Int8): the package''s FidelityFX 2.3.0 stays' }
+    }
+    if ($want -ne 'Sdk240') { return }
+    $fetch = Join-Path $PSScriptRoot 'fidelityfx-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'fidelityfx-fetch.ps1 is not next to the installer: the package''s FidelityFX 2.3.0 stays'; return }
+    if ($DryRun) { Dry "would replace runtime_local\amd\fidelityfx with AMD FSR SDK 2.4.0's signed DLLs (fidelityfx-fetch.ps1)"; return }
+    Step 'AMD FSR SDK 2.4.0 (FSR 4.1 upscaling on RX 6000 / 7000 / 9000), from AMD''s repository, pinned'
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'fidelityfx-v2.4.0' } else { Join-Path $InstallDir 'download\fidelityfx-v2.4.0' }
+    & $fetch -Dest (Join-Path $dest 'runtime_local\amd\fidelityfx') -Cache $cache -Record
+    if ($LASTEXITCODE -ne 0) { Warn "FSR SDK 2.4.0 not installed (fidelityfx-fetch.ps1 exit $LASTEXITCODE): the package's FidelityFX 2.3.0 stays" }
+    else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + FidelityFX SDK 2.4.0" }
 }
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
@@ -1343,6 +1389,7 @@ function Prepare-Runtime($pkg = $Runtime) {
     # an existing PushFPS / Veyra install with the pinned files first (no download), else the package
     if (Get-ExistingRuntime $dest $pkg) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
+        Add-FidelityFxSdk $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1448,6 +1495,8 @@ function Invoke-Stage {
     New-Item -ItemType Directory -Force $f, $c, (Join-Path $c 'shaders'), $r | Out-Null
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
+    # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1533,6 +1582,7 @@ function Invoke-Package {
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     New-Item -ItemType Directory -Force $out | Out-Null
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
     [IO.File]::WriteAllText((Join-Path $out 'Install-PushMPC.cmd'), ($cmd -join "`r`n") + "`r`n")
