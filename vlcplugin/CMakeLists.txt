@@ -199,12 +199,13 @@ if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
   enable_language(OBJC)
   set(MVO "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output")
   add_library(pushmpc_macosx_plugin SHARED ${MVO}/macosx.m ${MVO}/opengl/vout_helper.c ${MVO}/opengl/fragment_shaders.c
-              ${MVO}/opengl/converter_sw.c ${MVO}/opengl/pm_glscale.c)
+              ${MVO}/opengl/converter_sw.c ${MVO}/opengl/pm_glscale.c ${MVO}/opengl/pm_compat.c)
   set_target_properties(pushmpc_macosx_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_macosx_plugin")
   target_include_directories(pushmpc_macosx_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${MVO}" "${MVO}/opengl" "${MVO}/../../include")
   target_compile_definitions(pushmpc_macosx_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_macosx" HAVE_GL_CORE_SYMBOLS
                              GL_SILENCE_DEPRECATION "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
-  target_compile_options(pushmpc_macosx_plugin PRIVATE -Wno-deprecated-declarations)
+  # strverscmp / sincosf: VLC takes them from its compat layer, which plugins built outside its tree do not have
+  target_compile_options(pushmpc_macosx_plugin PRIVATE -Wno-deprecated-declarations "SHELL:-include ${MVO}/opengl/pm_compat.h")
   target_link_options(pushmpc_macosx_plugin PRIVATE -undefined dynamic_lookup)
   target_link_libraries(pushmpc_macosx_plugin PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework QuartzCore")
 endif()

@@ -9,3 +9,4 @@
 !/modules/video_output/win32/pm_sensors_stub.c
 !/modules/video_output/opengl/
 !/modules/video_output/opengl/pm_glscale.*
+!/modules/video_output/opengl/pm_compat.*
