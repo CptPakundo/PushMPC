@@ -88,7 +88,7 @@ inline std::string ReadSetting(const char* name)
 struct PortableSettings {
     bool enable = true;
     int smoother = 0;     // 0 Auto, 1 off, 2..8
-    int quality = -1;     // -1 Auto (CPU: balanced; GPU: high), 0 fast, 1 balanced, 2 high (8 px vectors at full size)
+    int quality = -1;     // -1 Auto (balanced on both engines), 0 fast, 1 balanced, 2 high (8 px vectors at full size)
     int threads = 0;      // 0 = all hardware threads (at most 16)
     std::string device;   // PortableDevice: "" / auto (the best Vulkan GPU), cpu (the CPU engine), a number or a part of a name
     std::string upscaler = "auto";   // Upscaler: auto | nis | fsr | off (RTX means auto here)

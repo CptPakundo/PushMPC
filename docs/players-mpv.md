@@ -137,10 +137,17 @@ loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=po
 
 - **Engine.** On the best Vulkan GPU it finds (a discrete card first), the GPU engine runs; without one (or with
   `PortableDevice = cpu`) the CPU engine. The log says which, and why; every frame carries `PushMPCEngine` = `gpu` or `cpu`.
-- Motion both ways between two real frames: PushFPS's block matcher on the GPU (8 px vectors from the full-size picture by
-  default), or, if you ask for it with `motion=nvof`, NVIDIA's optical-flow hardware (`VK_NV_optical_flow`; on an RTX 5090 it
-  measured slower and not better than the block matcher, so it is not the default). Scene cuts: PushFPS's rule plus PushMPC's guard (no blend across a cut: the nearer real frame is shown). The
-  generated frames sit at 1/k, 2/k, ... between the real ones.
+- Motion both ways between two real frames, computed once per pair and used for every generated frame of it: PushFPS's
+  block matcher on the GPU (16 px vectors by default; `portable_quality=high` uses 8 px ones, a little better on fast pans), or, if you ask for it, NVIDIA's
+  optical-flow hardware (`VK_NV_optical_flow`): `motion=nvof` uses its field, `motion=hybrid` offers its vectors to the
+  block matcher. The generated frames sit at 1/k, 2/k, ... between the real ones.
+- **Occlusions and texture:** where the forward and backward motion disagree (something appears or disappears), a
+  generated pixel falls back to the nearer real frame; where they agree but the picture cannot be predicted (water,
+  fire, grain), the two motion-compensated frames are averaged, which is the closer guess. At motion boundaries the
+  neighbouring blocks' vectors are tried too.
+- **Cuts, dissolves, fades and flashes:** a cut shows the nearer real frame (no blend across it). A dissolve or a fade is
+  blended, as it is in the film. A single bright frame (a camera flash, lightning) is held as one frame instead of being
+  spread over the generated frames.
 - **Anime on twos and threes (Dedup, on by default):** a repeated frame is recognised (PushFPS's rule) and the generated
   frames are spread between the different drawings, so a drawing held for two or three frames moves smoothly instead of
   stepping. The plugin looks two source frames ahead for this (`dedup=0` turns it off).

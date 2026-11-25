@@ -37,7 +37,10 @@ struct CutGuard {
     //  - PushFPS's rule (most blocks unexplained) is vetoed when the fields agree on real motion (agreement >=
     //    vetoAgreement with >= vetoMoving of the blocks moving): it fired on 45 of 57 rippling-water pairs that motion
     //    in fact explains (blend-like interpolation is right there), and on no junction the guard missed.
-    float maxAgreement = 0.30f, minChange = 8.0f, minUnexplained = 0.10f;
+    // Then the CC-BY film set (Tears of Steel, Sintel: 279 labelled cuts, 900 negative windows): the misses all had agreement
+    // <= 0.045 and a large change but under 10 % unexplained blocks (same-palette cuts), so the unexplained condition
+    // went and the agreement limit tightened to 0.15.
+    float maxAgreement = 0.15f, minChange = 8.0f, minUnexplained = 0.0f;
     float vetoAgreement = 0.50f, vetoMoving = 0.20f;
     bool enabled = true;
     // returns 0 no cut, 1 PushFPS's rule, 2 the guard

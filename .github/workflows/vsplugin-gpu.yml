@@ -356,7 +356,7 @@ jobs:
             n=$(basename "$l" .labels)
             build/gpu_bench "$o/$n.y4m" --clip $n --test windows --labels "$l" --frames 100000 | tee -a $o/windows.log | grep '^|' >> $o/table.md || true
           done
-          grep '^MISS' $o/windows.log || true
+          grep -E '^(MISS|NEGATIVES)' $o/windows.log || true
           cat $o/summary.json
           cat $o/table.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4

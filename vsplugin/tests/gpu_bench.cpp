@@ -167,13 +167,10 @@ static void BenchInterp(Y4m& clip)
     // device has VK_NV_optical_flow: the 5090 tester script, never a hosted runner)
     struct Method { std::string name; int kind; int quality; bool of; float lambda; bool refined = true; std::function<void(Config&)> tweak = nullptr; };
     auto me3 = [](Config& c) { c.prefilter = c.lambdaScale = c.equiangular = c.merge = c.globalCandidate = false; };
-    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-q2-no-me-fixes", 0, 2, false, 3.f, true, me3 }, { "gpu-classic-q2", 0, 2, false, 3.f, false, me3 },
+    std::vector<Method> methods = { { "gpu-blocks-q2", 0, 2, false, 3.f }, { "gpu-q2-no-global", 0, 2, false, 3.f, true, me3 }, { "gpu-classic-q2", 0, 2, false, 3.f, false, me3 },
                                     { "gpu-blocks-q1", 0, 1, false, 3.f },
-                                    { "q2-no-prefilter", 0, 2, false, 3.f, true, [](Config& c) { c.prefilter = false; } },
-                                    { "q2-no-lambda-scale", 0, 2, false, 3.f, true, [](Config& c) { c.lambdaScale = false; } },
-                                    { "q2-no-equiangular", 0, 2, false, 3.f, true, [](Config& c) { c.equiangular = false; } },
-                                    { "q2-no-merge", 0, 2, false, 3.f, true, [](Config& c) { c.merge = false; } },
-                                    { "q2-no-global", 0, 2, false, 3.f, true, [](Config& c) { c.globalCandidate = false; } },
+                                    { "q1-no-global", 0, 1, false, 3.f, true, [](Config& c) { c.globalCandidate = false; } },
+                                    { "q2-all-me-fixes", 0, 2, false, 3.f, true, [](Config& c) { c.prefilter = c.lambdaScale = c.equiangular = c.merge = true; } },
                                     { "gpu-nvof", 0, 2, true, 3.f }, { "gpu-nvof-slow", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 0; } },
                                     { "gpu-nvof-fast", 0, 2, true, 3.f, true, [](Config& c) { c.nvofPreset = 2; } },
                                     { "gpu-nvof-full-input", 0, 2, true, 3.f, true, [](Config& c) { c.nvofInput = 1; } },
@@ -367,10 +364,11 @@ static void BenchTransitions(Y4m& a, Y4m& b)
             Pic& g = outs[r.frame];
             g.FromBytes();
             if (i % 2 == 1) {
-                ++outsIn;
+                // a cut: only the output inside the cut pair (E - 1) must be a real frame; a flash: those next to it
+                const bool judged = ev.kind == 1 || (ev.kind == 0 ? i == E - 1 : (i == E - 1 || i == E + 1));
                 bool real = false;
                 for (int q = i - 1; q <= i + 1; q += 2) real = real || g.p[0] == full[size_t(q)].p[0];
-                blends += real ? 0 : 1;
+                if (judged) { ++outsIn; blends += real ? 0 : 1; }
                 ps += Psnr(g, full[size_t(i)]); ++n;
             }
         }
@@ -397,6 +395,7 @@ static void BenchWindows(Y4m& clip, const std::string& labelsPath)
     CutGuard guard;
     TransitionRules rules;
     std::map<std::string, std::array<int, 6>> tally;   // per label: windows, interpolated, rule cut, guard cut, flash hold, blend
+    double negMinAgree = 1.0; int negLowAgree = 0;
     for (size_t w = 0; w < windows; ++w) {
         Pic* f = &clip.frames[w * 7];
         const int sa = e.Upload(f[3].View(), err), sb = e.Upload(f[4].View(), err);
@@ -408,10 +407,12 @@ static void BenchWindows(Y4m& clip, const std::string& labelsPath)
         if (labels[w] == "hard" && d != 1 && d != 2)
             std::printf("MISS %s window %zu unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d decided %d\n", g_clip.c_str(), w, st.unexplainedF, st.unexplainedB,
                         st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0, d);
+        if (labels[w] == "none") { negMinAgree = std::min(negMinAgree, double(st.consistent)); if (st.consistent < 0.5) ++negLowAgree; }
         auto& t = tally[labels[w]];
         t[0]++; t[size_t(1 + std::clamp(d, 0, 4))]++;
         e.ReleasePair(p); e.ReleaseSlot(sa); e.ReleaseSlot(sb);
     }
+    std::printf("NEGATIVES %s: least forward-backward agreement %.3f, %d windows below 0.5\n", g_clip.c_str(), negMinAgree, negLowAgree);
     for (auto& [label, t] : tally) {
         char note[256];
         std::snprintf(note, sizeof(note), "%d windows: %d interpolated, %d cut (rule), %d cut (guard), %d held (flash), %d blended (transition)", t[0], t[1], t[2], t[3], t[4], t[5]);

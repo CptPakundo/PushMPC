@@ -298,7 +298,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     auto* d = new GInst();
     gpu::Config c;
     c.width = w; c.height = h; c.bits = bits;
-    c.quality = s.quality < 0 ? 2 : s.quality;
+    c.quality = s.quality < 0 ? 1 : s.quality;   // Auto: 16 px vectors (the CI benchmark's best on average with the refined rule)
     c.upscaler = up.kind == GpuUpscaler::Nis ? gpu::Upscaler::Nis : up.kind == GpuUpscaler::Fsr ? gpu::Upscaler::Fsr : gpu::Upscaler::None;
     c.outWidth = up.w; c.outHeight = up.h;
     c.sharpness = float(std::clamp(PArgF(in, a, "sharpness", up.kind == GpuUpscaler::Nis ? kDefaultSharpnessNis : kDefaultSharpnessFsr), 0.0, 1.0));
