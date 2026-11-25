@@ -35,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends build-essential nasm pkg-config meson ninja-build cmake ccache \
-            glslang-tools spirv-headers libvulkan-dev mesa-vulkan-drivers vulkan-tools libshaderc-dev libglslang-dev \
+            glslang-tools spirv-headers libvulkan-dev mesa-vulkan-drivers vulkan-tools libshaderc-dev glslang-dev \
             libass-dev liblua5.2-dev libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev libxkbcommon-dev \
             libwayland-dev wayland-protocols libegl-dev libgl-dev libdrm-dev zlib1g-dev python3-jinja2 bc
       - uses: actions/cache@v4
@@ -214,3 +214,57 @@ jobs:
           ./build-engine/out/engine_test
           export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.dylib" DYLD_LIBRARY_PATH="$PREFIX/lib"
           bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" macos
+
+  # (b) the runtime hook into an EXISTING mpv: Ubuntu 24.04's own mpv (0.37) and FFmpeg (6.1.1), no rebuild of either
+  hook:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CCACHE_DIR: /home/runner/pm-ccache-hook
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages (the distro mpv and FFmpeg)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg libavfilter-dev libavutil-dev nasm pkg-config \
+            build-essential cmake ccache patchelf
+          mpv --version | head -3; dpkg -s libavfilter9 | grep -E '^Version'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/pm-ccache-hook
+            /home/runner/pm-src-hook
+          key: mpvnative-hook-${{ hashFiles('mpvnative/pins.json') }}-${{ github.run_id }}
+          restore-keys: mpvnative-hook-${{ hashFiles('mpvnative/pins.json') }}-
+      - name: FFmpeg 6.1.1 source (the release Ubuntu ships) and the hook
+        run: |
+          pin() { python3 -c "import json,sys;print(json.load(open('mpvnative/pins.json'))['ffmpegDistro'][sys.argv[1]])" "$1"; }
+          s=/home/runner/pm-src-hook/ffmpeg
+          [ -d "$s/.git" ] || git clone -q --depth 1 -b "$(pin tag)" "$(pin repo)" "$s"
+          [ "$(git -C "$s" rev-parse HEAD)" = "$(pin commit)" ] || { echo "::error::ffmpeg 6.1.1 commit mismatch"; exit 1; }
+          bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hook"
+      - name: Engine module
+        run: |
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build-engine --parallel --target pushmpc_engine
+      - name: Distro mpv plays through vf_pushmpc (encode mode, x4) and on vo=null
+        run: |
+          export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.so"
+          t="$RUNNER_TEMP/t"; mkdir -p "$t"
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=4" -pix_fmt yuv420p -c:v ffv1 "$t/clip.mkv"
+          n=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv")
+          mpv --no-config --script="$RUNNER_TEMP/hook/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 "$t/clip.mkv" \
+            --o="$t/hook.mkv" --of=matroska --ovc=ffv1 --no-audio --msg-level=all=v > "$t/hook.log" 2>&1 || true
+          grep -iE "pushmpc|cplugin|lavfi|Opening|filter" "$t/hook.log" | head -25
+          python3 mpvnative/tests/check_frames.py "$t/hook.mkv" $((1 + (n - 1) * 4)) 96000/1001 --tolerance 3
+          mpv --no-config --script="$RUNNER_TEMP/hook/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 --vo=null --vo-null-fps=95.904 \
+            --video-sync=display-resample --ao=null --script=mpvnative/tests/sync.lua --loop-file=inf "$t/clip.mkv" > "$t/hook-sync.log" 2>&1 || true
+          grep -E "pushmpc" "$t/hook-sync.log" | head -8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpvnative-hook
+          path: |
+            ${{ runner.temp }}/hook
+            ${{ runner.temp }}/t/*.log
+          retention-days: 7

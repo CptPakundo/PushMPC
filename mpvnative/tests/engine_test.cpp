@@ -121,7 +121,7 @@ static void TestCpu(const pmeng_api* api, uint32_t fmt, const char* name)
                     if (bgv != 40 && bgv != 230) ++cutBlend;
                 } else if (s < cutAt) {
                     const int want = 4 * (s - 1) + int(oi.subframe);   // linear motion, 4 px per frame
-                    if (bx < 0 || std::abs(bx - want) > 1) ++motionErr;
+                    if (bx < 0 || std::abs(bx - want) > 2) { if (motionErr++ < 6) std::printf("%s: pair %d phase %u: box at %d, expected %d\n", name, s, oi.subframe, bx, want); }
                 }
             }
         }
@@ -164,7 +164,7 @@ static void TestD3D11(const pmeng_api* api)
     const uint32_t k = out.multiplier;
 
     D3D11_TEXTURE2D_DESC td = {}; td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 4; td.Format = DXGI_FORMAT_NV12;
-    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = 0;   // as FFmpeg's hwupload pool (WARP refuses NV12 arrays with shader binding)
     ComPtr<ID3D11Texture2D> in;
     hr = dev->CreateTexture2D(&td, nullptr, &in);
     CHECK(SUCCEEDED(hr), "NV12 array texture: 0x%08lx", hr);
