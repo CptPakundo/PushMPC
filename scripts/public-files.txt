@@ -39,6 +39,8 @@ vsplugin/stub/**
 vsplugin/tests/**
 vsplugin/third_party/README.md
 vsplugin/third_party/pushfps-portable/**
+vsplugin/third_party/nis/**
+vsplugin/third_party/fidelityfx-fsr1/**
 vsplugin/engines/**
 integrations/mpv/**
 scripts/vapoursynth-pin.json
@@ -47,3 +49,6 @@ vsplugin/third_party/vapoursynth/**
 tests/**
 scripts/nvidia-vfx-pin.json
 scripts/nvidia-vfx-fetch.ps1
+integrations/linux/**
+packaging/**
+scripts/test-potplayer-install.ps1

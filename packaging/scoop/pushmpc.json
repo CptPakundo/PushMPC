@@ -1,0 +1,38 @@
+{
+    "##": "Scoop manifest (dry run: integrations.yml installs it on a hosted runner from the CI release artifact; for a bucket only on the maintainer's go, after the repository is public). The zip is the release's PushMPC-<version>.zip (filter, core, the installer script); the installer script downloads Veyra's runtime package like Setup does. Uninstall puts every player setting back.",
+    "version": "0.6.0",
+    "description": "PushFPS video enhancement in media players: frame generation, RTX Video Super Resolution, scene-cut guard (MPC-HC, MPC-BE, PotPlayer, mpv family).",
+    "homepage": "https://github.com/CptPakundo/PushMPC",
+    "license": "GPL-3.0-only",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/PushMPC-0.6.0.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "installer": {
+        "script": [
+            "$stage = @(Get-ChildItem $dir -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'filter\\pushmpc-install.ps1') }) + @(Get-Item $dir | Where-Object { Test-Path (Join-Path $_.FullName 'filter\\pushmpc-install.ps1') }) | Select-Object -First 1",
+            "if (-not $stage) { throw 'PushMPC: filter\\pushmpc-install.ps1 not found in the package' }",
+            "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage.FullName 'filter\\pushmpc-install.ps1') install -StageDir $stage.FullName",
+            "if ($LASTEXITCODE) { throw \"PushMPC install failed ($LASTEXITCODE)\" }"
+        ]
+    },
+    "uninstaller": {
+        "script": [
+            "$s = Join-Path $env:LOCALAPPDATA 'PushMPC\\filter\\pushmpc-install.ps1'",
+            "if (Test-Path $s) { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $s uninstall; if ($LASTEXITCODE) { throw \"PushMPC uninstall failed ($LASTEXITCODE)\" } }"
+        ]
+    },
+    "notes": "PushMPC is set up in the players it found. Settings: in the player (MPC-HC: Play > Filters > PushMPC Filter). Remove it with: scoop uninstall pushmpc",
+    "checkver": {
+        "github": "https://github.com/CptPakundo/PushMPC"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/CptPakundo/PushMPC/releases/download/v$version/PushMPC-$version.zip"
+            }
+        }
+    }
+}

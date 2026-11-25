@@ -1,0 +1,16 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: level 0 of the 8-bit luma pyramid from the Y plane (its top 8 bits, rounded), as the CPU
+// engine's FillPicture: g = min(255, (y + half) >> shift).
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D srcY;              // R8/R16 UNORM, nearest
+layout(binding = 1, r8ui) uniform writeonly uimage2D dst;
+layout(push_constant) uniform PC { int w, h, shift; float kRaw; } pc;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.w || p.y >= pc.h) return;
+    uint v = uint(texelFetch(srcY, p, 0).r * pc.kRaw + 0.5);
+    if (pc.shift > 0) v = min(255u, (v + (1u << uint(pc.shift - 1))) >> uint(pc.shift));
+    imageStore(dst, p, uvec4(v));
+}

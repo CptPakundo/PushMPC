@@ -1,5 +1,5 @@
 // PushMPC's own settings (HKCU\Software\PushMPC). No PushFPS install is needed: the values map onto the settings
-// PushFPS's simple video page sets (pushcore builds the EnhancementSettings; see settings-and-runtime.md).
+// PushFPS's simple video page sets (pushcore builds the EnhancementSettings; see internal research notes).
 //
 // Values (REG_SZ, absent = the default; case-insensitive):
 //   Enable           DWORD 1/0                       default 1
@@ -98,8 +98,8 @@ inline CleanStrength NearestStrength(float tone, float structure)
     return d[0] < d[1] && d[0] < d[2] ? CleanStrength::Subtle : d[1] < d[2] ? CleanStrength::Balanced : CleanStrength::Strong;
 }
 
-// PushFPS Subtitle Hold (pushcore PushCoreSettings.subtitleHold) under Auto: OFF. Measured 2026-11-25 on an RTX 5090 (HANDOFF
-// "PushMPC is on PushFPS 4.5.3"): it masks only thin contrasting strokes that stood still for several moving frames, never
+// PushFPS Subtitle Hold (pushcore PushCoreSettings.subtitleHold) under Auto: OFF. Measured 2026-11-25 on an RTX 5090 (release tests,
+// PushFPS 4.5.3): it masks only thin contrasting strokes that stood still for several moving frames, never
 // the whole band, and on video without burned-in text it held 0 pixels (output identical); but it costs about 0.5 ms GPU per
 // source frame at 4K (4x and 8x), above the 0.3 ms bar, and on burned-in anime subtitles VFG's frames looked the same with it
 // (a fast pan left a text ghost either way). Soft subtitles are drawn by the player after the filter and never need it.

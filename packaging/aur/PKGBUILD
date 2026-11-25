@@ -1,0 +1,41 @@
+# AUR package (dry run: built and checked by .github/workflows/integrations.yml in an archlinux container; never
+# submitted without the maintainer's go). Builds the VapourSynth plugin from the release's source tarball against
+# Arch's own vapoursynth headers.
+#   /usr/lib/pushmpc/pushmpc_vs.so          the plugin, next to the script that loads it
+#   /usr/lib/pushmpc/pushmpc.vpy            the script mpv runs
+#   /usr/lib/vapoursynth/pushmpc_vs.so      a link, so VapourSynth also autoloads it (core.pushmpc in any script)
+#   /usr/bin/pushmpc-setup                  per user: pushmpc-setup install | uninstall | status (the mpv.conf block)
+pkgname=pushmpc
+pkgver=0.6.0
+pkgrel=1
+pkgdesc='Frame generation and scene-cut guard for mpv (VapourSynth plugin, PushFPS portable engine)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/CptPakundo/PushMPC'
+license=('GPL-3.0-or-later')
+depends=('mpv' 'vapoursynth' 'gcc-libs' 'glibc')
+makedepends=('cmake')
+install=pushmpc.install
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cmake -S "PushMPC-$pkgver/vsplugin" -B build -DCMAKE_BUILD_TYPE=Release -DVAPOURSYNTH_SDK=/usr/include/vapoursynth
+  cmake --build build --target pushmpc_vs portable_test
+}
+
+check() {
+  ./build/portable_test
+}
+
+package() {
+  install -Dm755 "PushMPC-$pkgver/vsplugin/bin/pushmpc_vs.so" "$pkgdir/usr/lib/pushmpc/pushmpc_vs.so"
+  install -Dm644 "PushMPC-$pkgver/vsplugin/scripts/pushmpc.vpy" "$pkgdir/usr/lib/pushmpc/pushmpc.vpy"
+  install -dm755 "$pkgdir/usr/lib/vapoursynth"
+  ln -s ../pushmpc/pushmpc_vs.so "$pkgdir/usr/lib/vapoursynth/pushmpc_vs.so"
+  install -Dm755 "PushMPC-$pkgver/integrations/mpv/mpv-integration.sh" "$pkgdir/usr/share/pushmpc/mpv-integration.sh"
+  install -Dm755 "PushMPC-$pkgver/integrations/linux/vs-python-link.sh" "$pkgdir/usr/share/pushmpc/vs-python-link.sh"
+  install -dm755 "$pkgdir/usr/bin"
+  printf '#!/bin/sh\n# PushMPC: puts the PushMPC block into your mpv.conf (install), takes it out again (uninstall), shows it (status)\n[ "${1:-install}" = install ] && sh /usr/share/pushmpc/vs-python-link.sh\nexec sh /usr/share/pushmpc/mpv-integration.sh "${1:-install}" --script /usr/lib/pushmpc/pushmpc.vpy\n' > "$pkgdir/usr/bin/pushmpc-setup"
+  chmod 755 "$pkgdir/usr/bin/pushmpc-setup"
+  install -Dm644 "PushMPC-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

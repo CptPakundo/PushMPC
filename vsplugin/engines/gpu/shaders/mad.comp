@@ -1,0 +1,23 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: the sum of absolute differences of two pyramid levels (Motion.cpp's meanAbsDiff, the
+// picture's change without motion); a workgroup reduces its tile, then one atomic add.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0, r8ui) uniform readonly uimage2D A;
+layout(binding = 1, r8ui) uniform readonly uimage2D B;
+layout(binding = 2, std430) buffer Stats { uint sum; uint pad0, pad1, pad2; } st;
+layout(push_constant) uniform PC { int w, h; } pc;
+shared uint part[256];
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint d = 0u;
+    if (p.x < pc.w && p.y < pc.h) d = uint(abs(int(imageLoad(A, p).r) - int(imageLoad(B, p).r)));
+    part[gl_LocalInvocationIndex] = d;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (gl_LocalInvocationIndex < s) part[gl_LocalInvocationIndex] += part[gl_LocalInvocationIndex + s];
+        barrier();
+    }
+    if (gl_LocalInvocationIndex == 0u) atomicAdd(st.sum, part[0]);
+}

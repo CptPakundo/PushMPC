@@ -1,0 +1,8 @@
+post_install() {
+  echo 'PushMPC: run "pushmpc-setup" as your user to add PushMPC to mpv (~/.config/mpv/mpv.conf).'
+  echo '         "pushmpc-setup uninstall" takes it out again. Settings: ~/.config/pushmpc/settings.ini'
+}
+post_upgrade() { :; }
+pre_remove() {
+  echo 'PushMPC: run "pushmpc-setup uninstall" as each user who set it up, before removing the package.'
+}

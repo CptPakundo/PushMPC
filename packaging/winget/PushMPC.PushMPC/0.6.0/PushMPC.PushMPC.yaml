@@ -1,0 +1,8 @@
+# winget manifest (dry run: validated by .github/workflows/integrations.yml with "winget validate"; submitted to
+# microsoft/winget-pkgs only on the maintainer's go, after the repository is public and the release exists).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
+PackageIdentifier: PushMPC.PushMPC
+PackageVersion: 0.6.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0
