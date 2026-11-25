@@ -9,7 +9,7 @@
 #     selectors, the RTX 30 compatibility on the real VFG library and its fatbin census); the plugin in VapourSynth
 #     without a GPU (Auto falls back to portable and says why); the self-test refuses to run without a GPU.
 #   pure (windows-2022, windows-11-arm): nvl_test and portable_test with MSVC x64 and ARM64 (the backend's pure parts
-#     stay portable; the Windows nvidia path itself is pushcore's, see track notes for ARM64).
+#     stay portable).
 name: vsplugin-nvidia-linux
 
 on:

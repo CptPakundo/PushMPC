@@ -8,7 +8,7 @@
 // baseline with attack / release, plus the 16-bin histogram), the dark rule (contrast-normalised, stretched 16-bin
 // histograms), the spike rule (against the last moving pair), held pairs (animation on twos: no baseline update), and the
 // active picture area (letterbox / pillarbox bars from per-column / per-row maxima over the first frames).
-// Not ported (open, see track notes): the bar-change cut and per-frame bar tracking, the scene score (zoom fit, chroma,
+// Not ported yet (the GPU guard from the same HLSL through Slang replaces this port): the bar-change cut and per-frame bar tracking, the scene score (zoom fit, chroma,
 // orientation histograms, logistic weights), block matching, the profile warp check, NVOF and Fourier-Mellin.
 // Pure C++: nvl_test.cpp checks it on synthetic frames.
 #pragma once
