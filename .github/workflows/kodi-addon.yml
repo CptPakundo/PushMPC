@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
           ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|cadence_test|FAIL|Passed|Failed" || true
@@ -115,6 +115,7 @@ jobs:
 
   kodi-linux:
     needs: build
+    if: ${{ !cancelled() }}   # each OS runs with its own build even if the other OS's build failed
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +163,7 @@ jobs:
 
   kodi-windows:
     needs: build
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
