@@ -53,6 +53,11 @@ jobs:
       - name: Selector names (the wheel's Python bindings and the effect libraries' strings)
         run: |
           for f in x-linux_x86_64/nvvfx/effects/*.py x-linux_x86_64/nvvfx/_lib_loader.py; do echo "===== $f"; grep -nE "\"[A-Z][A-Za-z0-9]+\"|'[A-Z][A-Za-z0-9]+'|set_|Set|Mode|Quality|def |class " "$f" | head -80; done
+          echo "===== enums"; cat x-linux_x86_64/nvvfx/effects/image_encoding.py | grep -vE '^\s*(#|$)'
+          sed -n '/^class QualityLevel/,/^class VideoSuperRes/p' x-linux_x86_64/nvvfx/effects/video_super_res.py | grep -E '^\s+[A-Z_0-9]+ = '
+          sed -n '/^class Mode/,/^class VideoFrameGeneration/p' x-linux_x86_64/nvvfx/effects/video_frame_generation.py | grep -E '^\s+[A-Z_0-9]+ = '
+          grep -nE 'Mode\.|QualityLevel\.|strength|Strength' x-linux_x86_64/nvvfx/effects/video_super_res.py | head -20
+          grep -nE 'encoding|RGB10A2|RGBA' x-linux_x86_64/nvvfx/effects/true_hdr.py x-linux_x86_64/nvvfx/effects/video_frame_generation.py | head -20
           for f in libnvVFXTrueHDR.so libnvVFXVideoSuperRes.so libnvVFXVideoFrameGeneration.so libVideoFX.so; do
             echo "===== strings $f"; strings -n 4 "x-linux_x86_64/nvvfx/libs/$f" | grep -xE "(Src|Dst)Image[0-9]|CudaStream|[A-Z][a-z]+([A-Z][a-z]+)*(Level|Mode|Width|Height|Multiplier|Index|Change|Enabled|Off|Gray|Luminance|Contrast|Saturation|Strength|Timestep|Directory|Path)|TrueHDR|VideoSuperRes|VideoFrameGeneration|ModelDir|ModelSel" | sort -u | head -60
           done
