@@ -51,12 +51,17 @@ if PUSHMPC_ENGINE=/nonexistent "$FF" -v info -y -i "$T/clip.mkv" -vf "pushmpc=en
 grep -i "passes through" "$T/ff-pass.log" | head -2
 
 # 4. Vulkan frames (lavapipe on Linux): hwupload -> pushmpc -> hwdownload; the module has no Vulkan engine yet, so this
-#    is the copy fallback inside the filter
+#    goes into the portable GPU engine on the same device (zero copy); the copy fallback when that cannot open
 if [ "$OS" = linux ]; then
     if "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" \
         -vf "format=nv12,hwupload,pushmpc=smoother=2,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk.mkv" > "$T/ff-vk.log" 2>&1; then
         grep -i "pushmpc\|lavapipe\|llvmpipe" "$T/ff-vk.log" | head -4
         check "$T/ff-vk.mkv" $((1 + (N - 1) * 2)) 48000/1001 2 && result ffmpeg-vulkan-x2 PASS || result ffmpeg-vulkan-x2 FAIL
+        if grep -q "portable-vulkan.*(zero copy)" "$T/ff-vk.log"; then result ffmpeg-vulkan-zero-copy PASS; else grep -iE "engine|fallback" "$T/ff-vk.log" | head -5; result ffmpeg-vulkan-zero-copy FAIL; fi
+        # the real frames (every 2nd output) must come back unchanged through import, engine and export
+        "$FF" -v info -i "$T/ff-vk.mkv" -i "$T/clip.mkv" -lavfi "[0]select='not(mod(n,2))',setpts=N/(FRAME_RATE*TB),format=yuv420p[a];[1]format=yuv420p[b];[a][b]psnr" -f null - > "$T/ff-vk-psnr.log" 2>&1
+        ps=$(grep -o "average:[a-z0-9.]*" "$T/ff-vk-psnr.log" | tail -1); echo "vulkan real frames vs source: $ps"
+        case $ps in average:inf|average:[6-9][0-9]*|average:1[0-9][0-9]*) result ffmpeg-vulkan-real-frames-exact PASS ;; *) result ffmpeg-vulkan-real-frames-exact FAIL ;; esac
     else tail -15 "$T/ff-vk.log"; result ffmpeg-vulkan-x2 FAIL; fi
     # fruc_vulkan needs VK_NV_optical_flow (RTX 30+): on lavapipe it must refuse cleanly
     "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 10 \

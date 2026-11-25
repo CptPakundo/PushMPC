@@ -1,5 +1,5 @@
 // pmeng_get_api: the C table FFmpeg's vf_pushmpc calls (pmeng.h). Picks the backend per instance:
-//   D3D11 frames -> pushcore (Windows) unless backend=portable; Vulkan frames -> (T1 engine, not in this build);
+//   D3D11 frames -> pushcore (Windows) unless backend=portable; Vulkan frames -> the portable GPU engine on the decoder's device;
 //   CPU frames   -> the portable CPU engine.
 // The filter retries a failed hardware open with mem = CPU (its copy fallback), so a reason here is enough.
 #include "engine.h"
@@ -78,7 +78,12 @@ void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options,
             why = "D3D11 frames on a non-Windows build";
 #endif
         } else if (dev->mem == PMENG_MEM_VULKAN) {
-            why = "the portable Vulkan engine (track T1) is not part of this module yet";
+#ifdef PME_VULKAN
+            if (backend == "portable-cpu") return fail("backend=portable-cpu: the CPU engine (copy fallback)");
+            b = pme::OpenVulkan(*dev, *st, o, *out, why);
+#else
+            why = "this module was built without the Vulkan engine";
+#endif
         } else {
             if (backend == "nvidia") return fail("backend=nvidia needs D3D11 frames (hwdec=d3d11va)");
             b = pme::OpenCpu(*st, o, *out, why);

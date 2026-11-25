@@ -10,12 +10,12 @@ mkdir -p "$out"
 sh "$here/../ffmpeg/add-to-ffmpeg.sh" "$tree"
 cd "$tree"
 cc=cc; command -v ccache >/dev/null && cc="ccache cc"
-if [ ! -f config.h ] || ! grep -q 'CONFIG_PUSHMPC_FILTER 1' config.h; then
+if [ ! -f config.h ] || ! grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h; then
     ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
         --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
         --disable-postproc > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
 fi
-grep -q 'CONFIG_PUSHMPC_FILTER 1' config.h
+grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h
 make -j"$(nproc)" >/dev/null
 so=$(ls libavfilter/libavfilter.so.* | grep -E '\.so\.[0-9]+$' | head -1)
 cp "$so" "$out/libpushmpc-avfilter.so"

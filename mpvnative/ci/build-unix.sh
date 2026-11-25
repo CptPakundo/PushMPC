@@ -61,8 +61,8 @@ if [ ! -f config.h ] || [ "$(cat .pm-config 2>/dev/null)" != "$want" ]; then
     ./configure "${cfg[@]}" > configure.out 2>&1 || { tail -40 configure.out; cat ffbuild/config.log | tail -60; exit 1; }
     echo "$want" > .pm-config
 fi
-grep -q 'CONFIG_PUSHMPC_FILTER 1' config.h || { echo "::error::FFmpeg configure did not enable the pushmpc filter"; exit 1; }
-grep -E 'CONFIG_(PUSHMPC|FRUC_VULKAN|D3D11VA|VULKAN)(_FILTER)? ' config.h || true
+grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h || { echo "::error::FFmpeg configure did not enable the pushmpc filter"; exit 1; }
+grep -E 'CONFIG_(PUSHMPC|FRUC_VULKAN|D3D11VA|VULKAN)(_FILTER)? ' config.h config_components.h || true
 make -j"$J" >/dev/null
 make install >/dev/null
 cd "$ROOT"

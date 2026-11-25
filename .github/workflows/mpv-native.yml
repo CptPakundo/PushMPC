@@ -58,7 +58,7 @@ jobs:
           ccache -s | head -12 || true
       - name: Engine module and engine_test
         run: |
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
           cmake --build build-engine --parallel
           ./build-engine/out/engine_test
       - name: Public clip (pinned)
@@ -121,7 +121,14 @@ jobs:
       - name: Engine module, stub pushcore and engine_test (MSVC, D3D11 on WARP)
         shell: pwsh
         run: |
-          cmake -S mpvnative/engine -B build-engine -A x64
+          # the pinned glslang (gpu-pins.json) for the Vulkan engine's two shaders
+          $pins = Get-Content vsplugin/engines/gpu/gpu-pins.json -Raw | ConvertFrom-Json
+          $zip = Join-Path $env:RUNNER_TEMP 'glslang.zip'
+          Invoke-WebRequest -Uri $pins.glslang.windows.url -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pins.glslang.windows.sha256.ToUpperInvariant()) { throw 'glslang SHA-256 mismatch' }
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'glslang') -Force
+          $g = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'glslang') -Recurse -Filter glslang*.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1).FullName
+          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g"
           if ($LASTEXITCODE) { throw 'configure' }
           cmake --build build-engine --config Release --parallel
           if ($LASTEXITCODE) { throw 'build' }
@@ -229,7 +236,7 @@ jobs:
       - name: Engine and checks
         timeout-minutes: 15
         run: |
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release && cmake --build build-engine --parallel
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON && cmake --build build-engine --parallel
           ./build-engine/out/engine_test
           export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.dylib" DYLD_LIBRARY_PATH="$PREFIX/lib"
           bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" macos
@@ -264,7 +271,7 @@ jobs:
           bash mpvnative/hook/build-hook.sh "$s" "$RUNNER_TEMP/hook"
       - name: Engine module
         run: |
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
           cmake --build build-engine --parallel --target pushmpc_engine
       - name: Distro mpv plays through vf_pushmpc (encode mode, x4) and on vo=null
         run: |

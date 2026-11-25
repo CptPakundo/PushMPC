@@ -66,9 +66,17 @@ typedef struct pmeng_image {
     /* D3D11 */
     void* d3d11_texture;          /* ID3D11Texture2D* */
     uint32_t d3d11_slice;
-    /* Vulkan (reserved for the T1 engine; the module reports whether it takes it in pmeng_output.mem) */
-    void* vk_frame;               /* AVVkFrame* */
-    void* vk_frames_ctx;          /* AVVulkanFramesContext* */
+    /* Vulkan: one entry per plane (an FFmpeg AVVkFrame translated by the filter, so the module needs no FFmpeg headers).
+       The module waits for each semaphore at `value`, leaves the image in VK_IMAGE_LAYOUT_GENERAL and signals value + 1;
+       the filter then updates the AVVkFrame (sem_value, layout, access, queue family) under its frame lock. */
+    struct pmeng_vk_plane {
+        void* image;               /* VkImage */
+        uint32_t aspect;           /* VK_IMAGE_ASPECT_COLOR_BIT, or VK_IMAGE_ASPECT_PLANE_n_BIT of a multi-planar image */
+        int32_t layout;            /* its VkImageLayout now */
+        void* semaphore;           /* its timeline semaphore */
+        uint64_t value;            /* the semaphore's current value */
+    } vk[3];
+    uint32_t vk_planes;            /* 2 (NV12 / P010) or 3 (YUV 4:2:0 three-plane) */
 } pmeng_image;
 
 typedef struct pmeng_device {
@@ -79,8 +87,16 @@ typedef struct pmeng_device {
     void (*lock)(void* ctx);
     void (*unlock)(void* ctx);
     void* lock_ctx;
-    /* Vulkan: FFmpeg's AVVulkanDeviceContext* (instance, physical device, device, queues, get_proc_addr) */
-    void* vk_device_ctx;
+    /* Vulkan: the decoder's device (FFmpeg's AVVulkanDeviceContext, translated); the engine runs on it, on a compute
+       queue the filter names; vk_lock_queue / vk_unlock_queue guard that queue (FFmpeg's lock_queue; NULL = none) */
+    void* vk_instance;             /* VkInstance */
+    void* vk_physical_device;      /* VkPhysicalDevice */
+    void* vk_device;               /* VkDevice */
+    void* vk_get_instance_proc_addr; /* PFN_vkGetInstanceProcAddr */
+    uint32_t vk_queue_family, vk_queue_index;
+    void (*vk_lock_queue)(void* ctx, uint32_t family, uint32_t index);
+    void (*vk_unlock_queue)(void* ctx, uint32_t family, uint32_t index);
+    void* vk_lock_ctx;
 } pmeng_device;
 
 typedef struct pmeng_stream {

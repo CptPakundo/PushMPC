@@ -167,8 +167,13 @@ static void TestD3D11(const pmeng_api* api)
     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = 0;   // as FFmpeg's hwupload pool (WARP refuses NV12 arrays with shader binding)
     ComPtr<ID3D11Texture2D> in;
     hr = dev->CreateTexture2D(&td, nullptr, &in);
-    CHECK(SUCCEEDED(hr), "NV12 array texture: 0x%08lx", hr);
-    if (FAILED(hr)) { api->close(h); return; }
+    if (FAILED(hr)) { td.ArraySize = 1; hr = dev->CreateTexture2D(&td, nullptr, &in); }   // some drivers: no NV12 arrays
+    if (FAILED(hr)) {
+        UINT fs = 0; dev->CheckFormatSupport(DXGI_FORMAT_NV12, &fs);
+        std::printf("d3d11: SKIP, this adapter cannot create NV12 textures (0x%08lx, format support 0x%x): the D3D11 path is checked through FFmpeg instead\n", hr, fs);
+        api->close(h); return;
+    }
+    const UINT slices = td.ArraySize;
     D3D11_TEXTURE2D_DESC od = {}; od.Width = out.width; od.Height = out.height; od.MipLevels = 1; od.ArraySize = 1; od.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     od.SampleDesc.Count = 1; od.Usage = D3D11_USAGE_DEFAULT; od.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     D3D11_TEXTURE2D_DESC sd = od; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -201,7 +206,7 @@ static void TestD3D11(const pmeng_api* api)
     for (int s = 0; s < N; ++s) {
         std::memset(nv12.data(), 16 + 16 * s, size_t(W) * H);
         std::memset(nv12.data() + size_t(W) * H, 128, size_t(W) * H / 2);
-        const UINT slice = UINT(s % 4);
+        const UINT slice = UINT(s) % slices;
         ctx->UpdateSubresource(in.Get(), D3D11CalcSubresource(0, slice, 1), nullptr, nv12.data(), W, W * H);
         pmeng_image im{}; im.mem = PMENG_MEM_D3D11; im.fmt = PMENG_FMT_NV12; im.width = W; im.height = H; im.d3d11_texture = in.Get(); im.d3d11_slice = slice;
         im.range = 1; im.matrix = 1; im.primaries = 1; im.transfer = 1;
@@ -232,7 +237,7 @@ int main()
     TestCpu(api, PMENG_FMT_YUV420P10, "yuv420p10");
     TestCpu(api, PMENG_FMT_NV12, "nv12");
     TestCpu(api, PMENG_FMT_P010, "p010");
-    {   // a Vulkan open must fail with a reason (the filter then takes the copy fallback)
+    {   // a Vulkan open without a device must fail with a reason (the filter then takes the copy fallback)
         pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_VULKAN;
         pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 64; st.height = 64; st.fmt = PMENG_FMT_NV12;
         pmeng_output out{}; char err[256] = {};

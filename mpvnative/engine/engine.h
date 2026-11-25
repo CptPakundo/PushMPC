@@ -4,8 +4,9 @@
 //   D3D11Backend  pushcore (Windows): the decoder's D3D11 texture goes straight into pushcore's ingress, the output is
 //                 copied (GPU) into the filter's own texture, so pushcore's leases return at once. One warm pushcore per
 //                 process (mpv rebuilds its filter graph on every seek).
-//   Vulkan        the portable Vulkan engine of track T1 plugs in here (VulkanBackend, same interface); until then
-//                 open() on Vulkan frames fails with the reason and the filter uses the copy fallback.
+//   VulkanBackend the portable GPU engine (vsplugin/engines/gpu) on the decoder's own Vulkan device: FFmpeg's Vulkan
+//                 frames in and out with no copy through host memory (builds without its dependencies: open() fails
+//                 with the reason and the filter uses its copy fallback through the CPU engine).
 #pragma once
 #include <cstdint>
 #include <map>
@@ -35,6 +36,9 @@ public:
 
 // nullptr + why on failure
 Backend* OpenCpu(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
+#ifdef PME_VULKAN
+Backend* OpenVulkan(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
+#endif
 #ifdef _WIN32
 Backend* OpenD3D11(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 #endif

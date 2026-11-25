@@ -55,6 +55,17 @@
 #if CONFIG_D3D11VA
 #include "libavutil/hwcontext_d3d11va.h"
 #endif
+#if CONFIG_VULKAN
+#include "libavutil/hwcontext_vulkan.h"
+/* zero copy into the engine's Vulkan engine: needs AVVulkanDeviceContext.qf (lavu 59.34, FFmpeg 7.1) */
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
+#define PM_VK_ZERO_COPY 1
+#else
+#define PM_VK_ZERO_COPY 0
+#endif
+#else
+#define PM_VK_ZERO_COPY 0
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -280,6 +291,73 @@ static void d3d11_lock(void *c)   { AVD3D11VADeviceContext *d = c; if (d->lock) 
 static void d3d11_unlock(void *c) { AVD3D11VADeviceContext *d = c; if (d->unlock) d->unlock(d->lock_ctx); }
 #endif
 
+#if PM_VK_ZERO_COPY
+#if !defined(FF_API_VULKAN_SYNC_QUEUES) || FF_API_VULKAN_SYNC_QUEUES
+static void vk_lock_queue(void *c, uint32_t family, uint32_t index)
+{
+    AVHWDeviceContext *dc = c;
+    AVVulkanDeviceContext *h = dc->hwctx;
+FF_DISABLE_DEPRECATION_WARNINGS
+    if (h->lock_queue)
+        h->lock_queue(dc, family, index);
+FF_ENABLE_DEPRECATION_WARNINGS
+}
+static void vk_unlock_queue(void *c, uint32_t family, uint32_t index)
+{
+    AVHWDeviceContext *dc = c;
+    AVVulkanDeviceContext *h = dc->hwctx;
+FF_DISABLE_DEPRECATION_WARNINGS
+    if (h->unlock_queue)
+        h->unlock_queue(dc, family, index);
+FF_ENABLE_DEPRECATION_WARNINGS
+}
+#define PM_VK_HAVE_QUEUE_LOCK 1
+#else
+#define PM_VK_HAVE_QUEUE_LOCK 0
+#endif
+
+/* the engine's view of an FFmpeg Vulkan frame: one entry per plane (image, aspect, layout, timeline semaphore) */
+static void vk_fill(pmeng_image *im, AVFrame *f)
+{
+    AVHWFramesContext *hwfc = (AVHWFramesContext *)f->hw_frames_ctx->data;
+    AVVkFrame *vkf = (AVVkFrame *)f->data[0];
+    const int planes = av_pix_fmt_count_planes(hwfc->sw_format);
+    int nb_images = 0, p;
+    while (nb_images < AV_NUM_DATA_POINTERS && vkf->img[nb_images])
+        nb_images++;
+    im->vk_planes = planes > 3 ? 3 : planes;
+    for (p = 0; p < (int)im->vk_planes; p++) {
+        const int img = nb_images == 1 ? 0 : p;
+        im->vk[p].image = (void *)vkf->img[img];
+        im->vk[p].aspect = nb_images == 1 && planes > 1 ? (VK_IMAGE_ASPECT_PLANE_0_BIT << p) : VK_IMAGE_ASPECT_COLOR_BIT;
+        im->vk[p].layout = vkf->layout[img];
+        im->vk[p].semaphore = (void *)vkf->sem[img];
+        im->vk[p].value = vkf->sem_value[img];
+    }
+}
+/* after the engine waited for value and signalled value + 1, leaving the images in GENERAL */
+static void vk_after(AVFrame *f, int wrote)
+{
+    AVVkFrame *vkf = (AVVkFrame *)f->data[0];
+    int i;
+    for (i = 0; i < AV_NUM_DATA_POINTERS && vkf->img[i]; i++) {
+        vkf->sem_value[i]++;
+        vkf->layout[i] = VK_IMAGE_LAYOUT_GENERAL;
+        vkf->access[i] = wrote ? VK_ACCESS_2_SHADER_WRITE_BIT : VK_ACCESS_2_SHADER_READ_BIT;
+        vkf->queue_family[i] = VK_QUEUE_FAMILY_IGNORED;
+    }
+}
+static void vk_lock_frame(AVFrame *f, int lock)
+{
+    AVHWFramesContext *hwfc = (AVHWFramesContext *)f->hw_frames_ctx->data;
+    AVVulkanFramesContext *vfc = hwfc->hwctx;
+    if (lock && vfc->lock_frame)
+        vfc->lock_frame(hwfc, (AVVkFrame *)f->data[0]);
+    else if (!lock && vfc->unlock_frame)
+        vfc->unlock_frame(hwfc, (AVVkFrame *)f->data[0]);
+}
+#endif
+
 static void add_opt(char *buf, size_t size, const char *key, const char *val)
 {
     if (!val || !*val)
@@ -319,6 +397,14 @@ static int alloc_hw_pool(AVFilterContext *ctx, AVBufferRef *device_ref, enum AVP
     if (hw == AV_PIX_FMT_D3D11) {
         AVD3D11VAFramesContext *dh = fc->hwctx;
         dh->BindFlags = D3D11_BIND_SHADER_RESOURCE | (render_target ? D3D11_BIND_RENDER_TARGET : 0);
+    }
+#endif
+#if PM_VK_ZERO_COPY
+    if (hw == AV_PIX_FMT_VULKAN && render_target) {   /* the engine writes it: one image per plane, storage usage */
+        AVVulkanFramesContext *vh = fc->hwctx;
+        vh->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
+        vh->usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        vh->tiling = VK_IMAGE_TILING_OPTIMAL;
     }
 #endif
     ret = av_hwframe_ctx_init(s->out_frames);
@@ -375,8 +461,30 @@ static int config_output(AVFilterLink *outlink)
         dev.lock_ctx = d;
     }
 #endif
-    if (dev.mem == PMENG_MEM_VULKAN)
-        dev.vk_device_ctx = ifc->device_ctx->hwctx;
+#if PM_VK_ZERO_COPY
+    if (dev.mem == PMENG_MEM_VULKAN) {
+        AVHWDeviceContext *dc = ifc->device_ctx;
+        AVVulkanDeviceContext *vk = dc->hwctx;
+        int i;
+        dev.vk_instance = (void *)vk->inst;
+        dev.vk_physical_device = (void *)vk->phys_dev;
+        dev.vk_device = (void *)vk->act_dev;
+        dev.vk_get_instance_proc_addr = (void *)vk->get_proc_addr;
+        for (i = 0; i < vk->nb_qf; i++)
+            if (vk->qf[i].flags & VK_QUEUE_COMPUTE_BIT) {
+                dev.vk_queue_family = vk->qf[i].idx;
+                dev.vk_queue_index = 0;
+                break;
+            }
+        if (i == vk->nb_qf)
+            dev.vk_device = NULL;   /* no compute queue: the module refuses, the copy fallback runs */
+#if PM_VK_HAVE_QUEUE_LOCK
+        dev.vk_lock_queue = vk_lock_queue;
+        dev.vk_unlock_queue = vk_unlock_queue;
+        dev.vk_lock_ctx = dc;
+#endif
+    }
+#endif
 
     st.width = inlink->w;
     st.height = inlink->h;
@@ -460,7 +568,7 @@ static int config_output(AVFilterLink *outlink)
         if (sw == AV_PIX_FMT_NONE)
             return start_passthrough(ctx, "the engine reported an unknown output format");
         ret = alloc_hw_pool(ctx, ifc->device_ref, s->in_fmt, sw, outlink->w, outlink->h,
-                            !s->fallback && s->in_fmt == AV_PIX_FMT_D3D11);
+                            !s->fallback);
         if (ret < 0)
             return ret;
         av_buffer_unref(&PM_HW_FRAMES(outlink));
@@ -515,10 +623,12 @@ static void fill_image(pmeng_image *im, AVFrame *f, uint32_t mem, uint32_t fmt)
     } else if (mem == PMENG_MEM_D3D11) {
         im->d3d11_texture = f->data[0];
         im->d3d11_slice = (uint32_t)(intptr_t)f->data[1];
-    } else if (mem == PMENG_MEM_VULKAN) {
-        im->vk_frame = f->data[0];
-        im->vk_frames_ctx = f->hw_frames_ctx ? ((AVHWFramesContext *)f->hw_frames_ctx->data)->hwctx : NULL;
     }
+#if PM_VK_ZERO_COPY
+    else if (mem == PMENG_MEM_VULKAN && f->hw_frames_ctx) {
+        vk_fill(im, f);
+    }
+#endif
 }
 
 static void strip_side_data(AVFrame *f, const enum AVFrameSideDataType *types, int n)
@@ -572,7 +682,21 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
         fill_image(&im, out, s->out.mem, s->out.fmt);
     }
 
-    ret = s->api->write(s->eng, &im);
+    {
+#if PM_VK_ZERO_COPY
+        const int vkw = !cpu && out && s->out.mem == PMENG_MEM_VULKAN;
+        if (vkw)
+            vk_lock_frame(out, 1);
+#endif
+        ret = s->api->write(s->eng, &im);
+#if PM_VK_ZERO_COPY
+        if (vkw) {
+            if (ret >= 0)
+                vk_after(out, 1);
+            vk_lock_frame(out, 0);
+        }
+#endif
+    }
     if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "engine write: %s\n", s->api->last_error(s->eng));
         ret = AVERROR_EXTERNAL;
@@ -750,7 +874,19 @@ static int process(AVFilterContext *ctx, AVFrame *in)
     s->pts[s->seq % PM_RING] = pts;
 
     for (tries = 0;; tries++) {
+#if PM_VK_ZERO_COPY
+        const int vkin = !s->fallback && s->in_fmt == AV_PIX_FMT_VULKAN;
+        if (vkin)
+            vk_lock_frame(in, 1);
+#endif
         ret = s->api->submit(s->eng, &im, av_rescale_q(pts, ctx->inputs[0]->time_base, AV_TIME_BASE_Q), flags);
+#if PM_VK_ZERO_COPY
+        if (vkin) {
+            if (ret == PMENG_OK)
+                vk_after(in, 0);
+            vk_lock_frame(in, 0);
+        }
+#endif
         if (ret != PMENG_BUSY)
             break;
         if (tries * 20 > s->wait_ms) {
