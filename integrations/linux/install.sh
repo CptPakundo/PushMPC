@@ -107,6 +107,26 @@ mpvconf() { sh "$mi" "$1" --conf "$2" --script "$3" $( [ "$dry" = 1 ] && echo --
 native_mpv_vs() { have mpv && mpv --no-config --vf=help 2>/dev/null | grep -q vapoursynth; }
 flatpak_mpv() { have flatpak && flatpak info "$FLATPAK_MPV" >/dev/null 2>&1; }
 
+# ------------------------------------------------------------------------------------------------ VapourSynth's Python link
+# VapourSynth R73 and newer: VSScript (the library mpv loads) finds Python through
+# ${XDG_CONFIG_HOME:-~/.config}/vapoursynth/vapoursynth.toml, which `vapoursynth config` writes. VSScript tries to run
+# that itself, but where the command is not on PATH (seen on Arch in CI) mpv fails with "Python executable and library
+# path couldn't be determined". So the installer runs it (the file is backed up and restored like the others).
+vs_config() {
+    if have vapoursynth stub; then c='vapoursynth config'
+    elif python3 -c 'import vapoursynth, vapoursynth._utils' >/dev/null 2>&1; then c='python3 -m vapoursynth config'
+    else return 0; fi
+    t=$cfg/vapoursynth/vapoursynth.toml
+    [ -f "$t" ] && [ ! -e "$t.pushmpc-written" ] && grep -q . "$t" && before=$(sha "$t") || before=''
+    backup_once "$t"
+    [ "$dry" = 1 ] && { say "would: run $c"; return 0; }
+    XDG_CONFIG_HOME=$cfg $c >/dev/null 2>&1 || { say "  VapourSynth: '$c' failed; mpv may not find Python (run it yourself if mpv says so)"; }
+    if [ -f "$t" ] && [ "$(sha "$t")" != "$before" ]; then mark_written "$t"; record "file|vsconfig|$t"; say "  VapourSynth: Python registered for VSScript ($t)"
+    else rm -f "$t.pushmpc-backup"; [ -f "$t.pushmpc-absent" ] && { how=$(cat "$t.pushmpc-absent"); rm -f "$t.pushmpc-absent"; [ "$how" = created-dir ] && rmdir "$(dirname "$t")" 2>/dev/null; }; fi
+    return 0
+}
+vsconfig_revert() { return 0; }
+
 # ------------------------------------------------------------------------------------------------ Flatpak override
 fp_overrides() { printf '%s/flatpak/overrides/%s' "$data" "$FLATPAK_MPV"; }
 fp_allow() {
@@ -304,6 +324,7 @@ do_install() {
     conf=$cfg/mpv/mpv.conf
     if [ "$nat" = 1 ]; then
         say "mpv ($(command -v mpv)) has VapourSynth:"
+        vs_config
         mpvconf install "$conf" "$script"; record "mpvconf|$conf"; targets=$((targets + 1))
     elif have mpv; then say "mpv ($(command -v mpv)) has no VapourSynth: its mpv.conf is not changed"
     fi

@@ -66,9 +66,10 @@ fresh() {
 snap() { (cd "$HOME" && find . -type f ! -path './.stubbin/*' ! -path './pkg/*' ! -name out.txt ! -name '.gs' ! -name '.fp-*' | LC_ALL=C sort | while read -r f; do printf '%s %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done); }
 runi() { sh "$pkg/install.sh" "$@" > "$out" 2>&1; }
 
-# 1. native mpv with VapourSynth, every frontend with existing settings
+# 1. native mpv with VapourSynth (R73+: the vapoursynth command registers Python), every frontend with existing settings
 fresh
 MPV_VS=1; GS_SCHEMA=1
+printf '#!/bin/sh\n[ "$1" = config ] || exit 1\ngrep -qs libvsscript "$XDG_CONFIG_HOME/vapoursynth/vapoursynth.toml" && exit 0\nmkdir -p "$XDG_CONFIG_HOME/vapoursynth"\nprintf "\\"/usr/lib/libvsscript.so\\" = [\\"/usr/bin/python3\\", \\"/usr/lib/libpython3.so\\", \\"1\\"]\\n" >> "$XDG_CONFIG_HOME/vapoursynth/vapoursynth.toml"\n' > "$HOME/.stubbin/vapoursynth"; chmod +x "$HOME/.stubbin/vapoursynth"
 mkdir -p "$HOME/.config/mpv" "$HOME/.config/haruna" "$HOME/.config/smplayer" "$HOME/.config/mpc-qt" "$HOME/.config/jellyfin-mpv-shim" "$HOME/.kodi/userdata"
 printf 'volume=70\n' > "$HOME/.config/mpv/mpv.conf"
 printf 'Counter=1\n\n[Command_0]\nCommand=cycle pause\nType=shortcut\n' > "$HOME/.config/haruna/custom-commands.conf"
@@ -98,6 +99,7 @@ check "1 Kodi player added" has '<player name="PushMPC mpv"' "$HOME/.kodi/userda
 check "1 Kodi uses mpv" has "<filename>$HOME/.stubbin/mpv</filename>" "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi VLC kept" has '<player name="VLC"' "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi prepend rule" has '<rules action="prepend">' "$HOME/.kodi/userdata/playercorefactory.xml"
+check "1 vapoursynth config run (VSScript finds Python)" has 'libvsscript' "$HOME/.config/vapoursynth/vapoursynth.toml"
 s1=$(snap)
 runi install; check "1 reinstall exits 0" same $? 0
 check "1 reinstall changes nothing" same "$(snap)" "$s1"

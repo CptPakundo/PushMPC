@@ -494,7 +494,8 @@ jobs:
             dnf -y -q install vapoursynth-libs >/dev/null 2>&1 || true
             mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
-            mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
+            mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv-fedora.txt 2>&1 || true
+            grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error|fail' /tmp/mpv-fedora.txt | head -30; tail -n 15 /tmp/mpv-fedora.txt
             grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-fedora/*.log | tee -a /tmp/versions.txt
             grep -q 'portable: output YUV' /tmp/vslog-fedora/*.log
           else
@@ -548,8 +549,8 @@ jobs:
           sh ~/.local/share/pushmpc/install.sh uninstall --keep-flatpak-mpv
           snap > /tmp/after.txt
           # the Flathub mpv was kept for the cache, so its own app folder (created on first run) is not compared
-          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\)' /tmp/after.txt > /tmp/after2.txt || true
-          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\)' /tmp/before.txt > /tmp/before2.txt || true
+          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\|\.ld\.so\)' /tmp/after.txt > /tmp/after2.txt || true
+          grep -v '\.var/app/io.mpv.Mpv/\(cache\|data\|\.local\|\.ld\.so\)' /tmp/before.txt > /tmp/before2.txt || true
           diff /tmp/before2.txt /tmp/after2.txt && echo "config and override restored byte for byte" | tee -a /tmp/versions.txt
           { echo '## linux-flatpak'; echo; echo '```'; cat /tmp/versions.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           grep -q 'portable: output YUV' /tmp/vslog-flatpak/*.log || { echo "::error::the plugin did not run inside the Flatpak mpv"; exit 1; }
@@ -721,8 +722,14 @@ jobs:
           Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | ForEach-Object { $q = Get-ItemProperty $_.PSPath; "MPC-HC filter entry $($_.PSChildName): $($q.Name) enabled $($q.Enabled)" } | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           # MPC Video Renderer (DSVidRen 14), which PushMPC needs downstream
           Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name DSVidRen -Value 14 -Type DWord
+          # hosted runners have no audio device: the null audio renderer, else MPC-HC cannot render the file
+          Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name AudioRendererType -Value 'Null Audio Renderer (Any)' -Type String
           "MPC Video Renderer registered: $((Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\CLSID\{71F080AA-8661-4093-B15E-4F6903E77D0A}\InprocServer32' -ErrorAction SilentlyContinue).'(default)')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"", '/play' -PassThru; Start-Sleep 25
+          Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, System.IntPtr l); public delegate bool EnumProc(System.IntPtr h, System.IntPtr l); [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(System.IntPtr h, out int pid); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n); [DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);'
+          $titles = [Collections.Generic.List[string]]::new()
+          [W.U]::EnumWindows({ param($h, $l) $id = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$id); if ($id -eq $m.Id -and [W.U]::IsWindowVisible($h)) { $sb = [Text.StringBuilder]::new(256); [void][W.U]::GetWindowText($h, $sb, 256); if ($sb.Length) { $titles.Add($sb.ToString()) } }; $true }, [IntPtr]::Zero) | Out-Null
+          "MPC-HC visible windows: $($titles -join ' | ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           try { $m.Refresh(); "MPC-HC window: '$($m.MainWindowTitle)'; modules: $(((Get-Process -Id $m.Id).Modules | Where-Object { $_.ModuleName -match 'PushMpc|MpcVideoRenderer|LAV' } | ForEach-Object ModuleName) -join ', ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" } catch { "modules: $_" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
           if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           $f = Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue
