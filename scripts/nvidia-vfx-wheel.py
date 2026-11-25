@@ -11,6 +11,7 @@
 #   headers  <wheel>                       the #define selector strings and enums of the SDK headers in the wheel
 #   verify   <platform> <dir>              the extracted files against the pin's per-file SHA-256 / size
 #   compare  <wheel> <pushmpc-install.ps1> the Windows wheel's VFX files against $RuntimeFileHashesNvidia (markdown)
+#   pe       <dir> <x64|ARM64>               every DLL's machine type and imports (the ARM64 wheel's structure check)
 import hashlib, json, os, re, sys, urllib.request, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -174,6 +175,73 @@ def cmd_compare(wheel, ps1):
             print(f"  {rel}: pin {sha} {size} | wheel {c['name']} {c['sha256']} {c['size']}")
 
 
+PE_MACHINES = {0x8664: "x64", 0xAA64: "ARM64", 0xA641: "ARM64EC", 0x14C: "x86"}
+
+
+def pe_info(path):
+    """machine and imported DLLs (with the CUDA driver functions) of a PE file, from its headers only"""
+    import struct
+    b = open(path, "rb").read()
+    if b[:2] != b"MZ":
+        return None
+    nt = struct.unpack_from("<I", b, 0x3C)[0]
+    if b[nt:nt + 4] != b"PE\0\0":
+        return None
+    machine, nsec = struct.unpack_from("<HH", b, nt + 4)
+    optsize = struct.unpack_from("<H", b, nt + 20)[0]
+    opt = nt + 24
+    magic = struct.unpack_from("<H", b, opt)[0]
+    ddir = opt + (112 if magic == 0x20B else 96)
+    imp_rva = struct.unpack_from("<I", b, ddir + 8)[0]
+    secs = [struct.unpack_from("<8sIIII", b, opt + optsize + 40 * i) for i in range(nsec)]
+
+    def off(rva):
+        for _, vsize, va, rsize, raw in secs:
+            if va <= rva < va + max(vsize, rsize):
+                return rva - va + raw
+        return None
+
+    def cstr(o):
+        return b[o:b.index(b"\0", o)].decode("ascii", "replace")
+    dlls, cuda = [], []
+    o = off(imp_rva) if imp_rva else None
+    while o is not None:
+        oft, _, _, name, ft = struct.unpack_from("<IIIII", b, o)
+        if not name:
+            break
+        dll = cstr(off(name))
+        dlls.append(dll)
+        if dll.lower() == "nvcuda.dll":
+            t = off(oft or ft)
+            while t is not None:
+                v = struct.unpack_from("<Q" if magic == 0x20B else "<I", b, t)[0]
+                if not v:
+                    break
+                if not v >> 63:
+                    cuda.append(cstr(off(v & 0x7FFFFFFF) + 2))
+                t += 8 if magic == 0x20B else 4
+        o += 20
+    return PE_MACHINES.get(machine, hex(machine)), dlls, cuda
+
+
+def cmd_pe(d, want):
+    bad = 0
+    for root, _, fs in os.walk(d):
+        for f in sorted(fs):
+            if not f.lower().endswith((".dll", ".pyd")):
+                continue
+            info = pe_info(os.path.join(root, f))
+            if not info:
+                continue
+            m, dlls, cuda = info
+            ok = m == want
+            bad += 0 if ok else 1
+            print(f"{'OK ' if ok else 'BAD'} {m:6} {f}: imports {', '.join(dlls)}")
+            if cuda:
+                print(f"        nvcuda.dll: {len(cuda)} functions; cuModuleLoadData {'yes' if 'cuModuleLoadData' in cuda else 'no'}, cuDeviceGetAttribute {'yes' if 'cuDeviceGetAttribute' in cuda else 'no'}")
+    sys.exit(1 if bad else 0)
+
+
 def main(a):
     if len(a) < 2:
         sys.exit(__doc__ or "see the header")
@@ -185,6 +253,7 @@ def main(a):
     elif c == "headers": cmd_headers(a[2])
     elif c == "verify": cmd_verify(a[2], a[3])
     elif c == "compare": cmd_compare(a[2], a[3])
+    elif c == "pe": cmd_pe(a[2], a[3])
     else: sys.exit("unknown command " + c)
 
 

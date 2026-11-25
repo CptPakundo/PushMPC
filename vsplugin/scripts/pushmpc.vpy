@@ -2,7 +2,8 @@
 # display_fps and user_data; mpv reloads this script on every seek (the plugin keeps its core warm across that).
 #
 # Backends (pushmpc.SelectBackend picks one; user_data backend=... or the Backend setting overrides Auto):
-#   nvidia    pushcore: RTX Video Super Resolution, NVIDIA frame generation, the scene-cut guard (Windows, RTX).
+#   nvidia    RTX Video Super Resolution, NVIDIA frame generation (VFG), RTX Video HDR, the scene-cut guard: pushcore on
+#             Windows; on Linux NVIDIA's Video Effects runtime through CUDA (installed by PushMPC's installer).
 #   rife      vs-rife-ncnn-vulkan (core.rife), when you have it installed (any Vulkan GPU). Never downloaded by PushMPC.
 #   portable  PushFPS's motion-compensated frame generation on the CPU (any GPU, Windows, Linux, macOS).
 # Auto: nvidia on an RTX GPU with pushcore, else rife when installed, else portable.
@@ -107,11 +108,23 @@ def _rife(c, args):
 
 _sel = core.pushmpc.SelectBackend(backend=_args.pop("backend", "") or "", **{_k: _args[_k] for _k in ("core_dir", "runtime_dir") if _k in _args})
 _backend = _text(_sel["backend"])
+# interp: the nvidia backend upscales but cannot generate frames on this GPU (Linux: RTX 20, or RTX 30 before its
+# self-test): rife or portable interpolates first, at the source size, then nvidia upscales every frame
+try:
+    _interp = _text(_sel["interp"])
+except (KeyError, IndexError):
+    _interp = ""
 if _backend == "rife":
     clip = _rife(clip, _args)
 else:
+    if _backend == "nvidia" and _interp == "rife":
+        clip = _rife(clip, _args)
+        _args["smoother"] = "off"
     for _k in ("rife_model", "rife_gpu"):
         _args.pop(_k, None)
+    if _backend == "nvidia" and _interp == "portable":
+        clip = core.pushmpc.Enhance(clip, backend="portable", **_args)
+        _args["smoother"] = "off"
     clip = core.pushmpc.Enhance(clip, backend=_backend, **_args)
 # mpv's vf=vapoursynth takes planar YUV only ("Unsupported output format" for RGB): the plugin's full-chroma RGB output
 # (chroma auto/444) goes to YUV 4:4:4, so no chroma resolution is lost. mpv keeps the input's colour parameters for the

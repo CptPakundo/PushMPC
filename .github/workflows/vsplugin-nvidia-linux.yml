@@ -1,0 +1,175 @@
+# The Linux NVIDIA backend of the VapourSynth route (vsplugin engines/nvidia-linux: RTX VSR, RTX Video HDR and VFG from
+# NVIDIA's Video Effects runtime through CUDA) on hosted runners. No runner has an NVIDIA GPU: the real-GPU run is the
+# manual script vsplugin/tests/nvidia-linux-manual.sh. What runs here:
+#   linux (ubuntu-24.04): the plugin with the backend, built with the pinned CUDA toolkit's nvcc (NVIDIA's apt repo,
+#     CI only) and the pinned VapourSynth wheel's headers; unit tests (nvl_test: colour, cut guard, Auto, fatbin
+#     retarget, SHA-256, settings; nvl_got_test: the RTX 30 GOT hooks on a demo pair; portable_test); the installer's
+#     fetch script against the pinned wheel (download, SHA-256 against pin and index, extract, per-file check, tamper
+#     check); nvl_struct_test: the real runtime loaded against a stub libcuda (symbols, API version, enum values,
+#     selectors, the RTX 30 compatibility on the real VFG library and its fatbin census); the plugin in VapourSynth
+#     without a GPU (Auto falls back to portable and says why); the self-test refuses to run without a GPU.
+#   pure (windows-2022, windows-11-arm): nvl_test and portable_test with MSVC x64 and ARM64 (the backend's pure parts
+#     stay portable; the Windows nvidia path itself is pushcore's, see track notes for ARM64).
+name: vsplugin-nvidia-linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['track/nvidia-linux']
+    paths: ['vsplugin/**', 'scripts/nvidia-vfx-*', 'scripts/vapoursynth-pin.json', '.github/workflows/vsplugin-nvidia-linux.yml']
+
+env:
+  CUDA_PKG_VERSION: '12-8'          # CUDA toolkit 12.8 (nvcc with sm_120): build time only, never on users' machines
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NVVFX: ${{ github.workspace }}/nvvfx-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CUDA toolkit (nvcc ${{ env.CUDA_PKG_VERSION }}, NVIDIA's apt repository)
+        timeout-minutes: 10
+        run: |
+          set -eux
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-${CUDA_PKG_VERSION} cuda-cudart-dev-${CUDA_PKG_VERSION}
+          ls /usr/local/ | grep cuda
+          /usr/local/cuda-${CUDA_PKG_VERSION/-/.}/bin/nvcc --version
+          echo "CUDA_PATH=/usr/local/cuda-${CUDA_PKG_VERSION/-/.}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Pinned VapourSynth wheel (SDK headers, libvapoursynth)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          url=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['linux']['url'])")
+          sha=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['linux']['sha256'])")
+          whl="$RUNNER_TEMP/$(basename "$url")"
+          curl -fsSL --retry 3 -o "$whl" "$url"
+          got=$(sha256sum "$whl" | cut -d' ' -f1 | tr a-f A-F)
+          [ "$got" = "$(echo "$sha" | tr a-f A-F)" ] || { echo "::error::SHA-256 mismatch for $url"; exit 1; }
+          python -m pip install --no-deps "$whl"
+          pkg=$(python -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+
+      - name: Build (plugin with the nvidia backend, self-test, tests)
+        timeout-minutes: 15
+        run: |
+          set -eux
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMVS_NVIDIA_LINUX=ON
+          grep -E "PMVS_NVIDIA_LINUX:BOOL=ON" build/CMakeCache.txt
+          cmake --build build --parallel
+          ls -la vsplugin/bin build/nvl_kernels.fatbin
+          # the plugin exports only VapourSynth's entry point; CUDA / VFX are run-time loaded (no libcuda in NEEDED)
+          nm -D --defined-only vsplugin/bin/pushmpc_vs.so | grep -E ' T ' | tee exports.txt
+          [ "$(grep -c ' T ' exports.txt)" = 1 ] && grep -q VapourSynthPluginInit2 exports.txt
+          ! readelf -d vsplugin/bin/pushmpc_vs.so | grep -E 'NEEDED.*(cuda|VideoFX|NVCV)'
+          readelf -d vsplugin/bin/pushmpc_vs.so | grep NEEDED
+          # the embedded kernels: SASS for 75 / 86 / 89 / 120 and PTX
+          "$CUDA_PATH/bin/cuobjdump" --list-elf --list-ptx build/nvl_kernels.fatbin
+
+      - name: Unit tests (nvl_test, nvl_got_test, portable_test)
+        timeout-minutes: 10
+        run: ctest --test-dir build --output-on-failure -R "nvl_test|nvl_got_test|portable_test"
+
+      - name: Pinned nvidia-vfx wheel (cache)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pushmpc
+          key: nvidia-vfx-linux-${{ hashFiles('scripts/nvidia-vfx-pin.json') }}
+
+      - name: Installer fetch script against the pin (download, verify, extract, check, tamper)
+        timeout-minutes: 15
+        run: |
+          set -eux
+          sh -n scripts/nvidia-vfx-fetch.sh && dash -n scripts/nvidia-vfx-fetch.sh
+          # no driver here: it must skip without --force, and refuse without the licence
+          sh scripts/nvidia-vfx-fetch.sh --dest "$NVVFX"
+          [ ! -e "$NVVFX" ]
+          set +e; sh scripts/nvidia-vfx-fetch.sh --dest "$NVVFX" --force </dev/null; rc=$?; set -e
+          [ "$rc" = 4 ]
+          # the real install (keep the wheel in the cache for the next run)
+          dash scripts/nvidia-vfx-fetch.sh --dest "$NVVFX" --force --accept-nvidia-license --keep-wheel
+          sh scripts/nvidia-vfx-fetch.sh --check --dest "$NVVFX"
+          find "$NVVFX" -type f | sort
+          du -sh "$NVVFX"
+          # a second run finds it intact and does nothing
+          sh scripts/nvidia-vfx-fetch.sh --dest "$NVVFX" --force --accept-nvidia-license | grep -q "already installed"
+          # tampering is caught
+          cp "$NVVFX/nvvfx/libs/libnvngxruntime.so" /tmp/keep.so
+          printf 'x' >> "$NVVFX/nvvfx/libs/libnvngxruntime.so"
+          set +e; sh scripts/nvidia-vfx-fetch.sh --check --dest "$NVVFX"; rc=$?; set -e
+          [ "$rc" = 1 ]
+          cp /tmp/keep.so "$NVVFX/nvvfx/libs/libnvngxruntime.so"
+          sh scripts/nvidia-vfx-fetch.sh --check --dest "$NVVFX"
+
+      - name: Structural test (the real runtime against a stub libcuda)
+        timeout-minutes: 10
+        run: |
+          set -eux
+          sh vsplugin/tests/nvidia-linux/make-cuda-stub.sh "$NVVFX" "$RUNNER_TEMP/cudastub"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/cudastub" ./build/nvl_struct_test "$NVVFX"
+          # the self-test helper refuses without a GPU (exit 2)
+          set +e; LD_LIBRARY_PATH="$RUNNER_TEMP/cudastub" ./vsplugin/bin/pushmpc-nvvfx-selftest --runtime "$NVVFX"; rc=$?; set -e
+          [ "$rc" = 2 ]
+
+      - name: The plugin in VapourSynth without a GPU (Auto falls back, says why)
+        timeout-minutes: 10
+        run: |
+          set -eux
+          export PUSHMPC_NVVFX_DIR="$NVVFX" PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/logs" LD_LIBRARY_PATH="$RUNNER_TEMP/cudastub"
+          python - <<'PY'
+          import vapoursynth as vs
+          core = vs.core
+          core.std.LoadPlugin("vsplugin/bin/pushmpc_vs.so")
+          sel = core.pushmpc.SelectBackend()
+          why = sel["why"].decode() if isinstance(sel["why"], bytes) else sel["why"]
+          backend = sel["backend"].decode() if isinstance(sel["backend"], bytes) else sel["backend"]
+          print("SelectBackend:", backend, "|", why)
+          assert backend == "portable" and "not present" in why, (backend, why)
+          clip = core.std.BlankClip(format=vs.YUV420P8, width=640, height=360, length=24, fpsnum=24000, fpsden=1001)
+          try:
+              core.pushmpc.Enhance(clip, backend="nvidia")
+              raise SystemExit("backend=nvidia without a GPU must fail")
+          except vs.Error as e:
+              print("backend=nvidia without a GPU:", e)
+              assert "nvidia" in str(e)
+          out = core.pushmpc.Enhance(clip, smoother="2", backend="auto")
+          assert out.num_frames == 48, out.num_frames
+          for i in range(out.num_frames): out.get_frame(i)
+          print("Auto (portable) rendered", out.num_frames, "frames")
+          PY
+          cat "$RUNNER_TEMP"/logs/* | tail -20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pushmpc_vs-linux-nvidia
+          path: |
+            vsplugin/bin/pushmpc_vs.so
+            vsplugin/bin/pushmpc-nvvfx-selftest
+
+  pure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: nvl_test and portable_test (MSVC ${{ matrix.os == 'windows-11-arm' && 'ARM64' || 'x64' }})
+        shell: bash
+        run: |
+          set -eux
+          cmake -S vsplugin -B build-pure -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-pure --config Release --target nvl_test portable_test --parallel
+          ctest --test-dir build-pure -C Release --output-on-failure -R "nvl_test|portable_test"

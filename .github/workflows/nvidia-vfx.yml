@@ -61,11 +61,23 @@ jobs:
           for f in libnvVFXTrueHDR.so libnvVFXVideoSuperRes.so libnvVFXVideoFrameGeneration.so libVideoFX.so; do
             echo "===== strings $f"; strings -n 4 "x-linux_x86_64/nvvfx/libs/$f" | grep -xE "(Src|Dst)Image[0-9]|CudaStream|[A-Z][a-z]+([A-Z][a-z]+)*(Level|Mode|Width|Height|Multiplier|Index|Change|Enabled|Off|Gray|Luminance|Contrast|Saturation|Strength|Timestep|Directory|Path)|TrueHDR|VideoSuperRes|VideoFrameGeneration|ModelDir|ModelSel" | sort -u | head -60
           done
+      - name: The pin's per-file lists match the wheels (every listed member, SHA-256 and size)
+        run: |
+          set -eu
+          for p in linux_x86_64 win_amd64 win_arm64; do
+            rm -rf "v-$p"; w=$(python3 -I scripts/nvidia-vfx-wheel.py fetch $p ~/wheels)
+            python3 -I scripts/nvidia-vfx-wheel.py extract "$w" "v-$p" $p > /dev/null
+            python3 -I scripts/nvidia-vfx-wheel.py verify $p "v-$p" | tail -3
+          done
+      - name: Windows wheels' structure (machine types, imports; ARM64 = RTX Spark)
+        run: |
+          echo "== win_amd64"; python3 -I scripts/nvidia-vfx-wheel.py pe x-win_amd64/nvvfx/libs x64
+          echo "== win_arm64"; python3 -I scripts/nvidia-vfx-wheel.py pe x-win_arm64/nvvfx/libs ARM64
       - name: VFG fatbin census (SM89 ELF entries the Ampere compat would retarget)
         run: |
           python3 -I - <<'PY'
           import glob, struct
-          for f in glob.glob("x-linux_x86_64/**/*VideoFrameGeneration*", recursive=True) + glob.glob("x-win_amd64/**/*VideoFrameGeneration*.dll", recursive=True):
+          for f in glob.glob("x-linux_x86_64/**/*VideoFrameGeneration*", recursive=True) + glob.glob("x-win_amd64/**/*VideoFrameGeneration*.dll", recursive=True) + glob.glob("x-win_arm64/**/*VideoFrameGeneration*.dll", recursive=True):
               b = open(f, "rb").read()
               p, n, sms, bad = 0, 0, {}, 0
               while True:
