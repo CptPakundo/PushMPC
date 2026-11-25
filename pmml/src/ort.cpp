@@ -20,8 +20,12 @@
 #include <thread>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #if __has_include(<dml_provider_factory.h>) && __has_include(<DirectML.h>)
 #define PMML_HAVE_DML 1
@@ -202,7 +206,9 @@ std::vector<IDXGIAdapter1*> dxgiAdapters(bool warp) {
             if (FAILED(f->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&a)))) break;
             DXGI_ADAPTER_DESC1 d{};
             a->GetDesc1(&d);
-            if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { a->Release(); continue; }
+            bool seen = false;   // the same adapter can be listed once per output
+            for (auto* o : v) { DXGI_ADAPTER_DESC1 e{}; o->GetDesc1(&e); seen = seen || (e.AdapterLuid.LowPart == d.AdapterLuid.LowPart && e.AdapterLuid.HighPart == d.AdapterLuid.HighPart); }
+            if ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) || seen) { a->Release(); continue; }
             v.push_back(a);
         }
     }

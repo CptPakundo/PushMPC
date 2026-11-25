@@ -53,6 +53,7 @@ struct Options {
     std::string runtimeDir;       // ort/<flavor>/, eps/<ep>/ep.json, ncnn models
     std::string modelsDir;        // pushflow-*.onnx (+ .onnx.txt facts, models.json) (an installed PushFPS's models work)
     std::string graphsDir;        // pack-*.onnx, synth-*.onnx (make_graphs.py)
+    std::string ncnnModelsDir;    // pushflow-<role>-<padW>x<padH>.ncnn.param/bin (ncnn_models.py); default <runtimeDir>/ncnn-models
     std::string cacheDir;         // engine caches (TensorRT-RTX, OpenVINO), the autobench cache
     Backend backend;
     std::string tier = "balanced";   // fast | balanced | quality (PushFlow's tiers: model and motion size)

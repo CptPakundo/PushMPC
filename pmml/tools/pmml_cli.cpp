@@ -26,8 +26,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #define popen _popen
 #define pclose _pclose
@@ -78,6 +82,7 @@ pmml::Options options(const Args& a, std::string* err) {
     o.modelsDir = a.get("--models", o.runtimeDir + "/models");
     o.graphsDir = a.get("--graphs", o.runtimeDir + "/graphs");
     o.cacheDir = a.get("--cache", "");
+    o.ncnnModelsDir = a.get("--ncnn-models", "");
     if (!pmml::Backend::parse(a.get("--backend", "cpu"), &o.backend)) *err = "bad --backend " + a.get("--backend");
     o.tier = a.get("--tier", "balanced");
     o.motionHeight = std::atoi(a.get("--motion", "0").c_str());
@@ -268,6 +273,7 @@ int cmdAuto(const Args& a, const char* argv0) {
     const int mult = std::atoi(a.get("--mult", "5").c_str());
     const std::string cacheDir = a.get("--cache", rt);
     const std::string common = " --runtime " + q(rt) + " --models " + q(a.get("--models", rt + "/models")) + " --graphs " + q(a.get("--graphs", rt + "/graphs")) +
+                               (a.has("--ncnn-models") ? " --ncnn-models " + q(a.get("--ncnn-models")) : "") +
                                (cacheDir.empty() ? "" : " --cache " + q(cacheDir));
     std::vector<pmml::ProbeResult> results;
     std::string cacheKeyText;

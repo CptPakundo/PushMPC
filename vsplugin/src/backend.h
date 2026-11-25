@@ -3,10 +3,13 @@
 //
 //   nvidia    pushcore (Windows, RTX): RTX VSR, NVIDIA VFG and the other methods, the scene-cut guard. The R1 path.
 //   portable  PushFPS's portable core on the CPU (engines/portable): any GPU, Windows, Linux, macOS.
+//   ml        PushFlow (RIFE) on the GPU through pmml (ONNX Runtime with the card's EP, or ncnn-Vulkan): any GPU, every
+//             OS, when the pmml runtime is installed (ml_vs.cpp).
 //   rife      a script preset: pushmpc.vpy chains vs-rife-ncnn-vulkan (core.rife) when the user has it installed. The
 //             plugin never downloads it; it only reports whether the script found it.
 //
-// Auto: an NVIDIA RTX GPU with pushcore present -> nvidia; otherwise rife when available; otherwise portable.
+// Auto: an NVIDIA RTX GPU with pushcore present -> nvidia; otherwise ml when the pmml runtime is installed; otherwise
+// rife when available; otherwise portable.
 #pragma once
 #include <algorithm>
 #include <cctype>
@@ -17,8 +20,8 @@
 
 namespace pmvs {
 
-enum class BackendKind { Nvidia, Portable, Rife };
-inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : "portable"; }
+enum class BackendKind { Nvidia, Portable, Rife, Ml };
+inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : k == BackendKind::Ml ? "ml" : "portable"; }
 
 // what the probe found. gpuFamily: pushcore_capabilities' family (PushMpcAuto.h GpuFamily: 1 RTX 50, 2 RTX 40,
 // 3 RTX 30, 4 RTX 20, 5 GTX, 6.. AMD / Intel / other; 0 unknown)
@@ -27,6 +30,8 @@ struct BackendProbe {
     bool pushcoreLoaded = false;  // pushcore.dll loaded and pushcore_capabilities answered
     uint32_t gpuFamily = 0;
     bool rifeAvailable = false;   // the script found core.rife
+    bool mlBuilt = false;         // this build has the ml backend (pmml)
+    bool mlAvailable = false;     // the pmml runtime is installed (ml_vs.cpp MlRuntimePresent)
     std::string gpuName;
 };
 inline bool IsRtxFamily(uint32_t f) { return f >= 1 && f <= 4; }
@@ -47,14 +52,20 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
         return r;
     }
     if (requested == "portable") { r.kind = BackendKind::Portable; r.why = "portable (your setting)"; return r; }
+    if (requested == "ml") {
+        if (p.mlBuilt && p.mlAvailable) { r.kind = BackendKind::Ml; r.why = "ml (your setting)"; }
+        else { r.kind = BackendKind::Portable; r.why = std::string("ml asked for, but ") + (p.mlBuilt ? "the pmml runtime is not installed" : "this build has no ml backend") + ": portable"; }
+        return r;
+    }
     if (requested == "rife") {
         if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "rife (your setting)"; }
         else { r.kind = BackendKind::Portable; r.why = "rife asked for, but vs-rife-ncnn-vulkan (core.rife) is not installed: portable"; }
         return r;
     }
-    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia, portable or rife (got '" + requested + "')"; return r; }
+    if (!requested.empty() && requested != "auto") { r.ok = false; r.why = "backend must be auto, nvidia, ml, portable or rife (got '" + requested + "')"; return r; }
     if (nvidiaOk) { r.kind = BackendKind::Nvidia; r.why = "Auto: " + gpu + " is an NVIDIA RTX GPU and pushcore is present: nvidia"; return r; }
     std::string not_nv = !p.nvidiaBuilt ? "no pushcore backend in this build" : !p.pushcoreLoaded ? "pushcore is not present" : gpu + " is not an NVIDIA RTX GPU";
+    if (p.mlBuilt && p.mlAvailable) { r.kind = BackendKind::Ml; r.why = "Auto: " + not_nv + "; the pmml runtime is installed: ml (PushFlow on the GPU)"; return r; }
     if (p.rifeAvailable) { r.kind = BackendKind::Rife; r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is installed: rife"; return r; }
     r.kind = BackendKind::Portable;
     r.why = "Auto: " + not_nv + "; vs-rife-ncnn-vulkan is not installed: portable (CPU)";
