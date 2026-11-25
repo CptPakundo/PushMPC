@@ -175,7 +175,7 @@ def write_glsl(layers, out, name):
             o.append("    return r;\n}\n\n")
     last = len(layers) - 1
     L = layers[-1]
-    o.append(f"//!DESC {name} (fragment) depth-to-space x2\n//!HOOK LUMA\n//!BIND t{last}_0\n//!WIDTH LUMA.w 2.0 *\n//!HEIGHT LUMA.h 2.0 *\n"
+    o.append(f"//!DESC {name} (fragment) depth-to-space x2\n//!HOOK LUMA\n//!BIND HOOKED\n//!BIND t{last}_0\n//!WIDTH LUMA.w 2.0 *\n//!HEIGHT LUMA.h 2.0 *\n"
              f"//!COMPONENTS 1\n{when}\n"
              "vec4 hook() {\n"
              "    // DCR: channel (row parity) * 2 + (column parity)\n"
