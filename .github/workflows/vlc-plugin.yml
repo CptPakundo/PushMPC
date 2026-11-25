@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc', 'track/vlc-2']
+    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   workflow_dispatch:
     inputs:
