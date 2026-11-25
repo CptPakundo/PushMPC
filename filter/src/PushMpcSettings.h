@@ -23,6 +23,7 @@
 //   VsrStyle         Auto | Standard | HighBitrate | Streaming   default Auto (RTX VSR model family; Auto picks it by the source bitrate)
 //   Deband           Auto | Off | On                 default Auto   (PushMPC's own deband pass, 8-bit SDR sources)
 //   DebandStrength   Low | Medium | High             default Medium
+//   SubtitleHold     Auto | Off | On                 default Auto   (PushFPS's Subtitle Hold: burned-in subtitles kept out of frame generation; Auto = kSubtitleHoldAuto)
 //   FrameLog         DWORD 1/0                       default 1
 // Debug and test values stay in HKCU\Software\PushMPC\Filter (see ReadConfig in PushMpcFilter.cpp).
 #pragma once
@@ -76,6 +77,7 @@ struct Settings {
     VsrStyle vsrStyle = VsrStyle::Auto;
     int deband = kAuto;     // kAuto, kOff, 1 = on
     DebandStrength debandStrength = DebandStrength::Medium;
+    int subtitleHold = kAuto;  // kAuto, kOff, 1 = on (PushFPS 4.5's Subtitle Hold, only while frame generation runs)
     bool frameLog = true;
     bool operator==(const Settings&) const = default;
 };
@@ -95,6 +97,14 @@ inline CleanStrength NearestStrength(float tone, float structure)
                          std::fabs(tone - 1.0f) + std::fabs(structure - 1.0f) };
     return d[0] < d[1] && d[0] < d[2] ? CleanStrength::Subtle : d[1] < d[2] ? CleanStrength::Balanced : CleanStrength::Strong;
 }
+
+// PushFPS Subtitle Hold (pushcore PushCoreSettings.subtitleHold) under Auto: OFF. Measured 2026-11-25 on an RTX 5090 (HANDOFF
+// "PushMPC is on PushFPS 4.5.3"): it masks only thin contrasting strokes that stood still for several moving frames, never
+// the whole band, and on video without burned-in text it held 0 pixels (output identical); but it costs about 0.5 ms GPU per
+// source frame at 4K (4x and 8x), above the 0.3 ms bar, and on burned-in anime subtitles VFG's frames looked the same with it
+// (a fast pan left a text ghost either way). Soft subtitles are drawn by the player after the filter and never need it.
+inline constexpr bool kSubtitleHoldAuto = false;
+inline bool SubtitleHoldWanted(const Settings& s) { return s.subtitleHold == kAuto ? kSubtitleHoldAuto : s.subtitleHold != kOff; }
 
 // ---- string forms (registry and the page)
 inline std::wstring ChoiceStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : std::to_wstring(v); }
@@ -182,6 +192,7 @@ inline Settings LoadSettings()
                : _wcsicmp(v.c_str(), L"Streaming") == 0 ? VsrStyle::Streaming : _wcsicmp(v.c_str(), L"Standard") == 0 && version >= 2 ? VsrStyle::Standard : VsrStyle::Auto;
     s.deband = ParseOnOff(RegReadStr(k, L"Deband"), kAuto);
     const std::wstring ds = RegReadStr(k, L"DebandStrength");
+    s.subtitleHold = ParseOnOff(RegReadStr(k, L"SubtitleHold"), kAuto);
     s.debandStrength = _wcsicmp(ds.c_str(), L"Low") == 0 ? DebandStrength::Low : _wcsicmp(ds.c_str(), L"High") == 0 ? DebandStrength::High : DebandStrength::Medium;
     const std::wstring hb = RegReadStr(k, L"HdrBoost");
     s.hdrBoost = _wcsicmp(hb.c_str(), L"Off") == 0 ? HdrBoost::Off : _wcsicmp(hb.c_str(), L"Low") == 0 ? HdrBoost::Low
@@ -219,6 +230,7 @@ inline bool SaveSettings(const Settings& s)
     str(L"VsrStyle", VsrStyleStr(s.vsrStyle));
     str(L"Deband", OnOffStr(s.deband));
     str(L"DebandStrength", DebandStrengthStr(s.debandStrength));
+    str(L"SubtitleHold", OnOffStr(s.subtitleHold));
     str(L"HdrBoost", HdrBoostStr(s.hdrBoost));
     str(L"HdrMethod", HdrMethodStr(s.hdrMethod));
     dw(L"HdrLimit", s.hdrLimit);

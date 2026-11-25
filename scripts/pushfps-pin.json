@@ -1,10 +1,10 @@
 {
   "pushfps": {
     "repository": "DosukaSOL/PushFPS",
-    "tag": "v4.4.0",
-    "commit": "efb7dde99dd65e5232591b6ea3dd52859ba11497",
-    "patch": "patches/pushfps-4.4.0-pushmpc.patch",
-    "displayVersion": "4.4.0-pushmpc"
+    "tag": "v4.5.3",
+    "commit": "731589e2eaf7cbdd28299ad195c34315d540be36",
+    "patch": "patches/pushfps-4.5.3-pushmpc.patch",
+    "displayVersion": "4.5.3-pushmpc"
   },
   "mpcvr": {
     "repository": "Aleksoid1978/VideoRenderer",

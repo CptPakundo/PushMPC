@@ -100,7 +100,7 @@ up above.
 
 The filter reads PushMPC's own settings (the same as the MPC-HC filter's settings page). The script's `user-data` can
 override them for mpv alone, for example `...:user-data=[smoother=4,sharper=2]`. The keys are `smoother`, `sharper`,
-`cleanup`, `sdr_to_hdr`, `deband`, `fg_quality`, `fg_method`, `vrr`, `upscaler`, `target`, `vsr_style`, `chroma`
+`cleanup`, `sdr_to_hdr`, `deband`, `subtitle_hold`, `fg_quality`, `fg_method`, `vrr`, `upscaler`, `target`, `vsr_style`, `chroma`
 (`auto`/`444`/`420`) and `display_hdr`.
 
 **Auto** chooses the multiplier from the display's refresh rate (mpv's `display_fps`) and the GPU budget, with the same
