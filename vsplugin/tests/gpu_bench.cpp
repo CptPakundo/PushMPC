@@ -279,8 +279,8 @@ static void Reduce(const Pic& big, Pic& s)
 static void BenchUpscale(Y4m& clip, int frames)
 {
     struct M { std::string name; Upscaler u; float sharp; };
-    const std::vector<M> ms = { { "fsr1-s0.25", Upscaler::Fsr, 0.25f }, { "fsr1-s0.5", Upscaler::Fsr, 0.5f }, { "fsr1-s0.75", Upscaler::Fsr, 0.75f },
-                                { "nis-s0.25", Upscaler::Nis, 0.25f }, { "nis-s0.5", Upscaler::Nis, 0.5f } };
+    const std::vector<M> ms = { { "fsr1-s0.25", Upscaler::Fsr, 0.25f }, { "fsr1-s0.5", Upscaler::Fsr, 0.5f }, { "fsr1-s0.75", Upscaler::Fsr, 0.75f }, { "fsr1-s1.0", Upscaler::Fsr, 1.0f },
+                                { "nis-s0.0", Upscaler::Nis, 0.0f }, { "nis-s0.1", Upscaler::Nis, 0.1f }, { "nis-s0.25", Upscaler::Nis, 0.25f }, { "nis-s0.5", Upscaler::Nis, 0.5f } };
     const int W = clip.w & ~3, H = clip.h & ~3;
     std::vector<Pic> big, small;
     for (int f = 0; f < std::min(frames, int(clip.frames.size())); ++f) {
@@ -346,6 +346,8 @@ static void BenchCuts(Y4m& clip, Y4m* other)
             PairStats st;
             const int p = e.Estimate(slotA, sb, prev, st, err);
             if (p < 0) { std::printf("cuts: %s\n", err.c_str()); return; }
+            std::printf("STAT %s %s pair %zu unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d
+", g_clip.c_str(), useOf ? "nvof" : "blocks", i, st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
             const int d = guard.Decide(st);
             falseRule += d == 1 ? 1 : 0; falseGuard += d == 2 ? 1 : 0; ++pairs; sumCons += st.consistent;
             if (prev >= 0) e.ReleasePair(prev);
@@ -358,10 +360,48 @@ static void BenchCuts(Y4m& clip, Y4m* other)
             const int sb = e.Upload(other->frames[0].View(), err);
             PairStats st;
             const int p = e.Estimate(slotA, sb, prev, st, err);
+            std::printf("STAT %s %s junction unexpl %.3f %.3f cost %.2f %.2f zero %.2f agree %.3f moving %.3f rule %d
+", g_clip.c_str(), useOf ? "nvof" : "blocks", st.unexplainedF, st.unexplainedB, st.meanCostF, st.meanCostB, st.zeroCost, st.consistent, st.moving, st.cutRule ? 1 : 0);
             const int d = p >= 0 ? guard.Decide(st) : -1;
             note += std::string("; junction: ") + (d == 1 ? "cut (rule)" : d == 2 ? "cut (guard)" : "MISSED") + " (unexplained " + std::to_string(int(100 * std::max(st.unexplainedF, st.unexplainedB))) + " %)";
         }
         Row("cuts", useOf ? "gpu-nvof" : "gpu-blocks", 0, 0, 0, note);
+    }
+}
+
+// a synthetic clip with known in-between frames: a detailed procedural picture under a camera that pans, zooms and
+// rotates, and a textured disc crossing it the other way (occlusions); 4:2:0 8-bit. For runs where no public clip may
+// be fetched (a local GPU), and as a motion type the derf clips lack (zoom + rotation).
+static double Hash01(int x, int y) { uint32_t h = uint32_t(x) * 73856093u ^ uint32_t(y) * 19349663u; h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15; return double(h % 1000) / 999.0; }
+static double Detail(double x, double y)
+{
+    const double cx = std::floor(x / 5.0), cy = std::floor(y / 5.0), fx = x / 5.0 - cx, fy = y / 5.0 - cy;
+    const double n = (Hash01(int(cx), int(cy)) * (1 - fx) + Hash01(int(cx) + 1, int(cy)) * fx) * (1 - fy) + (Hash01(int(cx), int(cy) + 1) * (1 - fx) + Hash01(int(cx) + 1, int(cy) + 1) * fx) * fy;
+    return 40 + 120 * n + 50 * std::sin(x * 0.045) * std::cos(y * 0.037) + 30 * ((int(std::floor(x / 40)) + int(std::floor(y / 40))) & 1);
+}
+static void Synthetic(int W, int H, int frames, Y4m& out)
+{
+    out.w = W; out.h = H; out.bits = 8;
+    out.header = "YUV4MPEG2 W" + std::to_string(W) + " H" + std::to_string(H) + " F50:1 Ip A1:1 C420jpeg";
+    for (int f = 0; f < frames; ++f) {
+        const double t = f;
+        const double s = 1.0 + 0.004 * t, a = 0.0025 * t, px = 3.0 * t, py = 1.2 * t;
+        const double dx = W * 0.75 - 9.0 * t, dy = H * 0.5 + 2.0 * t, r = H * 0.18;
+        Pic p; p.Alloc(W, H, 8);
+        auto sample = [&](double x, double y, int plane) {
+            const double ox = x - dx, oy = y - dy;
+            if (ox * ox + oy * oy < r * r) return plane == 0 ? 200 - 0.6 * Detail(ox * 1.7 + 500, oy * 1.7) : 128 + (plane == 1 ? 30.0 : -25.0);
+            const double cx = x - W / 2.0, cy = y - H / 2.0;
+            const double u = (std::cos(a) * cx - std::sin(a) * cy) / s + W / 2.0 + px, v = (std::sin(a) * cx + std::cos(a) * cy) / s + H / 2.0 + py;
+            return plane == 0 ? Detail(u, v) : 128 + (plane == 1 ? 12 : -10) * std::sin(u * 0.02 + v * 0.013);
+        };
+        for (int i = 0; i < 3; ++i)
+            for (int y = 0; y < p.PH(i); ++y)
+                for (int x = 0; x < p.PW(i); ++x) {
+                    const double sx = i ? 2 * x + 1.0 : x + 0.5, sy = i ? 2 * y + 1.0 : y + 0.5;
+                    p.p[i][size_t(y) * size_t(p.PW(i)) + size_t(x)] = uint16_t(std::clamp(std::lround(sample(sx, sy, i)), 0L, 255L));
+                }
+        out.frames.push_back(std::move(p));
     }
 }
 
@@ -386,7 +426,8 @@ int main(int argc, char** argv)
     if (g_clip.empty()) g_clip = file.substr(file.find_last_of("/\\") + 1);
     Y4m clip;
     std::string err;
-    if (!ReadY4m(file, frames, skip, clip, err)) { std::printf("gpu_bench: %s\n", err.c_str()); return 1; }
+    if (file == "synthetic") Synthetic(1280, 720, frames, clip);
+    else if (!ReadY4m(file, frames, skip, clip, err)) { std::printf("gpu_bench: %s\n", err.c_str()); return 1; }
     std::printf("gpu_bench: %s, %dx%d %d-bit, %zu frames, test %s\n", g_clip.c_str(), clip.w, clip.h, clip.bits, clip.frames.size(), test.c_str());
     if (test == "interp") BenchInterp(clip);
     else if (test == "twos") BenchTwos(clip);

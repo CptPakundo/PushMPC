@@ -10,6 +10,7 @@
     "flags": "-V --target-env vulkan1.2"
   },
   "moltenvk": { "version": "v1.4.2", "url": "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar", "sha256": "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e" },
+  "ffmpegVmaf": { "what": "BtbN static ffmpeg (GPL, with libvmaf) for the CI benchmark's VMAF only; never shipped", "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz", "sha256": "41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380" },
   "lavapipe": { "how": "Mesa's mesa-vulkan-drivers from the ubuntu-24.04 runner's apt (the version is logged by the job)" },
   "nis": { "version": "1.0.3", "commit": "35e13ba316c98eeecf16f37eae70ce88019911f6", "where": "vsplugin/third_party/nis (from PushFPS v4.5.3 third_party/nis)" },
   "fidelityfxFsr1": { "version": "FidelityFX SDK 1.1.4, FSR1 1.2.0", "where": "vsplugin/third_party/fidelityfx-fsr1" }

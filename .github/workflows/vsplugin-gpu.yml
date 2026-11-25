@@ -99,9 +99,10 @@ jobs:
           bad=0
           for f in build/spv/*.h; do
             n=$(basename "$f")
-            if ! cmp -s "$f" "vsplugin/engines/gpu/spv/$n"; then echo "::warning::vsplugin/engines/gpu/spv/$n differs from the pinned glslang's output (commit the spv artifact)"; bad=1; fi
+            if ! cmp -s "$f" "vsplugin/engines/gpu/spv/$n"; then echo "::error::vsplugin/engines/gpu/spv/$n differs from the pinned glslang's output (commit the spv artifact)"; bad=1; fi
           done
           echo "SPV_STALE=$bad" >> "$GITHUB_ENV"
+          [ "$bad" = 0 ] || echo "::error::stale SPIR-V: this build used fresh shaders, builds without glslang would not (the job fails at its end)"
 
       - uses: actions/upload-artifact@v4
         with: { name: spv, path: build/spv/*.h }
@@ -146,14 +147,22 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           path: ~/.cache/pm-clips
-          key: bench-clips-v1
+          key: bench-clips-v2-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
 
-      - name: Public clips (Xiph derf 720p50, Big Buck Bunny 60 fps)
+      - name: Public clips (Xiph derf 720p50, Big Buck Bunny 60 fps) and a static ffmpeg with libvmaf
         if: ${{ !cancelled() }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
           c=~/.cache/pm-clips; mkdir -p "$c"
+          j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          # ffmpeg with libvmaf (Ubuntu's has none): BtbN's static GPL build, pinned by SHA-256
+          if [ ! -x "$c/ffmpeg/ffmpeg" ]; then
+            curl -fsSL --retry 3 -o "$c/ffmpeg.tar.xz" "$(j ffmpegVmaf url)" && echo "$(j ffmpegVmaf sha256)  $c/ffmpeg.tar.xz" | sha256sum -c - \
+              && mkdir -p "$c/ffmpeg" && tar -xJf "$c/ffmpeg.tar.xz" -C "$c/ffmpeg" --strip-components=2 --wildcards '*/bin/ffmpeg' || echo "::warning::static ffmpeg not fetched: no VMAF"
+            rm -f "$c/ffmpeg.tar.xz"
+          fi
+          [ -x "$c/ffmpeg/ffmpeg" ] && "$c/ffmpeg/ffmpeg" -hide_banner -filters 2>/dev/null | grep -q libvmaf && echo "VMAF_FFMPEG=$c/ffmpeg/ffmpeg" >> "$GITHUB_ENV" || true
           # the first 64 frames of each 720p50 Y4M (an HTTP range: one frame is 1382406 bytes)
           for n in park_joy ducks_take_off in_to_tree old_town_cross; do
             f="$c/$n.y4m"
@@ -161,36 +170,37 @@ jobs:
           done
           # Big Buck Bunny (Blender Foundation, CC-BY 3.0), the 60 fps render: 1.2 s at 720p from 1:40 (CG animation)
           f="$c/bbb60.y4m"
-          [ -s "$f" ] || ffmpeg -hide_banner -loglevel error -ss 100 -i "https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_60fps_normal.mp4" -frames:v 72 -vf scale=1280:720 -pix_fmt yuv420p -an "$f" || echo "::warning::bbb not fetched"
+          [ -s "$f" ] || ffmpeg -hide_banner -loglevel error -ss 100 -i "http://distribution.bbb3d.renderfarming.net/video/mp4/bbb_sunflower_1080p_60fps_normal.mp4" -frames:v 72 -vf scale=1280:720 -pix_fmt yuv420p -an -f yuv4mpegpipe "$f" || { rm -f "$f"; echo "::warning::bbb not fetched"; }
           ls -la "$c"
 
       - name: Quality benchmark
         if: ${{ !cancelled() }}
-        timeout-minutes: 25
+        timeout-minutes: 35
         env: { PUSHMPC_VK_ALLOW_CPU: '1' }
         run: |
-          set -euo pipefail
+          set -uo pipefail
           c=~/.cache/pm-clips; o=$RUNNER_TEMP/bench; mkdir -p $o/y4m
           N=${{ github.event.inputs.bench_frames || '30' }}
           echo "| clip | test | method | PSNR-Y | SSIM-Y | ms | note |" > $o/table.md
           echo "|---|---|---|---|---|---|---|" >> $o/table.md
-          for n in park_joy ducks_take_off in_to_tree old_town_cross bbb60; do
-            [ -s "$c/$n.y4m" ] || continue
-            build/gpu_bench "$c/$n.y4m" --clip $n --test interp --frames $N --y4m-out $o/y4m --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || true
-          done
-          [ -s "$c/bbb60.y4m" ] && build/gpu_bench "$c/bbb60.y4m" --clip bbb60 --test twos --frames $N --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || true
-          [ -s "$c/park_joy.y4m" ] && build/gpu_bench "$c/park_joy.y4m" --clip park_joy --test upscale --frames 4 --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || true
-          [ -s "$c/bbb60.y4m" ] && build/gpu_bench "$c/bbb60.y4m" --clip bbb60 --test upscale --frames 4 --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || true
-          for n in park_joy ducks_take_off in_to_tree; do
-            [ -s "$c/$n.y4m" ] && [ -s "$c/old_town_cross.y4m" ] && build/gpu_bench "$c/$n.y4m" --clip $n --test cuts --frames $N --cut-with "$c/old_town_cross.y4m" --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md || true
-          done
-          if [ "${HAVE_VMAF:-0}" = 1 ]; then
+          run() { build/gpu_bench "$@" --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md; }
+          clips=""
+          for n in park_joy ducks_take_off in_to_tree old_town_cross bbb60; do [ -s "$c/$n.y4m" ] && clips="$clips $n"; done
+          for n in $clips; do run "$c/$n.y4m" --clip $n --test interp --frames $N --y4m-out $o/y4m; done
+          run synthetic --clip synthetic-zoom --test interp --frames $N --y4m-out $o/y4m
+          [ -s "$c/bbb60.y4m" ] && run "$c/bbb60.y4m" --clip bbb60 --test twos --frames 48
+          run synthetic --clip synthetic-zoom --test twos --frames 40
+          for n in park_joy bbb60; do [ -s "$c/$n.y4m" ] && run "$c/$n.y4m" --clip $n --test upscale --frames 4; done
+          # cuts: every clip's own pairs, and its junction to the first frame of every other clip
+          for a in $clips; do for b in $clips; do [ "$a" = "$b" ] && continue; run "$c/$a.y4m" --clip "$a>$b" --test cuts --frames 16 --cut-with "$c/$b.y4m"; done; done
+          grep '^STAT' $o/log.txt > $o/cutstats.txt || true
+          if [ -n "${VMAF_FFMPEG:-}" ]; then
             echo "" >> $o/table.md; echo "| clip | method | VMAF |" >> $o/table.md; echo "|---|---|---|" >> $o/table.md
             for r in $o/y4m/*_ref.y4m; do
               n=$(basename "$r" _ref.y4m)
               for d in $o/y4m/${n}_*.y4m; do
                 m=$(basename "$d" .y4m); m=${m#${n}_}; [ "$m" = ref ] && continue
-                v=$(ffmpeg -hide_banner -i "$d" -i "$r" -lavfi libvmaf -f null - 2>&1 | grep -oE 'VMAF score: [0-9.]+' | grep -oE '[0-9.]+$' || echo "-")
+                v=$("$VMAF_FFMPEG" -hide_banner -i "$d" -i "$r" -lavfi libvmaf -f null - 2>&1 | grep -oE 'VMAF score: [0-9.]+' | grep -oE '[0-9.]+$' || echo "-")
                 echo "| $n | $m | $v |" >> $o/table.md
               done
             done
@@ -206,6 +216,11 @@ jobs:
             ${{ runner.temp }}/bench/table.md
             ${{ runner.temp }}/bench/bench.csv
             ${{ runner.temp }}/bench/log.txt
+            ${{ runner.temp }}/bench/cutstats.txt
+
+      - name: Fail on stale SPIR-V
+        if: ${{ !cancelled() && env.SPV_STALE == '1' }}
+        run: exit 1
 
   windows:
     runs-on: windows-2025
