@@ -75,6 +75,14 @@ int main()
         wprintf(L"  %2d/%2d scope %d: windowed %-3ls | fullscreen %-3ls  (%ls)\n", c[0], c[1], w.scope, w.active ? L"VRR" : L"off", f.active ? L"VRR" : L"off", f.how.c_str());
     }
     { VrrProbe n; n.mode = 2; n.request = 2; VrrDecide(n, false, false, true); wprintf(L"  2/2 on a fixed-refresh monitor: %ls (%ls)\n", n.active ? L"VRR" : L"off", n.how.c_str()); }
+    // ---- AMD FreeSync (ADL, PushFPS 4.5.3 PushFreeSync.h): the NVIDIA rule with the driver default scope (fullscreen)
+    wprintf(L"\n[VRR AMD FreeSync] capStatus/caps/stateStatus/useCases -> windowed | fullscreen\n");
+    const int amd[][4] = { { 0, 12, 0, 2 }, { 0, 12, 0, 0 }, { 0, 4, 0, 2 }, { 0, 0, 0, 0 }, { -1, 0, 0, 0 }, { 0, 12, -1, 2 } };
+    for (const auto& c : amd) {
+        const FreeSyncState f = FreeSyncFrom(c[0], c[1], c[2], c[3]);
+        VrrProbe w; VrrDecideAmd(w, f, false); VrrProbe fs; VrrDecideAmd(fs, f, true);
+        wprintf(L"  %2d/%2d/%2d/%d: windowed %-3ls | fullscreen %-3ls  (%ls)\n", c[0], c[1], c[2], c[3], w.active ? L"VRR" : L"off", fs.active ? L"VRR" : L"off", fs.how.c_str());
+    }
     {
         // the user's state: global 1/1 inherited by mpc-hc64.exe
         VrrProbe w; w.mode = 1; w.request = 1; VrrDecide(w, true, true, false);

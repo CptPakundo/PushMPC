@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to PushMPC. Versions follow [semantic versioning](https://semver.org/); the core's version also
-names the PushFPS release it is built from (`0.6.0+pushfps4.4.0`).
+names the PushFPS release it is built from (`0.6.0+pushfps4.5.3`).
 
 ## 0.6.0: first release
 
@@ -13,8 +13,8 @@ with its own Setup and updater, plus the mpv route as a preview.
 | Component | Version | Built from |
 |---|---|---|
 | Filter (`PushMpcFilter.ax`, updater, installer script) | 0.6.0 | this repository |
-| Core (`pushcore.dll` and its shaders) | 0.6.0+pushfps4.4.0 | [PushFPS](https://github.com/DosukaSOL/PushFPS) v4.4.0 with the patches in `patches/` |
-| Runtime (not in the release; Setup fetches or reuses it) | veyra-2.1.9 | [Veyra](https://github.com/Likely7/Veyra-NRVideo)'s v2.1.9 NVIDIA or AMD package, PushFlow from PushFPS v4.4.0 |
+| Core (`pushcore.dll` and its shaders) | 0.6.0+pushfps4.5.3 | [PushFPS](https://github.com/DosukaSOL/PushFPS) v4.5.3 with the patches in `patches/` |
+| Runtime (not in the release; Setup fetches or reuses it) | veyra-2.2.1 | [Veyra](https://github.com/Likely7/Veyra-NRVideo)'s v2.2.1 NVIDIA or AMD package, PushFlow from PushFPS v4.5.3 |
 | vsplugin (optional, preview) | 0.6.0 | this repository; VapourSynth R82 with Python 3.12 fetched at install |
 
 ### Features
@@ -34,6 +34,14 @@ with its own Setup and updater, plus the mpv route as a preview.
   refresh or G-SYNC / VRR, from the NVIDIA driver profile and fullscreen state), then quality and upscaling with the
   time left. Auto learns the GPU's real costs while you watch, follows playback-rate changes and steps down instead of
   dropping frames. The status says what it chose and where it stopped.
+- **Engine: PushFPS 4.5.3** (was 4.4.0 in the release candidates) on Veyra's runtime v2.2.1 (the same vendor runtimes,
+  FFmpeg rebuilt with a D3D12 decoding fix; the package now keeps its program under `versions\2.2.1\`). It brings:
+  **Subtitle Hold** (burned-in subtitles kept out of frame generation; Advanced > Subtitle hold, off under Auto: it costs
+  about 0.5 ms per frame at 4K and soft subtitles never need it), FSR upscaling with motion at the right size (non-NVIDIA
+  GPUs), and a stronger motion search for AMD FRC. With Subtitle Hold on, the scene-cut guard still tests the real
+  frames.
+- **AMD FreeSync** is detected for Auto (AMD driver: FreeSync on and the player fullscreen counts as variable refresh),
+  as G-SYNC is on NVIDIA.
 - **Settings page** in the player (Play > Filters > PushMPC Filter) with live "Now:" lines, an optional on-screen status,
   a G-SYNC button for MPC-HC's driver profile (with backup and restore), and anonymised Copy diagnostics.
 - **Setup** per user, without administrator rights: installs the filter and core, fetches Veyra's runtime package

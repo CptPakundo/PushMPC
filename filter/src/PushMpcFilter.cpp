@@ -2587,6 +2587,7 @@ private:
     void ItmLimit(ID3D11ShaderResourceView* srv, CD3D11Sample* s, bool real, bool hdrIn);
     void ConvBegin(); void ConvEnd();
     uint32_t m_fgRun = PUSHCORE_FG_NONE, m_srRun = 0; bool m_cutGuardRun = false; std::wstring m_fgRunNote;   // what pushcore runs
+    uint32_t m_subtitleState = 0, m_subtitlePixels = 0;   // PushFPS Subtitle Hold as pushcore reports it (PushCoreStats)
 };
 
 // ------------------------------------------------------------------------------------------------ device
@@ -4252,13 +4253,15 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.videoHdr = c.hdr && !c.hdrItm && hdrFmt && !InputHdr() ? 1 : 0;   // PushMPC's curve runs in the filter instead
     p.cutGuard = c.guardFlow ? 3 : 1;   // 3: with NVIDIA's optical flow (Auto: when it fits the budget)
     p.videoHdrPeak = uint32_t(c.rtxHdrPeak);                             // HDR boost: RTX Video HDR's peak (Low 500 / Medium 700 / High 1000)
+    // PushFPS 4.5's Subtitle Hold: only with frame generation (pushcore leaves it out of a graph without it anyway)
+    p.subtitleHold = (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) && p.multiplier > 1 && pm::SubtitleHoldWanted(s) ? 1 : 0;
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
 {
     if (a.sr != b.sr || a.multiplier != b.multiplier || a.nr != b.nr || a.videoHdr != b.videoHdr) return false;
     if (a.videoHdr && a.videoHdrPeak != b.videoHdrPeak) return false;
-    if (a.multiplier > 1 && a.cutGuard != b.cutGuard) return false;
+    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold)) return false;
     if (a.sr && (a.srQuality != b.srQuality || a.srTarget != b.srTarget || a.srFamily != b.srFamily || a.srMethod != b.srMethod)) return false;
     if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier)) return false;
     if (a.nr && (a.nrTone != b.nrTone || a.nrStructure != b.nrStructure)) return false;
@@ -4273,8 +4276,8 @@ static bool IsUpgrade(const PushCoreSettings& from, const PushCoreSettings& to)
 }
 static std::wstring GraphKey(const PushCoreSettings& p)
 {
-    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
-                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1);
+    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{} sub{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
+                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1, p.subtitleHold);
 }
 void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
 {
@@ -4620,6 +4623,7 @@ void CPushMpcFilter::AutoLoop()
             if (ok && (g_coreFeatures & PUSHCORE_FEATURE_FG_METHODS)) {
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
+                if (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) { m_subtitleState = st.subtitleHoldState; m_subtitlePixels = st.subtitleHoldPixels; }
                 if (changed && st.fgFallback) {
                     // the method Auto asked for did not start on this GPU: not offered again in this session
                     PushCoreSettings asked;
@@ -4663,6 +4667,9 @@ void CPushMpcFilter::AutoLoop()
             running = m_fgRun > PUSHCORE_FG_AMDFRC || applied.multiplier < 2 ? std::wstring(L"off")
                     : std::format(L"{} {}x{}, cut guard {}", pm::FgMethodLabel(rm), std::min<int>(int(applied.multiplier), pm::MaxMultiplier(rm)),
                                   *pm::QualityName(rm, rq) ? std::wstring(L" ") + pm::QualityName(rm, rq) : std::wstring(), m_cutGuardRun ? (c.guardNote.empty() ? std::wstring(L"on") : L"on, " + c.guardNote) : std::wstring(L"off"));
+            if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_AMDFRC && m_subtitleState)
+                running += m_subtitleState == 1 ? (m_subtitlePixels ? std::format(L", subtitle hold on ({} px held)", m_subtitlePixels) : std::wstring(L", subtitle hold on"))
+                         : m_subtitleState == 2 ? std::wstring(L", subtitle hold unavailable") : std::wstring(L", subtitle hold not with this method");
             if (!m_fgRunNote.empty()) running += L" (" + m_fgRunNote + L")";
         }
         {
@@ -4920,6 +4927,7 @@ public:
         FillCombo(m_Dlg, IDC_PM_VRR, { L"Auto", L"Assume VRR", L"Assume fixed" });
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
+        FillCombo(m_Dlg, IDC_PM_SUBHOLD, { pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
         for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 140, 0);
         for (int id : { IDC_PM_FGMETHOD, IDC_PM_UPSCALER, IDC_PM_HDRMETHOD }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 260, 0);
         Show(pm::LoadSettings());
@@ -5047,6 +5055,7 @@ private:
         ComboSet(m_Dlg, IDC_PM_STYLE, s.vsrStyle == pm::VsrStyle::Auto ? 0 : int(s.vsrStyle) + 1);
         ComboSet(m_Dlg, IDC_PM_DEBAND, OnOffIdx(s.deband));
         ComboSet(m_Dlg, IDC_PM_DBSTR, int(s.debandStrength));
+        ComboSet(m_Dlg, IDC_PM_SUBHOLD, OnOffIdx(s.subtitleHold));
         CheckDlgButton(m_Dlg, IDC_PM_FRAMELOG, s.frameLog ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(m_Dlg, IDC_PM_HDRLIMIT, s.hdrLimit ? BST_CHECKED : BST_UNCHECKED);
     }
@@ -5073,6 +5082,7 @@ private:
         { const int v = ComboSel(m_Dlg, IDC_PM_STYLE); s.vsrStyle = v <= 0 ? pm::VsrStyle::Auto : pm::VsrStyle(std::clamp(v - 1, 0, 2)); }
         s.deband = OnOffVal(ComboSel(m_Dlg, IDC_PM_DEBAND));
         s.debandStrength = pm::DebandStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_DBSTR), 0, 2));
+        s.subtitleHold = OnOffVal(ComboSel(m_Dlg, IDC_PM_SUBHOLD));
         s.frameLog = IsDlgButtonChecked(m_Dlg, IDC_PM_FRAMELOG) == BST_CHECKED;
         s.hdrLimit = IsDlgButtonChecked(m_Dlg, IDC_PM_HDRLIMIT) == BST_CHECKED;
         return s;
@@ -5084,7 +5094,7 @@ private:
                         IDC_PM_STYLE_LBL, IDC_PM_STYLE, IDC_PM_DEBAND_LBL, IDC_PM_DEBAND, IDC_PM_DBSTR_LBL, IDC_PM_DBSTR, IDC_PM_DEBAND_NOW,
                         IDC_PM_FGMETHOD_LBL, IDC_PM_FGMETHOD, IDC_PM_VRR_LBL, IDC_PM_VRR, IDC_PM_UPSCALER_LBL, IDC_PM_UPSCALER, IDC_PM_CAPS_NOTE,
                         IDC_PM_HDRMETHOD_LBL, IDC_PM_HDRMETHOD, IDC_PM_HDRLIMIT, IDC_PM_DISPPEAK_LBL, IDC_PM_DISPPEAK,
-                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE })
+                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE })
             ShowWindow(GetDlgItem(m_Dlg, id), on ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), on && !m_pushFpsData.empty() ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_GSYNC), on && m_gsyncOffer ? SW_SHOW : SW_HIDE);

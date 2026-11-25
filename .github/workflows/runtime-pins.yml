@@ -1,0 +1,76 @@
+name: runtime-pins
+# Checks the Veyra runtime pins in scripts/pushmpc-install.ps1 against Veyra's official packages:
+# package SHA-256, then every pinned file (SHA-256 and size) inside the extracted package, for NVIDIA and AMD.
+on:
+  workflow_dispatch:
+  push:
+    paths: ['scripts/pushmpc-install.ps1', '.github/workflows/runtime-pins.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        vendor: [NVIDIA, AMD]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Read pins
+        id: pins
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $src = Get-Content scripts/pushmpc-install.ps1 -Raw
+          $v = '${{ matrix.vendor }}'
+          $m = [regex]::Match($src, "Vendor = '$v'[\s\S]*?Url\s*=\s*'([^']+)'[\s\S]*?Sha256\s*=\s*'([0-9A-Fa-f]{64})'")
+          if (-not $m.Success) { throw "no package pin for $v" }
+          "url=$($m.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "sha=$($m.Groups[2].Value)" >> $env:GITHUB_OUTPUT
+          $name = if ($v -eq 'AMD') { 'RuntimeFileHashesAmd' } else { 'RuntimeFileHashesNvidia' }
+          $t = [regex]::Match($src, "\`$$name = @\{([\s\S]*?)\r?\n\}")
+          if (-not $t.Success) { throw "no file table $name" }
+          $rows = [regex]::Matches($t.Groups[1].Value, "'([^']+)'\s*=\s*'([0-9A-Fa-f]{64}) (\d+)'") | ForEach-Object { "$($_.Groups[1].Value)|$($_.Groups[2].Value)|$($_.Groups[3].Value)" }
+          if ($rows.Count -lt 10) { throw "file table $name too small: $($rows.Count)" }
+          $rows | Set-Content pins.txt
+          "Package $($m.Groups[1].Value)`n$($rows.Count) pinned files"
+      - name: Cache package
+        uses: actions/cache@v4
+        with:
+          path: pkg
+          key: veyra-${{ steps.pins.outputs.sha }}
+      - name: Download and verify package
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          $zip = Join-Path pkg (Split-Path -Leaf '${{ steps.pins.outputs.url }}')
+          if (-not (Test-Path $zip)) { curl.exe -sSfL --retry 3 -o $zip '${{ steps.pins.outputs.url }}' }
+          $h = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($h -ne '${{ steps.pins.outputs.sha }}') { throw "package SHA-256 $h != pin" }
+          "package SHA-256 OK: $h"
+          Expand-Archive $zip -DestinationPath x -Force
+      - name: Check every pinned file
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $exe = Get-ChildItem x -Recurse -Filter veyra_qml_ui.exe | Select-Object -First 1
+          if (-not $exe) { throw 'veyra_qml_ui.exe not found: unknown package layout' }
+          $root = $exe.DirectoryName
+          "runtime root: $($root.Substring((Resolve-Path x).Path.Length))"
+          $bad = 0; $n = 0
+          foreach ($row in Get-Content pins.txt) {
+            $rel, $sha, $size = $row -split '\|'
+            $f = Join-Path $root $rel
+            $n++
+            if (-not (Test-Path -LiteralPath $f)) { "MISSING $rel"; $bad++; continue }
+            $len = (Get-Item -LiteralPath $f).Length
+            $h = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+            if ($h -ne $sha -or $len -ne [int64]$size) { "MISMATCH $rel  actual $h $len  pinned $sha $size"; $bad++ }
+          }
+          "$n pinned files checked, $bad problems"
+          if ($bad) { exit 1 }
