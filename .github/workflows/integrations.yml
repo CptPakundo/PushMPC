@@ -130,7 +130,9 @@ jobs:
           "MPC-QT: $($rel.tag_name) $($a.name) sha256 $((Get-FileHash $f).Hash)" | Tee-Object -Append $log
           # Kodi (latest stable Windows x64 installer from the official mirror, silent NSIS install)
           try {
-            $idx = (Invoke-WebRequest 'https://mirrors.kodi.tv/releases/windows/win64/' -UseBasicParsing).Links.href | Where-Object { $_ -match '^kodi-[\d.]+-\w+-x64\.exe$' } | Sort-Object { [version](($_ -replace '^kodi-([\d.]+)-.*', '$1')) } | Select-Object -Last 1
+            $all = (Invoke-WebRequest 'https://mirrors.kodi.tv/releases/windows/win64/' -UseBasicParsing).Links.href | Where-Object { $_ -match '^kodi-[\d.]+-\w+-x64\.exe$' }
+            $stable = @($all | Where-Object { $_ -notmatch '(?i)rc\d|beta|alpha' }); if ($stable.Count) { $all = $stable }
+            $idx = $all | Sort-Object { [version](($_ -replace '^kodi-([\d.]+)-.*', '$1')) } | Select-Object -Last 1
             $f = Join-Path $dl $idx; if (-not (Test-Path $f)) { Invoke-WebRequest "https://mirrors.kodi.tv/releases/windows/win64/$idx" -OutFile $f }
             $p = Start-Process $f -ArgumentList '/S' -PassThru; if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'Kodi installer timed out' }
             "Kodi: $idx sha256 $((Get-FileHash $f).Hash), installer exit $($p.ExitCode)" | Tee-Object -Append $log
@@ -168,7 +170,7 @@ jobs:
           $res = [ordered]@{}
           # the plugin keeps its log open: read with shared access
           function Read-Logs([string]$dir) { (Get-ChildItem $dir -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
-            $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() } }) -join "`n" }
+            try { $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() } } catch { "(log locked: $($_.Exception.Message))" } }) -join "`n" }
           function Test-Player([string]$name, [scriptblock]$start, [int]$wait = 30) {
             $logDir = "$env:RUNNER_TEMP\vslog-$($name -replace '\W', '')"; New-Item -ItemType Directory $logDir -Force | Out-Null
             $env:PUSHMPC_VS_LOG_DIR = $logDir
@@ -176,7 +178,8 @@ jobs:
             # the plugin's log is locked while the player runs: wait, stop the player, then read it
             if ($p) { [void]$p.WaitForExit($wait * 1000) }
             if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
-            Start-Sleep 2
+            Get-Process mpv, mpvnet, mpc-qt, kodi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep 3
             Get-Process mpv, mpvnet, mpc-qt, kodi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             $t = Read-Logs $logDir
             $ok = $t -match 'backend: '
@@ -410,7 +413,11 @@ jobs:
           head -n 8 $HOME/.config/mpv/mpv.conf
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
-          mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 --msg-level=all=info,vapoursynth=v 2>&1 | tail -20
+          echo "--- playback (vo=null): config, filter"
+          mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
+          ls /tmp/vslog-arch/ 2>/dev/null; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
+          echo "--- encode mode"
+          mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
           out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/out.mkv)
           echo "source frames (4 s): $src, output frames: $out"
@@ -487,7 +494,8 @@ jobs:
             dnf -y -q install vapoursynth-libs >/dev/null 2>&1 || true
             mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
-            mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | tail -10
+            mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
+            grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-fedora/*.log | tee -a /tmp/versions.txt
             grep -q 'portable: output YUV' /tmp/vslog-fedora/*.log
           else
             grep -q 'has no VapourSynth' /tmp/install.txt
@@ -528,7 +536,10 @@ jobs:
           cat ~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf | head -6
           mkdir -p ~/.var/app/io.mpv.Mpv/config/pushmpc; printf 'Smoother=2\n' > ~/.var/app/io.mpv.Mpv/config/pushmpc/settings.ini
           mkdir -p /tmp/fpout
-          flatpak run --filesystem=/tmp --env=PUSHMPC_VS_LOG_DIR=/tmp/vslog-flatpak io.mpv.Mpv /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/fpout/out.mkv --of=matroska --ovc=ffv1 2>&1 | tail -20 || true
+          echo "--- playback (vo=null) in the sandbox"
+          flatpak run --filesystem=/tmp --env=PUSHMPC_VS_LOG_DIR=/tmp/vslog-flatpak io.mpv.Mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error|VSScript' | head -30 || true
+          echo "--- encode mode in the sandbox"
+          flatpak run --filesystem=/tmp --env=PUSHMPC_VS_LOG_DIR=/tmp/vslog-flatpak io.mpv.Mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/fpout/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30 || true
           cat /tmp/vslog-flatpak/*.log 2>/dev/null | head -20 || true
           src=$(ffprobe -v error -count_frames -select_streams v:0 -read_intervals '%+4' -show_entries stream=nb_read_frames -of csv=p=0 /tmp/clip.mp4)
           out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/fpout/out.mkv 2>/dev/null || echo 0)
@@ -673,6 +684,14 @@ jobs:
           $p = Start-Process $f -ArgumentList '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES' -PassThru; $p.WaitForExit(300000) | Out-Null
           "MPC-HC $($rel.tag_name) ($($a.name)), installer exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           $exe = "$env:ProgramFiles\MPC-HC\mpc-hc64.exe"; if (-not (Test-Path $exe)) { throw 'mpc-hc64.exe missing' }
+          # MPC Video Renderer (PushMPC needs it downstream; MPC-HC's installer does not register one)
+          $vr = gh api repos/Aleksoid1978/VideoRenderer/releases/latest | ConvertFrom-Json
+          $va = $vr.assets | Where-Object { $_.name -match '\.zip$' } | Select-Object -First 1
+          $vz = "$env:RUNNER_TEMP\$($va.name)"; Invoke-WebRequest $va.browser_download_url -OutFile $vz
+          $vd = "$env:ProgramFiles\MpcVideoRenderer"; New-Item -ItemType Directory $vd -Force | Out-Null; Expand-Archive $vz $vd -Force
+          $vax = Get-ChildItem $vd -Recurse -Filter 'MpcVideoRenderer64.ax' | Select-Object -First 1
+          $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$($vax.FullName)`"" -Wait -PassThru
+          "MPC Video Renderer $($vr.tag_name): regsvr32 exit $($r.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           # first start writes its registry settings (Setup adds PushMPC to them)
           $m = Start-Process $exe -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           Invoke-WebRequest $env:CLIP_URL -OutFile "$env:RUNNER_TEMP\clip.mp4"
@@ -713,11 +732,15 @@ jobs:
       - name: Uninstall (Setup --uninstall --quiet)
         if: always()
         run: |
-          $s = "$env:LOCALAPPDATA\PushMPC\PushMPC-Setup.exe"
-          if (Test-Path $s) { $p = Start-Process $s -ArgumentList '--uninstall', '--quiet' -PassThru; $p.WaitForExit(300000) | Out-Null; "uninstall exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
+          # as Windows Settings > Apps does it: the QuietUninstallString Setup registered
+          $q = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC' -ErrorAction SilentlyContinue).QuietUninstallString
+          "QuietUninstallString: $q" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          if ($q) { $p = Start-Process cmd.exe -ArgumentList '/c', "`"$q`"" -PassThru; $p.WaitForExit(300000) | Out-Null; "uninstall exit $($p.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
+          "install folder left: $(Test-Path "$env:LOCALAPPDATA\PushMPC\filter"); MPC-HC entry left: $([bool](Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' }))" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           "registration left: $(Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
           @('## setup-graph ${{ matrix.os }}', '', '```') + (Get-Content "$env:RUNNER_TEMP\arm.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
+          if (Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}') { Write-Host '::error::uninstall left the filter registered'; exit 1 }
           if ($env:ARM_FILTER -ne 'True') { Write-Host '::error::MPC-HC x64 did not create the filter'; exit 1 }
       - uses: actions/upload-artifact@v4
         if: always()
