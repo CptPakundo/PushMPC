@@ -98,7 +98,7 @@ jobs:
             echo "exported av* symbols (must be 0): $(nm -D --defined-only "$f" | grep -c ' av' || true)"
           fi
 
-      - name: Unit tests (Linux: the GPU engine on lavapipe, required)
+      - name: Unit tests (on Linux the GPU engine runs on lavapipe and is required)
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
