@@ -186,7 +186,9 @@ vlc_module_end()
 struct filter_sys_t {
     filter_chain_t *download;  /* hardware pictures (DX11, CVPX, ...) -> I420 / I0AL with VLC's own converters */
     pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
-    uint64_t pc_errors;
+    uint64_t pc_errors, pc_routed, pc_unrouted;
+    char pc_err[240];
+    int64_t pc_miss_pts, pc_miss_want;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
     int alloc;
@@ -225,7 +227,11 @@ static const pm_pc_out *RouteDest(void *user, int64_t pts100ns)
 {
     pc_route *r = user;
     const int i = RouteIndex(r, pts100ns);
-    if (i < 0) return NULL;
+    if (i < 0) {
+        if (!r->sys->pc_unrouted++) { r->sys->pc_miss_pts = pts100ns; r->sys->pc_miss_want = r->j->n ? (int64_t)r->j->outs[0]->date * 10 : 0; }
+        return NULL;
+    }
+    r->sys->pc_routed++;
     pm_yuv_out o;
     PlanesOut(r->j->outs[i], &r->sys->wfmt, r->sys->bps_w, &o);
     for (int p = 0; p < 3; p++) { r->dst.data[p] = o.data[p]; r->dst.stride[p] = o.stride[p]; }
@@ -255,7 +261,7 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
         pm_pc_planes pl;
         for (int p = 0; p < 3; p++) { pl.data[p] = src.data[p]; pl.stride[p] = src.stride[p]; }
         if (pmx_push(sys->pc, &pl, (int64_t)j->src->date * 10, !j->contiguous, err, sizeof(err)) != 0) {
-            sys->pc_errors++;
+            if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "push: %s", err);
         } else if (j->n > 0) {
             /* collect until every picture is filled or the last one's display time has passed */
             pc_route r = { .sys = sys, .j = j };
@@ -265,7 +271,10 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
                 const bool stop = j->cancel || j->done >= j->n;
                 vlc_mutex_unlock(&j->lock);
                 if (stop || mdate() > deadline) break;
-                if (pmx_poll(sys->pc, 5, RouteDest, RouteDone, &r, err, sizeof(err)) < 0) { sys->pc_errors++; break; }
+                if (pmx_poll(sys->pc, 5, RouteDest, RouteDone, &r, err, sizeof(err)) < 0) {
+                    if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "poll: %s", err);
+                    break;
+                }
             }
         }
     } else {
@@ -656,7 +665,9 @@ static void Close(vlc_object_t *obj)
              st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->pc) {
-        if (sys->pc_errors) msg_Warn(f, "PushMPC: %" PRIu64 " pushcore errors", sys->pc_errors);
+        msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64
+                 " for %" PRId64 "), %" PRIu64 " errors%s%s", sys->pc_routed, sys->pc_unrouted, sys->pc_miss_pts, sys->pc_miss_want,
+                 sys->pc_errors, sys->pc_errors ? ", first: " : "", sys->pc_err);
         pmx_close(sys->pc);
     }
     if (sys->download) filter_chain_Delete(sys->download);

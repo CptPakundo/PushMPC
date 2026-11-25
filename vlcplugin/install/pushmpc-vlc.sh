@@ -18,7 +18,7 @@
 #        [avcodec]  avcodec-hw=none on Linux: VLC 3 cannot hand VA-API/VDPAU pictures back to the display after a CPU
 #                   filter and would drop every filter; software decoding keeps PushMPC on
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
-# Snap VLC: experimental (~/snap/vlc/common/pushmpc, its own vlcrc there, a vlc_vlc.desktop override). Switch it off in VLC:
+# Snap VLC: not supported (its launcher replaces VLC_PLUGIN_PATH; --target snap is kept for tests). Switch it off in VLC:
 # Tools > Effects and Filters > Video Effects > Advanced > Post processing, or Preferences > PushMPC > Smoother: Off.
 set -eu
 
@@ -71,8 +71,9 @@ detect_targets() {
   else
     if command -v vlc >/dev/null 2>&1 && ! readlink -f "$(command -v vlc)" | grep -q '/snap/'; then t="native"; fi
     if command -v flatpak >/dev/null 2>&1 && flatpak info "$APPID" >/dev/null 2>&1; then t="$t flatpak"; fi
-    # Snap VLC: experimental until the CI snap-spike confirms that the confined VLC loads from ~/snap/vlc/common
-    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then t="$t snap"; fi
+    # Snap VLC: the live snap's launcher replaces VLC_PLUGIN_PATH with its own folder (CI snap-spike, rev 4472), so a
+    # plugin in the home folder is never scanned; the "snap" target stays available for testing (--target snap)
+    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then say "note: the Snap VLC replaces VLC_PLUGIN_PATH and cannot load PushMPC; use the distro or Flathub VLC"; fi
   fi
   printf '%s' "$t"
 }

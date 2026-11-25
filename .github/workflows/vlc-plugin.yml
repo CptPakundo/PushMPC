@@ -304,6 +304,7 @@ jobs:
                  PY=python PUSHCORE=1 CASES="pc_x4_720 pc_x4_720_inline" LABEL="Windows, pushcore (stub core, WARP)"
           bash vlcplugin/tests/run-module.sh
           grep -h "PushMPC 0\|pushcore\|PushMPC: close\|output stage:" res/windows-pushcore/*.log | sort | uniq -c | head -20
+          cp -r "$LOCALAPPDATA/PushMPC/logs" res/windows-pushcore/ 2>/dev/null || true; tail -40 res/windows-pushcore/logs/*.log 2>/dev/null || true
           rm -f "$d/pm_pushcore.dll"; rm -rf "$LOCALAPPDATA/PushMPC/core"
       - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; a run with no arguments; uninstall)
         run: |
