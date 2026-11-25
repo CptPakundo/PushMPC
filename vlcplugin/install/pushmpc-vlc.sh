@@ -18,7 +18,8 @@
 #        [avcodec]  avcodec-hw=none on Linux: VLC 3 cannot hand VA-API/VDPAU pictures back to the display after a CPU
 #                   filter and would drop every filter; software decoding keeps PushMPC on
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
-# Snap VLC: not supported (its launcher replaces VLC_PLUGIN_PATH; --target snap is kept for tests). Switch it off in VLC:
+# Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so a Lua interface script (pushmpc_boot.lua, lua-intf + extraintf=luaintf)
+# loads the plugin and hands it VLC's postproc slot after checking VLC's layout (or changes nothing). Switch it off in VLC:
 # Tools > Effects and Filters > Video Effects > Advanced > Post processing, or Preferences > PushMPC > Smoother: Off.
 set -eu
 
@@ -71,9 +72,8 @@ detect_targets() {
   else
     if command -v vlc >/dev/null 2>&1 && ! readlink -f "$(command -v vlc)" | grep -q '/snap/'; then t="native"; fi
     if command -v flatpak >/dev/null 2>&1 && flatpak info "$APPID" >/dev/null 2>&1; then t="$t flatpak"; fi
-    # Snap VLC: the live snap's launcher replaces VLC_PLUGIN_PATH with its own folder (CI snap-spike, rev 4472), so a
-    # plugin in the home folder is never scanned; the "snap" target stays available for testing (--target snap)
-    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then say "note: the Snap VLC replaces VLC_PLUGIN_PATH and cannot load PushMPC; use the distro or Flathub VLC"; fi
+    # Snap VLC: through the Lua bootstrap (see the header)
+    if command -v snap >/dev/null 2>&1 && snap list vlc >/dev/null 2>&1; then t="$t snap"; fi
   fi
   printf '%s' "$t"
 }
@@ -113,14 +113,16 @@ install_one() {
     flatpak)
       flatpak override --user --env=VLC_PLUGIN_PATH="$DIR" "$APPID" ;;
     snap)
-      src=/var/lib/snapd/desktop/applications/vlc_vlc.desktop
-      if [ -f "$src" ]; then
-        mkdir -p "$HOME/.local/share/applications"
-        sed "s|^Exec=|Exec=env VLC_PLUGIN_PATH=$DIR |" "$src" > "$HOME/.local/share/applications/vlc_vlc.desktop"
-        printf 'X-PushMPC=1\n' >> "$HOME/.local/share/applications/vlc_vlc.desktop"
-      fi
-      mkdir -p "$HOME/.config/environment.d"
-      printf '# PushMPC for VLC (snap)\nVLC_PLUGIN_PATH=%s\n' "$DIR" > "$HOME/.config/environment.d/61-pushmpc-vlc-snap.conf" ;;
+      # the Lua bootstrap: VLC's user Lua folder (per snap revision; snapd copies it on refresh) plus a seed copy
+      lua="$here/snap/pushmpc_boot.lua"; [ -f "$lua" ] || lua="$here/pushmpc_boot.lua"
+      [ -f "$lua" ] || { echo "pushmpc_boot.lua not found next to the installer" >&2; exit 1; }
+      cp -f "$lua" "$DIR/pushmpc_boot.lua"
+      rev="$(snap list vlc 2>/dev/null | awk 'NR==2{print $3}')"
+      [ -n "$rev" ] || rev=current
+      [ -d "$HOME/snap/vlc/$rev" ] || (timeout 60 snap run vlc --version >/dev/null 2>&1 || true)
+      mkdir -p "$HOME/snap/vlc/$rev/.local/share/vlc/lua/intf"
+      cp -f "$lua" "$HOME/snap/vlc/$rev/.local/share/vlc/lua/intf/pushmpc_boot.lua"
+      [ -f "$DIR/pushmpc.conf" ] || printf 'smoother=0\n' > "$DIR/pushmpc.conf" ;;
     macos)
       la="$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; mkdir -p "$(dirname "$la")"
       cat > "$la" <<EOF
@@ -138,6 +140,11 @@ EOF
   vlcrc_set "$RC" core video-filter "$(filters_add "$(vlcrc_get "$RC" core video-filter)")"
   vlcrc_set "$RC" pushmpc pushmpc-smoother 0
   [ "$tgt" != macos ] && vlcrc_set "$RC" avcodec avcodec-hw none
+  if [ "$tgt" = snap ]; then
+    intfs="$(vlcrc_get "$RC" core extraintf)"
+    case ":$intfs:" in *:luaintf:*) ;; *) vlcrc_set "$RC" core extraintf "${intfs:+$intfs:}luaintf" ;; esac
+    vlcrc_set "$RC" core lua-intf pushmpc_boot
+  fi
   say "PushMPC for VLC installed ($tgt): plugin in $DIR, settings in $RC"
 }
 
@@ -150,8 +157,13 @@ uninstall_one() {
       grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc.desktop" ;;
     flatpak) flatpak override --user --unset-env=VLC_PLUGIN_PATH "$APPID" 2>/dev/null || true ;;
     snap)
-      rm -f "$HOME/.config/environment.d/61-pushmpc-vlc-snap.conf"
-      grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc_vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc_vlc.desktop" ;;
+      rm -f "$DIR/pushmpc_boot.lua" "$DIR/pushmpc.conf"; rmdir "$DIR" 2>/dev/null || true
+      for d in "$HOME"/snap/vlc/*/.local/share/vlc/lua/intf; do rm -f "$d/pushmpc_boot.lua"; done
+      if [ -f "$RC" ]; then
+        rest="$(vlcrc_get "$RC" core extraintf | tr ':' '\n' | grep -v '^luaintf$' | paste -s -d: - || true)"
+        if [ -n "$rest" ]; then vlcrc_set "$RC" core extraintf "$rest"; else vlcrc_del "$RC" core extraintf; fi
+        vlcrc_del "$RC" core lua-intf
+      fi ;;
     macos)   rm -f "$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; launchctl unsetenv VLC_PLUGIN_PATH 2>/dev/null || true ;;
   esac
   if [ -f "$RC" ]; then

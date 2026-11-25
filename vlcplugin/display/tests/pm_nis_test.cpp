@@ -15,7 +15,7 @@
 #include "../vlc3/modules/video_output/win32/pm_nis_d3d11.h"
 
 // the module's msg_* go to vlc_Log; print them here
-extern "C" const char vlc_module_name[] = "pm_nis_test";
+const char vlc_module_name[] = "pm_nis_test";   // declared extern by vlc_messages.h (C++ linkage)
 extern "C" void vlc_Log(vlc_object_t *, int prio, const char *, const char *, unsigned, const char *, const char *fmt, ...)
 {
     va_list ap; va_start(ap, fmt);

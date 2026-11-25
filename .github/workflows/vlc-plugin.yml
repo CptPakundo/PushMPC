@@ -254,6 +254,17 @@ jobs:
           b=$(grep -a -o FRAME $c/base.y4m 2>/dev/null | wc -l); x=$(grep -a -o FRAME $c/boot.y4m 2>/dev/null | wc -l)
           echo "base $b frames, with the bootstrap $x frames"
           [ "$x" -ge $((b * 3)) ] && echo "::notice::Snap VLC runs PushMPC (x$((x / (b > 0 ? b : 1))))" || echo "::warning::Snap bootstrap did not multiply frames"
+          echo "--- the installer's snap target: install, play with its settings only (Auto from pushmpc.conf -> smoother 4 here), uninstall"
+          rm -f $c/vlcrc $c/pushmpc/pushmpc.conf ~/snap/vlc/*/.local/share/vlc/lua/intf/pushmpc_boot.lua
+          sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target snap
+          printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
+          cat $c/vlcrc
+          timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --vout=yuv --yuv-yuv4mpeg2 --yuv-file=$c/installed.y4m \
+            $c/clip.mkv > res/snap/installed.log 2>&1 && rc=0 || rc=$?
+          i=$(grep -a -o FRAME $c/installed.y4m 2>/dev/null | wc -l)
+          echo "installed: exit $rc, $i frames"; grep -h "snap boot" res/snap/installed.log || true
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap; cat $c/vlcrc
+          [ "$i" -ge $((b * 3)) ] && echo "::notice::installer snap target: x$((i / (b > 0 ? b : 1)))" || { echo "::error::installer snap target did not run PushMPC"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-snap, path: res, retention-days: 7 }
