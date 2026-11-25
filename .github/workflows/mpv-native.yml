@@ -259,7 +259,9 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
-        tag: [n6.0.1, n6.1.6, n7.0.3, n7.1.5, n8.0.3, n8.1.3, n9.0.2, n9.1]
+        # the first and the last release of each branch (a point release can bump the micro version: 7.1 is 10.4.100,
+        # 7.1.5 is 10.5.100); same versions give the same file name
+        tag: [n6.0, n6.0.1, n6.1, n6.1.6, n7.0, n7.0.3, n7.1, n7.1.5, n8.0, n8.0.3, n8.1, n8.1.3, n9.0, n9.0.2, n9.1]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     env:

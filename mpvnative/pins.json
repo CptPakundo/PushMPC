@@ -3,6 +3,13 @@
   "ffmpeg": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n9.1", "commit": "74e4393595cf2b5857f0da925c4e0dd74ea306e5" },
   "ffmpegDistro": { "repo": "https://git.ffmpeg.org/ffmpeg.git", "tag": "n6.1.1", "commit": "e38092ef9395d7049f871ef4d5411eb410e283e0" },
   "hookBranches": [
+    { "tag": "n6.0", "commit": "ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2" },
+    { "tag": "n6.1", "commit": "d4ff0020b40b524a490cf62eccbd3a318f4c0e58" },
+    { "tag": "n7.0", "commit": "083443d67cb159ce469e5d902346b8d0c2cd1c93" },
+    { "tag": "n7.1", "commit": "b08d7969c550a804a59511c7b83f2dd8cc0499b8" },
+    { "tag": "n8.0", "commit": "140fd653aed8cad774f991ba083e2d01e86420c7" },
+    { "tag": "n8.1", "commit": "9047fa1b084f76b1b4d065af2d743df1b40dfb56" },
+    { "tag": "n9.0", "commit": "d32b387f2b0a484599d4587d651891f0c63c4238" },
     { "tag": "n6.0.1", "commit": "c41ff724ede7da657762d61097e26fac296c53bf" },
     { "tag": "n6.1.6", "commit": "f1e3a2bf7a2f2cde936d1ed97f09a26853d20125" },
     { "tag": "n7.0.3", "commit": "eaddd1d7140bab19e5a4403d3c0f61fe5f59cb75" },
