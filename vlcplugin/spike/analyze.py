@@ -37,6 +37,11 @@ sizes = sorted({f'{r["w"]}x{r["h"]}' for r in rows})
 dates = [int(r["date"]) for r in rows]
 shown = [int(r["shown"]) for r in rows]
 deltas = [(b - x) / 1000.0 for x, b in zip(dates, dates[1:])]
+# VLC itself shows the first picture once before playback starts (the baseline without any filter has the same step
+# back), so the first 2 * mult + 2 pictures are start-up and not judged
+skip = 2 * a.mult + 2
+startup_steps_back = sum(1 for d in deltas[:skip] if d <= 0)
+deltas = deltas[skip:]
 nonmono = sum(1 for d in deltas if d <= 0)
 exp = 1000.0 / (a.src_fps * a.mult)
 on_grid = sum(1 for d in deltas if abs(d - exp) <= 0.25 * exp)
@@ -68,6 +73,7 @@ res = dict(case=a.case, frames=n, unique=uniq, src_frames=a.src_frames, mult=a.m
            delta_ms_median=round(q(deltas, .5), 3) if deltas else None, delta_ms_min=round(min(deltas), 3) if deltas else None,
            delta_ms_max=round(max(deltas), 3) if deltas else None, expected_delta_ms=round(exp, 3),
            on_grid_pct=round(100.0 * on_grid / len(deltas), 1) if deltas else None, non_monotonic=nonmono,
+           startup_steps_back=startup_steps_back,
            late_ms_median=round(q(late, .5), 2) if late else None, late_ms_p95=round(q(late, .95), 2) if late else None,
            alloc_fail=alloc_fail, **markers)
 ok = True

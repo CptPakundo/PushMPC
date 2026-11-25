@@ -63,6 +63,15 @@ vlc_module_begin()
     set_callbacks(OpenDump, CloseDump)
 vlc_module_end()
 
+/* Debian/Ubuntu's VLC 3.0.20+ (the time64 transition build) looks up vlc_entry__3_0_0ft64; upstream, Flatpak, Windows
+ * and macOS look up vlc_entry__3_0_0f. On 64-bit targets the ABI is the same, so one binary exports both names: the
+ * build passes -DPM_ALT_ENTRY=<the name its headers do not define>. */
+#ifdef PM_ALT_ENTRY
+# define PM_STR2(x) #x
+# define PM_STR(x) PM_STR2(x)
+__asm__(".globl " PM_STR(PM_ALT_ENTRY) "\n\t.set " PM_STR(PM_ALT_ENTRY) ", vlc_entry__" PM_STR(MODULE_SYMBOL) "\n");
+#endif
+
 /* ---- D3D11 opaque pictures (Windows): layout replicated from VLC 3.0.x modules/video_chroma/d3d11_fmt.h and
  * modules/codec/avcodec/va_surface.h (internal headers, not in the SDK). Read-only here: it only proves that the
  * filter receives the decoder's ID3D11Texture2D and slice index. */

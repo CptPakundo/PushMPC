@@ -34,7 +34,8 @@ run() { # name mult expect_size -- vlc args...
   echo "== $name: vlc exit $rc in $(( $(date +%s) - t0 )) s"
   [ -s "$log" ] || cp "$OUT/$name.stdout" "$log" 2>/dev/null
   grep -E "pushspike|pushdump|as static|as interactive|compensate|dropping pictures|Failed to" "$log" | head -15
-  (cd "$OUT" && "$PY" "$here/analyze.py" "$name" "$csv" "$log" --src-frames "$SRC_FRAMES" --mult "$mult" ${size:+--expect-size "$size"})
+  local abs; abs="$(cd "$OUT" && pwd)"
+  (cd "$OUT" && "$PY" "$here/analyze.py" "$name" "$abs/$name.csv" "$abs/$name.log" --src-frames "$SRC_FRAMES" --mult "$mult" ${size:+--expect-size "$size"})
 }
 
 if ! command -v timeout >/dev/null 2>&1; then # macOS has no coreutils timeout
@@ -57,6 +58,11 @@ want plusi_m8    && run plusi_m8    8 "$S" -- "--video-filter=postproc{mult=8}:p
 want named_m2    && run named_m2    2 "$S" -- --video-filter=pushspike --pushspike-mult=2
 want scale2      && run scale2      1 ""   -- --video-filter=postproc --pushspike-mult=1 --pushspike-scale=2
 want scale2_m2   && run scale2_m2   2 ""   -- --video-filter=postproc --pushspike-mult=2 --pushspike-scale=2
+# the installer route: the setting lives in a vlcrc ([core] video-filter=postproc, the module's own section)
+if want vlcrc_m4; then
+  printf '[core]\nvideo-filter=postproc\n[pushspike]\npushspike-mult=4\npushspike-alloc=1\n' > "$OUT/vlcrc"
+  run vlcrc_m4 4 "$S" -- --config="$OUT/vlcrc"
+fi
 # Windows: the d3d11va decoder hands the static chain D3D11 textures ('DX11'); the filter logs texture + slice and
 # outputs mult-1 clones sharing the texture; VLC copies back to the CPU display after the chain.
 if [ "${D3D11:-0}" = 1 ]; then

@@ -70,7 +70,9 @@ jobs:
         run: |
           set -eux
           mkdir -p out/linux
-          gcc -std=gnu11 -O2 -Wall -fPIC -shared -DMODULE_STRING='"pushspike"' $(pkg-config --cflags vlc-plugin) \
+          # export both plug-in entry names (Debian/Ubuntu t64 builds: __3_0_0ft64; upstream/Flatpak: __3_0_0f)
+          if grep -q '3_0_0ft64' /usr/include/vlc/plugins/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
+          gcc -std=gnu11 -O2 -Wall -fPIC -shared -DMODULE_STRING='"pushspike"' -DPM_ALT_ENTRY=$alt $(pkg-config --cflags vlc-plugin) \
             vlcplugin/spike/pushspike.c -o out/linux/libpushspike_plugin.so $(pkg-config --libs vlc-plugin)
           nm -D out/linux/libpushspike_plugin.so | grep vlc_entry
           objdump -T out/linux/libpushspike_plugin.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
@@ -127,7 +129,7 @@ jobs:
           # the app's command is vlc, so VLC stays empty and the wrapper is the whole command
           export VLC="" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv OUT=res/flatpak \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Flathub VLC" \
-                 CASES="base pp_m2 pp_m4 heap_m8 plusi_m8 scale2" \
+                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 scale2 vlcrc_m4" \
                  VLC_WRAP="flatpak run --user --env=VLC_PLUGIN_PATH=$d org.videolan.VLC"
           bash vlcplugin/spike/run-cases.sh
       - uses: actions/upload-artifact@v4
@@ -222,14 +224,16 @@ jobs:
           d=~/Library/Application\ Support/pushspike; mkdir -p "$d" && cp out/mac/libpushspike_plugin.dylib "$d/"
           export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, VLC.app cask" \
-                 CASES="base pp_m2 pp_m4 heap_m8 plusi_m8 named_m2 scale2"
+                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 named_m2 scale2 vlcrc_m4" \
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
           bash vlcplugin/spike/run-cases.sh
           grep -ihE "pushspike|library validation|code signature|not valid|dlopen|cannot load" res/macos/pp_m2.log | head -20 || true
       - name: Same plugin inside the bundle (plugins dir; CI only, breaks the bundle signature)
         run: |
           cp out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/plugins/ || true
           export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR=/nonexistent CLIP=art/clip/clip.mkv OUT=res/macos-bundle \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, plugin inside VLC.app" CASES="pp_m2"
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, plugin inside VLC.app" CASES="pp_m2" \
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
           bash vlcplugin/spike/run-cases.sh
       - uses: actions/upload-artifact@v4
         if: always()
