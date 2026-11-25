@@ -120,6 +120,24 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: Installer round trip (native target; then a run with no arguments, from its vlcrc; then uninstall)
+        run: |
+          set -eu
+          mkdir -p ~/.config/vlc && printf '[core]\nvideo-filter=adjust\n[avcodec]\n#avcodec-hw=any\n' > ~/.config/vlc/vlcrc
+          cp ~/.config/vlc/vlcrc /tmp/vlcrc.before
+          sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target native
+          cat ~/.config/vlc/vlcrc; cat ~/.config/environment.d/60-pushmpc-vlc.conf
+          grep -q '^video-filter=adjust:postproc:pushmpc_out$' ~/.config/vlc/vlcrc
+          d=$(sed -n 's/^VLC_PLUGIN_PATH=//p' ~/.config/environment.d/60-pushmpc-vlc.conf)
+          cp art/plugin-linux/libpushdump_plugin.so "$d/"
+          export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv OUT=res/installed CASES=installed INSTALLED_MULT=0 \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, after the installer (Xvfb 60 Hz: Auto x2)" HWARGS=" "
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC 0" res/installed/installed.log | head -1 | grep -q -- "-> x" || { echo "::error::the module did not run from the installer's settings"; exit 1; }
+          rm -f "$d/libpushdump_plugin.so"
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target native
+          diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' ~/.config/vlc/vlcrc | grep .) && echo "vlcrc restored (active settings)"
+          [ ! -e ~/.config/environment.d/60-pushmpc-vlc.conf ] && [ ! -e "$d/libpushmpc_plugin.so" ] && echo "files removed"
       - name: Flathub VLC with the same plugin (flatpak override --env=VLC_PLUGIN_PATH, the installer's route)
         timeout-minutes: 20
         run: |
@@ -167,6 +185,27 @@ jobs:
                  CLIP10=art/clips/clip10.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
                  PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
           bash vlcplugin/tests/run-module.sh
+      - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; a run with no arguments; uninstall)
+        run: |
+          set -eu
+          mkdir -p "$APPDATA/vlc" && printf '[core]\n#video-filter=\n[direct3d11]\n#d3d11-upscale-mode=linear\n' > "$APPDATA/vlc/vlcrc"
+          powershell -NoProfile -ExecutionPolicy Bypass -File vlcplugin/install/pushmpc-vlc.ps1 -Action Install -SkipVlcCheck \
+            -Plugin "$(cygpath -w art/plugin-win64/libpushmpc_plugin.dll)"
+          cat "$APPDATA/vlc/vlcrc"
+          grep -q '^video-filter=postproc:pushmpc_out' "$APPDATA/vlc/vlcrc"; grep -q '^d3d11-upscale-mode=super' "$APPDATA/vlc/vlcrc"
+          pp=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH','User')" | tr -d '\r')
+          echo "VLC_PLUGIN_PATH (user) = $pp"
+          cp art/plugin-win64/libpushdump_plugin.dll "$(cygpath -u "$pp")/"
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$pp" CLIP=art/clips/clip.mkv OUT=res/installed \
+                 CASES=installed INSTALLED_MULT=0 PY=python SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
+                 LABEL="Windows, after the installer (Auto from the runner's display mode)" HWARGS=" "
+          bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC 0" res/installed/installed.log | head -1 | grep -q -- "-> x" || { echo "::error::the module did not run from the installer's settings"; exit 1; }
+          rm -f "$(cygpath -u "$pp")/libpushdump_plugin.dll"
+          powershell -NoProfile -ExecutionPolicy Bypass -File vlcplugin/install/pushmpc-vlc.ps1 -Action Uninstall
+          cat "$APPDATA/vlc/vlcrc"
+          left=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH','User')" | tr -d '\r')
+          [ -z "$left" ] && echo "VLC_PLUGIN_PATH removed"; ! grep -q '^video-filter=' "$APPDATA/vlc/vlcrc" && echo "video-filter restored"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-windows, path: res, retention-days: 7 }

@@ -48,11 +48,20 @@ want x2        && run x2        2 "$CLIP" -- $PP --pushmpc-smoother=2
 want x4        && run x4        4 "$CLIP" -- $PP --pushmpc-smoother=4
 want x8        && run x8        8 "$CLIP" -- $PP --pushmpc-smoother=8
 want x8_noout  && run x8_noout  4 "$CLIP" -- --video-filter=postproc --pushmpc-smoother=8   # expected: capped at x4
-want auto120   && PUSHMPC_DISPLAY_HZ=120 run auto120 5 "$CLIP" -- $PP
+# Auto cases pass mult 0: the analyzer takes the multiplier the module picked (display x5 / x6, minus what the
+# runner's CPU cannot generate in time) from its log, and checks that VLC showed that many frames on time
+want auto120   && PUSHMPC_DISPLAY_HZ=120 run auto120 0 "$CLIP" -- $PP
 if want vlcrc144; then  # the installer's route: everything in vlcrc, Auto, a 144 Hz display -> x6
   printf '[core]\nvideo-filter=postproc:pushmpc_out\n[pushmpc]\npushmpc-smoother=0\npushmpc-display-hz=144\n' > "$OUT/vlcrc"
-  run vlcrc144 6 "$CLIP" -- --config="$OUT/vlcrc"
+  run vlcrc144 0 "$CLIP" -- --config="$OUT/vlcrc"
 fi
+# after the installer ran: no arguments at all, everything comes from its vlcrc and VLC_PLUGIN_PATH (only when asked)
+if [[ " ${CASES:-} " == *" installed "* ]]; then
+  run installed "${INSTALLED_MULT:-0}" "$CLIP" --
+fi
+# the platform's default decoding (hardware where VLC finds it: VideoToolbox, VA-API, D3D11VA); VLC converts the
+# hardware pictures in front of the filter and back after it, or drops the filters when it cannot
+want x4_hwdec  && HWARGS=" " run x4_hwdec 4 "$CLIP" -- $PP --pushmpc-smoother=4
 if [ -n "${CLIP10:-}" ] && want x4_10bit; then
   run x4_10bit 4 "$CLIP10" -- $PP --pushmpc-smoother=4
 fi

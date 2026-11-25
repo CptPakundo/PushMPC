@@ -31,6 +31,12 @@ try:
 except FileNotFoundError:
     pass
 
+# --mult 0: Auto; take the multiplier the module picked from its log line ("... -> x5 (...")
+if a.mult == 0:
+    import re
+    m = re.findall(r"PushMPC [^\n]* -> x(\d+)", log)
+    a.mult = int(m[-1]) if m else 1
+
 n = len(rows)
 uniq = len({r["sum"] for r in rows})
 sizes = sorted({f'{r["w"]}x{r["h"]}' for r in rows})
