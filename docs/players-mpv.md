@@ -251,14 +251,20 @@ Same setup as above (`mpv-integration.ps1`). Auto picks `rife` when it is instal
 
 ### Linux
 
-Download `pushmpc-linux-x86_64-<version>.tar.gz` (or `-aarch64-`), unpack it and run its installer as your user (no
+Download `pushmpc-linux-x86_64-<version>.tar.gz` (or `-aarch64-`), unpack it and run its Setup as your user (no
 administrator password; nothing outside your home folder changes):
 
 ```sh
-sh install.sh                               # set up every player found
-sh ~/.local/share/pushmpc/install.sh status
-sh ~/.local/share/pushmpc/install.sh uninstall   # puts every changed file back
+sh setup.sh                                  # every player found, the engine for your GPU (VLC too when included)
+sh setup.sh plan                             # only show the engine Auto starts with, per player route
+sh ~/.local/share/pushmpc/setup.sh status
+sh ~/.local/share/pushmpc/setup.sh uninstall # puts every changed file back
 ```
+
+`setup.sh` finds the graphics card (and the Vulkan device), prints the engine Auto starts with, runs `install.sh` for
+the mpv family and Kodi, installs the VLC module when the download has it, and saves its choice in
+`~/.local/share/pushmpc/auto-plan.txt`. It asks only before a download that needs your yes (the Flathub mpv, NVIDIA's
+Video Effects); `--yes` accepts both, and without a terminal nothing is downloaded.
 
 mpv needs VapourSynth. Arch, Manjaro and EndeavourOS build mpv with it (Arch users can also use the AUR package
 `pushmpc` and run `pushmpc-setup`). **Ubuntu, Debian and Mint build mpv without it**: the installer then offers, once,

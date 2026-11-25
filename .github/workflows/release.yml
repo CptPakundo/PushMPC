@@ -541,9 +541,52 @@ jobs:
           }
           exit $fail
 
+  # The Linux downloads: pushmpc-linux-<arch>-<version>.tar.gz (setup.sh, install.sh, the VapourSynth plugin built in
+  # manylinux_2_28 with static libstdc++, as integrations.yml builds and tests it), attached to the release
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, image: 'quay.io/pypa/manylinux_2_28_x86_64', wheel: linux }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, image: 'quay.io/pypa/manylinux_2_28_aarch64', wheel: linuxArm64 }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          persist-credentials: false
+      - name: Pinned VapourSynth wheel (SDK headers)
+        run: |
+          set -eu
+          PY=/opt/python/cp312-cp312/bin/python
+          url=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['url'])")
+          sha=$($PY -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['${{ matrix.wheel }}']['sha256'])")
+          whl=/tmp/$(basename "$url")
+          curl -fsSL --retry 3 -o "$whl" "$url"
+          echo "$(echo "$sha" | tr A-F a-f)  $whl" | sha256sum -c -
+          $PY -m pip install --no-deps --no-cache-dir "$whl"
+          pkg=$($PY -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
+          mkdir -p vsplugin/third_party/vapoursynth
+          cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
+      - name: Plugin and tarball
+        run: |
+          set -eu
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake --build build --target pushmpc_vs portable_test --parallel
+          ./build/portable_test | tail -3
+          ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
+          git config --global --add safe.directory "$PWD"
+          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$ver"
+          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz
+      - uses: actions/upload-artifact@v4
+        with: { name: 'pushmpc-linux-${{ matrix.arch }}', path: dist/, if-no-files-found: error }
+
   publish:
-    needs: [build, gpu-smoke]
-    if: ${{ always() && needs.build.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
+    needs: [build, gpu-smoke, linux]
+    if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -556,6 +599,11 @@ jobs:
         with:
           name: pushmpc-release
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pushmpc-linux-*
+          path: release
+          merge-multiple: true
       # the release body: docs/release-notes-<version>.md of the built commit when it exists, else the text below
       - uses: actions/checkout@v4
         with:

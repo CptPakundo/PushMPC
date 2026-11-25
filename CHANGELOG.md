@@ -57,10 +57,18 @@ with its own Setup and updater, plus the mpv route as a preview.
 |---|---|
 | MPC-HC (x64) | ✅ supported, tested |
 | MPC-BE (x64) | 🆕 automatic: Setup adds the filter and sets MPC Video Decoder to D3D11 copy-back (put back on uninstall). Setup's changes are checked against MPC-BE 1.9.3 in CI; playback in MPC-BE itself is not tested yet |
-| mpv, SMPlayer | 🧪 preview, optional: the VapourSynth filter, set up only when Setup finds mpv or SMPlayer. Tested in CI with a stand-in core; not yet with a real GPU |
-| MPC-QT | 🧪 preview, manual setup |
-| PotPlayer (x64) | 🧪 manual setup, untested |
+| PotPlayer (x64) | 🆕 automatic: the filter in its priority list; checked in CI with a real PotPlayer |
+| mpv, mpv.net, SMPlayer, MPC-QT, Jellyfin, Kodi (external mpv) | 🆕 automatic on Windows and Linux; checked in CI with real players (no GPU there) |
+| Stremio 5.0.28+ | 🆕 automatic (its mpv config file setting) |
+| Plex for Windows / HTPC | 🧪 frame generation through capture mode; video super resolution inside Plex once its mpv supports it |
+| VLC 3 | 🧪 preview: PushMPC's VLC module (Windows, Linux, macOS) |
+| IINA, mpv on macOS | 🧪 preview: Homebrew formula (tap not published yet) |
+| Any other Windows player | 🧪 capture mode (fallback): PushFPS's window capture, about 50-60 ms of delay, no DRM-protected video |
 | SVP's own mpv | left alone (SVP manages it) |
+
+Setup (Windows) and `setup.sh` (Linux) find the players and the graphics card, log the engine Auto starts with
+(`auto-plan.json` / `auto-plan.txt`), write PushFlow's `pmml.txt` from it, offer AMD FSR SDK 2.4 on Radeon RX 6000-9000
+and NVIDIA's Video Effects on Linux, and turn capture mode on only for players without a native route.
 
 ### Known limitations
 

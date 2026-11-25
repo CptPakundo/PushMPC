@@ -48,7 +48,110 @@
 #include "pm_hw.h"
 
 #ifdef _WIN32
+# include <stdatomic.h>
 # include "pm_d3d11_picsys.h"   /* zero copy with VLC's Direct3D 11 hardware decoding */
+
+/* Zero copy above x4: VLC's private pool holds 4 pictures, so generated pictures come from a ring of our own textures on
+ * VLC's device, made like the pictures of VLC's Direct3D 11 pool (same size, format, bind flags; one texture each, with
+ * the luma and chroma shader views VLC's outputs draw from). A picture holds its slot and the ring until VLC releases
+ * it, so pictures may outlive the filter. */
+#define PM_RING_MAX 32
+typedef struct pm_ring {
+    atomic_int refs;
+    ID3D11Device *dev;
+    ID3D11DeviceContext *ctx;
+    D3D11_TEXTURE2D_DESC desc;
+    DXGI_FORMAT view_fmt[2];
+    struct { ID3D11Texture2D *tex; ID3D11ShaderResourceView *srv[2]; atomic_bool busy; } slot[PM_RING_MAX];
+    int size;
+} pm_ring;
+typedef struct { pm_d3d11_picsys sys; pm_ring *ring; int idx; } pm_ring_pic;   /* sys first: VLC reads it as its own */
+
+static void RingRelease(pm_ring *r)
+{
+    if (atomic_fetch_sub(&r->refs, 1) != 1) return;
+    for (int i = 0; i < r->size; i++) {
+        for (int v = 0; v < 2; v++) if (r->slot[i].srv[v]) ID3D11ShaderResourceView_Release(r->slot[i].srv[v]);
+        if (r->slot[i].tex) ID3D11Texture2D_Release(r->slot[i].tex);
+    }
+    ID3D11DeviceContext_Release(r->ctx);
+    ID3D11Device_Release(r->dev);
+    free(r);
+}
+
+static pm_ring *RingNew(ID3D11Texture2D *like, ID3D11DeviceContext *ctx, int size)
+{
+    pm_ring *r = calloc(1, sizeof(*r));
+    if (!r) return NULL;
+    atomic_init(&r->refs, 1);
+    ID3D11Texture2D_GetDesc(like, &r->desc);
+    r->desc.ArraySize = 1;
+    r->desc.MipLevels = 1;
+    r->desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+    r->desc.Usage = D3D11_USAGE_DEFAULT;
+    r->desc.CPUAccessFlags = 0;
+    r->desc.MiscFlags = 0;
+    const bool p010 = r->desc.Format == DXGI_FORMAT_P010;
+    r->view_fmt[0] = p010 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    r->view_fmt[1] = p010 ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    ID3D11DeviceContext_GetDevice(ctx, &r->dev);
+    r->ctx = ctx;
+    ID3D11DeviceContext_AddRef(ctx);
+    r->size = size > PM_RING_MAX ? PM_RING_MAX : size;
+    for (int i = 0; i < r->size; i++) atomic_init(&r->slot[i].busy, false);
+    return r;
+}
+
+static void RingPicDestroy(picture_t *p)
+{
+    pm_ring_pic *rp = (pm_ring_pic *)p->p_sys;
+    atomic_store(&rp->ring->slot[rp->idx].busy, false);
+    RingRelease(rp->ring);
+    free(rp);
+    free(p);
+}
+
+/* a free slot as a 'DX11'/'DX10' picture, NULL when all are on their way to the display */
+static picture_t *RingGet(pm_ring *r, const video_format_t *fmt)
+{
+    for (int i = 0; i < r->size; i++) {
+        bool expected = false;
+        if (!atomic_compare_exchange_strong(&r->slot[i].busy, &expected, true)) continue;
+        if (!r->slot[i].tex) {   /* made on first use */
+            if (FAILED(ID3D11Device_CreateTexture2D(r->dev, &r->desc, NULL, &r->slot[i].tex))) {
+                r->slot[i].tex = NULL; atomic_store(&r->slot[i].busy, false); return NULL;
+            }
+            for (int v = 0; v < 2; v++) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd;
+                memset(&sd, 0, sizeof(sd));
+                sd.Format = r->view_fmt[v];
+                sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                sd.Texture2D.MipLevels = 1;
+                if (FAILED(ID3D11Device_CreateShaderResourceView(r->dev, (ID3D11Resource *)r->slot[i].tex, &sd, &r->slot[i].srv[v])))
+                    r->slot[i].srv[v] = NULL;
+            }
+        }
+        pm_ring_pic *rp = calloc(1, sizeof(*rp));
+        if (!rp) { atomic_store(&r->slot[i].busy, false); return NULL; }
+        rp->sys.texture[0] = rp->sys.texture[1] = r->slot[i].tex;   /* as VLC's pool: one texture for both planes */
+        rp->sys.context = r->ctx;
+        rp->sys.slice_index = 0;
+        rp->sys.resourceView[0] = r->slot[i].srv[0];
+        rp->sys.resourceView[1] = r->slot[i].srv[1];
+        rp->sys.formatTexture = r->desc.Format;
+        rp->ring = r;
+        rp->idx = i;
+        picture_resource_t res;
+        memset(&res, 0, sizeof(res));
+        res.p_sys = (picture_sys_t *)rp;
+        res.pf_destroy = RingPicDestroy;
+        picture_t *p = picture_NewFromResource(fmt, &res);
+        if (!p) { free(rp); atomic_store(&r->slot[i].busy, false); return NULL; }
+        atomic_fetch_add(&r->refs, 1);
+        return p;
+    }
+    return NULL;
+}
 #endif
 
 double pm_display_hz(void);
@@ -211,6 +314,8 @@ vlc_module_begin()
     add_bool(CFG "zerocopy", true, "Zero copy with Direct3D 11 decoding", "Windows, pushcore: hardware-decoded "
              "pictures stay on the GPU (pushcore works on VLC's own D3D11 device); off = they are copied to the CPU "
              "and back, as before.", true)
+    add_bool(CFG "zerocopy-ring", true, "Own output pictures with zero copy", "Generated pictures come from textures "
+             "of the module's own (up to x8); off = VLC's 4-picture pool (at most x4).", true)
     add_integer(CFG "hw", 0, "Hardware-decoded video (Linux)", "Auto keeps VA-API / VDPAU pictures on the GPU: real frames "
                 "pass untouched, generated frames go into PushMPC's own surfaces on the decoder's device, after a "
                 "round-trip check of the driver (pass-through if it fails). Convert hands them to VLC's converter "
@@ -241,6 +346,10 @@ struct filter_sys_t {
     pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
     bool zc;                   /* pc runs on VLC's D3D11 device with 'DX11'/'DX10' pictures (no download) */
     uint64_t zc_fallback;      /* generated pictures pushcore did not deliver in time (the real frame copied in) */
+#ifdef _WIN32
+    pm_ring *ring;             /* zero copy: our own output pictures (beyond VLC's 4-picture pool) */
+#endif
+    uint64_t ring_out;
     uint64_t pc_errors, pc_routed, pc_unrouted;
     char pc_err[240];
     int64_t pc_miss_pts, pc_miss_want;
@@ -634,6 +743,12 @@ static picture_t *NewOut(filter_t *f, struct filter_sys_t *sys)
         if (!p) { sys->hw_no_surface++; sys->alloc_fail++; }
         return p;
     }
+#ifdef _WIN32
+    if (sys->ring) {            /* zero copy: our own D3D11 pictures first, VLC's pool when the ring is all in use */
+        picture_t *r = RingGet(sys->ring, &f->fmt_out.video);
+        if (r) { sys->ring_out++; return r; }
+    }
+#endif
     /* filter_NewPicture: the vout's private pool, or the heap once an interactive filter (pushmpc_out) follows */
     picture_t *p = sys->alloc == 2 ? picture_NewFromFormat(&f->fmt_out.video) : filter_NewPicture(f);
     if (!p) { sys->alloc_fail++; return NULL; }
@@ -888,8 +1003,9 @@ static void FillPcc(pm_pc_cfg *pcc, const video_format_t *v, int bits, int smoot
 #ifdef _WIN32
 /* zero copy: pushcore on the D3D11 device of VLC's own pictures (a picture of the vout's pool tells which), with VLC's
  * context lock */
-static pm_pc *ZcOpen(filter_t *f, const pm_pc_cfg *pcc, int *k, char *err, size_t n)
+static pm_pc *ZcOpen(filter_t *f, const pm_pc_cfg *pcc, int *k, pm_ring **ring, char *err, size_t n)
 {
+    *ring = NULL;
     picture_t *p = filter_NewPicture(f);
     pm_d3d11_picsys *ps = p ? PicSys(p) : NULL;
     if (!ps || !ps->context || !ps->texture[0]) {
@@ -911,10 +1027,14 @@ static pm_pc *ZcOpen(filter_t *f, const pm_pc_cfg *pcc, int *k, char *err, size_
     UINT size = sizeof(mutex);
     if (FAILED(ID3D11DeviceContext_GetPrivateData(ps->context, &PM_GUID_CONTEXT_MUTEX, &size, &mutex)) || size != sizeof(mutex))
         mutex = NULL;
-    picture_Release(p);
-    if (!dev) { snprintf(err, n, "no D3D11 device"); return NULL; }
+    if (!dev) { picture_Release(p); snprintf(err, n, "no D3D11 device"); return NULL; }
     pm_pc *pc = pmx_open_d3d11(pcc, dev, mutex, k, err, n);
     ID3D11Device_Release(dev);   /* pushcore holds its own reference */
+    /* our own output pictures, so the multiplier is not capped by VLC's 4-picture pool (pushmpc-zerocopy-ring=0: the
+     * pool only) */
+    if (pc && *k > 1 && OptInt(VLC_OBJECT(f), CFG "zerocopy-ring", 1))
+        *ring = RingNew(ps->texture[0], ps->context, 3 * *k + 4);
+    picture_Release(p);
     return pc;
 }
 #endif
@@ -939,7 +1059,7 @@ static int Open(vlc_object_t *obj)
             FillPcc(&pcc, v, v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B ? 10 : 8, smoother, zhz, OptInt(f, CFG "warp", 0) ? 1 : 0);
             int pk = 1;
             char err[300] = "";
-            sys->pc = ZcOpen(f, &pcc, &pk, err, sizeof(err));
+            sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
             if (sys->pc && pk > 1) {
                 sys->zc = true;
                 bits = pcc.bits;
@@ -1071,8 +1191,11 @@ static void Close(vlc_object_t *obj)
                  sys->pc_errors, sys->pc_errors ? ", first: " : "", sys->pc_err);
         if (sys->zc)
             msg_Info(f, "PushMPC: zero copy on VLC's D3D11 device; %" PRIu64 " generated pictures not delivered in time "
-                     "(the real frame shown)", sys->zc_fallback);
+                     "(the real frame shown); %" PRIu64 " from our own texture ring", sys->zc_fallback, sys->ring_out);
         pmx_close(sys->pc);
+#ifdef _WIN32
+        if (sys->ring) RingRelease(sys->ring);   /* pictures still on their way keep it alive */
+#endif
     }
     if (sys->hw) {
         msg_Info(f, "PushMPC: hardware path %s: %s; surface read failures %" PRIu64 ", upload failures %" PRIu64

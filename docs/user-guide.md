@@ -3,10 +3,21 @@
 ## Install
 
 Download **PushMPC-Setup.exe** from the [releases](https://github.com/CptPakundo/PushMPC/releases) and run it. It installs
-for your Windows account only, without administrator rights: welcome (it shows whether MPC-HC was found), licence and
-credits, then the installation with a progress bar. The welcome page lists the players it found (MPC-HC, MPC-BE, and
-mpv, SMPlayer or MPC-QT for the mpv preview). If MPC-HC or MPC-BE is running, setup offers to close it (both
-save their settings when they close, so they must not run during setup).
+for your Windows account only, without administrator rights: welcome, licence and credits, then the installation with a
+progress bar. The welcome page lists the supported players and the ones it found on this PC. If MPC-HC, MPC-BE or
+PotPlayer is running, setup offers to close it (they save their settings when they close).
+
+Setup asks nothing else. It:
+- sets up every player it finds (table below);
+- picks the engine Auto starts with for your graphics card and writes it to the log and to `auto-plan.json` (the same
+  rules as the players' Auto; `pushmpc-install.ps1 autoplan` shows it again, `autoplan -Apply` redoes it after a GPU
+  change);
+- chooses the ONNX Runtime execution provider for PushFlow (`runtime\runtime\experimental\pushflow\pmml.txt`) when the pmml
+  runtime is installed: TensorRT-RTX on an NVIDIA RTX card, or the provider pmml's benchmark measured fastest on this
+  card; DirectML otherwise;
+- on a Radeon RX 6000 / 7000 / 9000 fetches AMD FSR SDK 2.4 (FSR 4.1 INT8 upscaling; AMD's signed files, pinned). The
+  welcome page offers it with a checkbox that is on by default; `-FidelityFx Package` declines it in a script install;
+- turns on [capture mode](#capture-mode-fallback) only when it finds a player PushMPC cannot plug into.
 
 Setup is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC" the first time: click
 **More info**, then **Run anyway**. The download of Veyra's runtime package (about 750 MB) shows its progress, can be
@@ -56,7 +67,10 @@ leaves them out).
 | mpv, mpv.net, SMPlayer, MPC-QT | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in their settings, plus a VapourSynth runtime; see [mpv and mpv-based players](players-mpv.md) |
 | Jellyfin Desktop | preview | the VapourSynth filter in each profile's `mpv.conf` |
 | Kodi, Jellyfin MPV Shim, Plex-MPV-Shim | preview, when mpv is installed | they play through mpv (Kodi's external player; the shims' external mpv) |
-| Stremio | by hand | nothing: its built-in mpv resets video filters; [play in mpv](players-mpv.md#stremio-by-hand) |
+| Stremio 5.0.28 and newer | automatic | its "mpv config file" setting; [details](players-mpv.md#stremio) |
+| Plex for Windows, Plex HTPC | upscaling only when Plex's mpv supports it | RTX / Intel video super resolution in Plex's `mpv.conf`; frame generation through capture mode |
+| VLC 3 | preview | PushMPC's VLC module, when the download includes it; otherwise capture mode |
+| KMPlayer, GOM Player, Emby Theater, other players | fallback | [capture mode](#capture-mode-fallback) |
 | Zoom Player | by hand, untested | nothing ([steps](#zoom-player-by-hand)) |
 | SVP's own mpv | | left alone (SVP manages it) |
 
@@ -125,14 +139,32 @@ Video Renderer draws the video and the decoder copies back:
 
 Remove the filter there again when you uninstall PushMPC.
 
+### Capture mode (fallback)
+
+For a player PushMPC cannot plug into, capture mode runs PushFPS's own window capture on the player's window: frame
+generation and super resolution for any player. Setup turns it on only when it finds such a player, as the Start menu
+entry **PushMPC Capture (fallback)**. Start the player, then the entry, and pick the player's window in PushFPS.
+
+- It is a fallback: about 50-60 ms between the player and the screen, a second window over the player, and the sound
+  stays in the player (PushFPS's audio offset helps with lip sync). A native route always looks better.
+- DRM-protected video (streaming apps, browsers playing protected streams) shows a black picture.
+- It uses an installed PushFPS, with settings of its own (`%LOCALAPPDATA%\PushMPC\capture\data`; your PushFPS settings
+  are not touched). Without PushFPS, the first start asks to install PushFPS 4.5.3 from PushFPS's GitHub release
+  (checked by SHA-256; PushFPS's own installer, per user). Uninstalling PushMPC removes that PushFPS again, and only that
+  one.
+- `pushmpc-capture.ps1 status | launch | enable | disable` in `%LOCALAPPDATA%\PushMPC\filter` does the same by hand;
+  `pushmpc-install.ps1 install -Capture On|Off` overrides Setup's choice.
+- Windows only: PushFPS's Linux and macOS builds read capture cards, not windows.
+
 ## GPUs
 
 | GPU | Frame generation (Auto's order) | Upscaling | Clean up | SDR to HDR |
 |---|---|---|---|---|
 | RTX 50 / 40 | NVIDIA VFG, then DLSS-G, PushFlow, FSR | RTX VSR | yes | PushMPC's curve (RTX Video HDR selectable) |
 | RTX 30 | NVIDIA VFG (RTX 30 port), then DLSS-G (unlocked), PushFlow, FSR | RTX VSR | when the GPU time fits | PushMPC's curve (RTX Video HDR selectable) |
-| RTX 20 | PushFlow, then FSR | RTX VSR | when it fits | PushMPC's curve (RTX Video HDR selectable) |
-| GTX, Intel | PushFlow, then FSR | FSR or NIS | - | PushMPC's curve |
+| RTX 20 | DLSS-G, then PushFlow, NVIDIA optical flow, FSR | RTX VSR | when it fits | PushMPC's curve (RTX Video HDR selectable) |
+| GTX 16 / 10 | PushFlow, then NVIDIA optical flow (GTX 16), FSR | RTX VSR on GTX 16 (unlock, after its self-test), else NIS | - | PushMPC's curve |
+| Intel | PushFlow, then FSR | NIS | - | PushMPC's curve |
 | Radeon RX 9000 | PushFlow, then FSR 4, AMD FRC | FSR | yes (lmxxf runtime) | PushMPC's curve |
 | Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD FRC | FSR | RX 7000 (worker process), when it fits | PushMPC's curve |
 
