@@ -76,7 +76,7 @@ if(PM_GPU)
   endif()
 endif()
 
-add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c)
+add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
 target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
 target_compile_definitions(pushmpc_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc" _FILE_OFFSET_BITS=64 _REENTRANT _THREAD_SAFE)
@@ -110,4 +110,52 @@ target_link_libraries(pm_engine_test PRIVATE pm_engine_portable)
 set_target_properties(pm_engine_test PROPERTIES LINKER_LANGUAGE CXX)
 if(WIN32)
   target_link_options(pm_engine_test PRIVATE -static)
+endif()
+
+# ---- Windows: PushMPC's fork of VLC 3.0.24's Direct3D 11 output (display/vlc3, LGPL-2.1+) with NIS upscaling on any
+# GPU: libpushmpc_d3d11_plugin.dll (vout=pushmpc_d3d11); the VLC sources come from fetch-vlc-sources.sh (tarball +
+# PushMPC patch). NIS 1.0.3 (MIT) from vsplugin/third_party/nis; its HLSL is
+# embedded at build time and compiled at run time with the system's d3dcompiler_47.dll.
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/win32/direct3d11.c")   # display/vlc3/fetch-vlc-sources.sh first
+  set(D3 "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules")
+  set(NISDIR "${VS}/third_party/nis")
+  file(READ "${NISDIR}/NIS_Scaler.h" _nis_src)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/gen/pm_nis_shader.h"
+       "// generated from NIS_Scaler.h (NVIDIA Image Scaling 1.0.3, MIT)\nstatic const char kPmNisScalerHlsl[] = R\"PMNIS(${_nis_src})PMNIS\";\n")
+  set(D3D11_FORK_SOURCES
+    ${D3}/video_output/win32/direct3d11.c ${D3}/video_output/win32/common.c ${D3}/video_output/win32/events.c
+    ${D3}/video_output/win32/pm_sensors_stub.c ${D3}/video_output/win32/win32touch.c ${D3}/video_output/win32/d3d11_quad.c
+    ${D3}/video_output/win32/d3d11_shaders.c ${D3}/video_output/win32/d3d11_scaler.cpp
+    ${D3}/video_output/win32/d3d11_tonemap.cpp ${D3}/video_output/win32/pm_nis_d3d11.cpp
+    ${D3}/video_chroma/d3d11_fmt.c ${D3}/video_chroma/dxgi_fmt.c ${D3}/video_chroma/copy.c)
+  add_library(pushmpc_d3d11_plugin SHARED ${D3D11_FORK_SOURCES})
+  set_target_properties(pushmpc_d3d11_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_d3d11_plugin")
+  target_include_directories(pushmpc_d3d11_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/../include" "${D3}/video_output" "${D3}/video_output/win32"
+                             "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
+  target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
+                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
+  # what VLC's own config.h sets for this module (without HAVE_ID3D11VIDEODECODER the output never creates its staging
+  # texture for software-decoded pictures and crashes in Prepare; the other two give the HDR detection and render fence)
+  include(CheckIncludeFile)
+  check_include_file(d3d11_4.h PM_HAVE_D3D11_4_H)
+  check_include_file(dxgi1_6.h PM_HAVE_DXGI1_6_H)
+  target_compile_definitions(pushmpc_d3d11_plugin PRIVATE HAVE_ID3D11VIDEODECODER
+                             $<$<BOOL:${PM_HAVE_D3D11_4_H}>:HAVE_D3D11_4_H> $<$<BOOL:${PM_HAVE_DXGI1_6_H}>:HAVE_DXGI1_6_H>)
+  message(STATUS "pushmpc_d3d11: d3d11_4.h ${PM_HAVE_D3D11_4_H}, dxgi1_6.h ${PM_HAVE_DXGI1_6_H}")
+  target_compile_options(pushmpc_d3d11_plugin PRIVATE -Wno-unknown-pragmas -Wno-deprecated-declarations
+    # vlc_threads.h calls poll(), which VLC's own tree declares in its compat layer: Winsock's WSAPoll for the C++ files
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include winsock2.h>" "$<$<COMPILE_LANGUAGE:CXX>:-Dpoll=WSAPoll>")
+  if(VLC_CORE_LIB)
+    target_link_libraries(pushmpc_d3d11_plugin PRIVATE "${VLC_CORE_LIB}")
+  endif()
+  target_link_libraries(pushmpc_d3d11_plugin PRIVATE uuid gdi32 ole32 user32 dxgi d3d11 ws2_32)
+  target_link_options(pushmpc_d3d11_plugin PRIVATE -static -static-libgcc -static-libstdc++)
+
+  # the NIS upscaler on WARP without VLC (CI)
+  add_executable(pm_nis_test display/tests/pm_nis_test.cpp ${D3}/video_output/win32/pm_nis_d3d11.cpp)
+  target_include_directories(pm_nis_test PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/video_output/win32" "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
+  target_compile_definitions(pm_nis_test PRIVATE _WIN32_WINNT=0x0601 COBJMACROS poll=WSAPoll)
+  target_compile_options(pm_nis_test PRIVATE "SHELL:-include winsock2.h")
+  target_link_libraries(pm_nis_test PRIVATE d3d11 dxgi uuid ws2_32)
+  target_link_options(pm_nis_test PRIVATE -static)
 endif()

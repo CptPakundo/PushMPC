@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc']
+    branches: ['track/vlc', 'track/vlc-2']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   workflow_dispatch:
     inputs:
@@ -99,6 +99,10 @@ jobs:
           curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
           echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
           7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk" >/dev/null
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-src, key: vlc-src-3.0.24 }
+      - name: VLC 3.0.24 sources for the Direct3D 11 output fork (release tarball, SHA-256 checked, PushMPC patch applied)
+        run: sh vlcplugin/display/vlc3/fetch-vlc-sources.sh ~/vlc-src
       - name: Cross build (plugin, engine test, CSV test display)
         run: |
           set -eux
@@ -111,10 +115,14 @@ jobs:
             -DVLC_PLUGIN_INCLUDE="$sdk/include/vlc/plugins" -DVLC_CORE_LIB="$lib" -DPM_FETCH_GPU_DEPS=ON
           cmake --build build
           mkdir -p out/win64
-          cp build/libpushmpc_plugin.dll build/pm_engine_test.exe out/win64/
+          cp build/libpushmpc_plugin.dll build/pm_engine_test.exe build/libpushmpc_d3d11_plugin.dll build/pm_nis_test.exe out/win64/
           x86_64-w64-mingw32-gcc-posix -std=gnu11 -O2 -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='"pushdump"' \
             -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushdump_plugin.dll -L"$sdk/lib" -lvlccore -static-libgcc
           x86_64-w64-mingw32-objdump -p out/win64/libpushmpc_plugin.dll | grep -E "DLL Name|vlc_entry"
+          # symbol map of the display fork, to read crash stacks from the test job
+          { x86_64-w64-mingw32-objdump -x build/libpushmpc_d3d11_plugin.dll | grep -E "^ImageBase"; \
+            x86_64-w64-mingw32-nm -n -C build/libpushmpc_d3d11_plugin.dll | grep -iE " [tT] "; } > out/win64/d3d11fork-symbols.txt || true
+          wc -l out/win64/d3d11fork-symbols.txt
       - uses: actions/upload-artifact@v4
         with: { name: plugin-win64, path: out/win64, retention-days: 7 }
 
@@ -210,9 +218,9 @@ jobs:
             VLC=/usr/bin/vlc PLUGDIR=\$d CLIP=art/clips/clip.mkv OUT=res/distro SRC_FRAMES=\$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
             LABEL='${{ matrix.image }} distro VLC' CASES='base x2 x4 x8' bash vlcplugin/tests/run-module.sh" | tee distro.txt
           grep -q '^PASS {"case": "x4"' distro.txt || { echo "::error::x4 failed in ${{ matrix.image }}"; exit 1; }
-
-  # Snap VLC: the wrapper leaves VLC_PLUGIN_PATH alone and runs vlc --config=$SNAP_USER_COMMON/vlcrc;
-  # does the confined VLC load a plugin from ~/snap/vlc/common (AppArmor: mmap-exec allowed there?)
+  # Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so the plugin bank never sees PushMPC. Route: a Lua interface script in
+  # the snap's user Lua folder loads our .so with package.loadlib; its bootstrap checks VLC's module layout against the
+  # exported getters and hands the postproc slot (and one rarely used filter, for pushmpc_out) to PushMPC, or does nothing.
   snap-spike:
     needs: [clips, build-linux]
     runs-on: ubuntu-24.04
@@ -221,25 +229,46 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: art }
-      - name: snap install vlc, plugin in ~/snap/vlc/common, settings in its vlcrc
+      - name: Snap VLC with the Lua bootstrap (VLC's own yuv output counts the frames)
         run: |
           set -u
-          sudo snap install vlc || { echo "::warning::snap install failed"; exit 0; }
-          snap info vlc | grep -E 'installed|base' || true
-          snap run --shell vlc -c 'echo base=$SNAP_NAME rev=$SNAP_REVISION; cat /etc/os-release | head -2; ldd --version | head -1' || true
-          c=~/snap/vlc/common; d=$c/pushmpc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
+          sudo snap install vlc >/dev/null || { echo "::warning::snap install failed"; exit 0; }
+          snap list vlc
+          c=~/snap/vlc/common; mkdir -p $c/pushmpc && cp art/plugin-linux/libpushmpc_plugin.so $c/pushmpc/
+          timeout 60 snap run vlc --version >/dev/null 2>&1 || true    # creates ~/snap/vlc/<revision>
+          rev=$(snap list vlc | awk 'NR==2{print $3}'); lua=~/snap/vlc/$rev/.local/share/vlc/lua/intf
+          mkdir -p $lua && cp vlcplugin/install/snap/pushmpc_boot.lua $lua/ && ls -la ~/snap/vlc/ $lua
+          printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
           cp art/clips/clip.mkv $c/clip.mkv
-          printf '[core]\nvideo-filter=postproc:pushmpc_out\n[pushmpc]\npushmpc-smoother=4\n' > $c/vlcrc
-          echo "--- inside the snap: environment, wrapper, plugin scan"
-          VLC_PLUGIN_PATH="$d" snap run --shell vlc -c 'echo "VLC_PLUGIN_PATH=$VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; command -v vlc; head -40 "$SNAP/bin/vlc-snap-wrapper.sh" 2>/dev/null || ls $SNAP/bin' || true
-          VLC_PLUGIN_PATH="$d" timeout 60 snap run vlc -I dummy -vv --list 2>&1 | grep -iE "pushmpc|pushdump|browsing|cannot load|plugins.dat|entry point|VLC_PLUGIN" | head -20 || true
-          sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -10 || true
-          export VLC=/snap/bin/vlc PLUGDIR="$d" CLIP=$c/clip.mkv OUT=$c/res SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
-                 LABEL="Snap VLC (VLC_PLUGIN_PATH=~/snap/vlc/common/pushmpc)" CASES="base x2 x4 installed" INSTALLED_MULT=4
-          bash vlcplugin/tests/run-module.sh | tee snap.txt
-          grep -hiE "pushmpc|cannot load|denied|apparmor|plugins.dat|browsing" $c/res/x4.log | head -20 || true
-          sudo journalctl -k --no-pager 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -10 || true
-          mkdir -p res && cp -r $c/res res/snap || true
+          mkdir -p res/snap
+          run() { # name, then the vlcrc's [core] lines
+            name=$1; shift
+            printf '[core]\n%s\n' "$@" > $c/vlcrc
+            rm -f $c/$name.y4m
+            timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --avcodec-hw=none --vout=yuv --yuv-yuv4mpeg2 \
+              --yuv-file=$c/$name.y4m $c/clip.mkv > res/snap/$name.log 2>&1 && rc=0 || rc=$?
+            frames=$(grep -a -o FRAME $c/$name.y4m 2>/dev/null | wc -l)
+            echo "== $name: exit $rc frames=$frames"
+            grep -hE "PushMPC|pushmpc|lua|luaintf|postproc|Failed|denied" res/snap/$name.log | sort | uniq -c | head -15
+          }
+          run base 'extraintf='
+          run boot 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
+          PUSHMPC_SNAP_BOOT=0 run boot_off 'extraintf=luaintf' 'lua-intf=pushmpc_boot' 'video-filter=postproc:pushmpc_out'
+          sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | grep -i vlc | tail -5 || true
+          b=$(grep -a -o FRAME $c/base.y4m 2>/dev/null | wc -l); x=$(grep -a -o FRAME $c/boot.y4m 2>/dev/null | wc -l)
+          echo "base $b frames, with the bootstrap $x frames"
+          [ "$x" -ge $((b * 3)) ] && echo "::notice::Snap VLC runs PushMPC (x$((x / (b > 0 ? b : 1))))" || echo "::warning::Snap bootstrap did not multiply frames"
+          echo "--- the installer's snap target: install, play with its settings only (Auto from pushmpc.conf -> smoother 4 here), uninstall"
+          rm -f $c/vlcrc $c/pushmpc/pushmpc.conf ~/snap/vlc/*/.local/share/vlc/lua/intf/pushmpc_boot.lua
+          sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target snap
+          printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
+          cat $c/vlcrc
+          timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --vout=yuv --yuv-yuv4mpeg2 --yuv-file=$c/installed.y4m \
+            $c/clip.mkv > res/snap/installed.log 2>&1 && rc=0 || rc=$?
+          i=$(grep -a -o FRAME $c/installed.y4m 2>/dev/null | wc -l)
+          echo "installed: exit $rc, $i frames"; grep -h "snap boot" res/snap/installed.log || true
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap; cat $c/vlcrc
+          [ "$i" -ge $((b * 3)) ] && echo "::notice::installer snap target: x$((i / (b > 0 ? b : 1)))" || { echo "::error::installer snap target did not run PushMPC"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-snap, path: res, retention-days: 7 }
@@ -278,6 +307,8 @@ jobs:
         with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
       - name: Engine test
         run: art/plugin-win64/pm_engine_test.exe
+      - name: NIS upscaler of the Direct3D 11 output fork, on WARP (no VLC)
+        run: art/plugin-win64/pm_nis_test.exe
       - name: VLC ${{ env.VLC_WIN_VERSION }} (official portable 7z, SHA-256 checked)
         run: |
           set -eu
@@ -294,6 +325,45 @@ jobs:
                  CLIP10=art/clips/clip10.mkv CLIP720=art/clips/clip720.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
                  PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
           bash vlcplugin/tests/run-module.sh
+      - name: The Direct3D 11 output fork in VLC (vout=pushmpc_d3d11 on WARP; software decoding keeps VLC's quad there)
+        run: |
+          set +e -u +o pipefail
+          d="$LOCALAPPDATA/PushMPC/vlc"
+          export VLC_PLUGIN_PATH="$(cygpath -w "$d")"
+          mkdir -p res/windows-d3d11fork
+          # WARP has no video decoder: d3d11va falls back after the output opened (a path real GPUs do not take), so these
+          # runs decode in software; the same runs with VLC's own direct3d11 output are the reference
+          # a crash must not leave a Windows Error Reporting dialog or a stray vlc.exe that blocks the next runs
+          reg add 'HKCU\Software\Microsoft\Windows\Windows Error Reporting' //v DontShowUI //t REG_DWORD //d 1 //f > /dev/null
+          # first, the fork under the SDK's console debugger: on a crash it prints the stack (module + offset; the
+          # build job's d3d11fork-symbols.txt maps the fork's offsets to functions)
+          cdb="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
+          if [ -x "$cdb" ]; then
+            timeout 120 "$cdb" -g -G -c "r; kn 40; lm; q" "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio \
+              --play-and-exit --avcodec-hw=none --vout=pushmpc_d3d11 --pushmpc-d3d11-upscale=linear art/clips/clip720.mkv \
+              > res/windows-d3d11fork/cdb.txt 2>&1
+            grep -nE "^[0-9a-f]{2} |c0000|Access violation|exception|second chance|pushmpc_d3d11|libvlccore|libvlc " res/windows-d3d11fork/cdb.txt | head -60
+            taskkill //F //T //IM vlc.exe > /dev/null 2>&1
+          else echo "no cdb"; fi
+          for vout in direct3d11:- pushmpc_d3d11:linear pushmpc_d3d11:auto pushmpc_d3d11:nis; do
+            v=${vout%%:*}; mode=${vout#*:}; tag=$v-$mode
+            extra=""; [ "$mode" != - ] && extra="--pushmpc-d3d11-upscale=$mode"
+            for flt in none pp; do
+              fargs=""; [ $flt = pp ] && fargs="--video-filter=postproc:pushmpc_out --pushmpc-smoother=2"
+              timeout 60 "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio --play-and-exit --avcodec-hw=none \
+                --file-logging --logfile=res/windows-d3d11fork/$tag-$flt.log --log-verbose=2 --vout=$v $extra $fargs \
+                art/clips/clip720.mkv && rc=0 || rc=$?
+              echo "== $tag $flt: exit $rc"; echo "$tag-$flt $rc" >> res/windows-d3d11fork/rc.txt
+              grep -hE "using vout display module|PushMPC NIS|Using .* scaler|generated=" res/windows-d3d11fork/$tag-$flt.log | sort | uniq -c | head -5
+              [ $rc = 0 ] || tail -4 res/windows-d3d11fork/$tag-$flt.log
+              taskkill //F //T //IM vlc.exe > /dev/null 2>&1; taskkill //F //IM WerFault.exe > /dev/null 2>&1
+            done
+          done
+          cat res/windows-d3d11fork/rc.txt
+          grep -q 'using vout display module "pushmpc_d3d11"' res/windows-d3d11fork/pushmpc_d3d11-auto-none.log || { echo "::error::the fork did not open"; exit 1; }
+          ref=$(sed -n 's/^direct3d11---none //p' res/windows-d3d11fork/rc.txt); bad=""
+          while read -r t r; do case $t in pushmpc_d3d11-*) [ "$r" = 0 ] || [ "$r" = "$ref" ] || { echo "::error::$t exit $r (reference $ref)"; bad=1; } ;; esac; done < res/windows-d3d11fork/rc.txt
+          [ -z "$bad" ] || exit 1
       - name: pushcore through pm_pushcore.dll (the stub core on WARP; 720p)
         run: |
           set -u
