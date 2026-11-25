@@ -6,7 +6,8 @@
 -- mpv's video-target-params describe the display itself (Wayland's colour-management protocol, D3D11, winvk), not the
 -- video: gamma pq/hlg = an HDR output, max-luma = its peak. display-width / display-height give the size. X11 has no
 -- HDR output: target-params stay SDR there, which is right.
--- The values go into the filter's user-data (display_hdr, display_peak, display_width, display_height; any other keys
+-- The values go into the filter's user-data (display_hdr, display_peak, and display_w / display_h, which mpv 0.36+ also
+-- passes as display_res; any other keys
 -- the user put there are kept) and the vf is re-applied only when they change (debounced; mpv reloads the script, the
 -- plugin's engine stays warm). Script options (script-opts=pushmpc-display-...):
 --   enable=yes        no: do nothing
@@ -18,7 +19,7 @@ require("mp.options").read_options(opts, "pushmpc-display")
 if not opts.enable then return end
 
 local msg = require "mp.msg"
-local KEYS = { display_hdr = true, display_peak = true, display_width = true, display_height = true }
+local KEYS = { display_hdr = true, display_peak = true, display_w = true, display_h = true }
 
 -- user-data "k=v,k=v" <-> table (order kept for the keys we do not own)
 local function parse(ud)
@@ -35,7 +36,7 @@ end
 local function join(t, order)
     local out = {}
     for _, k in ipairs(order) do if t[k] ~= nil then out[#out + 1] = k .. "=" .. t[k] end end
-    for _, k in ipairs({ "display_hdr", "display_peak", "display_width", "display_height" }) do
+    for _, k in ipairs({ "display_hdr", "display_peak", "display_w", "display_h" }) do
         local seen = false
         for _, o in ipairs(order) do if o == k then seen = true end end
         if not seen and t[k] ~= nil then out[#out + 1] = k .. "=" .. t[k] end
@@ -52,7 +53,7 @@ local function display()
     local d = { display_hdr = tostring(hdr) }
     if hdr == 1 and tonumber(tp["max-luma"]) and tonumber(tp["max-luma"]) >= 100 then d.display_peak = string.format("%d", math.floor(tonumber(tp["max-luma"]) + 0.5)) end
     local w, h = mp.get_property_number("display-width"), mp.get_property_number("display-height")
-    if w and h and w > 0 and h > 0 then d.display_width = string.format("%d", w); d.display_height = string.format("%d", h) end
+    if w and h and w > 0 and h > 0 then d.display_w = string.format("%d", w); d.display_h = string.format("%d", h) end
     return d
 end
 
@@ -60,7 +61,7 @@ local last = nil
 local function apply()
     local d = display()
     if not d then return end
-    local key = (d.display_hdr or "") .. "/" .. (d.display_peak or "") .. "/" .. (d.display_width or "") .. "x" .. (d.display_height or "")
+    local key = (d.display_hdr or "") .. "/" .. (d.display_peak or "") .. "/" .. (d.display_w or "") .. "x" .. (d.display_h or "")
     if key == last then return end
     local vf = mp.get_property_native("vf")
     if type(vf) ~= "table" then return end
@@ -77,7 +78,7 @@ local function apply()
     last = key
     if changed then
         msg.info("display: HDR " .. d.display_hdr .. (d.display_peak and (", peak " .. d.display_peak .. " cd/m2") or "") ..
-                 (d.display_width and (", " .. d.display_width .. "x" .. d.display_height) or "") .. ": PushMPC's filter updated")
+                 (d.display_w and (", " .. d.display_w .. "x" .. d.display_h) or "") .. ": PushMPC's filter updated")
         mp.set_property_native("vf", vf)
     end
 end

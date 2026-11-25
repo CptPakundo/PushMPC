@@ -1,0 +1,301 @@
+# The portable GPU engine of pushmpc.Enhance (vsplugin/engines/gpu: Vulkan 1.2 compute) on hosted runners:
+#   linux    Mesa lavapipe (a Vulkan driver on the CPU): the shaders compiled by the pinned glslang and compared with
+#            the checked-in SPIR-V; portable_test; gpu_test against the CPU reference with the Khronos validation
+#            layer (no error allowed); the plugin through vspipe on the GPU engine; the quality benchmark on public
+#            clips (Xiph derf 720p50, Blender's Big Buck Bunny 60 fps): PSNR-Y / SSIM-Y (and VMAF when Ubuntu's
+#            ffmpeg has libvmaf) of the GPU engine, the CPU engine, a blend and a repeat; anime-style "on twos" with
+#            and without Dedup; NIS / FSR1 against bilinear; cuts. Timings on lavapipe mean nothing.
+#   windows  MSVC build of the engine, its tests (no Vulkan driver on the runner: gpu_test reports that and the CPU
+#            engine is what runs), gpu_test / gpu_bench / pushmpc_vs.dll as an artifact for a run on a real GPU.
+#   macos    (workflow_dispatch with macos = true only: macOS minutes cost 10x while the repo is private) the same
+#            tests on the runner's Metal device through the pinned MoltenVK.
+# Pins: vsplugin/engines/gpu/gpu-pins.json (SHA-256 checked); the VapourSynth wheel: scripts/vapoursynth-pin.json.
+name: vsplugin-gpu
+
+on:
+  push:
+    paths: ['vsplugin/**', '.github/workflows/vsplugin-gpu.yml']
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'also run the macOS job (Metal through MoltenVK; 10x minutes)'
+        type: boolean
+        default: false
+      bench_frames:
+        description: 'frames per clip in the benchmark'
+        default: '30'
+
+concurrency:
+  group: vsplugin-gpu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PINS: vsplugin/engines/gpu/gpu-pins.json
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages (Mesa lavapipe, the validation layer, ffmpeg)
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mesa-vulkan-drivers vulkan-validationlayers vulkan-tools ffmpeg ninja-build >/dev/null
+          dpkg-query -W mesa-vulkan-drivers vulkan-validationlayers ffmpeg
+          vulkaninfo --summary 2>/dev/null | sed -n '1,40p' || true
+          ffmpeg -hide_banner -filters 2>/dev/null | grep -q libvmaf && echo "HAVE_VMAF=1" >> "$GITHUB_ENV" || echo "ffmpeg has no libvmaf"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pm-gpu-deps
+          key: gpu-deps-linux-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+
+      - name: Pinned deps (Vulkan-Headers, volk, glslang)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          d=~/.cache/pm-gpu-deps; mkdir -p "$d"
+          j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          for n in vulkanHeaders volk; do
+            url=$(j $n url); f="$d/$n.tar.gz"
+            [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$url"
+            echo "$(j $n sha256)  $f" | sha256sum -c -
+            mkdir -p "$d/$n" && tar -xzf "$f" -C "$d/$n" --strip-components=1
+          done
+          url=$(j glslang linux url); sha=$(j glslang linux sha256); f="$d/glslang.tar.gz"
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$url"
+          echo "$sha  $f" | sha256sum -c -
+          mkdir -p "$d/glslang" && tar -xzf "$f" -C "$d/glslang"
+          g=$(find "$d/glslang" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -path "*bin/glslang" | head -1); chmod +x "$g" || true; "$g" --version | head -1
+          echo "VKH=$d/vulkanHeaders" >> "$GITHUB_ENV"; echo "VOLK=$d/volk" >> "$GITHUB_ENV"; echo "GLSLANG=$g" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Pinned VapourSynth wheel (for the plugin and vspipe)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          url=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['linux']['url'])")
+          sha=$(python -c "import json; print(json.load(open('scripts/vapoursynth-pin.json'))['portableCi']['linux']['sha256'])")
+          whl="$RUNNER_TEMP/$(basename "$url")"
+          curl -fsSL --retry 3 -o "$whl" "$url"
+          echo "$(echo "$sha" | tr A-F a-f)  $whl" | sha256sum -c -
+          python -m pip install -q --no-deps "$whl"
+
+      - name: Build (shaders by the pinned glslang, engine, tests, plugin)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cmake -S vsplugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_VULKAN_HEADERS_DIR="$VKH" -DPMVS_VOLK_DIR="$VOLK" -DPMVS_GLSLANG="$GLSLANG"
+          cmake --build build --target portable_test gpu_test gpu_bench pushmpc_vs --parallel
+          ls -la build/spv vsplugin/bin
+
+      - name: The checked-in SPIR-V matches the pinned glslang's
+        run: |
+          bad=0
+          for f in build/spv/*.h; do
+            n=$(basename "$f")
+            if ! cmp -s "$f" "vsplugin/engines/gpu/spv/$n"; then echo "::error::vsplugin/engines/gpu/spv/$n differs from the pinned glslang's output (commit the spv artifact)"; bad=1; fi
+          done
+          echo "SPV_STALE=$bad" >> "$GITHUB_ENV"
+          [ "$bad" = 0 ] || echo "::error::stale SPIR-V: this build used fresh shaders, builds without glslang would not (the job fails at its end)"
+
+      - uses: actions/upload-artifact@v4
+        with: { name: spv, path: build/spv/*.h }
+
+      - name: portable_test
+        timeout-minutes: 5
+        run: build/portable_test
+
+      - name: gpu_test on lavapipe (validation layer on)
+        timeout-minutes: 20
+        env: { PUSHMPC_VK_ALLOW_CPU: '1', PUSHMPC_VK_VALIDATION: '1' }
+        run: build/gpu_test --require
+
+      - name: The plugin through VapourSynth on the GPU engine (Python API and vspipe)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        env: { PUSHMPC_VK_ALLOW_CPU: '1', PUSHMPC_TEST_K: '4' }
+        run: |
+          set -euo pipefail
+          export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_VS_LOG_DIR=$RUNNER_TEMP/vslog
+          python - <<'PY'
+          import os, runpy, vapoursynth as vs
+          k = int(os.environ["PUSHMPC_TEST_K"])
+          runpy.run_path("vsplugin/tests/ci/portable_clip.vpy")
+          clip = vs.get_output(0)
+          clip = clip.clip if hasattr(clip, "clip") else clip
+          print("frames", clip.num_frames, "fps", clip.fps)
+          assert clip.num_frames == 48 * k, clip.num_frames
+          kinds = {}
+          for i in range(clip.num_frames):
+              f = clip.get_frame(i)
+              assert f.props["PushMPCEngine"] in (b"gpu", "gpu"), dict(f.props)
+              assert "_DurationNum" in f.props
+              kinds[f.props["PushMPCFrameKind"]] = kinds.get(f.props["PushMPCFrameKind"], 0) + 1
+          print("python API: all frames from the GPU engine; kinds", kinds)
+          PY
+          vsp=$(command -v vspipe || echo "$(python -c 'import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))')/vspipe")
+          "$vsp" vsplugin/tests/ci/portable_clip.vpy -- > /dev/null
+          cat $RUNNER_TEMP/vslog/*.log | tail -20
+
+      - uses: actions/cache@v4
+        if: ${{ !cancelled() }}
+        with:
+          path: ~/.cache/pm-clips
+          key: bench-clips-v2-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+
+      - name: Public clips (Xiph derf 720p50, Big Buck Bunny 60 fps) and a static ffmpeg with libvmaf
+        if: ${{ !cancelled() }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          c=~/.cache/pm-clips; mkdir -p "$c"
+          j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          # ffmpeg with libvmaf (Ubuntu's has none): BtbN's static GPL build, pinned by SHA-256
+          if [ ! -x "$c/ffmpeg/ffmpeg" ]; then
+            curl -fsSL --retry 3 -o "$c/ffmpeg.tar.xz" "$(j ffmpegVmaf url)" && echo "$(j ffmpegVmaf sha256)  $c/ffmpeg.tar.xz" | sha256sum -c - \
+              && mkdir -p "$c/ffmpeg" && tar -xJf "$c/ffmpeg.tar.xz" -C "$c/ffmpeg" --strip-components=2 --wildcards '*/bin/ffmpeg' || echo "::warning::static ffmpeg not fetched: no VMAF"
+            rm -f "$c/ffmpeg.tar.xz"
+          fi
+          [ -x "$c/ffmpeg/ffmpeg" ] && "$c/ffmpeg/ffmpeg" -hide_banner -filters 2>/dev/null | grep -q libvmaf && echo "VMAF_FFMPEG=$c/ffmpeg/ffmpeg" >> "$GITHUB_ENV" || true
+          # the first 64 frames of each 720p50 Y4M (an HTTP range: one frame is 1382406 bytes)
+          for n in park_joy ducks_take_off in_to_tree old_town_cross; do
+            f="$c/$n.y4m"
+            [ -s "$f" ] || curl -fsSL --retry 3 -r 0-$((64 * 1382406 + 512)) -o "$f" "https://media.xiph.org/video/derf/y4m/${n}_420_720p50.y4m" || echo "::warning::$n not fetched"
+          done
+          # Big Buck Bunny (Blender Foundation, CC-BY 3.0), the 60 fps render: 1.2 s at 720p from 1:40 (CG animation)
+          f="$c/bbb60.y4m"
+          [ -s "$f" ] || ffmpeg -hide_banner -loglevel error -ss 100 -i "http://distribution.bbb3d.renderfarming.net/video/mp4/bbb_sunflower_1080p_60fps_normal.mp4" -frames:v 72 -vf scale=1280:720 -pix_fmt yuv420p -an -f yuv4mpegpipe "$f" || { rm -f "$f"; echo "::warning::bbb not fetched"; }
+          ls -la "$c"
+
+      - name: Quality benchmark
+        if: ${{ !cancelled() }}
+        timeout-minutes: 35
+        env: { PUSHMPC_VK_ALLOW_CPU: '1' }
+        run: |
+          set -uo pipefail
+          c=~/.cache/pm-clips; o=$RUNNER_TEMP/bench; mkdir -p $o/y4m
+          N=${{ github.event.inputs.bench_frames || '30' }}
+          echo "| clip | test | method | PSNR-Y | SSIM-Y | ms | note |" > $o/table.md
+          echo "|---|---|---|---|---|---|---|" >> $o/table.md
+          run() { build/gpu_bench "$@" --csv $o/bench.csv | tee -a $o/log.txt | grep '^|' >> $o/table.md; }
+          clips=""
+          for n in park_joy ducks_take_off in_to_tree old_town_cross bbb60; do [ -s "$c/$n.y4m" ] && clips="$clips $n"; done
+          for n in $clips; do run "$c/$n.y4m" --clip $n --test interp --frames $N --y4m-out $o/y4m; done
+          run synthetic --clip synthetic-zoom --test interp --frames $N --y4m-out $o/y4m
+          [ -s "$c/bbb60.y4m" ] && run "$c/bbb60.y4m" --clip bbb60 --test twos --frames 48
+          run synthetic --clip synthetic-zoom --test twos --frames 40
+          for n in park_joy bbb60; do [ -s "$c/$n.y4m" ] && run "$c/$n.y4m" --clip $n --test upscale --frames 4; done
+          # cuts: every clip's own pairs, and its junction to the first frame of every other clip
+          for a in $clips; do for b in $clips; do [ "$a" = "$b" ] && continue; run "$c/$a.y4m" --clip "$a>$b" --test cuts --frames 16 --cut-with "$c/$b.y4m"; done; done
+          grep '^STAT' $o/log.txt > $o/cutstats.txt || true
+          if [ -n "${VMAF_FFMPEG:-}" ]; then
+            echo "" >> $o/table.md; echo "| clip | method | VMAF |" >> $o/table.md; echo "|---|---|---|" >> $o/table.md
+            for r in $o/y4m/*_ref.y4m; do
+              n=$(basename "$r" _ref.y4m)
+              for d in $o/y4m/${n}_*.y4m; do
+                m=$(basename "$d" .y4m); m=${m#${n}_}; [ "$m" = ref ] && continue
+                v=$("$VMAF_FFMPEG" -hide_banner -i "$d" -i "$r" -lavfi libvmaf -f null - 2>&1 | grep -oE 'VMAF score: [0-9.]+' | grep -oE '[0-9.]+$' || echo "-")
+                echo "| $n | $m | $v |" >> $o/table.md
+              done
+            done
+          fi
+          cat $o/table.md >> "$GITHUB_STEP_SUMMARY"
+          cat $o/table.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-linux
+          path: |
+            ${{ runner.temp }}/bench/table.md
+            ${{ runner.temp }}/bench/bench.csv
+            ${{ runner.temp }}/bench/log.txt
+            ${{ runner.temp }}/bench/cutstats.txt
+
+      - name: Fail on stale SPIR-V
+        if: ${{ !cancelled() && env.SPV_STALE == '1' }}
+        run: exit 1
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/pm-gpu-deps
+          key: gpu-deps-windows-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Pinned deps (Vulkan-Headers, volk, glslang)
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          d=~/pm-gpu-deps; mkdir -p "$d"
+          j() { python -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          for n in vulkanHeaders volk; do
+            f="$d/$n.tar.gz"; [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$(j $n url)"
+            echo "$(j $n sha256)  $f" | sha256sum -c -
+            mkdir -p "$d/$n" && tar -xzf "$f" -C "$d/$n" --strip-components=1
+          done
+          f="$d/glslang.zip"; [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$(j glslang windows url)"
+          echo "$(j glslang windows sha256)  $f" | sha256sum -c -
+          mkdir -p "$d/glslang" && (cd "$d/glslang" && unzip -qo "$f")
+          g=$(find "$d/glslang" -name glslangValidator.exe | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -name glslang.exe | head -1)
+          echo "VKH=$(cygpath -m "$d/vulkanHeaders")" >> "$GITHUB_ENV"; echo "VOLK=$(cygpath -m "$d/volk")" >> "$GITHUB_ENV"; echo "GLSLANG=$(cygpath -m "$g")" >> "$GITHUB_ENV"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          cmake -S vsplugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_VULKAN_HEADERS_DIR="$VKH" -DPMVS_VOLK_DIR="$VOLK" -DPMVS_GLSLANG="$GLSLANG"
+          cmake --build build --target portable_test gpu_test gpu_bench pushmpc_vs --parallel
+      - name: Tests (no Vulkan driver on the runner)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          build/portable_test.exe
+          build/gpu_test.exe --no-timings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-windows
+          path: |
+            build/gpu_test.exe
+            build/gpu_bench.exe
+            vsplugin/bin/pushmpc_vs.dll
+
+  macos:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned deps (Vulkan-Headers, volk, glslang, MoltenVK)
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          d=$RUNNER_TEMP/deps; mkdir -p "$d"
+          j() { python3 -c "import json,sys; v=json.load(open('$PINS')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          for n in vulkanHeaders volk; do curl -fsSL --retry 3 -o "$d/$n.tar.gz" "$(j $n url)"; echo "$(j $n sha256)  $d/$n.tar.gz" | shasum -a 256 -c -; mkdir -p "$d/$n"; tar -xzf "$d/$n.tar.gz" -C "$d/$n" --strip-components=1; done
+          curl -fsSL --retry 3 -o "$d/glslang.tar.gz" "$(j glslang macos url)"; echo "$(j glslang macos sha256)  $d/glslang.tar.gz" | shasum -a 256 -c -
+          mkdir -p "$d/glslang" && tar -xzf "$d/glslang.tar.gz" -C "$d/glslang"
+          curl -fsSL --retry 3 -o "$d/mvk.tar" "$(j moltenvk url)"; echo "$(j moltenvk sha256)  $d/mvk.tar" | shasum -a 256 -c -
+          mkdir -p "$d/mvk" && tar -xf "$d/mvk.tar" -C "$d/mvk"
+          lib=$(find "$d/mvk" -name libMoltenVK.dylib | head -1); echo "MoltenVK: $lib"
+          g=$(find "$d/glslang" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -path "*bin/glslang" | head -1); chmod +x "$g" || true
+          echo "VKH=$d/vulkanHeaders" >> "$GITHUB_ENV"; echo "VOLK=$d/volk" >> "$GITHUB_ENV"; echo "GLSLANG=$g" >> "$GITHUB_ENV"; echo "PUSHMPC_VULKAN_LIBRARY=$lib" >> "$GITHUB_ENV"
+      - name: Build
+        timeout-minutes: 12
+        run: |
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMVS_VULKAN_HEADERS_DIR="$VKH" -DPMVS_VOLK_DIR="$VOLK" -DPMVS_GLSLANG="$GLSLANG"
+          cmake --build build --target portable_test gpu_test gpu_bench --parallel
+      - name: Tests on Metal (MoltenVK)
+        timeout-minutes: 10
+        run: |
+          build/portable_test
+          build/gpu_test --require

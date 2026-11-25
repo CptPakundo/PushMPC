@@ -1,4 +1,4 @@
-# pushmpc_vs: the VapourSynth plugin pushmpc.Enhance (R1 and R3, players-all.md) with its backends, the stub pushcore.dll
+# pushmpc_vs: the VapourSynth plugin pushmpc.Enhance (R1 and R3, internal research notes) with its backends, the stub pushcore.dll
 # for tests and CI, and the tests:
 #   portable_test  every OS: backend selection, the CPU budget, settings.ini and folders, the portable engine on
 #                  synthetic frames (no VapourSynth, no GPU);
@@ -10,7 +10,7 @@
 # The same tree builds with MSVC on Windows, gcc / clang on Linux and clang on macOS:
 #   cmake -S vsplugin -B vsplugin/build -DCMAKE_BUILD_TYPE=Release && cmake --build vsplugin/build && ctest --test-dir vsplugin/build
 cmake_minimum_required(VERSION 3.21)
-project(PushMpcVsPlugin CXX)
+project(PushMpcVsPlugin C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,7 +48,84 @@ target_link_libraries(pmvs_portable PUBLIC pushfps_portable)
 add_executable(portable_test tests/portable_test.cpp)
 set_target_properties(portable_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
 target_link_libraries(portable_test PRIVATE pmvs_portable)
+target_include_directories(portable_test PRIVATE engines/gpu)   # cadence.h (pure C++)
 add_test(NAME portable_test COMMAND portable_test)
+
+# ---- the portable GPU engine (engines/gpu): Vulkan 1.2 compute, the Vulkan library loaded at run time through volk.
+# Needs Vulkan-Headers and volk (PMVS_VULKAN_HEADERS_DIR / PMVS_VOLK_DIR, or -DPMVS_FETCH_GPU_DEPS=ON to fetch the
+# commits engines/gpu/gpu-pins.json pins). Shaders: the checked-in SPIR-V (engines/gpu/spv), or made anew with
+# -DPMVS_GLSLANG=<glslangValidator>. Without the headers the plugin is built with the CPU engine only.
+option(PMVS_GPU "build the portable GPU engine (Vulkan) when its headers are available" ON)
+option(PMVS_FETCH_GPU_DEPS "download the pinned Vulkan-Headers and volk at configure time" OFF)
+set(PMVS_VULKAN_HEADERS_DIR "" CACHE PATH "a Vulkan-Headers checkout (holds include/vulkan/vulkan_core.h)")
+set(PMVS_VOLK_DIR "" CACHE PATH "a volk checkout (holds volk.c, volk.h)")
+set(PMVS_GLSLANG "" CACHE FILEPATH "glslangValidator: compile the shaders at build time")
+set(PMVS_GPU_ON OFF)
+if(PMVS_GPU)
+  file(READ "${CMAKE_SOURCE_DIR}/engines/gpu/gpu-pins.json" _pins)
+  if(PMVS_FETCH_GPU_DEPS AND (NOT PMVS_VULKAN_HEADERS_DIR OR NOT PMVS_VOLK_DIR))
+    include(FetchContent)
+    string(JSON _vh_url GET "${_pins}" vulkanHeaders url)
+    string(JSON _volk_url GET "${_pins}" volk url)
+    string(JSON _vh_sha GET "${_pins}" vulkanHeaders sha256)
+    string(JSON _volk_sha GET "${_pins}" volk sha256)
+    FetchContent_Declare(pm_vulkan_headers URL "${_vh_url}" URL_HASH SHA256=${_vh_sha} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_Declare(pm_volk URL "${_volk_url}" URL_HASH SHA256=${_volk_sha} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_GetProperties(pm_vulkan_headers)
+    if(NOT pm_vulkan_headers_POPULATED)
+      FetchContent_Populate(pm_vulkan_headers)
+    endif()
+    FetchContent_GetProperties(pm_volk)
+    if(NOT pm_volk_POPULATED)
+      FetchContent_Populate(pm_volk)
+    endif()
+    set(PMVS_VULKAN_HEADERS_DIR "${pm_vulkan_headers_SOURCE_DIR}" CACHE PATH "" FORCE)
+    set(PMVS_VOLK_DIR "${pm_volk_SOURCE_DIR}" CACHE PATH "" FORCE)
+  endif()
+  if(EXISTS "${PMVS_VULKAN_HEADERS_DIR}/include/vulkan/vulkan_core.h" AND EXISTS "${PMVS_VOLK_DIR}/volk.c")
+    set(PMVS_GPU_ON ON)
+  else()
+    message(STATUS "portable GPU engine: Vulkan-Headers / volk not found (PMVS_VULKAN_HEADERS_DIR, PMVS_VOLK_DIR or -DPMVS_FETCH_GPU_DEPS=ON): CPU engine only")
+  endif()
+endif()
+if(PMVS_GPU_ON)
+  set(_shaders pyr0 pyrdown dedup me mefinal mad fbcheck interp nis easu rcas pack ofconv)
+  set(_spv_dir "${CMAKE_SOURCE_DIR}/engines/gpu/spv")
+  if(PMVS_GLSLANG)
+    set(_spv_dir "${CMAKE_BINARY_DIR}/spv")
+    file(MAKE_DIRECTORY "${_spv_dir}")
+    configure_file("${CMAKE_SOURCE_DIR}/engines/gpu/spv/spv_all.h" "${_spv_dir}/spv_all.h" COPYONLY)
+    set(_spv_out)
+    foreach(s ${_shaders})
+      add_custom_command(OUTPUT "${_spv_dir}/${s}.h"
+        COMMAND "${PMVS_GLSLANG}" -V --target-env vulkan1.2 -I${CMAKE_SOURCE_DIR}/third_party/nis -I${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr1
+                --vn kSpv_${s} -o "${_spv_dir}/${s}.h" "${s}.comp"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/engines/gpu/shaders"
+        DEPENDS "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/${s}.comp" "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/common.glsl"
+        COMMENT "glslang: ${s}.comp" VERBATIM)
+      list(APPEND _spv_out "${_spv_dir}/${s}.h")
+    endforeach()
+    add_custom_target(pmvs_spv DEPENDS ${_spv_out})
+  endif()
+  add_library(pmvs_gpu STATIC engines/gpu/vk_context.cpp engines/gpu/gpu_engine.cpp engines/gpu/subtitle_hold.cpp "${PFP}/src/CrosshairHold.cpp" "${PMVS_VOLK_DIR}/volk.c")
+  if(TARGET pmvs_spv)
+    add_dependencies(pmvs_gpu pmvs_spv)
+  endif()
+  target_include_directories(pmvs_gpu PUBLIC engines/gpu "${PMVS_VULKAN_HEADERS_DIR}/include" "${PMVS_VOLK_DIR}" third_party/nis PRIVATE "${_spv_dir}")
+  target_compile_definitions(pmvs_gpu PUBLIC PMVS_GPU VK_NO_PROTOTYPES)
+  target_link_libraries(pmvs_gpu PUBLIC pmvs_portable ${CMAKE_DL_LIBS})
+
+  # gpu_test: the GPU engine against the CPU reference on synthetic clips (skips with exit 0 when there is no Vulkan
+  # device, unless --require); gpu_bench: the quality and speed benchmark on Y4M clips (CI and a real GPU)
+  add_executable(gpu_test tests/gpu_test.cpp)
+  add_executable(gpu_bench tests/gpu_bench.cpp)
+  foreach(t gpu_test gpu_bench)
+    set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+    target_link_libraries(${t} PRIVATE pmvs_gpu)
+    target_include_directories(${t} PRIVATE src)
+  endforeach()
+  add_test(NAME gpu_test COMMAND gpu_test)
+endif()
 
 # the Linux NVIDIA backend and its tests (engines/nvidia-linux/nvl.cmake; option PMVS_NVIDIA_LINUX)
 include(engines/nvidia-linux/nvl.cmake)
@@ -89,6 +166,9 @@ if(EXISTS "${VAPOURSYNTH_SDK}/VapourSynth4.h")
     target_sources(pushmpc_vs PRIVATE src/nvidia_linux_vs.cpp)
     target_compile_definitions(pushmpc_vs PRIVATE PMVS_NVIDIA_VFX)
     target_link_libraries(pushmpc_vs PRIVATE pmvs_nvl)
+  endif()
+  if(PMVS_GPU_ON)
+    target_link_libraries(pushmpc_vs PRIVATE pmvs_gpu)
   endif()
   if(WIN32)
     target_include_directories(pushmpc_vs PRIVATE "${PUSHMPC_FILTER_SRC}")

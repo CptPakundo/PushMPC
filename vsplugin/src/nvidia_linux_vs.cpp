@@ -263,7 +263,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     src.hdr = IsHdrTransfer(transfer); src.tenBit = bits > 8;
     Display disp; disp.refreshHz = NArgF(in, a, "display_fps", 0); disp.hdr = NArgI(in, a, "display_hdr", 0) != 0;
     // pushmpc-display.lua: the display's size (UpscaleTarget Screen) and its peak (RTX Video HDR) from mpv
-    const int dispH = int(NArgI(in, a, "display_height", 0));
+    const int dispH = int(NArgI(in, a, "display_h", 0));
     if (s.targetScreen && dispH > 0) s.targetH = TargetForDisplay(dispH);
     const double dispPeak = NArgF(in, a, "display_peak", 0);
     if (!s.hdrPeakSet && dispPeak >= 400) s.hdrPeak = std::min(dispPeak, 2000.0);

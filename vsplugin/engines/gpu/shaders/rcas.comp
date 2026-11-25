@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: AMD FidelityFX Super Resolution 1 RCAS (robust contrast-adaptive sharpening) after EASU,
+// on the luma plane; the unchanged ffx_fsr1.h (FidelityFX SDK 1.1.4, MIT), 32-bit path, with its noise limiter
+// (FSR_RCAS_DENOISE: film grain is not sharpened as much as edges).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;            // texelFetch only
+layout(binding = 1, r16) uniform writeonly image2D dst;
+layout(push_constant) uniform PC { uvec4 con; ivec2 size; } pc;
+
+#define FFX_GPU 1
+#define FFX_GLSL 1
+#define FFX_HALF 0
+#define FSR_RCAS_F 1
+#define FSR_RCAS_DENOISE 1
+#include "ffx_core.h"
+FfxFloat32x4 FsrRcasLoadF(FfxInt32x2 p) { return vec4(texelFetch(src, clamp(p, ivec2(0), pc.size - 1), 0).r); }
+void FsrRcasInputF(inout FfxFloat32 r, inout FfxFloat32 g, inout FfxFloat32 b) {}
+#include "fsr1/ffx_fsr1.h"
+
+void main()
+{
+    uvec2 ip = gl_GlobalInvocationID.xy;
+    if (ip.x >= uint(pc.size.x) || ip.y >= uint(pc.size.y)) return;
+    FfxFloat32 r, g, b;
+    FsrRcasF(r, g, b, ip, pc.con);
+    imageStore(dst, ivec2(ip), vec4(clamp(r, 0.0, 1.0)));
+}
