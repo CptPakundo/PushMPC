@@ -301,7 +301,7 @@ jobs:
       - name: Packages (the distro mpv and FFmpeg)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config gdb
           mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
       - uses: actions/download-artifact@v4
         with:
