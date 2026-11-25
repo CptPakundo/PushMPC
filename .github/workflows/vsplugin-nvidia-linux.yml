@@ -158,6 +158,44 @@ jobs:
             vsplugin/bin/pushmpc_vs.so
             vsplugin/bin/pushmpc-nvvfx-selftest
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvl-kernels-fatbin
+          path: build/nvl_kernels.fatbin
+
+  # Windows on Arm + RTX (RTX Spark): the same engine, the win_arm64 wheel (CUDA 13), the kernels from the Linux job
+  # (their PTX 7.5 is JIT-compiled for SM 12.1 by the driver). No GPU on the runner: build + structure only.
+  winarm64:
+    needs: linux
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: nvl-kernels-fatbin, path: fatbin }
+      - uses: actions/cache@v4
+        with:
+          path: ~/wheels
+          key: nvidia-vfx-wheel-winarm64-${{ hashFiles('scripts/nvidia-vfx-pin.json') }}
+      - name: Pinned win_arm64 runtime (SHA-256 against the pin and the index; pinned files only)
+        shell: bash
+        run: |
+          set -eux
+          w=$(python -I scripts/nvidia-vfx-wheel.py fetch win_arm64 ~/wheels)
+          python -I scripts/nvidia-vfx-wheel.py extract "$w" nvvfx-arm64 win_arm64
+          python -I scripts/nvidia-vfx-wheel.py verify win_arm64 nvvfx-arm64
+      - name: Build (MSVC ARM64) and the structural test
+        shell: bash
+        run: |
+          set -eux
+          cmake -S vsplugin -B build-arm64 -DPMVS_NVIDIA_WINARM64=ON -DPMVS_NVL_FATBIN="$PWD/fatbin/nvl_kernels.fatbin"
+          grep -E "PMVS_NVIDIA_WINARM64:BOOL=ON" build-arm64/CMakeCache.txt
+          cmake --build build-arm64 --config Release --target nvl_test pmvs_nvl pushmpc-nvvfx-selftest nvl_struct_test --parallel
+          ./build-arm64/Release/nvl_test.exe
+          ./build-arm64/Release/nvl_struct_test.exe "$PWD/nvvfx-arm64"
+          set +e; ./vsplugin/bin/Release/pushmpc-nvvfx-selftest.exe --runtime "$PWD/nvvfx-arm64" || ./vsplugin/bin/pushmpc-nvvfx-selftest.exe --runtime "$PWD/nvvfx-arm64"; rc=$?; set -e
+          [ "$rc" = 2 ]
+
   pure:
     strategy:
       fail-fast: false
