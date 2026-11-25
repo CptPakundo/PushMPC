@@ -1,0 +1,295 @@
+# inputstream.pushmpc (PushMPC inside Kodi's own VideoPlayer) on hosted runners:
+#   build    the add-on for Kodi 21 Omega and 22 Piers (each against that release's kodi-dev-kit), Linux and Windows;
+#            cadence_test (timestamps + engine glue, no Kodi)
+#   kodi-*   the real Kodi plays synthetic clips with the add-on installed and analyze.py judges every case from Kodi's
+#            debug log (LOGVIDEO + LOGAVTIMING) and JSON-RPC: Linux = Flathub Kodi (21.3 stable, 22 beta) under Xvfb
+#            with Mesa's software GL; Windows = the official 21.3 / 22.0 RC2 builds, portable mode, on WARP.
+# macOS builds run on manual dispatch only (private-repo minutes).
+name: kodi-addon
+
+on:
+  push:
+    paths: ['kodiaddon/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', '.github/workflows/kodi-addon.yml']
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'also build on macOS'
+        type: boolean
+        default: false
+      cases:
+        description: 'comma-separated case names (empty = all)'
+        type: string
+        default: ''
+
+concurrency:
+  group: kodi-addon-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FFMPEG_VERSION: '8.1'
+  KODI21_TAG: '21.3-Omega'
+  KODI22_TAG: '22.0rc2-Piers'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        kodi: [21, 22]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kodi dev kit (sparse checkout of the release tag)
+        id: devkit
+        shell: bash
+        run: |
+          tag=$([ "${{ matrix.kodi }}" = 21 ] && echo "$KODI21_TAG" || echo "$KODI22_TAG")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$tag" https://github.com/xbmc/xbmc.git "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+          grep -E 'INSTANCE_VERSION_(INPUTSTREAM|VIDEOCODEC) ' "$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include/kodi/versions.h"
+
+      - name: FFmpeg cache
+        id: ffcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-v1
+
+      - name: FFmpeg static (Linux)
+        if: runner.os == 'Linux' && steps.ffcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+          bash kodiaddon/ci/build-ffmpeg.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg"
+
+      - name: FFmpeg shared (Windows, BtbN build)
+        if: runner.os == 'Windows' && steps.ffcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          z="ffmpeg-n${FFMPEG_VERSION}-latest-win64-gpl-shared-${FFMPEG_VERSION}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ff.zip" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$z.zip"
+          sha256sum "$RUNNER_TEMP/ff.zip"
+          7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ff.zip" > /dev/null
+          mv "$RUNNER_TEMP/$z" "$RUNNER_TEMP/ffmpeg"
+          ls "$RUNNER_TEMP/ffmpeg/bin" "$RUNNER_TEMP/ffmpeg/lib" | head -40
+
+      - name: FFmpeg cache save (right away, so a later failure does not lose it)
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-v1
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
+            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
+          cmake --build build --config Release --parallel
+          ls -la build/addon/inputstream.pushmpc
+          cat build/addon/inputstream.pushmpc/addon.xml
+          if [ "$RUNNER_OS" = Linux ]; then
+            f=$(ls build/addon/inputstream.pushmpc/inputstream.pushmpc.so.*)
+            echo "dynamic dependencies:"; readelf -d "$f" | grep NEEDED
+            echo "exported av* symbols (must be 0): $(nm -D --defined-only "$f" | grep -c ' av' || true)"
+          fi
+
+      - name: Unit tests (on Linux the GPU engine runs on lavapipe and is required)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
+          fi
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ runner.os }}-kodi${{ matrix.kodi }}
+          path: build/addon
+
+  kodi-linux:
+    needs: build
+    if: ${{ !cancelled() }}   # each OS runs with its own build even if the other OS's build failed
+    strategy:
+      fail-fast: false
+      matrix:
+        kodi: [21, 22]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: addon-Linux-kodi${{ matrix.kodi }}
+          path: addon
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Flatpak, Xvfb, ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak xvfb ffmpeg dbus-x11 > /dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
+      - name: Kodi from Flathub
+        timeout-minutes: 20
+        run: |
+          if [ "${{ matrix.kodi }}" = 21 ]; then flatpak install --user -y --noninteractive flathub tv.kodi.Kodi//stable > /dev/null; br=stable
+          else flatpak install --user -y --noninteractive flathub-beta tv.kodi.Kodi//beta > /dev/null; br=beta; fi
+          echo "BRANCH=$br" >> "$GITHUB_ENV"
+          flatpak info --user tv.kodi.Kodi//$br
+      - name: Clips
+        run: python3 kodiaddon/ci/gen_clips.py ffmpeg "$RUNNER_TEMP/clips"
+      - name: Play the cases in Kodi
+        run: |
+          home="$HOME/.var/app/tv.kodi.Kodi/data"
+          mkdir -p "$home"
+          xvfb-run -a -s "-screen 0 1280x720x24" dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
+            --kodi "flatpak run --user --branch=$BRANCH --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=x11" --gpu \
+            --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
+            --clips "$RUNNER_TEMP/clips" --major ${{ matrix.kodi }} --out out --cases "${{ inputs.cases }}"
+      - name: Summary
+        if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-linux-${{ matrix.kodi }}-logs
+          path: out
+
+  kodi-windows:
+    needs: build
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        kodi: [21, 22]
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: addon-Windows-kodi${{ matrix.kodi }}
+          path: addon
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Kodi (official build, unpacked; portable mode)
+        shell: bash
+        run: |
+          exe=$([ "${{ matrix.kodi }}" = 21 ] && echo kodi-21.3-Omega-x64.exe || echo kodi-22.0-Piers_rc2-x64.exe)
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.exe" "https://mirrors.kodi.tv/releases/windows/win64/$exe"
+          sha256sum "$RUNNER_TEMP/kodi.exe"
+          7z x -y -o/c/kodi "$RUNNER_TEMP/kodi.exe" > /dev/null
+          rm -rf '/c/kodi/$PLUGINSDIR' '/c/kodi/uninstall.exe'
+          ls /c/kodi | head -50
+          ls /c/kodi/*.dll | head -40
+          mkdir -p /c/kodi/portable_data
+      - name: Clips (BtbN ffmpeg)
+        shell: bash
+        run: |
+          z="ffmpeg-n${FFMPEG_VERSION}-latest-win64-gpl-shared-${FFMPEG_VERSION}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ff.zip" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$z.zip"
+          7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ff.zip" > /dev/null
+          python kodiaddon/ci/gen_clips.py "$RUNNER_TEMP/$z/bin/ffmpeg.exe" "C:/clips"
+      - name: Play the cases in Kodi
+        shell: pwsh
+        run: |
+          python kodiaddon/ci/run_cases.py --kodi "C:\kodi\kodi.exe -p" --kill "taskkill /F /IM kodi.exe" `
+            --home C:\kodi\portable_data --addon addon\inputstream.pushmpc --clips C:\clips --major ${{ matrix.kodi }} `
+            --out out --cases "${{ inputs.cases }}"
+      - name: Summary
+        if: always()
+        shell: bash
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-windows-${{ matrix.kodi }}-logs
+          path: out
+
+  build-android:
+    # Android TV / Fire TV / Shield (arm64-v8a): build and package only. Kodi has no headless Android test path on a
+    # hosted runner yet; the engine is the GPU one (Vulkan, loaded at run time) with the CPU fallback.
+    strategy:
+      fail-fast: false
+      matrix:
+        kodi: [21, 22]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kodi dev kit
+        run: |
+          tag=$([ "${{ matrix.kodi }}" = 21 ] && echo "$KODI21_TAG" || echo "$KODI22_TAG")
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$tag" https://github.com/xbmc/xbmc.git "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+      - uses: actions/cache/restore@v4
+        id: ffcache
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+      - name: FFmpeg static (NDK)
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nasm > /dev/null
+          bash kodiaddon/ci/build-ffmpeg-android.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" "$ANDROID_NDK_LATEST_HOME"
+      - uses: actions/cache/save@v4
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+      - name: Build
+        run: |
+          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
+            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
+          cmake --build build --parallel
+          ls -la build/addon/inputstream.pushmpc
+          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build/addon/inputstream.pushmpc/libinputstream.pushmpc.so | grep NEEDED
+          grep library_android build/addon/inputstream.pushmpc/addon.xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-Android-arm64-kodi${{ matrix.kodi }}
+          path: build/addon
+
+  build-macos:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    strategy:
+      fail-fast: false
+      matrix:
+        kodi: [21, 22]
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kodi dev kit
+        run: |
+          tag=$([ "${{ matrix.kodi }}" = 21 ] && echo "$KODI21_TAG" || echo "$KODI22_TAG")
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$tag" https://github.com/xbmc/xbmc.git "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+      - uses: actions/cache@v4
+        id: ffcache
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-macOS-v1
+      - name: FFmpeg static
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm
+          bash kodiaddon/ci/build-ffmpeg.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" --enable-videotoolbox
+      - name: Build and test
+        run: |
+          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          otool -L build/addon/inputstream.pushmpc/inputstream.pushmpc.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-macOS-kodi${{ matrix.kodi }}
+          path: build/addon
