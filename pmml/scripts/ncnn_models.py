@@ -69,10 +69,13 @@ def main():
             entry = {"file": f"{stem}.ncnn.param", "size": [w, h], "ok": False}
             try:
                 r = subprocess.run([pnnx, f"{stem}.onnx", f"inputshape=[1,7,{h},{w}]"], cwd=work, capture_output=True, text=True, timeout=600)
-                log = (r.stdout + r.stderr)[-3000:]
+                log = r.stdout + r.stderr
+                (out / f"{stem}.pnnx.log").write_text(log, encoding="utf-8")   # the whole log (an artifact): the reason pnnx stops
+                log = "".join(ch for ch in log if ch.isascii())
                 param, binf = work / f"{stem}.ncnn.param", work / f"{stem}.ncnn.bin"
                 if not param.exists():
-                    entry["error"] = "pnnx made no ncnn param: " + log[-800:]
+                    lines = [ln for ln in log.splitlines() if any(k in ln.lower() for k in ("error", "unsupported", "not supported", "fail", "abort", "ignore"))]
+                    entry["error"] = f"pnnx exit {r.returncode}, no ncnn param: " + " | ".join(lines[-12:])[-1200:]
                     raise RuntimeError(entry["error"])
                 shutil.copy2(param, out / param.name)
                 shutil.copy2(binf, out / binf.name)
