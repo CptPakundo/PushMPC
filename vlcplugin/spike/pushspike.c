@@ -320,6 +320,15 @@ static void DumpDisplay(vout_display_t *vd, picture_t *pic, subpicture_t *sub)
             for (int x = 0; x < p->i_visible_pitch; x++)
                 if (p->p_pixels[(size_t)y * p->i_pitch + x] > 128) { sx += x; cnt += 1.0; }
         if (cnt > 0) cx = sx / cnt;
+    } else if (pic->i_planes > 0 && pic->p[0].p_pixels && pic->format.i_chroma == VLC_CODEC_I420_10L) {
+        const plane_t *p = &pic->p[0];   /* 10-bit samples in 16 bits: bright = above 512 */
+        double sx = 0.0, cnt = 0.0;
+        for (int y = 0; y < p->i_visible_lines; y++) {
+            const uint16_t *row = (const uint16_t *)(p->p_pixels + (size_t)y * p->i_pitch);
+            for (int x = 0; x < p->i_visible_pitch / 2; x++)
+                if (row[x] > 512) { sx += x; cnt += 1.0; }
+        }
+        if (cnt > 0) cx = sx / cnt;
     }
     fprintf(sys->f, "%" PRIu64 ",%" PRId64 ",%" PRId64 ",%u,%u,%4.4s,%016" PRIx64 ",%.2f\n", sys->n++, (int64_t)pic->date,
             (int64_t)now, pic->format.i_visible_width, pic->format.i_visible_height,
@@ -355,7 +364,9 @@ static int OpenDump(vlc_object_t *obj)
              vd->fmt.i_visible_width, vd->fmt.i_visible_height);
     free(name);
     fprintf(sys->f, "n,date,shown,w,h,chroma,sum,cx\n");
-    if (!IsCpu8(vd->fmt.i_chroma))
+    if (vd->fmt.i_chroma == VLC_CODEC_VAAPI_420_10BPP || vd->fmt.i_chroma == VLC_CODEC_I420_10L)
+        vd->fmt.i_chroma = VLC_CODEC_I420_10L; /* 10-bit sources stay 10-bit (the hardware-format tests measure them) */
+    else if (!IsCpu8(vd->fmt.i_chroma))
         vd->fmt.i_chroma = VLC_CODEC_I420; /* a CPU format; VLC converts (hardware surfaces are copied back) */
     vd->sys = sys;
     vd->pool = DumpPool;
