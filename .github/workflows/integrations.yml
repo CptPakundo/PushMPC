@@ -423,6 +423,7 @@ jobs:
           echo "--- encode mode"
           mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           cat /tmp/vslog-arch/*.log | head -20
+          echo "::notice title=arch mpv + plugin::$(grep -h 'backend: \|portable: output\|instance closed' /tmp/vslog-arch/*.log 2>/dev/null | head -3 | tr '\n' ' ') $(mpv -v /tmp/clip.mp4 --vo=null --ao=null --frames=1 2>&1 | grep -i 'vapoursynth\]' | tail -1)"
           grep -q 'portable: output YUV.*(x2)' /tmp/vslog-arch/*.log
           n=$(grep -ho 'instance closed after [0-9]*' /tmp/vslog-arch/*.log | head -1 | grep -o '[0-9]*$')
           echo "frames out of the plugin in 3 s of a 30 fps clip: ${n:-?}"; [ "${n:-0}" -ge 150 ] || { echo "::error::expected about 180 frames out (x2), got ${n:-none}"; exit 1; }
@@ -430,7 +431,8 @@ jobs:
           rm $HOME/.config/pushmpc/settings.ini; rmdir $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           snap > /tmp/after.txt
-          diff /tmp/before.txt /tmp/after.txt && echo "HOME restored byte for byte"
+          d=$(diff /tmp/before.txt /tmp/after.txt | tr '\n' ' '); [ -z "$d" ] || { echo "::error title=arch HOME not restored::$d"; exit 1; }
+          echo "HOME restored byte for byte"
       - name: Frontends under Xvfb (Celluloid, Haruna, SMPlayer, MPC-QT) with the installed settings
         timeout-minutes: 8
         run: |
@@ -498,6 +500,7 @@ jobs:
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
             mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv-fedora.txt 2>&1 || true
             grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error|fail' /tmp/mpv-fedora.txt | head -30; tail -n 15 /tmp/mpv-fedora.txt
+            echo "::notice title=fedora mpv::$(grep -i 'vapoursynth\]\|VapourSynth:' /tmp/mpv-fedora.txt /tmp/install.txt | tail -3 | tr '\n' ' ') toml: $(head -c 400 $HOME/.config/vapoursynth/vapoursynth.toml 2>/dev/null | tr '\n' ' ') mpv libs: $(ldd $(command -v mpv) | grep -i vapoursynth | tr '\n' ' ')"
             grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-fedora/*.log | tee -a /tmp/versions.txt
             grep -q 'portable: output YUV' /tmp/vslog-fedora/*.log
           else
@@ -733,6 +736,7 @@ jobs:
           [W.U]::EnumWindows({ param($h, $l) $id = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$id); if ($id -eq $m.Id -and [W.U]::IsWindowVisible($h)) { $sb = [Text.StringBuilder]::new(512); [void][W.U]::GetWindowText($h, $sb, 512); if ($sb.Length) { $titles.Add($sb.ToString()) }
               if ($sb.ToString() -eq 'MPC-HC') { [W.U]::EnumChildWindows($h, { param($c, $x) $cb = [Text.StringBuilder]::new(1024); [void][W.U]::GetWindowText($c, $cb, 1024); if ($cb.Length) { $titles.Add("  dialog text: $($cb.ToString())") }; $true }, [IntPtr]::Zero) | Out-Null } }; $true }, [IntPtr]::Zero) | Out-Null
           "MPC-HC visible windows: $($titles -join ' | ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          Write-Host "::notice title=MPC-HC windows::$($titles -join ' | ')"
           try { $m.Refresh(); "MPC-HC window: '$($m.MainWindowTitle)'; modules: $(((Get-Process -Id $m.Id).Modules | Where-Object { $_.ModuleName -match 'PushMpc|MpcVideoRenderer|LAV' } | ForEach-Object ModuleName) -join ', ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" } catch { "modules: $_" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt" }
           if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           $f = Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue

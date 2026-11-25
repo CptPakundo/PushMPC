@@ -202,7 +202,10 @@ ahead with `--flatpak yes` or `--flatpak no`. A Flathub mpv that PushMPC install
 
 What the installer sets up, each with a backup:
 
-- **mpv** (only when it has VapourSynth): the block in `~/.config/mpv/mpv.conf`.
+- **mpv** (only when it has VapourSynth): the block in `~/.config/mpv/mpv.conf`. With VapourSynth R73 or newer the
+  installer also runs `vapoursynth config`, which tells VapourSynth's script library inside mpv where Python is
+  (`~/.config/vapoursynth/vapoursynth.toml`; without it mpv stops with "Python executable and library path couldn't be
+  determined").
 - **Flathub mpv**: the block in `~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf`, and a Flatpak override that lets it read
   `~/.local/share/pushmpc` (read-only). Its settings file is `~/.var/app/io.mpv.Mpv/config/pushmpc/settings.ini`.
 - **Celluloid:** its "Load mpv configuration file" setting, pointed at `~/.config/mpv/mpv.conf`.
