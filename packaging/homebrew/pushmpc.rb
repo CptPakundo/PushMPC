@@ -59,22 +59,24 @@ class Pushmpc < Formula
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
     libexec.install "integrations/mpv/mpv-integration.sh"
 
-    # Homebrew's mpv (0.41+) dlopen()s libvapoursynth-script.dylib by leaf name, but Homebrew's vapoursynth keeps it
-    # inside its virtualenv, where dyld never looks: mpv's vf=vapoursynth then fails ("Failed to load VapourSynth
+    # Homebrew's mpv (0.41+) dlopen()s the VSScript library (libvsscript.dylib) by leaf name, but Homebrew's
+    # vapoursynth keeps it inside its virtualenv, where dyld never looks: mpv's vf=vapoursynth then fails ("Failed to load VapourSynth
     # VSScript library"). dyld's default fallback path includes ~/lib, so pushmpc-setup links the library there (and
     # takes the link out again), which also works for an mpv started from Finder (no shell environment).
     vs_real = formula_opt_prefix("vapoursynth").realpath
-    vsscript = Dir["#{vs_real}/**/libvapoursynth-script*.{dylib,so}"].min_by(&:length)
+    # VapourSynth R7x+ names it libvsscript (mpv tries libvsscript first, then libvapoursynth-script)
+    vsscript = Dir["#{vs_real}/**/lib{vsscript,vapoursynth-script}.{dylib,so}"].min_by(&:length)
+    opoo "no VSScript library in vapoursynth: #{Dir["#{vs_real}/**/*.{dylib,so}"].join(", ")}" unless vsscript
     vsscript_opt = vsscript ? formula_opt_prefix("vapoursynth")/Pathname(vsscript).relative_path_from(vs_real) : ""
     ohai "VSScript library: #{vsscript_opt}"
     (bin/"pushmpc-setup").write <<~SH
       #!/bin/sh
       # pushmpc-setup [install|uninstall|status] [mpv-integration.sh options]: PushMPC in ~/.config/mpv/mpv.conf, and
-      # (macOS) ~/lib/libvapoursynth-script.dylib -> Homebrew's VSScript library, so Homebrew's mpv finds VapourSynth.
+      # (macOS) ~/lib/<VSScript library> -> Homebrew's, so Homebrew's mpv finds VapourSynth.
       action=${1:-install}
       [ $# -gt 0 ] && shift
       vsscript="#{vsscript_opt}"
-      link="$HOME/lib/libvapoursynth-script.dylib"
+      link="$HOME/lib/$(basename "$vsscript")"
       mark="$HOME/lib/.pushmpc-vsscript-link"
       if [ "$(uname -s)" = Darwin ] && [ -n "$vsscript" ]; then
         case $action in
@@ -95,7 +97,7 @@ class Pushmpc < Formula
     <<~EOS
       To use PushMPC in mpv (and in IINA with "Use config directory" and a VapourSynth-enabled libmpv), run:
         pushmpc-setup install
-      It also links ~/lib/libvapoursynth-script.dylib to Homebrew's VapourSynth: Homebrew's mpv looks for that library
+      It also links Homebrew's VSScript library into ~/lib: Homebrew's mpv looks for that library
       by name and cannot find it inside the vapoursynth formula's virtualenv.
       Before `brew uninstall pushmpc`, run `pushmpc-setup uninstall` (your mpv.conf comes back byte for byte).
       Settings: ~/.config/pushmpc/settings.ini (Smoother=auto|off|2..8, Backend=auto|apple|portable,
