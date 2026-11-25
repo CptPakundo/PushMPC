@@ -1,0 +1,26 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC engine module: an FFmpeg Vulkan frame (NV12 / P010 two-plane, or three-plane YUV 4:2:0) into the GPU
+// engine's source slot (separate R8 / R16 UNORM planes holding code value / maxRaw). P010 keeps its 10 bits in the
+// top of each word (shift 6); the slot holds them at the bottom, as the CPU upload does.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D inY;     // R8 / R16 UNORM view of plane 0
+layout(binding = 1) uniform sampler2D inC1;    // two-plane: RG8 / RG16 (U, V); three-plane: U
+layout(binding = 2) uniform sampler2D inC2;    // three-plane: V (two-plane: unused, bound to inC1)
+layout(binding = 3) uniform writeonly image2D outY;
+layout(binding = 4) uniform writeonly image2D outU;
+layout(binding = 5) uniform writeonly image2D outV;
+layout(push_constant) uniform PC { int w, h, cw, ch, twoPlane, shift; float inScale, outScale; } pc;
+float conv(float x) { uint v = uint(x * pc.inScale + 0.5) >> uint(pc.shift); return float(v) / pc.outScale; }
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x < pc.w && p.y < pc.h) imageStore(outY, p, vec4(conv(texelFetch(inY, p, 0).r)));
+    if (p.x < pc.cw && p.y < pc.ch) {
+        float u, v;
+        if (pc.twoPlane != 0) { vec2 c = texelFetch(inC1, p, 0).rg; u = c.x; v = c.y; }
+        else { u = texelFetch(inC1, p, 0).r; v = texelFetch(inC2, p, 0).r; }
+        imageStore(outU, p, vec4(conv(u)));
+        imageStore(outV, p, vec4(conv(v)));
+    }
+}

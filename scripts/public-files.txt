@@ -73,3 +73,5 @@ pmml/tools/**
 pmml/tests/**
 pmml/scripts/**
 scripts/ml-runtime-pin.json
+kodiaddon/**
+mpvnative/**

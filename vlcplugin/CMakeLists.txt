@@ -77,7 +77,43 @@ if(PM_GPU)
   endif()
 endif()
 
-add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c)
+# zero copy on Linux with the GPU engine: VA-API surfaces as dmabufs into the engine and back (src/pm_dmabuf_vk.cpp). It
+# needs the SPIR-V of src/vk/*.comp: compiled here with -DPM_GLSLANG=<glslangValidator>, or pre-built headers in
+# -DPM_SPV_DIR (CI makes them on the host for the manylinux build). Without them the hardware path copies.
+set(PM_GLSLANG "" CACHE FILEPATH "glslangValidator for src/vk/*.comp")
+set(PM_SPV_DIR "" CACHE PATH "pre-built pm_dmabuf_*.h")
+set(PM_ZEROCOPY OFF)
+if(TARGET pm_engine_gpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(_db_dir "${CMAKE_CURRENT_BINARY_DIR}/gen")
+  if(PM_GLSLANG)
+    file(MAKE_DIRECTORY "${_db_dir}")
+    foreach(_v IN ITEMS in out8 out16)
+      set(_src out)
+      set(_def "")
+      if(_v STREQUAL "in")
+        set(_src in)
+      elseif(_v STREQUAL "out16")
+        set(_def -DB16)
+      endif()
+      execute_process(COMMAND "${PM_GLSLANG}" -V --target-env vulkan1.2 ${_def} --vn kSpv_pm_dmabuf_${_v}
+                      -o "${_db_dir}/pm_dmabuf_${_v}.h" "${CMAKE_CURRENT_SOURCE_DIR}/src/vk/dmabuf_${_src}.comp" RESULT_VARIABLE _r)
+      if(NOT _r EQUAL 0)
+        message(FATAL_ERROR "glslangValidator failed on dmabuf_${_src}.comp (${_v})")
+      endif()
+    endforeach()
+  elseif(PM_SPV_DIR)
+    set(_db_dir "${PM_SPV_DIR}")
+  endif()
+  if(EXISTS "${_db_dir}/pm_dmabuf_in.h" AND EXISTS "${_db_dir}/pm_dmabuf_out8.h" AND EXISTS "${_db_dir}/pm_dmabuf_out16.h")
+    target_sources(pm_engine_portable PRIVATE src/pm_dmabuf_vk.cpp)
+    target_include_directories(pm_engine_portable PRIVATE "${_db_dir}")
+    target_compile_definitions(pm_engine_portable PRIVATE PM_DMABUF)
+    set(PM_ZEROCOPY ON)
+  endif()
+endif()
+message(STATUS "PushMPC VLC: zero copy (VA-API dmabuf -> GPU engine) ${PM_ZEROCOPY}")
+
+add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c src/pm_hw.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
 target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
 target_compile_definitions(pushmpc_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc" _FILE_OFFSET_BITS=64 _REENTRANT _THREAD_SAFE)
@@ -103,6 +139,14 @@ else()
   # without VLC_CORE_LIB (the manylinux2014 release build) libvlccore's symbols stay undefined and resolve from the
   # VLC process at load, as on macOS, so one binary fits every distro's VLC 3.0.x (glibc >= 2.17)
   target_link_libraries(pushmpc_plugin PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# the zero-copy path without VLC: udmabuf surfaces through the GPU engine, compared with the copy path (CI: lavapipe)
+option(PM_DMABUF_TEST "build pm_dmabuf_test (needs a recent glibc and kernel headers: memfd, udmabuf)" OFF)
+if(PM_ZEROCOPY AND PM_DMABUF_TEST)
+  add_executable(pm_dmabuf_test tests/pm_dmabuf_test.c)
+  target_link_libraries(pm_dmabuf_test PRIVATE pm_engine_portable)
+  set_target_properties(pm_dmabuf_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
 # a headless check of the engine through the C interface (no VLC needed)
@@ -190,4 +234,24 @@ if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modul
   if(VLC_CORE_LIB)
     target_link_libraries(pushmpc_gl_plugin PRIVATE "${VLC_CORE_LIB}")
   endif()
+endif()
+
+# ---- macOS: PushMPC's fork of VLC 3.0.24's macOS OpenGL output (macosx.m + the same vout_helper patch as pushmpc_gl):
+# libpushmpc_macosx_plugin.dylib (vout=pushmpc_macosx), FSR 1 upscaling. It takes its window from VLC's macosx interface
+# (or a drawable-nsobject), like VLC's own macosx output.
+if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/macosx.m")
+  enable_language(OBJC)
+  set(MVO "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output")
+  add_library(pushmpc_macosx_plugin SHARED ${MVO}/macosx.m ${MVO}/opengl/vout_helper.c ${MVO}/opengl/fragment_shaders.c
+              ${MVO}/opengl/converter_sw.c ${MVO}/opengl/pm_glscale.c ${MVO}/opengl/pm_compat.c)
+  set_target_properties(pushmpc_macosx_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_macosx_plugin")
+  target_include_directories(pushmpc_macosx_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${MVO}" "${MVO}/opengl" "${MVO}/../../include")
+  # VLCOpenGLVideoView renamed: VLC's own macosx output defines the same Objective-C class in the same process
+  target_compile_definitions(pushmpc_macosx_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_macosx" HAVE_GL_CORE_SYMBOLS
+                             VLCOpenGLVideoView=PushMPCOpenGLVideoView
+                             GL_SILENCE_DEPRECATION "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
+  # strverscmp / sincosf: VLC takes them from its compat layer, which plugins built outside its tree do not have
+  target_compile_options(pushmpc_macosx_plugin PRIVATE -Wno-deprecated-declarations "SHELL:-include ${MVO}/opengl/pm_compat.h")
+  target_link_options(pushmpc_macosx_plugin PRIVATE -undefined dynamic_lookup)
+  target_link_libraries(pushmpc_macosx_plugin PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework QuartzCore")
 endif()

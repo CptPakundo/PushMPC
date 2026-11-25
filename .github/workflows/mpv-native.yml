@@ -1,0 +1,366 @@
+# The native mpv route (track T10): FFmpeg 9.1 + vf_pushmpc + mpv 0.42 built on the runners, the engine module
+# (pushmpc_engine), and headless checks (mpvnative/tests/run-tests.sh):
+#   linux    ubuntu-24.04: Vulkan-Headers, libplacebo, FFmpeg (+ fruc_vulkan), mpv; engine_test; ffmpeg CPU / 10-bit /
+#            Vulkan (lavapipe, copy fallback) / pass-through; mpv encode mode, lavfi graph, display-resample on vo=null;
+#            the portable folder as an artifact
+#   windows  windows-2022: engine + stub pushcore with MSVC, engine_test (D3D11 on WARP); FFmpeg (D3D11VA, Vulkan) and
+#            mpv in MSYS2 UCRT64; the same checks plus D3D11 frames into the stub pushcore; the portable mpv folder
+#   macos    dispatch only (input macos=true): engine + FFmpeg + mpv, CPU checks
+# ccache and the prefixes are cached, so a run that only touches the filter rebuilds one object file.
+name: mpv-native
+
+on:
+  push:
+    branches: ['track/mpv-native', 'track/mpv-native-*']
+    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', '.github/workflows/mpv-native.yml']
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'also run the macOS job'
+        type: boolean
+        default: false
+
+concurrency:
+  group: mpv-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PREFIX: /home/runner/pm-prefix
+      SRC: /home/runner/pm-src
+      CCACHE_DIR: /home/runner/pm-ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential nasm pkg-config meson ninja-build cmake ccache \
+            glslang-tools spirv-headers libvulkan-dev mesa-vulkan-drivers vulkan-tools libshaderc-dev glslang-dev \
+            libass-dev liblua5.2-dev libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libegl-dev libgl-dev libdrm-dev zlib1g-dev python3-jinja2 bc squashfs-tools patchelf
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/pm-ccache
+            /home/runner/pm-src
+            /home/runner/pm-prefix
+          key: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          restore-keys: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
+      - name: Build Vulkan-Headers, libplacebo, FFmpeg + vf_pushmpc, mpv
+        timeout-minutes: 60
+        run: |
+          ccache -z || true
+          bash mpvnative/ci/build-unix.sh "$PREFIX" "$SRC" linux
+          ccache -s | head -12 || true
+      - name: Engine module and engine_test
+        run: |
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
+          cmake --build build-engine --parallel
+          ./build-engine/out/engine_test
+      - name: Public clip (pinned)
+        run: |
+          url=$(python3 -c "import json;print(json.load(open('mpvnative/pins.json'))['clip']['url'])")
+          sha=$(python3 -c "import json;print(json.load(open('mpvnative/pins.json'))['clip']['sha256'])")
+          mkdir -p "$RUNNER_TEMP/t"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/clip.mp4" "$url" || { echo "::warning::clip download failed"; exit 0; }
+          got=$(sha256sum "$RUNNER_TEMP/clip.mp4" | cut -d' ' -f1 | tr a-f A-F)
+          echo "clip sha256 $got"
+          if [ "$sha" = TODO ]; then echo "::notice::clip not pinned yet (sha256 $got): not used"; exit 0; fi
+          [ "$got" = "$(echo "$sha" | tr a-f A-F)" ] || { echo "::error::clip SHA-256 mismatch: $got"; exit 1; }
+          cp "$RUNNER_TEMP/clip.mp4" "$RUNNER_TEMP/t/public.mp4"
+      - name: Headless checks
+        timeout-minutes: 15
+        run: |
+          ls /usr/share/vulkan/icd.d/ || true
+          lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1); [ -n "$lvp" ] && export VK_DRIVER_FILES="$lvp" VK_ICD_FILENAMES="$lvp"
+          export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.so" PUSHMPC_ENGINE_LOG="$RUNNER_TEMP/t/engine.log"
+          export LD_LIBRARY_PATH="$PREFIX/lib"
+          vulkaninfo --summary 2>&1 | grep -iE "deviceName|apiVersion|error" | head -6 || true
+          bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" linux
+      - name: Portable folder (mpv + FFmpeg with vf_pushmpc + engine)
+        if: always()
+        run: |
+          d="$RUNNER_TEMP/PushMPC-mpv-linux"; mkdir -p "$d/bin" "$d/lib"
+          cp "$PREFIX/bin/mpv" "$PREFIX/bin/ffmpeg" "$PREFIX/bin/ffprobe" "$d/bin/" 2>/dev/null || true
+          cp -P "$PREFIX"/lib/lib{avcodec,avdevice,avfilter,avformat,avutil,swresample,swscale,placebo,mpv}*.so* "$d/lib/" 2>/dev/null || true
+          cp build-engine/out/libpushmpc_engine.so "$d/lib/" 2>/dev/null || true
+          cp mpvnative/ci/SOURCES.txt LICENSE "$d/" 2>/dev/null || true
+          ls -la "$d/bin" "$d/lib"
+      - name: AppImage (and a check that it plays through vf_pushmpc)
+        timeout-minutes: 10
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash mpvnative/ci/make-appimage.sh "$PREFIX" build-engine/out/libpushmpc_engine.so "$SRC" "$RUNNER_TEMP/appimage"
+          t="$RUNNER_TEMP/t"
+          n=$(LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv")
+          env -u LD_LIBRARY_PATH -u PUSHMPC_ENGINE APPIMAGE_EXTRACT_AND_RUN=1 "$RUNNER_TEMP/appimage/PushMPC-mpv-x86_64.AppImage" --no-config "$t/clip.mkv" \
+            --vf=pushmpc=smoother=2 --o="$t/appimage.mkv" --of=matroska --ovc=ffv1 --no-audio > "$t/appimage.log" 2>&1 || { tail -20 "$t/appimage.log"; exit 1; }
+          grep -i pushmpc "$t/appimage.log" | head -3
+          LD_LIBRARY_PATH="$PREFIX/lib" python3 mpvnative/tests/check_frames.py "$t/appimage.mkv" $((1 + (n - 1) * 2)) 48000/1001 --ffprobe "$PREFIX/bin/ffprobe" --tolerance 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpvnative-linux
+          path: |
+            ${{ runner.temp }}/PushMPC-mpv-linux
+            ${{ runner.temp }}/appimage
+            ${{ runner.temp }}/t/*.log
+            ${{ runner.temp }}/t/*.txt
+            ${{ runner.temp }}/t/*.png
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Engine module, stub pushcore and engine_test (MSVC, D3D11 on WARP)
+        shell: pwsh
+        run: |
+          # the pinned glslang (gpu-pins.json) for the Vulkan engine's two shaders
+          $pins = Get-Content vsplugin/engines/gpu/gpu-pins.json -Raw | ConvertFrom-Json
+          $zip = Join-Path $env:RUNNER_TEMP 'glslang.zip'
+          Invoke-WebRequest -Uri $pins.glslang.windows.url -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pins.glslang.windows.sha256.ToUpperInvariant()) { throw 'glslang SHA-256 mismatch' }
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'glslang') -Force
+          $g = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'glslang') -Recurse -Filter glslang*.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1).FullName
+          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g"
+          if ($LASTEXITCODE) { throw 'configure' }
+          cmake --build build-engine --config Release --parallel
+          if ($LASTEXITCODE) { throw 'build' }
+          ./build-engine/out/engine_test.exe
+          if ($LASTEXITCODE) { throw 'engine_test failed' }
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: >-
+            make git diffutils bc
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-jinja mingw-w64-ucrt-x86_64-vulkan-loader mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-cross mingw-w64-ucrt-x86_64-spirv-headers mingw-w64-ucrt-x86_64-glslang
+            mingw-w64-ucrt-x86_64-libplacebo mingw-w64-ucrt-x86_64-libass mingw-w64-ucrt-x86_64-luajit
+            mingw-w64-ucrt-x86_64-lcms2 mingw-w64-ucrt-x86_64-libjpeg-turbo mingw-w64-ucrt-x86_64-uchardet mingw-w64-ucrt-x86_64-zlib
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/pm-ccache
+            ${{ runner.temp }}/pm-src
+            ${{ runner.temp }}/pm-prefix
+          key: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          restore-keys: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
+      - name: Build FFmpeg + vf_pushmpc and mpv (MSYS2 UCRT64)
+        shell: msys2 {0}
+        timeout-minutes: 80
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pm-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          ccache -z || true
+          bash mpvnative/ci/build-unix.sh $R/pm-prefix $R/pm-src msys2
+          ccache -s | head -12 || true
+      - name: Portable mpv folder (mpv + our FFmpeg + engine + MinGW runtime DLLs)
+        shell: msys2 {0}
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          d=$R/PushMPC-mpv-windows; rm -rf "$d"; mkdir -p "$d"
+          cp $R/pm-prefix/bin/mpv.exe $R/pm-prefix/bin/mpv.com $R/pm-prefix/bin/ffmpeg.exe $R/pm-prefix/bin/ffprobe.exe $R/pm-prefix/bin/*.dll "$d/"
+          for f in "$d"/*.exe "$d"/*.dll; do ldd "$f" | awk '/\/ucrt64\// {print $3}'; done | sort -u | while read -r dll; do cp -n "$dll" "$d/"; done
+          cp build-engine/out/pushmpc_engine.dll "$d/"
+          cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
+          ls "$d" | head -100; du -sh "$d"
+      - name: Headless checks
+        shell: msys2 {0}
+        timeout-minutes: 20
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          t="$(cygpath -u "$RUNNER_TEMP")/t"; mkdir -p "$t"
+          export PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")" PME_STUB_DIR="$PWD/build-engine/stub"
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine.log"
+          # run from the portable folder (its DLLs), as a user would
+          rm -rf $R/pm-portable-prefix; mkdir -p $R/pm-portable-prefix; cp -r $R/PushMPC-mpv-windows $R/pm-portable-prefix/bin
+          bash mpvnative/tests/run-tests.sh $R/pm-portable-prefix "$t" msys2
+      - name: D3D11 zero-copy filter path on WARP (harness, stub pushcore)
+        shell: msys2 {0}
+        timeout-minutes: 5
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          export PKG_CONFIG_PATH="$R/pm-prefix/lib/pkgconfig"
+          gcc -O2 -Wall mpvnative/tests/d3d11_warp_harness.c -o "$R/d3d11_warp_harness.exe" $(pkg-config --cflags --libs libavfilter libavutil) -ld3d11 -ldxgi -ldxguid -luuid
+          export PATH="$R/PushMPC-mpv-windows:$PATH" PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
+          "$R/d3d11_warp_harness.exe" "$(cygpath -m "$PWD/build-engine/stub")"
+      - name: Setup's entry point (pushmpc-native.ps1) into a temporary folder
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $from = Join-Path $env:RUNNER_TEMP 'PushMPC-mpv-windows'; $dest = Join-Path $env:RUNNER_TEMP 'native-install'
+          Copy-Item mpvnative/install/pushmpc-native.ps1 $from
+          $env:PUSHMPC_ENGINE = ''
+          $r = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') install -From $from -Dest $dest -Opts 'smoother=2' -Hwdec no -Json | ConvertFrom-Json
+          Write-Host "install: $($r | ConvertTo-Json -Compress)"
+          if ($r.state -ne 'installed') { throw 'install failed' }
+          # playback through the installed config (encode mode ignores it): mpv must see the x2 rate
+          $clip = Join-Path $env:RUNNER_TEMP 't\clip12.mkv'
+          & (Join-Path $from 'ffmpeg.exe') -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 $clip
+          Get-Content (Join-Path $dest 'portable_config/mpv.conf') | Write-Host
+          $log = & (Join-Path $dest 'mpv.com') --vo=null --ao=null --vo-null-fps=47.952 "--script=$((Resolve-Path mpvnative/tests/sync.lua).Path)" $clip 2>&1 | Out-String
+          $log -split "`n" | Select-String 'pushmpc' | Select-Object -First 4 | Write-Host
+          if ($log -notmatch 'after-seek: estimated-vf-fps=4[78]\.') { throw 'the installed config did not double the frame rate' }
+          $s = & pwsh -File (Join-Path $from 'pushmpc-native.ps1') status -Dest $dest -Json | ConvertFrom-Json
+          Write-Host "status: $($s | ConvertTo-Json -Compress)"
+          & pwsh -File (Join-Path $from 'pushmpc-native.ps1') uninstall -Dest $dest -Json
+          if (Test-Path $dest) { Get-ChildItem $dest -Recurse | Select-Object -First 10 | Out-String | Write-Host; throw 'uninstall left files behind' }
+      - name: mpv on a window (d3d11 on WARP, hwupload -> pushmpc -> d3d11 interop), best effort
+        shell: msys2 {0}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          stub=$(cygpath -m "$PWD/build-engine/stub"); t="$(cygpath -u "$RUNNER_TEMP")/t"
+          export PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
+          timeout 60 $R/PushMPC-mpv-windows/mpv.com --no-config --vo=gpu-next --gpu-api=d3d11 --d3d11-warp=yes --hwdec=no \
+            "--vf=format=nv12,hwupload,pushmpc=smoother=2:core_dir=[$stub]:display_fps=48" --script="$(cygpath -m mpvnative/tests/sync.lua)" \
+            --msg-level=all=v --loop-file=inf "$t/clip.mkv" > "$t/mpv-window.log" 2>&1
+          grep -iE "pushmpc|pushcore|hwupload|pushmpc-ci|d3d11" "$t/mpv-window.log" | head -30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpvnative-windows
+          path: |
+            ${{ runner.temp }}/PushMPC-mpv-windows
+            ${{ runner.temp }}/t/*.log
+            ${{ runner.temp }}/t/*.txt
+          retention-days: 7
+
+  macos:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      PREFIX: /Users/runner/pm-prefix
+      SRC: /Users/runner/pm-src
+      CCACHE_DIR: /Users/runner/pm-ccache
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: brew install nasm pkgconf meson ninja ccache glslang shaderc spirv-headers molten-vk vulkan-loader libass luajit || true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /Users/runner/pm-ccache
+            /Users/runner/pm-src
+            /Users/runner/pm-prefix
+          key: mpvnative-mac-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          restore-keys: mpvnative-mac-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
+      - name: Build
+        timeout-minutes: 60
+        run: bash mpvnative/ci/build-unix.sh "$PREFIX" "$SRC" macos
+      - name: Engine and checks
+        timeout-minutes: 15
+        run: |
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON && cmake --build build-engine --parallel
+          ./build-engine/out/engine_test
+          export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.dylib" DYLD_LIBRARY_PATH="$PREFIX/lib"
+          bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" macos
+
+  # (b) the runtime hook into an EXISTING mpv: one private libavfilter per FFmpeg branch (6.0 .. 9.1) and architecture,
+  # picked at run time by the system's avfilter_version(); then the distros' own mpv: Ubuntu 24.04 (FFmpeg 6.1),
+  # Debian 13 (7.1), Arch (current).
+  hook-libs:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        # every pinned tag of the branch (point releases can bump the micro version: 7.1 is 10.4.100, 7.1.5 is 10.5.100)
+        branch: [n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CCACHE_DIR: /home/runner/pm-ccache-hook
+      CCACHE_MAXSIZE: 1G
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends build-essential pkg-config ccache patchelf
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/pm-ccache-hook
+          key: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/hook/pushmpc_hook_glue.c', 'mpvnative/pins.json') }}
+          restore-keys: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-
+      - name: Every tag of FFmpeg ${{ matrix.branch }} (pinned) and its private libavfilter
+        run: bash mpvnative/hook/build-hook-branch.sh "${{ matrix.branch }}" "$RUNNER_TEMP/ffmpeg" "$RUNNER_TEMP/hooklib"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-${{ matrix.branch }}
+          path: ${{ runner.temp }}/hooklib/*.so
+          retention-days: 7
+
+  hook:
+    needs: hook-libs
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      CCACHE_DIR: /home/runner/pm-ccache-hook-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages (the distro mpv and FFmpeg)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config gdb
+          mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-*
+          path: ${{ runner.temp }}/hooklibs
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/pm-ccache-hook-test
+          key: mpvnative-hooktest-${{ matrix.runner }}-${{ github.run_id }}
+          restore-keys: mpvnative-hooktest-${{ matrix.runner }}-
+      - name: The hook and the engine module
+        run: |
+          # one file per libavfilter version (two tags of one version give the same build; copied one after another)
+          mkdir -p "$RUNNER_TEMP/hook"
+          for d in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$d"*.so "$RUNNER_TEMP/hook/"; done
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$RUNNER_TEMP/hook/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          cp mpvnative/ci/SOURCES.txt "$RUNNER_TEMP/hook/"
+          ls -la "$RUNNER_TEMP/hook"
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
+          cmake --build build-engine --parallel --target pushmpc_engine
+          cp build-engine/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+      - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
+        run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
+      - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
+        run: sh mpvnative/install/test-install.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-install"
+      - name: Debian 13's mpv (FFmpeg 7.1)
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:trixie sh -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - name: Arch's mpv (current FFmpeg)
+        if: matrix.runner == 'ubuntu-24.04'
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" archlinux:latest sh -c \
+            'pacman -Syu --noconfirm --needed mpv ffmpeg python >/dev/null 2>&1 && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpvnative-hook-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/hook
+            ${{ runner.temp }}/t-*/*.log
+          retention-days: 7

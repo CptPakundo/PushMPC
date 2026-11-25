@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3']
+    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4', 'track/vlc-hwfmt']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
   workflow_call:
@@ -16,9 +16,13 @@ on:
         description: 'Also run the macOS job (10x minutes while the repo is private)'
         type: boolean
         default: false
+      macos_fsr:
+        description: 'macOS FSR output fork: on-screen pixel test in the runner GUI session (dispatch only)'
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -31,8 +35,8 @@ jobs:
     steps:
       - uses: actions/cache@v4
         id: c
-        with: { path: clips, key: vlc-clips-v2 }
-      - name: Synthetic clips (public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps; 8 and 10 bit; 720p)
+        with: { path: clips, key: vlc-clips-v3 }
+      - name: Synthetic clips (public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps; 8 and 10 bit; 720p; hardware-format clips)
         if: steps.c.outputs.cache-hit != 'true'
         run: |
           set -eu
@@ -42,7 +46,11 @@ jobs:
           ffmpeg -hide_banner -loglevel error -filter_complex "$g" -map '[v]' -c:v libx264 -pix_fmt yuv420p -g 48 clips/clip.mkv
           ffmpeg -hide_banner -loglevel error -filter_complex "$g" -map '[v]' -c:v libx264 -profile:v high10 -pix_fmt yuv420p10le -g 48 clips/clip10.mkv
           ffmpeg -hide_banner -loglevel error -filter_complex "${g//320x180/1280x720}" -map '[v]' -c:v libx264 -pix_fmt yuv420p -g 48 clips/clip720.mkv
-          for c in clip clip10 clip720; do ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,pix_fmt -of default=nw=1 clips/$c.mkv > clips/$c.txt; cat clips/$c.txt; done
+          # hardware-format clips: no B-frames (the null drivers draw by decode order), 640x360; H.264 High and HEVC Main 10
+          # (also the installer's hardware self-test clip, pushmpc-selftest.mkv)
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=s=640x360:r=24:d=4 -c:v libx264 -profile:v high -bf 0 -pix_fmt yuv420p -g 48 clips/hwclip.mkv
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=s=640x360:r=24:d=4 -c:v libx265 -pix_fmt yuv420p10le -x265-params bframes=0:log-level=error -g 48 clips/hwclip10.mkv
+          for c in clip clip10 clip720 hwclip hwclip10; do ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,pix_fmt -of default=nw=1 clips/$c.mkv > clips/$c.txt; cat clips/$c.txt; done
       - uses: actions/upload-artifact@v4
         with: { name: clips, path: clips, retention-days: 5 }
 
@@ -53,7 +61,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: VLC 3 plugin headers (Ubuntu's libvlccore-dev, copied out for the build container)
         run: |
-          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y libvlccore-dev mesa-common-dev >/dev/null
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y libvlccore-dev mesa-common-dev glslang-tools >/dev/null
+          # the SPIR-V of the zero-copy shaders (vlcplugin/src/vk), made here for the manylinux build
+          mkdir -p vlcspv
+          glslangValidator -V --target-env vulkan1.2 --vn kSpv_pm_dmabuf_in -o vlcspv/pm_dmabuf_in.h vlcplugin/src/vk/dmabuf_in.comp
+          glslangValidator -V --target-env vulkan1.2 --vn kSpv_pm_dmabuf_out8 -o vlcspv/pm_dmabuf_out8.h vlcplugin/src/vk/dmabuf_out.comp
+          glslangValidator -V --target-env vulkan1.2 -DB16 --vn kSpv_pm_dmabuf_out16 -o vlcspv/pm_dmabuf_out16.h vlcplugin/src/vk/dmabuf_out.comp
           mkdir -p vlcinc && cp -r /usr/include/vlc/plugins/. vlcinc/
           grep -n 'MODULE_SUFFIX' vlcinc/vlc_plugin.h
           # OpenGL headers for the OpenGL output fork (headers only: the fork resolves GL through VLC's provider)
@@ -70,7 +83,7 @@ jobs:
           if grep -q '3_0_0ft64' vlcinc/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
           docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc "
             gcc --version | head -1
-            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON -DPM_GL_INCLUDE=/w/glinc
+            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON -DPM_GL_INCLUDE=/w/glinc -DPM_SPV_DIR=/w/vlcspv
             cmake --build build -j4
             gcc -std=gnu11 -O2 -fPIC -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='\"pushdump\"' -DPM_ALT_ENTRY=$alt \
               -I/w/vlcinc vlcplugin/spike/pushspike.c -o build/libpushdump_plugin.so
@@ -87,6 +100,8 @@ jobs:
             [ "$(printf '%s\n2.27\n' "$v" | sort -V | tail -1)" = 2.27 ] || { echo "::error::$f needs GLIBC_$v (> 2.27)"; exit 1; }
             ! objdump -T "$f" | grep -q 'GLIBCXX\|CXXABI' || { echo "::error::$f depends on the system libstdc++"; exit 1; }
           done
+          nm -C out/linux/libpushmpc_plugin.so | grep -q "pmdb::DmabufIO::Init" && echo "zero copy (VA-API dmabuf -> GPU engine) built in" \
+            || { echo "::error::the zero-copy path is not in the build"; exit 1; }
       - uses: actions/upload-artifact@v4
         with: { name: plugin-linux, path: out/linux, retention-days: 7 }
 
@@ -232,13 +247,111 @@ jobs:
             VLC=/usr/bin/vlc PLUGDIR=\$d CLIP=art/clips/clip.mkv OUT=res/distro SRC_FRAMES=\$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
             LABEL='${{ matrix.image }} distro VLC' CASES='base x2 x4 x8' bash vlcplugin/tests/run-module.sh" | tee distro.txt
           grep -q '^PASS {"case": "x4"' distro.txt || { echo "::error::x4 failed in ${{ matrix.image }}"; exit 1; }
+  # The hardware-format path (VA-API / VDPAU pictures kept on the GPU) without a GPU: PushMPC's null drivers
+  # (vlcplugin/tests/fakehw) decode by drawing a moving box, VLC's own VA-API (DRM) and VDPAU decoders use them, and
+  # the CSV display measures where the box is in every shown frame. Quirk switches reproduce what real drivers differ in;
+  # drivers that lose uploads must make PushMPC fall back to pass-through. Then the installer's self-test, both ways.
+  test-hw:
+    needs: [clips, build-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: VLC, Xvfb, libva / libvdpau headers; a DRM render node from vgem (VLC's VA-API DRM decoder opens one)
+        run: |
+          set -u
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base vlc-plugin-video-output xvfb \
+            libva-dev libvdpau-dev libx11-dev vainfo >/dev/null
+          echo "kernel $(uname -r)"; ls -l /dev/dri 2>&1 || true
+          sudo modprobe vgem 2>/dev/null || { sudo apt-get -qq install -y "linux-modules-extra-$(uname -r)" >/dev/null 2>&1; sudo modprobe vgem; } \
+            || echo "::warning::vgem not available"
+          # /dev/udmabuf: the null VA-API driver's surfaces export as dmabufs through it (zero copy, GL interop)
+          sudo modprobe udmabuf 2>/dev/null || echo "::warning::udmabuf not available"
+          sudo udevadm settle || true; sleep 2; sudo chmod 666 /dev/dri/renderD* /dev/dri/card* /dev/udmabuf 2>/dev/null; ls -l /dev/dri /dev/udmabuf
+          find /usr/lib/x86_64-linux-gnu/vlc \( -name '*vaapi*' -o -name '*vdpau*' \) | sort
+      - name: Null VA-API and VDPAU drivers; the module's libva declarations against <va/va.h>
+        run: |
+          set -eux
+          mkdir -p fakehw
+          gcc -std=gnu11 -O2 -Wall -fPIC -shared -o fakehw/pmnull_drv_video.so vlcplugin/tests/fakehw/pmnull_drv_video.c -lpthread
+          gcc -std=gnu11 -O2 -Wall -fPIC -shared -o fakehw/libvdpau_pmnull.so.1 vlcplugin/tests/fakehw/pmnull_vdpau.c -lpthread
+          gcc -std=gnu11 -Wall -o fakehw/layout vlcplugin/tests/fakehw/pm_va_layout_check.c && fakehw/layout
+          nm -D fakehw/pmnull_drv_video.so | grep vaDriverInit
+          sudo chmod 666 /dev/dri/renderD128; ls -l /dev/dri
+          LIBVA_DRIVERS_PATH=$PWD/fakehw LIBVA_DRIVER_NAME=pmnull vainfo --display drm --device /dev/dri/renderD128 || true
+      - name: Zero copy without VLC (pm_dmabuf_test; udmabuf surfaces through the GPU engine on lavapipe vs the copy path)
+        if: always()
+        run: |
+          set -u
+          sudo apt-get -qq install -y --no-install-recommends libvlccore-dev glslang-tools mesa-vulkan-drivers ninja-build >/dev/null
+          cmake -S vlcplugin -B dbt -G Ninja -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/usr/include/vlc/plugins \
+            -DPM_FETCH_GPU_DEPS=ON -DPM_GLSLANG="$(command -v glslangValidator)" -DPM_DMABUF_TEST=ON > dbt.log 2>&1 \
+            && cmake --build dbt --target pm_dmabuf_test >> dbt.log 2>&1 || { tail -40 dbt.log; echo "::error::pm_dmabuf_test build failed"; exit 1; }
+          grep "zero copy" dbt.log
+          vulkaninfo --summary 2>/dev/null | grep -iE "deviceName|driverInfo|apiVersion" | head -4 || true
+          PUSHMPC_VK_ALLOW_CPU=1 ./dbt/pm_dmabuf_test && r=0 || r=$?
+          echo "pm_dmabuf_test: exit $r"
+          [ $r = 3 ] && echo "::warning::Ubuntu 24.04's lavapipe cannot import dmabufs here: zero copy is verified in the Debian 13 container"
+          [ $r = 1 ] && { echo "::error::zero copy differs from the copy path"; exit 1; }
+          PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VK_NO_DMABUF=1 ./dbt/pm_dmabuf_test --expect-unavailable
+      - name: VDPAU cases (Ubuntu 24.04's VLC 3.0.20 decodes through VDPAU; it ships no VA-API decoder module)
+        run: |
+          d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
+          export VLC=$(command -v vlc) PLUGDIR="$d" FAKEHW=$PWD/fakehw CLIP=art/clips/hwclip.mkv \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip.txt) OUT=res/hw VDPAU=1 \
+                 CASES="vdp_base vdp_x4 vdp_x4_sync vdp_noput_x4 vdp_broken_x4" \
+                 LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin), null VDPAU driver"
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-hw.sh
+      - name: Installer hardware self-test through VDPAU (passes on the working driver, keeps software decoding on a broken one)
+        if: always()
+        run: |
+          set -eu
+          export VDPAU_DRIVER=pmnull VDPAU_DRIVER_PATH=$PWD/fakehw
+          d=~/.local/share/pushmpc/vlc; st=$d/hw-selftest.txt; rc=~/.config/vlc/vlcrc
+          rm -rf "$d"; mkdir -p ~/.config/vlc && printf '[core]\nvideo-filter=adjust\n[avcodec]\n#avcodec-hw=any\n' > $rc
+          cp $rc /tmp/vlcrc.before
+          echo "--- install under Xvfb: no GL interop on llvmpipe (no GL_NV_vdpau_interop), the VDPAU decoder tier passes -> avcodec-hw=vdpau"
+          xvfb-run -a sh vlcplugin/install/pushmpc-vlc.sh install --plugin art/plugin-linux/libpushmpc_plugin.so --target native --clip art/clips/hwclip.mkv
+          cat $rc; cat $st
+          grep -q '^ok direct vdpau' $st || { echo "::error::VDPAU self-test did not pass"; tail -30 $d/pushmpc-selftest.log; exit 1; }
+          grep -q '^avcodec-hw=vdpau$' $rc || { echo "::error::avcodec-hw is not vdpau after the decoder tier passed"; exit 1; }
+          echo "--- a driver that loses uploads: the self-test fails, software decoding comes back"
+          PMNULL_BROKEN=1 xvfb-run -a sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
+          cat $st; grep -q '^failed' $st && grep -q '^avcodec-hw=none' $rc || { echo "::error::broken driver not caught"; exit 1; }
+          echo "--- no X (no VDPAU) and no VA-API decoder: nothing proven, software decoding stays"
+          sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip art/clips/hwclip.mkv
+          cat $st; grep -q '^failed' $st && grep -q '^avcodec-hw=none' $rc || { echo "::error::no-decoder case changed settings"; exit 1; }
+          echo "--- no clip: skipped"
+          sh vlcplugin/install/pushmpc-vlc.sh selftest-hw --target native --clip /nonexistent.mkv
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target native
+          cat $rc
+          diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' $rc | grep .) && echo "vlcrc restored (active settings)"
+          [ ! -e $st ] && echo "state removed"
+      - name: VA-API in distro VLCs with a VA-API decoder (Debian 12 all DRM cases + headless self-test; Debian 13 zero copy + fallback tier; Debian 13 + backports Mesa GL interop, required; Ubuntu 22.04 3.0.16)
+        if: always()
+        run: |
+          set -u; bad=0; sudo chmod 666 /dev/dri/renderD128 /dev/udmabuf 2>/dev/null
+          dev="--device /dev/dri/renderD128"; [ -e /dev/udmabuf ] && dev="$dev --device /dev/udmabuf"
+          for im in debian:12=full debian:13=desktop debian:13=interop ubuntu:22.04=subset; do
+            img=${im%=*}; mode=${im#*=}; l=$(echo "$img" | tr -d ':.'); [ "$mode" = interop ] && l="$l-interop"
+            docker run --rm $dev -v "$PWD":/w -w /w "$img" bash vlcplugin/tests/run-hw-distro.sh "$l" $mode || bad=1
+            cat res/hw-$l/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          done
+          exit $bad
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-hw, path: res, retention-days: 7 }
+
   # Snap VLC: the wrapper unsets VLC_PLUGIN_PATH, so the plugin bank never sees PushMPC. Route: a Lua interface script in
   # the snap's user Lua folder loads our .so with package.loadlib; its bootstrap checks VLC's module layout against the
   # exported getters and hands the postproc slot (and one rarely used filter, for pushmpc_out) to PushMPC, or does nothing.
   snap-spike:
     needs: [clips, build-linux]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -283,6 +396,54 @@ jobs:
           echo "installed: exit $rc, $i frames"; grep -h "snap boot" res/snap/installed.log || true
           sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap; cat $c/vlcrc
           [ "$i" -ge $((b * 3)) ] && echo "::notice::installer snap target: x$((i / (b > 0 ? b : 1)))" || { echo "::error::installer snap target did not run PushMPC"; exit 1; }
+      - name: Snap VLC with hardware decoding through the null drivers (VA-API by environment; VDPAU through the bootstrap's test hook)
+        if: always()
+        run: |
+          set -u
+          snap list vlc >/dev/null 2>&1 || { echo "::warning::no snap VLC"; exit 0; }
+          sudo apt-get -qq install -y --no-install-recommends libva-dev libvdpau-dev libx11-dev xvfb >/dev/null
+          sudo modprobe vgem 2>/dev/null || { sudo apt-get -qq install -y "linux-modules-extra-$(uname -r)" >/dev/null 2>&1; sudo modprobe vgem; } || true
+          sudo modprobe udmabuf 2>/dev/null || true
+          # the snap's device cgroup (opengl interface) takes render nodes udev has tagged
+          sudo udevadm trigger --subsystem-match=drm --action=change; sudo udevadm settle || true
+          sudo chmod 666 /dev/dri/renderD* /dev/udmabuf 2>/dev/null; ls -l /dev/dri /dev/udmabuf 2>&1
+          echo "--- the snap's hardware decoders and GL converters"
+          find /snap/vlc/current/ \( -name '*vaapi*' -o -name '*vdpau*' -o -name 'libglconv*' \) 2>/dev/null | sed 's|.*/||' | sort | tr '\n' ' '; echo
+          echo "--- what the launch chain does with the drivers' variables"
+          LIBVA_DRIVERS_PATH=/pm-test VDPAU_DRIVER_PATH=/pm-test timeout 60 snap run --shell vlc -c 'env | grep -E "^(LIBVA|VDPAU)"' || true
+          c=~/snap/vlc/common; mkdir -p $c/pmnull $c/pushmpc res/snap
+          gcc -std=gnu11 -O2 -fPIC -shared -o $c/pmnull/pmnull_drv_video.so vlcplugin/tests/fakehw/pmnull_drv_video.c -lpthread
+          gcc -std=gnu11 -O2 -fPIC -shared -o $c/pmnull/libvdpau_pmnull.so.1 vlcplugin/tests/fakehw/pmnull_vdpau.c -lpthread
+          # PushMPC through the Lua bootstrap again (the installer test above removed it)
+          cp art/plugin-linux/libpushmpc_plugin.so $c/pushmpc/
+          rev=$(snap list vlc | awk 'NR==2{print $3}'); lua=~/snap/vlc/$rev/.local/share/vlc/lua/intf
+          mkdir -p $lua && cp vlcplugin/install/snap/pushmpc_boot.lua $lua/
+          printf 'smoother=4\n' > $c/pushmpc/pushmpc.conf
+          printf '[core]\nextraintf=luaintf\nlua-intf=pushmpc_boot\nvideo-filter=postproc:pushmpc_out\n' > $c/vlcrc
+          cp art/clips/hwclip.mkv $c/hwclip.mkv
+          S=$(sed -n 's/nb_read_frames=//p' art/clips/hwclip.txt)
+          Xvfb :99 -ac -screen 0 1280x720x24 >/dev/null 2>&1 &
+          sleep 2
+          bad=0
+          case_hw() { # name hw expect mult env...
+            name=$1; hw=$2; expect=$3; mult=$4; shift 4
+            rm -f $c/$name.y4m
+            env "$@" timeout 90 snap run vlc -I dummy --no-audio --play-and-exit -vv --avcodec-hw=$hw --vout=yuv --yuv-yuv4mpeg2 \
+              --yuv-file=$c/$name.y4m $c/hwclip.mkv > res/snap/$name.log 2>&1 && rc=0 || rc=$?
+            echo "== $name: exit $rc"
+            grep -hE "for hardware decoding|PushMPC|snap boot|hw decoder|Failed" res/snap/$name.log | sort | uniq -c | head -10
+            [ -s $c/$name.y4m ] && python3 vlcplugin/tests/y4mcx.py $c/$name.y4m res/snap/$name.csv
+            python3 vlcplugin/tests/hwcheck.py $name res/snap/$name.csv res/snap/$name.log --expect $expect --mult $mult --src-frames $S || bad=1
+          }
+          VA="LIBVA_DRIVERS_PATH=$c/pmnull LIBVA_DRIVER_NAME=pmnull"
+          # shellcheck disable=SC2086
+          case_hw snap_va_base   vaapi_drm base 1 $VA PUSHMPC_SNAP_BOOT=0
+          case_hw snap_va_x4     vaapi_drm hw   4 $VA
+          case_hw snap_va_broken vaapi_drm pass 4 $VA PMNULL_BROKEN=1
+          VD="DISPLAY=:99 VDPAU_DRIVER=pmnull PUSHMPC_TEST_VDPAU_DRIVER_PATH=$c/pmnull"
+          case_hw snap_vdp_x4    vdpau     hw   4 $VD
+          rm -f $c/vlcrc $c/pushmpc/pushmpc.conf $lua/pushmpc_boot.lua
+          exit $bad
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-snap, path: res, retention-days: 7 }
@@ -466,3 +627,42 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-macos, path: res, retention-days: 7 }
+
+  # dispatch only: PushMPC's macOS OpenGL output fork (pushmpc_macosx, FSR 1) against VLC's macosx output on the screen of
+  # the runner's logged-in GUI session
+  macos-fsr:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_fsr
+    runs-on: macos-15   # macos-14 is retired ("not supported")
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-src, key: vlc-src-3.0.24 }
+      - name: VLC.app (cask), the VLC 3 plugin headers (official SDK) and the VLC 3.0.24 sources (tarball, SHA-256 checked)
+        run: |
+          set -eu
+          brew install --cask vlc >/dev/null
+          brew install p7zip ninja >/dev/null 2>&1 || true
+          mkdir -p ~/vlc-dl && cd ~/vlc-dl
+          f=vlc-${VLC_WIN_VERSION}-win64.7z
+          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64/$f"
+          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk/include" >/dev/null
+          cd "$GITHUB_WORKSPACE" && sh vlcplugin/display/vlc3/fetch-vlc-sources.sh ~/vlc-src
+      - name: Build pushmpc_macosx
+        run: |
+          set -eux
+          inc="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins"
+          cmake -S vlcplugin -B build -G Ninja -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DVLC_PLUGIN_INCLUDE="$inc"
+          cmake --build build --target pushmpc_macosx_plugin
+          mkdir -p out/mac && cp build/libpushmpc_macosx_plugin.dylib out/mac/ && codesign -s - -f out/mac/*.dylib
+          lipo -info out/mac/libpushmpc_macosx_plugin.dylib; file /Applications/VLC.app/Contents/MacOS/VLC
+      - name: On-screen pixel test (pushmpc_macosx off / FSR against VLC's macosx output)
+        run: |
+          d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
+          system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Resolution|Display Type" || true
+          VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" OUT=res/mac-pixel bash vlcplugin/display/tests/mac_pixel_test.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-macos-fsr, path: res, retention-days: 7 }

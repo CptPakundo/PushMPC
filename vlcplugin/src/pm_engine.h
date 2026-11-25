@@ -68,6 +68,23 @@ const char *pm_engine_name(const pm_engine *e);
 int pm_engine_decide_k(int smoother, double src_fps, double display_hz, int width, int height, int bits, int threads,
                        int quality, char *why, size_t whysize);
 
+/* ---- zero copy (Linux): a VA-API surface exported as a dmabuf (DRM PRIME 2, separate layers) goes straight into the GPU
+ * engine, and a generated frame straight into one (pm_dmabuf_vk.cpp: VK_EXT_external_memory_dma_buf +
+ * VK_EXT_image_drm_format_modifier, any modifier the driver can import). The caller keeps the fds (the engine dups
+ * what it imports). Without the GPU engine or the driver support, pm_engine_dmabuf_ok says why and the caller copies. */
+typedef struct pm_dmabuf {
+    int width, height, bits;            /* the picture (visible) size, from the surface origin; 8 (NV12) or 10 (P010) */
+    int nobjects;
+    int fd[4];
+    uint64_t size[4], modifier[4];
+    int nlayers;                        /* 2: luma (DRM R8 / R16), chroma (GR88 / GR1616), one plane each */
+    struct { uint32_t drm_format; int object; uint32_t offset, pitch; } layer[2];
+} pm_dmabuf;
+int pm_engine_dmabuf_ok(const pm_engine *e, const char **why);
+int pm_engine_push_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, char *err, size_t errsize);
+/* the frame at phase t of the current pair into dst (written and finished when this returns). 0 = ok */
+int pm_engine_generate_dmabuf(pm_engine *e, float t, const pm_dmabuf *dst, char *err, size_t errsize);
+
 #ifdef __cplusplus
 }
 #endif

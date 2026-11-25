@@ -1,0 +1,12 @@
+PushMPC mpv build: what is inside and where its source is.
+
+All components are free software; the build uses no --enable-nonfree option and no proprietary library.
+  mpv 0.42.0                  GPL-2.0-or-later   https://github.com/mpv-player/mpv (tag v0.42.0)
+  FFmpeg 9.1 + vf_pushmpc     GPL-3.0-or-later   https://git.ffmpeg.org/ffmpeg.git (tag n9.1), configured with
+                              --enable-gpl --enable-version3; vf_pushmpc.c and the patch script are in this
+                              repository under mpvnative/ffmpeg
+  libplacebo 7.387.0          LGPL-2.1-or-later  https://code.videolan.org/videolan/libplacebo (when built here)
+  pushmpc_engine              GPL-3.0-or-later   this repository, mpvnative/engine (PushFPS portable core: GPL-3)
+  Windows: MinGW-w64 runtime and MSYS2 UCRT64 libraries (libass, freetype, harfbuzz, fribidi, luajit, zlib, lcms2,
+  shaderc, spirv-cross, vulkan-loader, ...) under their own free licences; sources at https://packages.msys2.org
+The exact commits are pinned in mpvnative/pins.json; the build script is mpvnative/ci/build-unix.sh.

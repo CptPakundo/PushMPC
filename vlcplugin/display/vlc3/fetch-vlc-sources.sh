@@ -46,7 +46,8 @@ modules/video_output/opengl/display.c
 modules/video_output/opengl/fragment_shaders.c
 modules/video_output/opengl/internal.h
 modules/video_output/opengl/vout_helper.c
-modules/video_output/opengl/vout_helper.h"
+modules/video_output/opengl/vout_helper.h
+modules/video_output/macosx.m"
 list=""
 for f in $files; do list="$list vlc-$ver/$f"; done
 # shellcheck disable=SC2086
@@ -54,4 +55,5 @@ tar -xJf "$tar" -C "$here" --strip-components=1 $list
 cd "$here"
 patch -p1 --forward < pushmpc-vlc-3.0.24.patch
 patch -p1 --forward < pushmpc-vlc-3.0.24-gl.patch
+patch -p1 --forward < pushmpc-vlc-3.0.24-macosx.patch
 echo "VLC $ver sources in $here/modules, PushMPC's patch applied"

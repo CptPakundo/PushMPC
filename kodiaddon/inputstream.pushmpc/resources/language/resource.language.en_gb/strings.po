@@ -1,0 +1,156 @@
+# Kodi Media Center language file
+# Addon id: inputstream.pushmpc
+msgid ""
+msgstr ""
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgctxt "#30000"
+msgid "PushMPC"
+msgstr ""
+
+msgctxt "#30001"
+msgid "Enhance local video files"
+msgstr ""
+
+msgctxt "#30002"
+msgid "Smoother (frame generation)"
+msgstr ""
+
+msgctxt "#30003"
+msgid "Quality"
+msgstr ""
+
+msgctxt "#30004"
+msgid "Enhance HDR video too (Kodi 22 and later)"
+msgstr ""
+
+msgctxt "#30005"
+msgid "Advanced"
+msgstr ""
+
+msgctxt "#30006"
+msgid "Upscaling"
+msgstr ""
+
+msgctxt "#30007"
+msgid "Display refresh rate (0 = detect)"
+msgstr ""
+
+msgctxt "#30008"
+msgid "CPU threads (0 = automatic)"
+msgstr ""
+
+msgctxt "#30010"
+msgid "Auto (match the display)"
+msgstr ""
+
+msgctxt "#30011"
+msgid "Off"
+msgstr ""
+
+msgctxt "#30012"
+msgid "x2"
+msgstr ""
+
+msgctxt "#30013"
+msgid "x3"
+msgstr ""
+
+msgctxt "#30014"
+msgid "x4"
+msgstr ""
+
+msgctxt "#30015"
+msgid "x5"
+msgstr ""
+
+msgctxt "#30016"
+msgid "x6"
+msgstr ""
+
+msgctxt "#30017"
+msgid "x8"
+msgstr ""
+
+msgctxt "#30018"
+msgid "x10"
+msgstr ""
+
+msgctxt "#30020"
+msgid "Fast"
+msgstr ""
+
+msgctxt "#30021"
+msgid "Balanced"
+msgstr ""
+
+msgctxt "#30030"
+msgid "Kodi's video scaler (on Windows it can use RTX / Intel Video Super Resolution)"
+msgstr ""
+
+msgctxt "#30031"
+msgid "x2 in PushMPC (test)"
+msgstr ""
+
+msgctxt "#30101"
+msgid "Off: Kodi plays files exactly as without PushMPC."
+msgstr ""
+
+msgctxt "#30102"
+msgid "Auto picks the largest multiplier the display can show and this machine can compute in time."
+msgstr ""
+
+msgctxt "#30103"
+msgid "Balanced looks better; Fast needs less CPU."
+msgstr ""
+
+msgctxt "#30104"
+msgid "Kodi 21 cannot take HDR pictures from an add-on, so HDR files always play through Kodi's own decoder there."
+msgstr ""
+
+msgctxt "#30106"
+msgid "Auto: NIS on the GPU engine where the screen is larger than the video; on Windows Kodi's scaler, which can use RTX / Intel Video Super Resolution."
+msgstr ""
+
+msgctxt "#30107"
+msgid "Auto uses this display rate when it is set; 0 asks the operating system."
+msgstr ""
+
+msgctxt "#30108"
+msgid "How many CPU threads the frame generator may use."
+msgstr ""
+
+msgctxt "#30009"
+msgid "Engine"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Auto (NIS on the GPU to the screen size; Windows: Kodi's scaler)"
+msgstr ""
+
+msgctxt "#30033"
+msgid "NIS to the screen size (GPU engine)"
+msgstr ""
+
+msgctxt "#30034"
+msgid "FSR1 to the screen size (GPU engine)"
+msgstr ""
+
+msgctxt "#30040"
+msgid "Auto (GPU, else CPU)"
+msgstr ""
+
+msgctxt "#30041"
+msgid "CPU"
+msgstr ""
+
+msgctxt "#30042"
+msgid "GPU (Vulkan) only"
+msgstr ""
+
+msgctxt "#30109"
+msgid "The GPU engine runs on any Vulkan 1.2 GPU and is much faster; the CPU engine is the fallback."
+msgstr ""
