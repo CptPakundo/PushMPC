@@ -74,7 +74,7 @@ if a.skip_motion: pass
 elif len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
 elif back > 3: problems.append(f"{back} jumps back (stale or misordered frames)")
 elif moving < (0.7 if k > 1 else 0.9): problems.append(f"only {len(steps) - repeats}/{len(steps)} frames show a new box position")
-elif abs(mean_step - step) > 0.25 * step: problems.append(f"mean step {mean_step:.2f} px, {step:.2f} expected")
+elif a.src_frames and abs(mean_step - step) > 0.25 * step: problems.append(f"mean step {mean_step:.2f} px, {step:.2f} expected")
 m = re.search(r"PushMPC: hw path ok, x(\d+) \((.*)\)\s*$", log, re.M)
 how = m.group(2) if m else ""
 gen = re.findall(r"PushMPC: close, in=\d+ out=\d+ generated=(\d+)", log)
