@@ -57,6 +57,7 @@ struct Engine::Impl {
     int fbx = 0, fby = 0, fbs = 16; // the finest grid (the field)
     bool useOf = false;
     Timing times;
+    std::shared_ptr<Synthesizer> synth;
 
     struct Pipe { VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout pl = VK_NULL_HANDLE; VkPipeline p = VK_NULL_HANDLE; std::vector<VkDescriptorType> types; uint32_t push = 0; };
     Pipe pipes[PCount];
@@ -289,6 +290,19 @@ Engine::~Engine() = default;
 const Config& Engine::Cfg() const { return m->cfg; }
 const DeviceInfo& Engine::Device() const { static DeviceInfo none; return m->ctx ? m->ctx->Info() : none; }
 bool Engine::OpticalFlowActive() const { return m->useOf; }
+std::shared_ptr<Context> Engine::Ctx() const { return m->ctx; }
+void Engine::SetSynthesizer(std::shared_ptr<Synthesizer> s) { m->synth = std::move(s); }
+bool Engine::PairResources(int pair, PairGpu& o) const
+{
+    if (pair < 0 || pair >= int(m->pairs.size()) || !m->pairs[size_t(pair)].used) return false;
+    const Impl::Pair& p = m->pairs[size_t(pair)];
+    const Impl::Slot& a = m->slots[size_t(p.a)];
+    const Impl::Slot& b = m->slots[size_t(p.b)];
+    o.aY = a.y.view; o.aU = a.u.view; o.aV = a.v.view; o.bY = b.y.view; o.bU = b.u.view; o.bV = b.v.view;
+    o.fieldF = p.fieldF.buf; o.fieldK = p.fieldK.buf; o.costF = p.costF.buf; o.costK = p.costK.buf;
+    o.blocksX = m->fbx; o.blocksY = m->fby; o.blockSize = m->fbs; o.width = m->cfg.width; o.height = m->cfg.height; o.bits = m->cfg.bits;
+    return true;
+}
 int Engine::OutWidth() const { return m->outW; }
 int Engine::OutHeight() const { return m->outH; }
 const Engine::Timing& Engine::Times() const { return m->times; }
@@ -778,7 +792,16 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     if (!ok) return false;
     const bool up = I.cfg.upscaler != Upscaler::None;
     const int sa = mode == 2 ? pr.b : pr.a, sb = mode == 1 ? pr.a : pr.b;
-    if (!I.Interp(j, sa, sb, &pr, t, mode == 2 ? 1 : mode, up ? 1 : 0, out, err)) return false;
+    if (mode == 0 && I.synth) {
+        // a plugged-in synthesis stage (Subtitle Hold is interp.comp's and does not apply)
+        PairGpu pg;
+        Engine::PairResources(pair, pg);
+        SynthTarget st;
+        st.packed = !up; st.buffer = I.readback.buf; st.offset = I.outStride * VkDeviceSize(out); st.pitchY = I.pitchY; st.pitchC = I.pitchC; st.offU = I.offU; st.offV = I.offV;
+        st.midY = I.midY.view; st.midU = I.midU.view; st.midV = I.midV.view;
+        if (!I.synth->Record(j.cb, pg, t, st, err)) return false;
+        I.Barrier(j.cb);
+    } else if (!I.Interp(j, sa, sb, &pr, t, mode == 2 ? 1 : mode, up ? 1 : 0, out, err)) return false;
     if (up && !I.UpscaleAndPack(j, out, err)) return false;
     ticket = I.Submit(j, err);
     if (!ticket) return false;

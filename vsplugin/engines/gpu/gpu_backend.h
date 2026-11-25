@@ -199,7 +199,10 @@ private:
     bool Drop(std::string& err)
     {
         bool ok = true;
-        for (auto& p : m_pending) { if (!engine.Wait(p.ticket, err)) ok = false; engine.ReleaseOut(p.out); Release(p.o.frame); }
+        for (auto& p : m_pending) {
+            if (p.out >= 0) { if (!engine.Wait(p.ticket, err)) ok = false; engine.ReleaseOut(p.out); m_outPlanes.erase(p.o.frame); }
+            Release(p.o.frame);
+        }
         m_pending.clear();
         if (m_holdChain.valid()) m_holdChain.wait();
         m_holdChain = {};
@@ -295,7 +298,10 @@ private:
             if (!up) {
                 if (!CopyReal(sh.src, f, *k, err)) return false;
                 if (tag) tag(pts, kind, f);
-                m_ready.push_back({ pts, false, f });
+                // queued behind the GPU outputs before it: the Pipeline must see the outputs in order (a real frame
+                // ahead of the generated ones before it would end its wait for them)
+                Pending p; p.o = { pts, false, f };
+                m_pending.push_back(p);
                 return true;
             }
             const int slot = SlotAt(sh.src);
@@ -326,10 +332,12 @@ private:
     }
     bool Complete(Pending& p, std::string& err)
     {
-        if (!engine.Wait(p.ticket, err)) return false;
-        auto it = m_outPlanes.find(p.o.frame);
-        if (it != m_outPlanes.end()) { engine.Read(p.out, it->second); m_outPlanes.erase(it); }
-        else engine.ReleaseOut(p.out);
+        if (p.out >= 0) {   // a GPU output (a copied real frame has out -1 and is complete)
+            if (!engine.Wait(p.ticket, err)) return false;
+            auto it = m_outPlanes.find(p.o.frame);
+            if (it != m_outPlanes.end()) { engine.Read(p.out, it->second); m_outPlanes.erase(it); }
+            else engine.ReleaseOut(p.out);
+        }
         m_ready.push_back(p.o);
         m_pending.pop_front();
         return true;
@@ -337,7 +345,7 @@ private:
     // the finished outputs, in order (all = wait for every one)
     bool Collect(bool all, std::string& err)
     {
-        while (!m_pending.empty() && (all || engine.Done(m_pending.front().ticket)))
+        while (!m_pending.empty() && (all || m_pending.front().out < 0 || engine.Done(m_pending.front().ticket)))
             if (!Complete(m_pending.front(), err)) return false;
         return true;
     }

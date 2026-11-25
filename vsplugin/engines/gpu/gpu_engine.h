@@ -61,6 +61,38 @@ struct PairStats {
 };
 struct DedupStats { float maxBlock = 0, mean = 0; bool duplicate = false; };
 
+// ---- the seams for more motion sources and a learned synthesis stage ("flow once, synthesize many"; SP7: splat to
+// phase t + a small fusion CNN). Motion is estimated once per pair of real frames (Estimate), into one field format
+// whatever the source; every output phase of the pair reuses it (Generate). A Synthesizer replaces interp.comp for
+// generated frames; without one (the default) interp.comp runs. Cut, Dedup, Subtitle Hold, upscaling and readback stay
+// the engine's.
+enum class MotionSource { BlockMatcher = 0, NvOpticalFlow = 1 };   // later: D3D12 Video Motion Estimator (via interop), others
+inline const char* MotionSourceName(MotionSource s) { return s == MotionSource::NvOpticalFlow ? "NVIDIA optical flow (VK_NV_optical_flow)" : "PushFPS's block matcher (GPU)"; }
+
+// one pair's GPU data after Estimate (valid until ReleasePair). Images: R8 / R16 UNORM planes holding the source's code
+// values (layout GENERAL). Fields: vec2 per block (blocksX x blocksY, row-major), full-size pixels, a point at p in A is at
+// p + F(p) in B (K the other way). Cost: the matched error per block (0..255 per pixel), the confidence measure.
+struct PairGpu {
+    VkImageView aY = VK_NULL_HANDLE, aU = VK_NULL_HANDLE, aV = VK_NULL_HANDLE, bY = VK_NULL_HANDLE, bU = VK_NULL_HANDLE, bV = VK_NULL_HANDLE;
+    VkBuffer fieldF = VK_NULL_HANDLE, fieldK = VK_NULL_HANDLE, costF = VK_NULL_HANDLE, costK = VK_NULL_HANDLE;
+    int blocksX = 0, blocksY = 0, blockSize = 0, width = 0, height = 0, bits = 8;
+};
+// where a synthesized frame goes: without upscaling the packed readback slot (rows of 4 / 2 samples per 32-bit word,
+// the pitches and plane offsets below, from `offset`), with upscaling the three R16 UNORM intermediate images (values
+// normalised to 0..1 of the source's range) that the upscaler reads.
+struct SynthTarget {
+    bool packed = true;
+    VkBuffer buffer = VK_NULL_HANDLE; VkDeviceSize offset = 0; int pitchY = 0, pitchC = 0; VkDeviceSize offU = 0, offV = 0;
+    VkImageView midY = VK_NULL_HANDLE, midU = VK_NULL_HANDLE, midV = VK_NULL_HANDLE;
+};
+class Synthesizer {
+public:
+    virtual ~Synthesizer() = default;
+    virtual const char* Name() const = 0;
+    // record the generated frame at phase t into cb (the engine has put a full barrier before; it puts one after)
+    virtual bool Record(VkCommandBuffer cb, const PairGpu& pair, float t, const SynthTarget& target, std::string& err) = 0;
+};
+
 class Engine {
 public:
     Engine();
@@ -72,6 +104,10 @@ public:
     const Config& Cfg() const;
     const DeviceInfo& Device() const;
     bool OpticalFlowActive() const;     // the motion comes from VK_NV_optical_flow
+    MotionSource Motion() const { return OpticalFlowActive() ? MotionSource::NvOpticalFlow : MotionSource::BlockMatcher; }
+    std::shared_ptr<Context> Ctx() const;
+    bool PairResources(int pair, PairGpu& out) const;
+    void SetSynthesizer(std::shared_ptr<Synthesizer> s);   // null: interp.comp (the default)
     int OutWidth() const;
     int OutHeight() const;
 
