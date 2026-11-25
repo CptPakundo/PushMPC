@@ -39,8 +39,8 @@ if(PMVS_NVIDIA_LINUX)
 endif()
 
 if(PMVS_NVIDIA_LINUX)
-  # SASS for Turing, Ampere, Ada, Blackwell (consumer) and PTX for anything newer (JIT by the driver)
-  set(PMVS_CUDA_GENCODE "-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_89,code=sm_89;-gencode;arch=compute_120,code=sm_120;-gencode;arch=compute_120,code=compute_120"
+  # SASS for Turing, Ampere, Ada, Blackwell (consumer); PTX 7.5 (JIT on anything else: Hopper, Blackwell data centre) and 12.0
+  set(PMVS_CUDA_GENCODE "-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_89,code=sm_89;-gencode;arch=compute_120,code=sm_120;-gencode;arch=compute_75,code=compute_75;-gencode;arch=compute_120,code=compute_120"
       CACHE STRING "nvcc -gencode list for the kernels' fatbin")
   set(NVL_FATBIN "${CMAKE_BINARY_DIR}/nvl_kernels.fatbin")
   set(NVL_FATBIN_CPP "${CMAKE_BINARY_DIR}/nvl_kernels_fatbin.cpp")

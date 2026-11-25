@@ -96,8 +96,9 @@ int main(int argc, char** argv)
         std::printf("CreateEffect(%s): %s\n", e.sel, vfx.Error(s).c_str());
         CHECK(s == NVCV_SUCCESS || s != bs, "%s is a known effect (status %d, unknown-selector status %d)", e.sel, s, bs);
         if (s != NVCV_SUCCESS || !h) continue;
-        void* badParam = nullptr; (void)badParam;
         const NvCV_Status bad = vfx.SetU32(h, "NoSuchParameter", 1);
+        std::printf("  SetU32(%s, NoSuchParameter): %s\n", e.sel, vfx.Error(bad).c_str());
+        CHECK(bad != NVCV_SUCCESS, "%s refuses an unknown parameter (so the accepted ones are real)", e.sel);
         for (const auto& [name, val] : e.u32) {
             const NvCV_Status ps = vfx.SetU32(h, name, val);
             std::printf("  SetU32(%s, %s=%u): %s\n", e.sel, name, val, vfx.Error(ps).c_str());
