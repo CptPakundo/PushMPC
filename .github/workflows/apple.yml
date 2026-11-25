@@ -72,7 +72,7 @@ jobs:
           ls -d /Applications/Xcode*.app | tr '\n' ' '; echo
           system_profiler SPDisplaysDataType | sed -n 1,20p || true
           echo "--- VTFrameProcessor error codes in this SDK"
-          grep -rhE -- "-197[0-9][0-9]" "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers/" | sed 's/^ *//' | head -40 || true
+          grep -rn -A16 "VTFrameProcessorError" "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers/VTErrors.h" | grep -E "= *-?[0-9]+|VTFrameProcessorError" | sed 's/^ *//' | head -40 || true
 
       - name: Build (VideoToolbox engine, unit tests)
         timeout-minutes: 8
@@ -157,13 +157,14 @@ jobs:
             set -- $cfg
             rm -f "$PUSHMPC_VS_LOG_DIR"/*.log
             echo "=== k=$1 bits=$2 sr=$3"
-            PUSHMPC_TEST_K=$1 PUSHMPC_TEST_BITS=$2 PUSHMPC_TEST_SR=$3 python "$RUNNER_TEMP/check.py"
+            PUSHMPC_TEST_K=$1 PUSHMPC_TEST_BITS=$2 PUSHMPC_TEST_SR=$3 python "$RUNNER_TEMP/check.py" | tee "$RUNNER_TEMP/ran-$1-$2-$3.txt"
             grep -h -E "backend|apple|portable:" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-400 | head -20
           done
           echo "=== vspipe --info (Auto backend)"
           PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" --info vsplugin/tests/ci/apple_clip.vpy
           PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=auto "$VSPIPE" vsplugin/tests/ci/apple_clip.vpy -- > /dev/null
-          echo "::notice title=apple backend on ${{ matrix.os }}::apple_vt_test=$APPLE_VT; k2/8-bit ran ${RAN_2_8_off:-?}; k4 ${RAN_4_8_off:-?}; 10-bit ${RAN_2_10_off:-?}; sr2 ${RAN_2_8_2:-?}"
+          echo "::notice title=apple backend on ${{ matrix.os }}::apple_vt_test=$APPLE_VT; backends that ran: $(grep -h -o 'backend that ran: [a-z]*' "$RUNNER_TEMP"/ran-*.txt 2>/dev/null | cut -d' ' -f4 | tr '
+' ' ')"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -257,8 +258,9 @@ jobs:
           cat "$HOME/.config/mpv/mpv.conf"
           src=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,r_frame_rate,width,height -of csv=p=0 "$clip")
           echo "source: $src"
-          # mpv on macOS reads ~/.config/mpv; MPV_HOME pins it to the fake HOME's folder either way
-          MPV_HOME="$HOME/.config/mpv" mpv "$clip" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska             --msg-level=all=info,cplayer=v,vapoursynth=v 2>&1 | grep -v -E "^\[cplayer\] (Set property|Run command)" | tail -40
+          # mpv's encode mode did not apply ~/.config/mpv/mpv.conf in run 45593276787 (no vf): include the block's file
+          # explicitly, so the test checks what pushmpc-setup wrote, and print the active filter chain
+          MPV_HOME="$HOME/.config/mpv" mpv "$clip" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v 2>&1 | tail -40
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"
           srcn=$(echo "$src" | awk -F, '{print $NF}'); outn=$(echo "$out" | awk -F, '{print $NF}')
