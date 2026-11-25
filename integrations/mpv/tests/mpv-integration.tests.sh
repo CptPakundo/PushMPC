@@ -100,6 +100,17 @@ printf 'hwdec=vaapi-copy\n' > "$HOME/c2.conf"
 run install --conf "$HOME/c2.conf"
 check "no conflict: hwdec=vaapi-copy" hasnot warning "$out"
 
+# shaders: the ArtCNN set next to pushmpc.vpy, picked by GPU vendor
+fresh
+mkdir -p "$HOME/sv/shaders"; for m in C4F16 C4F32; do printf '//!HOOK LUMA\n' > "$HOME/sv/shaders/ArtCNN_${m}_fragment.glsl"; done
+PUSHMPC_GPU_VENDOR=amd run install --script "$HOME/sv/pushmpc.vpy" --conf "$HOME/s1.conf"
+check "shaders: AMD -> C4F32, always" same "$(grep -c "pushmpc-shaders=$HOME/sv/shaders/ArtCNN_C4F32_fragment.glsl\|pushmpc-shaders-when=always" "$HOME/s1.conf")" 2
+PUSHMPC_GPU_VENDOR=intel run install --script "$HOME/sv/pushmpc.vpy" --conf "$HOME/s2.conf"
+check "shaders: Intel -> C4F16" has "ArtCNN_C4F16_fragment.glsl" "$HOME/s2.conf"
+PUSHMPC_GPU_VENDOR=nvidia run install --script "$HOME/sv/pushmpc.vpy" --conf "$HOME/s3.conf"
+check "shaders: NVIDIA -> fallback" has "pushmpc-shaders-when=fallback" "$HOME/s3.conf"
+run install --script "$HOME/nosh/pushmpc.vpy" --conf "$HOME/s4.conf"
+check "shaders: none installed -> no shader lines" hasnot "pushmpc-shaders" "$HOME/s4.conf"
 # 6. quoting: a path with spaces, a path with ]
 fresh
 run install --script "$HOME/my dir/push mpc.vpy" --conf "$HOME/a.conf"

@@ -86,6 +86,23 @@ cfg_quote() {
         *) printf '%s' "$1" ;;
     esac
 }
+# the ArtCNN fragment shaders pushmpc.lua falls back to (shaders/ next to pushmpc.vpy), by GPU tier: C4F32 on NVIDIA /
+# AMD, C4F16 on Intel or unknown; "fallback" on NVIDIA (PushMPC's NVIDIA backend upscales), else "always".
+# PUSHMPC_GPU_VENDOR (nvidia | amd | intel) overrides the detection (tests).
+shader_lines() {
+    v=${PUSHMPC_GPU_VENDOR:-}
+    if [ -z "$v" ]; then
+        for f in /sys/class/drm/card*/device/vendor; do
+            [ -r "$f" ] || continue
+            case $(cat "$f" 2>/dev/null) in 0x10de) v=nvidia ;; 0x1002) [ "$v" = nvidia ] || v=amd ;; 0x8086) [ -n "$v" ] || v=intel ;; esac
+        done
+    fi
+    case $v in nvidia|amd) m=C4F32 ;; *) m=C4F16 ;; esac
+    case $v in nvidia) w=fallback ;; *) w=always ;; esac
+    f=$(dirname "$script")/shaders/ArtCNN_${m}_fragment.glsl
+    [ -f "$f" ] || return 0
+    printf 'script-opts-append=pushmpc-shaders=%s%sscript-opts-append=pushmpc-shaders-when=%s%s' "$(cfg_quote "$f")" "$1" "$w" "$1"
+}
 block() {
     if [ "$1" = crlf ]; then nl=$(printf '\r\n_'); nl=${nl%_}; else nl='
 '; fi
@@ -98,6 +115,7 @@ block() {
         printf 'scripts-append=%s%s' "$(cfg_quote "$(dirname "$script")/pushmpc.lua")" "$nl"
         printf 'script-opts-append=pushmpc-vpy=%s%s' "$(cfg_quote "$script")" "$nl"
         printf 'script-opts-append=pushmpc-buffered=%s%sscript-opts-append=pushmpc-concurrent=%s%s' "$buffered" "$nl" "$concurrent" "$nl"
+        shader_lines "$nl"
     fi
     printf 'hwdec=auto-copy%shr-seek-framedrop=no%sinterpolation=no%s' "$nl" "$nl" "$nl"
     if [ -n "$extra" ]; then

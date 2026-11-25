@@ -6,6 +6,7 @@
 #     vsplugin/pushmpc_vs.so     the VapourSynth plugin (portable backend)
 #     vsplugin/pushmpc.vpy       the script mpv runs (vsplugin/scripts/pushmpc.vpy)
 #     vsplugin/pushmpc.lua       adds the filter at run time (integrations/mpv/pushmpc.lua)
+#     vsplugin/shaders/          ArtCNN C4F16 / C4F32 fragment shaders (integrations/mpv/make-shaders.py)
 #     LICENSE, README.txt
 #   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version> [<pushmpc-nvvfx-selftest>]   (run from the repository root)
 set -eu
@@ -20,6 +21,8 @@ install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
 install -m 644 integrations/mpv/pushmpc.lua "$d/vsplugin/pushmpc.lua"
+# the ArtCNN upscaling shaders (generated from the pinned ONNX weights; Python 3, stdlib only)
+python3 integrations/mpv/make-shaders.py "$d/vsplugin/shaders"
 install -m 644 LICENSE "$d/LICENSE"
 # the Linux NVIDIA backend's runtime fetcher (NVIDIA's files are downloaded on the user's machine, never shipped) and
 # its self-test (optional 5th argument), when this build has them

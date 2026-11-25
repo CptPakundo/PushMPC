@@ -280,12 +280,37 @@ $rows = Run 'Install' $r
 $pc = "$r\AppData\Local\Plex\mpv.conf"; $pt = (Read-PmText $pc).Text
 Check (($rows | Where-Object Player -eq 'Plex for Windows').Result -eq 'installed') 'Plex for Windows (new libmpv, NVIDIA): installed'
 Check ($pt -match 'script-opts-append=pushmpc-mode=vsr' -and $pt -match 'pushmpc-scaling=nvidia' -and $pt -match 'scripts-append=.*pushmpc\.lua' -and $pt -notmatch 'vf-append' -and $pt.EndsWith("glsl-shaders-append=C:/x.glsl`r`n")) 'Plex: VSR through pushmpc.lua, the user''s lines kept'
-Check (($rows | Where-Object Player -eq 'Plex HTPC').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'Plex HTPC').Note -match 'scaling-mode') 'Plex HTPC with an old libmpv: not changed, says why'
+Check (($rows | Where-Object Player -eq 'Plex HTPC').Result -eq 'skipped' -and ($rows | Where-Object Player -eq 'Plex HTPC').Note -match 'Lua') 'Plex HTPC with a libmpv without Lua: not changed, says why'
 Run 'Uninstall' $r | Out-Null
 Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Plex: restored byte for byte'
 $env:PUSHMPC_GPU_VENDOR = 'AMD Radeon RX 9070'
 $rows = Run 'Status' $r
 Check (-not ($rows | Where-Object Player -eq 'Plex for Windows').Managed) 'Plex with an AMD GPU: not changed (no d3d11vpp super resolution)'
+$env:PUSHMPC_GPU_VENDOR = ''
+# 17. ArtCNN shader fallback by GPU tier (vsplugin\shaders next to pushmpc.vpy)
+$r = New-Root; $roots += $r
+Fake-Mpv "$r\Program Files\mpv"
+$sd = "$r\AppData\Local\PushMPC\vsplugin\shaders"; New-Item -ItemType Directory $sd -Force | Out-Null
+foreach ($m in 'C4F16', 'C4F32') { [IO.File]::WriteAllText("$sd\ArtCNN_${m}_fragment.glsl", "//!HOOK LUMA") }
+$conf = "$r\AppData\Roaming\mpv\mpv.conf"
+foreach ($c in @(@{ G = 'AMD Radeon RX 7800 XT'; V = 'C4F32'; W = 'always' }, @{ G = 'Intel(R) UHD Graphics 770'; V = 'C4F16'; W = 'always' }, @{ G = 'NVIDIA GeForce RTX 4070'; V = 'C4F32'; W = 'fallback' })) {
+    $env:PUSHMPC_GPU_VENDOR = $c.G
+    Run 'Install' $r | Out-Null
+    $tx = (Read-PmText $conf).Text
+    Check ($tx -match "pushmpc-shaders=.*ArtCNN_$($c.V)_fragment\.glsl" -and $tx -match "pushmpc-shaders-when=$($c.W)") "shaders: $($c.G) -> $($c.V), $($c.W)"
+    Run 'Uninstall' $r | Out-Null
+}
+Check (-not (Test-Path $conf)) 'shaders: uninstall leaves no mpv.conf'
+# Plex with Lua but no scaling-mode: ArtCNN shaders instead of d3d11vpp
+New-Item -ItemType Directory "$r\Program Files\Plex\Plex" -Force | Out-Null
+[IO.File]::WriteAllText("$r\Program Files\Plex\Plex\libmpv-2.dll", 'MZ ... d3d11vpp ... mp.options ... mpv 0.38.0')
+$env:PUSHMPC_GPU_VENDOR = 'AMD Radeon RX 7800 XT'
+$before = Snapshot $r
+$rows = Run 'Install' $r
+$pt = (Read-PmText "$r\AppData\Local\Plex\mpv.conf").Text
+Check (($rows | Where-Object Player -eq 'Plex for Windows').Result -eq 'installed' -and $pt -match 'pushmpc-scaling=\r?\n' -and $pt -match 'ArtCNN_C4F32') 'Plex 0.38 without scaling-mode: ArtCNN shaders'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Plex shaders: restored byte for byte'
 $env:PUSHMPC_GPU_VENDOR = ''
 # 12. Stremio detected, not changed
 $r = New-Root; $roots += $r

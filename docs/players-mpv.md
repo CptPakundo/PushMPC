@@ -132,7 +132,16 @@ a full mpv instead). What works is upscaling: the installer adds `pushmpc.lua` t
 (`%LOCALAPPDATA%\Plex HTPC\mpv.conf`), which applies RTX Video Super Resolution (on NVIDIA RTX) or Intel's video super
 resolution through mpv's `d3d11vpp`, scaled from the video to your display and set again when either changes. Keep
 hardware decoding on in Plex's settings (`d3d11vpp` needs it). It is set up only when Plex's libmpv is new enough
-(mpv 0.38 or later, with Lua) and the GPU is NVIDIA or Intel; if `d3d11vpp` cannot start, Plex plays as before.
+(mpv 0.38 or later, with Lua) and the GPU is NVIDIA or Intel. Otherwise, and whenever `d3d11vpp` cannot start, it uses
+PushMPC's ArtCNN upscaling shaders instead (Plex's libmpv only needs Lua for that).
+
+### Upscaling shaders (fallback)
+
+PushMPC ships ArtCNN (MIT) luma-doubling shaders as mpv fragment passes, generated from the upstream model weights,
+next to `pushmpc.vpy` (`shaders\`). `pushmpc.lua` adds them for every video on PCs where nothing better upscales
+(no NVIDIA RTX for PushMPC's own upscaler), and elsewhere only when PushMPC's filter cannot start. The heavier C4F32 is
+used on discrete NVIDIA, AMD and Intel Arc GPUs, C4F16 on integrated GPUs. They run only when the video is shown at
+least 1.3 times its size.
 
 ## Settings
 
