@@ -439,14 +439,17 @@ void ProbeNvidia(const VSMap* in, const VSAPI* a, BackendProbe& p)
     if (!done) {
         done = true;
         cached.nvidiaBuilt = true;
+        { wchar_t v[8] = {}; cached.anyGpuDisabled = GetEnvironmentVariableW(L"PUSHMPC_DISABLE_ANYGPUCORE", v, 8) > 0 && v[0] == L'1'; }
         CoreHost& h = CoreHost::Get();
         std::string err;
         std::lock_guard<std::mutex> hl(h.Lock());
         PushCoreCaps caps;
-        if (h.Load(NvidiaPaths(in, a), err) && h.Caps(caps)) { cached.pushcoreLoaded = true; cached.gpuFamily = caps.family; cached.gpuName = caps.adapter; }
+        if (h.Load(NvidiaPaths(in, a), err) && h.Caps(caps)) { cached.pushcoreLoaded = true; cached.gpuFamily = caps.family; cached.gpuName = caps.adapter; cached.capsAvailable = caps.available; }
+        if (cached.pushcoreLoaded) Log(std::format("backend probe: {} family {} caps 0x{:X}{}", cached.gpuName, cached.gpuFamily, cached.capsAvailable, cached.anyGpuDisabled ? " (pushcore on non-RTX GPUs switched off)" : ""));
         else Log("backend probe: pushcore not usable" + (err.empty() ? std::string(" (pushcore_capabilities missing)") : ": " + err));
     }
     p.nvidiaBuilt = cached.nvidiaBuilt; p.pushcoreLoaded = cached.pushcoreLoaded; p.gpuFamily = cached.gpuFamily; p.gpuName = cached.gpuName;
+    p.capsAvailable = cached.capsAvailable; p.anyGpuDisabled = cached.anyGpuDisabled;
 }
 
 } // namespace
@@ -470,7 +473,7 @@ BackendChoice Choose(const VSMap* in, VSCore* core, const VSAPI* a, bool forScri
     BackendProbe p;
     const std::string lreq = LowerAscii(req);
 #ifdef _WIN32
-    if (lreq == "auto" || lreq == "nvidia") ProbeNvidia(in, a, p);
+    if (lreq == "auto" || lreq == "nvidia" || lreq == "pushcore") ProbeNvidia(in, a, p);
 #endif
     // Enhance itself cannot run rife (a script preset): only SelectBackend reports it
     if (forScript) {
