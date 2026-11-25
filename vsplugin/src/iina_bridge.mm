@@ -1,5 +1,5 @@
 // pushmpc-iina: PushMPC frame generation and super resolution INSIDE IINA, without modifying IINA.app
-// (second-opinion-apple.md section 4). An mpv C plugin (IINA 1.5.1's libmpv 0.42 has C plugins on, and IINA's
+// An mpv C plugin (IINA 1.5.1's libmpv 0.42 has C plugins on, and IINA's
 // entitlements disable library validation), loaded by the PushMPC IINA plugin with `load-script`. It patches libmpv's
 // imports (GOT slots) of a handful of PUBLIC libavfilter functions, so mpv's own lavfi bridge (filters/f_lavfi.c)
 // talks to us for one marked graph:

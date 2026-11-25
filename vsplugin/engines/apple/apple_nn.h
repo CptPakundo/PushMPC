@@ -3,8 +3,8 @@
 //   - ArtCNN (MIT, github.com/Artoriuz/ArtCNN) luma doublers: the .pmnn weights that vsplugin/tools/artcnn_tool.py
 //     writes from the pinned upstream ONNX files, and a float reference of the network (3x3 convolutions with zero
 //     padding, ReLU, the long skip, depth-to-space x2 in ONNX's DCR order, clip);
-//   - 10-bit recovery for an 8-bit-only interpolator ("quantisation-residual transfer", second-opinion-apple.md
-//     section 2): VideoToolbox's low-latency interpolator may list only 8-bit formats. The 2 bits it never sees are the
+//   - 10-bit recovery for an 8-bit-only interpolator ("quantisation-residual transfer",
+//     VideoToolbox's low-latency interpolator may list only 8-bit formats. The 2 bits it never sees are the
 //     residuals RA = A10 - 4 * A8 and RB = B10 - 4 * B8 (A8 = what it was given, rounded). They move with the picture,
 //     so the generated frame gets G10 = 4 * G8 + LP((1 - t) * RA(x - t * F) + t * RB(x + (1 - t) * F)), F = the
 //     forward optical flow of the pair (zero when there is none), LP a 3x3 [1 2 1] blur. Where the flow is wrong the

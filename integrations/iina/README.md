@@ -12,7 +12,7 @@ PushMPC filter (`pushmpc.Enhance`). Two tiers:
   keep working). When the bridge cannot run (IINA's FFmpeg major changed, an arm64e build, no Homebrew package), the
   filter passes frames through unchanged and the shader tier below applies. Log: `~/Library/Logs/PushMPC/iina-bridge.log`.
   Status: built and smoke-tested in CI inside IINA's own libmpv on a VM (portable engine); the VideoToolbox path
-  needs a real Mac (see the internal test plan).
+  needs a real Mac.
 - **Shaders only**, when the bridge is off or missing:
 
 - **Upscaling shaders, picked for your chip.** IINA renders through OpenGL 4.1, so only fragment and textureGather

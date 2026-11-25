@@ -282,7 +282,7 @@ inline SrChoice DecideSr(std::string mode, int w, int h, const std::vector<float
 }
 
 // ------------------------------------------------------------------------------------------------ super-resolution order
-// The upscalers the apple backend can run, best first (second-opinion-apple.md section 1):
+// The upscalers the apple backend can run, best first :
 //   Editing     VTSuperResolutionScaler (macOS 26; editing grade, temporal, takes the pair's optical flow; video up to
 //               1920x1080 on macOS; needs a one-time model download through Apple's API)
 //   ArtCnn32/16 ArtCNN C4F32 / C4F16 on Metal (MIT weights, tools/artcnn_tool.py; trained on anime / art)

@@ -266,8 +266,8 @@ std::string ProbeReport()
             r += Fmt("  low-latency super resolution: minimum %dx%d, maximum %dx%d\n", int(mn.width), int(mn.height), int(mx.width), int(mx.height));
         }
 #endif
-        // SP5 (second-opinion-engines.md 3a): isSupported, and the size queries per spatial scale factor
-        r += Fmt("  SP5: low-latency interpolation isSupported=%d, super resolution isSupported=%d; size queries (maximumDimension / "
+        // isSupported, and the size queries per spatial scale factor
+        r += Fmt("  low-latency interpolation isSupported=%d, super resolution isSupported=%d; size queries (maximumDimension / "
                  "maximumPixelCount, macOS 27 API): %s\n", int(c.lowLatencyFI), int(c.lowLatencySR), c.sizeQueries ? "present" : ("absent on " + c.os).c_str());
         if (c.sizeQueries)
             for (int f : { 1, 2 })
