@@ -728,7 +728,7 @@ jobs:
         timeout-minutes: 8
         run: |
           set -eu
-          sudo apt-get install -y -qq xvfb >/dev/null
+          sudo apt-get install -y -qq xvfb libgl1-mesa-dri libegl-mesa0 mesa-vulkan-drivers >/dev/null
           python3 integrations/mpv/make-shaders.py /tmp/shaders
           ls -la /tmp/shaders
           cat > /tmp/passes.lua <<'LUA'
@@ -743,11 +743,16 @@ jobs:
           end)
           LUA
           export HOME=/tmp/home-sh; mkdir -p $HOME
-          timeout 90 xvfb-run -a -s '-screen 0 1920x1080x24' mpv --no-config --vo=gpu --gpu-api=opengl --ao=null --geometry=1920x1080 --no-border \
-            --scripts=integrations/mpv/pushmpc.lua --script=/tmp/passes.lua \
-            "--script-opts=pushmpc-vpy=/nonexistent/pushmpc.vpy,pushmpc-shaders=/tmp/shaders/ArtCNN_C4F16_fragment.glsl,pushmpc-shaders-when=always" \
-            /tmp/clip.mp4 > /tmp/shaders.txt 2>&1 || true
-          grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
+          export LIBGL_ALWAYS_SOFTWARE=1
+          # the first video output that opens under Xvfb: OpenGL through EGL or GLX, then libplacebo (gpu-next)
+          for vo in "--vo=gpu --gpu-api=opengl --gpu-context=x11egl" "--vo=gpu --gpu-api=opengl --gpu-context=x11" "--vo=gpu-next --gpu-api=opengl" "--vo=gpu-next --gpu-api=vulkan"; do
+            timeout 90 xvfb-run -a -s '-screen 0 1920x1080x24' mpv --no-config $vo --ao=null --geometry=1920x1080 --border=no \
+              --scripts=integrations/mpv/pushmpc.lua --script=/tmp/passes.lua --msg-level=vo=v \
+              "--script-opts=pushmpc-vpy=/nonexistent/pushmpc.vpy,pushmpc-shaders=/tmp/shaders/ArtCNN_C4F16_fragment.glsl,pushmpc-shaders-when=always" \
+              /tmp/clip.mp4 > /tmp/shaders.txt 2>&1 || true
+            if grep -q 'vo-passes:' /tmp/shaders.txt; then echo "video output: $vo"; break; fi
+            echo "--- $vo did not open:"; grep -iE 'error|fail|could not' /tmp/shaders.txt | head -5
+          done          grep -E 'pushmpc|vo-passes|shader|Error' /tmp/shaders.txt | head -20
           echo "::notice title=ArtCNN fallback in mpv::$(grep -E 'upscaling shaders added|vo-passes' /tmp/shaders.txt | tr '\n' ' ' | cut -c1-700)"
           grep -q 'ArtCNN C4F16 (fragment)' /tmp/shaders.txt || { echo "::error::mpv did not run the ArtCNN passes"; exit 1; }
       - name: install.sh --flatpak yes (Flathub mpv for the user), encode mode inside the sandbox
