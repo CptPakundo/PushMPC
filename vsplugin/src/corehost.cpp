@@ -95,6 +95,33 @@ bool CoreHost::EnsureDevice(uint64_t luid, AdapterPick pick, std::string& err)
     Log(std::format("D3D11 device on {} (LUID {:016X}, feature level 0x{:X}){}", m_deviceName, m_luid, uint32_t(dev->GetFeatureLevel()), m_ctx4 ? "" : ", no ID3D11DeviceContext4 (fences unusable)"));
     return true;
 }
+bool CoreHost::AdoptDevice(ID3D11Device* dev, std::string& err)
+{
+    if (!dev) { err = "no D3D11 device"; return false; }
+    if (m_dev.Get() == dev) return true;
+    CloseCore();   // the core, the ingress ring and the egress objects belong to the old device
+    m_up.clear(); m_upW = m_upH = 0;
+    m_stage.Reset(); m_stageFmt = DXGI_FORMAT_UNKNOWN; m_stageW = m_stageH = 0;
+    m_cs.Reset(); m_cb.Reset();
+    for (int i = 0; i < 3; ++i) { m_plane[i].Reset(); m_planeStage[i].Reset(); m_uav[i].Reset(); }
+    m_planeW = m_planeH = 0;
+    ComPtr<ID3D11DeviceContext> ctx;
+    dev->GetImmediateContext(&ctx);
+    ComPtr<ID3D10Multithread> mt;   // pushcore records on the immediate context from its own threads
+    if (SUCCEEDED(ctx.As(&mt))) mt->SetMultithreadProtected(TRUE);
+    m_ctx4.Reset();
+    ctx.As(&m_ctx4);
+    m_dev = dev; m_ctx = ctx;
+    m_warp = false; m_luid = 0; m_deviceName = "the player's device";
+    ComPtr<IDXGIDevice> dd; ComPtr<IDXGIAdapter> ad;
+    if (SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&dd))) && SUCCEEDED(dd->GetAdapter(&ad))) {
+        DXGI_ADAPTER_DESC d{}; ad->GetDesc(&d);
+        m_deviceName = Narrow(d.Description); m_luid = (uint64_t(uint32_t(d.AdapterLuid.HighPart)) << 32) | d.AdapterLuid.LowPart;
+        m_warp = d.VendorId == 0x1414 && d.DeviceId == 0x8c;
+    }
+    Log(std::format("D3D11 device adopted: {} (LUID {:016X}){}", m_deviceName, m_luid, m_ctx4 ? "" : ", no ID3D11DeviceContext4 (fences unusable)"));
+    return true;
+}
 
 // ------------------------------------------------------------------------------------------------ acquire / release
 void CoreHost::ReturnAll()
@@ -154,7 +181,7 @@ void CoreHost::Release(uint64_t token)
     if (!Owns(token)) return;
     ReturnAll();
     m_owner = 0;
-    source = nullptr; alloc = nullptr; release = nullptr; tag = nullptr;
+    source = nullptr; alloc = nullptr; release = nullptr; tag = nullptr; sourceTex = nullptr; rawOut = nullptr;
 }
 bool CoreHost::Stats(PushCoreStats& st)
 {
@@ -184,6 +211,16 @@ bool CoreHost::EnsureUpload(uint32_t w, uint32_t h, bool p010, std::string& err)
 bool CoreHost::CanSubmit() { return m_core && m_api->canSubmit(m_core) != 0; }
 bool CoreHost::Submit(int64_t s, int64_t pts, bool discontinuity, std::string& err)
 {
+    if (sourceTex) {   // zero copy: the player's own texture (pushcore copies it into its ingress ring)
+        ID3D11Texture2D* tex = nullptr; uint32_t slice = 0;
+        if (!sourceTex(s, tex, slice) || !tex) { err = std::format("source texture {} is not available", s); return false; }
+        PushCoreSubmitTiming t = {};
+        t.structSize = PUSHCORE_SUBMIT_TIMING_SIZE_V2;
+        t.streamNow100ns = INT64_MIN;
+        const int r = m_api->submit2(m_core, tex, slice, pts, discontinuity ? PUSHCORE_SUBMIT_DISCONTINUITY : 0u, &t);
+        if (r != PUSHCORE_OK) { err = std::format("pushcore_submit2 -> {} {}", r, m_api->lastError(m_core)); return false; }
+        return true;
+    }
     PlaneView v;
     if (!source || !source(s, v)) { err = std::format("source frame {} is not available", s); return false; }
     const bool p010 = v.bits > 8;
@@ -395,6 +432,14 @@ bool CoreHost::Poll(uint32_t timeoutMs, std::vector<Out<void*>>& out, std::strin
     PushCoreFrame fr[16]; uint32_t n = 0;
     const int r = m_api->poll(m_core, fr, 16, &n, timeoutMs);
     if (r != PUSHCORE_OK && r != PUSHCORE_BUSY) { err = std::format("pushcore_poll -> {} {}", r, m_api->lastError(m_core)); return false; }
+    if (rawOut) {      // zero copy: the caller converts on the device; nothing is read back
+        for (uint32_t i = 0; i < n; ++i) {
+            const bool drawn = rawOut(fr[i], err);
+            m_api->presented(m_core, fr[i].lease, drawn ? m_ctx.Get() : nullptr);
+            out.push_back({ fr[i].pts100ns, fr[i].kind == PUSHCORE_FRAME_GENERATED, nullptr });
+        }
+        return true;
+    }
     for (uint32_t i = 0; i < n; ++i) {
         OutImage img;
         const uint32_t w = fr[i].width ? fr[i].width : m_out.width, h = fr[i].height ? fr[i].height : m_out.height;

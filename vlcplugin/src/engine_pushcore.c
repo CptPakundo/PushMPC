@@ -16,6 +16,11 @@ static struct {
     pm_pc_flush_fn flush;
     pm_pc_close_fn close;
     pm_pc_describe_fn describe;
+    /* optional (zero copy) */
+    pm_pc_open_d3d11_fn open_d3d11;
+    pm_pc_push_d3d11_fn push_d3d11;
+    pm_pc_poll_d3d11_fn poll_d3d11;
+    pm_pc_copy_d3d11_fn copy_d3d11;
 } B;
 static SRWLOCK lockB = SRWLOCK_INIT;
 
@@ -45,6 +50,13 @@ static int LoadBridge(char *err, size_t n)
             if (!B.open || !B.push || !B.poll || !B.flush || !B.close || !B.describe) {
                 FreeLibrary(B.dll);
                 B.dll = NULL;
+            } else {
+                B.open_d3d11 = (pm_pc_open_d3d11_fn)(void *)GetProcAddress(B.dll, "pm_pc_open_d3d11");
+                B.push_d3d11 = (pm_pc_push_d3d11_fn)(void *)GetProcAddress(B.dll, "pm_pc_push_d3d11");
+                B.poll_d3d11 = (pm_pc_poll_d3d11_fn)(void *)GetProcAddress(B.dll, "pm_pc_poll_d3d11");
+                B.copy_d3d11 = (pm_pc_copy_d3d11_fn)(void *)GetProcAddress(B.dll, "pm_pc_copy_d3d11");
+                if (!B.open_d3d11 || !B.push_d3d11 || !B.poll_d3d11 || !B.copy_d3d11)
+                    B.open_d3d11 = NULL;   /* an older bridge: the copy path only */
             }
         }
     }
@@ -64,6 +76,16 @@ int pmx_poll(pm_pc *pc, uint32_t ms, pm_pc_dest_fn d, pm_pc_done_fn f, void *u, 
 int pmx_flush(pm_pc *pc) { return B.flush(pc); }
 void pmx_close(pm_pc *pc) { if (pc) B.close(pc); }
 const char *pmx_describe(pm_pc *pc) { return B.describe ? B.describe(pc) : ""; }
+int pmx_has_d3d11(void) { char e[8]; return LoadBridge(e, sizeof(e)) && B.open_d3d11 != NULL; }
+pm_pc *pmx_open_d3d11(const pm_pc_cfg *cfg, void *dev, void *mutex, int *k, char *err, size_t n)
+{
+    if (k) *k = 1;
+    if (!pmx_has_d3d11()) { if (err && n) snprintf(err, n, "pm_pushcore.dll has no zero-copy path"); return NULL; }
+    return B.open_d3d11(cfg, dev, mutex, k, err, n);
+}
+int pmx_push_d3d11(pm_pc *pc, void *t, unsigned s, int64_t pts, int disc, char *err, size_t n) { return B.push_d3d11(pc, t, s, pts, disc, err, n); }
+int pmx_poll_d3d11(pm_pc *pc, uint32_t ms, pm_pc_dest_tex_fn d, pm_pc_done_fn f, void *u, char *err, size_t n) { return B.poll_d3d11(pc, ms, d, f, u, err, n); }
+int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned ss, void *dst, unsigned ds) { return B.copy_d3d11(pc, src, ss, dst, ds); }
 
 #else
 
@@ -78,5 +100,15 @@ int pmx_poll(pm_pc *pc, uint32_t ms, pm_pc_dest_fn d, pm_pc_done_fn f, void *u, 
 int pmx_flush(pm_pc *pc) { (void)pc; return -1; }
 void pmx_close(pm_pc *pc) { (void)pc; }
 const char *pmx_describe(pm_pc *pc) { (void)pc; return ""; }
+int pmx_has_d3d11(void) { return 0; }
+pm_pc *pmx_open_d3d11(const pm_pc_cfg *cfg, void *dev, void *mutex, int *k, char *err, size_t n)
+{
+    (void)cfg; (void)dev; (void)mutex; if (k) *k = 1;
+    if (err && n) snprintf(err, n, "pushcore is Windows-only");
+    return NULL;
+}
+int pmx_push_d3d11(pm_pc *pc, void *t, unsigned s, int64_t pts, int disc, char *err, size_t n) { (void)pc; (void)t; (void)s; (void)pts; (void)disc; (void)err; (void)n; return -1; }
+int pmx_poll_d3d11(pm_pc *pc, uint32_t ms, pm_pc_dest_tex_fn d, pm_pc_done_fn f, void *u, char *err, size_t n) { (void)pc; (void)ms; (void)d; (void)f; (void)u; (void)err; (void)n; return -1; }
+int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned ss, void *dst, unsigned ds) { (void)pc; (void)src; (void)ss; (void)dst; (void)ds; return -1; }
 
 #endif

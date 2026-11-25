@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc', 'track/vlc-2']
+    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   workflow_dispatch:
     inputs:
@@ -51,9 +51,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: VLC 3 plugin headers (Ubuntu's libvlccore-dev, copied out for the build container)
         run: |
-          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y libvlccore-dev >/dev/null
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y libvlccore-dev mesa-common-dev >/dev/null
           mkdir -p vlcinc && cp -r /usr/include/vlc/plugins/. vlcinc/
           grep -n 'MODULE_SUFFIX' vlcinc/vlc_plugin.h
+          # OpenGL headers for the OpenGL output fork (headers only: the fork resolves GL through VLC's provider)
+          mkdir -p glinc && cp -r /usr/include/GL /usr/include/KHR glinc/
+      - uses: actions/cache@v4
+        with: { path: ~/vlc-src, key: vlc-src-3.0.24 }
+      - name: VLC 3.0.24 sources for the output forks (release tarball, SHA-256 checked, PushMPC patches applied)
+        run: sh vlcplugin/display/vlc3/fetch-vlc-sources.sh ~/vlc-src
       - name: Build in manylinux2014 (glibc 2.17, devtoolset) - one binary for every distro's VLC 3.0.x
         timeout-minutes: 15
         run: |
@@ -62,13 +68,13 @@ jobs:
           if grep -q '3_0_0ft64' vlcinc/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
           docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc "
             gcc --version | head -1
-            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON
+            cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON -DPM_GL_INCLUDE=/w/glinc
             cmake --build build -j4
             gcc -std=gnu11 -O2 -fPIC -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='\"pushdump\"' -DPM_ALT_ENTRY=$alt \
               -I/w/vlcinc vlcplugin/spike/pushspike.c -o build/libpushdump_plugin.so
             ./build/pm_engine_test"
           mkdir -p out/linux
-          cp build/libpushmpc_plugin.so build/libpushdump_plugin.so out/linux/
+          cp build/libpushmpc_plugin.so build/libpushdump_plugin.so build/libpushmpc_gl_plugin.so out/linux/
       - name: GLIBC gate (newest symbol version <= 2.27, so Debian 11+, Ubuntu 18.04+ and a core18 snap load it)
         run: |
           set -eu
@@ -145,6 +151,12 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: The OpenGL output fork (vout=pushmpc_gl, FSR 1) against VLC's gl on screen (Xvfb, llvmpipe)
+        run: |
+          set -u
+          sudo apt-get -qq install -y --no-install-recommends ffmpeg >/dev/null
+          ldd /usr/lib/x86_64-linux-gnu/vlc/plugins/video_output/libgl_plugin.so | grep -i placebo || echo "VLC's gl output: no libplacebo"
+          PLUGDIR=~/.local/share/pushmpc/vlc OUT=res/gl-pixel xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/display/tests/gl_pixel_test.sh
       - name: The portable GPU engine (Vulkan) on Mesa's lavapipe
         run: |
           set -u
@@ -291,6 +303,12 @@ jobs:
           cp "$(find bb -name pm_pushcore.dll | head -1)" out/
           cp "$(find bs vsplugin/bin -name pushcore.dll 2>/dev/null | head -1)" out/stub/
           ls -la out out/stub
+      - name: Zero copy (pushcore on the player's D3D11 device, texture slices in and out) on WARP with the stub core
+        shell: bash
+        run: |
+          set -u
+          t=$(find bb -name pm_pc_zc_test.exe | head -1)
+          timeout 120 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)"
       - uses: actions/upload-artifact@v4
         with: { name: bridge-win64, path: out, retention-days: 7 }
 
