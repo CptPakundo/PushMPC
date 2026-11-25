@@ -30,8 +30,9 @@ CASES = [
     ("h264_x4", "h264.mkv", {"smoother": 4}, 4, True, "640x360", "play"),
     ("h264_x5", "h264.mp4", {"smoother": 5}, 5, True, "640x360", "play"),
     ("h264_x10", "h264.mp4", {"smoother": 10}, 10, True, "640x360", "play"),
-    ("auto", "h264.mp4", {"smoother": 0}, 0, True, "*", "play"),
-    ("nis", "h264.mp4", {"smoother": 2, "upscale": 3}, 2, True, "up" if a.gpu else "640x360", "play"),
+    ("auto", "h264.mp4", {"smoother": 0, "upscale": 0, "engine": 0}, 0, True, "*", "play"),
+    ("nis", "h264.mp4", {"smoother": 1, "upscale": 3, "engine": 0}, 1, True, "up" if a.gpu else "640x360", "play"),
+    ("gpu_x2", "h264.mp4", {"smoother": 2, "upscale": 1, "engine": 0}, 2, True, "640x360", "play"),
     ("cpu_engine", "h264.mp4", {"smoother": 2, "engine": 1, "upscale": 1}, 2, True, "640x360", "play"),
     ("off", "h264.mp4", {"smoother": 1}, 1, True, "640x360", "play"),
     ("upscale2", "h264.mp4", {"smoother": 2, "upscale": 2}, 2, True, "1280x720", "play"),
@@ -52,17 +53,21 @@ def write(path, text):
         f.write(text)
 
 ud = os.path.join(a.home, "userdata")
-write(os.path.join(ud, "advancedsettings.xml"),
-      "<advancedsettings version=\"1.0\">\n  <loglevel hide=\"true\">1</loglevel>\n</advancedsettings>\n")
-write(os.path.join(ud, "guisettings.xml"), """<settings version="2">
-    <setting id="debug.showloginfo">true</setting>
-    <setting id="debug.extralogging">true</setting>
-    <setting id="debug.setextraloglevel">32768,262144</setting>
-    <setting id="videoplayer.adjustrefreshrate">0</setting>
-    <setting id="services.esenabled">true</setting>
-    <setting id="filelists.showparentdiritems">true</setting>
-</settings>
-""")
+
+def kodi_settings():
+    # written before every start: Kodi rewrites guisettings.xml when it quits
+    write(os.path.join(ud, "advancedsettings.xml"),
+          "<advancedsettings version=\"1.0\">\n  <loglevel hide=\"true\">1</loglevel>\n</advancedsettings>\n")
+    write(os.path.join(ud, "guisettings.xml"), """<settings version="2">
+        <setting id="debug.showloginfo">true</setting>
+        <setting id="debug.extralogging">true</setting>
+        <setting id="debug.setextraloglevel">32768,262144</setting>
+        <setting id="videoplayer.adjustrefreshrate">0</setting>
+        <setting id="services.esenabled">true</setting>
+        <setting id="filelists.showparentdiritems">true</setting>
+    </settings>
+    """)
+
 dst = os.path.join(a.home, "addons", "inputstream.pushmpc")
 shutil.rmtree(dst, ignore_errors=True)
 shutil.copytree(a.addon, dst)
@@ -78,6 +83,7 @@ def launch(args, seconds, drive_case=None, drive_out=None):
     log = find_log()
     if log:
         os.remove(log)
+    kodi_settings()
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     d = None
     if drive_case:
@@ -123,6 +129,8 @@ if log:
 failed = []
 for name, clip, settings, k, decode, size, drive_case in CASES:
     s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": 0}
+    if a.gpu:
+        s.update({"engine": 1, "upscale": 1})
     s.update(settings)
     write(os.path.join(ud, "addon_data", "inputstream.pushmpc", "settings.xml"),
           "<settings version=\"2\">\n" + "".join(f"    <setting id=\"{k_}\">{v}</setting>\n" for k_, v in s.items()) + "</settings>\n")

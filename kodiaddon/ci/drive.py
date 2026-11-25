@@ -30,7 +30,9 @@ def rpc(method, params=None, timeout=5.0):
 
 def props():
     r = rpc("Player.GetProperties", {"playerid": 1, "properties": ["time", "totaltime", "speed", "currentaudiostream",
-            "currentsubtitle", "subtitleenabled", "currentvideostream"]})
+            "currentsubtitle", "subtitleenabled"]})
+    if r and "error" in r:
+        print("DRIVE rpc error", json.dumps(r["error"]))
     return (r or {}).get("result", {})
 
 def ms(t):

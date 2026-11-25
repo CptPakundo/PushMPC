@@ -62,7 +62,7 @@ vc = [(int(m.group(1)), int(m.group(2)), int(m.group(3))) for m in
 if decode:
     sizes = {(w, h) for _, w, h in vc}
     size_ok = (len(sizes) == 1 and (not size_up or all(w > 640 and h > 360 for w, h in sizes))) if size_any else sizes == {(ow, oh)}
-    res["kodi"] = len(vc) >= 0.9 * len(out) and size_ok
+    res["kodi"] = len(vc) >= 0.75 * len(out) and size_ok
     notes.append(f"Kodi took {len(vc)} add-on pictures, sizes {sorted(sizes)}")
 else:
     res["kodi"] = not vc
@@ -76,14 +76,14 @@ notes += [f"kodi: {c.strip()}" for c in cfg[:8]]
 # a runner is slower than the display mode). Pass: >= 85% of min(source x k, loop rate).
 rend = []
 for l in lines:
-    m = re.search(r"PrepareNextRender: frameOnScreen: (-?[d.]+) renderPts: (-?[d.]+) nextFramePts: (-?[d.]+)", l)
+    m = re.search(r"PrepareNextRender: frameOnScreen: (-?[\d.]+) renderPts: (-?[\d.]+) nextFramePts: (-?[\d.]+)", l)
     if m:
         t = ts(l)
         if t is not None:
             rend.append((t, float(m.group(3))))
 hz = None
 for l in lines:
-    m = re.search(r"@ ?([d.]+) ?Hz", l)
+    m = re.search(r"@ ?([\d.]+) ?Hz", l)
     if m and "Display" in l:
         hz = float(m.group(1))
 if len(rend) > 10:

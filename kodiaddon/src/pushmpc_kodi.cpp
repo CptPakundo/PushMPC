@@ -299,10 +299,11 @@ public:
             const AVRational sar = st->sample_aspect_ratio.num ? st->sample_aspect_ratio : p->sample_aspect_ratio;
             if (p->height > 0)
                 info.SetAspect(float(double(p->width) / p->height * (sar.num > 0 && sar.den > 0 ? av_q2d(sar) : 1.0)));
-            info.SetColorSpace(static_cast<INPUTSTREAM_COLORSPACE>(p->color_space));
+            const bool main = streamid - 1 == m_videoIndex;   // the main stream's colour may come from its first frame
+            info.SetColorSpace(static_cast<INPUTSTREAM_COLORSPACE>(main ? m_space : p->color_space));
             info.SetColorRange(static_cast<INPUTSTREAM_COLORRANGE>(p->color_range));
-            info.SetColorPrimaries(static_cast<INPUTSTREAM_COLORPRIMARIES>(p->color_primaries));
-            info.SetColorTransferCharacteristic(static_cast<INPUTSTREAM_COLORTRC>(p->color_trc));
+            info.SetColorPrimaries(static_cast<INPUTSTREAM_COLORPRIMARIES>(main ? m_prim : p->color_primaries));
+            info.SetColorTransferCharacteristic(static_cast<INPUTSTREAM_COLORTRC>(main ? m_trc : p->color_trc));
         } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
             info.SetStreamType(INPUTSTREAM_TYPE_AUDIO);
             info.SetCodecName(KodiDecoderName(p->codec_id));
@@ -456,6 +457,43 @@ private:
               (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
     }
 
+    // the transfer of the first decoded frame, for files whose container does not say (the codec's own VUI may):
+    // reads from the start and seeks back, before any stream is enabled
+    AVColorTransferCharacteristic ProbeTransfer()
+    {
+        AVColorTransferCharacteristic trc = AVCOL_TRC_UNSPECIFIED;
+        AVStream* st = m_fmt->streams[m_videoIndex];
+        const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+        if (!dec) return trc;
+        AVCodecContext* ctx = avcodec_alloc_context3(dec);
+        avcodec_parameters_to_context(ctx, st->codecpar);
+        ctx->thread_count = 1;
+        AVPacket* pkt = av_packet_alloc();
+        AVFrame* frm = av_frame_alloc();
+        st->discard = AVDISCARD_DEFAULT;
+        if (avcodec_open2(ctx, dec, nullptr) >= 0) {
+            for (int n = 0; n < 200 && trc == AVCOL_TRC_UNSPECIFIED; ++n) {
+                if (av_read_frame(m_fmt, pkt) < 0) break;
+                if (pkt->stream_index == m_videoIndex && avcodec_send_packet(ctx, pkt) >= 0)
+                    while (avcodec_receive_frame(ctx, frm) >= 0) {
+                        trc = frm->color_trc;
+                        m_prim = frm->color_primaries; m_space = frm->colorspace;
+                        if (trc == AVCOL_TRC_UNSPECIFIED) trc = AVCOL_TRC_RESERVED0;   // decoded, and really unspecified
+                        av_frame_unref(frm);
+                    }
+                av_packet_unref(pkt);
+            }
+        }
+        if (trc == AVCOL_TRC_RESERVED0) trc = AVCOL_TRC_UNSPECIFIED;
+        st->discard = AVDISCARD_ALL;
+        av_seek_frame(m_fmt, -1, m_fmt->start_time != AV_NOPTS_VALUE ? m_fmt->start_time : 0, AVSEEK_FLAG_BACKWARD);
+        avformat_flush(m_fmt);
+        av_frame_free(&frm);
+        av_packet_free(&pkt);
+        avcodec_free_context(&ctx);
+        return trc;
+    }
+
     // does PushMPC decode the main video stream, and at which multiplier
     void DecideVideo()
     {
@@ -469,10 +507,17 @@ private:
         std::string why;
         const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(p->format));
         const int bits = d ? d->comp[0].depth : 8;
+        AVColorTransferCharacteristic trc = p->color_trc;
+        if (trc == AVCOL_TRC_UNSPECIFIED && bits > 8 && m_settings.enabled) trc = ProbeTransfer();
+        m_trc = trc;
+        if (m_prim == AVCOL_PRI_UNSPECIFIED) m_prim = p->color_primaries;
+        if (m_space == AVCOL_SPC_UNSPECIFIED) m_space = p->color_space;
+        Log(ADDON_LOG_INFO, "colour: %s, %s, %s, %s range%s", av_color_transfer_name(trc), av_color_primaries_name(m_prim),
+            av_color_space_name(m_space), av_color_range_name(p->color_range), trc != p->color_trc ? " (transfer from the first frame)" : "");
         if (!m_settings.enabled) why = "off in the add-on settings";
         else if (!avcodec_find_decoder(p->codec_id)) why = std::string("no decoder for ") + avcodec_get_name(p->codec_id);
         else if (HasDolbyVision(st)) why = "Dolby Vision: Kodi's own decoder keeps it";
-        else if (IsHdrTransfer(p->color_trc) && (!PM_KODI22 || !m_settings.hdr))
+        else if (IsHdrTransfer(trc) && (!PM_KODI22 || !m_settings.hdr))
             why = PM_KODI22 ? "HDR is off in the add-on settings" : "HDR: Kodi 21 cannot take HDR pictures from an add-on";
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
@@ -520,6 +565,9 @@ private:
     int m_k = 1;
     double m_fps = 0;
     int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
+    AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
+    AVColorPrimaries m_prim = AVCOL_PRI_UNSPECIFIED;
+    AVColorSpace m_space = AVCOL_SPC_UNSPECIFIED;
     pmk::EngineCfg m_engineCfg;
     std::unique_ptr<pmk::IEngine> m_engine;
 };
