@@ -74,9 +74,9 @@ if [ -n "${CLIP10:-}" ] && want x4_10bit; then
 fi
 # Windows: pushcore through pm_pushcore.dll (CI: the stub core on WARP, which blends; HD sources only)
 if [ "${PUSHCORE:-0}" = 1 ] && [ -n "${CLIP720:-}" ]; then
-  PC="--pushmpc-engine=2 --pushmpc-warp --pushmpc-smoother=4"
-  want pc_x4_720        && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x4_720        4 "$CLIP720" -- $PP $PC
-  want pc_x4_720_inline && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x4_720_inline 4 "$CLIP720" -- --video-filter=postproc $PC
+  PC="--pushmpc-engine=2 --pushmpc-warp --pushmpc-smoother=2"   # x2: the stub converts on the CPU and WARP is slow
+  want pc_x2_720        && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x2_720        2 "$CLIP720" -- $PP $PC
+  want pc_x2_720_inline && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x2_720_inline 2 "$CLIP720" -- --video-filter=postproc $PC
 fi
 # the portable GPU engine (Vulkan); CI: Mesa's lavapipe (PUSHMPC_VK_ALLOW_CPU=1), so it shows the plumbing, not the speed
 if [ "${GPU_TEST:-0}" = 1 ]; then
