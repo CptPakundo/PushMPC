@@ -38,11 +38,13 @@ struct Pos { int64_t src = 0; int sub = 0; };
 inline Pos Map(int64_t n, int k) { return { n / k, int(n % k) }; }
 inline int64_t OutputFrames(int64_t srcFrames, int k) { return srcFrames * k; }
 // the source range output n needs: s alone for the real frame, s .. s + 1 for a generated one (s alone at the clip's end)
-inline void Needs(int64_t n, int k, int64_t srcFrames, int64_t& lo, int64_t& hi)
+// lookahead: a backend that settles a source frame's outputs only once `lookahead` later frames are in (the GPU engine's
+// Dedup) needs them submitted too
+inline void Needs(int64_t n, int k, int64_t srcFrames, int64_t& lo, int64_t& hi, int lookahead = 0)
 {
     const Pos p = Map(n, k);
     lo = p.src;
-    hi = p.sub == 0 ? p.src : std::min(p.src + 1, srcFrames - 1);
+    hi = std::min((p.sub == 0 ? p.src : p.src + 1) + lookahead, srcFrames - 1);
 }
 // the nearest real frame for a generated one that is missing
 inline int64_t NearestReal(int64_t n, int k, int64_t srcFrames)
@@ -106,6 +108,7 @@ public:
     struct Counters { uint64_t submitted = 0, outputs = 0, generated = 0, repeats = 0, discontinuities = 0, offGrid = 0, evicted = 0; };
 
     void Init(int k, int64_t srcFrames, double srcDur100ns) { m_grid.k = std::max(1, k); m_grid.srcDur100ns = srcDur100ns; m_srcFrames = srcFrames; }
+    void SetLookahead(int lookahead) { m_look = std::max(0, lookahead); }
     int K() const { return m_grid.k; }
     const Grid& GridOf() const { return m_grid; }
     int64_t NextSubmit() const { return m_nextSubmit; }
@@ -114,7 +117,7 @@ public:
 
     void Requests(int64_t n, int64_t& from, int64_t& to) const
     {
-        int64_t lo, hi; Needs(n, m_grid.k, m_srcFrames, lo, hi);
+        int64_t lo, hi; Needs(n, m_grid.k, m_srcFrames, lo, hi, m_look);
         from = Has(n) ? lo : RequestFrom(m_nextSubmit, lo, hi);
         to = hi;
     }
@@ -122,7 +125,7 @@ public:
     Result Produce(int64_t n, int64_t requestedFrom, Backend<Frame>& b, uint32_t waitMs, bool retry = true)
     {
         Result r;
-        int64_t lo, hi; Needs(n, m_grid.k, m_srcFrames, lo, hi);
+        int64_t lo, hi; Needs(n, m_grid.k, m_srcFrames, lo, hi, m_look);
         const Pos pos = Map(n, m_grid.k);
         const Plan plan = PlanSubmit(m_nextSubmit, pos.src, hi, requestedFrom, Has(n), n < m_evictedBelow);
         if (plan.discontinuity) {
@@ -143,7 +146,7 @@ public:
             if (!Drain(b, 0, r.err)) return r;
         }
         // wait until n is there, or until what it needs has come out without it
-        const int64_t needReal = pos.sub == 0 ? pos.src : hi;
+        const int64_t needReal = pos.sub == 0 ? pos.src : std::min(pos.src + 1, m_srcFrames - 1);
         const uint64_t deadline = b.NowMs() + waitMs;
         while (!Has(n) && m_realSeen < needReal) {
             if (!Drain(b, 10, r.err)) return r;
@@ -214,6 +217,7 @@ private:
     }
     static constexpr size_t kMaxCache = 96;
     Grid m_grid;
+    int m_look = 0;
     int64_t m_srcFrames = 0;
     int64_t m_nextSubmit = -1000000;
     int64_t m_realSeen = -1;
@@ -247,7 +251,7 @@ inline Reuse DecideReuse(bool haveCore, const CoreKey& cur, const CoreKey& next)
 
 // ------------------------------------------------------------------------------------------------ readback bandwidth
 // 4:4:4 readback above this (GB/s, one direction; mpv's re-upload costs the same again) goes 4:2:0 on the GPU first
-// (players-all.md section 3: 4K at <= 120 fps is fine in 4:4:4, 4K HDR at 240 is not).
+// (internal research notes section 3: 4K at <= 120 fps is fine in 4:4:4, 4K HDR at 240 is not).
 inline constexpr double kReadbackLimitGBs = 6.0;
 enum class Chroma { Auto = 0, C444 = 1, C420 = 2 };
 inline double ReadbackGBs(uint32_t w, uint32_t h, bool tenBit, bool c444, double outFps)

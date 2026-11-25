@@ -1,0 +1,17 @@
+{
+  "note": "Pins of the portable GPU engine (vsplugin/engines/gpu). Vulkan-Headers and volk are fetched by CMake at configure time when -DPMVS_FETCH_GPU_DEPS=ON (CI); glslang compiles the shaders on CI (the SPIR-V in engines/gpu/spv is what it made, checked in for builds without glslang); MoltenVK is the Vulkan driver of the macOS CI job (users get it from Homebrew's molten-vk). Licences: Apache-2.0 / MIT (Vulkan-Headers), MIT (volk, NIS, FidelityFX), Apache-2.0 (MoltenVK), BSD-3 / Apache-2.0 (glslang, a build tool only); all GPL-3.0 compatible.",
+  "vulkanHeaders": { "repository": "KhronosGroup/Vulkan-Headers", "tag": "vulkan-sdk-1.4.341.0", "commit": "b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2", "url": "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz", "sha256": "7937d8ec21785736436d9ff52564db7d55992070b5ac98324472cce6e425a7ba" },
+  "volk": { "repository": "zeux/volk", "tag": "vulkan-sdk-1.4.341.0", "commit": "d979819fd03de3a7606d6e23d6ff4968942599da", "url": "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz", "sha256": "ff6facfca90161325a1f817c08c7edb6f892bd3bf4745449b735d7e13585ec4c" },
+  "glslang": {
+    "version": "16.6.0",
+    "linux": { "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-linux-x86_64-release.tar.gz", "sha256": "2c34071f56ecf39d16233294d3739cf43f981fd39080f2fd9dccb782101191ce" },
+    "macos": { "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-macos-universal-release.tar.gz", "sha256": "4f8c05f2888a73ed0b7b274bc524af9130e09ae94b43c0f3f9ed83cfae852834" },
+    "windows": { "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip", "sha256": "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b" },
+    "flags": "-V --target-env vulkan1.2"
+  },
+  "moltenvk": { "version": "v1.4.2", "url": "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar", "sha256": "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e" },
+  "ffmpegVmaf": { "what": "BtbN static ffmpeg (GPL, with libvmaf) for the CI benchmark's VMAF only; never shipped", "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz", "sha256": "41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380" },
+  "lavapipe": { "how": "Mesa's mesa-vulkan-drivers from the ubuntu-24.04 runner's apt (the version is logged by the job)" },
+  "nis": { "version": "1.0.3", "commit": "35e13ba316c98eeecf16f37eae70ce88019911f6", "where": "vsplugin/third_party/nis (from PushFPS v4.5.3 third_party/nis)" },
+  "fidelityfxFsr1": { "version": "FidelityFX SDK 1.1.4, FSR1 1.2.0", "where": "vsplugin/third_party/fidelityfx-fsr1" }
+}

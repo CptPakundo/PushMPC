@@ -1,0 +1,206 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: a generated frame at phase t between real frames A and B, planar YUV 4:2:0 at the
+// source's bit depth. The CPU reference is InterpolatePlanes (vsplugin/engines/portable/portable_engine.cpp, a planar
+// port of PushFPS's Interpolate.cpp / frame.frag): two candidates, the forward field F and the reversed backward field
+// -K, each sampling A at p - t v and B at p + (1 - t) v; their luma error; weights 1 / (e + 4)^2; where even the better
+// candidate disagrees (occlusion) the result moves toward the nearer real frame's sample. Chroma takes the candidates of
+// the top-left luma pixel of its 2x2 block. One invocation writes 4 (8-bit) or 2 (16-bit) packed samples of a row into
+// the readback buffer, or one sample into the intermediate images when an upscaler follows.
+//
+// Subtitle Hold (PushFPS portable 0.3.0, CrosshairHold.h with HoldKind::Subtitles): inside the subtitle band frame
+// generation samples each real frame's filled copy (the burned-in text taken out), and a held pixel becomes
+//     real(A, B, t) + shows x (generated - filled(A, B, t))
+// (Interpolate.cpp's statement), so the text stays where it is, sharp, while the picture behind it moves.
+//
+// mode 1 / 2 writes real frame A / B unchanged (a scene cut's nearer real frame; a real frame on its way to the upscaler).
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D aY;
+layout(binding = 1) uniform sampler2D aU;
+layout(binding = 2) uniform sampler2D aV;
+layout(binding = 3) uniform sampler2D bY;
+layout(binding = 4) uniform sampler2D bU;
+layout(binding = 5) uniform sampler2D bV;
+layout(binding = 6, std430) readonly buffer FieldF { vec2 fF[]; };
+layout(binding = 7, std430) readonly buffer FieldK { vec2 fK[]; };
+layout(binding = 8, std430) writeonly buffer OutW { uint ow[]; };
+layout(binding = 9, r16) uniform writeonly image2D mY;
+layout(binding = 10, r16) uniform writeonly image2D mU;
+layout(binding = 11, r16) uniform writeonly image2D mV;
+// the band of both real frames as frame generation takes it, in code values: Y of A, Y of B (zw x zh), U of A, U of B,
+// V of A, V of B (zw / 2 x zh / 2), then how much of the background shows through each luma pixel (0..1)
+layout(binding = 12, std430) readonly buffer Hold { float hd[]; };
+layout(push_constant) uniform PC {
+    int W, H, CW, CH;
+    int mode, plane, target, bps;
+    int pitchY, pitchC, offU, offV;
+    int fbx, fby, fbs, hold;
+    int zx, zy, zw, zh;
+    float t, maxV, kRaw, errLow, errHigh;
+} pc;
+
+#include "common.glsl"
+
+vec2 lsize, csize;
+
+// one sample of a band copy (sampleBilinear on the zone, coordinates relative to it)
+float holdSample(int base, int w, int h, float x, float y)
+{
+    float fxc = clamp(x - 0.5, 0.0, float(w - 1)), fyc = clamp(y - 0.5, 0.0, float(h - 1));
+    int x0 = int(fxc), y0 = int(fyc), x1 = min(x0 + 1, w - 1), y1 = min(y0 + 1, h - 1);
+    float fx = fxc - float(x0), fy = fyc - float(y0);
+    float p00 = hd[base + y0 * w + x0], p10 = hd[base + y0 * w + x1], p01 = hd[base + y1 * w + x0], p11 = hd[base + y1 * w + x1];
+    float top = p00 + (p10 - p00) * fx, bottom = p01 + (p11 - p01) * fx;
+    return top + (bottom - top) * fy;
+}
+int zcw() { return pc.zw / 2; }
+int zch() { return pc.zh / 2; }
+int baseYa() { return 0; }
+int baseYb() { return pc.zw * pc.zh; }
+int baseUa() { return 2 * pc.zw * pc.zh; }
+int baseUb() { return baseUa() + zcw() * zch(); }
+int baseVa() { return baseUa() + 2 * zcw() * zch(); }
+int baseVb() { return baseUa() + 3 * zcw() * zch(); }
+int baseShows() { return baseUa() + 4 * zcw() * zch(); }
+
+bool inZone(vec2 q, vec4 z) { vec2 d = q - 0.5 - z.xy; return d.x >= 0.0 && d.y >= 0.0 && d.x <= z.z - 1.0 && d.y <= z.w - 1.0; }
+
+float takeY(bool second, float x, float y)
+{
+    if (pc.hold != 0 && inZone(vec2(x, y), vec4(pc.zx, pc.zy, pc.zw, pc.zh)))
+        return holdSample(second ? baseYb() : baseYa(), pc.zw, pc.zh, x - float(pc.zx), y - float(pc.zy));
+    return second ? pmSample(bY, lsize, pc.kRaw, x, y) : pmSample(aY, lsize, pc.kRaw, x, y);
+}
+float takeC(int pl, bool second, float x, float y)
+{
+    if (pc.hold != 0 && inZone(vec2(x, y), vec4(pc.zx / 2, pc.zy / 2, zcw(), zch()))) {
+        int base = pl == 1 ? (second ? baseUb() : baseUa()) : (second ? baseVb() : baseVa());
+        return holdSample(base, zcw(), zch(), x - float(pc.zx / 2), y - float(pc.zy / 2));
+    }
+    if (pl == 1) return second ? pmSample(bU, csize, pc.kRaw, x, y) : pmSample(aU, csize, pc.kRaw, x, y);
+    return second ? pmSample(bV, csize, pc.kRaw, x, y) : pmSample(aV, csize, pc.kRaw, x, y);
+}
+
+struct Cand { float fx, fy, kx, ky, e1, e2, w1, w2, occlusion; bool firstBetter, single; float ya1, yb1, ya2, yb2; };
+
+Cand candAt(int x, int y)
+{
+    Cand c;
+    const float t = pc.t, scale = 255.0 / pc.maxV;
+    float px = float(x) + 0.5, py = float(y) + 0.5;
+    vec2 f, k;
+    PM_FIELD_SAMPLE(fF, pc.fbx, pc.fby, pc.fbs, px, py, f);
+    PM_FIELD_SAMPLE(fK, pc.fbx, pc.fby, pc.fbs, px, py, k);
+    c.fx = f.x; c.fy = f.y; c.kx = -k.x; c.ky = -k.y;
+    c.single = abs(c.fx - c.kx) + abs(c.fy - c.ky) < 1e-4;
+    c.ya1 = takeY(false, px - t * c.fx, py - t * c.fy);
+    c.yb1 = takeY(true, px + (1.0 - t) * c.fx, py + (1.0 - t) * c.fy);
+    c.e1 = abs(c.ya1 - c.yb1) * scale;
+    c.w1 = 1.0 / ((c.e1 + 4.0) * (c.e1 + 4.0));
+    if (c.single) { c.ya2 = c.ya1; c.yb2 = c.yb1; c.e2 = c.e1; c.w2 = c.w1; }
+    else {
+        c.ya2 = takeY(false, px - t * c.kx, py - t * c.ky);
+        c.yb2 = takeY(true, px + (1.0 - t) * c.kx, py + (1.0 - t) * c.ky);
+        c.e2 = abs(c.ya2 - c.yb2) * scale;
+        c.w2 = 1.0 / ((c.e2 + 4.0) * (c.e2 + 4.0));
+    }
+    c.occlusion = pmSmoothstep(pc.errLow, pc.errHigh, min(c.e1, c.e2));
+    c.firstBetter = c.e1 <= c.e2;
+    return c;
+}
+
+float blendOf(Cand c, float a1, float b1, float a2, float b2)
+{
+    const float t = pc.t;
+    float nearSample = t < 0.5 ? (c.firstBetter ? a1 : a2) : (c.firstBetter ? b1 : b2);
+    float c1 = a1 + (b1 - a1) * t;
+    float v = c1;
+    if (!c.single) {
+        float c2 = a2 + (b2 - a2) * t;
+        v = (c1 * c.w1 + c2 * c.w2) / (c.w1 + c.w2);
+    }
+    v += (nearSample - v) * c.occlusion;
+    return v;
+}
+
+float rawAt(sampler2D s, int x, int y) { return floor(texelFetch(s, ivec2(x, y), 0).r * pc.kRaw + 0.5); }
+float quant(float v) { return floor(clamp(v + 0.5, 0.0, pc.maxV)); }
+
+float lumaAt(int x, int y)
+{
+    if (pc.mode == 1) return rawAt(aY, x, y);
+    if (pc.mode == 2) return rawAt(bY, x, y);
+    Cand c = candAt(x, y);
+    float v = blendOf(c, c.ya1, c.yb1, c.ya2, c.yb2);
+    if (pc.hold != 0 && x >= pc.zx && y >= pc.zy && x < pc.zx + pc.zw && y < pc.zy + pc.zh) {
+        int i = (y - pc.zy) * pc.zw + (x - pc.zx);
+        float real = rawAt(aY, x, y) + (rawAt(bY, x, y) - rawAt(aY, x, y)) * pc.t;
+        float given = hd[baseYa() + i] + (hd[baseYb() + i] - hd[baseYa() + i]) * pc.t;
+        v = real + hd[baseShows() + i] * (v - given);
+    }
+    return quant(v);
+}
+
+void chromaAt(int cx, int cy, out float u, out float vv)
+{
+    if (pc.mode == 1) { u = rawAt(aU, cx, cy); vv = rawAt(aV, cx, cy); return; }
+    if (pc.mode == 2) { u = rawAt(bU, cx, cy); vv = rawAt(bV, cx, cy); return; }
+    const float t = pc.t;
+    Cand c = candAt(min(2 * cx, pc.W - 1), min(2 * cy, pc.H - 1));
+    float px = float(cx) + 0.5, py = float(cy) + 0.5;
+    float ax1 = px - t * c.fx * 0.5, ay1 = py - t * c.fy * 0.5, bx1 = px + (1.0 - t) * c.fx * 0.5, by1 = py + (1.0 - t) * c.fy * 0.5;
+    float ax2 = px - t * c.kx * 0.5, ay2 = py - t * c.ky * 0.5, bx2 = px + (1.0 - t) * c.kx * 0.5, by2 = py + (1.0 - t) * c.ky * 0.5;
+    float r[2];
+    for (int pl = 1; pl <= 2; ++pl) {
+        float a1 = takeC(pl, false, ax1, ay1), b1 = takeC(pl, true, bx1, by1);
+        float a2 = c.single ? a1 : takeC(pl, false, ax2, ay2), b2 = c.single ? b1 : takeC(pl, true, bx2, by2);
+        float v = blendOf(c, a1, b1, a2, b2);
+        if (pc.hold != 0 && cx >= pc.zx / 2 && cy >= pc.zy / 2 && cx < pc.zx / 2 + zcw() && cy < pc.zy / 2 + zch()) {
+            int i = (cy - pc.zy / 2) * zcw() + (cx - pc.zx / 2);
+            int sl = (2 * (cy - pc.zy / 2)) * pc.zw + 2 * (cx - pc.zx / 2);
+            float ra = pl == 1 ? rawAt(aU, cx, cy) : rawAt(aV, cx, cy), rb = pl == 1 ? rawAt(bU, cx, cy) : rawAt(bV, cx, cy);
+            float ga = hd[(pl == 1 ? baseUa() : baseVa()) + i], gb = hd[(pl == 1 ? baseUb() : baseVb()) + i];
+            float real = ra + (rb - ra) * t, given = ga + (gb - ga) * t;
+            v = real + hd[baseShows() + sl] * (v - given);
+        }
+        r[pl - 1] = quant(v);
+    }
+    u = r[0]; vv = r[1];
+}
+
+void main()
+{
+    lsize = vec2(pc.W, pc.H);
+    csize = vec2(pc.CW, pc.CH);
+    const int per = pc.target == 0 ? 4 / pc.bps : 1;
+    const int gx = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    const int w = pc.plane == 0 ? pc.W : pc.CW, h = pc.plane == 0 ? pc.H : pc.CH;
+    const int x0 = gx * per;
+    if (x0 >= w || y >= h) return;
+    if (pc.plane == 0) {
+        uint word = 0u;
+        for (int k = 0; k < per; ++k) {
+            int x = x0 + k;
+            if (x >= w) break;
+            float v = lumaAt(x, y);
+            if (pc.target == 1) imageStore(mY, ivec2(x, y), vec4(v / pc.maxV));
+            else word |= uint(v) << uint(k * 8 * pc.bps);
+        }
+        if (pc.target == 0) ow[(y * pc.pitchY + x0 * pc.bps) >> 2] = word;
+    } else {
+        uint wu = 0u, wv = 0u;
+        for (int k = 0; k < per; ++k) {
+            int x = x0 + k;
+            if (x >= w) break;
+            float u, v;
+            chromaAt(x, y, u, v);
+            if (pc.target == 1) { imageStore(mU, ivec2(x, y), vec4(u / pc.maxV)); imageStore(mV, ivec2(x, y), vec4(v / pc.maxV)); }
+            else { wu |= uint(u) << uint(k * 8 * pc.bps); wv |= uint(v) << uint(k * 8 * pc.bps); }
+        }
+        if (pc.target == 0) {
+            ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
+            ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+        }
+    }
+}

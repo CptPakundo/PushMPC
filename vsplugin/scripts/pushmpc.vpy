@@ -62,9 +62,9 @@ for _kv in str(_ud).split(","):
     if "=" in _kv:
         _k, _v = _kv.split("=", 1)
         _k, _v = _k.strip(), _v.strip()
-        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms"):
+        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms", "display_w", "display_h"):
             _args[_k] = int(_v)
-        elif _k == "display_fps":
+        elif _k in ("display_fps", "sharpness"):
             _args[_k] = float(_v)
         elif _k:
             _args[_k] = _v
@@ -72,6 +72,13 @@ for _kv in str(_ud).split(","):
 _dfps = globals().get("display_fps", 0) or 0
 if _dfps > 1 and "display_fps" not in _args:
     _args["display_fps"] = float(_dfps)
+# mpv 0.36+ also passes the display size (display_res: [w, h]): the GPU engine upscales to it (Upscaler, UpscaleTarget)
+_dres = globals().get("display_res")
+try:
+    if _dres and len(_dres) >= 2 and int(_dres[0]) > 0 and "display_w" not in _args:
+        _args["display_w"], _args["display_h"] = int(_dres[0]), int(_dres[1])
+except (TypeError, ValueError):
+    pass
 
 def _text(v):
     return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)

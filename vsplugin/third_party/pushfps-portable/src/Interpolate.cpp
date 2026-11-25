@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -46,7 +47,8 @@ void sampleBilinear(const Bgra& image, float x, float y, float out[4]) {
 }
 
 bool interpolate(const Bgra& a, const Bgra& b, const MotionField& forward, const MotionField& backward,
-                 const Gray* mask, float t, Bgra& out, int threads, InterpolateSettings s) {
+                 const Gray* mask, float t, Bgra& out, int threads, InterpolateSettings s, const HoldPair* hold,
+                 const HoldPair* subtitles) {
     if (a.empty() || a.width != b.width || a.height != b.height) return false;
     if (!std::isfinite(t)) t = 0;
     t = std::clamp(t, 0.f, 1.f);
@@ -61,6 +63,30 @@ bool interpolate(const Bgra& a, const Bgra& b, const MotionField& forward, const
     }
     const bool useMask = mask && !mask->empty();
     const float W = float(a.width), H = float(a.height);
+    // Crosshair Hold and Subtitle Hold: inside each zone, frame generation samples the filled copy of each real
+    // frame (the overlay is not there to be moved), and the overlay's own pixels are laid back afterwards. The two
+    // zones never overlap (the square round the centre, the band near the bottom).
+    const HoldPair* zones[2] = {nullptr, nullptr};
+    int zoneCount = 0;
+    for (const HoldPair* z : {hold, subtitles}) {
+        if (!z || z->w <= 1 || z->h <= 1 || z->filledA.width != z->w || z->filledA.height != z->h ||
+            z->filledB.width != z->w || z->filledB.height != z->h || z->shows.width != z->w || z->shows.height != z->h ||
+            z->x < 0 || z->y < 0 || z->x + z->w > a.width || z->y + z->h > a.height) continue;
+        zones[zoneCount++] = z;
+    }
+    const bool useHold = zoneCount > 0;
+    // A sample whose four pixels all lie in a zone comes from that zone's filled copy; any other from the frame.
+    auto take = [&](const Bgra& frame, bool second, float sx, float sy, float o[4]) {
+        for (int i = 0; i < zoneCount; ++i) {
+            const HoldPair& z = *zones[i];
+            const float zx = sx - 0.5f - float(z.x), zy = sy - 0.5f - float(z.y);
+            if (zx >= 0.f && zy >= 0.f && zx <= float(z.w - 1) && zy <= float(z.h - 1)) {
+                sampleBilinear(second ? z.filledB : z.filledA, sx - float(z.x), sy - float(z.y), o);
+                return;
+            }
+        }
+        sampleBilinear(frame, sx, sy, o);
+    };
     auto rows = [&](int y0, int y1) {
         float a1[4], b1[4], a2[4], b2[4];
         for (int y = y0; y < y1; ++y) {
@@ -71,10 +97,10 @@ bool interpolate(const Bgra& a, const Bgra& b, const MotionField& forward, const
                 forward.sample(px, py, fx, fy);
                 backward.sample(px, py, kx, ky);
                 kx = -kx; ky = -ky;
-                sampleBilinear(a, px - t * fx, py - t * fy, a1);
-                sampleBilinear(b, px + (1.f - t) * fx, py + (1.f - t) * fy, b1);
-                sampleBilinear(a, px - t * kx, py - t * ky, a2);
-                sampleBilinear(b, px + (1.f - t) * kx, py + (1.f - t) * ky, b2);
+                take(a, false, px - t * fx, py - t * fy, a1);
+                take(b, true, px + (1.f - t) * fx, py + (1.f - t) * fy, b1);
+                take(a, false, px - t * kx, py - t * ky, a2);
+                take(b, true, px + (1.f - t) * kx, py + (1.f - t) * ky, b2);
                 const float e1 = (std::abs(a1[0] - b1[0]) + std::abs(a1[1] - b1[1]) + std::abs(a1[2] - b1[2])) / 3.f;
                 const float e2 = (std::abs(a2[0] - b2[0]) + std::abs(a2[1] - b2[1]) + std::abs(a2[2] - b2[2])) / 3.f;
                 const float w1 = 1.f / ((e1 + 4.f) * (e1 + 4.f)), w2 = 1.f / ((e2 + 4.f) * (e2 + 4.f));
@@ -84,11 +110,33 @@ bool interpolate(const Bgra& a, const Bgra& b, const MotionField& forward, const
                 float lock = 0.f;
                 if (useMask) lock = sampleMask(*mask, px / W, py / H);
                 const uint8_t* held = nearer.pixel(x, y);
+                // A held pixel: the real frames' own pixel, plus the share of the background's change that
+                // shows through it. Where nothing is held (the given pixels are the real ones and all of the
+                // change shows) the statement would give the generated pixel back, so it is not run.
+                bool holdHere = false;
+                float shows = 1.f;
+                const uint8_t *ra = nullptr, *rb = nullptr, *qa = nullptr, *qb = nullptr;
+                for (int i = 0; useHold && i < zoneCount; ++i) {
+                    const HoldPair& z = *zones[i];
+                    if (x < z.x || y < z.y || x >= z.x + z.w || y >= z.y + z.h) continue;
+                    const int zx = x - z.x, zy = y - z.y;
+                    const uint8_t level = z.shows.at(zx, zy);
+                    ra = a.pixel(x, y); rb = b.pixel(x, y);
+                    qa = z.filledA.pixel(zx, zy); qb = z.filledB.pixel(zx, zy);
+                    holdHere = level != kShowsFull || std::memcmp(ra, qa, 3) != 0 || std::memcmp(rb, qb, 3) != 0;
+                    shows = float(level) / float(kShowsFull);
+                    break;
+                }
                 for (int c = 0; c < 3; ++c) {
                     const float c1 = a1[c] + (b1[c] - a1[c]) * t;
                     const float c2 = a2[c] + (b2[c] - a2[c]) * t;
                     float v = (c1 * w1 + c2 * w2) / (w1 + w2);
                     v += (nearSample[c] - v) * occlusion;
+                    if (holdHere) {
+                        const float real = float(ra[c]) + (float(rb[c]) - float(ra[c])) * t;
+                        const float given = float(qa[c]) + (float(qb[c]) - float(qa[c])) * t;
+                        v = real + shows * (v - given);
+                    }
                     v += (float(held[c]) - v) * lock;
                     o[c] = uint8_t(std::clamp(v + 0.5f, 0.f, 255.f));
                 }
