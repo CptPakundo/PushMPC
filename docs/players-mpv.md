@@ -138,16 +138,16 @@ loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=po
 - **Engine.** On the best Vulkan GPU it finds (a discrete card first), the GPU engine runs; without one (or with
   `PortableDevice = cpu`) the CPU engine. The log says which, and why; every frame carries `PushMPCEngine` = `gpu` or `cpu`.
 - Motion both ways between two real frames: PushFPS's block matcher on the GPU (8 px vectors from the full-size picture by
-  default), or NVIDIA's optical-flow hardware where the driver offers it (`VK_NV_optical_flow`; `motion=blocks` turns it
-  off). Scene cuts: PushFPS's rule plus PushMPC's guard (no blend across a cut: the nearer real frame is shown). The
+  default), or, if you ask for it with `motion=nvof`, NVIDIA's optical-flow hardware (`VK_NV_optical_flow`; on an RTX 5090 it
+  measured slower and not better than the block matcher, so it is not the default). Scene cuts: PushFPS's rule plus PushMPC's guard (no blend across a cut: the nearer real frame is shown). The
   generated frames sit at 1/k, 2/k, ... between the real ones.
 - **Anime on twos and threes (Dedup, on by default):** a repeated frame is recognised (PushFPS's rule) and the generated
   frames are spread between the different drawings, so a drawing held for two or three frames moves smoothly instead of
   stepping. The plugin looks two source frames ahead for this (`dedup=0` turns it off).
 - **Subtitle Hold (on by default in this engine):** burned-in subtitles stay sharp and in place while the picture behind
   them moves (PushFPS's rule; `subtitle_hold=0` turns it off). Soft subtitles are drawn by mpv afterwards anyway.
-- **Upscaling (GPU engine):** to the screen when mpv passes its size (or `target=1440p|4K|5K`), with FSR1 (EASU + RCAS) by
-  default or NIS (`upscaler=nis`); `upscaler=off` leaves scaling to mpv. Chroma is scaled bicubic.
+- **Upscaling (GPU engine):** to the screen when mpv passes its size (or `target=1440p|4K|5K`), with NVIDIA Image Scaling (NIS) by
+  default or AMD FSR1 (`upscaler=fsr`); `upscaler=off` leaves scaling to mpv. Chroma is scaled bicubic.
 - The output keeps the source's format and colour (YUV 4:2:0, 8 or 10 bit, SDR or HDR). Without upscaling, real frames
   are passed through unchanged. No RTX features.
 - **Auto and the GPU.** The plugin times one source frame and one generated frame on the GPU at the video's size and

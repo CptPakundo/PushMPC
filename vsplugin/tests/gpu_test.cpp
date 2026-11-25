@@ -450,7 +450,7 @@ static void TestUpscale(Upscaler u, float sharp = 0.5f)
 
 static void TestOpticalFlow()
 {
-    Config c; c.width = 480; c.height = 272; c.bits = 8; c.quality = 2;
+    Config c; c.width = 480; c.height = 272; c.bits = 8; c.quality = 2; c.blockMatcherOnly = false;
     Engine e;
     std::string err;
     if (!MakeEngine(e, c, err)) { CHECK(false, "configure: %s", err.c_str()); return; }

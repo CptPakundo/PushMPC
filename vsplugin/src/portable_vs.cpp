@@ -1,7 +1,7 @@
 // pushmpc.Enhance, backend "portable" (Windows with any GPU, Linux, macOS): PushFPS's portable frame generation behind
 // the same Pipeline as the nvidia backend (schedule.h), on one of two engines:
 //   GPU  engines/gpu: Vulkan 1.2 compute (MoltenVK on macOS) on the best Vulkan device: GPU motion estimation (PushFPS's
-//        block matcher, or NVIDIA's optical-flow hardware where the driver has VK_NV_optical_flow), interpolation, the
+//        block matcher; NVIDIA's optical-flow hardware through VK_NV_optical_flow on request), interpolation, the
 //        cut guard, Dedup (anime on twos / threes), Subtitle Hold, NIS / FSR1 upscaling to the screen;
 //   CPU  engines/portable: PushFPS's portable core on the CPU, when there is no usable Vulkan device (the log says why)
 //        or PortableDevice = cpu.
@@ -301,9 +301,9 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     c.quality = s.quality < 0 ? 2 : s.quality;
     c.upscaler = up.kind == GpuUpscaler::Nis ? gpu::Upscaler::Nis : up.kind == GpuUpscaler::Fsr ? gpu::Upscaler::Fsr : gpu::Upscaler::None;
     c.outWidth = up.w; c.outHeight = up.h;
-    c.sharpness = float(std::clamp(PArgF(in, a, "sharpness", 0.5), 0.0, 1.0));
+    c.sharpness = float(std::clamp(PArgF(in, a, "sharpness", up.kind == GpuUpscaler::Nis ? kDefaultSharpnessNis : kDefaultSharpnessFsr), 0.0, 1.0));
     c.sourceSlots = 8; c.outSlots = 10;
-    c.blockMatcherOnly = s.motion == "blocks";
+    c.blockMatcherOnly = s.motion != "nvof";   // the block matcher unless asked (motion=nvof / PortableMotion=nvof)
     if (!d->be.engine.Configure(c, req, why)) { delete d; return false; }
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);

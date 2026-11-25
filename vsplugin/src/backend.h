@@ -105,9 +105,12 @@ inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, 
 // display resolution, when the script passes it), 1440p, 4K or 5K, keeping the aspect ratio, even sizes. Nothing is
 // upscaled when the target is not more than 5 % larger than the source (mpv scales the rest) or unknown.
 // upscaler: auto | nis | fsr | off (rtx / vsr mean auto: there is no RTX VSR outside pushcore). Auto picks kAutoUpscaler,
-// the better of the two on the CI benchmark (vsplugin-gpu.yml; track notes).
+// the better of the two on the CI benchmark (2x from half size, vsplugin-gpu.yml): NIS at sharpness 0.1 led on PSNR on
+// both clips (28.48 / 40.08 dB vs FSR1's best 28.34 / 39.84, bilinear 27.45 / 38.06). kDefaultSharpness* are the
+// defaults when no sharpness is given.
 enum class GpuUpscaler { None = 0, Nis = 1, Fsr = 2 };
-inline constexpr GpuUpscaler kAutoUpscaler = GpuUpscaler::Fsr;
+inline constexpr GpuUpscaler kAutoUpscaler = GpuUpscaler::Nis;
+inline constexpr double kDefaultSharpnessNis = 0.1, kDefaultSharpnessFsr = 0.5;
 struct UpscaleChoice { GpuUpscaler kind = GpuUpscaler::None; int w = 0, h = 0; std::string why; };
 inline UpscaleChoice DecideUpscale(std::string upscaler, std::string target, int displayW, int displayH, int srcW, int srcH)
 {

@@ -5,10 +5,10 @@
 // frame unchanged (byte for byte); generated frames and upscaled real frames come from the GPU, each with its own
 // ticket, and are copied out when the GPU has them (Poll), so the CPU copies one while the GPU makes the next.
 //
-// The cut guard: PushFPS's scene-cut rule (most blocks changed and motion explains little of it) as the fixed rule, and
-// PushMPC's guard on top (the idea of the pushcore guard, with this engine's own measures): a pair whose unexplained
-// share is high, whose forward and backward fields disagree, and whose matched error jumps far above the recent moving
-// pairs' is a cut too. A cut pair's outputs show the nearer real frame (no morph).
+// The cut guard: PushFPS's scene-cut rule (most blocks changed and motion explains little of it), and
+// PushMPC's guard (the idea of the pushcore guard, with this engine's own measures): forward and backward fields that
+// disagree on a changed picture make a cut; fields that agree on real motion veto the rule (see CutGuard). A cut
+// pair's outputs show the nearer real frame (no morph).
 #pragma once
 #include <algorithm>
 #include <chrono>
@@ -28,28 +28,27 @@
 namespace pmvs::gpu {
 
 struct CutGuard {
-    // PushMPC's guard (on top of PushFPS's rule)
-    float minUnexplained = 0.30f;   // share of blocks motion does not explain
-    float maxConsistent = 0.25f;    // forward-backward agreement below this: the motion is not coherent
-    float jump = 3.0f;              // matched error above jump x the median of the last moving pairs ...
-    float floor = 6.0f;             // ... and above this (0..255 per pixel)
-    std::deque<float> history;      // matched error of the last moving pairs (no cut)
+    // Calibrated on the CI benchmark's cut matrix (vsplugin-gpu.yml: 20 junctions between 5 public clips, 300 motion pairs
+    // incl. rippling water, a fast pan, zooms, CG animation): forward-backward agreement was <= 0.014 at every junction
+    // and >= 0.818 on every motion pair. So:
+    //  - PushMPC's guard: a cut when the two fields disagree (agreement < maxAgreement), the picture changed (zero-motion
+    //    error > minChange) and motion leaves some of it unexplained (>= minUnexplained): 20/20 junctions, 0/300 false;
+    //  - PushFPS's rule (most blocks unexplained) is vetoed when the fields agree on real motion (agreement >=
+    //    vetoAgreement with >= vetoMoving of the blocks moving): it fired on 45 of 57 rippling-water pairs that motion
+    //    in fact explains (blend-like interpolation is right there), and on no junction the guard missed.
+    float maxAgreement = 0.30f, minChange = 8.0f, minUnexplained = 0.10f;
+    float vetoAgreement = 0.50f, vetoMoving = 0.20f;
     bool enabled = true;
     // returns 0 no cut, 1 PushFPS's rule, 2 the guard
     int Decide(const PairStats& st)
     {
-        const float mc = std::max(st.meanCostF, st.meanCostB);
-        int r = st.cutRule ? 1 : 0;
-        if (!r && enabled && history.size() >= 3) {
-            std::vector<float> h(history.begin(), history.end());
-            std::nth_element(h.begin(), h.begin() + long(h.size() / 2), h.end());
-            const float base = h[h.size() / 2];
-            if (std::max(st.unexplainedF, st.unexplainedB) >= minUnexplained && st.consistent < maxConsistent && mc > std::max(floor, jump * base)) r = 2;
-        }
-        if (!r) { history.push_back(mc); while (history.size() > 6) history.pop_front(); }
-        return r;
+        if (!enabled) return st.cutRule ? 1 : 0;
+        const bool coherent = st.consistent >= vetoAgreement && st.moving >= vetoMoving;
+        if (st.cutRule && !coherent) return 1;
+        if (st.consistent < maxAgreement && st.zeroCost > minChange && std::max(st.unexplainedF, st.unexplainedB) >= minUnexplained) return 2;
+        return 0;
     }
-    void Reset() { history.clear(); }
+    void Reset() {}
 };
 
 // Auto's budget on the GPU: one source frame's cost (upload, the duplicate test, motion both ways) and one output's

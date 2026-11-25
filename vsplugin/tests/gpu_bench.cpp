@@ -180,6 +180,7 @@ static void BenchInterp(Y4m& clip)
         std::ofstream y4m;
         if (!g_y4mOut.empty()) { y4m.open(g_y4mOut + "/" + g_clip + "_" + m.name + ".y4m", std::ios::binary); y4m << clip.header << '\n'; }
         double ps = 0, ss = 0, ms = 0; int n = 0, cuts = 0;
+        CutGuard guard;
         int prevPair = -1, prevSlotA = -1;
         int slotPrev = -1;
         veyra::portable::MotionField lastF, lastK;
@@ -193,10 +194,11 @@ static void BenchInterp(Y4m& clip)
                 PairStats st;
                 const int pr = e.Estimate(sa, sb, prevPair, st, err);
                 if (pr < 0) { std::printf("estimate: %s\n", err.c_str()); break; }
-                cuts += st.cutRule ? 1 : 0;
+                const int cut = guard.Decide(st);   // the backend's decision (PushFPS's rule + the guard)
+                cuts += cut ? 1 : 0;
                 YuvOut o = g.Out();
                 int out = -1; uint64_t ticket = 0;
-                if (!e.Generate(pr, 0.5f, st.cutRule ? 1 : 0, out, ticket, err) || !e.Wait(ticket, err)) { std::printf("generate: %s\n", err.c_str()); break; }
+                if (!e.Generate(pr, 0.5f, cut ? 1 : 0, out, ticket, err) || !e.Wait(ticket, err)) { std::printf("generate: %s\n", err.c_str()); break; }
                 e.Read(out, o);
                 g.FromBytes();
                 if (prevPair >= 0) e.ReleasePair(prevPair);
