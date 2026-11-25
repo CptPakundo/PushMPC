@@ -2861,7 +2861,8 @@ switch ($Action) {
         $p = Join-Path $InstallDir 'pending.json'
         if (-not (Test-Path $p)) { Info 'Nothing pending.'; break }
         $left = @()
-        foreach ($c in @(Get-Content $p -Raw | ConvertFrom-Json)) {
+        # (Windows PowerShell 5.1's ConvertFrom-Json returns a JSON array as one object: unrolled)
+        foreach ($c in @(Get-Content $p -Raw | ConvertFrom-Json | ForEach-Object { $_ })) {
             if (Swap-Component $c.name $c.staging) { if (-not $DryRun) { Remove-Item $c.staging -Recurse -Force }; Info "$($c.name) $($c.version) installed" } else { $left += $c }
         }
         if ($DryRun) { break }

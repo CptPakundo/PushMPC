@@ -408,7 +408,12 @@ do_install() {
     targets=0
     nat=0; native_mpv_vs && nat=1
     conf=$cfg/mpv/mpv.conf
-    if [ "$nat" = 1 ]; then
+    # PUSHMPC_NATIVE_HOOK=1 (setup.sh): PushMPC's native hook (mpvnative/install/pushmpc-native.sh) is active in this mpv's
+    # mpv.conf; the VapourSynth block is then not added (never both routes in one mpv)
+    hook=${PUSHMPC_NATIVE_HOOK:-0}
+    if [ "$hook" = 1 ]; then
+        say "mpv ($(command -v mpv)): PushMPC's native hook is in its mpv.conf (no VapourSynth needed)"; targets=$((targets + 1))
+    elif [ "$nat" = 1 ]; then
         say "mpv ($(command -v mpv)) has VapourSynth:"
         vs_config
         vs_selftest; st=$?
@@ -423,7 +428,7 @@ do_install() {
     fi
     nat_broken=${nat_broken:-0}
     fp=0; flatpak_mpv && fp=1
-    if [ "$fp" = 0 ] && [ "$nat" = 0 ]; then
+    if [ "$fp" = 0 ] && [ "$nat" = 0 ] && [ "$hook" = 0 ]; then
         say "No mpv with VapourSynth found."
         if ask_flatpak && install_flatpak_mpv; then fp=1; fi
     fi
@@ -435,6 +440,8 @@ do_install() {
         say "  Flatpak override: $FLATPAK_MPV may read $pm (read-only)"
         targets=$((targets + 1))
     fi
+    # Celluloid reads mpv.conf, so the native hook's block serves it as well
+    if [ "$hook" = 1 ] && [ "$nat" = 0 ] && { have celluloid || [ -d "$cfg/celluloid" ]; }; then say "Celluloid:"; celluloid_install "$conf"; fi
     # frontends on the system libmpv need its VapourSynth too
     if [ "$nat" = 1 ]; then
         if have celluloid || [ -d "$cfg/celluloid" ]; then say "Celluloid:"; celluloid_install "$conf"; fi
@@ -456,7 +463,7 @@ do_install() {
     done
     if [ -d "$HOME/.kodi" ] || have kodi; then
         say "Kodi:"
-        if [ "$nat" = 1 ]; then kodi_install "$(command -v mpv)" ''
+        if [ "$nat" = 1 ] || [ "$hook" = 1 ]; then kodi_install "$(command -v mpv)" ''
         elif [ "$fp" = 1 ]; then kodi_install "$(command -v flatpak || echo /usr/bin/flatpak)" "run $FLATPAK_MPV "
         else say "  no mpv with VapourSynth: not changed"; fi
     fi

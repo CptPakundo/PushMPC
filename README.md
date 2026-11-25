@@ -107,9 +107,13 @@ Setup is not code-signed yet: if SmartScreen says "Windows protected your PC", c
 release manifest the updater reads is signed. Uninstall from *Windows Settings > Apps > Installed apps > PushMPC*: every
 player setting PushMPC changed is put back. *Modify* offers Repair and Update.
 
+Optional: `PushMPC-mpv-windows-<version>.zip` on the release page is PushMPC's own mpv build (the native route, zero
+copy); unpack it and run `pushmpc-native.ps1 install -From <folder>`. Your own mpv keeps the VapourSynth route.
+
 **Linux** (x86_64, aarch64): download `pushmpc-linux-<arch>-<version>.tar.gz` from the
 [releases](https://github.com/CptPakundo/PushMPC/releases/latest), unpack it and run `sh setup.sh` as your user. It sets
-up every player it finds and offers, once each, the Flathub mpv (Ubuntu and Debian build mpv without VapourSynth) and
+up every player it finds (the distribution's mpv gets PushMPC's native hook when it runs there: zero copy, no
+VapourSynth; else the VapourSynth route), installs PushFlow's GPU runtime, and offers, once each, the Flathub mpv (Ubuntu and Debian build mpv without VapourSynth) and
 NVIDIA's Video Effects. Remove it with `sh ~/.local/share/pushmpc/setup.sh uninstall`.
 
 **macOS** (Apple silicon): a Homebrew formula (`brew install pushmpc`, then `pushmpc-setup install`); its tap is not

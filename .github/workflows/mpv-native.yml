@@ -13,6 +13,9 @@ on:
   push:
     branches: ['track/mpv-native', 'track/mpv-native-*']
     paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', '.github/workflows/mpv-native.yml']
+  # release.yml builds the release's native hook and mpv through this workflow (artifacts mpvnative-hook-<runner>,
+  # mpvnative-windows)
+  workflow_call:
   workflow_dispatch:
     inputs:
       macos:

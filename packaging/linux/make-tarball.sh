@@ -35,6 +35,13 @@ if [ -n "${PUSHMPC_PMML_GRAPHS:-}" ] && [ -f "$PUSHMPC_PMML_GRAPHS/synth-yuv.onn
     mkdir -p "$d/pmml/graphs"; cp "$PUSHMPC_PMML_GRAPHS"/*.onnx "$d/pmml/graphs/"
     install -m 644 pmml/scripts/fetch_runtime.py "$d/pmml/fetch_runtime.py"; install -m 644 scripts/ml-runtime-pin.json "$d/pmml/ml-runtime-pin.json"
 fi
+# optional: PushMPC's native hook for the distro mpv (PUSHMPC_MPVNATIVE_DIR = mpv-native.yml's hook folder:
+# pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so) with its installer, which setup.sh runs
+if [ -n "${PUSHMPC_MPVNATIVE_DIR:-}" ] && [ -f "$PUSHMPC_MPVNATIVE_DIR/pushmpc_hook.so" ]; then
+    mkdir -p "$d/mpvnative"; cp "$PUSHMPC_MPVNATIVE_DIR"/*.so "$d/mpvnative/"
+    [ -f "$PUSHMPC_MPVNATIVE_DIR/SOURCES.txt" ] && cp "$PUSHMPC_MPVNATIVE_DIR/SOURCES.txt" "$d/mpvnative/"
+    install -m 755 mpvnative/install/pushmpc-native.sh "$d/mpvnative/pushmpc-native.sh"
+fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"

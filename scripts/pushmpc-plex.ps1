@@ -84,7 +84,8 @@ function Get-Plex {
     }
     return $out
 }
-function Read-State { if (Test-Path -LiteralPath $StateFile) { try { return @(Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json) } catch { } }; return @() }
+# (Windows PowerShell 5.1's ConvertFrom-Json returns a JSON array as one object: unrolled here)
+function Read-State { if (Test-Path -LiteralPath $StateFile) { try { $j = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json; return @($j | ForEach-Object { $_ } | Where-Object { $_ -and $_.Dll }) } catch { } }; return @() }
 function Write-State($rows) { if ($DryRun) { return }; New-Item -ItemType Directory -Force $PlexDir | Out-Null; ConvertTo-Json @($rows) -Depth 4 | Set-Content -LiteralPath $StateFile -Encoding UTF8 }
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 

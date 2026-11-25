@@ -4,6 +4,8 @@
 # Auto starts with (the same rules as the plugin's Auto: vsplugin backend.h), and runs the per-player installers:
 #   install.sh        mpv, Flathub mpv, Celluloid, Haruna, SMPlayer, MPC-QT, the Jellyfin / Plex MPV shims,
 #                     Jellyfin Desktop, Kodi (mpv as its external player), NVIDIA's Video Effects (Linux, licence step)
+#   mpvnative/        PushMPC's native hook for the distro mpv (zero copy, no VapourSynth), when it activates in that mpv;
+#                     else the VapourSynth route (never both)
 #   pushmpc-vlc.sh    VLC 3 (native, Flathub, Snap), when this download has the VLC module (vlc/)
 #   kodi/install.sh   the Kodi add-on, when this download has it (kodi/)
 #   pmml              PushFlow (RIFE) on the GPU for the mpv route: ONNX Runtime and the EP for this GPU (TensorRT-RTX on an
@@ -199,6 +201,30 @@ do_vlc() {
     printf '%s\n' "$out" | sed 's/^/  /'
     if [ "$rc" = 0 ]; then record vlc; else say "  VLC's installer failed (exit $rc): VLC not changed"; fi
 }
+# The distro mpv: PushMPC's native hook (mpvnative/: zero copy, no VapourSynth needed) when it activates in this mpv,
+# else the VapourSynth route (install.sh); never both in one mpv. The hook's own installer decides "installed" (active)
+# or "installed-inactive" (exit 3: no build for this mpv's FFmpeg), which is undone again.
+hookon=0
+do_native() {
+    hookon=0
+    [ "$os" = Darwin ] && return 0
+    ni=$here/mpvnative/pushmpc-native.sh
+    [ -f "$ni" ] && have mpv || return 0
+    if [ "$dry" = 1 ]; then say "mpv (native hook): would try sh mpvnative/pushmpc-native.sh install --target native"; return 0; fi
+    say "mpv (native hook):"
+    mkdir -p "$pm/mpvnative-installer"; cp "$ni" "$pm/mpvnative-installer/pushmpc-native.sh"
+    out=$(sh "$ni" install --from "$here/mpvnative" --target native --json 2>"$pm/mpvnative-installer/install.log"); rc=$?
+    sed 's/^/  /' "$pm/mpvnative-installer/install.log" | tail -n 5
+    state=$(printf '%s\n' "$out" | sed -n 's/.*"target":"native".*"state":"\([^"]*\)".*/\1/p' | head -n 1)
+    detail=$(printf '%s\n' "$out" | sed -n 's/.*"target":"native".*"detail":"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ "$rc" = 0 ] && [ "$state" = installed ]; then
+        hookon=1; record native
+        say "  the native hook is active in this mpv${detail:+ ($detail)}: the VapourSynth route is not added to it"
+    else
+        say "  the native hook does not run in this mpv (${state:-exit $rc}${detail:+: $detail}): the VapourSynth route instead"
+        sh "$ni" uninstall --target native >/dev/null 2>&1
+    fi
+}
 # PushFlow's models: from PushFPS's release zip (the same files and pins as the Windows Setup takes)
 PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip
 PF_ZIP_SHA=8466ab7187d9ad7f8db7ac54582e3482ffa4e75d3ff97b28e434816b8fa7ff31
@@ -295,8 +321,9 @@ case $action in
         if [ "$os" = Darwin ]; then do_mac
         else
             [ -f "$here/install.sh" ] || { echo "setup.sh: install.sh is missing (run setup.sh from the unpacked PushMPC folder)" >&2; exit 1; }
+            do_native
             # shellcheck disable=SC2086
-            sh "$here/install.sh" install $pass; rc=$?
+            PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }
         fi
         do_vlc
@@ -310,6 +337,8 @@ case $action in
         say "Plan saved in $plan. Remove everything with: sh $pm/setup.sh uninstall"
         ;;
     uninstall)
+        if recorded native && [ -f "$pm/mpvnative-installer/pushmpc-native.sh" ]; then say "mpv (native hook):"; sh "$pm/mpvnative-installer/pushmpc-native.sh" uninstall --target native 2>&1 | sed 's/^/  /'; fi
+        [ "$dry" = 1 ] || rm -rf "$pm/mpvnative-installer"
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; sh "$pm/kodi-installer/install.sh" uninstall | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
