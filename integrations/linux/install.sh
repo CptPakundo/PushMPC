@@ -126,6 +126,8 @@ vs_config() {
     # so the same Python entry is added under that library's path too.
     if [ -f "$t" ] && have mpv; then
         vs_lib=$(ldd "$(command -v mpv)" 2>/dev/null | sed -n 's/^.*=> \(\/[^ ]*\(vsscript\|vapoursynth-script\)[^ ]*\) .*$/\1/p' | head -n 1)
+        # mpv usually opens it at run time (dlopen), so it is not in ldd's list: the one the loader would find
+        [ -n "$vs_lib" ] || vs_lib=$( { /sbin/ldconfig -p 2>/dev/null || ldconfig -p 2>/dev/null; } | sed -n 's/^.*=> \(\/.*lib\(vapoursynth-script\|vsscript\)\.so[^ ]*\)$/\1/p' | head -n 1)
         if [ -n "$vs_lib" ]; then
             key=$(readlink -f "$vs_lib" | sed 's#/lib64/#/lib/#')
             rest=$(grep '^"' "$t" | tail -n 1 | sed 's/^"[^"]*"//')
@@ -140,6 +142,23 @@ vs_config() {
     return 0
 }
 vsconfig_revert() { return 0; }
+# mpv's VapourSynth filter on a generated picture: 0 = it runs, 1 = it cannot start (VSScript / Python), 2 = unknown
+vs_selftest() {
+    d=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/pushmpc-vstest.$$"); mkdir -p "$d"
+    printf 'video_in.set_output()\n' > "$d/t.vpy"
+    mpv --no-config --vo=null --ao=null --frames=2 --vf="vapoursynth=file=[$d/t.vpy]" 'av://lavfi:testsrc=size=160x120:rate=24' > "$d/out" 2>&1; rc=$?
+    vs_msg=$(grep -i 'vapoursynth\]' "$d/out" | grep -iv 'concurrent requests' | head -n 1)
+    r=2
+    if [ "$rc" = 0 ]; then r=0
+    elif grep -qi 'Failed to initialize VapourSynth\|Creating filter .vapoursynth. failed\|libvapoursynth' "$d/out"; then r=1; fi
+    rm -rf "$d"
+    return $r
+}
+vs_hint() {
+    say "  mpv's VapourSynth cannot start Python: ${vs_msg:-unknown error}"
+    say "  Install your distribution's VapourSynth Python module (Fedora: sudo dnf install python3-vapoursynth;"
+    say "  Debian/Ubuntu: python3-vapoursynth), run 'vapoursynth config' once, then run this installer again."
+}
 
 # ------------------------------------------------------------------------------------------------ Flatpak override
 fp_overrides() { printf '%s/flatpak/overrides/%s' "$data" "$FLATPAK_MPV"; }
@@ -339,9 +358,17 @@ do_install() {
     if [ "$nat" = 1 ]; then
         say "mpv ($(command -v mpv)) has VapourSynth:"
         vs_config
-        mpvconf install "$conf" "$script"; record "mpvconf|$conf"; targets=$((targets + 1))
+        vs_selftest; st=$?
+        if [ "$st" = 1 ]; then
+            # mpv would refuse to play anything with a filter that cannot start: its mpv.conf is left alone
+            vs_hint; nat=0; nat_broken=1
+        else
+            [ "$st" = 2 ] && say "  (mpv's VapourSynth self-test could not run here; set up anyway)"
+            mpvconf install "$conf" "$script"; record "mpvconf|$conf"; targets=$((targets + 1))
+        fi
     elif have mpv; then say "mpv ($(command -v mpv)) has no VapourSynth: its mpv.conf is not changed"
     fi
+    nat_broken=${nat_broken:-0}
     fp=0; flatpak_mpv && fp=1
     if [ "$fp" = 0 ] && [ "$nat" = 0 ]; then
         say "No mpv with VapourSynth found."
@@ -365,7 +392,7 @@ do_install() {
             if [ -f "$cfg/$s/conf.json" ]; then say "$s:"; mpvconf install "$cfg/$s/mpv.conf" "$script"; record "mpvconf|$cfg/$s/mpv.conf"; fi
         done
     else
-        for p in celluloid haruna smplayer mpc-qt; do have "$p" && say "$p: uses the system mpv library, which has no VapourSynth here: not changed (use mpv from Flathub)"; done
+        for p in celluloid haruna smplayer mpc-qt; do have "$p" && say "$p: uses the system mpv library, whose VapourSynth cannot run here: not changed (use mpv from Flathub)"; done
     fi
     for a in io.github.celluloid_player.Celluloid org.kde.haruna io.github.mpc_qt.mpc-qt com.github.iwalton3.jellyfin-mpv-shim; do
         [ -d "$fpdata/$a" ] && say "Flatpak $a: its own mpv build, not changed (no VapourSynth plugin slot)"

@@ -18,6 +18,7 @@ stubs() {
     cat > "$b/mpv" <<'EOF'
 #!/bin/sh
 for a in "$@"; do case $a in --vf=help) echo "Available libavfilter filters:"; [ "${MPV_VS:-0}" = 1 ] && echo "  vapoursynth      VapourSynth bridge"; exit 0 ;; esac; done
+for a in "$@"; do case $a in av://lavfi:*) if [ "${MPV_VSFAIL:-0}" = 1 ]; then echo "[vapoursynth] Failed to initialize VapourSynth VSScript library: Python executable and library path couldn't be determined"; echo "[user_filter_wrapper] Creating filter 'vapoursynth' failed."; exit 2; fi ;; esac; done
 exit 0
 EOF
     cat > "$b/flatpak" <<'EOF'
@@ -174,6 +175,19 @@ check "6 Kodi: our parts gone" hasnot 'PushMPC' "$HOME/.kodi/userdata/playercore
 check "6 Kodi: the user's edit kept" has '<!-- mine -->' "$HOME/.kodi/userdata/playercorefactory.xml"
 check "6 SMPlayer: our flags gone, --fs kept" same "$(grep '^mplayer_additional_options=' "$HOME/.config/smplayer/smplayer.ini")" 'mplayer_additional_options=--fs'
 check "6 Kodi: created file kept as the user changed it" test -f "$HOME/.kodi/userdata/playercorefactory.xml"
+
+# 8. mpv has VapourSynth but its VSScript cannot start Python: mpv.conf left alone (mpv would refuse to play), the
+#    Flathub mpv offered instead
+fresh
+MPV_VS=1; MPV_VSFAIL=1; export MPV_VSFAIL
+before=$(snap)
+runi install --flatpak no; check "8 install exits 0" same $? 0
+check "8 hint names the Python module" has 'python3-vapoursynth' "$out"
+check "8 mpv.conf not created" test ! -e "$HOME/.config/mpv/mpv.conf"
+check "8 falls back to the Flathub offer" has 'No mpv with VapourSynth found' "$out"
+runi uninstall
+check "8 nothing left" same "$(snap)" "$before"
+MPV_VSFAIL=0
 
 # 7. dry run writes nothing
 fresh

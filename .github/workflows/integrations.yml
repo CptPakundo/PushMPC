@@ -414,10 +414,10 @@ jobs:
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
           echo "--- VSScript's Python link"
-          cat $HOME/.config/vapoursynth/vapoursynth.toml 2>&1
-          python -c "import vapoursynth._utils as u; print('get_vsscript:', u.get_vsscript())" 2>&1
-          ldd $(command -v mpv) | grep -i vapoursynth; for l in $(ldd $(command -v mpv) | grep -io '/[^ ]*vapoursynth[^ ]*'); do echo "$l -> $(readlink -f $l)"; done
-          pacman -Ql vapoursynth | grep -E '\.so|bin/' | head
+          cat $HOME/.config/vapoursynth/vapoursynth.toml 2>&1 || true
+          python -c "import vapoursynth._utils as u; print('get_vsscript:', u.get_vsscript())" 2>&1 || true
+          ldconfig -p | grep -i 'vapoursynth\|vsscript' || true
+          pacman -Ql vapoursynth | grep -E '\.so|bin/' | head || true
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           ls /tmp/vslog-arch/ 2>/dev/null; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
           echo "--- encode mode"
@@ -488,14 +488,18 @@ jobs:
           if mpv --no-config --vf=help 2>/dev/null | grep -q vapoursynth; then echo "FEDORA_VS=1" >> "$GITHUB_ENV"; echo "Fedora mpv: VapourSynth yes" | tee -a /tmp/versions.txt
           else echo "FEDORA_VS=0" >> "$GITHUB_ENV"; echo "Fedora mpv: VapourSynth NO" | tee -a /tmp/versions.txt; fi
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
-      - name: install.sh (the answer for this mpv), mpv encode mode when it has VapourSynth
+      - name: install.sh (the answer for this mpv), then with the VapourSynth Python module, mpv through the plugin
         run: |
           set -eu
           export HOME=/tmp/home-fedora; mkdir -p $HOME
           tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+          echo "::notice title=fedora install (mpv only)::$(grep -i 'VapourSynth\|python3-vapoursynth\|mpv.conf' /tmp/install.txt | tr '\n' ' ')"
           if [ "$FEDORA_VS" = 1 ]; then
-            dnf -y -q install vapoursynth-libs >/dev/null 2>&1 || true
+            sh $HOME/.local/share/pushmpc/install.sh uninstall
+            dnf -y -q install python3-vapoursynth >/dev/null 2>&1 || dnf -y -q install vapoursynth-python3 >/dev/null 2>&1 || true
+            rpm -qa | grep -i vapoursynth | tee -a /tmp/versions.txt
+            sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
             mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
             mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv-fedora.txt 2>&1 || true
@@ -698,6 +702,9 @@ jobs:
           $vax = Get-ChildItem $vd -Recurse -Filter 'MpcVideoRenderer64.ax' | Select-Object -First 1
           $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$($vax.FullName)`"" -Wait -PassThru
           "MPC Video Renderer $($vr.tag_name): regsvr32 exit $($r.ExitCode)" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          # no update question on the first start (it blocks the window), then the first start writes the settings
+          New-Item 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Force | Out-Null
+          Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name UpdaterAutoCheck -Value 0 -Type DWord
           # first start writes its registry settings (Setup adds PushMPC to them)
           $m = Start-Process $exe -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           Invoke-WebRequest $env:CLIP_URL -OutFile "$env:RUNNER_TEMP\clip.mp4"
