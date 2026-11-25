@@ -345,11 +345,19 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
             fOf.pNext = &fSync2; f12.pNext = &fOf;
         } else ofFam = -1;
     }
+    // external memory, one list for every host:
+    //  - dma-buf buffers (Kodi's DRM-PRIME frame buffers written in place): VK_KHR_external_memory_fd + _dma_buf;
+    //  - dma-buf images (VA-API surfaces in VLC): those plus VK_EXT_image_drm_format_modifier, and the foreign queue
+    //    family when the driver has it. PUSHMPC_VK_NO_DMABUF=1 leaves all of it out.
 #if !defined(_WIN32) && !defined(__APPLE__)
-    if (HasDeviceExt(m_phys, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) && HasDeviceExt(m_phys, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+    const char* noDb = std::getenv("PUSHMPC_VK_NO_DMABUF");
+    if (!(noDb && noDb[0] == '1') && HasDeviceExt(m_phys, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+        HasDeviceExt(m_phys, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
         exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
         exts.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
-        m_dmabuf = true;
+        m_dmabufBuf = true;
+        if (HasDeviceExt(m_phys, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME)) { exts.push_back(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME); m_dmabuf = true; }
+        if (HasDeviceExt(m_phys, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) { exts.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME); m_foreign = true; }
     }
 #endif
 #if defined(__ANDROID__)
@@ -362,7 +370,7 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
         vkGetPhysicalDeviceFeatures2(m_phys, &q2);
         if (qY.samplerYcbcrConversion) {
             exts.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
-            exts.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+            if (!m_foreign) { exts.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME); m_foreign = true; }
             fY.samplerYcbcrConversion = VK_TRUE;
             fY.pNext = f12.pNext; f12.pNext = &fY;
             m_ahb = true;
@@ -379,7 +387,7 @@ bool Context::Open(const DeviceRequest& req, std::string& err)
     di.queueCreateInfoCount = qCount; di.pQueueCreateInfos = qis;
     di.enabledExtensionCount = uint32_t(exts.size()); di.ppEnabledExtensionNames = exts.data();
     const VkResult r = vkCreateDevice(m_phys, &di, nullptr, &m_dev);
-    if (r != VK_SUCCESS) { m_dmabuf = false; m_ahb = false; err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
+    if (r != VK_SUCCESS) { m_dmabuf = m_dmabufBuf = m_foreign = m_ahb = false; err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + m_info.name; m_dev = VK_NULL_HANDLE; return false; }
     volkLoadDevice(m_dev);
     if (hostImport && vkGetMemoryHostPointerPropertiesEXT) {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
@@ -509,7 +517,7 @@ bool Context::ImportDmaBuf(int fd, VkDeviceSize size, VkBufferUsageFlags usage, 
 {
     out = {};
 #if !defined(_WIN32) && !defined(__APPLE__)
-    if (!m_dmabuf || !vkGetMemoryFdPropertiesKHR) { err = "dma-buf import not supported by " + m_info.name; return false; }
+    if (!m_dmabufBuf || !vkGetMemoryFdPropertiesKHR) { err = "dma-buf import not supported by " + m_info.name; return false; }
     VkExternalMemoryBufferCreateInfo eb{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
     eb.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };

@@ -78,6 +78,18 @@ if [ "$OS" = linux ]; then
         dups=$(grep -ho "([0-9]* duplicates)" "$T/engine-twos.log" | tail -1 | tr -dc 0-9)
         if check "$T/twos-vk.mkv" $((1 + (N2 - 1) * 2)) 48 2 && [ "${dups:-0}" -ge $((N2 / 2 - 2)) ]; then result ffmpeg-vulkan-dedup-twos PASS; else echo "duplicates: ${dups:-none} of $N2"; result ffmpeg-vulkan-dedup-twos FAIL; fi
     else tail -15 "$T/twos-vk.log"; result ffmpeg-vulkan-dedup-twos FAIL; fi
+    # transition rules on the Vulkan path: a flash (one white frame) is held, a dissolve is blended (thumbnails read back)
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=4" -vf "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(n,48)'" -pix_fmt yuv420p -c:v ffv1 "$T/flash.mkv"
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=3" -f lavfi -i "smptehdbars=size=640x360:rate=24:duration=3" \
+        -filter_complex "[0][1]xfade=transition=fade:duration=1.5:offset=0.75,format=yuv420p" -c:v ffv1 "$T/dissolve.mkv"
+    for c in flash dissolve; do
+        PUSHMPC_ENGINE_LOG="$T/engine-$c.log" "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/$c.mkv" \
+            -vf "format=nv12,hwupload,pushmpc=smoother=2,hwdownload,format=nv12" -c:v ffv1 "$T/$c-vk.mkv" > "$T/$c-vk.log" 2>&1 || tail -10 "$T/$c-vk.log"
+        grep -h "close:" "$T/engine-$c.log" | tail -1 | sed "s/^/$c: /"
+    done
+    fl=$(grep -ho "[0-9]* flashes held" "$T/engine-flash.log" | tail -1 | tr -dc 0-9)
+    [ "${fl:-0}" -ge 1 ] && result ffmpeg-vulkan-flash-held PASS || result ffmpeg-vulkan-flash-held FAIL
+    grep -q "close:" "$T/engine-dissolve.log" && result ffmpeg-vulkan-dissolve-runs PASS || result ffmpeg-vulkan-dissolve-runs FAIL
     # fruc_vulkan needs VK_NV_optical_flow (RTX 30+): on lavapipe it must refuse cleanly
     "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" -frames:v 10 \
         -vf "format=nv12,hwupload,fruc_vulkan=fps=source_fps*2,hwdownload,format=nv12" -f null - > "$T/fruc.log" 2>&1

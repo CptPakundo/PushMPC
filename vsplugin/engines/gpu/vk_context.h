@@ -71,7 +71,7 @@ public:
     bool OpticalFlow() const { return m_ofQueue != VK_NULL_HANDLE; }
     // Linux dma-buf import (VK_KHR_external_memory_fd + VK_EXT_external_memory_dma_buf): a player's frame buffer as a
     // storage buffer the shaders write into (zero copy into Kodi's DRM-PRIME pictures)
-    bool DmaBuf() const { return m_dmabuf; }
+    bool DmaBuf() const { return m_dmabufBuf; }   // dma-buf buffers (Kodi's frame buffers); Dmabuf(): dma-buf images
     // fd stays the caller's (a duplicate is imported); the buffer is device memory owned by the dma-buf
     bool ImportDmaBuf(int fd, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out, std::string& err);
     // host memory as a storage buffer the shaders write into (VK_EXT_external_memory_host): a player's system-memory
@@ -89,6 +89,10 @@ public:
     void Destroy(Buffer& b);
     void Destroy(Image& i);
     bool FormatOk(VkFormat f, VkFormatFeatureFlags need) const;
+    // dmabuf import (VK_EXT_external_memory_dma_buf + VK_EXT_image_drm_format_modifier) is enabled on this device
+    bool Dmabuf() const { return m_dmabuf; }
+    bool QueueFamilyForeign() const { return m_foreign; }   // VK_EXT_queue_family_foreign
+    int MemType(uint32_t bits, VkMemoryPropertyFlags want) const { return MemoryType(bits, want); }
 
 private:
     Context() = default;
@@ -102,7 +106,7 @@ private:
     VkQueue m_queue = VK_NULL_HANDLE;
     uint32_t m_family = 0, m_ofFamily = 0;
     VkQueue m_ofQueue = VK_NULL_HANDLE;
-    bool m_dmabuf = false;
+    bool m_dmabufBuf = false;
     VkDeviceSize m_hostAlign = 0;
     bool m_ahb = false;
     std::mutex m_ofLock;
@@ -113,6 +117,7 @@ private:
     std::mutex m_queueLock;
     bool m_external = false;
     ExternalDevice m_ext;
+    bool m_dmabuf = false, m_foreign = false;
 };
 
 // load the Vulkan library once per process; false with the reason when there is none

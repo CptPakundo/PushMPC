@@ -82,7 +82,7 @@ if(PME_VULKAN_ON)
   set(_spv "${CMAKE_BINARY_DIR}/pme_spv")
   file(MAKE_DIRECTORY "${_spv}")
   set(_spv_out)
-  foreach(s import export)
+  foreach(s import export thumb)
     add_custom_command(OUTPUT "${_spv}/pme_${s}.h"
       COMMAND "${PME_GLSLANG}" -V --target-env vulkan1.2 --vn kSpv_pme_${s} -o "${_spv}/pme_${s}.h" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s}.comp"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s}.comp" COMMENT "glslang: ${s}.comp" VERBATIM)

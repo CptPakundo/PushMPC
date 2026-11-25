@@ -285,3 +285,9 @@ bug report.
 The About tab names the installed versions and opens the log folder. If PushMPC cannot run (no DirectX 12 GPU, a
 missing or mismatched component, an interlaced video, another renderer), the video plays unchanged and the status says
 why. If a frame generation method does not start on your GPU, PushMPC falls back to the next one and says so.
+
+**VLC on Linux: hardware-decoded video.** The installer tests VLC's hardware decoding with PushMPC on and writes what
+it found to `hw-selftest.txt` in the plugin folder (run `pushmpc-vlc.sh selftest-hw` to test again, for example after a
+driver update). Zero-copy VA-API display (VLC's OpenGL output importing the decoder's surfaces) needs Mesa 25.1 or newer,
+or an X server with DRI3. Without either, the installer sets `avcodec-hw=vaapi_drm`: hardware decoding stays, and VLC
+copies the frames for the display. If no hardware path passes, software decoding stays on, with PushMPC still working.

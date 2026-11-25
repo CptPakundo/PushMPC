@@ -1,0 +1,22 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC engine module: the transition rules' thumbnail (vsplugin/engines/gpu/transitions.h Thumb::Of) on the GPU:
+// every 8th luma sample of every 8th row, its top 8 bits, packed 4 per word into a small host-visible buffer.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D srcY;        // the slot's Y plane (R8 / R16 UNORM holding code / kRaw)
+layout(std430, binding = 1) writeonly buffer Out { uint words[]; } dst;
+layout(push_constant) uniform PC { int tw, th, rowWords, shift; float kRaw; } pc;
+void main()
+{
+    const int i = int(gl_GlobalInvocationID.x);
+    const int wx = i % pc.rowWords, y = i / pc.rowWords;
+    if (y >= pc.th) return;
+    uint word = 0u;
+    for (int k = 0; k < 4; ++k) {
+        const int x = wx * 4 + k;
+        if (x >= pc.tw) break;
+        uint v = uint(texelFetch(srcY, ivec2(x * 8, y * 8), 0).r * pc.kRaw + 0.5) >> uint(pc.shift);
+        word |= min(v, 255u) << uint(8 * k);
+    }
+    dst.words[i] = word;
+}

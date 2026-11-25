@@ -197,6 +197,16 @@ public:
     void ReleaseOutput(int id);
     bool GenerateInto(int pair, float t, int mode, int output, uint64_t& ticket, std::string& err);
     bool RealInto(int slot, int output, uint64_t& ticket, std::string& err);
+    // ---- zero-copy hosts (VA-API dmabufs imported in VLC): the host records its own commands into the engine's command
+    // buffer, ordered on the engine's timeline. UploadWith: rec writes the source into `planar` (device memory, Upload's
+    // staging layout: rows of width x bytes per sample, packed; U at offU, V at offV, all 4-byte aligned), then the
+    // engine takes it as Upload does (slot, pyramid). GenerateWith: Generate, then rec reads the frame from its packed
+    // readback slot (as Read sees it) in the same submission; the caller frees the slot with ReleaseOut after Wait.
+    struct PlanarDesc { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceSize offU = 0, offV = 0; int width = 0, height = 0, cw = 0, ch = 0, bps = 1; };
+    struct PackedDesc { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceSize offset = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0, width = 0, height = 0, cw = 0, ch = 0, bps = 1; };
+    int UploadWith(const std::function<bool(VkCommandBuffer, const PlanarDesc&, std::string&)>& rec, uint64_t& ticket, std::string& err);
+    bool GenerateWith(int pair, float t, int mode, const std::function<bool(VkCommandBuffer, const PackedDesc&, std::string&)>& rec,
+                      int& out, uint64_t& ticket, std::string& err);
 
     // gpu_test: a pair's fields from / to the CPU reference's MotionField
     bool InjectFields(int pair, const veyra::portable::MotionField& f, const veyra::portable::MotionField& k, std::string& err);
