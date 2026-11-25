@@ -136,7 +136,7 @@ jobs:
           $sp = Join-Path $rt $pin.vapoursynth.wheelTo; New-Item -ItemType Directory $sp -Force | Out-Null
           foreach ($w in Get-ChildItem (Join-Path $rt $pin.vapoursynth.wheel)) { tar -xf $w.FullName -C $sp }
           foreach ($p in Get-ChildItem $rt -Filter 'python*._pth') { Add-Content $p.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
-          Copy-Item "$env:RUNNER_TEMP\vsdll\pushmpc_vs.dll" $vsp; Copy-Item vsplugin/scripts/pushmpc.vpy $vsp
+          Copy-Item "$env:RUNNER_TEMP\vsdll\pushmpc_vs.dll" $vsp; Copy-Item vsplugin/scripts/pushmpc.vpy, integrations/mpv/pushmpc.lua $vsp
           $vss = (Get-ChildItem $rt -Recurse -Filter VSScript.dll | Select-Object -First 1).DirectoryName
           "VSSCRIPT_DIR=$vss" >> $env:GITHUB_ENV
           $clip = Fetch $env:CLIP_URL ''
@@ -327,8 +327,8 @@ jobs:
           $sdll = "$env:LOCALAPPDATA\Programs\Stremio\libmpv-2.dll"
           if (Test-Path $sdll) {
             $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\vslog-stremio"; New-Item -ItemType Directory $env:PUSHMPC_VS_LOG_DIR -Force | Out-Null
-            # as Stremio sets it up: d3d11vpp in vf (its GPU video processing), our config with the script
-            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll $sdll -Option "scripts=$lua", "script-opts=pushmpc-vpy=$vpy", 'hwdec=auto-copy' 2>&1 | Out-String
+            # our config with the script, in Stremio's libmpv (with the runtime on PATH, as -RuntimeOnPath sets it)
+            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll $sdll -Options "scripts=$lua|script-opts=pushmpc-vpy=$vpy|hwdec=auto-copy" 2>&1 | Out-String
             $rc = $LASTEXITCODE; Write-Host $r
             $plug = (Get-ChildItem $env:PUSHMPC_VS_LOG_DIR -Filter *.log -ErrorAction SilentlyContinue | Get-Content) -match 'backend: |portable: output'
             "Stremio libmpv + pushmpc.lua: host exit $rc; plugin log: $(($plug | Select-Object -First 2) -join ' | ')" | Tee-Object -Append $out
@@ -336,7 +336,7 @@ jobs:
           }
           foreach ($d in @("$env:ProgramFiles\Plex\Plex", "$env:ProgramFiles\Plex\Plex HTPC")) {
             if (-not (Test-Path "$d\libmpv-2.dll")) { continue }
-            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll "$d\libmpv-2.dll" -Option "scripts=$lua", 'script-opts=pushmpc-mode=vsr,pushmpc-scaling=nvidia' 2>&1 | Out-String
+            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll "$d\libmpv-2.dll" -Options "scripts=$lua|script-opts=pushmpc-mode=vsr,pushmpc-scaling=nvidia" 2>&1 | Out-String
             $rc = $LASTEXITCODE; Write-Host $r
             "$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr): host exit $rc (0 = played to the end: a failing d3d11vpp on WARP must not stop playback)" | Tee-Object -Append $out
             Write-Host "::notice title=$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr)::host exit $rc; $((($r -split "`n") -match 'd3d11vpp|super resolution|pushmpc') -join ' | ')"
@@ -698,7 +698,7 @@ jobs:
         timeout-minutes: 5
         run: |
           set -eu
-          export HOME=/tmp/home-novs; mkdir -p $HOME/vs
+          export HOME=/tmp/home-novs; mkdir -p $HOME/vs; unset XDG_CONFIG_HOME XDG_DATA_HOME
           cp integrations/mpv/pushmpc.lua vsplugin/scripts/pushmpc.vpy $HOME/vs/
           sh integrations/mpv/mpv-integration.sh install --script $HOME/vs/pushmpc.vpy
           cat $HOME/.config/mpv/mpv.conf
@@ -786,7 +786,7 @@ jobs:
           PY
           grep -q 'loaded: True' /tmp/aur.txt
           export HOME=/tmp/home-aur; mkdir -p $HOME; unset XDG_CONFIG_HOME XDG_DATA_HOME
-          pushmpc-setup install; grep -q 'vf-append=@pushmpc:vapoursynth=file=\[/usr/lib/pushmpc/pushmpc.vpy\]' $HOME/.config/mpv/mpv.conf
+          pushmpc-setup install; grep -q '^scripts-append=/usr/lib/pushmpc/pushmpc.lua' $HOME/.config/mpv/mpv.conf; grep -q '^script-opts-append=pushmpc-vpy=/usr/lib/pushmpc/pushmpc.vpy' $HOME/.config/mpv/mpv.conf
           # mpv through the packaged setup (encode mode, x2)
           pacman -S --noconfirm --needed ffmpeg >/dev/null
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"

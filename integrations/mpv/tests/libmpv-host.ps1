@@ -1,11 +1,11 @@
 <#
   libmpv-host.ps1: plays a generated test picture through another program's libmpv-2.dll (Stremio's, Plex's), with
   PushMPC's options, in this PowerShell process: their DLL is loaded, their program is not run. CI only.
-    pwsh libmpv-host.ps1 -Dll <libmpv-2.dll> [-Option key=value ...] [-Seconds 3] [-Log <file>]
+    pwsh libmpv-host.ps1 -Dll <libmpv-2.dll> [-Options "key=value|key=value"] [-Seconds 3] [-Log <file>]
   Prints the end-of-file reason and the log lines about PushMPC, d3d11vpp, vapoursynth and Lua. Exit code: 0 = the
   file played to its end, 1 = playback ended with an error, 2 = the DLL could not be used.
 #>
-param([Parameter(Mandatory = $true)][string]$Dll, [string[]]$Option = @(), [int]$Seconds = 3, [string]$Log = '')
+param([Parameter(Mandatory = $true)][string]$Dll, [string]$Options = '', [int]$Seconds = 3, [string]$Log = '')
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent (Resolve-Path -LiteralPath $Dll).Path
 if (-not $Log) { $Log = Join-Path ([IO.Path]::GetTempPath()) ('libmpv-host-' + [guid]::NewGuid().ToString('N') + '.log') }
@@ -29,7 +29,7 @@ public static class LibMpvHost {
 if ([LibMpvHost]::LoadLibrary((Join-Path $dir 'libmpv-2.dll')) -eq [IntPtr]::Zero) { Write-Host "cannot load $Dll (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"; exit 2 }
 $ctx = [LibMpvHost]::mpv_create()
 if ($ctx -eq [IntPtr]::Zero) { Write-Host 'mpv_create failed'; exit 2 }
-$set = @('vo=null', 'ao=null', "log-file=$Log", 'msg-level=all=v') + $Option
+$set = @('vo=null', 'ao=null', "log-file=$Log", 'msg-level=all=v') + @($Options -split '\|' | Where-Object { $_ })
 foreach ($kv in $set) {
     $i = $kv.IndexOf('='); $k = $kv.Substring(0, $i); $v = $kv.Substring($i + 1)
     $rc = [LibMpvHost]::mpv_set_option_string($ctx, [LibMpvHost]::U($k), [LibMpvHost]::U($v))
