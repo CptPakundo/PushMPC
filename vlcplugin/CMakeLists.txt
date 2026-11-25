@@ -21,6 +21,7 @@ endif()
 set(VLC_PLUGIN_INCLUDE "" CACHE PATH "VLC 3 plugin headers")
 set(VLC_CORE_LIB "" CACHE FILEPATH "libvlccore to link (optional on macOS)")
 set(PM_ALT_ENTRY "" CACHE STRING "second plug-in entry name to export")
+set(PM_GL_INCLUDE "" CACHE PATH "OpenGL headers (GL/gl.h, GL/glext.h, KHR/) for the OpenGL output fork, if not in the system")
 if(NOT EXISTS "${VLC_PLUGIN_INCLUDE}/vlc_common.h")
   message(FATAL_ERROR "VLC_PLUGIN_INCLUDE must point at the VLC 3 plugin headers (vlc_common.h)")
 endif()
@@ -158,4 +159,35 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
   target_compile_options(pm_nis_test PRIVATE "SHELL:-include winsock2.h")
   target_link_libraries(pm_nis_test PRIVATE d3d11 dxgi uuid ws2_32)
   target_link_options(pm_nis_test PRIVATE -static)
+
+  # the filter's zero-copy path reads VLC's D3D11 pictures: its layout copy against VLC 3.0.24's own headers (compile only)
+  add_library(pm_d3d11_layout_check OBJECT tests/pm_d3d11_layout_check.c)
+  target_include_directories(pm_d3d11_layout_check PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}" "${D3}/../include")
+  target_compile_definitions(pm_d3d11_layout_check PRIVATE __PLUGIN__ MODULE_STRING="pm_check" HAVE_ID3D11VIDEODECODER
+                             _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS)
+endif()
+
+# ---- Linux: PushMPC's fork of VLC 3.0.24's OpenGL output (display/vlc3, LGPL-2.1+) with FSR 1 upscaling on any GPU:
+# libpushmpc_gl_plugin.so (vout=pushmpc_gl). It takes VLC's own OpenGL providers (glx, egl) and glconv modules (VA-API,
+# VDPAU), resolves every GL function through the provider (no libGL link) and, like the filter, only needs libvlccore and
+# the C library.
+if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/opengl/display.c")
+  set(GLD "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_output/opengl")
+  add_library(pushmpc_gl_plugin SHARED ${GLD}/display.c ${GLD}/vout_helper.c ${GLD}/fragment_shaders.c ${GLD}/converter_sw.c
+              ${GLD}/pm_glscale.c)
+  set_target_properties(pushmpc_gl_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_gl_plugin")
+  target_include_directories(pushmpc_gl_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${GLD}" "${GLD}/../../../include")
+  if(PM_GL_INCLUDE)
+    target_include_directories(pushmpc_gl_plugin PRIVATE "${PM_GL_INCLUDE}")
+  endif()
+  target_compile_definitions(pushmpc_gl_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_gl" _GNU_SOURCE
+                             "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
+  if(PM_ALT_ENTRY)
+    target_compile_definitions(pushmpc_gl_plugin PRIVATE PM_ALT_ENTRY=${PM_ALT_ENTRY})
+  endif()
+  target_compile_options(pushmpc_gl_plugin PRIVATE -Wno-deprecated-declarations)
+  target_link_libraries(pushmpc_gl_plugin PRIVATE m)
+  if(VLC_CORE_LIB)
+    target_link_libraries(pushmpc_gl_plugin PRIVATE "${VLC_CORE_LIB}")
+  endif()
 endif()

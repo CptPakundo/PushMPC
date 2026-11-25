@@ -21,6 +21,7 @@
 #include "nvl_colour.h"
 #include "nvl_cuda.h"
 #include "nvl_gpuguard.h"
+#include "nvl_nvof.h"
 #include "nvl_vfx.h"
 
 namespace pmvs::nvl {
@@ -47,10 +48,12 @@ struct EngineConfig {
     float hdrPeak = 1000;         // RTX Video HDR peak luminance (cd/m2, 400..2000)
     bool ampere = false;          // the RTX 30 compatibility (Install before VFG loads)
     int slots = 0;                // pinned output slots (0 = Auto: 2k + 2, at most 18)
+    bool guardFlow = false;       // NVIDIA optical flow for the GPU cut guard (its flow measures, feature bit 128)
     bool operator==(const EngineConfig& o) const
     {
         return srcW == o.srcW && srcH == o.srcH && bits == o.bits && srcHdr == o.srcHdr && plan.k == o.plan.k && plan.vfgQuality == o.plan.vfgQuality && plan.vsr == o.plan.vsr
-            && plan.vsrQuality == o.plan.vsrQuality && plan.outW == o.plan.outW && plan.outH == o.plan.outH && plan.hdr == o.plan.hdr && hdrPeak == o.hdrPeak && ampere == o.ampere;
+            && plan.vsrQuality == o.plan.vsrQuality && plan.outW == o.plan.outW && plan.outH == o.plan.outH && plan.hdr == o.plan.hdr && hdrPeak == o.hdrPeak && ampere == o.ampere
+            && plan.nvof == o.plan.nvof && guardFlow == o.guardFlow;
     }
 };
 
@@ -89,6 +92,12 @@ public:
     bool HasGpuGuard() const { return m_guard.Ready(); }
     bool Guard(int parity, bool compare, std::string& err);
     uint64_t GuardCuts() const { return m_guard.Cuts(); }
+    // NVIDIA optical flow (the fast tier and the guard's flow): both directions for the pair ending at enhanced[parity];
+    // call after Upload, before Guard and Generate
+    bool HasFlow() const { return m_of.Ready(); }
+    bool Flow(int parity, std::string& err);
+    // measured GPU time of the optical flow (both directions) and of one warped frame (ms; 0 = not yet measured)
+    void FlowCosts(double& flowMs, double& warpMs);
 
 private:
     struct Image { CUdeviceptr ptr = 0; size_t pitch = 0; void* desc = nullptr; int w = 0, h = 0; bool tenBit = false; };
@@ -98,7 +107,7 @@ private:
     bool MakeImage(Image& im, int w, int h, bool tenBit, std::string& err);
     void FreeImage(Image& im);
     // holdFlag: a device word; when non-zero at run time the slot gets `alt` instead (the GPU cut guard's hold)
-    int ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag = 0, const Image* alt = nullptr);
+    int ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag = 0, const Image* alt = nullptr, CUdeviceptr holdFlag2 = 0, const Image* alt2 = nullptr);
     bool Launch(CUfunction f, unsigned gx, unsigned gy, void** args, std::string& err);
 
     CudaApi* m_cu = nullptr;
@@ -108,11 +117,17 @@ private:
     CUcontext m_ctx = nullptr;
     CUstream m_stream = nullptr;
     CUmodule m_module = nullptr;
-    CUfunction m_toPacked8 = nullptr, m_toPacked16 = nullptr, m_toYuv = nullptr;
+    CUfunction m_toPacked8 = nullptr, m_toPacked16 = nullptr, m_toYuv = nullptr, m_toGray = nullptr, m_warp = nullptr;
     void* m_vsr = nullptr; void* m_hdr = nullptr; void* m_vfg = nullptr;
     void* m_vfgLib = nullptr;
     AmpereCompat m_ampere;
     GpuGuard m_guard;
+    OpticalFlow m_of;
+    bool m_flowFresh = false;       // the flow of the current pair was computed
+    CUevent m_ev[4] = {};           // flow begin / end, warp begin / end (timing)
+    bool m_evFlow = false, m_evWarp = false;
+    double m_flowMs = 0, m_warpMs = 0; int m_flowN = 0, m_warpN = 0;
+    void ResolveTimers();
     // device buffers
     CUdeviceptr m_srcPlane[3] = {}; size_t m_srcPitch[3] = {};
     Image m_packed, m_vsrOut, m_hdrOut, m_enh[2], m_vfgOut;

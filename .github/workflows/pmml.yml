@@ -191,6 +191,19 @@ jobs:
               build/pmml_cli run --runtime rt --models pmml-data/models --graphs pmml-data/graphs --ncnn-models rt/ncnn-models --backend $b --tier fast                 --clip pmml-data/clips/$n.y4m --frames 9 --mult 4 $once --compare pmml-data/ref/$n-fast --min-db 27 | tee -a run.log
             done
           done
+      - name: ncnn rebuild on the GPU (pmml.Rebuild) against the CPU rebuild, same flows (lavapipe)
+        if: hashFiles('rt/ncnn-models/**/flownet.param') != ''
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          n=$(jq -r '.clips.names[0]' "$PIN")
+          common="--runtime rt --models pmml-data/models --graphs pmml-data/graphs --ncnn-models rt/ncnn-models --backend ncnn:ncnn:vulkan:0 --tier fast --clip pmml-data/clips/$n.y4m --frames 9 --mult 4"
+          for once in "" --flow-once; do
+            d=$RUNNER_TEMP/ncnn-cpu-rebuild$once; mkdir -p $d
+            PMML_NCNN_CPU_REBUILD=1 build/pmml_cli run $common $once --dump $d | tee -a gpu-rebuild.log
+            build/pmml_cli run $common $once --compare $d --min-db 45 | tee -a gpu-rebuild.log
+          done
+          grep -E "rebuild on|PMML_RUN" gpu-rebuild.log | sed 's/^PMML_RUN //' >> $GITHUB_STEP_SUMMARY
       - run: grep PMML_RUN run.log | sed 's/^PMML_RUN //' >> $GITHUB_STEP_SUMMARY || true
 
   arm:

@@ -10,7 +10,7 @@ name: nvidia-vfx
 on:
   workflow_dispatch:
   push:
-    branches: ['track/nvidia-linux']
+    branches: ['track/nvidia-linux', 'track/nvidia-linux-2']
     paths: ['scripts/nvidia-vfx-*', '.github/workflows/nvidia-vfx.yml']
 
 concurrency:

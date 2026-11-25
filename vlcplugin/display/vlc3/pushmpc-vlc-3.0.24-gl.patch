@@ -1,0 +1,121 @@
+--- a/modules/video_output/opengl/display.c
++++ b/modules/video_output/opengl/display.c
+@@ -42,6 +42,12 @@
+ #define PROVIDER_LONGTEXT N_( \
+     "Extension through which to use the Open Graphics Library (OpenGL).")
+ 
++/* PushMPC: built outside VLC's tree, where N_() may not be the constant-expression macro the option tables need */
++#undef N_
++#define N_(str) (str)
++static const char *const pm_upscale_values[] = { "fsr", "off" };
++static const char *const pm_upscale_text[] = { N_("FSR 1 (any GPU)"), N_("Off (VLC's bilinear)") };
++
+ vlc_module_begin ()
+ #if defined (USE_OPENGL_ES2)
+ # define API VLC_OPENGL_ES2
+@@ -58,19 +64,33 @@
+ 
+ # define API VLC_OPENGL
+ # define MODULE_VARNAME "gl"
+-    set_shortname (N_("OpenGL"))
+-    set_description (N_("OpenGL video output"))
++/* PushMPC: VLC 3.0.24's OpenGL output with FSR 1 upscaling on any GPU, as its own module "pushmpc_gl" (vout=pushmpc_gl).
++ * It declares only its own options: "gl", "glconv" and the colour options stay VLC's gl module's, which this module
++ * reads */
++    set_shortname (N_("PushMPC OpenGL"))
++    set_description (N_("PushMPC OpenGL video output (VLC's, with FSR 1 upscaling on any GPU)"))
+     set_category (CAT_VIDEO)
+     set_subcategory (SUBCAT_VIDEO_VOUT)
+-    set_capability ("vout display", 270)
++    set_capability ("vout display", 0)
+     set_callbacks (Open, Close)
+-    add_shortcut ("opengl", "gl")
+-    add_module ("gl", "opengl", NULL,
+-                GL_TEXT, PROVIDER_LONGTEXT, true)
++    add_shortcut ("pushmpc_gl")
++    add_string ("pushmpc-gl-upscale", "fsr", N_("Video upscaling"),
++                N_("fsr = AMD FidelityFX Super Resolution 1 (edge adaptive upscaling + sharpening), "
++                   "off = VLC's bilinear"), false)
++        change_string_list (pm_upscale_values, pm_upscale_text)
++    add_float_with_range ("pushmpc-gl-sharpness", 0.5, 0.0, 1.0, N_("FSR sharpness"),
++                          N_("0 = none, 1 = strongest"), false)
+ #endif
+-    add_glopts ()
+ vlc_module_end ()
+ 
++/* PushMPC: Debian/Ubuntu's VLC 3.0.20+ looks up vlc_entry__3_0_0ft64, the others vlc_entry__3_0_0f (same ABI on 64-bit
++ * targets): the build passes the name its headers do not define */
++#ifdef PM_ALT_ENTRY
++# define PM_STR2(x) #x
++# define PM_STR(x) PM_STR2(x)
++__asm__(".globl " PM_STR(PM_ALT_ENTRY) "\n\t.set " PM_STR(PM_ALT_ENTRY) ", vlc_entry__" PM_STR(MODULE_SYMBOL) "\n");
++#endif
++
+ struct vout_display_sys_t
+ {
+     vout_display_opengl_t *vgl;
+--- a/modules/video_output/opengl/vout_helper.c
++++ b/modules/video_output/opengl/vout_helper.c
+@@ -43,6 +43,8 @@
+ 
+ #include "vout_helper.h"
+ #include "internal.h"
++#include "pm_glscale.h" /* PushMPC */
++#include <string.h>
+ 
+ #ifndef GL_CLAMP_TO_EDGE
+ # define GL_CLAMP_TO_EDGE 0x812F
+@@ -171,6 +173,8 @@
+     float f_z;    /* Position of the camera on the shpere radius vector */
+     float f_z_min;
+     float f_sar;
++
++    pm_glscale *pm_scale; /* PushMPC: FSR 1 upscaling, NULL = VLC's bilinear */
+ };
+ 
+ static const GLfloat identity[] = {
+@@ -990,6 +994,16 @@
+         return NULL;
+     }
+ 
++    /* PushMPC: FSR 1 upscaling unless pushmpc-gl-upscale=off; it needs framebuffer objects, else VLC's path */
++    {
++        char *up = var_InheritString(gl, "pushmpc-gl-upscale");
++        if (up == NULL || strcmp(up, "off") != 0)
++            vgl->pm_scale = PM_GlScaleCreate(VLC_OBJECT(gl), gl, &vgl->vt, vgl->prgm->tc->glsl_version,
++                                             vgl->prgm->tc->glsl_precision_header,
++                                             var_InheritFloat(gl, "pushmpc-gl-sharpness"));
++        free(up);
++    }
++
+     *fmt = vgl->fmt;
+     if (subpicture_chromas) {
+         *subpicture_chromas = gl_subpicture_chromas;
+@@ -1007,6 +1021,8 @@
+     vgl->vt.Finish();
+     vgl->vt.Flush();
+ 
++    PM_GlScaleDestroy(vgl->pm_scale); /* PushMPC */
++
+     const size_t main_tex_count = vgl->prgm->tc->tex_count;
+     const bool main_del_texs = !vgl->prgm->tc->handle_texs_gen;
+ 
+@@ -1728,7 +1744,17 @@
+         vgl->last_source.i_visible_width = source->i_visible_width;
+         vgl->last_source.i_visible_height = source->i_visible_height;
+     }
+-    DrawWithShaders(vgl, vgl->prgm);
++    /* PushMPC: flat 2D pictures that are upscaled go through FSR 1 (VLC's draw into a source-size texture, then EASU
++     * and RCAS into the window); 360/stereo/rotated pictures and downscaling keep VLC's path */
++    if (vgl->pm_scale && vgl->fmt.projection_mode == PROJECTION_MODE_RECTANGULAR &&
++        vgl->fmt.orientation == ORIENT_NORMAL && vgl->fmt.multiview_mode == MULTIVIEW_2D &&
++        PM_GlScaleBegin(vgl->pm_scale, source->i_visible_width, source->i_visible_height))
++    {
++        DrawWithShaders(vgl, vgl->prgm);
++        PM_GlScaleEnd(vgl->pm_scale);
++    }
++    else
++        DrawWithShaders(vgl, vgl->prgm);
+ 
+     /* Draw the subpictures */
+     // Change the program for overlays

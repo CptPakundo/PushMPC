@@ -70,6 +70,16 @@ public:
     std::function<bool(uint32_t w, uint32_t h, OutImage& img)> alloc; // a new VapourSynth output frame
     std::function<void(void* handle)> release;            // frees an output frame
     std::function<void(int64_t pts, bool generated, void* handle)> tag; // frame props after the pixels are in
+    // zero copy (VLC's hardware-decoded pictures): source frames as textures on the adopted device, and the output frames
+    // handed over as they come from pushcore (rawOut returns true when it read the frame on Context(); the host then
+    // returns it with that context, else without)
+    std::function<bool(int64_t s, ID3D11Texture2D*& tex, uint32_t& slice)> sourceTex;
+    std::function<bool(const PushCoreFrame& fr, std::string& err)> rawOut;
+    // use the caller's D3D11 device instead of the host's own; the core is reopened when the device changes
+    bool AdoptDevice(ID3D11Device* dev, std::string& err);
+    ID3D11Device* Device() const { return m_dev.Get(); }
+    ID3D11DeviceContext* Context() const { return m_ctx.Get(); }
+    ID3D11DeviceContext4* Context4() const { return m_ctx4.Get(); }
 
     // Backend
     bool CanSubmit() override;

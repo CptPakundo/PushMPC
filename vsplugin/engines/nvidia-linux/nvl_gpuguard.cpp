@@ -75,14 +75,15 @@ void GpuGuard::Close()
 
 uint64_t GpuGuard::Cuts() const { return m_count ? *static_cast<volatile uint32_t*>(m_count) : 0; }
 
-bool GpuGuard::Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, unsigned parity, bool compare, std::string& err)
+bool GpuGuard::Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, unsigned parity, bool compare, std::string& err, const Flow& flow)
 {
     if (!m_ready) { err = "cut guard not open"; return false; }
     const uint64_t frameBytes = uint64_t(pitch) * m_h;
     const Params& p = params;
-    // Fourier-Mellin only when compared and no flow is attached (as PushMpcCutGuard runs it); its results land in the
-    // result buffer for the pair test that follows
-    if ((p.features & 256u) && compare) {
+    const uint32_t flowFlags = (p.features & 128u) && compare ? flow.flags : 0u;
+    // Fourier-Mellin only where NVOF's measures are missing (as PushMpcCutGuard runs it: it added nothing beside them);
+    // its results land in the result buffer for the pair test that follows
+    if ((p.features & 256u) && compare && !((p.features & 128u) && (flowFlags & 6u) == 6u)) {
         FmGlobals g{ m_fmConst, { previous, frameBytes }, { current, frameBytes }, { m_scratch, kScratch }, { m_results, kResultBytes } };
         if (!Cu(m_cu->cuMemcpyHtoDAsync(m_fmGlobals, &g, sizeof(g), m_stream), "FM bindings", err)) return false;
         uint32_t area0 = 0, area1 = 0;
@@ -113,10 +114,13 @@ bool GpuGuard::Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, uns
     c[33] = F(p.spikeRatio); c[34] = F(p.spikeMin); c[35] = F(p.spikeHistogram); c[36] = F(p.spikeHistogramRatio);
     c[37] = F(p.mcVeto); c[38] = F(p.mcMin); c[39] = F(p.mcRatio); c[40] = F(p.barChangeBins); c[41] = F(p.barPicture);
     c[42] = p.barPersist; c[43] = F(p.scoreThreshold);
-    c[44] = 0; c[45] = 0; c[46] = 0; c[47] = 0; c[48] = 0;   // no flow attached (bit 128 inactive)
+    c[44] = flowFlags; c[45] = flow.flowPitch; c[46] = flow.costPitch; c[47] = flow.gridW | (flow.gridH << 16); c[48] = flow.extentW | (flow.extentH << 16);
     c[49] = F(p.scoreThresholdFlow);
-    // unused flow bindings point at the previous frame, as on Windows
-    ScGlobals g{ m_scConst, { previous, frameBytes }, { current, frameBytes }, { m_results, kResultBytes }, { previous, frameBytes }, { previous, frameBytes }, { previous, frameBytes } };
+    // the flow buffers (unused ones point at the previous frame, as on Windows)
+    const uint64_t fb = uint64_t(flow.flowPitch) * flow.gridH, cb = uint64_t(flow.costPitch) * flow.gridH;
+    const ByteBuf none{ previous, frameBytes };
+    ScGlobals g{ m_scConst, { previous, frameBytes }, { current, frameBytes }, { m_results, kResultBytes },
+                 (flowFlags & 1u) ? ByteBuf{ flow.forward, fb } : none, (flowFlags & 2u) ? ByteBuf{ flow.cost, cb } : none, (flowFlags & 4u) ? ByteBuf{ flow.backward, fb } : none };
     return Cu(m_cu->cuMemcpyHtoDAsync(m_scConst, c, sizeof(c), m_stream), "constants", err)
         && Cu(m_cu->cuMemcpyHtoDAsync(m_scGlobals, &g, sizeof(g), m_stream), "bindings", err)
         && Cu(m_cu->cuLaunchKernel(m_scMain, 1, 1, 1, 256, 1, 1, 0, m_stream, nullptr, nullptr), "pair test", err)

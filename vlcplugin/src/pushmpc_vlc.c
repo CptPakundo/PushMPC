@@ -47,6 +47,10 @@
 #include "engine_pushcore.h"
 #include "pm_hw.h"
 
+#ifdef _WIN32
+# include "pm_d3d11_picsys.h"   /* zero copy with VLC's Direct3D 11 hardware decoding */
+#endif
+
 double pm_display_hz(void);
 
 #ifndef PUSHMPC_VLC_VERSION
@@ -204,6 +208,9 @@ vlc_module_begin()
              "has until its display time (needs pushmpc_out after postproc).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
+    add_bool(CFG "zerocopy", true, "Zero copy with Direct3D 11 decoding", "Windows, pushcore: hardware-decoded "
+             "pictures stay on the GPU (pushcore works on VLC's own D3D11 device); off = they are copied to the CPU "
+             "and back, as before.", true)
     add_integer(CFG "hw", 0, "Hardware-decoded video (Linux)", "Auto keeps VA-API / VDPAU pictures on the GPU: real frames "
                 "pass untouched, generated frames go into PushMPC's own surfaces on the decoder's device, after a "
                 "round-trip check of the driver (pass-through if it fails). Convert hands them to VLC's converter "
@@ -230,6 +237,8 @@ struct filter_sys_t {
     bool hw_ready, hw_failed;
     uint64_t hw_down_fail, hw_up_fail, hw_no_surface;
     pm_pc *pc;                 /* Windows: pushcore through pm_pushcore.dll (else the portable engine, eng) */
+    bool zc;                   /* pc runs on VLC's D3D11 device with 'DX11'/'DX10' pictures (no download) */
+    uint64_t zc_fallback;      /* generated pictures pushcore did not deliver in time (the real frame copied in) */
     uint64_t pc_errors, pc_routed, pc_unrouted;
     char pc_err[240];
     int64_t pc_miss_pts, pc_miss_want;
@@ -266,7 +275,7 @@ static void JobUpload(struct filter_sys_t *sys, pm_job *j, int i)
     vlc_mutex_unlock(&j->lock);
 }
 /* pushcore hands out generated frames by pts: route each into the job's picture with that time, in display order */
-typedef struct { struct filter_sys_t *sys; pm_job *j; bool filled[16]; pm_pc_out dst; } pc_route;
+typedef struct { struct filter_sys_t *sys; pm_job *j; bool filled[16]; pm_pc_out dst; pm_pc_tex tex; } pc_route;
 static int RouteIndex(pc_route *r, int64_t pts100ns)
 {
     pm_job *j = r->j;
@@ -307,12 +316,77 @@ static void RouteDone(void *user, int64_t pts100ns)
 }
 
 /* one job: push the newest source frame, then make the job's pictures in display order */
+#ifdef _WIN32
+/* zero copy: generated frames go straight into the job's pictures (textures of VLC's D3D11 pool) */
+static const pm_pc_tex *RouteDestTex(void *user, int64_t pts100ns)
+{
+    pc_route *r = user;
+    const int i = RouteIndex(r, pts100ns);
+    if (i < 0) {
+        if (!r->sys->pc_unrouted++) { r->sys->pc_miss_pts = pts100ns; r->sys->pc_miss_want = r->j->n ? (int64_t)r->j->outs[0]->date * 10 : 0; }
+        return NULL;
+    }
+    pm_d3d11_picsys *ps = PicSys(r->j->outs[i]);
+    if (!ps || !ps->texture[0]) return NULL;
+    r->sys->pc_routed++;
+    r->tex.texture = ps->texture[0];
+    r->tex.slice = ps->slice_index;
+    return &r->tex;
+}
+
+static void RunJobZc(struct filter_sys_t *sys, pm_job *j)
+{
+    char err[200];
+    pm_d3d11_picsys *in = PicSys(j->src);
+    if (!in || !in->texture[0]) {
+        if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "a picture without a D3D11 texture");
+        return;
+    }
+    if (pmx_push_d3d11(sys->pc, in->texture[0], in->slice_index, (int64_t)j->src->date * 10, !j->contiguous, err, sizeof(err)) != 0) {
+        if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "push: %s", err);
+        return;
+    }
+    pc_route r = { .sys = sys, .j = j };
+    /* inline: the pictures go out when this returns, so wait at most until the last one is due */
+    const mtime_t deadline = j->n > 0 ? j->outs[j->n - 1]->date : 0;
+    while (j->n > 0) {
+        vlc_mutex_lock(&j->lock);
+        const bool stop = j->cancel || j->done >= j->n;
+        vlc_mutex_unlock(&j->lock);
+        if (stop || mdate() > deadline) break;
+        if (pmx_poll_d3d11(sys->pc, 5, RouteDestTex, RouteDone, &r, err, sizeof(err)) < 0) {
+            if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "poll: %s", err);
+            break;
+        }
+    }
+    for (int guard = 0; guard < 64; guard++)
+        if (pmx_poll_d3d11(sys->pc, 0, RouteDestTex, RouteDone, &r, err, sizeof(err)) <= 0) break;
+    /* what pushcore did not deliver in time shows the real frame (copied on the GPU), never a stale pool texture */
+    pm_d3d11_picsys *real = j->real ? PicSys(j->real) : NULL;
+    for (int i = 0; i < j->n; i++) {
+        if (r.filled[i]) continue;
+        pm_d3d11_picsys *o = PicSys(j->outs[i]);
+        if (real && real->texture[0] && o && o->texture[0])
+            pmx_copy_d3d11(sys->pc, real->texture[0], real->slice_index, o->texture[0], o->slice_index);
+        sys->zc_fallback++;
+    }
+    vlc_mutex_lock(&j->lock);
+    j->done = j->n;
+    vlc_cond_broadcast(&j->cond);
+    vlc_mutex_unlock(&j->lock);
+}
+#endif
+
 static void RunJob(struct filter_sys_t *sys, pm_job *j)
 {
     pm_yuv src;
-    PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
     char err[200];
+#ifdef _WIN32
+    if (sys->zc) RunJobZc(sys, j);
+    else
+#endif
     if (sys->pc) {
+        PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
         pm_pc_planes pl;
         for (int p = 0; p < 3; p++) { pl.data[p] = src.data[p]; pl.stride[p] = src.stride[p]; }
         if (pmx_push(sys->pc, &pl, (int64_t)j->src->date * 10, !j->contiguous, err, sizeof(err)) != 0) {
@@ -336,6 +410,7 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
                 if (pmx_poll(sys->pc, 0, RouteDest, RouteDone, &r, err, sizeof(err)) <= 0) break;
         }
     } else {
+        PlanesIn(j->src, &sys->wfmt, sys->bps_w, &src);
         if (pm_engine_push(sys->eng, &src, j->contiguous, err, sizeof(err)) != 0)
             pm_engine_forget(sys->eng);
         const bool pair = pm_engine_have_pair(sys->eng);
@@ -516,7 +591,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         }
     }
 
-    const bool async = sys->worker_on && OutStages() > 0;
+    const bool async = sys->worker_on && OutStages() > 0 && !sys->zc;
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
@@ -682,6 +757,58 @@ static bool SetupDownload(filter_t *f, struct filter_sys_t *sys, int *bits)
     return true;
 }
 
+static void FillPcc(pm_pc_cfg *pcc, const video_format_t *v, int bits, int smoother, double hz, int warp)
+{
+    const int w = (int)v->i_visible_width, h = (int)v->i_visible_height;
+    memset(pcc, 0, sizeof(*pcc));
+    pcc->abi = PM_PC_ABI;
+    pcc->width = (uint32_t)w; pcc->height = (uint32_t)h; pcc->bits = bits;
+    pcc->fps_num = (int)v->i_frame_rate; pcc->fps_den = (int)v->i_frame_rate_base;
+    const bool uhd = w >= 3200 || h >= 1800;
+    pcc->matrix = v->space == COLOR_SPACE_BT2020 ? 9 : v->space == COLOR_SPACE_BT601 ? 6 :
+                  v->space == COLOR_SPACE_BT709 ? 1 : (w >= 1024 || h >= 600 ? (uhd && bits > 8 ? 9 : 1) : 6);
+    pcc->transfer = v->transfer == TRANSFER_FUNC_SMPTE_ST2084 ? 16 : v->transfer == TRANSFER_FUNC_HLG ? 18 : 1;
+    pcc->primaries = v->primaries == COLOR_PRIMARIES_BT2020 ? 9 : pcc->matrix == 9 ? 9 : 1;
+    pcc->range = v->b_color_range_full ? 2 : 1;
+    pcc->smoother = smoother;
+    pcc->display_hz = hz;
+    pcc->warp = warp;
+}
+
+#ifdef _WIN32
+/* zero copy: pushcore on the D3D11 device of VLC's own pictures (a picture of the vout's pool tells which), with VLC's
+ * context lock */
+static pm_pc *ZcOpen(filter_t *f, const pm_pc_cfg *pcc, int *k, char *err, size_t n)
+{
+    picture_t *p = filter_NewPicture(f);
+    pm_d3d11_picsys *ps = p ? PicSys(p) : NULL;
+    if (!ps || !ps->context || !ps->texture[0]) {
+        snprintf(err, n, "no D3D11 picture from VLC's pool");
+        if (p) picture_Release(p);
+        return NULL;
+    }
+    const DXGI_FORMAT want = pcc->bits > 8 ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(ps->texture[0], &td);
+    if (td.Format != want) {
+        snprintf(err, n, "VLC's pictures are DXGI format %d, not %s", (int)td.Format, pcc->bits > 8 ? "P010" : "NV12");
+        picture_Release(p);
+        return NULL;
+    }
+    ID3D11Device *dev = NULL;
+    ID3D11DeviceContext_GetDevice(ps->context, &dev);
+    HANDLE mutex = NULL;
+    UINT size = sizeof(mutex);
+    if (FAILED(ID3D11DeviceContext_GetPrivateData(ps->context, &PM_GUID_CONTEXT_MUTEX, &size, &mutex)) || size != sizeof(mutex))
+        mutex = NULL;
+    picture_Release(p);
+    if (!dev) { snprintf(err, n, "no D3D11 device"); return NULL; }
+    pm_pc *pc = pmx_open_d3d11(pcc, dev, mutex, k, err, n);
+    ID3D11Device_Release(dev);   /* pushcore holds its own reference */
+    return pc;
+}
+#endif
+
 static int Open(vlc_object_t *obj)
 {
     filter_t *f = (filter_t *)obj;
@@ -691,12 +818,36 @@ static int Open(vlc_object_t *obj)
     if (!sys) return VLC_ENOMEM;
     f->fmt_out.video = f->fmt_in.video;
     f->fmt_out.i_codec = f->fmt_in.i_codec;
+#ifdef _WIN32
+    {   /* hardware-decoded D3D11 pictures with pushcore: no copies at all (pushmpc-zerocopy=0 = the copy path) */
+        const int engine = (int)OptInt(f, CFG "engine", 0), smoother = (int)OptInt(f, CFG "smoother", 0);
+        if ((v->i_chroma == VLC_CODEC_D3D11_OPAQUE || v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B) &&
+            (engine == 0 || engine == 2) && smoother != 1 && OptInt(f, CFG "zerocopy", 1) && pmx_has_d3d11()) {
+            double zhz = OptFloat(f, CFG "display-hz", 0.0);
+            if (zhz <= 0) zhz = pm_display_hz();
+            pm_pc_cfg pcc;
+            FillPcc(&pcc, v, v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B ? 10 : 8, smoother, zhz, OptInt(f, CFG "warp", 0) ? 1 : 0);
+            int pk = 1;
+            char err[300] = "";
+            sys->pc = ZcOpen(f, &pcc, &pk, err, sizeof(err));
+            if (sys->pc && pk > 1) {
+                sys->zc = true;
+                bits = pcc.bits;
+                sys->k = pk > 8 ? 8 : pk;
+                snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
+            } else {
+                if (sys->pc) { pmx_close(sys->pc); sys->pc = NULL; snprintf(err, sizeof(err), "pushcore runs x1 here"); }
+                msg_Dbg(f, "PushMPC: zero copy not used (%s): the copy path", err);
+            }
+        }
+    }
+#endif
     /* Linux VA-API / VDPAU pictures: kept as they are on both sides (pm_hw.h); the converter route is the fallback */
-    if (pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
+    if (!sys->zc && pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
         sys->hw = pm_hw_new(obj, v, 8);
     if (sys->hw) {
         msg_Dbg(f, "PushMPC: %4.4s kept as it is (generated frames go into PushMPC's own surfaces)", (const char *)&v->i_chroma);
-    } else if (!Supported(v->i_chroma, &bits)) {
+    } else if (!sys->zc && !Supported(v->i_chroma, &bits)) {
         /* NV12 and hardware surfaces: convert in front of the engine with VLC's own converters (SetupDownload) */
         if (!SetupDownload(f, sys, &bits)) {
             msg_Dbg(f, "PushMPC: no converter from %4.4s", (const char *)&v->i_chroma);
@@ -723,21 +874,9 @@ static int Open(vlc_object_t *obj)
     sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;
     sys->bps_w = sys->bps;
     const int engine = (int)OptInt(f, CFG "engine", 0);
-    if (!sys->hw && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
+    if (!sys->hw && !sys->zc && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
-        memset(&pcc, 0, sizeof(pcc));
-        pcc.abi = PM_PC_ABI;
-        pcc.width = (uint32_t)w; pcc.height = (uint32_t)h; pcc.bits = bits;
-        pcc.fps_num = (int)v->i_frame_rate; pcc.fps_den = (int)v->i_frame_rate_base;
-        const bool uhd = w >= 3200 || h >= 1800;
-        pcc.matrix = v->space == COLOR_SPACE_BT2020 ? 9 : v->space == COLOR_SPACE_BT601 ? 6 :
-                     v->space == COLOR_SPACE_BT709 ? 1 : (w >= 1024 || h >= 600 ? (uhd && bits > 8 ? 9 : 1) : 6);
-        pcc.transfer = v->transfer == TRANSFER_FUNC_SMPTE_ST2084 ? 16 : v->transfer == TRANSFER_FUNC_HLG ? 18 : 1;
-        pcc.primaries = v->primaries == COLOR_PRIMARIES_BT2020 ? 9 : pcc.matrix == 9 ? 9 : 1;
-        pcc.range = v->b_color_range_full ? 2 : 1;
-        pcc.smoother = smoother;
-        pcc.display_hz = hz;
-        pcc.warp = OptInt(f, CFG "warp", 0) ? 1 : 0;
+        FillPcc(&pcc, v, bits, smoother, hz, OptInt(f, CFG "warp", 0) ? 1 : 0);
         int pk = 1;
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
@@ -820,6 +959,9 @@ static void Close(vlc_object_t *obj)
         msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64
                  " for %" PRId64 "), %" PRIu64 " errors%s%s", sys->pc_routed, sys->pc_unrouted, sys->pc_miss_pts, sys->pc_miss_want,
                  sys->pc_errors, sys->pc_errors ? ", first: " : "", sys->pc_err);
+        if (sys->zc)
+            msg_Info(f, "PushMPC: zero copy on VLC's D3D11 device; %" PRIu64 " generated pictures not delivered in time "
+                     "(the real frame shown)", sys->zc_fallback);
         pmx_close(sys->pc);
     }
     if (sys->hw) {

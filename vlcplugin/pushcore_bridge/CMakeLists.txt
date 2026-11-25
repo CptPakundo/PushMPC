@@ -14,3 +14,9 @@ target_include_directories(pm_pushcore PRIVATE . "${ROOT}/vsplugin/src" "${ROOT}
 target_compile_definitions(pm_pushcore PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(pm_pushcore PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(pm_pushcore PRIVATE d3d11 dxgi d3dcompiler user32 advapi32 shell32 ole32)
+
+# the zero-copy path on WARP with the stub core (CI): pm_pc_zc_test <pm_pushcore.dll> <stub folder>
+add_executable(pm_pc_zc_test pm_pc_zc_test.cpp)
+target_compile_definitions(pm_pc_zc_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(pm_pc_zc_test PRIVATE /W3 /EHsc /O2 /utf-8)
+target_link_libraries(pm_pc_zc_test PRIVATE d3d11)
