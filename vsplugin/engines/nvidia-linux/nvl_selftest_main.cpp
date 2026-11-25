@@ -13,16 +13,20 @@ using namespace pmvs::nvl;
 
 int main(int argc, char** argv)
 {
-    bool ampere = false, quiet = false;
+    bool ampere = false, quiet = false, gpu = false;
     int device = -1;
     std::string runtime;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--ampere")) ampere = true;
         else if (!std::strcmp(argv[i], "--quiet")) quiet = true;
+        else if (!std::strcmp(argv[i], "--gpu")) gpu = true;
         else if (!std::strcmp(argv[i], "--device") && i + 1 < argc) device = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--runtime") && i + 1 < argc) runtime = argv[++i];
-        else { std::fprintf(stderr, "usage: %s [--ampere] [--device N] [--runtime DIR] [--quiet]\n", argv[0]); return 2; }
+        else { std::fprintf(stderr, "usage: %s [--gpu] [--ampere] [--device N] [--runtime DIR] [--quiet]\n", argv[0]); return 2; }
     }
+    // the GPU only on purpose: --ampere (Auto's own call from the plugin), --gpu (a tester), PUSHMPC_TEST_GPU=1 (CI)
+    const char* allow = std::getenv("PUSHMPC_TEST_GPU");
+    if (!ampere && !gpu && !(allow && !std::strcmp(allow, "1"))) { std::fprintf(stderr, "pass --gpu to run the self-test on this machine's GPU\n"); return 2; }
     const GpuInfo g = ProbeGpu(device, runtime);
     if (!quiet) std::printf("GPU: %s (SM %d.%d, %s), driver %d, runtime %s%s\n", g.driver ? g.name.c_str() : "none", g.major, g.minor, GpuClassName(g.cls), g.driverVersion,
                             g.runtimeDir.c_str(), g.runtime ? "" : " (missing)");

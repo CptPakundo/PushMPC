@@ -13,6 +13,10 @@ on:
     branches: ['track/nvidia-linux']
     paths: ['scripts/nvidia-vfx-*', '.github/workflows/nvidia-vfx.yml']
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   probe:
     runs-on: ubuntu-24.04

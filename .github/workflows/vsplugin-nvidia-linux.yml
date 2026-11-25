@@ -21,11 +21,16 @@ on:
 env:
   CUDA_PKG_VERSION: '12-8'          # CUDA toolkit 12.8 (nvcc with sm_120): build time only, never on users' machines
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      PUSHMPC_TEST_GPU: '1'   # the struct test and self-test may load the (stub) driver here
       NVVFX: ${{ github.workspace }}/nvvfx-runtime
     steps:
       - uses: actions/checkout@v4
@@ -169,6 +174,8 @@ jobs:
     needs: linux
     runs-on: windows-11-arm
     timeout-minutes: 30
+    env:
+      PUSHMPC_TEST_GPU: '1'   # no driver on the runner: the tests see none
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

@@ -34,10 +34,10 @@ if sh "$REPO/scripts/nvidia-vfx-fetch.sh" --dest "$PUSHMPC_NVVFX_DIR" --accept-n
 else no "runtime fetch"; fi
 
 step "2. Self-test: VFG on a synthetic moving box (native; RTX 30 also with --ampere)"
-"$BIN/pushmpc-nvvfx-selftest" && ok "VFG native self-test" || echo "note: native VFG fails on RTX 30 / 20 by design (exit $?)"
+"$BIN/pushmpc-nvvfx-selftest" --gpu && ok "VFG native self-test" || echo "note: native VFG fails on RTX 30 / 20 by design (exit $?)"
 cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 if [ "$cc" = "8.6" ]; then
-    "$BIN/pushmpc-nvvfx-selftest" --ampere && ok "RTX 30 compatibility self-test (cached for Auto in $XDG_CACHE_HOME/pushmpc)" || no "RTX 30 compatibility self-test"
+    "$BIN/pushmpc-nvvfx-selftest" --gpu --ampere && ok "RTX 30 compatibility self-test (cached for Auto in $XDG_CACHE_HOME/pushmpc)" || no "RTX 30 compatibility self-test"
 fi
 
 step "3. Synthetic clips through the plugin: timing, counts, colours"

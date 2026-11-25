@@ -4,6 +4,10 @@ on:
   push:
     branches: ['track/nvidia-linux']
     paths: ['.github/workflows/nvl-slang-probe.yml']
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   probe:
     runs-on: ubuntu-24.04
@@ -21,8 +25,9 @@ jobs:
           sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null
           sudo apt-get install -y --no-install-recommends cuda-nvcc-12-8 cuda-cudart-dev-12-8 >/dev/null
           S=vsplugin/engines/nvidia-linux/shaders
+          ./slang/bin/slangc -h 2>&1 | grep -iE "lang|legacy|scope|prelude" | head -20
           for f in VfgShotChange VfgFourierMellin; do
-            ./slang/bin/slangc $S/$f.hlsl -entry main -stage compute -target cuda -o $f.cu -reflection-json $f.json 2>&1 | head -40
+            ./slang/bin/slangc -lang slang $S/$f.hlsl -entry main -stage compute -target cuda -o $f.cu -reflection-json $f.json 2>&1 | grep -vE "E30081|implicit conversion|^ *[0-9]* *\||^----|^ *-->|^$" | head -60
             echo "== $f.cu: $(wc -l < $f.cu) lines"; head -60 $f.cu; grep -nE "__global__|SLANG_globalParams|struct GlobalParams|KernelContext|EntryPointParams" $f.cu | head -30
             echo "== reflection"; head -c 4000 $f.json
             /usr/local/cuda-12.8/bin/nvcc -fatbin -O3 -std=c++17 -I slang/include -arch=sm_86 -o $f.fatbin $f.cu 2>&1 | head -40; ls -la $f.fatbin || true

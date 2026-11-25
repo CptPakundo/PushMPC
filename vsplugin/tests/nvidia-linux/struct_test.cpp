@@ -39,6 +39,9 @@ struct NvCVImageHead { unsigned width, height; int pitch; int pixelFormat; int c
 int main(int argc, char** argv)
 {
     if (argc < 2) { std::printf("usage: nvl_struct_test <runtime-dir>\n"); return 2; }
+    // never on a developer's GPU by accident: CI sets this (stub driver / no driver), a tester sets it on purpose
+    const char* allow = std::getenv("PUSHMPC_TEST_GPU");
+    if (!allow || std::strcmp(allow, "1") != 0) { std::printf("nvl_struct_test: refusing to load the CUDA driver or the runtime without PUSHMPC_TEST_GPU=1\n"); return 2; }
     const std::string root = argv[1], libs = VfxApi::LibDir(root);
 #ifdef _WIN32
     _putenv_s("PUSHMPC_NVVFX_DIR", root.c_str());
