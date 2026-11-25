@@ -329,7 +329,9 @@ jobs:
           mkdir -p res/windows-d3d11fork
           # WARP has no video decoder: d3d11va falls back after the output opened (a path real GPUs do not take), so these
           # runs decode in software; the same runs with VLC's own direct3d11 output are the reference
-          for vout in pushmpc_d3d11:auto pushmpc_d3d11:nis pushmpc_d3d11:linear direct3d11:-; do
+          # a crash must not leave a Windows Error Reporting dialog or a stray vlc.exe that blocks the next runs
+          reg add 'HKCU\Software\Microsoft\Windows\Windows Error Reporting' //v DontShowUI //t REG_DWORD //d 1 //f > /dev/null
+          for vout in direct3d11:- pushmpc_d3d11:linear pushmpc_d3d11:auto pushmpc_d3d11:nis; do
             v=${vout%%:*}; mode=${vout#*:}; tag=$v-$mode
             extra=""; [ "$mode" != - ] && extra="--pushmpc-d3d11-upscale=$mode"
             for flt in none pp; do
@@ -340,6 +342,7 @@ jobs:
               echo "== $tag $flt: exit $rc"; echo "$tag-$flt $rc" >> res/windows-d3d11fork/rc.txt
               grep -hE "using vout display module|PushMPC NIS|Using .* scaler|generated=" res/windows-d3d11fork/$tag-$flt.log | sort | uniq -c | head -5
               [ $rc = 0 ] || tail -4 res/windows-d3d11fork/$tag-$flt.log
+              taskkill //F //T //IM vlc.exe > /dev/null 2>&1; taskkill //F //IM WerFault.exe > /dev/null 2>&1
             done
           done
           cat res/windows-d3d11fork/rc.txt
