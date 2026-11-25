@@ -126,8 +126,10 @@ struct Settings {
     int fgQuality = -1;     // -1 Auto, 0 Low, 1 Medium, 2 High
     int sdrToHdr = 0;       // 0 Auto (on when the output is HDR), 1 on, -1 off
     int vsrStyle = -1;      // -1 Auto, 0 standard, 1 high bitrate, 2 streaming
-    int targetH = 2160;     // the upscale target height (Screen = the display's, else 2160)
+    int targetH = 2160;     // the upscale target height (Screen = the display's when known, else 2160)
+    bool targetScreen = true;   // UpscaleTarget Screen: the display's size decides (TargetForDisplay)
     double hdrPeak = 1000;  // RTX Video HDR peak (cd/m2)
+    bool hdrPeakSet = false;    // the user chose it (else the display's peak when mpv reports one)
 };
 struct Source { int w = 1920, h = 1080; double fps = 23.976; bool hdr = false; bool tenBit = false; double bpp = -1; };
 struct Display { double refreshHz = 0; bool vrr = false; bool hdr = false; };   // refreshHz <= 0: unknown
@@ -142,6 +144,9 @@ struct Plan {
     std::string why;
 };
 
+// UpscaleTarget Screen with a known display height: the Windows rule (PushMpcAuto.h TargetExtent): up to 1440 -> 1440p,
+// up to 2160 -> 4K, above -> 5K
+inline int TargetForDisplay(int displayHeight) { return displayHeight <= 0 ? 2160 : displayHeight <= 1440 ? 1440 : displayHeight <= 2160 ? 2160 : 2880; }
 inline int EvenUp(double v) { return int(v + 0.5) & ~1; }
 
 inline Plan Decide(const Settings& s, const Source& src, const Display& d, const Caps& caps, Costs c)

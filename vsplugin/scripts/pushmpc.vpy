@@ -8,7 +8,8 @@
 #   portable  PushFPS's motion-compensated frame generation on the CPU (any GPU, Windows, Linux, macOS).
 # Auto: nvidia on an RTX GPU with pushcore, else rife when installed, else portable.
 #
-# user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments, e.g.
+# user_data (optional, from the vf option user-data=...): "key=value,key=value" with the plugin's arguments (pushmpc-display.lua
+# adds display_hdr, display_peak, display_width, display_height from mpv's own view of the display), e.g.
 #   smoother=4,sharper=2,chroma=420        backend=portable,portable_threads=8        backend=rife,rife_model=46
 # Settings otherwise come from PushMPC's own settings: HKCU\Software\PushMPC on Windows (the same as in MPC-HC),
 # ~/.config/pushmpc/settings.ini on Linux and macOS.
@@ -63,9 +64,9 @@ for _kv in str(_ud).split(","):
     if "=" in _kv:
         _k, _v = _kv.split("=", 1)
         _k, _v = _k.strip(), _v.strip()
-        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms"):
+        if _k in ("display_hdr", "display_width", "display_height", "matrix", "transfer", "primaries", "range", "wait_ms"):
             _args[_k] = int(_v)
-        elif _k == "display_fps":
+        elif _k in ("display_fps", "display_peak"):
             _args[_k] = float(_v)
         elif _k:
             _args[_k] = _v

@@ -175,6 +175,7 @@ static void TestAuto()
     Source hb = src; hb.bpp = 0.5;
     p = Decide(s, hb, d, c5090, costs);
     CHECK(p.vsrStyle == 1 && p.vsrQuality >= 16 && p.vsrQuality <= 19, "high bitrate style: %d", p.vsrQuality);
+    CHECK(TargetForDisplay(1440) == 1440 && TargetForDisplay(1080) == 1440 && TargetForDisplay(2160) == 2160 && TargetForDisplay(2880) == 2880 && TargetForDisplay(0) == 2160, "display height -> upscale target (Windows rule)");
     CHECK(VsrQualityLevel(2, 1) == 21 && VsrQualityLevel(2, 4) == 23 && VsrQualityLevel(0, 3) == 3, "VSR quality levels");
     CHECK(CadenceEven(240, 120) && !CadenceEven(240, 143.86) && std::fabs(HoldMs(240, false, 143.86) - 8.333) < 0.01, "cadence");
 }
@@ -243,6 +244,7 @@ static void TestSettings()
     CHECK(s.smoother == 1 && s.sharper == 3 && s.fgQuality == -1, "arguments override");
     Settings d = LoadSettings([](const char*) { return std::string(); });
     CHECK(d.smoother == 0 && d.sharper == 0 && d.fgQuality == -1 && d.sdrToHdr == 0 && d.targetH == 2160, "defaults are Auto");
+    CHECK(d.targetScreen && !d.hdrPeakSet && !s.targetScreen && s.hdrPeakSet, "Screen target and the peak: the display decides unless set");
 }
 
 int main()

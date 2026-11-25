@@ -14,7 +14,12 @@ add_test(NAME nvl_test COMMAND nvl_test)
 
 set(PMVS_NVIDIA_LINUX_DEFAULT OFF)
 if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64")
-  set(PMVS_NVIDIA_LINUX_DEFAULT ON)
+  # NVIDIA publishes the Video Effects runtime for Linux x86-64 only (nvidia-vfx wheels: manylinux x86_64, win_amd64,
+  # win_arm64): on Linux aarch64 (DGX Spark, Jetson) the backend would have nothing to load, so it is off by default
+  # there and Auto never offers it (ProbeGpu says why when it is built anyway).
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(PMVS_NVIDIA_LINUX_DEFAULT ON)
+  endif()
   # the GOT hooks on a demo pair: libnvl_cudademo.so (cuDeviceGetAttribute, cuModuleLoadData, cuCtxGetDevice) and
   # libnvl_gotdemo.so importing them, as libnvVFXVideoFrameGeneration.so imports them from libcuda.so.1
   add_library(nvl_cudademo SHARED tests/nvidia-linux/cudademo.cpp)

@@ -35,9 +35,10 @@ template <class Get> Settings LoadSettings(Get&& get)
     const std::string st = LowerAscii(TrimAscii(get("VsrStyle")));
     s.vsrStyle = st == "standard" ? 0 : st == "highbitrate" ? 1 : st == "streaming" ? 2 : -1;
     const std::string t = LowerAscii(TrimAscii(get("UpscaleTarget")));
-    s.targetH = t == "1440p" ? 1440 : t == "5k" ? 2880 : 2160;   // Screen: the display is not known to the plugin: 4K
+    s.targetH = t == "1440p" ? 1440 : t == "5k" ? 2880 : 2160;   // Screen: the display's size when mpv reports it, else 4K
+    s.targetScreen = !(t == "1440p" || t == "4k" || t == "5k");
     const double peak = std::atof(get("DisplayPeak").c_str());
-    if (peak >= 400 && peak <= 2000) s.hdrPeak = peak;
+    if (peak >= 400 && peak <= 2000) { s.hdrPeak = peak; s.hdrPeakSet = true; }
     return s;
 }
 // the plugin arguments over it (key as the plugin's argument names)
@@ -49,8 +50,8 @@ inline bool ApplyArg(Settings& s, const std::string& key, const std::string& v)
     if (key == "fg_quality") { const std::string q = LowerAscii(v); s.fgQuality = q == "low" ? 0 : q == "medium" ? 1 : q == "high" ? 2 : -1; return true; }
     if (key == "sdr_to_hdr") { const std::string h = LowerAscii(v); s.sdrToHdr = h == "on" || h == "1" ? 1 : h == "off" || h == "0" ? -1 : 0; return true; }
     if (key == "vsr_style") { const std::string st = LowerAscii(v); s.vsrStyle = st == "standard" ? 0 : st == "highbitrate" ? 1 : st == "streaming" ? 2 : -1; return true; }
-    if (key == "target") { const std::string t = LowerAscii(v); s.targetH = t == "1440p" ? 1440 : t == "5k" ? 2880 : 2160; return true; }
-    if (key == "hdr_peak") { const double p = std::atof(v.c_str()); if (p >= 400 && p <= 2000) s.hdrPeak = p; return true; }
+    if (key == "target") { const std::string t = LowerAscii(v); s.targetH = t == "1440p" ? 1440 : t == "5k" ? 2880 : 2160; s.targetScreen = !(t == "1440p" || t == "4k" || t == "5k"); return true; }
+    if (key == "hdr_peak") { const double p = std::atof(v.c_str()); if (p >= 400 && p <= 2000) { s.hdrPeak = p; s.hdrPeakSet = true; } return true; }
     return false;
 }
 

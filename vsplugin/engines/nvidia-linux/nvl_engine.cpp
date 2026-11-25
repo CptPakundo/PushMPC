@@ -38,6 +38,10 @@ GpuInfo ProbeGpu(int device, const std::string& runtimeDir)
     const std::string libs = VfxApi::LibDir(g.runtimeDir);
     g.runtime = FileExists(libs + "/libVideoFX.so") && FileExists(libs + "/libNVCVImage.so");
     if (!g.runtime) g.runtimeWhy = "the NVIDIA Video Effects runtime is not installed in " + g.runtimeDir + " (scripts/nvidia-vfx-fetch.sh)";
+#if !defined(__x86_64__) && !defined(_M_X64) && !defined(_WIN32)
+    g.runtime = false;   // NVIDIA ships no Linux aarch64 build of the runtime: never offered here
+    g.runtimeWhy = "NVIDIA publishes no Linux aarch64 build of its Video Effects runtime (nvidia-vfx: Linux x86-64, Windows x64 and ARM64 only)";
+#endif
     if (!cu.Load(why)) { g.why = why; return g; }
     CUresult r = cu.cuInit(0);
     if (r != CUDA_SUCCESS) { g.why = "cuInit: " + cu.Error(r); return g; }

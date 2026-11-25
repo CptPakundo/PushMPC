@@ -247,7 +247,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     if (!g.driver || !g.runtime) { a->freeNode(node); return fail(!g.driver ? g.why : g.runtimeWhy); }
     Settings s = LoadSettings([](const char* n) { return ReadSetting(n); });
     std::string overrides;
-    for (const char* key : { "enable", "smoother", "sharper", "fg_quality", "sdr_to_hdr", "vsr_style", "target", "hdr_peak" })
+    for (const char* key : { "enable", "smoother", "sharper", "fg_quality", "sdr_to_hdr", "vsr_style", "target", "hdr_peak", "fg_method" })
         if (const std::string v = NArg(in, a, key); !v.empty() && ApplyArg(s, key, v)) overrides += std::format(" {}={}", key, v);
     if (!s.enable) { Log("nvidia: PushMPC is off (Enable = 0): the clip passes through"); a->mapConsumeNode(out, "clip", node, maReplace); return; }
 
@@ -262,6 +262,11 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     src.fps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     src.hdr = IsHdrTransfer(transfer); src.tenBit = bits > 8;
     Display disp; disp.refreshHz = NArgF(in, a, "display_fps", 0); disp.hdr = NArgI(in, a, "display_hdr", 0) != 0;
+    // pushmpc-display.lua: the display's size (UpscaleTarget Screen) and its peak (RTX Video HDR) from mpv
+    const int dispH = int(NArgI(in, a, "display_height", 0));
+    if (s.targetScreen && dispH > 0) s.targetH = TargetForDisplay(dispH);
+    const double dispPeak = NArgF(in, a, "display_peak", 0);
+    if (!s.hdrPeakSet && dispPeak >= 400) s.hdrPeak = std::min(dispPeak, 2000.0);
     Costs costs; costs.card = CardFactor(g.name, g.cls);
     const nvl::Plan plan = Decide(s, src, disp, g.caps, costs);
     Log(std::format("nvidia: {}x{} {}-bit, {}/{} fps, {} frames; {}; display {:.3f} Hz{}, HDR {}; settings from {}{}", src.w, src.h, bits, vi->fpsNum, vi->fpsDen, vi->numFrames,
