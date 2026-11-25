@@ -123,6 +123,7 @@ vlc_module_begin()
 vlc_module_end()
 
 struct filter_sys_t {
+    filter_chain_t *download;  /* hardware pictures (DX11, CVPX, ...) -> I420 / I0AL with VLC's own converters */
     pm_engine *eng;
     int k;                 /* outputs per source frame */
     int alloc;
@@ -180,10 +181,14 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
     sys->in++;
+    if (sys->download) {        /* our own converter in front, so our extra pictures reach the static chain intact */
+        cur = filter_chain_VideoFilter(sys->download, cur);
+        if (!cur) return NULL;
+    }
     if (sys->k <= 1 || !sys->eng) { sys->out++; return cur; }
 
     pm_yuv src;
-    PlanesIn(cur, &f->fmt_in.video, sys->bps, &src);
+    PlanesIn(cur, &f->fmt_out.video, sys->bps, &src);
 
     picture_t *prev = sys->prev;
     sys->prev = cur;
@@ -230,6 +235,43 @@ static void Flush(filter_t *f)
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     if (sys->eng) pm_engine_forget(sys->eng);
+    if (sys->download) filter_chain_VideoFlush(sys->download);
+}
+
+static picture_t *DownloadBufferNew(filter_t *inner)
+{
+    filter_t *f = (filter_t *)inner->owner.sys;
+    return picture_NewFromFormat(&f->fmt_out.video);
+}
+
+/* Hardware decoder output (D3D11 'DX11'/'DX10', VideoToolbox 'CVPN'/'CVPP', D3D9, ...): if VLC refused us, it would
+ * put its own converter in front of us inside a "chain" filter, and that wrapper returns one picture per input, so
+ * every generated frame would be dropped ("dropping pictures"). Instead we run VLC's converter ourselves and output
+ * I420 / I0AL; VLC then converts our output back for the display after the static chain (CPU upload). */
+static bool SetupDownload(filter_t *f, struct filter_sys_t *sys, int *bits)
+{
+    const vlc_fourcc_t c = f->fmt_in.video.i_chroma;
+    const vlc_chroma_description_t *d = vlc_fourcc_GetChromaDescription(c);
+    const bool ten = (d && d->pixel_bits > 8) || c == VLC_CODEC_D3D11_OPAQUE_10B || c == VLC_CODEC_D3D9_OPAQUE_10B ||
+                     c == VLC_CODEC_CVPX_P010 || c == VLC_CODEC_VAAPI_420_10BPP;
+    const vlc_fourcc_t target = ten ? VLC_CODEC_I420_10L : VLC_CODEC_I420;
+    es_format_t out;
+    es_format_Copy(&out, &f->fmt_in);
+    out.i_codec = out.video.i_chroma = target;
+    filter_owner_t owner = { .sys = f, .video = { .buffer_new = DownloadBufferNew } };
+    f->fmt_out.i_codec = f->fmt_out.video.i_chroma = target;   /* DownloadBufferNew allocates in this format */
+    sys->download = filter_chain_NewVideo(f, false, &owner);
+    if (!sys->download) { es_format_Clean(&out); return false; }
+    filter_chain_Reset(sys->download, &f->fmt_in, &out);
+    const int r = filter_chain_AppendConverter(sys->download, &f->fmt_in, &out);
+    es_format_Clean(&out);
+    if (r != 0) {
+        filter_chain_Delete(sys->download);
+        sys->download = NULL;
+        return false;
+    }
+    *bits = ten ? 10 : 8;
+    return true;
 }
 
 static int Open(vlc_object_t *obj)
@@ -237,18 +279,22 @@ static int Open(vlc_object_t *obj)
     filter_t *f = (filter_t *)obj;
     const video_format_t *v = &f->fmt_in.video;
     int bits = 8;
-    if (!Supported(v->i_chroma, &bits)) {
-        /* NV12, hardware surfaces (DX11, VAOP, CVPX...): VLC then converts to I420 in front of us ("middle man") */
-        msg_Dbg(f, "PushMPC: input %4.4s not handled directly", (const char *)&v->i_chroma);
-        return VLC_EGENERIC;
-    }
-    if (!video_format_IsSimilar(&f->fmt_in.video, &f->fmt_out.video) && f->fmt_out.video.i_chroma != v->i_chroma) {
-        msg_Dbg(f, "PushMPC: output format differs from input");
-        return VLC_EGENERIC;
-    }
-
     struct filter_sys_t *sys = calloc(1, sizeof(*sys));
     if (!sys) return VLC_ENOMEM;
+    f->fmt_out.video = f->fmt_in.video;
+    f->fmt_out.i_codec = f->fmt_in.i_codec;
+    if (!Supported(v->i_chroma, &bits)) {
+        /* NV12 and hardware surfaces: convert in front of the engine with VLC's own converters (SetupDownload) */
+        if (!SetupDownload(f, sys, &bits)) {
+            msg_Dbg(f, "PushMPC: no converter from %4.4s", (const char *)&v->i_chroma);
+            f->fmt_out.video = f->fmt_in.video;
+            f->fmt_out.i_codec = f->fmt_in.i_codec;
+            free(sys);
+            return VLC_EGENERIC;
+        }
+        msg_Dbg(f, "PushMPC: %4.4s converted to %4.4s in front of the engine", (const char *)&v->i_chroma,
+                (const char *)&f->fmt_out.video.i_chroma);
+    }
     sys->bits = bits;
     sys->bps = bits > 8 ? 2 : 1;
     sys->alloc = (int)var_InheritInteger(f, CFG "alloc");
@@ -272,8 +318,6 @@ static int Open(vlc_object_t *obj)
         }
     }
 
-    f->fmt_out.video = f->fmt_in.video;
-    f->fmt_out.i_codec = f->fmt_in.i_codec;
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
     f->p_sys = (void *)sys;
@@ -297,6 +341,7 @@ static void Close(vlc_object_t *obj)
              st.cuts, st.me_ms, st.gen_ms);
     Flush(f);
     if (sys->eng) pm_engine_close(sys->eng);
+    if (sys->download) filter_chain_Delete(sys->download);
     free(sys);
 }
 

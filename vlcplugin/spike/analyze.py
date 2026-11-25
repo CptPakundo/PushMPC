@@ -46,8 +46,8 @@ deltas = [(b - x) / 1000.0 for x, b in zip(dates, dates[1:])]
 # VLC itself shows the first picture once before playback starts (the baseline without any filter has the same step
 # back), so the first 2 * mult + 2 pictures are start-up and not judged
 skip = 2 * a.mult + 2
-startup_steps_back = sum(1 for d in deltas[:skip] if d <= 0)
-deltas = deltas[skip:]
+startup_steps_back = sum(1 for d in deltas[:skip] if d <= 0) + sum(1 for d in deltas[-skip:] if d <= 0)
+deltas = deltas[skip:-skip] if len(deltas) > 2 * skip else []   # the end of the clip (drain) is not judged either
 nonmono = sum(1 for d in deltas if d <= 0)
 exp = 1000.0 / (a.src_fps * a.mult)
 on_grid = sum(1 for d in deltas if abs(d - exp) <= 0.25 * exp)

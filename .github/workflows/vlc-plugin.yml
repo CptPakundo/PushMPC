@@ -249,7 +249,8 @@ jobs:
           d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
           export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP10=art/clips/clip10.mkv \
                  OUT=res/macos SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="macOS, VLC.app cask" \
-                 HWARGS="--codec=avcodec,none --avcodec-hw=none" DISPLAYS="macosx"
+                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
+          # (no real-display case: VLC's macosx vout needs the macosx interface, which needs a logged-in GUI session)
           bash vlcplugin/tests/run-module.sh
       - uses: actions/upload-artifact@v4
         if: always()
