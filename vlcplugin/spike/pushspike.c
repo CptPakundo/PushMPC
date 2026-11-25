@@ -95,13 +95,13 @@ static bool IsD3D11Opaque(vlc_fourcc_t c)
 }
 
 /* ---------------------------------------------------------------- filter */
-typedef struct {
+struct filter_sys_t { /* typedef'd in vlc_common.h */
     int mult, scale, alloc;
     bool opaque;
     picture_t *prev;
     uint64_t in, out, alloc_fail;
-    vlc_tick_t fallback_dt;
-} filter_sys_t;
+    mtime_t fallback_dt;
+};
 
 static picture_t *NewOut(filter_t *f, filter_sys_t *sys)
 {
@@ -148,7 +148,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         /* pass-through with mult-1 clones sharing the texture (timestamps spread like the CPU path) */
         if (!sys->prev) { sys->prev = cur; return NULL; }
         picture_t *head = sys->prev, *tail = head;
-        vlc_tick_t dt = cur->date - head->date;
+        mtime_t dt = cur->date - head->date;
         if (dt <= 0 || dt > CLOCK_FREQ) dt = sys->fallback_dt;
         for (int k = 1; k < sys->mult; k++) {
             picture_t *c = picture_Clone(head);
@@ -165,7 +165,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     if (!sys->prev) { sys->prev = cur; return NULL; } /* one frame of latency, as a real interpolator */
 
     picture_t *a = sys->prev;
-    vlc_tick_t dt = cur->date - a->date;
+    mtime_t dt = cur->date - a->date;
     if (dt <= 0 || dt > CLOCK_FREQ) dt = sys->fallback_dt;
 
     picture_t *head = NULL, *tail = NULL;
@@ -222,7 +222,7 @@ static int OpenFilter(vlc_object_t *obj)
     sys->alloc = var_CreateGetInteger(f, FCFG "alloc");
     sys->opaque = opaque;
     sys->fallback_dt = (f->fmt_in.video.i_frame_rate && f->fmt_in.video.i_frame_rate_base)
-        ? (vlc_tick_t)CLOCK_FREQ * f->fmt_in.video.i_frame_rate_base / f->fmt_in.video.i_frame_rate
+        ? (mtime_t)CLOCK_FREQ * f->fmt_in.video.i_frame_rate_base / f->fmt_in.video.i_frame_rate
         : CLOCK_FREQ / 24;
 
     f->fmt_out.video = f->fmt_in.video;
@@ -274,7 +274,7 @@ static picture_pool_t *DumpPool(vout_display_t *vd, unsigned count)
 static void DumpDisplay(vout_display_t *vd, picture_t *pic, subpicture_t *sub)
 {
     vout_display_sys_t *sys = vd->sys;
-    const vlc_tick_t now = mdate();
+    const mtime_t now = mdate();
     uint64_t sum = 0;
     if (pic->i_planes > 0 && pic->p[0].p_pixels) {
         const plane_t *p = &pic->p[0];
