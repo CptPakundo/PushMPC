@@ -16,6 +16,7 @@ $clsid = '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}'; $vsClsid = '{3AB7506B-FC4A-41
 $fails = 0
 function Check([string]$what, [bool]$ok) { if ($ok) { Write-Host "  PASS  $what" } else { Write-Host "  FAIL  $what" -ForegroundColor Red; $script:fails++ } }
 function Run([string]$action, [string[]]$more = @()) {
+    if (-not ($more -contains '-PotLavPath')) { $more += @('-PotLavPath', 'none') }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script, $action, '-InstallDir', $state, '-PotRegRoot', $root, '-PotPlayerExe', $exe) + $more
     $out = & powershell.exe @a 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $out; throw "$action exited $LASTEXITCODE" }
@@ -91,6 +92,24 @@ try {
     Run 'potplayer-remove' | Out-Null
     Check 'later filter moved down to 0001, end marker at 0002' ((Val "$ov\0001" Name) -eq 'Later filter' -and (Val "$ov\0002" Type) -eq -2 -and -not (Test-Path "$ov\0003"))
     Check 'no PushMPC entry left' (-not (Get-ChildItem $ov | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq $clsid }))
+
+    Write-Host 'LAV Video as the decoder (LAV Filters installed)'
+    Reset-Fake -Empty
+    $before = Export-Fake
+    $lav = Join-Path $tmp 'LAVVideo.ax'; Set-Content -Path $lav -Value 'fake' -Encoding ASCII
+    $o = Run 'potplayer-apply' @('-PotLavPath', $lav)
+    Check 'LAV entry 0001 after ours (Type 1, Prefer, its path)' ((Val "$ov\0000" CLSID) -eq $clsid -and (Val "$ov\0001" CLSID) -eq '{EE30215D-164F-4A92-A4EB-9D4C13390F9F}' -and (Val "$ov\0001" Path) -eq $lav -and (Val "$ov\0001" FilterType) -eq 0)
+    Check 'LAV entry has compressed video types (H264 first)' ((Val "$ov\0001" mod0001) -eq '{34363248-0000-0010-8000-00AA00389B71}')
+    Check 'end marker at 0002' ((Val "$ov\0002" Type) -eq -2)
+    Run 'potplayer-remove' | Out-Null
+    Check 'both entries removed, key exactly as before' ((Export-Fake) -eq $before)
+    Write-Host 'the user already has LAV Video in the list'
+    Reset-Fake
+    $before = Export-Fake
+    Run 'potplayer-apply' @('-PotLavPath', $lav) | Out-Null
+    Check 'the user''s LAV entry kept, no second one' ((Val "$ov\0000" Path) -eq 'C:\LAV\LAVVideo.ax' -and @(Get-ChildItem $ov | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{EE30215D-164F-4A92-A4EB-9D4C13390F9F}' }).Count -eq 1)
+    Run 'potplayer-remove' | Out-Null
+    Check 'user''s LAV entry still there after uninstall, key exactly as before' ((Export-Fake) -eq $before)
 
     Write-Host 'INI mode'
     Reset-Fake

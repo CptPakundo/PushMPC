@@ -77,6 +77,7 @@ printf 'Counter=1\n\n[Command_0]\nCommand=cycle pause\nType=shortcut\n' > "$HOME
 printf '[%%General]\nversion=1\n\n[advanced]\nmplayer_additional_options=--volume-max=150\nother=1\n' > "$HOME/.config/smplayer/smplayer.ini"
 printf '{\n    "playerOpenMode": 0,\n    "tweaksMpvOptionsFileChkBox": false,\n    "tweaksMpvOptionsFilePath": ""\n}\n' > "$HOME/.config/mpc-qt/settings.json"
 printf '{"mpv_ext": false}\n' > "$HOME/.config/jellyfin-mpv-shim/conf.json"
+mkdir -p "$HOME/.local/share/jellyfin-desktop/profiles/p1"
 printf '<playercorefactory>\n  <players>\n    <player name="VLC" type="ExternalPlayer"><filename>/usr/bin/vlc</filename></player>\n  </players>\n</playercorefactory>\n' > "$HOME/.kodi/userdata/playercorefactory.xml"
 before=$(snap)
 runi install; check "1 install exits 0" same $? 0
@@ -96,6 +97,7 @@ check "1 MPC-QT options file on" has '"tweaksMpvOptionsFileChkBox": true' "$HOME
 check "1 MPC-QT path = own file" has "\"tweaksMpvOptionsFilePath\": \"$d/mpc-qt-mpv.conf\"" "$HOME/.config/mpc-qt/settings.json"
 check "1 MPC-QT own file has the block" has 'vf-append=@pushmpc' "$d/mpc-qt-mpv.conf"
 check "1 Jellyfin shim mpv.conf" has 'vf-append=@pushmpc' "$HOME/.config/jellyfin-mpv-shim/mpv.conf"
+check "1 Jellyfin Desktop profile mpv.conf" has 'vf-append=@pushmpc' "$HOME/.local/share/jellyfin-desktop/profiles/p1/mpv.conf"
 check "1 Kodi player added" has '<player name="PushMPC mpv"' "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi uses mpv" has "<filename>$HOME/.stubbin/mpv</filename>" "$HOME/.kodi/userdata/playercorefactory.xml"
 check "1 Kodi VLC kept" has '<player name="VLC"' "$HOME/.kodi/userdata/playercorefactory.xml"

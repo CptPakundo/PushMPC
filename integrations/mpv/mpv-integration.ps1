@@ -34,6 +34,8 @@
      with the block. Backup/absent marker and exact restore as for mpv.conf.
    - with -RuntimeOnPath: %LOCALAPPDATA%\PushMPC\vapoursynth on the user's PATH (mpv loads VSScript.dll from the DLL
      search path); removed again only if this script added it.
+   - Jellyfin Desktop 2.x: the block in %LOCALAPPDATA%\Jellyfin Desktop\profiles\<id>\mpv.conf (its libmpv comes from
+     shinchiro's builds, with VapourSynth).
   Detected but not changed: SVP's own mpv (SVP manages it); Stremio 5 (its mpv sets the vf property itself whenever the
   display state changes, which drops any configured filter: use Stremio's "external player" with mpv, see
   docs\players-mpv.md).
@@ -192,6 +194,14 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
     foreach ($u in ($kodiUser | Select-Object -Unique)) {
         $found += [pscustomobject]@{ Player = 'Kodi'; Exe = $hostExe; Kind = 'kodi'; Config = "$u\playercorefactory.xml"; Managed = [bool]$hostExe
             Note = $(if ($hostExe) { "videos play in mpv ($hostExe) as Kodi's external player" } else { 'not changed: Kodi needs mpv (shinchiro build) as its external player; install mpv, then run PushMPC Setup again' }) }
+    }
+    # Jellyfin Desktop 2.x: libmpv from shinchiro's builds (VapourSynth inside), mpv.conf per profile
+    $jd = "$($E.LocalAppData)\Jellyfin Desktop\profiles"
+    if (Test-Path -LiteralPath $jd -PathType Container) {
+        foreach ($pr in @(Get-ChildItem -LiteralPath $jd -Directory -ErrorAction SilentlyContinue)) {
+            $found += [pscustomobject]@{ Player = "Jellyfin Desktop ($($pr.Name))"; Exe = ''; Kind = 'mpvconf'; Config = "$($pr.FullName)\mpv.conf"; Managed = $true
+                Note = 'its bundled libmpv (shinchiro build) reads mpv.conf in the profile folder' }
+        }
     }
     foreach ($d in @("$($E.LocalAppData)\Programs\Stremio", "$($E.ProgramFiles)\Stremio")) {
         $exe = @('stremio-shell-ng.exe', 'stremio.exe') | ForEach-Object { "$d\$_" } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1

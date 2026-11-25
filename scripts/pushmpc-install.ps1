@@ -86,6 +86,7 @@ param(
     [switch]$NoPotPlayer,
     [string]$PotRegRoot = 'HKCU:\Software\DAUM\PotPlayerMini64',
     [string]$PotPlayerExe = '',
+    [string]$PotLavPath = '',
     # mpv route: skip it; tests: a fake root for mpv-integration.ps1 (-Root); stage: the plugin build; the runtime pins
     [switch]$NoMpv,
     [string]$MpvRoot = '',
@@ -1977,15 +1978,59 @@ function Set-PotPlayerEntry($state) {
         if ($DryRun) { Dry "would set $($e.Key) Disabled=1" } else { Set-ItemProperty $e.Key -Name Disabled -Value 1 }
         Set-StateValue $state 'potDisabledVapourSynth' $e.Name
     }
-    Info 'PotPlayer: choose MPC Video Renderer (Preferences > Video > Video renderer) and a copy-back decoder (Filter control > Video decoder: built-in with DXVA2/D3D11 copy-back, or LAV Video in copy-back) for PushMPC to process video.'
+    Set-PotPlayerLav $state
+    Info 'PotPlayer: choose MPC Video Renderer (Preferences > Video > Video renderer) for PushMPC to process video.'
+}
+# LAV Video as PotPlayer's decoder (a Prefer entry in the same list, after PushMPC's): LAV hands HDR mastering data and
+# MaxCLL to the filter as side data, which PotPlayer's built-in decoder does not. Only when LAV Filters is installed
+# (registered) and the list has no LAV Video entry of the user's; removed again on uninstall. -PotLavPath overrides the
+# registered path (tests).
+$PotLavClsid = '{EE30215D-164F-4A92-A4EB-9D4C13390F9F}'
+function Find-LavVideo {
+    if ($PotLavPath -eq 'none') { return '' }
+    if ($PotLavPath) { return $PotLavPath }
+    foreach ($root in @('HKCU:\Software\Classes', 'HKLM:\Software\Classes')) {
+        $v = (Get-ItemProperty -Path "$root\CLSID\$PotLavClsid\InprocServer32" -ErrorAction SilentlyContinue).'(default)'
+        if ($v -and (Test-Path -LiteralPath $v)) { return $v }
+    }
+    return ''
+}
+function Set-PotPlayerLav($state) {
+    $entries = Get-PotEntries
+    if ($entries | Where-Object { $_.Clsid -eq $PotLavClsid }) { if (-not (Get-StateValue $state 'potLavEntry')) { Info 'PotPlayer: your LAV Video entry is kept as it is' }; return }
+    $lav = Find-LavVideo
+    if (-not $lav) { Info 'PotPlayer: LAV Filters is not installed. With LAV Video as its decoder PotPlayer passes HDR mastering data to PushMPC: install LAV Filters (github.com/Nevcairiel/LAVFilters), then run setup again.'; return }
+    $end = $entries | Where-Object End | Select-Object -First 1
+    if (-not $end) { return }
+    $name = $end.Name; $key = $end.Key; $endName = '{0:D4}' -f ([int]$end.Name + 1)
+    $vids = '{73646976-0000-0010-8000-00AA00389B71}'
+    $subs = @('{34363248-0000-0010-8000-00AA00389B71}', '{31435641-0000-0010-8000-00AA00389B71}', '{43564548-0000-0010-8000-00AA00389B71}', '{31435648-0000-0010-8000-00AA00389B71}',
+              '{31305641-0000-0010-8000-00AA00389B71}', '{30395056-0000-0010-8000-00AA00389B71}', '{E06D8026-DB46-11CF-B4D1-00805F6CBBEA}', '{31435657-0000-0010-8000-00AA00389B71}')   # H264 AVC1 HEVC HVC1 AV01 VP90 MPEG2 WVC1
+    if ($DryRun) { Dry "would add LAV Video ($lav) as PotPlayer's decoder (entry $name, Prefer)"; return }
+    if (Test-Path (Join-Path $PotOverride $endName)) { Remove-Item (Join-Path $PotOverride $endName) -Recurse -Force }
+    Rename-Item -Path $key -NewName $endName
+    $key = Join-Path $PotOverride $name
+    New-Item -Path $key -Force | Out-Null
+    New-ItemProperty $key -Name Type -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty $key -Name Disabled -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty $key -Name Name -PropertyType String -Value 'LAV Video Decoder' -Force | Out-Null
+    New-ItemProperty $key -Name CLSID -PropertyType String -Value $PotLavClsid -Force | Out-Null
+    New-ItemProperty $key -Name Path -PropertyType String -Value $lav -Force | Out-Null
+    $i = 0; foreach ($sub in $subs) { New-ItemProperty $key -Name ('mod{0:D4}' -f $i) -PropertyType String -Value $vids -Force | Out-Null; New-ItemProperty $key -Name ('mod{0:D4}' -f ($i + 1)) -PropertyType String -Value $sub -Force | Out-Null; $i += 2 }
+    New-ItemProperty $key -Name FilterType -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty $key -Name Merit -PropertyType DWord -Value 0x00800003 -Force | Out-Null
+    New-ItemProperty $key -Name MeritHi -PropertyType DWord -Value 0 -Force | Out-Null
+    Set-StateValue $state 'potLavEntry' $name
+    Info "PotPlayer: LAV Video ($lav) set as its decoder (entry $name, Prefer): HDR mastering data reaches PushMPC"
 }
 function Remove-PotPlayerEntry($state) {
     $entries = Get-PotEntries
     $gone = @()
-    foreach ($e in ($entries | Where-Object { $_.Clsid -eq $FilterClsid })) {
+    $lavName = Get-StateValue $state 'potLavEntry'
+    foreach ($e in ($entries | Where-Object { $_.Clsid -eq $FilterClsid -or ($lavName -and $_.Name -eq $lavName -and $_.Clsid -eq $PotLavClsid) })) {
         if ($DryRun) { Dry "would remove $($e.Key)" } else { Remove-Item $e.Key -Recurse -Force }
         $gone += $e.Name
-        Info "PotPlayer filter priority: entry $($e.Name) removed"
+        Info "PotPlayer filter priority: entry $($e.Name) ($($e.Props.Name)) removed"
     }
     $vsName = Get-StateValue $state 'potDisabledVapourSynth'
     if ($gone.Count) {
@@ -2540,7 +2585,7 @@ switch ($Action) {
     'potplayer-remove' {
         $state = Read-State
         Remove-PotPlayerEntry $state
-        foreach ($n in @('potEntry', 'potOverrideCreated', 'potDisabledVapourSynth')) { if ($state.PSObject.Properties[$n]) { $state.PSObject.Properties.Remove($n) } }
+        foreach ($n in @('potEntry', 'potOverrideCreated', 'potDisabledVapourSynth', 'potLavEntry')) { if ($state.PSObject.Properties[$n]) { $state.PSObject.Properties.Remove($n) } }
         Write-State $state
     }
     'mpcbe-remove' {

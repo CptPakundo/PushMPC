@@ -22,6 +22,7 @@
 #   SMPlayer          [advanced] mplayer_additional_options in ~/.config/smplayer/smplayer.ini
 #   MPC-QT            Options > Tweaks "mpv options file" in ~/.config/mpc-qt/settings.json
 #   Jellyfin MPV Shim, Plex-MPV-Shim   the block in the mpv.conf beside their conf.json
+#   Jellyfin Desktop  the block in ~/.local/share/jellyfin-desktop/profiles/<id>/mpv.conf (system libmpv)
 #   Kodi (native)     ~/.kodi/userdata/playercorefactory.xml: mpv (or the Flathub mpv) as the external player
 #                     for every video, in marked parts
 # Environment for tests: HOME, XDG_*; PUSHMPC_SRC (folder with vsplugin/ and mpv-integration.sh; default: next to
@@ -388,13 +389,17 @@ do_install() {
         if have haruna || [ -d "$cfg/haruna" ]; then say "Haruna:"; haruna_install; fi
         if have smplayer || [ -d "$cfg/smplayer" ]; then say "SMPlayer:"; smplayer_install; fi
         if have mpc-qt || [ -d "$cfg/mpc-qt" ]; then say "MPC-QT:"; mpcqt_install; fi
+        for pr in "$data"/jellyfin-desktop/profiles/*/; do
+            [ -d "$pr" ] || continue
+            say "Jellyfin Desktop ($(basename "$pr")):"; mpvconf install "${pr}mpv.conf" "$script"; record "mpvconf|${pr}mpv.conf"
+        done
         for s in jellyfin-mpv-shim plex-mpv-shim; do
             if [ -f "$cfg/$s/conf.json" ]; then say "$s:"; mpvconf install "$cfg/$s/mpv.conf" "$script"; record "mpvconf|$cfg/$s/mpv.conf"; fi
         done
     else
         for p in celluloid haruna smplayer mpc-qt; do have "$p" && say "$p: uses the system mpv library, whose VapourSynth cannot run here: not changed (use mpv from Flathub)"; done
     fi
-    for a in io.github.celluloid_player.Celluloid org.kde.haruna io.github.mpc_qt.mpc-qt com.github.iwalton3.jellyfin-mpv-shim; do
+    for a in io.github.celluloid_player.Celluloid org.kde.haruna io.github.mpc_qt.mpc-qt com.github.iwalton3.jellyfin-mpv-shim org.jellyfin.JellyfinDesktop; do
         [ -d "$fpdata/$a" ] && say "Flatpak $a: its own mpv build, not changed (no VapourSynth plugin slot)"
     done
     if [ -d "$HOME/.kodi" ] || have kodi; then

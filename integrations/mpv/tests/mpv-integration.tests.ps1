@@ -239,6 +239,16 @@ Run 'Install' $r @{ RuntimeOnPath = $true } | Out-Null
 Check ([IO.File]::ReadAllText("$r\user-path.txt") -eq "C:\Tools;C:\Other;$r\AppData\Local\PushMPC\vapoursynth") 'runtime appended after a trailing separator'
 Run 'Uninstall' $r | Out-Null
 Check ([IO.File]::ReadAllText("$r\user-path.txt") -eq 'C:\Tools;C:\Other;') 'user PATH restored exactly, trailing separator kept'
+# 14. Jellyfin Desktop: one mpv.conf per profile
+$r = New-Root; $roots += $r
+$jp = "$r\AppData\Local\Jellyfin Desktop\profiles"; New-Item -ItemType Directory "$jp\abc123", "$jp\def456" -Force | Out-Null
+[IO.File]::WriteAllText("$jp\def456\mpv.conf", "sub-auto=fuzzy`r`n")
+$before = Snapshot $r
+$rows = Run 'Install' $r
+Check (@($rows | Where-Object { $_.Player -like 'Jellyfin Desktop*' -and $_.Result -eq 'installed' }).Count -eq 2) 'Jellyfin Desktop: both profiles installed'
+Check ((Read-PmText "$jp\abc123\mpv.conf").Text.StartsWith($script:PmBegin) -and (Read-PmText "$jp\def456\mpv.conf").Text.EndsWith("sub-auto=fuzzy`r`n")) 'Jellyfin Desktop: block on top of each profile mpv.conf'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Jellyfin Desktop restored byte for byte'
 # 12. Stremio detected, not changed
 $r = New-Root; $roots += $r
 New-Item -ItemType Directory "$r\AppData\Local\Programs\Stremio" -Force | Out-Null; [IO.File]::WriteAllText("$r\AppData\Local\Programs\Stremio\stremio-shell-ng.exe", 'fake')
