@@ -30,6 +30,7 @@ check() {
 package() {
   install -Dm755 "PushMPC-$pkgver/vsplugin/bin/pushmpc_vs.so" "$pkgdir/usr/lib/pushmpc/pushmpc_vs.so"
   install -Dm644 "PushMPC-$pkgver/vsplugin/scripts/pushmpc.vpy" "$pkgdir/usr/lib/pushmpc/pushmpc.vpy"
+  install -Dm644 "PushMPC-$pkgver/integrations/mpv/pushmpc.lua" "$pkgdir/usr/lib/pushmpc/pushmpc.lua"
   install -dm755 "$pkgdir/usr/lib/vapoursynth"
   ln -s ../pushmpc/pushmpc_vs.so "$pkgdir/usr/lib/vapoursynth/pushmpc_vs.so"
   install -Dm755 "PushMPC-$pkgver/integrations/mpv/mpv-integration.sh" "$pkgdir/usr/share/pushmpc/mpv-integration.sh"

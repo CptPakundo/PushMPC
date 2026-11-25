@@ -27,7 +27,7 @@ on:
         description: 'run id of a release.yml dry run (artifact pushmpc-release); empty = the newest one that still has it'
         default: ''
   push:
-    branches: ['track/integrations']
+    branches: ['track/integrations', 'track/integrations-2']
     paths:
       - 'integrations/**'
       - 'packaging/**'
@@ -264,6 +264,99 @@ jobs:
         if: always()
         with: { name: win-players-logs, path: "${{ runner.temp }}/vslog-*\n${{ runner.temp }}/*.txt" }
 
+  # Stremio 5.0.28+ and Plex for Windows: their own libmpv-2.dll, loaded by libmpv-host.ps1 (their programs are not
+  # run): which features it has, PushMPC's pushmpc.lua in it (VapourSynth route for Stremio, d3d11vpp VSR route for
+  # Plex; soft failure on WARP), and the config writers' install/uninstall on the runner's profile
+  stremio-plex:
+    needs: win-build
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: t4-windows-bits, path: '${{ runner.temp }}/bits' }
+      - name: Stremio (official installer, per user, silent) and Plex for Windows (official installer, silent)
+        timeout-minutes: 15
+        run: |
+          $out = "$env:RUNNER_TEMP\sp.txt"
+          $v = (Invoke-RestMethod 'https://api.github.com/repos/Stremio/stremio-shell-ng/releases/latest' -Headers @{ Authorization = "Bearer ${{ github.token }}" }).tag_name.TrimStart('v')
+          $file = "StremioSetup-v${v}_x64.exe"; $got = $null
+          foreach ($u in @("https://dl.strem.io/stremio-shell-ng/v$v/$file", "https://dl.strem.io/shell-win/v$v/$file", "https://github.com/Stremio/stremio-shell-ng/releases/download/v$v/$file")) {
+            try { Invoke-WebRequest $u -OutFile "$env:RUNNER_TEMP\$file"; $got = $u; break } catch { "  not at $u" | Tee-Object -Append $out }
+          }
+          if ($got) {
+            $sig = Get-AuthenticodeSignature "$env:RUNNER_TEMP\$file"
+            $p = Start-Process "$env:RUNNER_TEMP\$file" -ArgumentList '/VERYSILENT', '/CURRENTUSER', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru; $p.WaitForExit(300000) | Out-Null
+            "Stremio $v from $got (signature $($sig.Status)), installer exit $($p.ExitCode)" | Tee-Object -Append $out
+          } else { "Stremio ${v}: installer not found" | Tee-Object -Append $out }
+          try {
+            $j = Invoke-RestMethod 'https://plex.tv/api/downloads/6.json'
+            $rel = @($j.computer.Windows.releases | Where-Object { $_.url -match 'x86_64|64' })[0]; if (-not $rel) { $rel = @($j.computer.Windows.releases)[0] }
+            Invoke-WebRequest $rel.url -OutFile "$env:RUNNER_TEMP\plex.exe"
+            $p = Start-Process "$env:RUNNER_TEMP\plex.exe" -ArgumentList '/S' -PassThru; $p.WaitForExit(300000) | Out-Null
+            "Plex $($j.computer.Windows.version) from $($rel.url), installer exit $($p.ExitCode)" | Tee-Object -Append $out
+          } catch { "Plex: not installed ($_)" | Tee-Object -Append $out }
+          foreach ($d in @("$env:LOCALAPPDATA\Programs\Stremio", "$env:ProgramFiles\Plex\Plex", "$env:ProgramFiles\Plex\Plex HTPC")) {
+            $dll = "$d\libmpv-2.dll"
+            if (-not (Test-Path $dll)) { "${d}: no libmpv-2.dll" | Tee-Object -Append $out; continue }
+            $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
+            $f = foreach ($k in 'vapoursynth', 'mp.options', 'd3d11vpp', 'scaling-mode', 'mpv 0.') { "${k}=$($t.Contains($k))" }
+            $mv = [regex]::Match($t, 'mpv v?0\.\d+\.\d+[^\x00]{0,30}').Value
+            "${d}\libmpv-2.dll: $($f -join ' '); $mv; $((Get-Item $dll).Length) bytes" | Tee-Object -Append $out
+            Write-Host "::notice title=libmpv in $(Split-Path $d -Leaf)::$($f -join ' '); $mv"
+          }
+      - name: Plugin and the pinned VapourSynth runtime (the layout PushMPC installs)
+        timeout-minutes: 10
+        run: |
+          $pin = Get-Content scripts/vapoursynth-pin.json -Raw | ConvertFrom-Json
+          $pm = "$env:LOCALAPPDATA\PushMPC"; $rt = "$pm\vapoursynth"; $vsp = "$pm\vsplugin"
+          New-Item -ItemType Directory $rt, $vsp -Force | Out-Null
+          foreach ($e in $pin.python, $pin.vapoursynth) { $f = "$env:RUNNER_TEMP\$(Split-Path $e.url -Leaf)"; Invoke-WebRequest $e.url -OutFile $f; if ((Get-FileHash $f).Hash -ne $e.sha256.ToUpper()) { throw "sha $($e.url)" }; tar -xf $f -C $rt }
+          $sp = Join-Path $rt $pin.vapoursynth.wheelTo; New-Item -ItemType Directory $sp -Force | Out-Null
+          foreach ($w in Get-ChildItem (Join-Path $rt $pin.vapoursynth.wheel)) { tar -xf $w.FullName -C $sp }
+          foreach ($p in Get-ChildItem $rt -Filter 'python*._pth') { Add-Content $p.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
+          Copy-Item "$env:RUNNER_TEMP\bits\pushmpc_vs.dll", vsplugin/scripts/pushmpc.vpy, integrations/mpv/pushmpc.lua $vsp
+          "VSSCRIPT_DIR=$((Get-ChildItem $rt -Recurse -Filter VSScript.dll | Select-Object -First 1).DirectoryName)" >> $env:GITHUB_ENV
+      - name: pushmpc.lua inside Stremio's and Plex's libmpv
+        timeout-minutes: 8
+        run: |
+          $out = "$env:RUNNER_TEMP\sp.txt"
+          $vsp = "$env:LOCALAPPDATA\PushMPC\vsplugin"; $lua = "$vsp\pushmpc.lua".Replace('\', '/'); $vpy = "$vsp\pushmpc.vpy".Replace('\', '/')
+          $env:PATH = "$env:VSSCRIPT_DIR;$env:PATH"
+          $sdll = "$env:LOCALAPPDATA\Programs\Stremio\libmpv-2.dll"
+          if (Test-Path $sdll) {
+            $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\vslog-stremio"; New-Item -ItemType Directory $env:PUSHMPC_VS_LOG_DIR -Force | Out-Null
+            # as Stremio sets it up: d3d11vpp in vf (its GPU video processing), our config with the script
+            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll $sdll -Option "scripts=$lua", "script-opts=pushmpc-vpy=$vpy", 'hwdec=auto-copy' 2>&1 | Out-String
+            $rc = $LASTEXITCODE; Write-Host $r
+            $plug = (Get-ChildItem $env:PUSHMPC_VS_LOG_DIR -Filter *.log -ErrorAction SilentlyContinue | Get-Content) -match 'backend: |portable: output'
+            "Stremio libmpv + pushmpc.lua: host exit $rc; plugin log: $(($plug | Select-Object -First 2) -join ' | ')" | Tee-Object -Append $out
+            Write-Host "::notice title=Stremio libmpv + pushmpc.lua::host exit $rc; plugin: $(($plug | Select-Object -First 2) -join ' | ')"
+          }
+          foreach ($d in @("$env:ProgramFiles\Plex\Plex", "$env:ProgramFiles\Plex\Plex HTPC")) {
+            if (-not (Test-Path "$d\libmpv-2.dll")) { continue }
+            $r = pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll "$d\libmpv-2.dll" -Option "scripts=$lua", 'script-opts=pushmpc-mode=vsr,pushmpc-scaling=nvidia' 2>&1 | Out-String
+            $rc = $LASTEXITCODE; Write-Host $r
+            "$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr): host exit $rc (0 = played to the end: a failing d3d11vpp on WARP must not stop playback)" | Tee-Object -Append $out
+            Write-Host "::notice title=$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr)::host exit $rc; $((($r -split "`n") -match 'd3d11vpp|super resolution|pushmpc') -join ' | ')"
+            if ($rc -ne 0) { Write-Host "::error::playback in Plex's libmpv did not reach the end with pushmpc.lua in vsr mode"; exit 1 }
+          }
+      - name: Config writers on the runner's profile (install, uninstall restores exactly)
+        run: |
+          $out = "$env:RUNNER_TEMP\sp.txt"
+          $files = @("$env:APPDATA\Stremio\mpv-config.txt", "$env:LOCALAPPDATA\PushMPC\stremio\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf", "$env:LOCALAPPDATA\Plex HTPC\mpv.conf")
+          $snap = { foreach ($f in $files) { if (Test-Path $f) { "$f=$((Get-FileHash $f).Hash)" } else { "$f=absent" } } }
+          $before = & $snap
+          . ./integrations/mpv/mpv-integration.ps1
+          $rows = Invoke-PmMpvIntegration -Action Install
+          $rows | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Tee-Object -Append $out
+          foreach ($f in $files) { if (Test-Path $f) { "--- $f"; Get-Content $f } }
+          Invoke-PmMpvIntegration -Action Uninstall | Format-Table -AutoSize -Wrap | Out-String -Width 300
+          $diff = Compare-Object $before (& $snap)
+          @('## stremio-plex', '', '```') + (Get-Content $out) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          if ($diff) { $diff | Format-Table | Out-String -Width 300; Write-Host '::error::uninstall did not restore exactly'; exit 1 }
+          Write-Host "::notice title=Stremio/Plex writers::$((($rows | ForEach-Object { "$($_.Player): $($_.Result)" }) -join '; '))"
   potplayer:
     needs: win-build
     runs-on: windows-2025
@@ -601,6 +694,23 @@ jobs:
           dpkg -s mpv | grep -E '^(Version|Depends)' | tee /tmp/versions.txt
           mpv --no-config --vf=help | grep -q vapoursynth && echo "Ubuntu mpv: VapourSynth yes" | tee -a /tmp/versions.txt || echo "Ubuntu mpv: VapourSynth NO" | tee -a /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - name: An mpv without VapourSynth reading the PushMPC block (as legacy Emby Theater shares %APPDATA%\mpv) still plays
+        timeout-minutes: 5
+        run: |
+          set -eu
+          export HOME=/tmp/home-novs; mkdir -p $HOME/vs
+          cp integrations/mpv/pushmpc.lua vsplugin/scripts/pushmpc.vpy $HOME/vs/
+          sh integrations/mpv/mpv-integration.sh install --script $HOME/vs/pushmpc.vpy
+          cat $HOME/.config/mpv/mpv.conf
+          rc=0; mpv /tmp/clip.mp4 --vo=null --ao=null --length=2 > /tmp/novs.txt 2>&1 || rc=$?
+          tail -n 8 /tmp/novs.txt
+          echo "::notice title=mpv without VapourSynth + PushMPC block::exit $rc; $(grep -i 'pushmpc' /tmp/novs.txt | head -2 | tr '\n' ' ')"
+          [ "$rc" = 0 ] || { echo "::error::mpv without VapourSynth stopped playing with the PushMPC block"; exit 1; }
+          grep -q "PushMPC's filter could not start" /tmp/novs.txt || { echo "::error::pushmpc.lua did not report the soft failure"; exit 1; }
+          # the old vf= line on the same mpv, for the record: it refuses to play
+          rc2=0; mpv /tmp/clip.mp4 --vo=null --ao=null --length=2 --no-config "--vf-append=@pushmpc:vapoursynth=file=[$HOME/vs/pushmpc.vpy]" > /tmp/novs-vf.txt 2>&1 || rc2=$?
+          echo "::notice title=same mpv with a vf= line::exit $rc2 (non-zero = playback refused)"
+          sh integrations/mpv/mpv-integration.sh uninstall
       - name: install.sh --flatpak yes (Flathub mpv for the user), encode mode inside the sandbox
         timeout-minutes: 15
         run: |

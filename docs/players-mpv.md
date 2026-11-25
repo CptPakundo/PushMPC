@@ -19,8 +19,10 @@ methods, the scene-cut guard, the colour chain), with the same settings and the 
 | Kodi | Kodi's own player has no filter hook: videos play in mpv as Kodi's external player (`playercorefactory.xml`) | automatic when mpv is installed |
 | Jellyfin MPV Shim, Plex-MPV-Shim | their bundled mpv has no VapourSynth on Windows: they are switched to the installed mpv (`conf.json` `mpv_ext`) with the block in their `mpv.conf` | automatic when mpv is installed |
 | Jellyfin Desktop 2.x | its libmpv (shinchiro's build on Windows) reads `mpv.conf` in each profile folder | automatic |
-| Plex for Windows, legacy Emby Theater | libmpv without VapourSynth: a VapourSynth line would stop playback | not set up (use Plex-MPV-Shim) |
-| Stremio | its built-in mpv resets the video filters itself | by hand: play in mpv, see below |
+| Plex for Windows, Plex HTPC | libmpv without VapourSynth: no frame generation; RTX (or Intel) Video Super Resolution through mpv's `d3d11vpp`, in Plex's own `mpv.conf` | automatic upscaling when Plex's libmpv supports it (Plex-MPV-Shim for the full set) |
+| legacy Emby Theater | reads `%APPDATA%\mpv\mpv.conf` with a libmpv without VapourSynth | nothing written for it; PushMPC's block there is safe for it (see below) |
+| Stremio 5.0.28 and newer | its "mpv config file" setting | automatic |
+| Stremio before 5.0.28 | no config file setting | by hand: play in mpv, see below |
 | SVP's own mpv | | left alone: SVP manages it. Do not run both filters at once |
 
 The mpv build must include VapourSynth support. Most Windows builds do; `mpv --vf=help` lists `vapoursynth` when it is
@@ -42,13 +44,21 @@ again after installing one):
 
    ```
    # >>> PushMPC managed: do not edit between these lines (PushMPC uninstall removes them)
-   vf-append=@pushmpc:vapoursynth=file=[<path>/pushmpc.vpy]:buffered-frames=4:concurrent-frames=2
+   scripts-append=<path>/pushmpc.lua
+   script-opts-append=pushmpc-vpy=<path>/pushmpc.vpy
+   script-opts-append=pushmpc-buffered=4
+   script-opts-append=pushmpc-concurrent=2
    hwdec=auto-copy
    hr-seek-framedrop=no
    interpolation=no
    # <<< PushMPC managed
    ```
 
+   - `pushmpc.lua` (installed next to `pushmpc.vpy`) adds the filter once the video runs, with mpv's `vf append`
+     command. If the filter cannot start (an mpv without VapourSynth, a missing runtime), mpv logs a warning and
+     plays without it. A `vf=` line in `mpv.conf` would instead make that mpv refuse to play every file, which also
+     matters for other players that read the same file (legacy Emby Theater reads `%APPDATA%\mpv\mpv.conf`). The
+     script also adds the filter back when a player resets the filter list (Stremio).
    - `hwdec=auto-copy`: VapourSynth only takes frames in system memory, so hardware decoding must copy back.
    - `hr-seek-framedrop=no`: no frames are dropped around a seek.
    - `interpolation=no`: mpv's own frame blending would fight the generated frames.
@@ -103,12 +113,26 @@ Jellyfin Desktop 2.x plays through libmpv (on Windows the same shinchiro build a
 (created when there is none) and takes it out again on uninstall. Run setup again after adding a profile. The Flatpak
 build has its own mpv and is left alone.
 
-### Stremio (by hand)
+### Stremio
 
-Stremio's built-in mpv sets its video filter list itself whenever the display state changes, so a filter in a config
-file does not last. Play in mpv instead: in Stremio, Settings > Player > "Play in external player" (choose mpv), or
-copy the stream link and open it in mpv (where your Stremio version has no such setting). mpv then runs PushMPC as set
-up above.
+Stremio 5.0.28 added an "mpv config file" setting (its path is kept in `%APPDATA%\Stremio\mpv-config.txt`). When no
+file is chosen there, the installer sets `%LOCALAPPDATA%\PushMPC\stremio\mpv.conf` (the block alone); when you chose
+one, the block goes into your file. Stremio sets its video filter list itself whenever the display state changes;
+`pushmpc.lua` adds PushMPC's filter again after each change (one short hitch on a resolution or monitor change), and
+removes Stremio's own `d3d11vpp` (its "GPU video processing") while PushMPC's filter runs, because PushMPC upscales
+itself. Close Stremio during setup. Uninstalling puts `mpv-config.txt` back as it was.
+
+Older Stremio versions have no such setting: play in mpv instead (Stremio's external player setting, or copy the stream
+link into mpv).
+
+### Plex for Windows and Plex HTPC
+
+Plex's libmpv has no VapourSynth, so PushMPC's frame generation cannot run inside it (Plex-MPV-Shim plays Plex through
+a full mpv instead). What works is upscaling: the installer adds `pushmpc.lua` to `%LOCALAPPDATA%\Plex\mpv.conf`
+(`%LOCALAPPDATA%\Plex HTPC\mpv.conf`), which applies RTX Video Super Resolution (on NVIDIA RTX) or Intel's video super
+resolution through mpv's `d3d11vpp`, scaled from the video to your display and set again when either changes. Keep
+hardware decoding on in Plex's settings (`d3d11vpp` needs it). It is set up only when Plex's libmpv is new enough
+(mpv 0.38 or later, with Lua) and the GPU is NVIDIA or Intel; if `d3d11vpp` cannot start, Plex plays as before.
 
 ## Settings
 

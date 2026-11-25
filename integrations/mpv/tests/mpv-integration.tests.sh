@@ -30,7 +30,9 @@ run install; check "install (absent) exits 0" same $? 0
 check "absent: mpv.conf created" test -f "$conf"
 check "absent: marker says created-dir" same "$(cat "$conf.pushmpc-absent")" created-dir
 check "absent: block at line 1" same "$(head -n 1 "$conf")" "$BEGIN_LINE"
-check "absent: vf line with the default script path" same "$(sed -n 2p "$conf")" "vf-append=@pushmpc:vapoursynth=file=[$HOME/.local/share/pushmpc/vsplugin/pushmpc.vpy]:buffered-frames=4:concurrent-frames=2"
+check "absent: scripts-append names pushmpc.lua next to the vpy" same "$(sed -n 2p "$conf")" "scripts-append=$HOME/.local/share/pushmpc/vsplugin/pushmpc.lua"
+check "absent: script-opts carry the default script path" same "$(sed -n 3p "$conf")" "script-opts-append=pushmpc-vpy=$HOME/.local/share/pushmpc/vsplugin/pushmpc.vpy"
+check "absent: no vf= line (a filter that cannot start would stop all playback)" hasnot '^vf-append=' "$conf"
 check "absent: hwdec" has '^hwdec=auto-copy$' "$conf"
 check "absent: hr-seek-framedrop" has '^hr-seek-framedrop=no$' "$conf"
 check "absent: interpolation" has '^interpolation=no$' "$conf"
@@ -49,13 +51,13 @@ cp "$conf" "$HOME/orig"
 run install
 check "existing: backup is the original" cmp -s "$conf.pushmpc-backup" "$HOME/orig"
 check "existing: one block" same "$(blocks "$conf")" 1
-check "existing: original kept below the block" same "$(sed -n 7p "$conf")" 'profile=gpu-hq'
+check "existing: original kept below the block" same "$(sed -n 10p "$conf")" 'profile=gpu-hq'
 check "existing: hwdec in a profile is no conflict" hasnot warning "$out"
 run install
 check "reinstall: still one block" same "$(blocks "$conf")" 1
 check "reinstall: up to date" has 'up to date' "$out"
 run install --buffered 6
-check "new options: block replaced in place" same "$(blocks "$conf"):$(sed -n 2p "$conf" | grep -c 'buffered-frames=6')" 1:1
+check "new options: block replaced in place" same "$(blocks "$conf"):$(sed -n 4p "$conf" | grep -c 'pushmpc-buffered=6')" 1:1
 run uninstall
 check "existing: restored byte for byte" cmp -s "$conf" "$HOME/orig"
 check "existing: backup removed" test ! -e "$conf.pushmpc-backup"
@@ -92,7 +94,7 @@ check "conflict: other VapourSynth filter" has 'another VapourSynth filter' "$ou
 check "conflict: later global hwdec" has "later global 'hwdec=vaapi'" "$out"
 check "conflict: global interpolation warned once" same "$(grep -c "interpolation=yes' turns" "$out" | tr -d ' ')" 1
 sh "$tool" status > "$HOME/st.txt" 2>&1
-check "status: installed" has 'PushMPC block: installed (lines 1-6)' "$HOME/st.txt"
+check "status: installed" has 'PushMPC block: installed (lines 1-9)' "$HOME/st.txt"
 check "status: warned" has 'warning: another VapourSynth' "$HOME/st.txt"
 printf 'hwdec=vaapi-copy\n' > "$HOME/c2.conf"
 run install --conf "$HOME/c2.conf"
@@ -101,10 +103,13 @@ check "no conflict: hwdec=vaapi-copy" hasnot warning "$out"
 # 6. quoting: a path with spaces, a path with ]
 fresh
 run install --script "$HOME/my dir/push mpc.vpy" --conf "$HOME/a.conf"
-check "spaces quoted with []" same "$(sed -n 2p "$HOME/a.conf")" "vf-append=@pushmpc:vapoursynth=file=[$HOME/my dir/push mpc.vpy]:buffered-frames=4:concurrent-frames=2"
+p="$HOME/my dir/push mpc.vpy"; n=$(printf '%s' "$p" | wc -c | tr -d ' ')
+check "spaces: script-opts value %n% quoted" same "$(sed -n 3p "$HOME/a.conf")" "script-opts-append=pushmpc-vpy=%$n%$p"
+run install --direct --script "$HOME/my dir/push mpc.vpy" --conf "$HOME/a2.conf"
+check "--direct: vf line, spaces quoted with []" same "$(sed -n 2p "$HOME/a2.conf")" "vf-append=@pushmpc:vapoursynth=file=[$HOME/my dir/push mpc.vpy]:buffered-frames=4:concurrent-frames=2"
 p="$HOME/x]y/p.vpy"; n=$(printf '%s' "$p" | wc -c | tr -d ' ')
-run install --script "$p" --conf "$HOME/b.conf"
-check "] quoted with %n%" same "$(sed -n 2p "$HOME/b.conf")" "vf-append=@pushmpc:vapoursynth=file=%$n%$p:buffered-frames=4:concurrent-frames=2"
+run install --direct --script "$p" --conf "$HOME/b.conf"
+check "--direct: ] quoted with %n%" same "$(sed -n 2p "$HOME/b.conf")" "vf-append=@pushmpc:vapoursynth=file=%$n%$p:buffered-frames=4:concurrent-frames=2"
 
 # 7. CRLF files keep CRLF in the block and restore exactly
 fresh

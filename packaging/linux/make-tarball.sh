@@ -5,6 +5,7 @@
 #     mpv-integration.sh         integrations/mpv/mpv-integration.sh (the mpv.conf block)
 #     vsplugin/pushmpc_vs.so     the VapourSynth plugin (portable backend)
 #     vsplugin/pushmpc.vpy       the script mpv runs (vsplugin/scripts/pushmpc.vpy)
+#     vsplugin/pushmpc.lua       adds the filter at run time (integrations/mpv/pushmpc.lua)
 #     LICENSE, README.txt
 #   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version> [<pushmpc-nvvfx-selftest>]   (run from the repository root)
 set -eu
@@ -18,6 +19,7 @@ install -m 755 integrations/linux/install.sh "$d/install.sh"
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
+install -m 644 integrations/mpv/pushmpc.lua "$d/vsplugin/pushmpc.lua"
 install -m 644 LICENSE "$d/LICENSE"
 # the Linux NVIDIA backend's runtime fetcher (NVIDIA's files are downloaded on the user's machine, never shipped) and
 # its self-test (optional 5th argument), when this build has them
