@@ -105,13 +105,15 @@
         "**/*.dll",
         "**/*.so*",
         "**/*.xml",
+        "**/*.manifest",
         "**/LICENSE*",
         "**/*NOTICE*"
       ],
       "library": [
         "*onnxruntime*providers*openvino*",
         "*openvino*ep*"
-      ]
+      ],
+      "note": "On Windows every OpenVINO DLL carries an embedded manifest that depends on the private side-by-side assembly 'openvino_runtime' 1.8.1.0, described by openvino_runtime.manifest next to them: without that file each LoadLibrary fails with error 14001 (sxstrace: 'Resolving reference openvino_runtime ... Activation Context generation failed', CI run 45643575147). The .manifest files are extracted with the DLLs."
     },
     "qnn": {
       "what": "Qualcomm QNN (Hexagon NPU, Adreno GPU backend) as an ONNX Runtime plugin EP (onnxruntime-qnn 2.8.0, needs ORT >= 1.24.2). Snapdragon X on Windows ARM64. Host: ort/core.",

@@ -262,6 +262,29 @@ jobs:
         run: |
           build/pmml_cli.exe list --runtime rt --flavor core || true
           build/pmml_cli.exe list --runtime rt --flavor directml
+      - name: OpenVINO plugin EP on Windows (why it does not load)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $d = "rt/eps/openvino"
+          Get-ChildItem $d -Filter *.dll | ForEach-Object {
+            $m = Join-Path $env:RUNNER_TEMP ($_.BaseName + '.manifest')
+            & mt.exe -nologo "-inputresource:$($_.FullName);#2" "-out:$m" 2>$null | Out-Null
+            if (Test-Path $m) { Write-Host "== manifest of $($_.Name)"; Get-Content $m | Select-Object -First 30 }
+          }
+          & dumpbin /nologo /dependents "$d/tbb12.dll" "$d/openvino.dll" "$d/openvino_onnx_frontend.dll" | Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class L { [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr LoadLibraryExW(string p, IntPtr f, uint flags); }'
+          foreach ($n in 'tbb12.dll', 'tbbmalloc.dll', 'openvino.dll', 'openvino_onnx_frontend.dll', 'onnxruntime_providers_openvino_plugin.dll') {
+            $h = [L]::LoadLibraryExW((Resolve-Path "$d/$n").Path, [IntPtr]::Zero, 0x00000008)
+            Write-Host "$n -> $(if ($h -ne [IntPtr]::Zero) { 'loaded' } else { 'error ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error() })"
+          }
+          & sxstrace.exe Trace -logfile:"$env:RUNNER_TEMP\sxs.etl" -nostop 2>$null &
+          Start-Sleep 3
+          [L]::LoadLibraryExW((Resolve-Path "$d/openvino.dll").Path, [IntPtr]::Zero, 0x00000008) | Out-Null
+          & sxstrace.exe StopTrace 2>$null
+          & sxstrace.exe Parse -logfile:"$env:RUNNER_TEMP\sxs.etl" -outfile:"$env:RUNNER_TEMP\sxs.txt" 2>$null
+          if (Test-Path "$env:RUNNER_TEMP\sxs.txt") { Get-Content "$env:RUNNER_TEMP\sxs.txt" | Select-Object -First 60 }
+
       - name: CPU EP and DirectML on WARP against the reference
         env: { PMML_DML_WARP: '1' }
         run: |

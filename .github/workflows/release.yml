@@ -322,7 +322,7 @@ jobs:
         env:
           PUSHFLOW_PYTHON: ${{ steps.pushflow-python.outputs.python-path }}
         run: |
-          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core --headers
+          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core,directml --headers
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Configure PushFPS with pushcore (PUSHMPC_SOURCE_DIR)
@@ -359,10 +359,38 @@ jobs:
         run: |
           $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
           Write-Host "$($shaders.Count) shader targets"
-          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_hip_preflight pushcore_gpu_harness --parallel
+          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_hip_preflight pushcore_gpu_harness pushflow_pmml_check --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
+
+      # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
+      # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
+      # (VEYRA_PUSHFLOW_PMML; a DirectML choice stays on PushFlow's own zero-copy session by design), the generated
+      # frames compared pixel by pixel
+      - name: PushFlow on pmml inside pushcore's engine (WARP)
+        timeout-minutes: 25
+        env:
+          PUSHFLOW_PYTHON: ${{ steps.pushflow-python.outputs.python-path }}
+        run: |
+          $env:PATH = "$env:DEPS\vcpkg\installed\x64-windows\bin;$env:PATH"
+          $tool = "$env:BUILD\pushmpc\pushflow_pmml_check.exe"; $rt = "$env:DEPS\pushflow\runtime"; $sh = "$env:BUILD\shaders"
+          $out = "$env:RUNNER_TEMP\pushflow-check"; New-Item -ItemType Directory -Force $out | Out-Null
+          $fail = 0
+          foreach ($mode in @(@{n='directml-own'; v=''}, @{n='pmml-cpu'; v="$env:DEPS\pmml|ort:core:cpu:0"}, @{n='pmml-dml-native'; v="$env:DEPS\pmml|ort:directml:dml:0"})) {
+            $env:VEYRA_PUSHFLOW_PMML = $mode.v; $env:PMML_DML_WARP = '1'
+            & $tool $rt $sh "$out\$($mode.n).rgba" --warp 1 --size 512x288 --tier 0 2>&1 | Tee-Object -Variable log | Select-Object -Last 8
+            $r = ($log | Select-String '^RESULT ' | Select-Object -Last 1).Line
+            $p = ($log | Select-String '^PROVIDER ' | Select-Object -Last 1).Line
+            if ($r -notmatch '^RESULT ok') { Write-Host "::error::$($mode.n): $r"; $fail++ }
+            elseif ($mode.n -eq 'pmml-cpu' -and $p -notmatch 'pmml') { Write-Host "::error::$($mode.n) did not run on pmml: $p"; $fail++ }
+            elseif ($mode.n -eq 'pmml-dml-native' -and $p -ne 'PROVIDER DirectML') { Write-Host "::error::a DirectML choice should stay on PushFlow's own session: $p"; $fail++ }
+            "| $($mode.n) | $p | $r |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+          $env:VEYRA_PUSHFLOW_PMML = ''
+          if ($fail) { exit 1 }
+          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/compare_rgba.py $out directml-own pmml-cpu pmml-dml-native --min-db 35
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::the pmml path does not match PushFlow on DirectML'; exit 1 }
 
       - name: MPC Video Renderer source (DirectShow base classes for the filter)
         timeout-minutes: 10
