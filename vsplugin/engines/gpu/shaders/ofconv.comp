@@ -1,24 +1,59 @@
 #version 450
 // SPDX-License-Identifier: GPL-3.0-or-later
-// PushMPC portable GPU engine: NVIDIA hardware optical flow (VK_NV_optical_flow) as the motion source. The flow engine
-// gives one vector per 4x4 (or 1x1 / 2x2 / 8x8) pixels in S10.5 fixed point (here read as two 16-bit integers, 1/32 px);
-// this pass makes the engine's own field from it: per block of `bs` pixels the mean vector of the grid cells inside it,
-// then the matched and the zero-motion error on the full-size luma, so the scene-cut rule and the cut guard work as
-// with the block matcher (mefinal.comp's counts).
+// PushMPC portable GPU engine: NVIDIA hardware optical flow (VK_NV_optical_flow) into the engine's field. The flow
+// engine gives one vector per 4x4 pixels of its input (the full-size luma, or the half-size one above 1440 lines) in
+// S10.5 fixed point (read here as two 16-bit integers, 1/32 px), and a cost per cell (0..255).
+//  - dense (the default): one field block per flow cell, so the field keeps the flow's resolution (4 px at full
+//    input, 8 px at half); otherwise the mean of the cells inside each block of `bs` pixels;
+//  - cells whose cost is above maxCost are rejected and filled with the median of their accepted 3x3 neighbours
+//    (NvFRUC-like); the forward-backward check is the interpolation's own consistency gate (fbcheck.comp);
+//  - per block the matched and the zero-motion error on the full-size luma, so the scene-cut rule and the cut guard
+//    work as with the block matcher (mefinal.comp's counts).
+// The same pass writes the hint field of the hybrid mode (the flow as one more block-matcher candidate, me.comp).
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(binding = 0, std430) readonly buffer Flow { int fl[]; };   // gw x gh cells, (x, y) int16 packed in one word
-layout(binding = 1, r8ui) uniform readonly uimage2D A;
-layout(binding = 2, r8ui) uniform readonly uimage2D B;
-layout(binding = 3, std430) writeonly buffer Field { vec2 field[]; };
-layout(binding = 4, std430) writeonly buffer Cost { float cost[]; };
-layout(binding = 5, std430) buffer Stats { uint unexplained; uint costSum256; uint blocks; uint pad; } st;
-layout(push_constant) uniform PC { int w, h, bx, by, bs, gw, gh, grid; float cutFloor, cutRatio; } pc;
+layout(binding = 0, std430) readonly buffer Flow { int fl[]; };     // gw x gh cells, (x, y) int16 packed in one word
+layout(binding = 1, std430) readonly buffer FCost { uint fc[]; };   // gw x gh bytes, 4 per word
+layout(binding = 2, r8ui) uniform readonly uimage2D A;
+layout(binding = 3, r8ui) uniform readonly uimage2D B;
+layout(binding = 4, std430) writeonly buffer Field { vec2 field[]; };
+layout(binding = 5, std430) writeonly buffer Cost { float cost[]; };
+layout(binding = 6, std430) buffer Stats { uint unexplained; uint costSum256; uint blocks; uint pad; } st;
+layout(push_constant) uniform PC { int w, h, bx, by, bs, gw, gh, ofScale, dense, useCost; float maxCost, cutFloor, cutRatio; } pc;
 
-vec2 cell(int i, int j)
+ivec2 clampCell(int i, int j) { return ivec2(clamp(i, 0, pc.gw - 1), clamp(j, 0, pc.gh - 1)); }
+vec2 rawCell(ivec2 c)
 {
-    int v = fl[clamp(j, 0, pc.gh - 1) * pc.gw + clamp(i, 0, pc.gw - 1)];
+    int v = fl[c.y * pc.gw + c.x];
     int x = (v << 16) >> 16, y = v >> 16;   // sign-extended low / high halves
-    return vec2(float(x), float(y)) / 32.0;
+    return vec2(float(x), float(y)) / 32.0 * float(pc.ofScale);
+}
+float cellCost(ivec2 c)
+{
+    if (pc.useCost == 0) return 0.0;
+    uint k = uint(c.y * pc.gw + c.x);
+    return float((fc[k >> 2] >> ((k & 3u) * 8u)) & 255u);
+}
+// a cell's vector, or the median of its accepted neighbours when its cost rejects it
+vec2 cellVec(int i, int j)
+{
+    ivec2 c = clampCell(i, j);
+    if (cellCost(c) <= pc.maxCost) return rawCell(c);
+    float xs[9], ys[9];
+    int n = 0;
+    for (int dj = -1; dj <= 1; ++dj)
+        for (int di = -1; di <= 1; ++di) {
+            ivec2 q = clampCell(i + di, j + dj);
+            if (cellCost(q) <= pc.maxCost) { vec2 v = rawCell(q); xs[n] = v.x; ys[n] = v.y; ++n; }
+        }
+    if (n == 0) return rawCell(c);
+    // insertion sort, n <= 9
+    for (int a = 1; a < n; ++a) {
+        float kx = xs[a], ky = ys[a]; int b = a - 1;
+        while (b >= 0 && xs[b] > kx) { xs[b + 1] = xs[b]; --b; } xs[b + 1] = kx;
+        b = a - 1;
+        while (b >= 0 && ys[b] > ky) { ys[b + 1] = ys[b]; --b; } ys[b + 1] = ky;
+    }
+    return vec2(xs[n / 2], ys[n / 2]);
 }
 
 void main()
@@ -26,11 +61,15 @@ void main()
     ivec2 b = ivec2(gl_GlobalInvocationID.xy);
     if (b.x >= pc.bx || b.y >= pc.by) return;
     const int x0 = b.x * pc.bs, y0 = b.y * pc.bs;
-    const int c0x = x0 / pc.grid, c0y = y0 / pc.grid, n = max(1, pc.bs / pc.grid);
     vec2 v = vec2(0.0);
-    for (int j = 0; j < n; ++j)
-        for (int i = 0; i < n; ++i) v += cell(c0x + i, c0y + j);
-    v /= float(n * n);
+    if (pc.dense != 0) v = cellVec(b.x, b.y);
+    else {
+        const int cellPx = 4 * pc.ofScale;
+        const int c0x = x0 / cellPx, c0y = y0 / cellPx, n = max(1, pc.bs / cellPx);
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < n; ++i) v += cellVec(c0x + i, c0y + j);
+        v /= float(n * n);
+    }
     const int idx = b.y * pc.bx + b.x;
     field[idx] = v;
     const ivec2 d = ivec2(floor(v + 0.5)), hi = ivec2(pc.w - 1, pc.h - 1);

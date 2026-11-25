@@ -72,6 +72,20 @@ private:
 void InterpolatePlanes(const Picture& a, const Picture& b, const veyra::portable::MotionField& fwd, const veyra::portable::MotionField& bwd,
                        float t, int maxValue, Picture& out, int threads, veyra::portable::InterpolateSettings s = {});
 
+// The refined rule (the GPU engine's default; this is its CPU reference, gpu_test compares the two):
+//  - occlusion is decided geometrically: the fallback to the nearer frame's sample is weighted by how much the
+//    forward and backward fields disagree at the pixel (1 - consistency), not by the photometric error alone;
+//    where they agree and the error is still high (water, fire, grain: texture motion cannot predict) the two
+//    motion-compensated samples are averaged, which is the lower-error choice for unpredictable texture;
+//  - each candidate's error is the mean over a 3x3 patch (no pixel-to-pixel switching on texture);
+//  - at motion boundaries (the field changes by more than boundaryPx within one block) the forward vectors of the
+//    four neighbouring blocks are tried too, and the best by patch error replaces the worse candidate.
+struct RefineOptions { float boundaryPx = 1.0f; };
+// per block of a field: 1 when it and the opposite field cancel (|f + k(p + f)| = 0), falling to 0 at 1.5 px + 5 %
+std::vector<float> Consistency(const veyra::portable::MotionField& f, const veyra::portable::MotionField& k);
+void InterpolatePlanesRefined(const Picture& a, const Picture& b, const veyra::portable::MotionField& fwd, const veyra::portable::MotionField& bwd,
+                              float t, int maxValue, Picture& out, int threads, veyra::portable::InterpolateSettings s = {}, RefineOptions o = {});
+
 // one motion estimation (both ways) and one generated frame on a synthetic picture of this size: the CPU budget Auto uses
 struct Calibration { double meMs = 0, genMs = 0; int threads = 1; };
 Calibration Calibrate(int width, int height, int bits, int threads, int quality);

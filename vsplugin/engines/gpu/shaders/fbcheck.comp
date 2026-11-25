@@ -1,23 +1,30 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // SPDX-License-Identifier: GPL-3.0-or-later
-// PushMPC portable GPU engine: forward-backward agreement of a pair's two fields, for the cut guard (PushMPC's guard on
-// NVIDIA measures the same on NVOF's fields): a block counts when its forward vector f and the backward field at the
-// place it points to, k, cancel within 1.5 px + 5 % of |f|. Also counts the blocks with real motion (|f| >= 1 px).
+// PushMPC portable GPU engine: forward-backward agreement of a pair's two fields. Per block of field `own`: its vector
+// f and the opposite field at the place it points to, k(p + f), cancel within 1.5 px + 5 % of |f|. Writes the
+// per-block consistency 1 - |f + k| / (1.5 + 0.05 |f|) (clamped to 0..1; interp.comp's occlusion gate, the CPU
+// reference is Consistency() in portable_engine.cpp) and counts the agreeing blocks and those moving >= 1 px for the
+// cut guard. Run once per direction.
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(binding = 0, std430) readonly buffer FieldF { vec2 fwd[]; };
-layout(binding = 1, std430) readonly buffer FieldK { vec2 bwd[]; };
+layout(binding = 0, std430) readonly buffer FieldOwn { vec2 own[]; };
+layout(binding = 1, std430) readonly buffer FieldOther { vec2 other[]; };
 layout(binding = 2, std430) buffer Stats { uint consistent; uint moving; uint pad0, pad1; } st;
+layout(binding = 3, std430) writeonly buffer Cons { float cons[]; };
 layout(push_constant) uniform PC { int bx, by, bs; } pc;
 #include "common.glsl"
 void main()
 {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= pc.bx || p.y >= pc.by) return;
-    vec2 f = fwd[p.y * pc.bx + p.x];
+    const int idx = p.y * pc.bx + p.x;
+    vec2 f = own[idx];
     vec2 c = (vec2(p) + 0.5) * float(pc.bs);
     vec2 k;
-    PM_FIELD_SAMPLE(bwd, pc.bx, pc.by, pc.bs, c.x + f.x, c.y + f.y, k);
-    if (length(f + k) <= 1.5 + 0.05 * length(f)) atomicAdd(st.consistent, 1u);
+    PM_FIELD_SAMPLE(other, pc.bx, pc.by, pc.bs, c.x + f.x, c.y + f.y, k);
+    const float d = sqrt((f.x + k.x) * (f.x + k.x) + (f.y + k.y) * (f.y + k.y));
+    const float lim = 1.5 + 0.05 * sqrt(f.x * f.x + f.y * f.y);
+    cons[idx] = clamp(1.0 - d / lim, 0.0, 1.0);
+    if (d <= lim) atomicAdd(st.consistent, 1u);
     if (length(f) >= 1.0) atomicAdd(st.moving, 1u);
 }

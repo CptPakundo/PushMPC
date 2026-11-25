@@ -201,6 +201,139 @@ void InterpolatePlanes(const Picture& a, const Picture& b, const MotionField& fw
     });
 }
 
+std::vector<float> Consistency(const MotionField& f, const MotionField& k)
+{
+    std::vector<float> c(f.vx.size(), 0.f);
+    for (int j = 0; j < f.blocksY; ++j)
+        for (int i = 0; i < f.blocksX; ++i) {
+            const size_t idx = size_t(j) * size_t(f.blocksX) + size_t(i);
+            const float fx = f.vx[idx], fy = f.vy[idx];
+            const float cx = (float(i) + 0.5f) * float(f.blockSize), cy = (float(j) + 0.5f) * float(f.blockSize);
+            float kx, ky;
+            k.sample(cx + fx, cy + fy, kx, ky);
+            const float d = std::sqrt((fx + kx) * (fx + kx) + (fy + ky) * (fy + ky));
+            const float lim = 1.5f + 0.05f * std::sqrt(fx * fx + fy * fy);
+            c[idx] = std::clamp(1.f - d / lim, 0.f, 1.f);
+        }
+    return c;
+}
+
+namespace {
+// bilinear over a per-block array, the same arithmetic as MotionField::sample
+float SampleBlocks(const MotionField& f, const std::vector<float>& v, float x, float y)
+{
+    const float gx = std::clamp(x / float(f.blockSize) - 0.5f, 0.0f, float(f.blocksX - 1));
+    const float gy = std::clamp(y / float(f.blockSize) - 0.5f, 0.0f, float(f.blocksY - 1));
+    const int i0 = int(gx), j0 = int(gy), i1 = std::min(i0 + 1, f.blocksX - 1), j1 = std::min(j0 + 1, f.blocksY - 1);
+    const float fx = gx - float(i0), fy = gy - float(j0);
+    auto at = [&](int i, int j) { return v[size_t(j) * size_t(f.blocksX) + size_t(i)]; };
+    const float top = at(i0, j0) + (at(i1, j0) - at(i0, j0)) * fx;
+    const float bottom = at(i0, j1) + (at(i1, j1) - at(i0, j1)) * fx;
+    return top + (bottom - top) * fy;
+}
+} // namespace
+
+void InterpolatePlanesRefined(const Picture& a, const Picture& b, const MotionField& fwd, const MotionField& bwd, float t, int maxValue, Picture& out, int threads,
+                              veyra::portable::InterpolateSettings s, RefineOptions o)
+{
+    for (int i = 0; i < 3; ++i) { out.p[i].w = a.p[i].w; out.p[i].h = a.p[i].h; out.p[i].px.resize(a.p[i].px.size()); }
+    if (!std::isfinite(t)) t = 0;
+    t = std::clamp(t, 0.f, 1.f);
+    const Picture& nearer = t < 0.5f ? a : b;
+    const bool fieldsOk = !fwd.empty() && !bwd.empty() && !fwd.sceneCut && !bwd.sceneCut && fwd.width == a.p[0].w && fwd.height == a.p[0].h
+                       && bwd.width == a.p[0].w && bwd.height == a.p[0].h;
+    if (!fieldsOk || t == 0.f || t == 1.f) {
+        for (int i = 0; i < 3; ++i) out.p[i].px = (t == 1.f ? b : nearer).p[i].px;
+        return;
+    }
+    const std::vector<float> consF = Consistency(fwd, bwd), consK = Consistency(bwd, fwd);
+    const float scale = 255.f / float(maxValue), maxV = float(maxValue);
+    const float bs = float(fwd.blockSize);
+    struct Cand { float fx, fy, kx, ky, e1, e2, cons; bool single; };
+    // the patch error of vector v at luma position (px, py): the mean over 3x3 of |A(q - t v) - B(q + (1 - t) v)|
+    auto patchErr = [&](float px, float py, float vx, float vy) {
+        float e = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const float qx = px + float(dx), qy = py + float(dy);
+                e += std::abs(Sample(a.p[0], qx - t * vx, qy - t * vy) - Sample(b.p[0], qx + (1.f - t) * vx, qy + (1.f - t) * vy));
+            }
+        return e * (scale / 9.f);
+    };
+    auto candAt = [&](int x, int y) {
+        Cand c;
+        const float px = float(x) + 0.5f, py = float(y) + 0.5f;
+        fwd.sample(px, py, c.fx, c.fy);
+        bwd.sample(px, py, c.kx, c.ky);
+        c.kx = -c.kx; c.ky = -c.ky;
+        c.single = std::abs(c.fx - c.kx) + std::abs(c.fy - c.ky) < 1e-4f;
+        c.e1 = patchErr(px, py, c.fx, c.fy);
+        c.e2 = c.single ? c.e1 : patchErr(px, py, c.kx, c.ky);
+        // motion boundary: the forward vectors of the neighbouring blocks compete for the worse candidate's place
+        float g = 0;
+        float nx[4], ny[4];
+        const float offs[4][2] = { { -bs, 0 }, { bs, 0 }, { 0, -bs }, { 0, bs } };
+        for (int n = 0; n < 4; ++n) {
+            fwd.sample(px + offs[n][0], py + offs[n][1], nx[n], ny[n]);
+            g = std::max(g, std::max(std::abs(nx[n] - c.fx), std::abs(ny[n] - c.fy)));
+        }
+        if (g > o.boundaryPx) {
+            float bestE = 1e30f; int best = -1;
+            for (int n = 0; n < 4; ++n) { const float e = patchErr(px, py, nx[n], ny[n]); if (e < bestE) { bestE = e; best = n; } }
+            if (best >= 0 && bestE < std::max(c.e1, c.e2)) {
+                if (c.e1 >= c.e2) { c.fx = nx[best]; c.fy = ny[best]; c.e1 = bestE; }
+                else { c.kx = nx[best]; c.ky = ny[best]; c.e2 = bestE; }
+                c.single = std::abs(c.fx - c.kx) + std::abs(c.fy - c.ky) < 1e-4f;
+            }
+        }
+        c.cons = 0.5f * (SampleBlocks(fwd, consF, px, py) + SampleBlocks(bwd, consK, px, py));
+        return c;
+    };
+    auto blend = [&](const Cand& c, float a1, float b1, float a2, float b2) {
+        const float occRaw = Smoothstep(s.errorLow, s.errorHigh, std::min(c.e1, c.e2));
+        const float occl = occRaw * (1.f - c.cons);
+        const bool firstBetter = c.e1 <= c.e2;
+        const float nearSample = t < 0.5f ? (firstBetter ? a1 : a2) : (firstBetter ? b1 : b2);
+        const float c1 = a1 + (b1 - a1) * t;
+        float v = c1;
+        if (!c.single) {
+            const float c2 = a2 + (b2 - a2) * t;
+            const float w1 = 1.f / ((c.e1 + 4.f) * (c.e1 + 4.f)), w2 = 1.f / ((c.e2 + 4.f) * (c.e2 + 4.f));
+            float wn = w1 / (w1 + w2);
+            wn += (0.5f - wn) * (occRaw * c.cons);   // consistent but unpredictable: the plain average of the two
+            v = c1 * wn + c2 * (1.f - wn);
+        }
+        v += (nearSample - v) * occl;
+        return uint16_t(std::clamp(v + 0.5f, 0.f, maxV));
+    };
+    const int W = a.p[0].w, H = a.p[0].h, CW = a.p[1].w, CH = a.p[1].h;
+    ParallelRows(H, threads, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            uint16_t* row = out.p[0].px.data() + size_t(y) * size_t(W);
+            for (int x = 0; x < W; ++x) {
+                const Cand c = candAt(x, y);
+                const float px = float(x) + 0.5f, py = float(y) + 0.5f;
+                const float a1 = Sample(a.p[0], px - t * c.fx, py - t * c.fy), b1 = Sample(b.p[0], px + (1.f - t) * c.fx, py + (1.f - t) * c.fy);
+                const float a2 = c.single ? a1 : Sample(a.p[0], px - t * c.kx, py - t * c.ky), b2 = c.single ? b1 : Sample(b.p[0], px + (1.f - t) * c.kx, py + (1.f - t) * c.ky);
+                row[x] = blend(c, a1, b1, a2, b2);
+            }
+        }
+    });
+    ParallelRows(CH, threads, [&](int c0, int c1) {
+        for (int cy = c0; cy < c1; ++cy)
+            for (int cx = 0; cx < CW; ++cx) {
+                const Cand c = candAt(std::min(2 * cx, W - 1), std::min(2 * cy, H - 1));
+                const float px = float(cx) + 0.5f, py = float(cy) + 0.5f;
+                for (int pl = 1; pl <= 2; ++pl) {
+                    const float a1 = Sample(a.p[pl], px - t * c.fx * 0.5f, py - t * c.fy * 0.5f), b1 = Sample(b.p[pl], px + (1.f - t) * c.fx * 0.5f, py + (1.f - t) * c.fy * 0.5f);
+                    const float a2 = c.single ? a1 : Sample(a.p[pl], px - t * c.kx * 0.5f, py - t * c.ky * 0.5f);
+                    const float b2 = c.single ? b1 : Sample(b.p[pl], px + (1.f - t) * c.kx * 0.5f, py + (1.f - t) * c.ky * 0.5f);
+                    out.p[pl].px[size_t(cy) * size_t(CW) + size_t(cx)] = blend(c, a1, b1, a2, b2);
+                }
+            }
+    });
+}
+
 bool Engine::Configure(const Config& c, std::string& err)
 {
     if (c.width < 16 || c.height < 16 || c.bits < 8 || c.bits > 16) { err = "portable engine: the picture must be at least 16x16, 8..16 bits"; return false; }

@@ -14,23 +14,32 @@
 layout(local_size_x = 64) in;
 layout(binding = 0, r8ui) uniform readonly uimage2D A;
 layout(binding = 1, r8ui) uniform readonly uimage2D B;
-struct Cell { ivec2 v; int cost; int zero; vec2 sub; };
+// pcost: the SAD of the parent's vector (2 x the coarser level's) for this block: the quadtree merge in mefinal.comp
+struct Cell { ivec2 v; int cost; int zero; vec2 sub; int pcost; int pad; };
 layout(binding = 2, std430) readonly buffer Parent { Cell par[]; };
 layout(binding = 3, std430) readonly buffer Neigh { Cell nb[]; };
 layout(binding = 4, std430) readonly buffer Prev { vec2 prevF[]; };
 layout(binding = 5, std430) writeonly buffer Out { Cell outc[]; };
+// F_HINT: another motion source's field (NVIDIA optical flow in the hybrid mode) as one more candidate at every level
+layout(binding = 6, std430) readonly buffer Hint { vec2 hintF[]; };
 layout(push_constant) uniform PC {
     int w, h, bx, by, pbx, pby, flags, range;
     float lambda, scale;
     int prevBx, prevBy, prevBs, limX, limY, pad;
+    // F_GLOBAL: the pair's global motion (affine, full-size pixels: v = (g0 + g1 x + g2 y, g3 + g4 x + g5 y)), fitted
+    // to the previous pair's field (gpu_engine.cpp FitAffine): one more candidate at every level (the 3DRS "global
+    // candidate" of TV motion compensation; pans, zooms and rotations)
+    float g0, g1, g2, g3, g4, g5;
+    int hbx, hby, hbs, pad2;
 } pc;
-const int F_COARSEST = 1, F_LAST = 2, F_NEIGH = 4, F_PREV = 8, F_EXTENDED = 16;
+const int F_COARSEST = 1, F_LAST = 2, F_NEIGH = 4, F_PREV = 8, F_EXTENDED = 16, F_EQUIANGULAR = 32, F_GLOBAL = 64, F_HINT = 128;
 const int kMaxCand = 320;
 
 shared uint sA[64];
 shared ivec2 sCand[kMaxCand];
 shared int sRaw[kMaxCand];
 shared int sCount;
+shared int sParIdx;
 shared ivec2 sPred;
 
 #include "common.glsl"
@@ -81,14 +90,26 @@ void main()
                               : ivec2(median3(left.x, up.x, parv.x), median3(left.y, up.y, parv.y));
         sPred = pred;
         int n = 0;
+        sParIdx = -1;
         sCand[n++] = ivec2(0);
         sCand[n++] = clampCand(pred);
+        if ((pc.flags & F_HINT) != 0) {
+            vec2 hv;
+            PM_FIELD_SAMPLE(hintF, pc.hbx, pc.hby, pc.hbs, (float(x0) + 4.0) * pc.scale, (float(y0) + 4.0) * pc.scale, hv);
+            sCand[n++] = clampCand(ivec2(lroundf(hv.x / pc.scale), lroundf(hv.y / pc.scale)));
+        }
+        if ((pc.flags & F_GLOBAL) != 0) {
+            const float gx = (float(x0) + 4.0) * pc.scale, gy = (float(y0) + 4.0) * pc.scale;
+            const vec2 gv = vec2(pc.g0 + pc.g1 * gx + pc.g2 * gy, pc.g3 + pc.g4 * gx + pc.g5 * gy);
+            sCand[n++] = clampCand(ivec2(lroundf(gv.x / pc.scale), lroundf(gv.y / pc.scale)));
+        }
         if ((pc.flags & F_PREV) != 0) {
             vec2 pv;
             PM_FIELD_SAMPLE(prevF, pc.prevBx, pc.prevBy, pc.prevBs, (float(x0) + 4.0) * pc.scale, (float(y0) + 4.0) * pc.scale, pv);
             sCand[n++] = clampCand(ivec2(lroundf(pv.x / pc.scale), lroundf(pv.y / pc.scale)));
         }
         if (!coarsest) {
+            sParIdx = n;
             sCand[n++] = clampCand(parv);
             ivec2 pn1 = parentAt(i / 2 + ((i & 1) != 0 ? 1 : -1), j / 2);
             ivec2 pn2 = parentAt(i / 2, j / 2 + ((j & 1) != 0 ? 1 : -1));
@@ -112,6 +133,7 @@ void main()
     barrier();
     for (int k = tid; k < count; k += 64) sRaw[k] = sad(sCand[k]);
     barrier();
+    const int pcost = sParIdx >= 0 ? sRaw[sParIdx] : 0;
     const ivec2 pred = sPred;
     ivec2 best = ivec2(0);
     int bestRaw = 0;
@@ -148,14 +170,22 @@ void main()
         }
         barrier();
         zero = sRaw[0];
-        int den = sRaw[1] - 2 * bestRaw + sRaw[2];
-        sub.x = den <= 0 ? 0.0 : clamp(float(sRaw[1] - sRaw[2]) / float(2 * den), -0.5, 0.5);
-        den = sRaw[3] - 2 * bestRaw + sRaw[4];
-        sub.y = den <= 0 ? 0.0 : clamp(float(sRaw[3] - sRaw[4]) / float(2 * den), -0.5, 0.5);
+        if ((pc.flags & F_EQUIANGULAR) != 0) {
+            // the equiangular (V) fit, the matched estimator for SAD (the parabola locks to whole pixels)
+            int m = max(sRaw[1], sRaw[2]) - bestRaw;
+            sub.x = m <= 0 ? 0.0 : clamp(float(sRaw[1] - sRaw[2]) / float(2 * m), -0.5, 0.5);
+            m = max(sRaw[3], sRaw[4]) - bestRaw;
+            sub.y = m <= 0 ? 0.0 : clamp(float(sRaw[3] - sRaw[4]) / float(2 * m), -0.5, 0.5);
+        } else {
+            int den = sRaw[1] - 2 * bestRaw + sRaw[2];
+            sub.x = den <= 0 ? 0.0 : clamp(float(sRaw[1] - sRaw[2]) / float(2 * den), -0.5, 0.5);
+            den = sRaw[3] - 2 * bestRaw + sRaw[4];
+            sub.y = den <= 0 ? 0.0 : clamp(float(sRaw[3] - sRaw[4]) / float(2 * den), -0.5, 0.5);
+        }
     }
     if (tid == 0) {
         Cell c;
-        c.v = best; c.cost = bestRaw; c.zero = zero; c.sub = sub;
+        c.v = best; c.cost = bestRaw; c.zero = zero; c.sub = sub; c.pcost = pcost; c.pad = 0;
         outc[idx] = c;
     }
 }

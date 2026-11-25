@@ -19,6 +19,8 @@
 #include "platform.h"
 #include "portable_backend.h"
 #include "cadence.h"
+#include "transitions.h"
+#include <functional>
 #include "veyra/portable/Interpolate.h"
 
 using namespace pmvs;
@@ -377,6 +379,33 @@ static void TestCadence()
     CHECK(ParseQuality("high", -1) == 2 && ParseQuality("Auto", 1) == -1 && ParseTri("on", -1) == 1 && ParseTri("x", 0) == 0, "words");
 }
 
+// transitions.h: a dissolve is a linear ramp, motion is not; a flash is a bright frame between two matching ones
+static pmvs::gpu::Thumb MakeThumb(int w, int h, std::function<int(int, int)> f)
+{
+    pmvs::gpu::Thumb t; t.w = w; t.h = h; t.px.resize(size_t(w) * size_t(h));
+    double s = 0;
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { const int v = std::clamp(f(x, y), 0, 255); t.px[size_t(y) * size_t(w) + size_t(x)] = uint8_t(v); s += v; }
+    t.mean = s / double(t.px.size());
+    return t;
+}
+static void TestTransitions()
+{
+    using namespace pmvs::gpu;
+    auto sceneA = [](int x, int y) { return 60 + int(50 * std::sin(x * 0.4) * std::cos(y * 0.3)); };
+    auto sceneB = [](int x, int y) { return 180 - int(40 * std::sin(x * 0.25 + y * 0.2)); };
+    auto mix = [&](double a) { return MakeThumb(64, 36, [&](int x, int y) { return int(std::lround(sceneA(x, y) * (1 - a) + sceneB(x, y) * a)); }); };
+    CHECK(LinearTransition(mix(0.25), mix(0.5), mix(0.75)), "dissolve: linear");
+    auto fade = [&](double g) { return MakeThumb(64, 36, [&](int x, int y) { return int(std::lround(sceneA(x, y) * g)); }); };
+    CHECK(LinearTransition(fade(1.0), fade(0.8), fade(0.6)), "fade: linear");
+    auto moved = [&](int dx) { return MakeThumb(64, 36, [&](int x, int y) { return sceneA(x + dx, y); }); };
+    CHECK(!LinearTransition(moved(0), moved(2), moved(4)), "motion: not linear");
+    CHECK(!LinearTransition(moved(0), moved(0), moved(0)), "still: no transition");
+    auto bright = MakeThumb(64, 36, [&](int x, int y) { return sceneA(x, y) + 70; });
+    CHECK(Flash(moved(0), bright, moved(0)), "flash");
+    CHECK(!Flash(fade(0.6), fade(0.8), fade(1.0)), "a fade is not a flash");
+    CHECK(!Flash(moved(0), moved(1), moved(2)), "motion is not a flash");
+}
+
 static void TestCalibrate()
 {
     const Calibration c = Calibrate(1920, 1080, 8, 0, 1);
@@ -401,6 +430,7 @@ int main()
     TestHardCut();
     TestSeekAndOrder();
     TestCadence();
+    TestTransitions();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

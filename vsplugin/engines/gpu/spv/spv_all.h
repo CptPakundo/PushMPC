@@ -16,3 +16,4 @@
 #include "rcas.h"
 #include "pack.h"
 #include "ofconv.h"
+#include "blur.h"
