@@ -28,8 +28,10 @@ def rpc(method, params=None, timeout=5.0):
                 if isinstance(obj, dict) and obj.get("id") == 7:
                     return obj
 
+PLAYER = [1]
+
 def props():
-    r = rpc("Player.GetProperties", {"playerid": 1, "properties": ["time", "totaltime", "speed", "currentaudiostream",
+    r = rpc("Player.GetProperties", {"playerid": PLAYER[0], "properties": ["time", "totaltime", "speed", "currentaudiostream",
             "currentsubtitle", "subtitleenabled"]})
     if r and "error" in r:
         print("DRIVE rpc error", json.dumps(r["error"]))
@@ -65,6 +67,8 @@ while time.time() < deadline:
     try:
         r = rpc("Player.GetActivePlayers")
         if r and r.get("result"):
+            PLAYER[0] = r["result"][0].get("playerid", 1)
+            print("DRIVE players", json.dumps(r["result"]))
             break
     except OSError:
         pass
@@ -75,7 +79,7 @@ print("DRIVE: playing")
 time.sleep(min(4.0, secs))
 p0 = props(); print("DRIVE props0", json.dumps(p0))
 if case == "seek":
-    rpc("Player.Seek", {"playerid": 1, "value": {"time": {"hours": 0, "minutes": 0, "seconds": 12, "milliseconds": 0}}})
+    rpc("Player.Seek", {"playerid": PLAYER[0], "value": {"time": {"hours": 0, "minutes": 0, "seconds": 12, "milliseconds": 0}}})
     time.sleep(3)
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE seek_ok", 12000 <= ms(p1.get("time", {})) <= 16500)
@@ -86,7 +90,7 @@ elif case == "chapter":
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE chapter_ok", ms(p1.get("time", {})) >= 10000 and ms(p1.get("time", {})) > t0 + 4000)
 elif case == "subs":
-    rpc("Player.SetSubtitle", {"playerid": 1, "subtitle": "on"})
+    rpc("Player.SetSubtitle", {"playerid": PLAYER[0], "subtitle": "on"})
     time.sleep(2)
     p1 = props(); print("DRIVE props1", json.dumps(p1))
     print("DRIVE subs_ok", bool(p1.get("subtitleenabled")) and bool(p1.get("currentsubtitle")))

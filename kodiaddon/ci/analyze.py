@@ -76,7 +76,7 @@ notes += [f"kodi: {c.strip()}" for c in cfg[:8]]
 # a runner is slower than the display mode). Pass: >= 85% of min(source x k, loop rate).
 rend = []
 for l in lines:
-    m = re.search(r"PrepareNextRender: frameOnScreen: (-?[\d.]+) renderPts: (-?[\d.]+) nextFramePts: (-?[\d.]+)", l)
+    m = re.search(r"PrepareNextRender(?:\(\))?: frameOnScreen: (-?[\d.]+) renderPts: (-?[\d.]+) nextFramePts: (-?[\d.]+)", l)
     if m:
         t = ts(l)
         if t is not None:
