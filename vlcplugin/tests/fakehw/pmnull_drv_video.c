@@ -668,10 +668,8 @@ static VAStatus ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID sid, uint3
         pthread_mutex_lock(&d->lock);
         FILE *lf = fopen(showlog, "a");
         if (lf) {
-            if (ftell(lf) == 0) fprintf(lf, "n,cx
-");
-            fprintf(lf, "%u,%.2f
-", d->shown++, cnt ? sx / cnt : -1.0);
+            if (ftell(lf) == 0) fprintf(lf, "n,cx\n");
+            fprintf(lf, "%u,%.2f\n", d->shown++, cnt ? sx / cnt : -1.0);
             fclose(lf);
         }
         pthread_mutex_unlock(&d->lock);
