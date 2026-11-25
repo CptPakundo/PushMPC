@@ -1,4 +1,4 @@
-# pushmpc_vs: the VapourSynth plugin pushmpc.Enhance (R1 and R3, players-all.md) with its backends, the stub pushcore.dll
+# pushmpc_vs: the VapourSynth plugin pushmpc.Enhance (R1 and R3, internal research notes) with its backends, the stub pushcore.dll
 # for tests and CI, and the tests:
 #   portable_test  every OS: backend selection, the CPU budget, settings.ini and folders, the portable engine on
 #                  synthetic frames (no VapourSynth, no GPU);

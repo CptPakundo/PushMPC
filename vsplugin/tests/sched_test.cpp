@@ -172,7 +172,7 @@ static void TestReuse()
 
 static void TestChroma()
 {
-    // players-all.md section 3: 4K HDR 4:4:4 (49.8 MB) at 240 = 11.9 GB/s -> 4:2:0; at 120 = 5.97 -> 4:4:4
+    // internal research notes section 3: 4K HDR 4:4:4 (49.8 MB) at 240 = 11.9 GB/s -> 4:2:0; at 120 = 5.97 -> 4:4:4
     ChromaDecision d = DecideChroma(Chroma::Auto, 3840, 2160, true, 240);
     CHECK(d.use420 && d.gbs444 > 11.8 && d.gbs444 < 12.0 && d.gbs420 < 6.0);
     d = DecideChroma(Chroma::Auto, 3840, 2160, true, 120); CHECK(!d.use420);
