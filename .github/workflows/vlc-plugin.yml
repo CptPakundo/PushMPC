@@ -119,6 +119,10 @@ jobs:
           x86_64-w64-mingw32-gcc-posix -std=gnu11 -O2 -shared -D__PLUGIN__ -DPUSHSPIKE_DUMP_ONLY -DMODULE_STRING='"pushdump"' \
             -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushdump_plugin.dll -L"$sdk/lib" -lvlccore -static-libgcc
           x86_64-w64-mingw32-objdump -p out/win64/libpushmpc_plugin.dll | grep -E "DLL Name|vlc_entry"
+          # symbol map of the display fork, to read crash stacks from the test job
+          { x86_64-w64-mingw32-objdump -x build/libpushmpc_d3d11_plugin.dll | grep -E "^ImageBase"; \
+            x86_64-w64-mingw32-nm -n -C build/libpushmpc_d3d11_plugin.dll | grep -iE " [tT] "; } > out/win64/d3d11fork-symbols.txt || true
+          wc -l out/win64/d3d11fork-symbols.txt
       - uses: actions/upload-artifact@v4
         with: { name: plugin-win64, path: out/win64, retention-days: 7 }
 
@@ -331,6 +335,16 @@ jobs:
           # runs decode in software; the same runs with VLC's own direct3d11 output are the reference
           # a crash must not leave a Windows Error Reporting dialog or a stray vlc.exe that blocks the next runs
           reg add 'HKCU\Software\Microsoft\Windows\Windows Error Reporting' //v DontShowUI //t REG_DWORD //d 1 //f > /dev/null
+          # first, the fork under the SDK's console debugger: on a crash it prints the stack (module + offset; the
+          # build job's d3d11fork-symbols.txt maps the fork's offsets to functions)
+          cdb="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
+          if [ -x "$cdb" ]; then
+            timeout 120 "$cdb" -g -G -c "r; kn 40; lm; q" "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" -I dummy --no-audio \
+              --play-and-exit --avcodec-hw=none --vout=pushmpc_d3d11 --pushmpc-d3d11-upscale=linear art/clips/clip720.mkv \
+              > res/windows-d3d11fork/cdb.txt 2>&1
+            grep -nE "^[0-9a-f]{2} |c0000|Access violation|exception|second chance|pushmpc_d3d11|libvlccore|libvlc " res/windows-d3d11fork/cdb.txt | head -60
+            taskkill //F //T //IM vlc.exe > /dev/null 2>&1
+          else echo "no cdb"; fi
           for vout in direct3d11:- pushmpc_d3d11:linear pushmpc_d3d11:auto pushmpc_d3d11:nis; do
             v=${vout%%:*}; mode=${vout#*:}; tag=$v-$mode
             extra=""; [ "$mode" != - ] && extra="--pushmpc-d3d11-upscale=$mode"
