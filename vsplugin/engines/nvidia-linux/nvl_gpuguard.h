@@ -45,11 +45,16 @@ public:
     bool Ready() const { return m_ready; }
     // the pair test of (previous, current) (pitch = both frames' row pitch); parity = the current frame's (0/1);
     // compare = false after a reset (no valid previous: never a cut, the state's references are cleared)
-    bool Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, unsigned parity, bool compare, std::string& err);
+    // the pair's optical flow (NVIDIA hardware, at the source size): vectors from the current frame to the previous one
+    // ("forward" in the shader's words), its 8-bit cost, the other direction; flags as the shader's flowFlags (0 = none)
+    struct Flow { uint32_t flags = 0; CUdeviceptr forward = 0, cost = 0, backward = 0; uint32_t flowPitch = 0, costPitch = 0, gridW = 0, gridH = 0, extentW = 0, extentH = 0; };
+    bool Test(CUdeviceptr previous, CUdeviceptr current, size_t pitch, unsigned parity, bool compare, std::string& err, const Flow& flow = Flow());
     // device words the output kernel reads (non-zero = hold): hard cut of the pair whose current frame has `parity`,
     // and "hard or soft" (the frames up to the pair's midpoint)
     CUdeviceptr HardFlag(unsigned parity) const { return m_results + (parity & 1u) * 8; }
     CUdeviceptr AnyFlag(unsigned parity) const { return m_results + kSoftOffset + (parity & 1u) * 16; }
+    // "soft only" (after the midpoint a soft cut shows the current real frame B)
+    CUdeviceptr SoftOnlyFlag(unsigned parity) const { return m_results + kSoftOffset + (parity & 1u) * 16 + 8; }
     // cuts held so far (the count word, copied back a few pairs late)
     uint64_t Cuts() const;
     Params params;

@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <format>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -44,6 +46,7 @@ struct NMeta { int64_t durNum = 0, durDen = 0; std::shared_ptr<VSMap> props; };
 
 struct NInst {
     VSNode* node = nullptr;
+    std::string flowKey;          // where the optical-flow tier's measured costs go (FlowCostKey)
     VSVideoInfo vi{}, inVi{};
     int k = 1;
     uint64_t token = 0;
@@ -59,6 +62,30 @@ struct NInst {
     VSFrameContext* fc = nullptr;
     std::vector<const VSFrame*> held;
 };
+
+// the optical-flow tier's measured costs per GPU and size (CUDA events in the engine), read by Auto the next time:
+// <cache>/pushmpc/nvl-flow-costs, one line "<gpu>|<src w>x<h>|<out h> TAB <flow ms> TAB <warp ms>"
+std::string FlowCostKey(const std::string& gpu, int w, int h, int outH) { return gpu + "|" + std::to_string(w) + "x" + std::to_string(h) + "|" + std::to_string(outH); }
+std::string FlowCostFile() { std::string p = SelfTestCachePath(); const size_t s = p.find_last_of("/\\"); return s == std::string::npos ? std::string() : p.substr(0, s + 1) + "nvl-flow-costs"; }
+void ReadFlowCosts(const std::string& key, double& flow, double& warp)
+{
+    std::ifstream f(FlowCostFile());
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t a = line.find('\t'), b = line.find('\t', a + 1);
+        if (a != std::string::npos && b != std::string::npos && line.substr(0, a) == key) { flow = std::atof(line.c_str() + a + 1); warp = std::atof(line.c_str() + b + 1); }
+    }
+}
+void WriteFlowCosts(const std::string& key, double flow, double warp)
+{
+    const std::string file = FlowCostFile();
+    if (file.empty() || flow <= 0 || warp <= 0) return;
+    double f0 = 0, w0 = 0;
+    ReadFlowCosts(key, f0, w0);   // mpv reloads the script on every seek: write only what changed by more than 10 %
+    if (f0 > 0 && w0 > 0 && std::fabs(flow - f0) <= 0.1 * f0 && std::fabs(warp - w0) <= 0.1 * w0) return;
+    std::ofstream f(file, std::ios::app);
+    f << key << '\t' << flow << '\t' << warp << '\n';   // the last line of a key wins
+}
 
 std::string NArg(const VSMap* in, const VSAPI* a, const char* key)
 {
@@ -217,7 +244,11 @@ void VS_CC NFree(void* inst, VSCore*, const VSAPI* a)
         Warm& w = W();
         std::lock_guard<std::mutex> lk(w.lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
-        if (w.owner == d->token) { std::string e; d->engine->Drain(e); w.owner = 0; }   // the engine stays warm in W()
+        if (w.owner == d->token) {   // the engine stays warm in W()
+            std::string e; d->engine->Drain(e); w.owner = 0;
+            double fl = 0, wa = 0; d->engine->FlowCosts(fl, wa);
+            if (fl > 0 && wa > 0) { WriteFlowCosts(d->flowKey, fl, wa); Log(std::format("nvidia: optical flow measured: {:.2f} ms per pair, warp {:.2f} ms per frame (kept for Auto)", fl, wa)); }
+        }
         Log(std::format("nvidia: instance closed after {} frames ({} cuts held); the engine stays warm", d->produced, d->be.heldCuts));
     }
     a->freeNode(d->node);
@@ -235,6 +266,25 @@ void NvLinuxProbe(const VSMap* in, const VSAPI* a, BackendProbe& p)
     p.gpuFamily = FamilyOf(g.cls);
     p.gpuName = g.name;
     p.nvidiaNoFg = p.pushcoreLoaded && !g.caps.vfg;
+    p.nvidiaNvof = p.pushcoreLoaded && g.caps.nvof;
+}
+
+// the multiplier the optical-flow tier reaches for a clip (Auto, as NvLinuxCreate would decide it): SelectBackend's
+// comparison with pmml on GPUs without VFG
+int NvLinuxNvofMultiplier(const VSMap* in, const VSAPI* a, int width, int height, double fps, double displayHz)
+{
+    const GpuInfo& g = Probe(in, a);
+    if (!g.driver || !g.caps.nvof) return 0;
+    Settings s = LoadSettings([](const char* n) { return ReadSetting(n); });
+    if (s.smoother == 1) return 0;
+    s.fgMethod = 1;
+    Source src; src.w = width; src.h = height; src.fps = fps;
+    Display d; d.refreshHz = displayHz;
+    Costs c; c.card = CardFactor(g.name, g.cls);
+    ReadFlowCosts(FlowCostKey(g.name, width, height, s.targetH), c.flowMeasured, c.warpMeasured);
+    Caps caps = g.caps; caps.vfg = false;
+    const nvl::Plan pl = Decide(s, src, d, caps, c);
+    return pl.nvof ? pl.k : 0;
 }
 
 // node: the validated YUV 4:2:0 clip (owned from here on)
@@ -268,6 +318,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     const double dispPeak = NArgF(in, a, "display_peak", 0);
     if (!s.hdrPeakSet && dispPeak >= 400) s.hdrPeak = std::min(dispPeak, 2000.0);
     Costs costs; costs.card = CardFactor(g.name, g.cls);
+    ReadFlowCosts(FlowCostKey(g.name, src.w, src.h, s.targetH), costs.flowMeasured, costs.warpMeasured);   // the optical-flow tier, measured before
     const nvl::Plan plan = Decide(s, src, disp, g.caps, costs);
     Log(std::format("nvidia: {}x{} {}-bit, {}/{} fps, {} frames; {}; display {:.3f} Hz{}, HDR {}; settings from {}{}", src.w, src.h, bits, vi->fpsNum, vi->fpsDen, vi->numFrames,
         src.hdr ? "HDR (PQ/HLG)" : "SDR", disp.refreshHz, disp.refreshHz > 1 ? " (mpv's display_fps)" : " (unknown: x2)", disp.hdr ? "on" : "off",
@@ -277,7 +328,8 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
 
     EngineConfig cfg;
     cfg.srcW = src.w; cfg.srcH = src.h; cfg.bits = bits; cfg.srcHdr = src.hdr; cfg.plan = plan; cfg.hdrPeak = float(s.hdrPeak);
-    cfg.ampere = plan.k >= 2 && VfgAmpere(g.major, g.minor);
+    cfg.ampere = plan.k >= 2 && !plan.nvof && VfgAmpere(g.major, g.minor);
+    cfg.guardFlow = plan.guardFlow;
     Warm& w = W();
     std::unique_lock<std::mutex> lk(w.lock);
     std::string err;
@@ -288,8 +340,8 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
         if (!e->Open(g, cfg, err)) {
             // a frame-generation failure falls back to upscaling only, as pushcore's fallback chain does
             if (cfg.plan.k >= 2) {
-                Log("nvidia: VFG could not start (" + err + "): upscaling only");
-                cfg.plan.k = 1; cfg.ampere = false;
+                Log(std::string("nvidia: ") + (cfg.plan.nvof ? "the optical-flow tier" : "VFG") + " could not start (" + err + "): upscaling only");
+                cfg.plan.k = 1; cfg.plan.nvof = false; cfg.ampere = false; cfg.guardFlow = false;
                 e = std::make_shared<Engine>();
                 if (!(cfg.plan.vsr || cfg.plan.hdr) || !e->Open(g, cfg, err)) { lk.unlock(); a->freeNode(node); return fail(err); }
             } else { lk.unlock(); a->freeNode(node); return fail(err); }
@@ -305,6 +357,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     d->inVi = *vi;
     d->engine = w.engine;
     d->token = ++w.next;
+    d->flowKey = FlowCostKey(g.name, src.w, src.h, s.targetH);
     w.owner = d->token;
     d->k = std::max(1, w.engine->Config().plan.k);
     d->colour = fmt;

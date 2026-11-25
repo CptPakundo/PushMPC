@@ -108,7 +108,7 @@ if(PMVS_NVIDIA_VFX)
   endforeach()
   list(LENGTH NVL_GUARD_SOURCES nvl_guard_n)
 
-  add_library(pmvs_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp" "${NVL}/nvl_gpuguard.cpp"
+  add_library(pmvs_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp" "${NVL}/nvl_gpuguard.cpp" "${NVL}/nvl_nvof.cpp"
                               "${NVL_FATBIN_CPP}" ${NVL_GUARD_SOURCES})
   if(nvl_guard_n EQUAL 2)
     target_compile_definitions(pmvs_nvl PRIVATE PMVS_NVL_GPU_GUARD)

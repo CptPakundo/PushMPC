@@ -15,7 +15,7 @@ name: vsplugin-nvidia-linux
 on:
   workflow_dispatch:
   push:
-    branches: ['track/nvidia-linux']
+    branches: ['track/nvidia-linux', 'track/nvidia-linux-2']
     paths: ['vsplugin/**', 'scripts/nvidia-vfx-*', 'scripts/vapoursynth-pin.json', '.github/workflows/vsplugin-nvidia-linux.yml']
 
 env:

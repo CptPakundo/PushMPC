@@ -9,6 +9,12 @@
 
 namespace pmvs::nvl {
 
+// FgMethod: VFG -> 0; NVOF / OpticalFlow -> 1 (NVIDIA optical flow + warp); anything else (Auto, the Windows-only methods) -> -1
+inline int ParseFgMethod(const std::string& v)
+{
+    const std::string s = LowerAscii(TrimAscii(v));
+    return s == "vfg" ? 0 : (s == "nvof" || s == "opticalflow" || s == "optical-flow") ? 1 : -1;
+}
 // "Auto" / "Off" / "N" (lo..hi) -> 0 Auto, -1 off, N
 inline int ParseLevel(const std::string& v, int lo, int hi, int def)
 {
@@ -30,6 +36,7 @@ template <class Get> Settings LoadSettings(Get&& get)
     s.sharper = ParseLevel(get("Sharper"), 1, 4, 0);
     const std::string q = LowerAscii(TrimAscii(get("FgQuality")));
     s.fgQuality = q == "low" ? 0 : q == "medium" ? 1 : q == "high" ? 2 : -1;
+    s.fgMethod = ParseFgMethod(get("FgMethod"));
     const std::string h = LowerAscii(TrimAscii(get("SdrToHdr")));
     s.sdrToHdr = h == "on" || h == "1" ? 1 : h == "off" || h == "0" ? -1 : 0;
     const std::string st = LowerAscii(TrimAscii(get("VsrStyle")));
@@ -47,6 +54,7 @@ inline bool ApplyArg(Settings& s, const std::string& key, const std::string& v)
     if (key == "enable") { s.enable = ParseBool(v, s.enable); return true; }
     if (key == "smoother") { const int sm = ParseLevel(v, 2, 8, s.smoother == 1 ? -1 : s.smoother); s.smoother = sm < 0 ? 1 : sm; return true; }
     if (key == "sharper") { s.sharper = ParseLevel(v, 1, 4, s.sharper); return true; }
+    if (key == "fg_method") { s.fgMethod = ParseFgMethod(v); return true; }
     if (key == "fg_quality") { const std::string q = LowerAscii(v); s.fgQuality = q == "low" ? 0 : q == "medium" ? 1 : q == "high" ? 2 : -1; return true; }
     if (key == "sdr_to_hdr") { const std::string h = LowerAscii(v); s.sdrToHdr = h == "on" || h == "1" ? 1 : h == "off" || h == "0" ? -1 : 0; return true; }
     if (key == "vsr_style") { const std::string st = LowerAscii(v); s.vsrStyle = st == "standard" ? 0 : st == "highbitrate" ? 1 : st == "streaming" ? 2 : -1; return true; }

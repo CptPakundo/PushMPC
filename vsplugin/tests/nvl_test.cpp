@@ -19,6 +19,7 @@
 #include "nvl_fatbin.h"
 #include "nvl_settings.h"
 #include "nvl_sha256.h"
+#include "backend.h"
 
 using namespace pmvs::nvl;
 
@@ -247,6 +248,51 @@ static void TestSettings()
     CHECK(d.targetScreen && !d.hdrPeakSet && !s.targetScreen && s.hdrPeakSet, "Screen target and the peak: the display decides unless set");
 }
 
+// the optical-flow tier, the guard's flow, the interpolator choice without VFG, the flow arithmetic
+static void TestFlowTier()
+{
+    Caps c20; c20.gpu = GpuClass::Rtx20; c20.vsr = c20.hdr = true; c20.vfg = false; c20.nvof = true; c20.vfgWhy = "Turing";
+    Costs k20; k20.card = CardFactor("GeForce RTX 2070", GpuClass::Rtx20);
+    Settings s; Source src; src.w = 1920; src.h = 1080; src.fps = 24000.0 / 1001;
+    Display d; d.refreshHz = 144;
+    Plan p = Decide(s, src, d, c20, k20);
+    CHECK(p.nvof && p.k >= 2 && !p.interpElsewhere && p.guardFlow, "RTX 20: the optical-flow tier generates: %s", p.why.c_str());
+    k20.flowMeasured = 40; k20.warpMeasured = 5;   // a slow measurement: the budget limits the multiplier
+    Plan slow = Decide(s, src, d, c20, k20);
+    CHECK(slow.k < p.k, "measured costs decide (x%d -> x%d): %s", p.k, slow.k, slow.why.c_str());
+    Caps none = c20; none.nvof = false;
+    p = Decide(s, src, d, none, Costs());
+    CHECK(p.k == 1 && p.interpElsewhere && !p.nvof, "no VFG, no NVOFA: interpolation elsewhere");
+    Caps c50; c50.gpu = GpuClass::Rtx50; c50.vsr = c50.hdr = c50.vfg = c50.nvof = true;
+    Settings of = s; of.fgMethod = 1;
+    p = Decide(of, src, d, c50, Costs());
+    CHECK(p.nvof && p.k >= 2, "optical flow asked for on an RTX 50: %s", p.why.c_str());
+    p = Decide(s, src, d, c50, Costs());
+    CHECK(!p.nvof && p.k >= 2 && p.guardFlow, "RTX 50: VFG, with the guard's flow when it fits: %s", p.why.c_str());
+    // PickInterp
+    pmvs::BackendProbe b; b.nvidiaBuilt = b.pushcoreLoaded = true; b.nvidiaNoFg = true; b.gpuFamily = 4;
+    std::string why;
+    b.mlBuilt = b.mlAvailable = true; b.mlK = 3; b.nvidiaNvof = true; b.nvofK = 3;
+    CHECK(pmvs::PickInterp(b, &why) == "ml", "ml measured as high as the optical flow: ml (%s)", why.c_str());
+    b.nvofK = 5;
+    CHECK(pmvs::PickInterp(b, &why) == "", "the optical flow reaches more: the nvidia backend generates (%s)", why.c_str());
+    b.mlK = -1; b.srcHeight = 2160; b.nvofK = 2;
+    CHECK(pmvs::PickInterp(b, &why) == "", "4K, ml not measured: optical flow (%s)", why.c_str());
+    b.srcHeight = 1080;
+    CHECK(pmvs::PickInterp(b, &why) == "ml", "1080p, ml not measured: ml (%s)", why.c_str());
+    b.mlAvailable = false; b.nvidiaNvof = false; b.rifeAvailable = true;
+    CHECK(pmvs::PickInterp(b, &why) == "rife", "then rife");
+    b.rifeAvailable = false;
+    CHECK(pmvs::PickInterp(b, &why) == "portable", "then portable");
+    // flow arithmetic: at t = 0 the sample for A is the pixel itself, at t = 1 B's; a consistent pair weighs by time
+    float a0x, a0y, a1x, a1y;
+    IntermediateFlows(0.f, 8.f, 2.f, -8.f, -2.f, a0x, a0y, a1x, a1y);
+    CHECK(a0x == 0 && a0y == 0 && a1x == 8 && a1y == 2, "t = 0: A in place, B one full vector away");
+    IntermediateFlows(0.5f, 8.f, 0.f, -8.f, 0.f, a0x, a0y, a1x, a1y);
+    CHECK(std::fabs(a0x + 4.f) < 1e-6 && std::fabs(a1x - 4.f) < 1e-6, "t = 0.5 linear motion: half a vector each way (%f, %f)", a0x, a1x);
+    CHECK(RoundTripWeight(0.5f, 0.f) == 0.5f && RoundTripWeight(0.5f, 4.f) < 0.1f, "a vector that does not come back loses its weight");
+}
+
 int main()
 {
     TestColour();
@@ -255,6 +301,7 @@ int main()
     TestFatbin();
     TestSha();
     TestSettings();
+    TestFlowTier();
     std::printf("nvl_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
