@@ -349,6 +349,7 @@ jobs:
             Write-Host "::notice title=$(Split-Path $d -Leaf) libmpv + pushmpc.lua (vsr)::host exit $rc; $((($r -split "`n") -match 'd3d11vpp|super resolution|pushmpc') -join ' | ')"
             if ($rc -ne 0) { Write-Host "::error::playback in Plex's libmpv did not reach the end with pushmpc.lua in vsr mode"; exit 1 }
           }
+          exit 0   # the host's last exit code would otherwise become this step's
       - name: Config writers on the runner's profile (install, uninstall restores exactly)
         run: |
           $out = "$env:RUNNER_TEMP\sp.txt"
