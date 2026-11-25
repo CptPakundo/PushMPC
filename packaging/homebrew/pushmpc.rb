@@ -4,7 +4,7 @@
 # (and takes it out again exactly).
 #
 # For our own tap (not homebrew-core):
-#   brew tap pushmpc/tap https://github.com/CptPakundo/homebrew-pushmpc
+#   brew tap pushmpc/tap <URL of the homebrew-pushmpc tap repository>
 #   brew install pushmpc/tap/pushmpc
 # The url / sha256 below point at the release tarball; CI (.github/workflows/apple.yml, job homebrew) installs this file from a local tap with
 # the checkout's own tarball (`brew install --build-from-source`), then runs `brew test`.

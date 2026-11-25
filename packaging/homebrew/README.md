@@ -8,7 +8,7 @@
 
 Once the tap repository `homebrew-pushmpc` exists (a public action, so it waits for the go-ahead), users run:
 
-    brew tap pushmpc/tap https://github.com/CptPakundo/homebrew-pushmpc
+    brew tap pushmpc/tap <URL of the homebrew-pushmpc tap repository>
     brew install pushmpc/tap/pushmpc
     pushmpc-setup install      # puts the filter into ~/.config/mpv/mpv.conf
     # to remove: pushmpc-setup uninstall && brew uninstall pushmpc
