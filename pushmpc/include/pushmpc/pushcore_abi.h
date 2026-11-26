@@ -155,10 +155,15 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_FG_NVOF 5u        /* PUSHCORE_FEATURE_NVOF_FG: NVIDIA's optical-flow hardware (NVOFA: Turing except TU117, and
                                       later) as the motion of FSR 3.1's frame interpolation and warp, 2x: the flow costs no
                                       shader time (GTX 16 / RTX 20 where VFG does not run and PushFlow is too slow) */
+#define PUSHCORE_FG_XEFG 6u        /* PUSHCORE_FEATURE_XEFG: Intel XeSS frame generation on a headless swap chain (Intel Arc / Xe; other GPUs
+                                      only when forced, unlock XeFg), at the output size after the upscaler, the graph's optical flow
+                                      as its motion, 2x..4x (more through the identity-gated MFG unlock) */
 #define PUSHCORE_FG_NONE 255u      /* (reported only) no frame generation could start */
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
 #define PUSHCORE_SR_METHOD_NIS 2u  /* NVIDIA Image Scaling (shaders, any GPU) */
+#define PUSHCORE_SR_METHOD_XESS 3u /* PUSHCORE_FEATURE_XESS_SR: Intel XeSS SR (libxess.dll, XMX on Arc, DP4a elsewhere), temporal, the graph's flow
+                                      as its motion; srQuality 1..4 = preset Performance / Balanced / Quality / Ultra Quality */
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
@@ -312,6 +317,8 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
+#define PUSHCORE_FEATURE_XEFG (1u << 20) /* PUSHCORE_FG_XEFG, PUSHCORE_CAP_XEFG, pushcore_selfTest PUSHCORE_SELFTEST_XEFG */
+#define PUSHCORE_FEATURE_XESS_SR (1u << 22) /* PUSHCORE_SR_METHOD_XESS, PUSHCORE_CAP_XESS_SR, pushcore_selfTest PUSHCORE_SELFTEST_XESS_SR */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */
@@ -345,7 +352,9 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
-#define PUSHCORE_CAP_COUNT 14u
+#define PUSHCORE_CAP_XEFG 14u        /* PUSHCORE_FG_XEFG: libxess_fg.dll + libxell.dll installed, Intel GPU (else forced), its self-test passed */
+#define PUSHCORE_CAP_XESS_SR 16u     /* PUSHCORE_SR_METHOD_XESS: libxess.dll installed, Intel GPU (else forced), its self-test passed */
+#define PUSHCORE_CAP_COUNT 17u
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;
@@ -377,6 +386,33 @@ typedef struct PushCoreFlowBench {
     char note[256];            /* out: model / precision per tier, or why it failed */
 } PushCoreFlowBench;
 PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreFlowBench* io);
+
+/* Additive export (PUSHCORE_FEATURE_XEFG / PUSHCORE_FEATURE_XESS_SR): a method's self-test on its own D3D12 device on the
+   adapter (adapterLuid 0 = the first hardware adapter; warp 1 = Windows' software GPU, for CI). XeFG: init, `frames`
+   synthetic frames through pushcore's XeFG stage at `multiplier`, the generated frames checked against the ideal in-between
+   frame (the square test of the XeFG spike). XeSS SR: a 2x upscale of a moving synthetic scene against the ground truth and
+   a bilinear upscale. record 1 = write the result to HKCU\Software\PushMPC\SelfTest\<XeFg|XessSr> (keyed vendor:device:driver),
+   which pushcore_capabilities reads. Seconds of GPU work: run it once per adapter and driver (the filter does, on a worker). */
+#define PUSHCORE_SELFTEST_XEFG 1u
+#define PUSHCORE_SELFTEST_XESS_SR 2u
+typedef struct PushCoreSelfTest {
+    uint32_t structSize;       /* sizeof(PushCoreSelfTest) */
+    uint32_t which;            /* in: PUSHCORE_SELFTEST_* */
+    uint32_t multiplier;       /* in (XeFG): 2..8; 0 = 2 */
+    uint32_t width, height;    /* in: test size (0 = 640x360 XeFG, 1280x720 output XeSS SR) */
+    uint32_t frames;           /* in: 0 = 30 (XeFG) / 16 (XeSS SR) */
+    int32_t warp;              /* in: 1 = WARP */
+    int32_t record;            /* in: 1 = store the result for pushcore_capabilities */
+    int32_t ran;               /* out: the test got to run (the files loaded, a device) */
+    int32_t passed;            /* out */
+    double metric[4];          /* out, XeFG: median position error px, median PSNR, median PSNR of a blend, ms per output;
+                                       XeSS SR: PSNR XeSS, PSNR bilinear, ms per frame, - */
+    uint32_t realOut, generatedOut, expectedGenerated, reserved;
+    char adapter[128];         /* out */
+    char note[512];            /* out: what ran and the verdict, or why it could not run */
+} PushCoreSelfTest;
+PUSHCORE_API int pushcore_selfTest(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreSelfTest* io);
+typedef int (*PushCoreSelfTestFn)(uint64_t, const wchar_t*, PushCoreSelfTest*);
 typedef int (*PushCoreCapabilitiesFn)(uint64_t, const wchar_t*, PushCoreCaps*);
 typedef int (*PushCoreFlowBenchFn)(uint64_t, const wchar_t*, PushCoreFlowBench*);
 PUSHCORE_API int pushcore_submit2(PushCore* core, ID3D11Texture2D* texture, uint32_t arraySlice,

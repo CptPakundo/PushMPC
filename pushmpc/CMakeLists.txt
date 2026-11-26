@@ -34,13 +34,24 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+# G10: Intel XeSS frame generation (headless swap chain) and XeSS SR need the XeSS SDK headers (PushFPS's VEYRA_XESS_ROOT);
+# without them pushcore says so in pushcore_capabilities (PushCoreXessStub.cpp)
+if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h" AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess/xess_d3d12.h")
+  set(PUSHCORE_XESS_SOURCES src/PushCoreXefg.cpp src/PushCoreXessSr.cpp)
+else()
+  set(PUSHCORE_XESS_SOURCES src/PushCoreXessStub.cpp)
+  message(STATUS "pushcore: XeSS SDK headers not found (VEYRA_XESS_ROOT): XeFG and XeSS SR are built as unavailable")
+endif()
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h src/PushCoreXess.h ${PUSHCORE_XESS_SOURCES} include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h")
+  target_include_directories(pushcore_dll PRIVATE "${VEYRA_XESS_ROOT}/inc")
+endif()
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
 target_compile_options(pushcore_dll PRIVATE /utf-8)
 target_include_directories(pushcore_dll PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
 # d3dcompiler: PushMPC's deband compute shader (PushCoreDeband.h) is compiled at open with the system's d3dcompiler_47.dll
-target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler)
+target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler bcrypt wintrust crypt32 version)
 
 # GPU harness: loads pushcore.dll by path, decodes with D3D11VA on its own D3D11 device (as LAV does),
 # feeds the textures in and "presents" the outputs in D3D11. FFmpeg is delay-loaded so the

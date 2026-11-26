@@ -35,6 +35,9 @@
 #include "veyra/gfx/AmfFrcBackend.h"
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
+#include "PushCoreXess.h"                   // G10: XeSS frame generation (headless swap chain) and XeSS SR
+#include "veyra/gfx/FsrSrBackend.h"         // its provider override: XeSS SR in the graph's temporal upscaler slot
+#include "veyra/pipeline/PushMpcCutGuard.h" // the cut guard of the XeFG route (pushcore's own, on the real frames it hands XeFG)
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -188,6 +191,7 @@ const char* fgName(uint32_t b) {
     case PUSHCORE_FG_FSR: return "FSR FG";
     case PUSHCORE_FG_AMDFRC: return "AMD FRC";
     case PUSHCORE_FG_NVOF: return "NVOF FG";
+    case PUSHCORE_FG_XEFG: return "XeFG";
     default: return "none";
     }
 }
@@ -240,8 +244,10 @@ bool findAdapter(uint64_t luid, DXGI_ADAPTER_DESC1& out) {
         ComPtr<IDXGIAdapter1> a;
         if (f->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&a)) == DXGI_ERROR_NOT_FOUND || !a) break;
         DXGI_ADAPTER_DESC1 d{};
-        if (FAILED(a->GetDesc1(&d)) || (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
+        if (FAILED(a->GetDesc1(&d))) continue;
         const uint64_t l = (uint64_t(uint32_t(d.AdapterLuid.HighPart)) << 32) | d.AdapterLuid.LowPart;
+        // WARP only by LUID with PUSHMPC_TEST_WARP=1 (CI), as the patched D3D12DeviceContext
+        if ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && !(luid && l == luid && pmu::EnvTrue(L"PUSHMPC_TEST_WARP"))) continue;
         if (luid && l != luid) continue;
         out = d;
         return true;
@@ -295,6 +301,28 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         set(PUSHCORE_CAP_NVOF_FG, nvofa && !offSwitch, ffx && veyra::ngx::NvOfSession::builtWithSdk(),
             offSwitch ? "switched off (PUSHMPC_DISABLE_NVOFWARP / Unlocks NvofWarp = 0)" : "needs NVIDIA's optical-flow hardware (Turing except GTX 1650 / TU117, or newer)",
             !ffx ? "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)" : "this pushcore was built without NVIDIA Optical Flow support");
+    }
+    // G10: Intel's XeSS methods. Hardware: an Intel GPU (Arc / Xe; XeSS needs SM 6.4); other vendors only when forced on
+    // (Unlocks\XeFg / XessSr = 1: PushFlow, VFG and FSR exist there). Available: Intel-signed runtime files and the unlock's
+    // decision (its self-test passed on this adapter and driver, or forced on); off switch PUSHMPC_DISABLE_XEFG / XESSSR.
+    {
+        const bool intel = v == 0x8086;
+        const std::wstring key = pmu::SelfTestKey(v, d.DeviceId, driverVersionOf(d.AdapterLuid));
+        auto xess = [&](uint32_t bit, pmu::Unlock u, bool files, const std::string& filesWhy) {
+            std::wstring src;
+            const pmu::UnlockMode mode = pmu::ReadUnlockMode(u, &src);
+            const pmu::UnlockDecision dec = pmu::DecideUnlock(u, mode, intel || mode == pmu::UnlockMode::On, L"Intel GPUs only unless forced on", pmu::ReadSelfTest(u, key), false, src);
+            const std::string why = narrow(dec.why);
+            const bool hw = mode != pmu::UnlockMode::Off && (intel || mode == pmu::UnlockMode::On);
+            if (hw) c.hardware |= 1u << bit;
+            if (hw && files && dec.on) { c.available |= 1u << bit; c.reason[bit][0] = 0; return; }
+            std::snprintf(c.reason[bit], sizeof(c.reason[bit]), "%s", !hw ? (mode == pmu::UnlockMode::Off ? why.c_str() : "Intel XeSS runs on Intel Arc / Xe (other GPUs: Unlocks = 1)")
+                                                                  : !files ? filesWhy.c_str() : why.c_str());
+        };
+        std::string fgWhy, srWhy;
+        const bool fgFiles = pushmpc::xess::fgFilesUsable(&fgWhy), srFiles = pushmpc::xess::srFileUsable(&srWhy);
+        xess(PUSHCORE_CAP_XEFG, pmu::Unlock::XeFg, fgFiles, fgWhy);
+        xess(PUSHCORE_CAP_XESS_SR, pmu::Unlock::XessSr, srFiles, srWhy);
     }
     set(PUSHCORE_CAP_VFG, vfgHw, veyra::pipeline::VfgBackend::runtimeAvailable(rt), "needs an NVIDIA RTX 30, 40 or 50 card",
         "the VFG files are not installed (runtime\\nvidia-vfg)");
@@ -401,6 +429,15 @@ struct PushCore {
     uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
+    // G10: the XeFG route (fgBackend XEFG): the stage (it owns the outputs), pushcore's own cut guard on the real frames
+    // handed to XeFG, copies of the last real frames (the guard holds A / B over a cut pair's generated frames)
+    std::unique_ptr<pushmpc::xess::XefgStage> xefg;
+    std::unique_ptr<veyra::pipeline::CutGuard> xguard;
+    static constexpr uint32_t kXReal = 4, kXLists = 8;
+    ComPtr<ID3D12Resource> xreal[kXReal]; uint64_t xrealSeq[kXReal]{}; uint64_t xguardSeq[2]{};
+    ComPtr<ID3D12CommandAllocator> xalloc[kXLists]; uint64_t xallocValue[kXLists]{}; ComPtr<ID3D12GraphicsCommandList> xlist; uint32_t xnext = 0;
+    int64_t xlastPts = INT64_MIN; uint64_t xseq = 0, xholds = 0, xholdsSkipped = 0, xlastGraphSource = 0;
+    bool srXessFailed = false;              // XeSS SR did not start in this instance: FSR from then on
 
     // ---- D3D11 side (borrowed device, our objects) ----
     ComPtr<ID3D11Device> d11;
@@ -505,7 +542,7 @@ struct PushCore {
         uint32_t next = 0;
     };
     std::deque<Batch> batches;
-    struct Lease { std::shared_ptr<veyra::pipeline::FrameLease> graphLease; uint32_t kind = 0, parity = 0; int outSlot = -1; };
+    struct Lease { std::shared_ptr<veyra::pipeline::FrameLease> graphLease; uint32_t kind = 0, parity = 0; int outSlot = -1; int xefgSlot = -1; };
     std::map<uint64_t, Lease> leases;
     uint64_t nextLease = 1;
     uint64_t sequence = 0, submittedCount = 0;
@@ -590,6 +627,15 @@ struct PushCore {
             s.frameGenerationBackend = FrameGenerationBackend::AmdFrc;
             cap = 2;
             break;
+        case PUSHCORE_FG_XEFG:
+            // G10: PushFPS's XeSS present-sink mode (the graph makes the real frames at the output size and the motion its
+            // XeSS presenter gives XeFG: the refined optical flow, FidelityFX on any GPU, NVIDIA's on NVIDIA); pushcore's
+            // XefgStage then runs XeFG on its headless swap chain. 2x..8x (above the runtime's own ceiling: the MFG unlock)
+            s.frameGenerationBackend = FrameGenerationBackend::XeSS;
+            s.opticalFlowBackend = nvidia ? OpticalFlowBackend::Nvidia : OpticalFlowBackend::AmdFidelityFx;
+            s.fgMotionRefine = true;
+            cap = 8;
+            break;
         default:
             s.frameGenerationBackend = FrameGenerationBackend::Vfg;
             break;
@@ -604,7 +650,13 @@ struct PushCore {
         // the upscaler: RTX VSR, or AMD FSR / NVIDIA Image Scaling (any GPU; on a non-NVIDIA GPU RTX VSR becomes FSR)
         runSr = settings.srMethod;
         if (!nvidia && runSr == PUSHCORE_SR_METHOD_RTX) runSr = PUSHCORE_SR_METHOD_FSR;
-        if (runSr == PUSHCORE_SR_METHOD_FSR) {
+        if (runSr == PUSHCORE_SR_METHOD_XESS && srXessFailed) runSr = PUSHCORE_SR_METHOD_FSR;   // XeSS SR did not start here: FSR
+        if (runSr == PUSHCORE_SR_METHOD_XESS) {
+            // G10: Intel XeSS SR in the graph's temporal upscaler slot (FSR's: the same flow motion, depth, reset rule and
+            // frame time), through FsrSrBackend's provider override, set around the graph's initialize
+            s.videoSrQuality = kVideoSrFsr;
+            s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;
+        } else if (runSr == PUSHCORE_SR_METHOD_FSR) {
             s.videoSrQuality = kVideoSrFsr;   // FidelityFX picks FSR 4.1 (ML / INT8) where the driver offers it
             s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;   // FSR is temporal: its motion from FidelityFX flow
         } else if (runSr == PUSHCORE_SR_METHOD_NIS) {
@@ -772,6 +824,8 @@ struct PushCore {
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
         case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
+        // G10: XeFG at the asked multiplier, at 4x / 2x when more does not start (the MFG unlock refused), then PushFlow, FSR FG
+        case PUSHCORE_FG_XEFG: add(PUSHCORE_FG_XEFG, 8); if (m > 4) add(PUSHCORE_FG_XEFG, 4); if (m > 2) add(PUSHCORE_FG_XEFG, 2); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         default: add(PUSHCORE_FG_VFG, 8); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
@@ -818,7 +872,9 @@ struct PushCore {
         if (cfgFg >= 0) options.fg = cfgFg != 0;
         if (cfgMultiplier >= 2) options.fgMultiplier = uint32_t(std::clamp(cfgMultiplier, 2, 8));
         if (cfgVfgQuality >= 0) options.settings.vfgQuality = uint32_t(cfgVfgQuality);
-        if (options.fg && engine::presentSinkFrameGeneration(options.settings.frameGenerationBackend))
+        // XeSS presents on its own swap chain: only pushcore's XeFG route (XefgStage, the headless shim) takes it
+        const bool xefgRoute = options.fg && engine::presentSinkFrameGeneration(options.settings.frameGenerationBackend);
+        if (xefgRoute && !(haveSettings && tryFg == PUSHCORE_FG_XEFG))
             return fail("the saved frame generation method presents on its own (XeSS) and cannot feed a renderer");
 
         const bool hdrTransfer = stream.transfer == AVCOL_TRC_SMPTE2084 || stream.transfer == AVCOL_TRC_ARIB_STD_B67;
@@ -860,7 +916,7 @@ struct PushCore {
             gd.hdrOutputMode = engine::HdrOutputMode::Hdr10;
         }
         gd.nrAutoPoolLayer.reset();
-        gd.shareableOutputs = (flags & PUSHCORE_FLAG_EGRESS_COPY) == 0;
+        gd.shareableOutputs = (flags & PUSHCORE_FLAG_EGRESS_COPY) == 0 && !xefgRoute;   // XeFG: XefgStage's outputs are what D3D11 sees
         gd.pushMpcCutGuard = !haveSettings || settings.cutGuard != 0;   // the scene-cut guard for every backend
         // its optical flow (cutGuard 3; PUSHMPC_CUT_FLOW=0/1 overrides, 2 = FidelityFX's flow on any GPU, for calibration)
         {
@@ -902,15 +958,39 @@ struct PushCore {
         }
         graph = std::make_unique<pipeline::EnhanceGraph>(ctx, ring, cache);
         const auto t = Clock::now();
-        if (!graph->initialize(gd) || !graph->createViews()) {
+        // G10: XeSS SR takes the graph's temporal upscaler slot while this graph initialises
+        const bool xessSr = haveSettings && runSr == PUSHCORE_SR_METHOD_XESS && options.sr;
+        if (xessSr) gfx::FsrSrBackend::setProviderOverride(static_cast<const gfx::FsrSrBackend::ProviderOverride*>(pushmpc::xess::srProvider(settings.srQuality)));
+        const bool started = graph->initialize(gd) && graph->createViews();
+        if (xessSr) gfx::FsrSrBackend::setProviderOverride(nullptr);
+        if (!started) {
             lastFailed = graph->failedBackend();
             return fail(std::format("enhancement graph did not start (failed backend {})", int(graph->failedBackend())));
         }
+        if (xessSr && !graph->fsrSrEnabled()) {
+            // XeSS SR did not start on this GPU (no runtime, no preset for this scale, a driver refusal): FSR in its place
+            veyra::log::warn("pushcore", "XeSS SR did not start (see xess-sr): FSR upscaling instead");
+            srXessFailed = true;
+            graph->shutdown(); graph.reset();
+            return buildGraphOnce();
+        }
         graph->recordGpuTimings();
-        if (fg && !graph->fgEnabled()) { lastFailed = engine::FailedBackend::Fg; return fail("frame generation did not start"); }
+        if (fg && !graph->fgEnabled() && !xefgRoute) { lastFailed = engine::FailedBackend::Fg; return fail("frame generation did not start"); }
+        if (xefgRoute) {
+            // G10: XeFG on the headless swap chain at the output size, on the graph's queue
+            if (!graph->xessEnabled()) { lastFailed = engine::FailedBackend::Fg; return fail("the graph did not start in XeSS present-sink mode"); }
+            pushmpc::xess::XefgConfig xc;
+            xc.device = ctx.device(); xc.queue = ring.queue(); xc.d3d11 = d11_1.Get();
+            xc.width = graph->workWidth(); xc.height = graph->workHeight(); xc.format = graph->outputFormat(); xc.hdr10 = graph->hdr10Output();
+            xc.multiplier = multiplier;
+            xefg = std::make_unique<pushmpc::xess::XefgStage>();
+            std::string why;
+            if (!xefg->init(xc, why)) { xefg.reset(); lastFailed = engine::FailedBackend::Fg; return fail("XeFG did not start: " + why); }
+            if (!initXefgGuard()) veyra::log::warn("pushcore", "XeFG: the cut guard did not start (no hold on cuts; XeFG's own scene-change detection stays)");
+        }
         if (haveSettings && settings.activeArea[2] > settings.activeArea[0] && settings.activeArea[3] > settings.activeArea[1])
             graph->setCutGuardActiveArea(settings.activeArea[0], settings.activeArea[1], settings.activeArea[2], settings.activeArea[3]);
-        cutGuardOn = fg && graph->cutGuardActive();
+        cutGuardOn = fg && (xefg ? xguard != nullptr : graph->cutGuardActive());
         description = std::format(
             "source {}x{} {}{} -> output {}x{} {}; SR {} (videoSrQuality {}); FG {} {} {}X (quality/tier {}, async {}, cut guard {}); NR {}; egress {}; GPU family {}",
             stream.width, stream.height, stream.format == PUSHCORE_INPUT_P010 ? "P010" : "NV12",
@@ -921,8 +1001,148 @@ struct PushCore {
             engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier, gd.vfgQuality,
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
+        if (xefg) description += std::format("; {} on a headless swap chain, cut guard {}", xefg->description(), xguard ? "on (hold on cuts)" : "off");
+        if (xessSr) description += std::format("; upscaler {}", graph->fsrSrProviderVersion());
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
         return buildEgress();
+    }
+
+    // G10: pushcore's own cut guard for the XeFG route (the graph's guard does not run in present-sink mode): every real
+    // frame handed to XeFG is copied (xreal ring) and tested against the one before; a cut pair's generated frames are then
+    // replaced on the GPU by the pair's real frames (predicated copies), as the guard does for every other method.
+    bool initXefgGuard() {
+        xguard.reset();
+        for (auto& r : xreal) r.Reset();
+        for (auto& s : xrealSeq) s = 0;
+        xguardSeq[0] = xguardSeq[1] = 0;
+        if (haveSettings && settings.cutGuard == 0) return true;   // switched off: no guard, nothing to warn about
+        auto g = std::make_unique<veyra::pipeline::CutGuard>();
+        if (!g->initialize(ctx.device(), graph->workWidth(), graph->workHeight(), graph->outputFormat(), true, "xefg")) return false;
+        if (haveSettings && settings.activeArea[2] > settings.activeArea[0] && settings.activeArea[3] > settings.activeArea[1])
+            g->setActiveArea(settings.activeArea[0], settings.activeArea[1], settings.activeArea[2], settings.activeArea[3]);
+        for (auto& r : xreal) {
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = graph->workWidth(); td.Height = graph->workHeight();
+            td.DepthOrArraySize = 1; td.MipLevels = 1; td.Format = graph->outputFormat(); td.SampleDesc.Count = 1;
+            if (FAILED(ctx.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)))) return false;
+        }
+        for (auto& a : xalloc) if (!a && FAILED(ctx.device()->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a)))) return false;
+        if (!xlist) {
+            if (FAILED(ctx.device()->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, xalloc[0].Get(), nullptr, IID_PPV_ARGS(&xlist)))) return false;
+            xlist->Close();
+        }
+        xguard = std::move(g);
+        return true;
+    }
+    ID3D12GraphicsCommandList* xBegin() {
+        const uint32_t a = xnext++ % kXLists;
+        if (xallocValue[a] && fence12->GetCompletedValue() < xallocValue[a]) { fence12->SetEventOnCompletion(xallocValue[a], waitEvent); WaitForSingleObject(waitEvent, 10000); }
+        xalloc[a]->Reset(); xlist->Reset(xalloc[a].Get(), nullptr);
+        return xlist.Get();
+    }
+    void xEnd() {
+        xlist->Close();
+        ID3D12CommandList* lists[] = {xlist.Get()};
+        ring.queue()->ExecuteCommandLists(1, lists);
+        ring.queue()->Signal(fence12.Get(), ++value12);
+        xallocValue[(xnext - 1) % kXLists] = value12;
+    }
+    static void xBarrier(ID3D12GraphicsCommandList* l, ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+        D3D12_RESOURCE_BARRIER br{}; br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; br.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+        l->ResourceBarrier(1, &br);
+    }
+
+    // G10: one source frame on the XeFG route: the graph's real frame (and its motion) to XeFG; the graph lease goes as soon
+    // as the copies are queued (same queue, in order)
+    int submitXefg(Batch& b, bool reset) {
+        using namespace veyra::pipeline;
+        if (b.out.batch.count < 1) return fail("XeFG route: the graph made no real frame");
+        for (int spin = 0; !graph->resolveFrame(b.out, 0) && spin < 2000; ++spin) Sleep(0);
+        auto& f = b.out.batch.frames[0];
+        if (!f.lease || !f.lease->texture) return fail("XeFG route: no real frame texture");
+        ID3D12Resource* real = f.lease->texture.Get();
+        const uint32_t parity = f.lease->slot;
+        const uint64_t seq = ++xseq;
+        // the motion PushFPS's XeSS presenter gives XeFG, with its reset rule (no valid motion, or not from the frame before)
+        const bool motionOk = graph->presentMotionValid(parity) && graph->motionPreviousSource(parity) == xlastGraphSource;
+        xlastGraphSource = f.identity.sourceFrameId ? f.identity.sourceFrameId : xlastGraphSource;
+        const bool xreset = reset || !motionOk || xlastPts == INT64_MIN;
+        if (xguard) {
+            auto* l = xBegin();
+            ID3D12Resource* copy = xreal[seq % kXReal].Get();
+            xBarrier(l, real, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            xBarrier(l, copy, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            l->CopyResource(copy, real);
+            xBarrier(l, real, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            xBarrier(l, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            xguard->captureAndTest(l, copy, unsigned(seq & 1), !xreset);
+            xBarrier(l, copy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            xEnd();
+            xguard->submitted(fence12.Get(), value12);
+            xrealSeq[seq % kXReal] = seq; xguardSeq[seq & 1] = seq;
+        }
+        const float frameMs = xlastPts != INT64_MIN && b.realPts > xlastPts ? float(double(b.realPts - xlastPts) / 10000.0) : 0.0f;
+        std::string why;
+        if (!xefg->submit(real, graph->presentMotion(parity), xreset, xreset ? 0.0f : frameMs, b.realPts, seq, why)) return fail("XeFG: " + why);
+        xlastPts = b.realPts;
+        xsource[seq % kXSource] = b.sourceIndex;
+        f.lease.reset();   // the copies into XeFG's back buffer and the guard's ring are queued before any later graph work
+        return PUSHCORE_OK;
+    }
+    static constexpr uint32_t kXSource = 64;
+    uint64_t xsource[kXSource]{};   // XeFG sequence -> pushcore source index
+
+    // G10: the XeFG route's outputs: what XeFG presented (captured by the shim), with the guard's hold on cut pairs, made
+    // ready for D3D11 on fence12 (one Wait + Signal on the graph queue per poll)
+    int pollXefg(PushCoreFrame* frames, uint32_t capacity, uint32_t& count) {
+        std::vector<pushmpc::xess::XefgStage::Output> outs;
+        pushmpc::xess::XefgStage::Output o;
+        while (count + outs.size() < capacity && xefg->take(o)) {
+            if (o.dropped) { ++st.skippedGenerated; continue; }
+            outs.push_back(o);
+        }
+        if (outs.empty()) return PUSHCORE_OK;
+        uint64_t waitV = 0; ID3D12Fence* waitF = nullptr;
+        for (const auto& x : outs) if (x.fenceValue > waitV) { waitV = x.fenceValue; waitF = x.fence; }
+        if (waitF) ring.queue()->Wait(waitF, waitV);
+        bool any = false;
+        ID3D12GraphicsCommandList* l = nullptr;
+        for (const auto& x : outs) {
+            if (!x.generated || !xguard) continue;
+            const uint64_t k = x.sourceIndex;   // the pair (k-1, k)
+            ID3D12Resource* a = xreal[(k - 1) % kXReal].Get();
+            ID3D12Resource* bb = xreal[k % kXReal].Get();
+            if (k < 2 || xrealSeq[(k - 1) % kXReal] != k - 1 || xrealSeq[k % kXReal] != k || xguardSeq[k & 1] != k) { ++xholdsSkipped; continue; }
+            if (!l) l = xBegin();
+            xBarrier(l, x.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            xBarrier(l, a, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            xBarrier(l, bb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            xguard->holdOnCut(l, x.resource, a, unsigned(k & 1), bb, 2 * x.subframe > x.groupSize);
+            xBarrier(l, x.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+            xBarrier(l, a, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            xBarrier(l, bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            ++xholds; any = true;
+        }
+        if (any) xEnd();
+        else if (hrFail(ring.queue()->Signal(fence12.Get(), ++value12), "D3D12 Signal(XeFG outputs)")) return PUSHCORE_ERROR;
+        for (const auto& x : outs) {
+            PushCoreFrame& f = frames[count];
+            f = {};
+            f.texture = x.texture;
+            f.readyFence = fence12in11.Get();
+            f.readyValue = value12;
+            f.kind = x.generated ? PUSHCORE_FRAME_GENERATED : PUSHCORE_FRAME_REAL;
+            f.pts100ns = x.pts100ns;
+            f.sourceIndex = xsource[x.sourceIndex % kXSource];
+            f.subframe = x.subframe;
+            f.width = graph->workWidth(); f.height = graph->workHeight();
+            Lease le; le.kind = f.kind; le.xefgSlot = int(x.slot);
+            f.lease = nextLease++;
+            leases.emplace(f.lease, std::move(le));
+            ++count; ++st.outputs;
+            if (x.generated) ++st.generated; else ++st.real;
+        }
+        return PUSHCORE_OK;
     }
 
     // AMD FRC's AMF runtime needs the system's d3dcompiler_47.dll: an old copy (Qt's in Veyra's folder; MPC-HC ships its
@@ -966,6 +1186,10 @@ struct PushCore {
     int buildEgress() {
         opened.clear(); outSlots.clear(); outNext = 0;
         egressMode = gd.shareableOutputs ? PUSHCORE_EGRESS_DIRECT : PUSHCORE_EGRESS_COPY;
+        if (xefg) {   // XeFG route: XefgStage's captured outputs are the egress (shared textures, one copy each)
+            veyra::log::info("pushcore", std::format("egress: XeFG's {} captured output textures", xefg->slotCount()));
+            return PUSHCORE_OK;
+        }
         if (egressMode == PUSHCORE_EGRESS_DIRECT) {
             // Open the whole pool now so the hot path never creates handles.
             std::vector<ID3D12Resource*> pool{graph->videoFrameResource(0), graph->videoFrameResource(1)};
@@ -1017,7 +1241,7 @@ struct PushCore {
     }
 
     // ------------------------------------------------------------------------------------------
-    bool canSubmit() const { return graph && graph->nextFrameSlotAvailable(); }
+    bool canSubmit() const { return graph && graph->nextFrameSlotAvailable() && (!xefg || xefg->canSubmit()); }
 
     bool ensureIngress(ID3D11Texture2D* src) {
         D3D11_TEXTURE2D_DESC sd{};
@@ -1077,7 +1301,7 @@ struct PushCore {
 
     void collectTimings() {
         if (!graph) return;
-        cutsSeen.store(cutBase + graph->cutGuardCuts(), std::memory_order_relaxed);
+        cutsSeen.store(cutBase + graph->cutGuardCuts() + (xguard ? xguard->cuts() : 0), std::memory_order_relaxed);
         for (const auto& t : graph->takeGpuTimings()) {
             using veyra::diagnostics::GpuStage;
             auto ms = [&](GpuStage s) { const auto& g = t.gpu[size_t(s)]; return g.state == veyra::diagnostics::SampleState::Measured && g.milliseconds ? *g.milliseconds : -1.0; };
@@ -1214,7 +1438,8 @@ struct PushCore {
         if (hrFail(ring.queue()->Signal(fence12.Get(), ++value12), "D3D12 Signal(batch)")) return PUSHCORE_ERROR;
         slot.freeValue = value12;
         b.readyValue = value12;
-        batches.push_back(std::move(b));
+        if (xefg) { if (const int xr = submitXefg(b, reset); xr != PUSHCORE_OK) return xr; }
+        else batches.push_back(std::move(b));
         needReset = false; haveReal = true;
         ++submittedCount; ++st.submitted;
         st.submitCpuMs += msSince(t0);
@@ -1346,6 +1571,17 @@ struct PushCore {
         if (!graph) return fail("not open");
         uint32_t count = 0;
         const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+        if (xefg) {
+            // XeFG's outputs arrive from its own threads (the shim's captures): poll until one is there or the time is up
+            for (;;) {
+                if (pollXefg(frames, capacity, count) != PUSHCORE_OK) return PUSHCORE_ERROR;
+                collectTimings();
+                if (count || !timeoutMs || Clock::now() >= deadline) break;
+                Sleep(1);
+            }
+            *countOut = count;
+            return PUSHCORE_OK;
+        }
         for (;;) {
             if (pollOnce(frames, capacity, count) != PUSHCORE_OK) return PUSHCORE_ERROR;
             collectTimings();
@@ -1379,7 +1615,10 @@ struct PushCore {
             if (hrFail(lastPresentCtx4->Signal(fence11.Get(), ++value11), "D3D11 Signal(presented)")) return PUSHCORE_ERROR;
         }
         auto& l = it->second;
-        if (egressMode == PUSHCORE_EGRESS_DIRECT) {
+        if (l.xefgSlot >= 0) {
+            // XeFG route: the slot may take another capture once the caller's draw (signalled above) is done
+            if (xefg) xefg->release(uint32_t(l.xefgSlot), c ? fence11in12.Get() : nullptr, c ? value11 : 0);
+        } else if (egressMode == PUSHCORE_EGRESS_DIRECT) {
             // The real frame comes last in its batch, so its value also covers the batch's generated reads.
             if (l.kind == PUSHCORE_FRAME_REAL && value11) graph->presentationSubmitted(l.parity, fence11in12.Get(), value11);
         } else if (l.outSlot >= 0) {
@@ -1393,6 +1632,7 @@ struct PushCore {
     void dropQueued() {
         batches.clear();
         pendingCopyLeases.clear();
+        if (xefg) { xefg->flush(); xlastPts = INT64_MIN; }
         needReset = true;
     }
 
@@ -1405,6 +1645,17 @@ struct PushCore {
     void teardownGraph() {
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
+        if (xefg) {   // XeFG presents on the graph's queue: stop it before the graph goes
+            const auto c = xefg->counters();
+            veyra::log::info("pushcore", std::format("XeFG: {} presents, {} captured ({} real, {} generated, {} dropped), {} status errors, holds {} (skipped {}), "
+                "XeLL sleep {:.1f} ms and Present {:.1f} ms per frame", c.presents, c.captures, c.real, c.generated, c.dropped, c.statusErrors, xholds, xholdsSkipped,
+                c.presents ? c.sleepMsTotal / c.presents : 0.0, c.presents ? c.presentMsTotal / c.presents : 0.0));
+            xefg->shutdown(); xefg.reset();
+            if (xguard) { cutBase += xguard->cuts(); xguard.reset(); }
+            for (auto& r : xreal) r.Reset();
+            xlastPts = INT64_MIN; xlastGraphSource = 0;
+            if (ring.initialized()) ring.drainQueue();
+        }
         opened.clear(); outSlots.clear();
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
     }
@@ -1561,7 +1812,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_XEFG | PUSHCORE_FEATURE_XESS_SR; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -1681,6 +1932,7 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.leasesOut = core->leases.size();
     uint64_t pending = 0;
     for (const auto& b : core->batches) pending += b.out.batch.count - b.next;
+    if (core->xefg) pending += core->xefg->pending();   // G10: what XeFG still owes (presented by its own thread)
     core->st.pendingFrames = pending;
     {
         const auto f = core->costFull.recentP50(std::chrono::milliseconds(3000));
@@ -1772,6 +2024,47 @@ int pushcore_capabilities(uint64_t adapterLuid, const wchar_t* rootDir, PushCore
         fillCaps(d, veyra::runtime::localRuntimeDirectory(), c);
         *out = c;
         return PUSHCORE_OK;
+    } catch (...) { return PUSHCORE_ERROR; }
+}
+
+int pushcore_selfTest(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreSelfTest* io) {
+    if (!io || io->structSize < sizeof(PushCoreSelfTest)) return PUSHCORE_ERROR;
+    try {
+        const std::filesystem::path root = rootDir && *rootDir ? std::filesystem::path(rootDir) : moduleDirectory();
+        veyra::runtime::setApplicationRootOverride(root);
+        io->ran = io->passed = 0; io->adapter[0] = io->note[0] = 0;
+        for (auto& m : io->metric) m = -1;
+        io->realOut = io->generatedOut = io->expectedGenerated = 0;
+        const bool warp = io->warp != 0;
+        uint32_t vendor = 0, device = 0; std::wstring driver; std::string note, adapter; bool ran = false, passed = false;
+        pmu::Unlock unlock = pmu::Unlock::XeFg;
+        if (io->which == PUSHCORE_SELFTEST_XEFG) {
+            const auto r = pushmpc::xess::xefgSelfTest(adapterLuid, warp, io->multiplier ? io->multiplier : 2, io->width ? io->width : 640, io->height ? io->height : 360, io->frames ? io->frames : 30);
+            ran = r.ran; passed = r.passed; note = r.note; adapter = r.adapter; vendor = r.vendor; device = r.device; driver = r.driver;
+            io->metric[0] = r.medianPositionErrorPx; io->metric[1] = r.medianPsnr; io->metric[2] = r.medianPsnrBlend; io->metric[3] = r.msPerGenerated;
+            io->realOut = r.realOut; io->generatedOut = r.generatedOut; io->expectedGenerated = r.expectedGenerated;
+        } else if (io->which == PUSHCORE_SELFTEST_XESS_SR) {
+            unlock = pmu::Unlock::XessSr;
+            const auto r = pushmpc::xess::xessSrSelfTest(adapterLuid, warp, io->width ? io->width : 1280, io->height ? io->height : 720, io->frames ? io->frames : 16);
+            ran = r.ran; passed = r.passed; note = r.note; adapter = r.adapter; vendor = r.vendor; device = r.device; driver = r.driver;
+            io->metric[0] = r.psnrXess; io->metric[1] = r.psnrBilinear; io->metric[2] = r.msPerFrame;
+        } else {
+            std::snprintf(io->note, sizeof(io->note), "unknown self-test %u", io->which);
+            return PUSHCORE_ERROR;
+        }
+        io->ran = ran ? 1 : 0; io->passed = passed ? 1 : 0;
+        std::snprintf(io->adapter, sizeof(io->adapter), "%s", adapter.c_str());
+        std::snprintf(io->note, sizeof(io->note), "%s", note.c_str());
+        veyra::log::info("pushcore", std::format("self-test {} on {}: {}", narrow(pmu::UnlockName(unlock)), adapter, note));
+        if (io->record && ran) {
+            std::wstring w(note.size(), L'\0');
+            w.resize(size_t(MultiByteToWideChar(CP_UTF8, 0, note.data(), int(note.size()), w.data(), int(w.size()))));
+            pmu::WriteSelfTest(unlock, pmu::SelfTestKey(vendor, device, driver), passed, w);
+        }
+        return ran ? PUSHCORE_OK : PUSHCORE_ERROR;
+    } catch (const std::exception& e) {
+        std::snprintf(io->note, sizeof(io->note), "exception: %s", e.what());
+        return PUSHCORE_ERROR;
     } catch (...) { return PUSHCORE_ERROR; }
 }
 
