@@ -346,7 +346,7 @@ typedef struct PushCoreStats {
     float animeSrMs;              /* its last frame: readback + model + upload, CPU wall time */
     /* Appended (PUSHCORE_FEATURE_ANIME_HOLD): the hold compose on generated frames */
     uint32_t holdActive;          /* 1 = hold plans are made for this stream */
-    uint32_t animClass;           /* the picture's class from its cadence (Auto per show): 0 not known yet, 1 feature
+    uint32_t animClass;           /* the picture's class from its cadence (diagnostic only: nothing is stored per show and Auto uses the filter's ContentDetect class): 0 not known yet, 1 feature
                                      (moving parts mostly on ones), 2 TV limited (twos / threes), 3 mixed CG (rarely
                                      drawn on twos); + 16 once final (after ~2 minutes), provisional before */
     uint64_t holdPairs;           /* source pairs with a hold */

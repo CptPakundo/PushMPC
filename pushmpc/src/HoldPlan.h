@@ -587,7 +587,8 @@ private:
     int64_t lastChange_ = -1;
 };
 
-// ---- the show's class (Auto per show) from the cadence of its moving parts over the first minutes ----
+// ---- the picture's class from the cadence of its moving parts over the first minutes (a statistic for the log and the stats;
+// automatic decisions use ContentDetect, pushmpc/content_detect.h, per shot) ----
 enum class ShowClass : uint8_t { Unknown = 0, Feature = 1, TvLimited = 2, MixedCg = 3 };
 class ShowClassifier {
 public:
