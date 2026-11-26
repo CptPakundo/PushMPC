@@ -222,10 +222,12 @@ Advanced:
 | On-screen status | Brief at start, Always, Off | shows what PushMPC is doing (for example "5x Medium · VSR 4 · 120 fps") in the top-left corner. Brief at start (default): for 3 seconds when playback starts or settings change; Always: kept on; Off: hidden. While it is visible it also appears in MPC-HC's Save Image screenshots. |
 | On battery | Light, Same as plugged in | Light (default) uses a lighter profile on laptop battery: frame generation up to 2x, VSR up to level 2, clean up and deband off, SDR to HDR boost Low. Same as plugged in keeps the full profile. |
 
-Also the frame log, and "Import my PushFPS settings" when PushFPS is installed.
+Also "Write a frame log" (off by default; turn it on only when you are asked for one to troubleshoot), and "Import my
+PushFPS settings" when PushFPS is installed. PushMPC keeps the logs of the last 20 playbacks (at most 50 MB) and deletes older
+ones.
 
 **G-SYNC.** If your NVIDIA display supports G-SYNC but MPC-HC's driver profile does not have it turned on, Advanced
-offers "Turn on G-SYNC for MPC-HC (windowed and full screen)". It changes only MPC-HC's own profile in the NVIDIA
+offers "Turn on G-SYNC for MPC-HC" (for windowed and full screen playback). It changes only MPC-HC's own profile in the NVIDIA
 driver, keeps a backup, and the uninstaller puts your previous setting back.
 
 **HDR video on an HDR display.** PushMPC passes HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) to MPC Video

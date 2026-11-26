@@ -4,7 +4,7 @@
 
 // Plain Win32 controls only (no owner draw, no own colours): MPC-HC hosts COM property pages in its
 // CMPCThemeComPropertyPage, which subclasses standard controls for its dark theme, as it does for LAV's pages.
-IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 422
+IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 426
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
@@ -24,9 +24,9 @@ BEGIN
     LTEXT           "HDR boost", -1, 7, 90, 52, 8
     COMBOBOX        IDC_PM_HDRBOOST, 62, 88, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Status", -1, 7, 108, 100, 8
-    EDITTEXT        IDC_PM_STATUS, 7, 118, 286, 64, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_HSCROLL | ES_AUTOHSCROLL
+    EDITTEXT        IDC_PM_STATUS, 7, 118, 286, 64, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
     PUSHBUTTON      "Show advanced settings", IDC_PM_ADVANCED, 7, 188, 110, 14
-    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 286, 212
+    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 286, 216
     LTEXT           "FG quality", IDC_PM_FGQ_LBL, 15, 220, 62, 8
     COMBOBOX        IDC_PM_FGQ, 78, 218, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Upscale style", IDC_PM_STYLE_LBL, 152, 220, 62, 8
@@ -45,8 +45,8 @@ BEGIN
     COMBOBOX        IDC_PM_VRR, 216, 266, 70, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Upscaler", IDC_PM_UPSCALER_LBL, 15, 284, 62, 8
     COMBOBOX        IDC_PM_UPSCALER, 78, 282, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "HDR method", IDC_PM_HDRMETHOD_LBL, 152, 284, 62, 8
-    COMBOBOX        IDC_PM_HDRMETHOD, 216, 282, 70, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "HDR method", IDC_PM_HDRMETHOD_LBL, 152, 284, 46, 8
+    COMBOBOX        IDC_PM_HDRMETHOD, 200, 282, 86, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX    "Limit brightness on bright scenes", IDC_PM_HDRLIMIT, 152, 297, 140, 10
     LTEXT           "Display peak", IDC_PM_DISPPEAK_LBL, 15, 298, 62, 8
     COMBOBOX        IDC_PM_DISPPEAK, 78, 296, 64, 80, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
@@ -59,11 +59,11 @@ BEGIN
     COMBOBOX        IDC_PM_OSD, 78, 374, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "On battery", IDC_PM_BATTERY_LBL, 152, 376, 62, 8
     COMBOBOX        IDC_PM_BATTERY, 216, 374, 70, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "Turn on G-SYNC for MPC-HC (windowed and full screen)", IDC_PM_GSYNC, 15, 389, 180, 13
-    LTEXT           "", IDC_PM_GSYNC_NOTE, 200, 391, 90, 8, SS_ENDELLIPSIS
+    PUSHBUTTON      "Turn on G-SYNC for MPC-HC", IDC_PM_GSYNC, 15, 389, 150, 13
+    LTEXT           "", IDC_PM_GSYNC_NOTE, 170, 391, 116, 8, SS_ENDELLIPSIS
     LTEXT           "Subtitle hold", IDC_PM_SUBHOLD_LBL, 15, 406, 62, 8
     COMBOBOX        IDC_PM_SUBHOLD, 78, 404, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Keeps burned-in subtitles steady in generated frames", IDC_PM_SUBHOLD_NOTE, 152, 406, 138, 8, SS_ENDELLIPSIS
+    LTEXT           "Keeps burned-in subtitles steady in generated frames", IDC_PM_SUBHOLD_NOTE, 150, 403, 136, 17
 END
 
 IDD_PUSHMPC_ABOUT DIALOGEX 0, 0, 300, 352

@@ -38,6 +38,9 @@
 #include <map>
 #include <set>
 #include <type_traits>
+#ifndef WM_DPICHANGED_AFTERPARENT
+#define WM_DPICHANGED_AFTERPARENT 0x02E3
+#endif
 #include <utility>
 #include <mutex>
 #include <string>
@@ -115,6 +118,48 @@ static std::wstring LocalAppData()
 }
 
 // ------------------------------------------------------------------------------------------------ log
+// Old logs go (F-LOG: nothing was ever deleted; one folder held 1702 files / 205 MB): the filter's own files only
+// (filter-*.log, filter-frames-*.csv, filter-gpu-*.csv, filter-exit-*.log, diagnostics-*.txt; Setup's and the updater's
+// logs stay), newest first, kept while within kKeepSessions playback sessions and kKeepBytes. A session is the files
+// that share one stamp (date-time-process id; filter-exit-<pid>.log goes with its process). At most 400 deletions per
+// start, so a huge backlog shrinks over a few starts without delaying one.
+static void PruneLogs(const std::wstring& dir)
+{
+    constexpr size_t kKeepSessions = 20;
+    constexpr uint64_t kKeepBytes = 50ull << 20;
+    struct F { std::wstring name, key; uint64_t bytes; FILETIME t; };
+    std::vector<F> files;
+    for (const wchar_t* pat : { L"filter-*.log", L"filter-frames-*.csv", L"filter-gpu-*.csv", L"diagnostics-*.txt" }) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((dir + L"\\" + pat).c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::wstring n = fd.cFileName;
+            // the session key: the trailing "-<pid>" of the stamp (yyyymmdd-hhmmss-pid), so filter-exit-<pid>.log
+            // joins its process's files; a file without one is a session of its own
+            std::wstring key = n;
+            const size_t dot = n.find_last_of(L'.'), dash = n.find_last_of(L'-', dot);
+            if (dot != std::wstring::npos && dash != std::wstring::npos && dash + 1 < dot) {
+                const std::wstring pid = n.substr(dash + 1, dot - dash - 1);
+                if (pid.find_first_not_of(L"0123456789") == std::wstring::npos) key = pid;
+            }
+            files.push_back({ n, key, (uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow, fd.ftLastWriteTime });
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::sort(files.begin(), files.end(), [](const F& a, const F& b) { return CompareFileTime(&a.t, &b.t) > 0; });
+    std::vector<std::wstring> sessions;
+    uint64_t bytes = 0;
+    int deleted = 0;
+    for (const F& f : files) {
+        const bool known = std::find(sessions.begin(), sessions.end(), f.key) != sessions.end();
+        if (!known && sessions.size() < kKeepSessions && bytes + f.bytes <= kKeepBytes) sessions.push_back(f.key);
+        if ((known || std::find(sessions.begin(), sessions.end(), f.key) != sessions.end()) && bytes + f.bytes <= kKeepBytes) { bytes += f.bytes; continue; }
+        if (deleted >= 400) break;
+        if (DeleteFileW((dir + L"\\" + f.name).c_str())) ++deleted;
+    }
+}
 static std::wstring LogDir()
 {
     static const std::wstring dir = [] {
@@ -122,6 +167,7 @@ static std::wstring LogDir()
         if (d.empty()) d = L"C:\\Temp";
         d += L"\\PushMPC"; CreateDirectoryW(d.c_str(), nullptr);
         d += L"\\logs"; CreateDirectoryW(d.c_str(), nullptr);
+        PruneLogs(d);
         return d;
     }();
     return dir;
@@ -2977,9 +3023,11 @@ void CPushMpcFilter::FillOsd(ID3D11DeviceContext* def, UINT w, UINT h, bool draw
     if (!m_cbOsd) return;
     struct { float box[4], text[4], params[4], glyph[97][4], chars[32][4]; } o{};
     const pm::OsdMode mode = m_cfg.user.osd;
-    const bool visible = draw && m_osdSrv && m_mode == Mode::Active && mode != pm::OsdMode::Off && (mode == pm::OsdMode::Always || QpcMs(Qpc()) < m_osdUntilMs.load());
+    std::wstring text;
+    if (draw && m_osdSrv && m_mode == Mode::Active && mode != pm::OsdMode::Off) { std::lock_guard<std::mutex> lk(m_osdLock); text = m_osdText; }
+    // no box until the status thread has composed the line (F-UI3: an empty box for the first second)
+    const bool visible = !text.empty() && (mode == pm::OsdMode::Always || QpcMs(Qpc()) < m_osdUntilMs.load());
     if (visible) {
-        std::wstring text; { std::lock_guard<std::mutex> lk(m_osdLock); text = m_osdText; }
         float x = 0.0f; int n = 0;
         for (wchar_t ch : text) {
             if (n >= 64) break;
@@ -3348,6 +3396,7 @@ bool CPushMpcFilter::TryActivate(REFERENCE_TIME pts)
     m_api->outputInfo(m_core, &m_oi);
     m_mult = m_oi.multiplier ? m_oi.multiplier : 1;
     m_activeQpc = Qpc();
+    { std::lock_guard<std::mutex> ol(m_osdLock); m_osdText.clear(); }   // the status thread composes this session's line
     OsdBrief();
     { std::lock_guard<std::mutex> al(m_autoLock); m_graphQpc = m_activeQpc; m_autoTimings.clear(); }
     m_coreDisc = true;
@@ -4696,7 +4745,10 @@ void CPushMpcFilter::AutoLoop()
                 if (why.size() > 48) why = why.substr(0, 47) + L"\u2026";
                 osd += L" \u00B7 off: " + why;
             }
-            std::lock_guard<std::mutex> ol(m_osdLock); m_osdText = osd;
+            bool first = false;
+            { std::lock_guard<std::mutex> ol(m_osdLock); first = m_osdText.empty(); m_osdText = osd; }
+            // Brief: the full three seconds count from when there is something to show
+            if (first && QpcMs(Qpc()) < m_osdUntilMs.load()) OsdBrief();
         }
         // the updater (PushMpcUpdater.exe --auto): once per 24 h, 20 s into stable playback, never during start-up
         if (m_mode == Mode::Active && !m_updateTried && m_activeQpc && QpcMs(Qpc() - m_activeQpc) > 20000.0 && m_fgLevel == 0) {
@@ -4934,8 +4986,10 @@ public:
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
         FillCombo(m_Dlg, IDC_PM_SUBHOLD, { (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) && pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off ? L"Auto (on text)" : pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
-        for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 140, 0);
-        for (int id : { IDC_PM_FGMETHOD, IDC_PM_UPSCALER, IDC_PM_HDRMETHOD }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, 260, 0);
+        // drop-down widths in dialog units (they scale with the font and the display's DPI, as the template does)
+        for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, Dlu(95), 0);
+        for (int id : { IDC_PM_FGMETHOD, IDC_PM_UPSCALER, IDC_PM_HDRMETHOD }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, Dlu(175), 0);
+        m_scrollY = 0;
         Show(pm::LoadSettings());
         m_pushFpsData = PushFpsDataDir();
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), m_pushFpsData.empty() ? SW_HIDE : SW_SHOW);
@@ -4943,7 +4997,7 @@ public:
         {
             bool nvidia = false; { std::lock_guard<std::mutex> lk(g_statusLock); nvidia = g_gpuKnown && g_gpu.family >= pm::kRtx50 && g_gpu.family <= pm::kGtx; }
             m_gsyncOffer = nvidia && pm::QueryDisplay(pm::PlayerWindow(), pm::VrrMode::Auto, true).vrrCapable && pm::NvGsyncState() == 0;
-            if (pm::MpcBeInstalled()) SetDlgItemTextW(m_Dlg, IDC_PM_GSYNC, L"Turn on G-SYNC for MPC-HC and MPC-BE (windowed and full screen)");
+            if (pm::MpcBeInstalled()) SetDlgItemTextW(m_Dlg, IDC_PM_GSYNC, L"Turn on G-SYNC for MPC-HC and MPC-BE");
         }
         ShowAdvanced(false);
         m_loading = false;
@@ -4951,9 +5005,79 @@ public:
         SetTimer(m_Dlg, 1, 1000, nullptr);
         return S_OK;
     }
+    // dialog units (horizontal) to pixels at the page's current font and DPI
+    int Dlu(int x) const { RECT r = { 0, 0, x, 8 }; MapDialogRect(m_Dlg, &r); return r.right; }
+    // F-UI1: the host sizes the page from the template only when it first builds the sheet, and on the first open
+    // the sheet can come out shorter than the page with Advanced shown (MPC-HC grew it only after the About tab had
+    // been visited). The page scrolls itself when its content is taller than the space it has, at any DPI.
+    int ContentBottom() const
+    {
+        int bottom = 0;
+        for (HWND c = GetWindow(m_Dlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+            if (!IsWindowVisible(c)) continue;
+            RECT r; GetWindowRect(c, &r); MapWindowPoints(nullptr, m_Dlg, reinterpret_cast<POINT*>(&r), 2);
+            bottom = std::max<int>(bottom, r.bottom + m_scrollY);
+        }
+        RECT m = { 0, 0, 0, 7 }; MapDialogRect(m_Dlg, &m);
+        return bottom + m.bottom;
+    }
+    void ScrollTo(int y)
+    {
+        RECT cr; GetClientRect(m_Dlg, &cr);
+        const int maxY = std::max<int>(0, ContentBottom() - (cr.bottom - cr.top));
+        y = std::clamp(y, 0, maxY);
+        if (y != m_scrollY) {
+            ScrollWindowEx(m_Dlg, 0, m_scrollY - y, nullptr, nullptr, nullptr, nullptr, SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+            m_scrollY = y;
+        }
+        SCROLLINFO si = { sizeof(si) };
+        si.fMask = SIF_POS; si.nPos = m_scrollY;
+        SetScrollInfo(m_Dlg, SB_VERT, &si, TRUE);
+    }
+    void UpdateScroll()
+    {
+        RECT cr; GetClientRect(m_Dlg, &cr);
+        const int h = cr.bottom - cr.top, content = ContentBottom();
+        SCROLLINFO si = { sizeof(si) };
+        si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        si.nMin = 0; si.nMax = content > h ? content - 1 : 0; si.nPage = content > h ? UINT(h) : 0; si.nPos = m_scrollY;
+        SetScrollInfo(m_Dlg, SB_VERT, &si, TRUE);   // hides the bar when everything fits
+        ScrollTo(m_scrollY);                         // keeps the position inside the new range
+    }
+    bool ScrollMessage(UINT msg, WPARAM w)
+    {
+        RECT one = { 0, 0, 0, 16 }; MapDialogRect(m_Dlg, &one);
+        const int line = std::max<int>(1, one.bottom);
+        if (msg == WM_VSCROLL) {
+            RECT cr; GetClientRect(m_Dlg, &cr);
+            SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_ALL; GetScrollInfo(m_Dlg, SB_VERT, &si);
+            int y = m_scrollY;
+            switch (LOWORD(w)) {
+            case SB_LINEUP: y -= line; break;
+            case SB_LINEDOWN: y += line; break;
+            case SB_PAGEUP: y -= cr.bottom - line; break;
+            case SB_PAGEDOWN: y += cr.bottom - line; break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: y = si.nTrackPos; break;
+            case SB_TOP: y = 0; break;
+            case SB_BOTTOM: y = INT_MAX / 2; break;
+            default: return true;
+            }
+            ScrollTo(y);
+            return true;
+        }
+        if (msg == WM_MOUSEWHEEL) {
+            SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_PAGE; GetScrollInfo(m_Dlg, SB_VERT, &si);
+            if (!si.nPage) return false;   // nothing to scroll
+            ScrollTo(m_scrollY - GET_WHEEL_DELTA_WPARAM(w) * 3 * line / WHEEL_DELTA);
+            return true;
+        }
+        return false;
+    }
     INT_PTR MessageImpl(HWND hwnd, UINT msg, WPARAM w, LPARAM l)
     {
         if (msg == WM_TIMER) { Refresh(); return TRUE; }
+        if ((msg == WM_VSCROLL && !l) || msg == WM_MOUSEWHEEL) { if (ScrollMessage(msg, w)) { SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, 0); return TRUE; } }
+        if (msg == WM_SIZE || msg == WM_DPICHANGED_AFTERPARENT) { UpdateScroll(); }
         if (msg == WM_COMMAND && !m_loading) {
             const int id = LOWORD(w), code = HIWORD(w);
             if (code == BN_CLICKED && id == IDC_PM_ADVANCED) { ShowAdvanced(!m_advanced); return TRUE; }
@@ -4985,6 +5109,7 @@ public:
     }
 private:
     bool m_advanced = false, m_loading = true;
+    int m_scrollY = 0;   // pixels the page is scrolled down (F-UI1)
     std::wstring m_pushFpsData;
     void Dirty() { m_bDirty = TRUE; if (m_pPageSite) m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY); }
     // Frame generation method and upscaler: every choice is listed; one this GPU cannot run says so in its text, the note
@@ -5096,6 +5221,7 @@ private:
     void ShowAdvanced(bool on)
     {
         m_advanced = on;
+        if (!on) ScrollTo(0);   // back to the top before the section goes
         for (int id : { IDC_PM_ADV_GROUP, IDC_PM_FGQ_LBL, IDC_PM_FGQ, IDC_PM_TARGET_LBL, IDC_PM_TARGET, IDC_PM_STRENGTH_LBL, IDC_PM_STRENGTH, IDC_PM_FRAMELOG, IDC_PM_IMPORT_NOTE,
                         IDC_PM_STYLE_LBL, IDC_PM_STYLE, IDC_PM_DEBAND_LBL, IDC_PM_DEBAND, IDC_PM_DBSTR_LBL, IDC_PM_DBSTR, IDC_PM_DEBAND_NOW,
                         IDC_PM_FGMETHOD_LBL, IDC_PM_FGMETHOD, IDC_PM_VRR_LBL, IDC_PM_VRR, IDC_PM_UPSCALER_LBL, IDC_PM_UPSCALER, IDC_PM_CAPS_NOTE,
@@ -5105,6 +5231,7 @@ private:
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), on && !m_pushFpsData.empty() ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_GSYNC), on && m_gsyncOffer ? SW_SHOW : SW_HIDE);
         SetDlgItemTextW(m_Dlg, IDC_PM_ADVANCED, on ? L"Hide advanced settings" : L"Show advanced settings");
+        UpdateScroll();
     }
     static void SetIfChanged(HWND dlg, int id, const std::wstring& s)
     {
@@ -5115,12 +5242,37 @@ private:
     void Refresh()
     {
         const PageStatus st = PageSnapshot();
+        // F-UI2: a "Now:" line that does not fit its space loses its explanations in brackets first ("Medium (High at
+        // 5x would take ...)" -> "Medium"); the Status box keeps the full story. The rest is cut with an ellipsis.
+        auto fit = [&](int id, std::wstring s) {
+            HWND c = GetDlgItem(m_Dlg, id);
+            if (!c || s.empty()) return s;
+            RECT r; GetClientRect(c, &r);
+            HDC dc = GetDC(c);
+            HGDIOBJ old = SelectObject(dc, reinterpret_cast<HGDIOBJ>(SendMessageW(c, WM_GETFONT, 0, 0)));
+            auto width = [&](const std::wstring& t) { SIZE z{}; GetTextExtentPoint32W(dc, t.c_str(), int(t.size()), &z); return z.cx; };
+            while (width(s) > r.right) {
+                size_t open = std::wstring::npos;
+                for (const wchar_t* o : { L" (", L" [" }) { const size_t p = s.rfind(o); if (p != std::wstring::npos && (open == std::wstring::npos || p > open)) open = p; }
+                if (open == std::wstring::npos) break;
+                const wchar_t openCh = s[open + 1], closeCh = openCh == L'(' ? L')' : L']';
+                int depth = 0; size_t end = std::wstring::npos;
+                for (size_t i = open + 1; i < s.size(); ++i) {
+                    if (s[i] == openCh) ++depth;
+                    else if (s[i] == closeCh && --depth == 0) { end = i; break; }
+                }
+                s.erase(open, end == std::wstring::npos ? std::wstring::npos : end - open + 1);
+            }
+            SelectObject(dc, old);
+            ReleaseDC(c, dc);
+            return s;
+        };
         auto now = [](const std::wstring& n) { return n.empty() ? std::wstring() : L"Now: " + n; };
-        SetIfChanged(m_Dlg, IDC_PM_SMOOTH_NOW, now(st.smoother));
-        SetIfChanged(m_Dlg, IDC_PM_SHARP_NOW, now(st.sharper));
-        SetIfChanged(m_Dlg, IDC_PM_CLEAN_NOW, now(st.cleanUp));
-        SetIfChanged(m_Dlg, IDC_PM_HDR_NOW, now(st.sdrToHdr));
-        SetIfChanged(m_Dlg, IDC_PM_DEBAND_NOW, st.deband.empty() ? std::wstring() : L"Deband now: " + st.deband);
+        SetIfChanged(m_Dlg, IDC_PM_SMOOTH_NOW, fit(IDC_PM_SMOOTH_NOW, now(st.smoother)));
+        SetIfChanged(m_Dlg, IDC_PM_SHARP_NOW, fit(IDC_PM_SHARP_NOW, now(st.sharper)));
+        SetIfChanged(m_Dlg, IDC_PM_CLEAN_NOW, fit(IDC_PM_CLEAN_NOW, now(st.cleanUp)));
+        SetIfChanged(m_Dlg, IDC_PM_HDR_NOW, fit(IDC_PM_HDR_NOW, now(st.sdrToHdr)));
+        SetIfChanged(m_Dlg, IDC_PM_DEBAND_NOW, fit(IDC_PM_DEBAND_NOW, st.deband.empty() ? std::wstring() : L"Deband now: " + st.deband));
         SetIfChanged(m_Dlg, IDC_PM_STATUS, st.live.empty() ? st.state : st.state + L"\r\n" + st.live);
         RefreshCaps();
     }
