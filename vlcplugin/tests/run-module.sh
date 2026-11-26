@@ -57,7 +57,8 @@ if want vlcrc144; then  # the installer's route: everything in vlcrc, Auto, a 14
 fi
 # after the installer ran: no arguments at all, everything comes from its vlcrc and VLC_PLUGIN_PATH (only when asked)
 if [[ " ${CASES:-} " == *" installed "* ]]; then
-  run installed "${INSTALLED_MULT:-0}" "$CLIP" --
+  # shellcheck disable=SC2086
+  run installed "${INSTALLED_MULT:-0}" "$CLIP" -- ${INSTALLED_ARGS:-}
 fi
 # the platform's default decoding (hardware where VLC finds it: VideoToolbox, VA-API, D3D11VA); VLC converts the
 # hardware pictures in front of the filter and back after it, or drops the filters when it cannot

@@ -6,15 +6,21 @@
   Install:
     1. finds VLC (HKLM/HKCU\Software\VideoLAN\VLC, Program Files) and reads its version and bitness: the plugin is
        64-bit and for VLC 3.0.x; a 32-bit VLC or VLC 4 gets a clear message and nothing is changed;
-    2. copies the plugin to %LOCALAPPDATA%\PushMPC\vlc (VLC's own folder stays untouched, so VLC updates keep it);
+    2. copies the plugin to %LOCALAPPDATA%\PushMPC\vlc (VLC's own folder stays untouched, so VLC updates keep it),
+       with what ships next to it: pm_pushcore.dll (the bridge to PushMPC's pushcore: NVIDIA VFG, DLSS-G, PushFlow,
+       FSR FG, zero copy on VLC's D3D11 device) and libpushmpc_d3d11_plugin.dll (PushMPC's Direct3D 11 output: the
+       GPU's own Super Resolution where the driver has it, else NVIDIA Image Scaling on any GPU);
     3. adds that folder to the user environment variable VLC_PLUGIN_PATH (HKCU\Environment; VLC 3 scans it after its
        own plugins; no plugins cache to rebuild) and broadcasts the change, so VLC started afterwards sees it;
     4. edits %APPDATA%\vlc\vlcrc (backup vlcrc.pushmpc-backup, and the values it replaces in pushmpc-vlc.state.json):
          [core]        video-filter gains postproc:pushmpc_out (the static-chain slot, then the output stage)
+         [core]        vout=pushmpc_d3d11 when that output ships and VLC's output is the default (or direct3d11);
+                       an output the user picked stays; VLC falls back to its own outputs if it cannot open
          [direct3d11]  d3d11-upscale-mode=super (VLC's own RTX / Intel Video Super Resolution when the window is
                        larger than the video; VLC uses its normal scaler on other GPUs)
          [pushmpc]     pushmpc-smoother=0 (Auto)
-  Uninstall restores the replaced values and removes the folder from VLC_PLUGIN_PATH.
+  Uninstall puts vlcrc back byte for byte (or removes it when install created it) as long as nothing else changed it
+  since; otherwise it restores the replaced values. It removes the files and the folder from VLC_PLUGIN_PATH.
   Switch off inside VLC: Tools > Effects and Filters > Video Effects > Advanced > Post processing, or
   Tools > Preferences > All > Video > Filters > PushMPC > Smoother: Off.
   -VlcRc and -NoEnvironment exist for tests (a fake profile).
@@ -60,6 +66,15 @@ function Find-Vlc {
     return $null
 }
 
+# the files that ship next to the plugin (optional: an older build has only the plugin)
+$Extras = @('pm_pushcore.dll', 'libpushmpc_d3d11_plugin.dll')
+function Copy-IfOther([string]$from, [string]$to) {
+    # a repair that runs from the installed folder must not copy a file onto itself
+    if ([IO.Path]::GetFullPath($from).TrimEnd('\') -ieq [IO.Path]::GetFullPath($to).TrimEnd('\')) { return }
+    Copy-Item -Force -LiteralPath $from $to
+}
+function Get-Sha([string]$f) { if (Test-Path -LiteralPath $f) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash } else { return '' } }
+
 function Read-Rc([string]$f) { if (Test-Path $f) { return [IO.File]::ReadAllLines($f) } else { return @() } }
 function Write-Rc([string]$f, [string[]]$lines) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null
@@ -100,7 +115,7 @@ function Read-State {
     return $h
 }
 function Join-Filters([string]$cur, [bool]$add) {
-    $list = @(); if ($cur) { $list = $cur.Split(':') | Where-Object { $_ -and $_ -ne 'postproc' -and $_ -ne 'pushmpc_out' } }
+    $list = @(); if ($cur) { $list = @($cur.Split(':') | Where-Object { $_ -and $_ -ne 'postproc' -and $_ -ne 'pushmpc_out' }) }
     if ($add) { $list += 'postproc', 'pushmpc_out' }
     return ($list -join ':')
 }
@@ -126,7 +141,8 @@ switch ($Action) {
         Write-Host ("VLC: " + $(if ($v) { "$($v.Version) in $($v.Dir) ($(if ($v.Is64) {'64-bit'} else {'32-bit'}))" } else { 'not found' }))
         Write-Host "plugin: $(if (Test-Path (Join-Path $PluginDir 'libpushmpc_plugin.dll')) { $PluginDir } else { 'not installed' })"
         Write-Host "VLC_PLUGIN_PATH (user): $([Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User'))"
-        Write-Host "video-filter: $(Get-RcValue (Read-Rc $VlcRc) 'core' 'video-filter')"
+        Write-Host "video-filter: $(Get-RcValue (Read-Rc $VlcRc) 'core' 'video-filter'); vout: $(Get-RcValue (Read-Rc $VlcRc) 'core' 'vout')"
+        foreach ($x in $Extras) { Write-Host "${x}: $(if (Test-Path (Join-Path $PluginDir $x)) { 'installed' } else { 'not installed' })" }
     }
     'Install' {
         if (-not $SkipVlcCheck) {
@@ -138,34 +154,58 @@ switch ($Action) {
         if (-not $Plugin) { $Plugin = Join-Path $PSScriptRoot 'libpushmpc_plugin.dll' }
         if (-not (Test-Path $Plugin)) { throw "plugin not found: $Plugin" }
         New-Item -ItemType Directory -Force -Path $PluginDir | Out-Null
-        Copy-Item -Force $Plugin (Join-Path $PluginDir 'libpushmpc_plugin.dll')
+        Copy-IfOther $Plugin (Join-Path $PluginDir 'libpushmpc_plugin.dll')
+        $have = @{}
+        foreach ($x in $Extras) {
+            $sx = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Plugin).Path) $x
+            if (Test-Path -LiteralPath $sx) { Copy-IfOther $sx (Join-Path $PluginDir $x); $have[$x] = $true }
+            else { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $PluginDir $x) }   # not in this build: no stale copy
+        }
         Set-UserPluginPath $PluginDir $true
         $lines = Read-Rc $VlcRc
-        if ((Test-Path $VlcRc) -and -not (Test-Path "$VlcRc.pushmpc-backup")) { Copy-Item $VlcRc "$VlcRc.pushmpc-backup" }
+        # the backup is of the user's own vlcrc: a repeated install (a repair) keeps the first one
+        if ((Test-Path $VlcRc) -and -not (Read-State) -and -not (Test-Path "$VlcRc.pushmpc-backup")) { Copy-Item $VlcRc "$VlcRc.pushmpc-backup" }
         $state = @{
             'video-filter' = Get-RcValue $lines 'core' 'video-filter'
             'd3d11-upscale-mode' = Get-RcValue $lines 'direct3d11' 'd3d11-upscale-mode'
+            'vout' = Get-RcValue $lines 'core' 'vout'
             # no vlcrc yet (VLC never ran): uninstall removes the one this install wrote
             'vlcrc-absent' = $(if (Test-Path $VlcRc) { 'no' } else { 'yes' })
             'vlcdir-absent' = $(if (Test-Path (Split-Path $VlcRc)) { 'no' } else { 'yes' })
         }
         $prev = Read-State; if ($prev) { $state = $prev }  # a repeated install keeps the first originals
-        $state | ConvertTo-Json | Set-Content -Encoding UTF8 $stateFile
         $lines = Set-RcValue $lines 'core' 'video-filter' (Join-Filters (Get-RcValue $lines 'core' 'video-filter') $true)
         $lines = Set-RcValue $lines 'direct3d11' 'd3d11-upscale-mode' 'super'
         $lines = Set-RcValue $lines 'pushmpc' 'pushmpc-smoother' '0'
+        # PushMPC's Direct3D 11 output (VLC's own, plus an upscaler for every GPU) in place of VLC's default output
+        $vout = Get-RcValue $lines 'core' 'vout'
+        if ($have['libpushmpc_d3d11_plugin.dll']) {
+            if (-not $vout -or $vout -in 'any', 'direct3d11', 'pushmpc_d3d11') { $lines = Set-RcValue $lines 'core' 'vout' 'pushmpc_d3d11' }
+            else { Write-Host "VLC's video output stays $vout (your choice); vout=pushmpc_d3d11 adds PushMPC's upscaling" }
+        } elseif ($vout -eq 'pushmpc_d3d11') { $lines = Set-RcValue $lines 'core' 'vout' $state['vout'] }
         Write-Rc $VlcRc $lines
-        Write-Host "PushMPC for VLC installed: plugin in $PluginDir, settings in $VlcRc"
+        $state['vlcrc-installed'] = Get-Sha $VlcRc
+        $state | ConvertTo-Json | Set-Content -Encoding UTF8 $stateFile
+        Write-Host "PushMPC for VLC installed: plugin in $PluginDir$(if ($have.Count) { ' with ' + (@($have.Keys | Sort-Object) -join ', ') }), settings in $VlcRc"
     }
     'Uninstall' {
         $state = Read-State
-        if (Test-Path $VlcRc) {
+        $exact = $state -and "$($state['vlcrc-installed'])" -and (Get-Sha $VlcRc) -eq "$($state['vlcrc-installed'])"
+        if ($exact -and "$($state['vlcrc-absent'])" -ne 'yes' -and (Test-Path "$VlcRc.pushmpc-backup")) {
+            # nothing changed vlcrc since install: the file as it was, byte for byte
+            Copy-Item -Force "$VlcRc.pushmpc-backup" $VlcRc; Remove-Item -Force "$VlcRc.pushmpc-backup"
+        } elseif ($exact -and "$($state['vlcrc-absent'])" -eq 'yes') {
+            Remove-Item -Force $VlcRc
+            $dir = Split-Path $VlcRc
+            if ("$($state['vlcdir-absent'])" -eq 'yes' -and (Test-Path $dir) -and -not (Get-ChildItem $dir -Force)) { Remove-Item $dir }
+        } elseif (Test-Path $VlcRc) {
             $lines = Read-Rc $VlcRc
             $rest = Join-Filters (Get-RcValue $lines 'core' 'video-filter') $false
             $lines = Set-RcValue $lines 'core' 'video-filter' $(if ($rest) { $rest } else { $null })
             $orig = if ($state) { $state['d3d11-upscale-mode'] } else { $null }
             $lines = Set-RcValue $lines 'direct3d11' 'd3d11-upscale-mode' $orig
             $lines = Set-RcValue $lines 'pushmpc' 'pushmpc-smoother' $null
+            if ((Get-RcValue $lines 'core' 'vout') -eq 'pushmpc_d3d11') { $lines = Set-RcValue $lines 'core' 'vout' $(if ($state) { $state['vout'] } else { $null }) }
             Write-Rc $VlcRc $lines
             # a vlcrc this install created and VLC never filled holds no setting now: removed again (and VLC's folder)
             if ($state -and "$($state.'vlcrc-absent')" -eq 'yes' -and -not @(Get-Content $VlcRc | Where-Object { $_.Trim() -and $_ -notmatch '^\s*(\[|#)' }).Count) {
@@ -176,6 +216,7 @@ switch ($Action) {
         }
         Set-UserPluginPath $PluginDir $false
         Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $PluginDir 'libpushmpc_plugin.dll'), $stateFile
+        foreach ($x in $Extras) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $PluginDir $x) }
         if ((Test-Path $PluginDir) -and -not (Get-ChildItem $PluginDir)) { Remove-Item $PluginDir }
         Write-Host 'PushMPC for VLC removed.'
     }

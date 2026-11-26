@@ -25,6 +25,9 @@ install -m 755 integrations/linux/install.sh "$d/install.sh"
 # which setup.sh installs when VLC / Kodi is found
 if [ -n "${PUSHMPC_VLC_PLUGIN:-}" ] && [ -f "$PUSHMPC_VLC_PLUGIN" ]; then
     mkdir -p "$d/vlc"; install -m 755 "$PUSHMPC_VLC_PLUGIN" "$d/vlc/libpushmpc_plugin.so"; install -m 755 vlcplugin/install/pushmpc-vlc.sh "$d/vlc/pushmpc-vlc.sh"
+    # PushMPC's OpenGL output with FSR 1 upscaling (vout=pushmpc_gl), from the same build; the installer sets it up
+    glf="$(dirname "$PUSHMPC_VLC_PLUGIN")/libpushmpc_gl_plugin.so"
+    if [ -f "$glf" ]; then install -m 755 "$glf" "$d/vlc/libpushmpc_gl_plugin.so"; else echo "make-tarball.sh: no libpushmpc_gl_plugin.so next to the VLC module: VLC keeps its own output" >&2; fi
     if [ -n "${PUSHMPC_VLC_SELFTEST_CLIP:-}" ] && [ -f "$PUSHMPC_VLC_SELFTEST_CLIP" ]; then install -m 644 "$PUSHMPC_VLC_SELFTEST_CLIP" "$d/vlc/pushmpc-selftest.mkv"
     else echo "make-tarball.sh: no PUSHMPC_VLC_SELFTEST_CLIP: VLC's hardware-decoding self-test will be skipped on install" >&2; fi
 fi
