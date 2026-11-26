@@ -2148,6 +2148,24 @@ public:
     }
     // the playback graph once per connection (filters, their CLSIDs and pin connections): what really sits upstream
     bool m_graphLogged = false;
+    int64_t m_segQpc = 0; std::atomic<int> m_segSamples = 0;
+    // the filters upstream of our input, nearest first (LAV Video, then the splitter, ...)
+    std::wstring UpstreamChain()
+    {
+        std::wstring s; IPin* p = m_pInput ? m_pInput->GetConnected() : nullptr; ComPtr<IPin> hold;
+        for (int i = 0; p && i < 6; ++i) {
+            PIN_INFO pi = {}; if (FAILED(p->QueryPinInfo(&pi)) || !pi.pFilter) break;
+            ComPtr<IBaseFilter> f; f.Attach(pi.pFilter);
+            FILTER_INFO fi = {}; f->QueryFilterInfo(&fi); if (fi.pGraph) fi.pGraph->Release();
+            s += (s.empty() ? L"" : L" <- ") + std::wstring(fi.achName);
+            ComPtr<IEnumPins> e; ComPtr<IPin> in, up; p = nullptr;
+            if (FAILED(f->EnumPins(&e))) break;
+            while (e->Next(1, &in, nullptr) == S_OK) { PIN_DIRECTION d; in->QueryDirection(&d); if (d == PINDIR_INPUT && SUCCEEDED(in->ConnectedTo(&up)) && up) break; in.Reset(); }
+            if (!up) break;
+            hold = up; p = hold.Get();
+        }
+        return s.empty() ? std::wstring(L"(not connected)") : s;
+    }
     void LogGraph()
     {
         if (!m_pGraph) return;
@@ -2186,6 +2204,7 @@ public:
     HRESULT NewSegment(REFERENCE_TIME start, REFERENCE_TIME stop, double rate) override
     {
         Log(std::format("NewSegment start {:.3f} s rate {}", start / 1e7, rate));
+        m_segQpc = Qpc(); m_segSamples = 0;
         // the playback rate (F9): the splitter's timestamps are divided by it, so the source interval is the measured
         // interval at 1.0x divided by the rate, set at once (one Auto decision per change, no estimate converging)
         const double r = rate > 0 ? rate : 1.0, was = m_rate.load();
@@ -2246,6 +2265,13 @@ public:
     HRESULT EndOfStream() override
     {
         Log("EndOfStream from upstream");
+        if (m_segQpc && m_segSamples.load() == 0) {
+            // the decoder ended the video without one frame since the segment started: the audio plays on over a black
+            // picture. Not ours to fix (no frame came in), but it must not be silent: say it in the log and the status.
+            Log(std::format("WARNING: the video stream ended {:.0f} ms after NewSegment with NO video frame from upstream (audio may play on over a black picture); the upstream chain: {}",
+                QpcMs(Qpc() - m_segQpc), Narrow(UpstreamChain())));
+            SetStatus(L"the video decoder sent no frames (end of stream right after the start); see the log");
+        }
         if (m_mode == Mode::PassSys) return CTransformFilter::EndOfStream();
         if (m_mode == Mode::Active) { m_eos = true; SetEvent(m_hSubmit); return S_OK; }
         PushReady(ReadyItem{ nullptr, 0, 0, 3, 0, m_flushGen.load(), Qpc() });
@@ -3562,6 +3588,7 @@ HRESULT CPushMpcFilter::PassSysmem(IMediaSample* pIn)
 
 HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
 {
+    ++m_segSamples;
     if (m_flushing || m_stopReq) return S_OK;
     AM_MEDIA_TYPE* pmt = nullptr;
     if (pIn->GetMediaType(&pmt) == S_OK && pmt) {
