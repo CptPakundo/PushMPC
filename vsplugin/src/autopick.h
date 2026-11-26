@@ -57,8 +57,26 @@ inline HWND MpvWindow()
     }, reinterpret_cast<LPARAM>(&ctx));
     return ctx.found;
 }
-// displayFps: mpv's display_fps (<= 0 = unknown); haveWindow: the player's window is known (else VRR Auto = fixed)
-inline pm::Display ResolveDisplay(const pm::Display& queried, bool haveWindow, pm::VrrMode vrr, double displayFps, int displayHdr)
+// mpv was started full screen (--fs, --fullscreen, --fs=yes on its command line). The filter starts before mpv's window
+// goes full screen, so the window alone says "windowed" for a player that is about to fill the screen.
+inline bool MpvStartsFullscreen(const std::wstring& cmdline)
+{
+    std::wstring c = L" " + cmdline + L" ";
+    for (auto& ch : c) ch = wchar_t(towlower(ch));
+    bool on = false;
+    for (const wchar_t* k : { L" --fs", L" --fullscreen" }) {
+        for (size_t p = c.find(k); p != std::wstring::npos; p = c.find(k, p + 1)) {
+            const size_t e = p + wcslen(k);
+            if (c[e] == L' ' || c[e] == L'"') on = true;
+            else if (c.compare(e, 4, L"=yes") == 0) on = true;
+            else if (c.compare(e, 3, L"=no") == 0) on = false;
+        }
+    }
+    return on;
+}
+// displayFps: mpv's display_fps (<= 0 = unknown); haveWindow: the player's window is known (else VRR Auto = fixed);
+// startsFullscreen: -1 = from this process's command line (mpv --fs)
+inline pm::Display ResolveDisplay(const pm::Display& queried, bool haveWindow, pm::VrrMode vrr, double displayFps, int displayHdr, int startsFullscreen = -1)
 {
     pm::Display d = queried;
     if (displayFps > 1) d.refreshHz = displayFps;
@@ -66,6 +84,18 @@ inline pm::Display ResolveDisplay(const pm::Display& queried, bool haveWindow, p
     if (!haveWindow && vrr == pm::VrrMode::Auto) {
         d.vrr = false; d.vrrKnown = false;
         d.vrrHow = L"the player's window is not known to the plugin (embedded or headless): fixed refresh assumed";
+    } else if (vrr == pm::VrrMode::Auto && !d.vrr && d.vrrHow.find(L"the player is windowed") != std::wstring::npos) {
+        const bool fs = startsFullscreen >= 0 ? startsFullscreen != 0 : MpvStartsFullscreen(GetCommandLineW());
+        const bool amd = d.vrrHow.find(L"FreeSync") != std::wstring::npos;
+        if (fs && (d.vrrCapable || amd)) {
+            // the profile's scope covers full screen and mpv was asked for it: VRR from the first frame
+            d.vrr = true;
+            d.vrrHow = amd ? L"FreeSync for mpv's window (AMD driver: on; mpv started full screen)"
+                           : L"G-SYNC for mpv's window (fullscreen only; mpv started full screen)";
+        } else {
+            const size_t p = d.vrrHow.find(L"the player is windowed");
+            d.vrrHow.replace(p, wcslen(L"the player is windowed"), L"mpv's window was not full screen when PushMPC started");
+        }
     }
     return d;
 }

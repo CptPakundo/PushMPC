@@ -217,6 +217,17 @@ static void TestAuto()
     // with mpv's window known the probed state stays
     d = ResolveDisplay(q, true, pm::VrrMode::Auto, 240, -1);
     CHECK(d.vrr);
+    // mpv started with --fs: its window is not full screen yet when the filter starts; G-SYNC fullscreen-only covers it
+    CHECK(MpvStartsFullscreen(L"mpv.exe --fs clip.mkv") && MpvStartsFullscreen(L"mpv --fullscreen=yes x") && !MpvStartsFullscreen(L"mpv --fs=no x")
+          && !MpvStartsFullscreen(L"mpv --fs-screen=1 x") && !MpvStartsFullscreen(L"mpv clip.mkv"));
+    {
+        pm::Display w = q; w.vrr = false; w.vrrCapable = true;
+        w.vrrHow = L"G-SYNC is fullscreen-only and the player is windowed (NVIDIA profile: application mode 1, global mode 1)";
+        pm::Display f = ResolveDisplay(w, true, pm::VrrMode::Auto, 240, -1, 1);
+        CHECK(f.vrr && f.vrrHow.find(L"mpv started full screen") != std::wstring::npos);
+        f = ResolveDisplay(w, true, pm::VrrMode::Auto, 240, -1, 0);
+        CHECK(!f.vrr && f.vrrHow.find(L"not full screen when PushMPC started") != std::wstring::npos);
+    }
     // display_hdr forces the HDR flag
     d = ResolveDisplay(q, false, pm::VrrMode::Auto, 0, 1); CHECK(d.hdr && d.refreshHz == 60);
     // the user's Smoother setting caps it
