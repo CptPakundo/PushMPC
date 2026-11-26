@@ -82,7 +82,8 @@ jobs:
           tag=$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['tag'])")
           up="$RUNNER_TEMP/upstream"; mkdir -p "$up/shaders"
           for f in VfgShotChange.hlsl; do curl -fsSL --retry 3 -o "$up/shaders/$f" "https://raw.githubusercontent.com/DosukaSOL/PushFPS/$tag/shaders/$f"; done
-          (cd "$up" && git init -q && git apply --include='shaders/VfgShotChange.hlsl' --include='shaders/VfgFourierMellin.hlsl' "$GITHUB_WORKSPACE/$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['patch'])")")
+          patch=$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['patch'])")   # read here: the subshell below runs in $up
+          (cd "$up" && git init -q && git apply --include='shaders/VfgShotChange.hlsl' --include='shaders/VfgFourierMellin.hlsl' "$GITHUB_WORKSPACE/$patch")
           for f in VfgShotChange.hlsl VfgFourierMellin.hlsl; do cmp "$up/shaders/$f" "vsplugin/engines/nvidia-linux/shaders/$f"; done
           echo "vendored HLSL = PushFPS $tag + PushMPC's patch"
 
