@@ -313,7 +313,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
-#define PUSHCORE_FEATURE_HELIXSR (1u << 18) /* PUSHCORE_FG_HELIXFG, PUSHCORE_CAP_HELIX_FG / PUSHCORE_CAP_HLX_FSR4 */
+#define PUSHCORE_FEATURE_HELIXSR (1u << 26) /* PUSHCORE_FG_HELIXFG, PUSHCORE_CAP_HELIX_FG / PUSHCORE_CAP_HLX_FSR4 */
 #define PUSHCORE_FEATURE_TURING_DLSSG (1u << 17) /* PUSHCORE_FG_DLSSG on RTX 20 through the community port (Setup fetches it;
                                                     self-tested on the first DLSS-G open, unlock TuringDlssg); PUSHCORE_CAP_DLSSG says
                                                     whether it is usable on this card */
