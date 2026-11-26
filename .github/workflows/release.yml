@@ -657,6 +657,27 @@ jobs:
 
           Get-ChildItem $rel -File | Format-Table Name, Length
 
+      # G13: every component in scripts/release-components.txt must be in the release; a release (tag, not a dry run)
+      # fails without one, a dry run warns
+      - name: Expected components (scripts/release-components.txt)
+        timeout-minutes: 2
+        env:
+          STRICT: ${{ steps.version.outputs.tag != '' && inputs.dry_run != true }}
+        run: |
+          $stage = 'repo/stage/PushMPC'; $rel = "$env:RUNNER_TEMP\release"; $missing = @()
+          foreach ($line in Get-Content repo/scripts/release-components.txt) {
+            $l = ($line -replace '#.*$', '').Trim(); if (-not $l) { continue }
+            $name, $where, $path = $l -split '\s+', 3
+            $base = switch ($where) { 'stage' { $stage } 'release' { $rel } default { throw "release-components.txt: unknown place '$where' ($l)" } }
+            if (Test-Path (Join-Path $base $path)) { Write-Host "ok       $name ($where $path)" }
+            else { Write-Host "MISSING  $name ($where $path)"; $missing += "$name ($where $path)" }
+          }
+          if (-not $missing) { 'All expected components are in the release.' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY; exit 0 }
+          $msg = "Missing release components: $($missing -join ', ')"
+          "## :warning: $msg" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($env:STRICT -eq 'true') { Write-Host "::error title=Release components::$msg (not publishing)"; exit 1 }
+          Write-Host "::warning title=Release components::$msg (dry run: not fatal)"
+
       - uses: actions/upload-artifact@v4
         with:
           name: pushmpc-release
@@ -852,6 +873,8 @@ jobs:
         continue-on-error: true
         with: { name: plexmac, path: plexmac }
       - name: pushmpc-plex-mac-<version>.tar.gz
+        env:   # G13: a release (tag or beta, not a dry run) needs the bundle
+          STRICT: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}
         run: |
           ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
           mkdir -p dist
@@ -862,6 +885,7 @@ jobs:
             shasum -a 256 "dist/pushmpc-plex-mac-$ver.tar.gz"
           else
             echo "::warning title=Plex for Mac::no plexmac artifact (mpv-native.yml plex-macos): the release has no Plex for Mac bundle"
+            [ "$STRICT" != true ] || { echo "::error title=Plex for Mac::a release needs the Plex for Mac bundle"; exit 1; }
           fi
       - uses: actions/upload-artifact@v4
         with: { name: pushmpc-macos, path: dist/, if-no-files-found: ignore }
@@ -901,8 +925,9 @@ jobs:
         with: { name: pushmpc-src, path: src/, if-no-files-found: error }
 
   publish:
-    needs: [build, gpu-smoke, linux, macos, formula]
-    if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
+    # G13: a release goes out only with every component built (vlc, mpvnative, kodi, macos, formula all green)
+    needs: [build, gpu-smoke, linux, macos, formula, vlc, mpvnative, kodi]
+    if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.vlc.result == 'success' && needs.mpvnative.result == 'success' && needs.kodi.result == 'success' && needs.macos.result == 'success' && needs.formula.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

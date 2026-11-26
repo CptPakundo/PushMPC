@@ -1,0 +1,13 @@
+# The components every release must contain. release.yml's build job checks each line after packaging: a release
+# (a tag, not a dry run) fails when one is missing; a dry run lists what is missing as a warning.
+#
+# One component per line: <name> <where> <path>
+#   where = stage    <path> is relative to the staged release folder (repo/stage/PushMPC): what Setup installs
+#   where = release  <path> is a file name (wildcards allowed) in the release folder: a separate release asset
+# Add a line here when a new component ships; nothing else needs to change.
+vlc         stage    vlc/libpushmpc_plugin.dll
+kodi        stage    kodi/kodi21
+kodi22      stage    kodi/kodi22
+plexnative  stage    plexnative/avfilter-8.dll
+mpvbuild    stage    filter/mpvbuild.json
+mpvbuild    release  PushMPC-mpv-windows-*.zip
