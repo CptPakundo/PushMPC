@@ -92,18 +92,34 @@ public static class PlexHost {
         if ($p -ne [IntPtr]::Zero) { $status = [Runtime.InteropServices.Marshal]::PtrToStringAnsi(([Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($p, [PlexHost+StatusFn])).Invoke()) }
         else { $status = 'avfilter-8.dll is not the proxy' }
     }
-    [void][PlexHost]::mpv_command_string($ctx, [PlexHost]::U('loadfile "av://lavfi:testsrc=size=320x180:rate=24:duration=2"'))
-    $deadline = (Get-Date).AddSeconds(40); $reason = 'timeout'
-    while ((Get-Date) -lt $deadline) {
-        $ev = [PlexHost]::mpv_wait_event($ctx, 1.0); $id = [Runtime.InteropServices.Marshal]::ReadInt32($ev)
-        if ($id -eq 7) { $reason = @{ 0 = 'eof'; 2 = 'stop'; 3 = 'quit'; 4 = 'error' }[[Runtime.InteropServices.Marshal]::ReadInt32([Runtime.InteropServices.Marshal]::ReadIntPtr($ev, 16))]; break }
-        if ($id -eq 1) { $reason = 'shutdown'; break }
+    # what Plex's FFmpeg can open varies (no libavdevice, so no av://lavfi; its own decoder set): a shipped H.264 clip
+    # (pushmpc-selftest-*, next to this script), then a Y4M written here, then av://lavfi
+    $y4m = Join-Path ([IO.Path]::GetTempPath()) ('pushmpc-plex-selftest-' + [guid]::NewGuid().ToString('N') + '.y4m')
+    $fs = [IO.File]::Create($y4m); $hdr = [Text.Encoding]::ASCII.GetBytes("YUV4MPEG2 W64 H64 F24:1 Ip A1:1 C420jpeg`n"); $fs.Write($hdr, 0, $hdr.Length)
+    $fr = [Text.Encoding]::ASCII.GetBytes("FRAME`n"); $px = New-Object byte[] 6144
+    for ($n = 0; $n -lt 48; $n++) { for ($k = 0; $k -lt 4096; $k++) { $px[$k] = [byte](($k + $n * 5) % 256) }; for ($k = 4096; $k -lt 6144; $k++) { $px[$k] = 128 }; $fs.Write($fr, 0, $fr.Length); $fs.Write($px, 0, 6144) }
+    $fs.Close()
+    $cands = @(Get-ChildItem $PSScriptRoot -Filter 'pushmpc-selftest*' -ErrorAction SilentlyContinue | ForEach-Object FullName) + @($y4m, 'av://lavfi:testsrc=size=320x180:rate=24:duration=2')
+    $reason = 'none'; $f = ''; $tried = @()
+    foreach ($c in $cands) {
+        [void][PlexHost]::mpv_command_string($ctx, [PlexHost]::U("loadfile `"$($c.Replace('\', '/'))`""))
+        $deadline = (Get-Date).AddSeconds(40); $reason = 'timeout'
+        while ((Get-Date) -lt $deadline) {
+            $ev = [PlexHost]::mpv_wait_event($ctx, 1.0); $id = [Runtime.InteropServices.Marshal]::ReadInt32($ev)
+            if ($id -eq 7) { $reason = @{ 0 = 'eof'; 2 = 'stop'; 3 = 'quit'; 4 = 'error' }[[Runtime.InteropServices.Marshal]::ReadInt32([Runtime.InteropServices.Marshal]::ReadIntPtr($ev, 16))]; break }
+            if ($id -eq 1) { $reason = 'shutdown'; break }
+        }
+        Start-Sleep -Milliseconds 200
+        $t = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { '' }
+        $f = [regex]::Match($t, '(?:pushcore|portable-cpu|portable-vulkan) \([^\r\n]*?, x\d').Value
+        $tried += "$(if ($c -like 'av://*') { 'lavfi' } else { [IO.Path]::GetFileName($c) -replace '^pushmpc-selftest-', '' -replace '^pushmpc-plex-selftest-[0-9a-f]+', 'generated' }): $reason"
+        if ($reason -eq 'eof' -and $f) { break }
     }
     [PlexHost]::mpv_terminate_destroy($ctx)
-    $t = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
-    $f = [regex]::Match($t, 'portable-cpu[^\r\n]*?x\d').Value
-    Write-Output "selftest: vf option $(if ($vfrc -ge 0) { 'accepted' } else { "refused ($vfrc)" }); proxy: $status; playback: $reason; filter: $(if ($f) { $f } else { 'not seen' })"
-    Remove-Item $log -ErrorAction SilentlyContinue
+    $t = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { '' }
+    $why = if ($reason -eq 'eof' -and $f) { '' } else { '; log: ' + ((@([regex]::Matches($t, '[^\r\n]*(?:Failed|failed|rror|not found|No such)[^\r\n]*') | Select-Object -First 4 | ForEach-Object { $_.Value.Trim() })) -join ' | ') }
+    Write-Output "selftest: vf option $(if ($vfrc -ge 0) { 'accepted' } else { "refused ($vfrc)" }); proxy: $status; playback: $($tried -join ', '); filter: $(if ($f) { $f } else { 'not seen' })$why"
+    Remove-Item $log, $y4m -ErrorAction SilentlyContinue
     exit $(if ($vfrc -ge 0 -and $f -and $reason -eq 'eof') { 0 } else { 3 })
 }
 

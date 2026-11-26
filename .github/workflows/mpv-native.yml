@@ -406,8 +406,24 @@ jobs:
           path: ${{ runner.temp }}/plexlibs/*.dll
           retention-days: 7
 
+  # self-test clips for players whose FFmpeg is their own (Plex: no libavdevice, a reduced decoder set). Shipped next
+  # to the Plex installers as pushmpc-selftest-*.
+  selftest-clips:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg >/dev/null
+          mkdir clips; src="testsrc2=size=320x180:rate=24:duration=2"
+          ffmpeg -v error -f lavfi -i $src -c:v libx264 -profile:v main -pix_fmt yuv420p -movflags +faststart clips/pushmpc-selftest-h264.mp4
+          ffmpeg -v error -f lavfi -i $src -c:v libx265 -pix_fmt yuv420p -x265-params log-level=error clips/pushmpc-selftest-hevc.mkv
+          ffmpeg -v error -f lavfi -i $src -c:v libvpx-vp9 -b:v 200k clips/pushmpc-selftest-vp9.webm
+          ls -la clips
+      - uses: actions/upload-artifact@v4
+        with: { name: selftest-clips, path: clips/, retention-days: 7 }
+
   plex:
-    needs: plex-libs
+    needs: [plex-libs, selftest-clips]
     runs-on: windows-2025
     timeout-minutes: 45
     defaults: { run: { shell: pwsh } }
@@ -415,6 +431,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: plexlibs, path: '${{ runner.temp }}/plexlibs' }
+      - uses: actions/download-artifact@v4
+        with: { name: selftest-clips, path: '${{ runner.temp }}/plexlibs' }
       - name: Engine module (MSVC) next to the proxy
         run: |
           cmake -S mpvnative/engine -B build-engine -A x64 -DPME_VULKAN=OFF
@@ -483,7 +501,7 @@ jobs:
   # Plex desktop / HTPC on Linux (Flathub): Plex bundles libmpv + FFmpeg 5.x (libavfilter.so.8); pushmpc_preload.so via
   # `flatpak override --env=LD_PRELOAD` adds vf_pushmpc. Self-test inside the sandbox with Plex's own libmpv.
   plex-linux:
-    needs: hook-libs
+    needs: [hook-libs, selftest-clips]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -492,19 +510,21 @@ jobs:
         with:
           pattern: hooklib-x64-*
           path: ${{ runner.temp }}/hooklibs
+      - uses: actions/download-artifact@v4
+        with: { name: selftest-clips, path: '${{ runner.temp }}/clips' }
       - name: The preload, the engine (Debian 12 build), the self-test host
         run: |
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
-          cc -O2 -Wall mpvnative/plex/libmpv_host.c -o "$RUNNER_TEMP/libmpv_host" -ldl
+          cc -O2 -Wall mpvnative/plex/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '
       - name: Flathub Plex (tv.plex.PlexDesktop, tv.plex.PlexHTPC)
         timeout-minutes: 25
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends flatpak ffmpeg xvfb xauth >/dev/null
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends flatpak xvfb xauth >/dev/null
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
             flatpak install --user -y --noninteractive flathub "$id" > /dev/null 2>&1 && echo "$id: installed $(flatpak info --user "$id" | sed -n 's/^ *Version: //p')" || echo "$id: not installed"
@@ -517,37 +537,26 @@ jobs:
             timeout 25 xvfb-run -a flatpak run --user "$id" > /dev/null 2>&1 || true
             (cd "$HOME/.var/app/$id" && find . -maxdepth 3 -type d | grep -v '/cache' | sort | head -30)
           done
-      - name: Install, uninstall bit-exact, then self-test through Plex's libmpv in its sandbox
+      - name: Install (self-test through Plex's libmpv in its sandbox), status, uninstall bit-exact
         timeout-minutes: 15
         run: |
           d="$RUNNER_TEMP/plexlin"; fails=0; tested=0
+          cp "$RUNNER_TEMP"/clips/pushmpc-selftest-* "$d/"
           for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
             flatpak info --user "$id" >/dev/null 2>&1 || continue
+            tested=$((tested + 1))
             n=$( [ "$id" = tv.plex.PlexDesktop ] && echo desktop || echo htpc )
             snap() { (cd "$HOME/.var/app" && find "$id" -path '*/cache' -prune -o -type f -print | sort | xargs -r sha256sum | sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
             before=$(snap)
-            sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" --json || { echo "::error::$id: install failed"; fails=$((fails + 1)); continue; }
+            out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" --json); rc=$?; echo "install: $out"
+            echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \
+              && echo "$id: vf_pushmpc active through Plex's libmpv" || { echo "::error::$id: install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
             flatpak override --user --show "$id"
-            sh mpvnative/install/pushmpc-plex-linux.sh status --target "$n" --json
-            sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target "$n" --json
+            echo "status: $(sh mpvnative/install/pushmpc-plex-linux.sh status --target "$n" --json)"
+            echo "uninstall: $(sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target "$n" --json)"
             [ "$(snap)" = "$before" ] && echo "$id: uninstall restored the files and overrides exactly" || { echo "::error::$id: files or overrides differ after uninstall"; fails=$((fails + 1)); }
-            # the sandbox run: installed again, clips in formats a custom FFmpeg build is likely to decode
-            sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" > /dev/null 2>&1
-            t="$HOME/.var/app/$id/pushmpc-test"; mkdir -p "$t"; cp "$RUNNER_TEMP/libmpv_host" "$t/"
-            ffmpeg -v error -y -f lavfi -i testsrc2=size=320x180:rate=24:duration=2 -pix_fmt yuv420p "$t/clip.y4m"
-            ffmpeg -v error -y -f lavfi -i testsrc2=size=320x180:rate=24:duration=2 -c:v mpeg4 -q:v 3 "$t/clip.avi"
-            ffmpeg -v error -y -f lavfi -i testsrc2=size=320x180:rate=24:duration=2 -c:v mjpeg -q:v 3 "$t/clip.mkv"
-            lib=$(flatpak run --user --command=sh "$id" -c 'find /app -name "libmpv.so*" 2>/dev/null | sort | head -1')
-            echo "$id: Plex's libmpv: ${lib:-none}"
-            if [ -n "$lib" ]; then
-              tested=$((tested + 1))
-              out=$(flatpak run --user --command="$t/libmpv_host" "$id" "$lib" "$t/clip.y4m" "$t/clip.avi" "$t/clip.mkv" 2>&1); rc=$?
-              echo "$out" | grep -E "^host:|pushmpc" | head -20
-              [ "$rc" = 0 ] && echo "$id: vf_pushmpc active through Plex's libmpv" || { echo "$out" | tail -20; echo "::error::$id: the filter is not active through Plex's libmpv (exit $rc)"; fails=$((fails + 1)); }
-            fi
-            rm -rf "$t"; sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target "$n" > /dev/null 2>&1
           done
-          [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak with a libmpv to test"; exit 1; }
+          [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak installed"; exit 1; }
           [ "$fails" = 0 ] && echo "plex-linux: all checks passed" || exit 1
 
   # Plex for Mac: what the bundle holds (signature, entitlements, libmpv / FFmpeg dylibs). Dispatch only (macOS minutes).

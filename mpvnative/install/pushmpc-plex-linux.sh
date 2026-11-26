@@ -66,8 +66,28 @@ conf_remove() {
     else rm -f "$c.pushmpc-native-backup" "$c.pushmpc-native-absent"; fi
 }
 files_ok() { [ -f "$from/pushmpc_preload.so" ] && [ -f "$from/libpushmpc_engine.so" ] && ls "$from"/libpushmpc-avfilter-8.*.so >/dev/null 2>&1; }
-copy_files() { mkdir -p "$1" && cp "$from/pushmpc_preload.so" "$from/libpushmpc_engine.so" "$from"/libpushmpc-avfilter-*.so "$1/" && { [ ! -f "$from/SOURCES.txt" ] || cp "$from/SOURCES.txt" "$1/"; }; }
-remove_files() { rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent"; rmdir "$1" 2>/dev/null; }
+copy_files() {
+    mkdir -p "$1" && cp "$from/pushmpc_preload.so" "$from/libpushmpc_engine.so" "$from"/libpushmpc-avfilter-*.so "$1/" || return 1
+    for x in SOURCES.txt pushmpc-plex-selftest "$from"/pushmpc-selftest-*; do x=${x##*/}; [ ! -f "$from/$x" ] || cp "$from/$x" "$1/"; done
+}
+remove_files() { rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent" "$1/pushmpc-plex-selftest" "$1"/pushmpc-selftest-*; rmdir "$1" 2>/dev/null; }
+# selftest <dir> <libmpv path> <runner...>: Plex's own libmpv plays the shipped clips with vf=pushmpc through the
+# preload (pushmpc-plex-selftest = mpvnative/plex/libmpv_host.c). Sets st_detail; returns 0 active, 3 not, 2 no test.
+selftest() {
+    d=$1; lib=$2; shift 2
+    [ -x "$d/pushmpc-plex-selftest" ] && ls "$d"/pushmpc-selftest-* >/dev/null 2>&1 || { st_detail='no self-test files'; return 2; }
+    [ -n "$lib" ] || { st_detail="no libmpv.so found in Plex"; return 2; }
+    out=$("$@" "$d/pushmpc-plex-selftest" "$lib" "$d"/pushmpc-selftest-* 2>&1); r=$?
+    st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
+    case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
+}
+report_install() {   # report_install <name> <rc of selftest> <where>
+    case $2 in
+        0) emit "$1" installed "$3; selftest: $st_detail" ;;
+        3) emit "$1" installed-inactive "$3; selftest: $st_detail"; return 3 ;;
+        *) emit "$1" installed "$3; $st_detail" ;;
+    esac
+}
 
 do_flatpak() {   # do_flatpak <target name> <app id>
     name=$1; id=$2; base=$HOME/.var/app/$id; dest=$base/pushmpc; conf=$base/data/plex/mpv.conf
@@ -87,7 +107,9 @@ do_flatpak() {   # do_flatpak <target name> <app id>
         fi
         flatpak override --user --env=LD_PRELOAD="$dest/pushmpc_preload.so" "$id" || { emit "$name" error "flatpak override failed"; return 1; }
         conf_add "$conf"
-        emit "$name" installed "$id: LD_PRELOAD=$dest/pushmpc_preload.so; $conf" ;;
+        lib=$(flatpak run --command=sh "$id" -c 'find /app -name "libmpv.so*" 2>/dev/null | sort | head -1' 2>/dev/null)
+        selftest "$dest" "$lib" flatpak run --command=sh "$id" -c 'exec "$@"' sh; s=$?
+        report_install "$name" $s "$id: LD_PRELOAD=$dest/pushmpc_preload.so; $conf" ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$dest"; return 0; }
         ovf=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/overrides/$id
@@ -115,7 +137,9 @@ do_tarball() {
         mkdir -p "$(dirname "$launcher")"
         printf '#!/bin/sh\n# PushMPC: Plex with vf_pushmpc (pushmpc-plex-linux.sh uninstall removes this)\nLD_PRELOAD="%s${LD_PRELOAD:+:$LD_PRELOAD}" exec "%s" "$@"\n' "$dest/pushmpc_preload.so" "$tdir/Plex.sh" > "$launcher"
         chmod +x "$launcher"; conf_add "$conf"
-        emit tarball installed "launcher $launcher; $conf" ;;
+        lib=$(find "$tdir" -name "libmpv.so*" 2>/dev/null | sort | head -1)
+        selftest "$dest" "$lib" env LD_PRELOAD="$dest/pushmpc_preload.so"; s=$?
+        report_install tarball $s "launcher $launcher; $conf" ;;
     uninstall)
         [ "$dry" = 1 ] && { emit tarball would-uninstall "$dest"; return 0; }
         remove_files "$dest"; rm -f "$launcher"; conf_remove "$conf"

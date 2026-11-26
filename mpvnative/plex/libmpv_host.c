@@ -1,7 +1,7 @@
 /*
  * libmpv_host <libmpv.so> <media file> [<more files>...]: loads another program's libmpv (Plex's, inside its Flatpak
  * sandbox) and plays each file with vf=pushmpc=smoother=2 on vo=null until one plays to the end. Prints whether the
- * filter was accepted, the filter's own log line and the end-of-file reason. Exit 0: accepted, x2 seen, played to the
+ * filter was accepted, the filter's own log line and the end-of-file reason. Exit 0: accepted, the x2 filter line seen, played to the
  * end; 2: libmpv not usable; 3: otherwise. CI and installer self-tests only.
  */
 #include <dlfcn.h>
@@ -55,7 +55,7 @@ int main(int argc, char **argv)
         destroy(ctx);
         lf = fopen(log, "r");
         while (lf && fgets(line, sizeof(line), lf))
-            if (strstr(line, "portable-cpu") && strstr(line, "x2")) { seen = 1; printf("host: %s", line); }
+            if (strstr(line, "frames") && strstr(line, " -> ") && strstr(line, ", x2;")) { seen = 1; printf("host: %s", line); }
         if (lf) fclose(lf);
         printf("host: %s: vf %s; end of file reason %d (0 = eof)\n", argv[f], vfrc >= 0 ? "accepted" : (errstr ? errstr(vfrc) : "refused"), reason);
         ok = vfrc >= 0 && seen && reason == 0;
