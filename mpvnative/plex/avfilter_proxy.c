@@ -44,7 +44,7 @@ static BOOL CALLBACK init(PINIT_ONCE once, PVOID param, PVOID *ctx)
     (void)once; (void)param; (void)ctx;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(void *)init, &self) ||
         !(n = GetModuleFileNameW(self, dir, MAX_PATH)) || n >= MAX_PATH) { plog("cannot find its own folder"); return TRUE; }
-    while (n > 0 && dir[n - 1] != L'\' && dir[n - 1] != L'/') dir[--n] = 0;
+    while (n > 0 && dir[n - 1] != L'\\' &&dir[n - 1] != L'/') dir[--n] = 0;
     swprintf(path, MAX_PATH + 64, L"%lsavfilter-8-plex.dll", dir);
     orig = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!orig) { plog("avfilter-8-plex.dll (the original) is missing"); return TRUE; }

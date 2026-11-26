@@ -338,9 +338,11 @@ jobs:
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$RUNNER_TEMP/hook/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
           cp mpvnative/ci/SOURCES.txt "$RUNNER_TEMP/hook/"
           ls -la "$RUNNER_TEMP/hook"
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
-          cmake --build build-engine --parallel --target pushmpc_engine
-          cp build-engine/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+          # the engine for distro mpv is built on Debian 12 (glibc 2.36, the oldest system the hook targets), so it loads
+          # on every distro from there on (a build on the runner's glibc 2.39 does not load on Debian 12)
+          docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
+          cp build-engine-bookworm/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+          objdump -T "$RUNNER_TEMP/hook/libpushmpc_engine.so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/^/engine needs at most /'
       - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
         run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
       - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
