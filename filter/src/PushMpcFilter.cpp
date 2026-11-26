@@ -368,6 +368,8 @@ struct Config {
     std::wstring folder;       // PushFpsFolder (developer): run on a PushFPS folder as the runtime root (its own shaders)
     std::wstring dataDir;      // DataDir (developer): use a PushFPS chain session instead of PushMPC's settings
     int simulateLostSec = 0, simulateLostMode = 1;
+    int fullOpenDelayMs = 700;   // FullOpenDelayMs: quick start, the full graph opens this long after the quick one
+    int simulateNoOutputSec = 0; // debug SimulateNoOutput: the copier stops taking pushcore's frames this long after activation (tests the no-output guard)
     std::wstring forceFallback; // debug: pass-through with this reason
     bool forceP010 = false;     // debug ForceP010: skip Y416/Y410 (tests the P010 HDR output)
     bool skipY416 = false;      // debug SkipY416: no Y416 at all
@@ -427,6 +429,8 @@ static Config ReadConfig()
     ReadS(k, L"PushFpsFolder", c.folder);
     ReadS(k, L"DataDir", c.dataDir);
     ReadDw(k, L"SimulateDeviceLost", c.simulateLostSec);
+    ReadDw(k, L"SimulateNoOutput", c.simulateNoOutputSec);
+    ReadDw(k, L"FullOpenDelayMs", c.fullOpenDelayMs);
     ReadDw(k, L"SimulateDeviceLostMode", c.simulateLostMode);
     ReadS(k, L"ForceFallback", c.forceFallback);
     ReadB(k, L"ForceP010", c.forceP010);
@@ -2161,6 +2165,7 @@ public:
     {
         const FILTER_STATE was = m_State;
         if (was == State_Running) { m_stepMode = true; m_stepSkips = 0; m_pauseFromRunQpc = Qpc(); }
+        if (was == State_Running) { std::unique_lock<std::mutex> lk(m_coreLock, std::try_to_lock); if (lk.owns_lock()) CloseRetired("the player paused"); }
         HRESULT hr = CTransformFilter::Pause();
         m_stopReq = false;
         WakeAll();
@@ -2569,6 +2574,24 @@ private:
     std::atomic<bool> m_quickPhase = false;   // the quick graph runs (Auto and reloads wait until the full graph took over)
     int64_t m_quickQpc = 0;
     bool m_sizeAfterHandover = false;          // the full graph's output size differs (Receive asks downstream for it)
+    // no-output guard: the first submit that no output followed yet (0 = none pending). Should pushcore take frames and give
+    // none back for 2 s (a graph that stopped producing, a handover gone wrong), the source frames are shown instead, never
+    // a black or frozen picture.
+    std::atomic<int64_t> m_waitOutQpc = 0;
+    PushCore* m_retired = nullptr;   // the quick graph after the handover, idle until CloseRetired (under m_coreLock)
+    void CloseRetired(const char* why)
+    {
+        if (!m_retired) return;
+        CloseAsync(m_api, m_retired, "the quick graph");
+        m_retired = nullptr;
+        Log(std::format("quick start: the idle quick graph is closed now ({})", why));
+    }
+    bool VideoMemoryShort()
+    {
+        ComPtr<IDXGIDevice> dd; ComPtr<IDXGIAdapter> a; ComPtr<IDXGIAdapter3> a3; DXGI_QUERY_VIDEO_MEMORY_INFO mi = {};
+        if (!m_device || FAILED(m_device.As(&dd)) || FAILED(dd->GetAdapter(&a)) || FAILED(a.As(&a3)) || FAILED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mi))) return false;
+        return mi.CurrentUsage + (1024ull << 20) > mi.Budget;
+    }
     bool QuickStartWanted(const PushCoreSettings& ps, std::string& why);
     void TryHandover(REFERENCE_TIME pts, const PushCoreSubmitTiming& t);   // under m_coreLock
     void RetireOld(const char* why);                                       // under m_coreLock
@@ -3432,6 +3455,8 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
                 }
                 core = nullptr;
             }
+            // the quick graph's first frames run cold: the full graph's allocations wait a moment (FullOpenDelayMs)
+            if (published && c->cfg.fullOpenDelayMs > 0) Sleep(DWORD(c->cfg.fullOpenDelayMs));
             bool stop = false;   // the filter closed meanwhile: the full graph is not opened at all
             { std::lock_guard<std::mutex> lk(c->job->lock); stop = c->job->abandoned; }
             if (!stop) {
@@ -3554,7 +3579,10 @@ void CPushMpcFilter::RetireOld(const char* why)
     PushCore* old = m_oldCore;
     m_oldCore = nullptr;   // m_discardUpTo stays: the full graph's copy of the handover frame may still come
     { std::lock_guard<std::mutex> sl(m_srvLock); m_srvs.clear(); }
-    CloseAsync(m_api, old, "the quick graph", 3000);   // later: the full graph's first seconds do not share the GPU with a teardown
+    // kept, idle, until a quiet moment (pause, seek, stop) or until video memory runs short: tearing a VFG graph down
+    // while another one plays stalls the GPU for one or two frames at 8x (CUDA frees wait for the device)
+    if (m_retired) CloseAsync(m_api, m_retired, "the quick graph");
+    m_retired = old;
     m_quickPhase = false;
     { std::lock_guard<std::mutex> al(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
     m_admGrace = 8;
@@ -3570,6 +3598,8 @@ void CPushMpcFilter::DrainCore(bool flush)
         RetireOld("flush");
     }
     m_discardUpTo = INT64_MIN;   // a flush: nothing of the full graph is held back any more (the next pts may be earlier)
+    m_waitOutQpc = 0;
+    CloseRetired("seek");
     if (!m_core || m_faulted) return;
     PushCoreFrame fr[16]; uint32_t n = 0;
     int dropped = 0;
@@ -3604,6 +3634,7 @@ void CPushMpcFilter::CloseCore()
     {
         std::lock_guard<std::mutex> lk(m_coreLock);
         if (m_oldCore) { PushCore* o = m_oldCore; m_oldCore = nullptr; CloseAsync(m_api, o, "the quick graph"); }
+        CloseRetired("the file closes");
         m_quickPhase = false; m_discardUpTo = INT64_MIN;
         // the quick graph while the full one still builds: pushcore_close would wait for that build (one graph build at a
         // time in a process), so it closes on its own thread and the player never waits for it
@@ -3686,6 +3717,7 @@ void CPushMpcFilter::DeviceLost(int where, const std::string& what)
     {
         std::lock_guard<std::mutex> lk(m_coreLock);
         if (m_oldCore) { SehClose(m_api, m_oldCore); m_oldCore = nullptr; }
+        if (m_retired) { SehClose(m_api, m_retired); m_retired = nullptr; }
         m_quickPhase = false;
         if (m_core) { SehClose(m_api, m_core); m_core = nullptr; }
     }
@@ -4004,6 +4036,7 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
                 while (m_sideByPts.size() > 32) m_sideByPts.erase(m_sideByPts.begin());
             }
             m_lastSubmitQpc = Qpc();
+            { int64_t none = 0; m_waitOutQpc.compare_exchange_strong(none, m_lastSubmitQpc); }   // the no-output guard (copier)
             SetEvent(m_hSubmit);
             }
         }
@@ -4082,6 +4115,7 @@ void CPushMpcFilter::CopierLoop()
             { std::lock_guard<std::mutex> lk(m_autoLock); ps = m_pending; }
             { std::lock_guard<std::mutex> lk(m_coreLock); if (m_core) m_api->setSettings(m_core, &ps); }
             DoReload(false);
+            m_waitOutQpc = 0;
             { std::lock_guard<std::mutex> lk(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
             continue;
         }
@@ -4090,17 +4124,36 @@ void CPushMpcFilter::CopierLoop()
             m_reloadSeen = g_reloadSerial.load();
             m_reloadWanted = false;
             DoReload(forced);
+            m_waitOutQpc = 0;
             continue;
         }
         PushCoreFrame fr[8]; uint32_t n = 0;
         int pr = PUSHCORE_OK;
         PushCore* src = nullptr;   // fast start: the quick graph first, until it delivered its last frame (handover)
-        {
+        const bool simulatedStop = m_cfg.simulateNoOutputSec > 0 && QpcMs(Qpc() - m_activeQpc) >= m_cfg.simulateNoOutputSec * 1000.0;
+        if (!simulatedStop) {
             std::lock_guard<std::mutex> lk(m_coreLock);
             src = m_oldCore ? m_oldCore : m_core;
             if (src) pr = m_api->poll(src, fr, 8, &n, 0);
         }
         if (pr == PUSHCORE_DEVICE_LOST) { DeviceLost(1, "pushcore_poll"); continue; }
+        if (n) m_waitOutQpc = 0;
+        else if (const int64_t w = m_waitOutQpc.load(); w && !m_reloading && !m_flushing && m_mode == Mode::Active && QpcMs(Qpc() - w) >= 2000.0) {
+            m_waitOutQpc = 0;
+            Log(std::format("no-output guard: pushcore took frames but gave none back for {:.0f} ms{}: the source frames are shown instead",
+                QpcMs(Qpc() - w), simulatedStop ? " (SimulateNoOutput)" : ""));
+            m_faulted = true;
+            Fallback(L"PushFPS stopped giving frames back: the source frames are shown");
+            {
+                // the stuck instance closes on its own thread now: the player's stop never waits for it
+                std::lock_guard<std::mutex> lk(m_coreLock);
+                if (m_oldCore) { CloseAsync(m_api, m_oldCore, "the quick graph (no-output guard)"); m_oldCore = nullptr; }
+                if (m_core) { CloseAsync(m_api, m_core, "pushcore (no-output guard)"); m_core = nullptr; }
+                m_quickPhase = false;
+            }
+            SetEvent(m_hLease);
+            continue;
+        }
         OutFmt f;
         { std::lock_guard<std::mutex> lk(m_fmtLock); f = m_outFmt; }
         for (uint32_t i = 0; i < n; i++) {
@@ -4175,6 +4228,10 @@ void CPushMpcFilter::CopierLoop()
         }
         if (QpcMs(Qpc() - lastStats) >= 1000.0) {
             lastStats = Qpc();
+            {
+                bool retired = false; { std::lock_guard<std::mutex> lk(m_coreLock); retired = m_retired != nullptr; }
+                if (retired && VideoMemoryShort()) { std::lock_guard<std::mutex> lk(m_coreLock); CloseRetired("video memory is needed"); }
+            }
             PushCoreGpuTiming g[256]; uint32_t gn = 0;
             {
                 std::lock_guard<std::mutex> lk(m_coreLock);
