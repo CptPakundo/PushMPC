@@ -19,7 +19,10 @@ on:
         description: 'also run the macOS job'
         type: boolean
         default: false
-plex_linux:        description: 'also run the Plex on Linux job (unfinished)'        type: boolean        default: false
+      plex_linux:
+        description: 'also run the Plex on Linux job (unfinished)'
+        type: boolean
+        default: false
 
 concurrency:
   group: mpv-native-${{ github.ref }}
