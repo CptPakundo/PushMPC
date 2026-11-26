@@ -211,7 +211,8 @@ do_vlc() {
 # (NVIDIA's engine and PushFlow as sidecar modules, the Vulkan GPU engine, the CPU engine; Auto picks at play time);
 # when the engine this GPU should get is not in this download's hook, the VapourSynth route is taken instead.
 # Vulkan decoding (hwdec=vulkan: frames straight into the Vulkan engine, no copy) when that engine is the one that
-# runs: a Vulkan GPU without NVIDIA's engine and without PushFlow (PushFlow is measured against it on copied frames).
+# runs: a Vulkan GPU without NVIDIA's engine and without PushFlow (PushFlow is measured against it on copied frames);
+# NVDEC (hwdec=nvdec: CUDA frames into NVIDIA's engine, device to device) when NVIDIA's engine runs.
 # The hook's own installer decides "installed" (active) or "installed-inactive" (exit 3: no build for this mpv's
 # FFmpeg), which is undone again.
 hookon=0
@@ -227,7 +228,7 @@ do_native() {
     [ -f "$ni" ] && have mpv || return 0
     eng=$(native_engine); hw=auto-safe; need=''
     case $eng in
-        nvidia) need=libpushmpc_engine_nvl.so ;;
+        nvidia) need=libpushmpc_engine_nvl.so; hw=nvdec ;;   # NVDEC's CUDA frames into NVIDIA's engine, device to device
         ml) need=libpushmpc_engine_ml.so ;;
         vulkan) hw=vulkan ;;
     esac

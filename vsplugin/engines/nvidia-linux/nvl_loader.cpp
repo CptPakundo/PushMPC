@@ -42,7 +42,11 @@ bool CudaApi::Load(std::string& why, const char* path)
         && Bind(lib, "cuModuleLoadData", cuModuleLoadData, why) && Bind(lib, "cuModuleGetFunction", cuModuleGetFunction, why) && Bind(lib, "cuModuleUnload", cuModuleUnload, why)
         && Bind(lib, "cuModuleGetGlobal_v2", cuModuleGetGlobal, why) && Bind(lib, "cuMemsetD8Async", cuMemsetD8Async, why)
         && Bind(lib, "cuLaunchKernel", cuLaunchKernel, why) && Bind(lib, "cuGetErrorName", cuGetErrorName, why) && Bind(lib, "cuGetErrorString", cuGetErrorString, why);
-    if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; }
+    if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; return false; }
+    // optional (CUDA frames from the decoder): every driver since CUDA 4 has them; missing = the copy route only
+    cuMemcpy3DPeer = reinterpret_cast<decltype(cuMemcpy3DPeer)>(os::Sym(lib, "cuMemcpy3DPeer"));
+    cuMemcpy3DPeerAsync = reinterpret_cast<decltype(cuMemcpy3DPeerAsync)>(os::Sym(lib, "cuMemcpy3DPeerAsync"));
+    cuMemcpy2D = reinterpret_cast<decltype(cuMemcpy2D)>(os::Sym(lib, "cuMemcpy2D_v2"));
     return ok;
 }
 

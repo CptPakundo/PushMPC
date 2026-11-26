@@ -49,11 +49,12 @@ struct EngineConfig {
     bool ampere = false;          // the RTX 30 compatibility (Install before VFG loads)
     int slots = 0;                // pinned output slots (0 = Auto: 2k + 2, at most 18)
     bool guardFlow = false;       // NVIDIA optical flow for the GPU cut guard (its flow measures, feature bit 128)
+    bool deviceOut = false;       // outputs stay in device memory as NV12 / P010 (the decoder's CUDA frames: CopyOut)
     bool operator==(const EngineConfig& o) const
     {
         return srcW == o.srcW && srcH == o.srcH && bits == o.bits && srcHdr == o.srcHdr && plan.k == o.plan.k && plan.vfgQuality == o.plan.vfgQuality && plan.vsr == o.plan.vsr
             && plan.vsrQuality == o.plan.vsrQuality && plan.outW == o.plan.outW && plan.outH == o.plan.outH && plan.hdr == o.plan.hdr && hdrPeak == o.hdrPeak && ampere == o.ampere
-            && plan.nvof == o.plan.nvof && guardFlow == o.guardFlow;
+            && plan.nvof == o.plan.nvof && guardFlow == o.guardFlow && deviceOut == o.deviceOut;
     }
 };
 
@@ -61,6 +62,14 @@ struct EngineConfig {
 struct SrcView { const uint8_t* data[3] = {}; ptrdiff_t stride[3] = {}; int width = 0, height = 0, bits = 8; InFormat fmt; };
 // a finished output frame in pinned host memory (4:2:0, 8 or 10 bits in 16-bit words)
 struct OutView { const uint8_t* data[3] = {}; size_t pitch[3] = {}; int width = 0, height = 0, bits = 8; };
+// a decoder's CUDA frame (FFmpeg AV_PIX_FMT_CUDA, NVDEC's NV12 / P010) in the decoder's own context: the source of
+// UploadDevice (ready once `stream` has run), or the destination of CopyOut
+struct DevFrame {
+    CUcontext ctx = nullptr; CUstream stream = nullptr;
+    CUdeviceptr y = 0, uv = 0; size_t yPitch = 0, uvPitch = 0;
+    int width = 0, height = 0; bool p010 = false;
+    InFormat fmt;                 // the source's colour (input only)
+};
 
 class Engine {
 public:
@@ -75,6 +84,14 @@ public:
 
     // the source frame into enhanced[parity] (upload, convert, VSR, HDR); queued on the stream
     bool Upload(const SrcView& v, int parity, std::string& err);
+    // the same from the decoder's CUDA frame, device to device (no host copy; the decoder's context may differ)
+    bool CanTakeDevice() const { return m_toSemiPacked && m_cu && m_cu->cuMemcpy3DPeerAsync; }
+    bool UploadDevice(const DevFrame& v, int parity, std::string& err);
+    // deviceOut: a ready slot into the caller's CUDA frame (NV12 for 8-bit output, P010 for 10-bit), synchronous
+    bool CanWriteDevice() const { return m_cfg.deviceOut && m_toSemiOut && m_cu && m_cu->cuMemcpy3DPeer; }
+    // a decoder's context is on `device` and the driver has the peer copies (checked before the engine opens)
+    static bool ContextOnDevice(CUcontext ctx, int device, std::string& why);
+    bool CopyOut(int slot, const DevFrame& d, std::string& err);
     // into a free output slot (returns its index, or -1): the VFG frame j of k of the pair (enhanced[1 - parity],
     // enhanced[parity]); newPair: the first subframe of a new pair (the inputs are rebound)
     int Generate(int parity, int j, int k, bool newPair, std::string& err);
@@ -101,7 +118,10 @@ public:
 
 private:
     struct Image { CUdeviceptr ptr = 0; size_t pitch = 0; void* desc = nullptr; int w = 0, h = 0; bool tenBit = false; };
-    struct Slot { void* host = nullptr; size_t pitch[3] = {}; uint8_t* planes[3] = {}; CUevent done = nullptr; bool busy = false; };
+    struct Slot { void* host = nullptr; size_t pitch[3] = {}; uint8_t* planes[3] = {}; CUevent done = nullptr; bool busy = false;
+                  CUdeviceptr dev[2] = {}; size_t devPitch[2] = {}; int w = 0, h = 0; };   // deviceOut: NV12 / P010 in device memory
+    // the source in the first stage's input or enhanced[parity], from planar (8 / 16-bit) or semi-planar device planes
+    bool Convert(int parity, const CUdeviceptr planes[3], const size_t pitch[3], bool semi, bool wide, int shift, int bits, const InFormat& f, std::string& err);
     bool Cu(CUresult r, const char* what, std::string& err);
     bool Cv(NvCV_Status s, const char* what, std::string& err);
     bool MakeImage(Image& im, int w, int h, bool tenBit, std::string& err);
@@ -118,6 +138,8 @@ private:
     CUstream m_stream = nullptr;
     CUmodule m_module = nullptr;
     CUfunction m_toPacked8 = nullptr, m_toPacked16 = nullptr, m_toYuv = nullptr, m_toGray = nullptr, m_warp = nullptr;
+    CUfunction m_toSemiPacked = nullptr, m_toSemiOut = nullptr;   // the decoder's CUDA frames in / out (optional)
+    CUdeviceptr m_devIn[2] = {}; size_t m_devInPitch[2] = {};      // its NV12 / P010 copied into this context
     void* m_vsr = nullptr; void* m_hdr = nullptr; void* m_vfg = nullptr;
     void* m_vfgLib = nullptr;
     AmpereCompat m_ampere;

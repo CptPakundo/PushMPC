@@ -58,6 +58,18 @@ if [ "$mode" = software ]; then
     grep -q "nvidia not used: " "$T/nv.engine.log" || fail "backend=nvidia: no reason logged"
     grep -q "^open: " "$T/nv.engine.log" || fail "backend=nvidia: no engine opened after the fallback"
     frames_ok nv 2 || fail "backend=nvidia fallback: frames"
+    # 4. an engine asking for a 10-bit stream (NVIDIA's RTX Video HDR on 8-bit frames; here the test option makes the CPU
+    #    engine ask): the filter tags its frames, the hook reads vf-metadata, converts the stream to 10 bits ahead of the
+    #    filter and sets it up again with source_depth=8 (real-time playback on vo=null: the hook looks every 0.5 s)
+    ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=8" -pix_fmt yuv420p -c:v ffv1 "$T/clip8.mkv"
+    rm -f "$T/depth.engine.log"
+    PUSHMPC_ENGINE_LOG="$T/depth.engine.log" timeout 120 mpv --no-config --script="$H/pushmpc_hook.so" \
+        --script-opts="pushmpc-vf=smoother=2:extra=test_want_out_depth=10" --vo=null --ao=null --msg-level=all=v "$T/clip8.mkv" > "$T/depth.log" 2>&1
+    echo "-- 10-bit request:"
+    grep -E "pushmpc_hook|want_depth|would do more|frames.*x2" "$T/depth.log" | head -8 | sed 's/^/   /'
+    grep -q "10-bit stream for the engine" "$T/depth.log" || fail "the hook did not answer the engine's 10-bit request"
+    grep -q "on yuv420p10le frames" "$T/depth.log" || fail "the filter did not get the 10-bit stream after the request"
+    [ "$(grep -c '^open: ' "$T/depth.engine.log" 2>/dev/null)" -ge 2 ] || fail "no second engine open after the request"
 fi
 
 if [ "$mode" = vulkan ]; then

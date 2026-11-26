@@ -83,7 +83,8 @@ Engine::~Engine()
         for (auto& p : m_srcPlane) if (p) m_cu->cuMemFree(p);
         for (auto& p : m_yuv) if (p) m_cu->cuMemFree(p);
         for (auto& u : m_up) { if (u.host) m_cu->cuMemFreeHost(u.host); if (u.done) m_cu->cuEventDestroy(u.done); }
-        for (auto& s : m_slots) { if (s.host) m_cu->cuMemFreeHost(s.host); if (s.done) m_cu->cuEventDestroy(s.done); }
+        for (auto& s : m_slots) { if (s.host) m_cu->cuMemFreeHost(s.host); if (s.done) m_cu->cuEventDestroy(s.done); for (auto d : s.dev) if (d) m_cu->cuMemFree(d); }
+        for (auto& p : m_devIn) if (p) m_cu->cuMemFree(p);
         m_guard.Close();
         m_of.Close();
         for (auto& e : m_ev) if (e) m_cu->cuEventDestroy(e);
@@ -143,6 +144,10 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
         || !Cu(m_cu->cuModuleGetFunction(&m_toPacked8, m_module, "nvl_yuv8_to_packed"), "nvl_yuv8_to_packed", err)
         || !Cu(m_cu->cuModuleGetFunction(&m_toPacked16, m_module, "nvl_yuv16_to_packed"), "nvl_yuv16_to_packed", err)
         || !Cu(m_cu->cuModuleGetFunction(&m_toYuv, m_module, "nvl_packed_to_yuv420"), "nvl_packed_to_yuv420", err)) return false;
+    // the decoder's CUDA frames (optional: a fatbin without these kernels keeps the copy route)
+    if (m_cu->cuModuleGetFunction(&m_toSemiPacked, m_module, "nvl_semi_to_packed") != CUDA_SUCCESS) m_toSemiPacked = nullptr;
+    if (m_cu->cuModuleGetFunction(&m_toSemiOut, m_module, "nvl_planar_to_semi") != CUDA_SUCCESS) m_toSemiOut = nullptr;
+    if (cfg.deviceOut && (!m_toSemiOut || !m_cu->cuMemcpy3DPeer)) { err = "the decoder's CUDA frames cannot be written here (kernel or driver function missing)"; return false; }
 
     // formats: VSR takes RGBA8 (RGB10A2 with ImageEncodingMode for an HDR source); TrueHDR RGBA8 -> RGB10A2 PQ BT.2020;
     // VFG either. A 10-bit SDR source keeps 10 bits when no VSR / HDR stage needs 8.
@@ -174,6 +179,12 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
     const int nslots = cfg.slots > 0 ? cfg.slots : std::min(18, 2 * std::max(1, p.k) + 2);
     m_slots.resize(size_t(nslots));
     for (auto& s : m_slots) {
+        if (cfg.deviceOut) {   // NV12 / P010 in device memory, copied into the caller's CUDA frame by CopyOut
+            if (!Cu(m_cu->cuMemAllocPitch(&s.dev[0], &s.devPitch[0], size_t(ow) * obps, size_t(oh), 4), "cuMemAllocPitch (device output)", err)
+                || !Cu(m_cu->cuMemAllocPitch(&s.dev[1], &s.devPitch[1], size_t(ocw) * 2 * obps, size_t(och), 4), "cuMemAllocPitch (device output)", err)
+                || !Cu(m_cu->cuEventCreate(&s.done, CU_EVENT_DISABLE_TIMING), "cuEventCreate", err)) return false;
+            continue;
+        }
         size_t total = 0;
         for (int i = 0; i < 3; ++i) { s.pitch[i] = Align(size_t(opw[i]) * obps, 64); total += s.pitch[i] * size_t(oph[i]); }
         if (!Cu(m_cu->cuMemHostAlloc(&s.host, total, CU_MEMHOSTALLOC_PORTABLE), "cuMemHostAlloc (readback)", err)
@@ -282,12 +293,52 @@ bool Engine::Upload(const SrcView& v, int parity, std::string& err)
     }
     if (!Cu(m_cu->cuEventRecord(u.done, m_stream), "cuEventRecord", err)) return false;
     u.used = true;
+    return Convert(parity, m_srcPlane, m_srcPitch, false, v.bits > 8, 0, v.bits, v.fmt, err);
+}
+
+bool Engine::UploadDevice(const DevFrame& v, int parity, std::string& err)
+{
+    if (!CanTakeDevice()) { err = "the decoder's CUDA frames: not supported by this driver or build"; return false; }
+    if (v.width != m_cfg.srcW || v.height != m_cfg.srcH) { err = "the decoder's CUDA frame has another size"; return false; }
+    const bool wide = v.p010;
+    const int bps = wide ? 2 : 1, cw = (v.width + 1) / 2, ch = (v.height + 1) / 2;
+    // the decoder's work on its frame first (its stream, in its context), then the copy on ours
+    if (v.ctx) {
+        if (m_cu->cuCtxPushCurrent(v.ctx) != CUDA_SUCCESS) { err = "cuCtxPushCurrent (the decoder's context) failed"; return false; }
+        const CUresult r = m_cu->cuStreamSynchronize(v.stream);
+        CUcontext popped = nullptr;
+        m_cu->cuCtxPopCurrent(&popped);
+        if (!Cu(r, "cuStreamSynchronize (the decoder's stream)", err)) return false;
+    }
+    Ctx c(*m_cu, m_ctx);
+    if (!c.ok) { err = "cuCtxPushCurrent failed"; return false; }
+    if (!m_devIn[0]) {
+        if (!Cu(m_cu->cuMemAllocPitch(&m_devIn[0], &m_devInPitch[0], size_t(v.width) * bps, size_t(v.height), 4), "cuMemAllocPitch (CUDA input)", err)
+            || !Cu(m_cu->cuMemAllocPitch(&m_devIn[1], &m_devInPitch[1], size_t(cw) * 2 * bps, size_t(ch), 4), "cuMemAllocPitch (CUDA input)", err)) return false;
+    }
+    const CUdeviceptr src[2] = { v.y, v.uv };
+    const size_t spitch[2] = { v.yPitch, v.uvPitch }, rows[2] = { size_t(v.height), size_t(ch) }, bytes[2] = { size_t(v.width) * bps, size_t(cw) * 2 * bps };
+    for (int i = 0; i < 2; ++i) {
+        CUDA_MEMCPY3D_PEER m{};
+        m.srcMemoryType = CU_MEMORYTYPE_DEVICE; m.srcDevice = src[i]; m.srcPitch = spitch[i]; m.srcHeight = rows[i]; m.srcContext = v.ctx ? v.ctx : m_ctx;
+        m.dstMemoryType = CU_MEMORYTYPE_DEVICE; m.dstDevice = m_devIn[i]; m.dstPitch = m_devInPitch[i]; m.dstHeight = rows[i]; m.dstContext = m_ctx;
+        m.WidthInBytes = bytes[i]; m.Height = rows[i]; m.Depth = 1;
+        if (!Cu(m_cu->cuMemcpy3DPeerAsync(&m, m_stream), "cuMemcpy3DPeerAsync (CUDA input)", err)) return false;
+    }
+    const CUdeviceptr planes[3] = { m_devIn[0], m_devIn[1], 0 };
+    const size_t pitch[3] = { m_devInPitch[0], m_devInPitch[1], 0 };
+    // P010: 10-bit codes in the top bits (shift 6)
+    return Convert(parity, planes, pitch, true, wide, wide ? 6 : 0, wide ? 10 : 8, v.fmt, err);
+}
+
+bool Engine::Convert(int parity, const CUdeviceptr srcPlanes[3], const size_t srcPitch[3], bool semi, bool wide, int shift, int bits, const InFormat& fmt, std::string& err)
+{
     m_flowFresh = false;
     if (m_of.Ready()) {
-        // the source luma as NVOF's 8-bit input of this parity
-        const uint8_t* yp = reinterpret_cast<const uint8_t*>(m_srcPlane[0]);
-        unsigned yPitch = unsigned(m_srcPitch[0]), gPitch = m_of.InputPitch();
-        int bitsIn = v.bits, gw = v.width, gh = v.height;
+        // the source luma as NVOF's 8-bit input of this parity (P010's words read as 16-bit codes: >> 8)
+        const uint8_t* yp = reinterpret_cast<const uint8_t*>(srcPlanes[0]);
+        unsigned yPitch = unsigned(srcPitch[0]), gPitch = m_of.InputPitch();
+        int bitsIn = semi && wide ? 16 : bits, gw = m_cfg.srcW, gh = m_cfg.srcH;
         uint8_t* gp = reinterpret_cast<uint8_t*>(m_of.Input(parity));
         void* gargs[] = { &yp, &yPitch, &bitsIn, &gw, &gh, &gp, &gPitch };
         if (!Launch(m_toGray, unsigned(gw), unsigned(gh), gargs, err)) return false;
@@ -295,14 +346,19 @@ bool Engine::Upload(const SrcView& v, int parity, std::string& err)
     // convert into the first stage's input, or straight into enhanced[parity]
     const bool stages = m_vsr || m_hdr;
     Image& dst = stages ? m_packed : m_enh[parity];
-    struct { const uint8_t* p[3]; unsigned pitch[3]; } planes = { { reinterpret_cast<const uint8_t*>(m_srcPlane[0]), reinterpret_cast<const uint8_t*>(m_srcPlane[1]), reinterpret_cast<const uint8_t*>(m_srcPlane[2]) },
-                                                                   { unsigned(m_srcPitch[0]), unsigned(m_srcPitch[1]), unsigned(m_srcPitch[2]) } };
-    int w = v.width, h = v.height, tb = dst.tenBit ? 1 : 0;
-    InFormat f = v.fmt; f.bits = v.bits;
+    struct { const uint8_t* p[3]; unsigned pitch[3]; } planes = { { reinterpret_cast<const uint8_t*>(srcPlanes[0]), reinterpret_cast<const uint8_t*>(srcPlanes[1]), reinterpret_cast<const uint8_t*>(srcPlanes[2]) },
+                                                                   { unsigned(srcPitch[0]), unsigned(srcPitch[1]), unsigned(srcPitch[2]) } };
+    int w = m_cfg.srcW, h = m_cfg.srcH, tb = dst.tenBit ? 1 : 0, wd = wide ? 1 : 0, sh = shift;
+    InFormat f = fmt; f.bits = bits;
     Coeffs k = MatrixCoeffs(f.matrix);
     void* out = reinterpret_cast<void*>(dst.ptr); unsigned outPitch = unsigned(dst.pitch);
-    void* args[] = { &planes, &w, &h, &f, &k, &tb, &out, &outPitch };
-    if (!Launch(v.bits > 8 ? m_toPacked16 : m_toPacked8, unsigned(w), unsigned(h), args, err)) return false;
+    if (semi) {
+        void* args[] = { &planes, &w, &h, &f, &k, &tb, &wd, &sh, &out, &outPitch };
+        if (!Launch(m_toSemiPacked, unsigned(w), unsigned(h), args, err)) return false;
+    } else {
+        void* args[] = { &planes, &w, &h, &f, &k, &tb, &out, &outPitch };
+        if (!Launch(bits > 8 ? m_toPacked16 : m_toPacked8, unsigned(w), unsigned(h), args, err)) return false;
+    }
     if (m_vsr && !Cv(m_vfx.Run(m_vsr, 1), "NvVFX_Run(VideoSuperRes)", err)) return false;
     if (m_hdr && !Cv(m_vfx.Run(m_hdr, 1), "NvVFX_Run(TrueHDR)", err)) return false;
     if (stages) {
@@ -337,6 +393,18 @@ int Engine::ToSlot(const Image& im, std::string& err, CUdeviceptr holdFlag, cons
     unsigned alt2Pitch = alt2 ? unsigned(alt2->pitch) : 0u;
     void* args[] = { &in, &inPitch, &tb, &w, &h, &k, &bits, &out, &flag, &altPtr, &altPitch, &flag2, &alt2Ptr, &alt2Pitch };
     if (!Launch(m_toYuv, unsigned((w + 1) / 2), unsigned((h + 1) / 2), args, err)) return -1;
+    if (m_cfg.deviceOut) {   // NV12 / P010 in the slot's device memory
+        int wide = m_outBits > 8 ? 1 : 0, shift = m_outBits > 8 ? 6 : 0;
+        uint8_t* yp = reinterpret_cast<uint8_t*>(s.dev[0]);
+        uint8_t* uvp = reinterpret_cast<uint8_t*>(s.dev[1]);
+        unsigned yPitch = unsigned(s.devPitch[0]), uvPitch = unsigned(s.devPitch[1]);
+        void* sargs[] = { &out, &w, &h, &wide, &shift, &yp, &yPitch, &uvp, &uvPitch };
+        if (!Launch(m_toSemiOut, unsigned((w + 1) / 2), unsigned((h + 1) / 2), sargs, err)) return -1;
+        if (!Cu(m_cu->cuEventRecord(s.done, m_stream), "cuEventRecord", err)) return -1;
+        s.busy = true;
+        s.w = w; s.h = h;
+        return idx;
+    }
     const int obps = m_outBits > 8 ? 2 : 1, cw = (w + 1) / 2, ch = (h + 1) / 2;
     const int pw[3] = { w, cw, cw }, ph[3] = { h, ch, ch };
     for (int i = 0; i < 3; ++i) {
@@ -475,6 +543,45 @@ OutView Engine::View(int slot) const
 }
 
 void Engine::Release(int slot) { if (slot >= 0 && slot < int(m_slots.size())) m_slots[size_t(slot)].busy = false; }
+
+bool Engine::ContextOnDevice(CUcontext ctx, int device, std::string& why)
+{
+    CudaApi& cu = Cuda();
+    std::string e;
+    if (!cu.Load(e)) { why = e; return false; }
+    if (!cu.cuMemcpy3DPeer || !cu.cuMemcpy3DPeerAsync) { why = "the driver has no cuMemcpy3DPeer"; return false; }
+    if (!ctx) { why = "no CUDA context from the decoder"; return false; }
+    if (cu.cuCtxPushCurrent(ctx) != CUDA_SUCCESS) { why = "the decoder's CUDA context cannot be made current"; return false; }
+    CUdevice d = -1;
+    const CUresult r = cu.cuCtxGetDevice(&d);
+    CUcontext popped = nullptr;
+    cu.cuCtxPopCurrent(&popped);
+    if (r != CUDA_SUCCESS) { why = "cuCtxGetDevice: CUDA " + cu.Error(r); return false; }
+    CUdevice want = -1;
+    if (cu.cuDeviceGet(&want, device) != CUDA_SUCCESS || d != want) { why = "the decoder runs on another GPU (CUDA device " + std::to_string(d) + ")"; return false; }
+    return true;
+}
+
+bool Engine::CopyOut(int slot, const DevFrame& d, std::string& err)
+{
+    if (!CanWriteDevice() || slot < 0 || slot >= int(m_slots.size())) { err = "no device output here"; return false; }
+    Slot& s = m_slots[size_t(slot)];
+    Ctx c(*m_cu, m_ctx);
+    if (!c.ok) { err = "cuCtxPushCurrent failed"; return false; }
+    if (!Cu(m_cu->cuEventSynchronize(s.done), "cuEventSynchronize (device output)", err)) return false;
+    const int bps = m_outBits > 8 ? 2 : 1, cw = (s.w + 1) / 2, ch = (s.h + 1) / 2;
+    const CUdeviceptr dst[2] = { d.y, d.uv };
+    const size_t dpitch[2] = { d.yPitch, d.uvPitch }, rows[2] = { size_t(s.h), size_t(ch) }, bytes[2] = { size_t(s.w) * bps, size_t(cw) * 2 * bps };
+    for (int i = 0; i < 2; ++i) {
+        CUDA_MEMCPY3D_PEER m{};
+        m.srcMemoryType = CU_MEMORYTYPE_DEVICE; m.srcDevice = s.dev[i]; m.srcPitch = s.devPitch[i]; m.srcHeight = rows[i]; m.srcContext = m_ctx;
+        m.dstMemoryType = CU_MEMORYTYPE_DEVICE; m.dstDevice = dst[i]; m.dstPitch = dpitch[i]; m.dstHeight = rows[i]; m.dstContext = d.ctx ? d.ctx : m_ctx;
+        m.WidthInBytes = bytes[i]; m.Height = rows[i]; m.Depth = 1;
+        // synchronous: the caller's frame is complete when this returns
+        if (!Cu(m_cu->cuMemcpy3DPeer(&m), "cuMemcpy3DPeer (CUDA output)", err)) return false;
+    }
+    return true;
+}
 
 bool Engine::Drain(std::string& err)
 {

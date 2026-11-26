@@ -365,6 +365,12 @@ Backend* OpenSidecar(const pmeng_stream& st, const Options& o, pmeng_output& out
     return b;
 }
 
+Backend* OpenSidecarDevice(const pmeng_device&, const pmeng_stream&, const Options&, pmeng_output&, std::string& why)
+{
+    why = "PushFlow takes frames in host memory";
+    return nullptr;
+}
+
 bool ProbeSidecar(const Options& o, std::string& why)
 {
     const std::string rt = RuntimeDir(o);

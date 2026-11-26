@@ -54,6 +54,8 @@ Backend* OpenVulkan(const pmeng_device& dev, const pmeng_stream& st, const Optio
 // a sidecar module (libpushmpc_engine_nvl.so, libpushmpc_engine_ml.so): its one engine for frames in host memory, and a
 // cheap check whether it would run here (pmeng_sidecar_probe)
 Backend* OpenSidecar(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
+// hardware frames the sidecar takes itself (the NVIDIA engine: the decoder's CUDA frames, PMENG_MEM_CUDA)
+Backend* OpenSidecarDevice(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 bool ProbeSidecar(const Options& o, std::string& why);
 #endif
 #ifdef _WIN32

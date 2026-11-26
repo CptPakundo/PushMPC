@@ -1,9 +1,12 @@
 // pmeng_get_api: the C table FFmpeg's vf_pushmpc calls (pmeng.h). Picks the backend per instance:
 //   D3D11 frames -> pushcore (Windows) unless backend=portable; Vulkan frames -> the portable GPU engine on the decoder's device;
 //   CPU frames   -> the portable CPU engine.
+//   CUDA frames   -> NVIDIA's engine (libpushmpc_engine_nvl.so) device to device (Linux, hwdec=nvdec).
 // The filter retries a failed hardware open with mem = CPU (its copy fallback), so a reason here is enough.
 #include "engine.h"
+#include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -150,13 +153,16 @@ private:
     const pmeng_api* m_api;
     void* m_h;
 };
-pme::Backend* OpenSidecarOf(int which, const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why)
+pme::Backend* OpenSidecarOf(int which, const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why,
+                            const pmeng_device* hw = nullptr)
 {
     const Sidecar& s = LoadSidecar(which);
     if (!s.api) { why = s.why; return nullptr; }
     pmeng_device dev{};
     dev.struct_size = sizeof(dev);
     dev.mem = PMENG_MEM_CPU;
+    if (hw) std::memcpy(&dev, hw, std::min<size_t>(sizeof(dev), hw->struct_size ? hw->struct_size : sizeof(dev)));   // the filter's (maybe shorter) struct
+    if (hw) dev.struct_size = std::min<uint32_t>(uint32_t(sizeof(dev)), hw->struct_size ? hw->struct_size : uint32_t(sizeof(dev)));
     char err[512] = {};
     std::memset(&out, 0, sizeof(out));
     out.struct_size = sizeof(out);
@@ -166,6 +172,7 @@ pme::Backend* OpenSidecarOf(int which, const pmeng_stream& st, const pme::Option
 }
 pme::Backend* OpenNvl(const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why) { return OpenSidecarOf(0, st, o, out, why); }
 pme::Backend* OpenMl(const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why) { return OpenSidecarOf(1, st, o, out, why); }
+pme::Backend* OpenNvlCuda(const pmeng_device& dev, const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why) { return OpenSidecarOf(0, st, o, out, why, &dev); }
 #endif
 
 #ifndef PME_SIDECAR
@@ -239,11 +246,29 @@ pme::Backend* OpenSoftware(const pmeng_stream& st, const pme::Options& o, pmeng_
             std::snprintf(out.description + n, sizeof(out.description) - n, " (GPU engines not used: %s)", tried.c_str());
         }
     }
+    // tests only (mpvnative/hook/test-hook-engines.sh): the request NVIDIA's engine makes for RTX Video HDR on 8-bit
+    // frames, so the hook's 10-bit round trip runs on machines without that engine
+    if (b && pme::Opt(o, "test_want_out_depth") == "10" && pme::Opt(o, "source_bits").empty() && !(st.fmt == PMENG_FMT_YUV420P10 || st.fmt == PMENG_FMT_P010))
+        out.want_out_depth = 10;
+    (void)autoPick; (void)attempt;   // unused in builds without the GPU engines
     return b;
 }
 #endif
 
+void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* options, pmeng_output* out, char* err, uint32_t errSize);
+// an older filter's pmeng_output is shorter (no want_out_depth): never write past its struct_size
 void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options, pmeng_output* out, char* err, uint32_t errSize)
+{
+    if (!out) return OpenFull(dev, st, options, out, err, errSize);
+    const size_t minimal = offsetof(pmeng_output, want_out_depth);   // minor 0's whole struct
+    const size_t cap = out->struct_size < minimal ? minimal : std::min<size_t>(out->struct_size, sizeof(pmeng_output));
+    pmeng_output full{};
+    void* h = OpenFull(dev, st, options, &full, err, errSize);
+    full.struct_size = uint32_t(cap);
+    std::memcpy(out, &full, cap);
+    return h;
+}
+void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* options, pmeng_output* out, char* err, uint32_t errSize)
 {
     auto fail = [&](const std::string& why) -> void* {
         if (err && errSize) { std::snprintf(err, errSize, "%s", why.c_str()); }
@@ -280,6 +305,17 @@ void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options,
             b = pme::OpenVulkan(*dev, *st, o, *out, why);
 #else
             why = "this module was built without the Vulkan engine";
+#endif
+        } else if (dev->mem == PMENG_MEM_CUDA) {
+            // the decoder's CUDA frames: NVIDIA's engine device to device; anything else takes the copy fallback
+#if defined(PME_SIDECAR)
+            b = pme::OpenSidecarDevice(*dev, *st, o, *out, why);
+#elif defined(PME_HAVE_SIDECARS)
+            if (backend != "auto" && backend != "nvidia") return fail("backend=" + backend + " takes frames in host memory (copy fallback)");
+            b = OpenNvlCuda(*dev, *st, o, *out, why);
+            if (!b) why = "NVIDIA's engine on CUDA frames: " + why + " (copy fallback)";
+#else
+            return fail("CUDA frames: no engine for them in this build (copy fallback)");
 #endif
         } else {
 #ifdef PME_SIDECAR

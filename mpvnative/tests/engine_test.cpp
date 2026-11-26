@@ -7,6 +7,7 @@
 //   D3D11, Windows: WARP device, NV12 textures, the stub pushcore (CPU blend) -> BGRA textures with the right pixels,
 //   x2 order, pending() drains to 0.
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -336,6 +337,44 @@ int main()
         pmeng_output out{}; char err[256] = {};
         CHECK(api->open(&dev, &st, "", &out, err, sizeof(err)) == nullptr && err[0], "vulkan open should fail with a reason");
         std::printf("vulkan: %s\n", err);
+    }
+    {   // CUDA frames (minor 1) with no NVIDIA engine here (or no driver): fail with a reason -> the filter's copy fallback
+        pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CUDA;
+        pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 64; st.height = 64; st.fmt = PMENG_FMT_NV12;
+        pmeng_output out{}; out.struct_size = sizeof(out); char err[512] = {};
+        void* h = api->open(&dev, &st, "smoother=2\n", &out, err, sizeof(err));
+        CHECK(h == nullptr && err[0], "cuda open without a context should fail with a reason");
+        if (h) api->close(h);
+        std::printf("cuda: %s\n", err);
+    }
+    {   // a minor-0 filter's shorter pmeng_output: nothing past its struct_size is written
+        struct { pmeng_output out; uint32_t canary[8]; } old{};
+        std::memset(&old, 0xA5, sizeof(old));
+        old.out.struct_size = uint32_t(offsetof(pmeng_output, want_out_depth));
+        const uint8_t* tail = reinterpret_cast<const uint8_t*>(&old.out) + offsetof(pmeng_output, want_out_depth);
+        pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+        pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 320; st.height = 180; st.fmt = PMENG_FMT_YUV420P; st.fps_num = 24; st.fps_den = 1;
+        char err[256] = {};
+        void* h = api->open(&dev, &st, "smoother=2\nbackend=portable-cpu\n", &old.out, err, sizeof(err));
+        CHECK(h, "open with a short pmeng_output: %s", err);
+        bool intact = true;
+        for (size_t i = 0; i < sizeof(old) - offsetof(pmeng_output, want_out_depth); ++i) intact = intact && tail[i] == 0xA5;
+        CHECK(intact, "the module wrote past a minor-0 pmeng_output");
+        CHECK(old.out.multiplier == 2, "short pmeng_output: x%u", old.out.multiplier);
+        if (h) api->close(h);
+    }
+    {   // want_out_depth (minor 1), through the tests-only option: 8-bit asks for 10, a converted stream does not
+        for (int conv = 0; conv < 2; ++conv) {
+            pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+            pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 320; st.height = 180; st.fps_num = 24; st.fps_den = 1;
+            st.fmt = conv ? PMENG_FMT_YUV420P10 : PMENG_FMT_YUV420P;
+            pmeng_output out{}; out.struct_size = sizeof(out); char err[256] = {};
+            void* h = api->open(&dev, &st, conv ? "smoother=2\nbackend=portable-cpu\ntest_want_out_depth=10\nsource_bits=8\n" : "smoother=2\nbackend=portable-cpu\ntest_want_out_depth=10\n",
+                                &out, err, sizeof(err));
+            CHECK(h, "want_out_depth open: %s", err);
+            CHECK(out.want_out_depth == (conv ? 0u : 10u), "want_out_depth %u (converted %d)", out.want_out_depth, conv);
+            if (h) api->close(h);
+        }
     }
 #ifdef _WIN32
     TestD3D11(api);
