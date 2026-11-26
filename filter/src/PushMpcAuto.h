@@ -60,6 +60,8 @@ struct Source {
     bool tenBit = false;      // P010 input (10-bit)
     bool animHint = false;    // the file's path names it animation (AnimationHint)
     double heldShare = -1;    // held frames pushcore found (share of the last ~10 s; < 0 = not measured); sticky once >= kAnimationHeldShare
+    int showClass = 0;        // the show's class (PushMpcShows.h: 1 feature, 2 TV limited, 3 mixed CG; 0 not known yet)
+    int showChoice = -1;      // the user's mode for this show (0 Full, 1 Camera only, 2 Off; -1 none)
 };
 // Animation (cartoons, anime): drawn on twos or threes, a quarter to two thirds of a TV episode's frames repeat the drawing
 // before them (pushcore's held-frame test); live action and 3D CG at 24 distinct frames have almost none. The path is the
@@ -188,6 +190,9 @@ struct Choice {               // resolved values for pushcore and the filter
     bool deband = false; int debandStrength = 1;
     bool animation = false;   // treated as animation (Settings.animation On, or Auto: AnimationHint / held frames found)
     std::wstring animNote;
+    int animMode = 0;         // PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off
+    uint32_t holdFlags = 0;   // PUSHCORE_HOLD_* bits (pushcore_abi.h)
+    std::wstring animModeNote;
     double predictedMs = 0, budgetMs = 0;
     std::wstring smootherNote, sharperNote, cleanNote, hdrNote, debandNote, stoppedAt, fgNote, qualityNote;
     bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod; }
@@ -353,6 +358,12 @@ inline const wchar_t* QualityName(FgMethod m, int q)
     return L"";
 }
 
+// Anime round 5: Auto's animation mode per show class, until the user's verdict on the split-screen pairs (V1-V4: two
+// "Camera only" answers for a class set its constant to 1). 0 Full, 1 Camera only, 2 Off.
+inline constexpr int kAnimModeFeature = 0, kAnimModeTv = 0, kAnimModeMixedCg = 0;
+// V5-V7: transient hold and line-art protection on by default for animation (flash / impact hold on every video:
+// the user's rule, 2026-11-26)
+inline constexpr bool kHoldTransientsAuto = true, kHoldLiveTransientsAuto = true, kLineArtAuto = true;
 inline Choice Decide(const Settings& s, const Source& src, const Display& d, const Costs& costsIn, const Gpu& g = Gpu{})
 {
     Choice r;
@@ -373,6 +384,19 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (src.heldShare >= kAnimationHeldShare) { r.animation = true; r.animNote = std::format(L"on, held drawings found ({:.0f} % of frames)", 100.0 * std::min(1.0, src.heldShare)); }
     else if (src.animHint) { r.animation = true; r.animNote = L"on, the file name or folder says animation"; }
     else { r.animation = false; r.animNote = src.heldShare >= 0 ? std::format(L"off, no held drawings ({:.0f} % of frames); held frames are still re-timed", 100.0 * src.heldShare) : L"Auto, measuring"; }
+    // --- the animation mode (round 5): the setting, else the show's own choice, else Auto's constant for its class
+    {
+        static const wchar_t* kModeName[3] = { L"Full", L"Camera only", L"Off" };
+        if (s.animMode >= 0 && s.animMode <= 2) { r.animMode = s.animMode; r.animModeNote = std::wstring(kModeName[r.animMode]); }
+        else if (src.showChoice >= 0 && src.showChoice <= 2) { r.animMode = src.showChoice; r.animModeNote = std::wstring(kModeName[r.animMode]) + L", this show's choice"; }
+        else {
+            r.animMode = src.showClass == 1 ? kAnimModeFeature : src.showClass == 3 ? kAnimModeMixedCg : kAnimModeTv;
+            r.animModeNote = std::wstring(kModeName[r.animMode]) + (src.showClass == 1 ? L" (Auto: feature)" : src.showClass == 2 ? L" (Auto: TV)" : src.showClass == 3 ? L" (Auto: mixed CG)" : L" (Auto)");
+        }
+        const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
+        const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation) : true;
+        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
+    }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);
 

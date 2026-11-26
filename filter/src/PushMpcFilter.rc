@@ -4,7 +4,7 @@
 
 // Plain Win32 controls only (no owner draw, no own colours): MPC-HC hosts COM property pages in its
 // CMPCThemeComPropertyPage, which subclasses standard controls for its dark theme, as it does for LAV's pages.
-IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 444
+IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 462
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
@@ -68,6 +68,9 @@ BEGIN
     LTEXT           "Animation", IDC_PM_ANIM_LBL, 15, 424, 62, 8
     COMBOBOX        IDC_PM_ANIM, 78, 422, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Smooth motion for cartoons and anime drawn on twos", IDC_PM_ANIM_NOTE, 150, 421, 128, 17
+    LTEXT           "Drawn motion", IDC_PM_ANIMMODE_LBL, 15, 442, 62, 8
+    COMBOBOX        IDC_PM_ANIMMODE, 78, 440, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Camera only keeps the drawn look: pans stay smooth, drawings change as drawn", IDC_PM_ANIMMODE_NOTE, 150, 439, 128, 17
 END
 
 IDD_PUSHMPC_ABOUT DIALOGEX 0, 0, 300, 352

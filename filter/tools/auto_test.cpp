@@ -1,6 +1,7 @@
 // Headless check of the Auto rules (no GPU): prints the decision for a few sources, displays and GPU families.
 #include "../src/PushMpcAuto.h"
 #include "../src/PushMpcExtras.h"
+#include "../src/PushMpcShows.h"
 #include "../../pushmpc/include/pushmpc/unlocks.h"
 #include <cstdio>
 #include <random>
@@ -260,6 +261,16 @@ int main()
             check(a.animation && !b.animation && c2.animation && !e.animation && f.animation, L"Animation Auto: held share >= 20 % or the path; Off / On fixed", a.animNote + L" | " + b.animNote);
             check(a.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
                   std::wstring(FgMethodLabel(a.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
+            // round 5: the animation mode (Auto = Full for every class until the verdict; the show's choice; the setting)
+            Source tv = held; tv.showClass = 2; Source picked = held; picked.showClass = 2; picked.showChoice = 1;
+            Settings cam; cam.animMode = 1; Settings noTrans; noTrans.holdTransients = kOff;
+            const Choice m1 = Decide({}, tv, d, {}, g), m2 = Decide({}, picked, d, {}, g), m3 = Decide(cam, picked, d, {}, g), m4 = Decide(noTrans, live, d, {}, g), m5 = Decide({}, live, d, {}, g);
+            check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full by class until the verdict, a show's choice is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
+            check((m1.holdFlags & 1) && (m1.holdFlags & 2) && (m5.holdFlags & 1) && (m5.holdFlags & 8) && !(m5.holdFlags & 2) && m4.holdFlags == 0,
+                  L"holds: transients on for every video (flash / impact also on live action), line art on animation only; Off turns them off", std::to_wstring(m1.holdFlags) + L" / " + std::to_wstring(m5.holdFlags));
+            check(ShowKeyFor(L"D:\\TV\\Show\\Season 1\\e01.mkv") == ShowKeyFor(L"d:\\tv\\show\\season 2\\e05.mkv") && ShowKeyFor(L"D:\\TV\\Show\\S01\\e01.mkv") == ShowKeyFor(L"D:\\TV\\Show\\e09.mkv")
+                  && ShowKeyFor(L"D:\\TV\\Show\\e01.mkv") != ShowKeyFor(L"D:\\TV\\Other\\e01.mkv") && ShowKeyFor(L"D:\\TV\\Show\\e01.mkv").size() == 16,
+                  L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"D:\\TV\\Show\\e01.mkv"));
         }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;

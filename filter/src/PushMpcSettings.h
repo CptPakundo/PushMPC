@@ -25,6 +25,10 @@
 //   DebandStrength   Low | Medium | High             default Medium
 //   SubtitleHold     Auto | Off | On                 default Auto   (PushFPS's Subtitle Hold: burned-in subtitles kept out of frame generation; Auto = kSubtitleHoldAuto)
 //   Animation        Auto | Off | On                 default Auto   (cartoons and anime: held drawings re-timed, the animation tuning; Auto = when the picture is found to be animation)
+//   AnimationMode    Auto | Full | CameraOnly | Off  default Auto   (how drawn animation moves: Full = every part smooth at its own cadence; Camera only = pans and slides smooth, drawings
+//                                                                   pop as drawn; Off = plain frame generation. Auto = the show's own choice (HKCU\Software\PushMPC\Shows), else by its class)
+//   HoldTransients   Auto | Off | On                 default Auto   (flashes and impact frames shown as drawn, every video; smears and appearing objects on animation)
+//   LineArt          Auto | Off | On                 default Auto   (line contrast of generated frames kept at the drawing's on animation; dropped first when the GPU is short)
 //   FrameLog         DWORD 1/0                       default 0 (troubleshooting only; the filter log is always written)
 // Debug and test values stay in HKCU\Software\PushMPC\Filter (see ReadConfig in PushMpcFilter.cpp).
 #pragma once
@@ -81,6 +85,9 @@ struct Settings {
     DebandStrength debandStrength = DebandStrength::Medium;
     int subtitleHold = kAuto;  // kAuto, kOff, 1 = on (PushFPS 4.5's Subtitle Hold, only while frame generation runs)
     int animation = kAuto;     // kAuto, kOff, 1 = on: held-frame re-timing (pushcore heldFrames) and Auto's animation tuning
+    int animMode = kAuto;      // kAuto, or PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off (AnimationMode)
+    int holdTransients = kAuto;   // kAuto, kOff, 1 = on
+    int lineArt = kAuto;          // kAuto, kOff, 1 = on
     bool frameLog = false;   // the per-frame CSVs (about 150 kB a minute): for troubleshooting, off unless asked for
     bool operator==(const Settings&) const = default;
 };
@@ -210,6 +217,10 @@ inline Settings LoadSettings()
     const std::wstring ds = RegReadStr(k, L"DebandStrength");
     s.subtitleHold = ParseOnOff(RegReadStr(k, L"SubtitleHold"), kAuto);
     s.animation = ParseOnOff(RegReadStr(k, L"Animation"), kAuto);
+    { const std::wstring am = RegReadStr(k, L"AnimationMode");
+      s.animMode = _wcsicmp(am.c_str(), L"Full") == 0 ? 0 : (_wcsicmp(am.c_str(), L"CameraOnly") == 0 || _wcsicmp(am.c_str(), L"Camera only") == 0) ? 1 : _wcsicmp(am.c_str(), L"Off") == 0 ? 2 : kAuto; }
+    s.holdTransients = ParseOnOff(RegReadStr(k, L"HoldTransients"), kAuto);
+    s.lineArt = ParseOnOff(RegReadStr(k, L"LineArt"), kAuto);
     s.debandStrength = _wcsicmp(ds.c_str(), L"Low") == 0 ? DebandStrength::Low : _wcsicmp(ds.c_str(), L"High") == 0 ? DebandStrength::High : DebandStrength::Medium;
     const std::wstring hb = RegReadStr(k, L"HdrBoost");
     s.hdrBoost = _wcsicmp(hb.c_str(), L"Off") == 0 ? HdrBoost::Off : _wcsicmp(hb.c_str(), L"Low") == 0 ? HdrBoost::Low
@@ -249,6 +260,9 @@ inline bool SaveSettings(const Settings& s)
     str(L"DebandStrength", DebandStrengthStr(s.debandStrength));
     str(L"SubtitleHold", OnOffStr(s.subtitleHold));
     str(L"Animation", OnOffStr(s.animation));
+    str(L"AnimationMode", s.animMode == 0 ? L"Full" : s.animMode == 1 ? L"CameraOnly" : s.animMode == 2 ? L"Off" : L"Auto");
+    str(L"HoldTransients", OnOffStr(s.holdTransients));
+    str(L"LineArt", OnOffStr(s.lineArt));
     str(L"HdrBoost", HdrBoostStr(s.hdrBoost));
     str(L"HdrMethod", HdrMethodStr(s.hdrMethod));
     dw(L"HdrLimit", s.hdrLimit);

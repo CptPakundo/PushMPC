@@ -1623,7 +1623,7 @@ struct PushCore {
             const RegionFrame& r = rit->second;
             const float cad = r.changedShare() > 0.002 ? cadenceHist.Median(seq, r.changed.size(), [&](size_t i) { return r.changed[i] != 0; }, 7) : 0.f;
             showClass.Push(cad, holdAnimNow.load());
-            animClassNow = uint32_t(showClass.Provisional());
+            animClassNow = uint32_t(showClass.Provisional()) | (showClass.Class() != ShowClass::Unknown ? 16u : 0u);   // 16: final
         }
         if (seq >= 3) {
             const uint64_t s = seq - 2;

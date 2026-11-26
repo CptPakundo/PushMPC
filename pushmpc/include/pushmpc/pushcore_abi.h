@@ -292,7 +292,7 @@ typedef struct PushCoreStats {
     uint32_t holdActive;          /* 1 = hold plans are made for this stream */
     uint32_t animClass;           /* the picture's class from its cadence (Auto per show): 0 not known yet, 1 feature
                                      (moving parts mostly on ones), 2 TV limited (twos / threes), 3 mixed CG (rarely
-                                     drawn on twos); known after ~2 minutes, provisional before */
+                                     drawn on twos); + 16 once final (after ~2 minutes), provisional before */
     uint64_t holdPairs;           /* source pairs with a hold */
     uint64_t holdFrames;          /* generated frames composed */
     uint64_t holdFlashes;         /* flash / impact pairs held whole */

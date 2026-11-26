@@ -56,6 +56,9 @@
 #define IDC_PM_ANIM_LBL      1060
 #define IDC_PM_ANIM          1061
 #define IDC_PM_ANIM_NOTE     1062
+#define IDC_PM_ANIMMODE_LBL  1063
+#define IDC_PM_ANIMMODE      1064
+#define IDC_PM_ANIMMODE_NOTE 1065
 #define IDC_AB_DIAG          1106
 #define IDC_AB_DIAG_NOTE     1107
 #define IDC_AB_UPDATE        1108

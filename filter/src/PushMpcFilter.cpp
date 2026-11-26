@@ -55,6 +55,7 @@
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
+#include "PushMpcShows.h"
 #include "PushMpcAuto.h"
 #include <commctrl.h>
 #include <shellapi.h>
@@ -1583,6 +1584,7 @@ public:
         // timed per step (RC1 F7: one close took 9.2 s; the exit helper's line says how long after these steps it ran)
         const int64_t q0 = Qpc();
         ExitMark("filter teardown started");
+        if (!m_showKey.empty() && pm::CurrentShow() == m_showKey) pm::SetCurrentShow({});   // round 5: no show playing now
         StopThreads();
         const int64_t q1 = Qpc();
         StopWatcher();
@@ -2711,6 +2713,9 @@ private:
     // Animation Auto: the path hint (once per file) and pushcore's held-frame share (sticky once it says animation)
     std::atomic<int> m_animHint = -1;          // -1 not looked at yet, 0 / 1
     std::atomic<double> m_heldShare = -1.0;
+    std::wstring m_showKey;                     // round 5: this file's show (PushMpcShows.h), empty = none
+    std::atomic<int> m_showClass = 0, m_showChoice = -1;
+    bool m_showClassSaved = false;
     bool m_heldLogged = false;
 };
 
@@ -4307,6 +4312,9 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
     s.animHint = m_animHint.load() == 1;
     s.heldShare = m_heldShare.load();
+    // the page may set this show's choice while it plays (Shows\<key>\Choice)
+    if (!m_showKey.empty()) m_showChoice = pm::ReadShow(m_showKey).choice;
+    s.showClass = m_showClass.load(); s.showChoice = m_showChoice.load();
     return s;
 }
 // The stream's bitrate, for Clean up's Auto rule: the splitter's video type (dwBitRate), else the file's size over its
@@ -4408,13 +4416,15 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     // held-frame re-timing (animation drawn on twos / threes): with frame generation, unless Animation is Off. pushcore
     // re-times only where it finds held frames, so it is on for every video (live action has none and is unchanged).
     p.heldFrames = (g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && p.multiplier > 1 && s.enable && s.animation != pm::kOff ? (s.animation == pm::kAuto ? 1 : 2) : 0;
+    // round 5: the animation mode and the holds (pushcore makes hold plans only with heldFrames)
+    if ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) && p.heldFrames) { p.animationMode = c.animMode; p.holdFlags = c.holdFlags; }
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
 {
     if (a.sr != b.sr || a.multiplier != b.multiplier || a.nr != b.nr || a.videoHdr != b.videoHdr) return false;
     if (a.videoHdr && a.videoHdrPeak != b.videoHdrPeak) return false;
-    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold || a.heldFrames != b.heldFrames)) return false;
+    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold || a.heldFrames != b.heldFrames || a.animationMode != b.animationMode || a.holdFlags != b.holdFlags)) return false;
     if (a.sr && (a.srQuality != b.srQuality || a.srTarget != b.srTarget || a.srFamily != b.srFamily || a.srMethod != b.srMethod)) return false;
     if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier)) return false;
     if (a.nr && (a.nrTone != b.nrTone || a.nrStructure != b.nrStructure)) return false;
@@ -4728,6 +4738,13 @@ void CPushMpcFilter::AnimationHintOnce()
 {
     if (m_animHint.load() >= 0) return;
     m_animHint = pm::AnimationHint(SourceFile()) ? 1 : 0;
+    m_showKey = pm::ShowKeyFor(SourceFile());
+    if (!m_showKey.empty()) {
+        const pm::ShowInfo si = pm::ReadShow(m_showKey);
+        m_showClass = si.cls; m_showChoice = si.choice; m_showClassSaved = si.cls != 0;
+        pm::SetCurrentShow(m_showKey);
+        Log(std::format("animation mode: show class {}, choice {}", si.cls, si.choice));
+    }
     if (m_animHint.load() == 1) Log("animation: the file name or folder says animation");
 }
 void CPushMpcFilter::StartAuto()
@@ -4788,6 +4805,12 @@ void CPushMpcFilter::AutoLoop()
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
                 if (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) { m_subtitleState = st.subtitleHoldState; m_subtitlePixels = st.subtitleHoldPixels; }
+                if ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) && (st.animClass & 16u) && !m_showClassSaved && !m_showKey.empty()) {
+                    // the class pushcore measured over ~2 minutes: kept for this show (Auto per show)
+                    m_showClassSaved = true; m_showClass = int(st.animClass & 3u);
+                    pm::WriteShowDword(m_showKey, L"Class", int(st.animClass & 3u));
+                    Log(std::format("animation mode: show class {} measured and kept", st.animClass & 3u));
+                }
                 if ((g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && st.heldActive && st.heldTested >= 96) {
                     // ~4 s of frames tested: the share of held drawings (kept once it says animation: a still or a 3D CG
                     // scene in a cartoon does not undo it)
@@ -5125,6 +5148,7 @@ public:
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
         FillCombo(m_Dlg, IDC_PM_ANIM, { L"Auto", L"Off", L"On" });
+        FillCombo(m_Dlg, IDC_PM_ANIMMODE, { L"Auto", L"Full", L"Camera only", L"Off" });
         FillCombo(m_Dlg, IDC_PM_SUBHOLD, { (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) && pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off ? L"Auto (on text)" : pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
         // drop-down widths in dialog units (they scale with the font and the display's DPI, as the template does)
         for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, Dlu(95), 0);
@@ -5343,6 +5367,12 @@ private:
         ComboSet(m_Dlg, IDC_PM_DBSTR, int(s.debandStrength));
         ComboSet(m_Dlg, IDC_PM_SUBHOLD, OnOffIdx(s.subtitleHold));
         ComboSet(m_Dlg, IDC_PM_ANIM, OnOffIdx(s.animation));
+        {   // the show playing now (its own choice), else the default for every show
+            const std::wstring show = pm::CurrentShow();
+            const int v = show.empty() ? s.animMode : pm::ReadShow(show).choice;
+            ComboSet(m_Dlg, IDC_PM_ANIMMODE, v < 0 ? 0 : v + 1);
+            SetDlgItemTextW(m_Dlg, IDC_PM_ANIMMODE_LBL, show.empty() ? L"Drawn motion" : L"This show");
+        }
         CheckDlgButton(m_Dlg, IDC_PM_FRAMELOG, s.frameLog ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(m_Dlg, IDC_PM_HDRLIMIT, s.hdrLimit ? BST_CHECKED : BST_UNCHECKED);
     }
@@ -5371,6 +5401,12 @@ private:
         s.debandStrength = pm::DebandStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_DBSTR), 0, 2));
         s.subtitleHold = OnOffVal(ComboSel(m_Dlg, IDC_PM_SUBHOLD));
         s.animation = OnOffVal(ComboSel(m_Dlg, IDC_PM_ANIM));
+        {
+            const int v = ComboSel(m_Dlg, IDC_PM_ANIMMODE) - 1;   // -1 Auto
+            const std::wstring show = pm::CurrentShow();
+            if (show.empty()) s.animMode = v < 0 ? pm::kAuto : v;
+            else pm::WriteShowDword(show, L"Choice", v);           // sticky for this show; the default stays as it is
+        }
         s.frameLog = IsDlgButtonChecked(m_Dlg, IDC_PM_FRAMELOG) == BST_CHECKED;
         s.hdrLimit = IsDlgButtonChecked(m_Dlg, IDC_PM_HDRLIMIT) == BST_CHECKED;
         return s;
@@ -5384,7 +5420,7 @@ private:
                         IDC_PM_FGMETHOD_LBL, IDC_PM_FGMETHOD, IDC_PM_VRR_LBL, IDC_PM_VRR, IDC_PM_UPSCALER_LBL, IDC_PM_UPSCALER, IDC_PM_CAPS_NOTE,
                         IDC_PM_HDRMETHOD_LBL, IDC_PM_HDRMETHOD, IDC_PM_HDRLIMIT, IDC_PM_DISPPEAK_LBL, IDC_PM_DISPPEAK,
                         IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE,
-                        IDC_PM_ANIM_LBL, IDC_PM_ANIM, IDC_PM_ANIM_NOTE })
+                        IDC_PM_ANIM_LBL, IDC_PM_ANIM, IDC_PM_ANIM_NOTE, IDC_PM_ANIMMODE_LBL, IDC_PM_ANIMMODE, IDC_PM_ANIMMODE_NOTE })
             ShowWindow(GetDlgItem(m_Dlg, id), on ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), on && !m_pushFpsData.empty() ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_GSYNC), on && m_gsyncOffer ? SW_SHOW : SW_HIDE);
