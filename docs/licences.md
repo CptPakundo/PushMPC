@@ -15,6 +15,11 @@ them.
 - **NVIDIA Image Scaling** 1.0.3: MIT (`vsplugin/third_party/nis/`).
 - **AMD FidelityFX Super Resolution 1** (FidelityFX SDK 1.1.4): MIT (`vsplugin/third_party/fidelityfx-fsr1/`).
 - **ncnn** (Tencent), in the Linux builds of the PushFlow route: BSD-3-Clause.
+- **Intel VPL dispatcher** (libvpl 2.17.0, Intel): MIT, linked into pushcore.dll for Intel's AI frame interpolation.
+- **Intel XeSS SDK** 3.0.2 headers (Intel): Intel Simplified Software License, with Intel's third-party notices.
+
+The licence texts of these two are installed with pushcore in `core\licenses\` (`libvpl-LICENSE.txt`,
+`intel-xess-LICENSE.txt`, `intel-xess-third-party-programs.txt`).
 - The deband pass is PushMPC's own implementation of the well-known random-offset deband method (as used by
   libplacebo and mpv); no code was taken from them.
 
@@ -29,6 +34,9 @@ them.
 - **PushFlow**: ONNX Runtime and its execution providers (MIT, Microsoft; TensorRT-RTX under NVIDIA's licence,
   OpenVINO under Apache-2.0) from nuget.org and pypi.org, and the RIFE models (MIT) from PushFPS's release.
 - **AMD FidelityFX SDK** runtime (FSR 4.1 on Radeon RX 6000-9000), from AMD's GitHub release, under AMD's licence.
+- **Intel XeSS** 3.0.2 runtime (XeSS super resolution, XeSS frame generation, XeLL), from Intel's GitHub repository, on
+  Intel graphics cards: Intel Simplified Software License. Intel's licence and third-party notices are installed with
+  the files in `runtime\licenses\intel-xess\`.
 - **VapourSynth** R82 portable (LGPL-2.1) and Python's embeddable package (PSF licence), for the mpv route on Windows.
 - **mpv** for Plex, when Plex's own player can't take PushMPC's filter: shinchiro's libmpv build (GPL/LGPL).
 - **ArtCNN** weights (MIT), for the Mac's Homebrew package.

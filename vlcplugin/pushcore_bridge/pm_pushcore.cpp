@@ -241,7 +241,11 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     s.sharper = pm::kOff; s.cleanUp = pm::kOff; s.deband = pm::kOff; s.sdrToHdr = pm::kOff;
     pm::Gpu g; g.available = 0; g.hardware = 0; g.family = pm::kFamUnknown;
     PushCoreCaps caps;
-    if (host.Caps(caps)) { g.family = caps.family; g.available = caps.available; g.hardware = caps.hardware; g.name = Widen(caps.adapter); }
+    if (host.Caps(caps)) {
+        g.family = caps.family; g.available = caps.available; g.hardware = caps.hardware; g.name = Widen(caps.adapter);
+        for (uint32_t i = 0; i < pm::kCapCount && i < PUSHCORE_CAP_COUNT; ++i) g.reason[i] = Widen(caps.reason[i]);
+        pm::ReadMeasured(g);   // the Intel methods' self-test numbers
+    }
     pm::Costs costs;
     costs.card = pm::CardFactor(g.name, g.family);
     LoadLearned(costs, g.name);

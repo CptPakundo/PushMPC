@@ -34,6 +34,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -115,8 +116,15 @@ int wmain(int argc, wchar_t** argv) {
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
     int sr = -1, fgOpt = -1, mult = -1;
-    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|none): the filter's route
+    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|xefg|vpl|none, --srmethod rtx|fsr|nis|xess|ivsr): the filter's route
     bool useSettings = false;
+    // G10: --adapter nvidia (default) | intel | amd | any | warp (Windows' software GPU, sets PUSHMPC_TEST_WARP=1 for pushcore);
+    // <video> = synthetic:WxH = no file: a textured square moving over a textured background, a hard cut at --cut N
+    // (default 0 = none), 30 fps; --check 1 reads every output back and checks the square's position in the generated
+    // frames and the hold on the cut pair; --selftest xefg|xess|ivsr|vpl|bridge|all runs pushcore_selfTest on the adapter
+    // (--record 1 stores the hardware results; tools/pushcore_selftest is the stand-alone version)
+    std::wstring adapterPick = L"nvidia", selfTest;
+    uint64_t cutAt = 0; bool checkMotion = false, selfTestRecord = false;
     PushCoreSettings ps{};
     ps.structSize = sizeof(ps); ps.source = PUSHCORE_SETTINGS_PUSHMPC; ps.sr = 1; ps.srQuality = 4; ps.srTarget = PUSHCORE_SR_TARGET_4K;
     ps.multiplier = 4; ps.vfgQuality = 1; ps.nrTone = ps.nrStructure = 1; ps.fgBackend = PUSHCORE_FG_VFG; ps.fgTier = 1;
@@ -126,13 +134,19 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--backend") {
             useSettings = true;
             ps.fgBackend = v == L"dlssg" ? PUSHCORE_FG_DLSSG : v == L"pushflow" ? PUSHCORE_FG_PUSHFLOW : v == L"fsr" ? PUSHCORE_FG_FSR
-                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : PUSHCORE_FG_VFG;
+                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : v == L"xefg" ? PUSHCORE_FG_XEFG : v == L"vpl" ? PUSHCORE_FG_VPL : PUSHCORE_FG_VFG;
             if (v == L"none") ps.multiplier = 1;
             continue;
         }
         if (k == L"--q") { ps.vfgQuality = uint32_t(_wtoi(v.c_str())); ps.fgTier = ps.vfgQuality; continue; }
         if (k == L"--srq") { const int q = _wtoi(v.c_str()); ps.sr = q > 0; ps.srQuality = q > 0 ? uint32_t(q) : 2u; continue; }
-        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX; continue; }
+        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : v == L"xess" ? PUSHCORE_SR_METHOD_XESS
+                                                       : v == L"ivsr" ? PUSHCORE_SR_METHOD_IVSR : PUSHCORE_SR_METHOD_RTX; continue; }
+        if (k == L"--adapter" || k == L"--vendor") { adapterPick = v; continue; }
+        if (k == L"--cut") { cutAt = uint64_t(_wtoi64(v.c_str())); continue; }
+        if (k == L"--check") { checkMotion = _wtoi(v.c_str()) != 0; continue; }
+        if (k == L"--selftest") { selfTest = v; continue; }
+        if (k == L"--record") { selfTestRecord = _wtoi(v.c_str()) != 0; continue; }
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
@@ -171,34 +185,111 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "harness " << utf8(exe) << "\nloaded  " << utf8(dllPath) << " (ABI " << api->abiVersionFn() << ")\n";
     }
 
-    // --- D3D11 device on the NVIDIA adapter, as LAV/MPC-VR would have it ---
+    // --- D3D11 device on the NVIDIA adapter (or --adapter's), as LAV/MPC-VR would have it ---
+    const bool warpAdapter = adapterPick == L"warp";
+    const bool synthetic = input.rfind(L"synthetic:", 0) == 0;
+    if (warpAdapter) SetEnvironmentVariableW(L"PUSHMPC_TEST_WARP", L"1");   // pushcore's D3D12 side may then take WARP (by LUID)
     ComPtr<IDXGIFactory1> factory;
     CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     ComPtr<IDXGIAdapter1> adapter, best;
     SIZE_T bestMem = 0;
-    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+    if (warpAdapter) { ComPtr<IDXGIFactory4> f4; if (SUCCEEDED(factory.As(&f4))) f4->EnumWarpAdapter(IID_PPV_ARGS(&best)); }
+    else for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 d{}; adapter->GetDesc1(&d);
-        if (d.VendorId == 0x10DE && d.DedicatedVideoMemory > bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory; }
+        const uint32_t want = adapterPick == L"intel" ? 0x8086u : adapterPick == L"amd" ? 0x1002u : adapterPick == L"any" ? 0u : 0x10DEu;
+        if ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) || (want && d.VendorId != want)) continue;
+        if (d.DedicatedVideoMemory >= bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory; }
     }
-    if (!best) { std::cout << "no NVIDIA adapter\n"; return 1; }
+    if (!best) { std::cout << "no " << utf8(adapterPick) << " adapter\n"; return 1; }
+    uint64_t bestLuid = 0;
+    { DXGI_ADAPTER_DESC1 d{}; best->GetDesc1(&d); bestLuid = (uint64_t(uint32_t(d.AdapterLuid.HighPart)) << 32) | d.AdapterLuid.LowPart; }
+    // --selftest: pushcore_selfTest on this adapter, then exit (0 = passed)
+    if (!selfTest.empty()) {
+        auto fn = reinterpret_cast<PushCoreSelfTestFn>(GetProcAddress(dll, "pushcore_selfTest"));
+        if (!fn) { std::cout << "pushcore_selfTest missing\n"; return 1; }
+        const uint32_t which = selfTest == L"xess" ? PUSHCORE_SELFTEST_XESS_SR : selfTest == L"ivsr" ? PUSHCORE_SELFTEST_IVSR
+                             : selfTest == L"vpl" ? PUSHCORE_SELFTEST_VPL_FI : selfTest == L"bridge" ? PUSHCORE_SELFTEST_BRIDGE
+                             : selfTest == L"all" ? 31u : PUSHCORE_SELFTEST_XEFG;
+        if (mult >= 2) SetEnvironmentVariableW(L"PUSHMPC_SELFTEST_XEFG_MULTIPLIER", std::to_wstring(mult).c_str());
+        if (maxFrames != 120) SetEnvironmentVariableW(L"PUSHMPC_SELFTEST_FRAMES", std::to_wstring(maxFrames).c_str());
+        std::vector<char> report(32768);
+        const uint32_t flags = (warpAdapter ? PUSHCORE_SELFTEST_FLAG_WARP : 0u) | (selfTestRecord ? PUSHCORE_SELFTEST_FLAG_RECORD : 0u);
+        const int r = fn(warpAdapter ? 0 : bestLuid, pushfps.c_str(), which, flags, report.data(), uint32_t(report.size()));
+        std::cout << "SELFTEST " << utf8(selfTest) << ": " << report.data() << "\n" << (r == PUSHCORE_OK ? "PASS" : "FAIL") << "\n";
+        return r == PUSHCORE_OK ? 0 : 1;
+    }
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> imm;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-    if (FAILED(D3D11CreateDevice(best.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    if (FAILED(D3D11CreateDevice(best.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, (synthetic ? 0 : D3D11_CREATE_DEVICE_VIDEO_SUPPORT) | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                                  levels, 2, D3D11_SDK_VERSION, &device, nullptr, &imm))) { std::cout << "D3D11CreateDevice failed\n"; return 1; }
     { ComPtr<ID3D10Multithread> mt; if (SUCCEEDED(device.As(&mt))) mt->SetMultithreadProtected(TRUE); }
     ComPtr<ID3D11DeviceContext4> imm4; imm.As(&imm4);
     { DXGI_ADAPTER_DESC1 d{}; best->GetDesc1(&d); std::cout << "D3D11 device on " << utf8(d.Description) << std::format(" LUID {:08X}:{:08X}\n", unsigned(d.AdapterLuid.HighPart), d.AdapterLuid.LowPart); }
 
     // --- D3D11VA decode on that device ---
-    AVFormatContext* fmt = nullptr;
+    // G10: the synthetic source (no decoder): NV12 frames made on the CPU, BT.709 limited range, 30 fps. A red textured
+    // square moves by (vx, vy) per frame over a textured grey background; at frame --cut the background and the square's
+    // path change completely (a hard cut).
+    struct Synth {
+        uint32_t W = 0, H = 0, S = 0; double vx = 0, vy = 0; uint64_t cut = 0;
+        double px(double t) const { return W * 0.15 + vx * t; }
+        double py(double t) const { return H * 0.30 + vy * t; }
+        // RGB (8-bit) of frame k at continuous time t (t = k for real frames; scene = 0 before the cut, 1 after)
+        void rgb(double t, int scene, std::vector<uint8_t>& img) const {
+            img.assign(size_t(W) * H * 3, 0);
+            const double sx = scene ? W * 0.6 - vx * (t - double(cut)) : px(t), sy = scene ? H * 0.55 : py(t);
+            for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) {
+                uint8_t* p = &img[(size_t(y) * W + x) * 3];
+                const bool c = ((x / 16) + (y / 16)) & 1;
+                if (!scene) { p[0] = uint8_t(70 + (c ? 30 : 0) + (x * 37 % 19)); p[1] = uint8_t(80 + (y * 13 % 23)); p[2] = uint8_t(90 + ((x + y) % 29)); }
+                else { p[0] = uint8_t(20 + (y * 7 % 31)); p[1] = uint8_t(120 + (c ? 50 : 0)); p[2] = uint8_t(60 + (x * 11 % 37)); }
+                const double qx = x + 0.5 - sx, qy = y + 0.5 - sy;
+                if (qx >= 0 && qy >= 0 && qx < S && qy < S) {
+                    const bool cc = ((int(qx) / 6) + (int(qy) / 6)) & 1;
+                    p[0] = uint8_t(cc ? 240 : 210); p[1] = uint8_t(cc ? 40 : 70); p[2] = uint8_t((int(qx) * 9 + int(qy) * 5) & 63);
+                }
+            }
+        }
+        void nv12(const std::vector<uint8_t>& rgb, uint8_t* dst, uint32_t pitch) const {   // BT.709 limited range
+            auto Y = [&](const uint8_t* p) { return 16.0 + 219.0 * (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) / 255.0; };
+            for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) dst[size_t(y) * pitch + x] = uint8_t(std::lround(Y(&rgb[(size_t(y) * W + x) * 3])));
+            uint8_t* uv = dst + size_t(pitch) * H;
+            for (uint32_t y = 0; y < H / 2; ++y) for (uint32_t x = 0; x < W / 2; ++x) {
+                double r = 0, g = 0, b = 0;
+                for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) { const uint8_t* p = &rgb[(size_t(2 * y + dy) * W + 2 * x + dx) * 3]; r += p[0]; g += p[1]; b += p[2]; }
+                r /= 4 * 255.0; g /= 4 * 255.0; b /= 4 * 255.0;
+                const double yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                uv[size_t(y) * pitch + 2 * x] = uint8_t(std::clamp(std::lround(128 + 224 * (b - yy) / 1.8556), 0L, 255L));
+                uv[size_t(y) * pitch + 2 * x + 1] = uint8_t(std::clamp(std::lround(128 + 224 * (r - yy) / 1.5748), 0L, 255L));
+            }
+        }
+    } syn;
+    ComPtr<ID3D11Texture2D> synTex, synStaging;
+    uint64_t synIndex = 0;
+    AVFormatContext* fmt = nullptr; AVStream* st = nullptr; AVCodecContext* dec = nullptr; AVBufferRef* hwdev = nullptr;
+    AVPacket* pkt = nullptr; AVFrame* decoded = nullptr;
+    int vs = -1;
+    AVPixelFormat sw = AV_PIX_FMT_NV12;
+    if (synthetic) {
+        unsigned w = 640, h = 360;
+        swscanf_s(input.c_str() + 10, L"%ux%u", &w, &h);
+        syn.W = std::max(64u, w) & ~1u; syn.H = std::max(64u, h) & ~1u; syn.S = std::max(16u, syn.H / 5);
+        syn.vx = std::max(2.0, syn.W / 80.0); syn.vy = std::max(0.5, syn.H / 240.0); syn.cut = cutAt;
+        D3D11_TEXTURE2D_DESC d{}; d.Width = syn.W; d.Height = syn.H; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_NV12; d.SampleDesc = {1, 0};
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, &synTex))) { std::cout << "no NV12 texture on this device\n"; return 1; }
+        d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, &synStaging))) { std::cout << "no NV12 staging texture\n"; return 1; }
+        std::cout << std::format("synthetic source {}x{} NV12 30 fps, square {} px moving {:.1f},{:.1f} px per frame, cut at {}\n", syn.W, syn.H, syn.S, syn.vx, syn.vy, cutAt);
+    } else {
     if (avformat_open_input(&fmt, utf8(input).c_str(), nullptr, nullptr) < 0 || avformat_find_stream_info(fmt, nullptr) < 0) { std::cout << "cannot open input\n"; return 1; }
-    const int vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (vs < 0) { std::cout << "no video stream\n"; return 1; }
-    AVStream* st = fmt->streams[vs];
+    st = fmt->streams[vs];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
-    AVCodecContext* dec = avcodec_alloc_context3(codec);
+    dec = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(dec, st->codecpar);
-    AVBufferRef* hwdev = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    hwdev = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
     auto* hwctx = reinterpret_cast<AVD3D11VADeviceContext*>(reinterpret_cast<AVHWDeviceContext*>(hwdev->data)->hwctx);
     hwctx->device = device.Get(); device->AddRef();   // FFmpeg releases it
     if (av_hwdevice_ctx_init(hwdev) < 0) { std::cout << "D3D11VA device init failed\n"; return 1; }
@@ -207,11 +298,23 @@ int wmain(int argc, wchar_t** argv) {
     dec->extra_hw_frames = 4;
     if (!codec || avcodec_open2(dec, codec, nullptr) < 0) { std::cout << "no decoder\n"; return 1; }
     if (start > 0) av_seek_frame(fmt, -1, int64_t(start * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
-    AVPacket* pkt = av_packet_alloc();
-    AVFrame* decoded = av_frame_alloc();
+    pkt = av_packet_alloc();
+    decoded = av_frame_alloc();
+    }
     bool eof = false;
     double decodeMs = 0; uint64_t decodedCount = 0;
-    auto decodeNext = [&]() -> bool {   // leaves a D3D11 frame in `decoded`
+    auto decodeNext = [&]() -> bool {   // leaves a D3D11 frame in `decoded` (synthetic: makes the next frame)
+        if (synthetic) {
+            std::vector<uint8_t> rgb;
+            syn.rgb(double(synIndex), cutAt && synIndex >= cutAt ? 1 : 0, rgb);
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (FAILED(imm->Map(synStaging.Get(), 0, D3D11_MAP_WRITE, 0, &m))) return false;
+            syn.nv12(rgb, static_cast<uint8_t*>(m.pData), m.RowPitch);
+            imm->Unmap(synStaging.Get(), 0);
+            imm->CopyResource(synTex.Get(), synStaging.Get());
+            ++decodedCount;
+            return true;
+        }
         const auto t = Clock::now();
         for (;;) {
             const int r = avcodec_receive_frame(dec, decoded);
@@ -232,20 +335,24 @@ int wmain(int argc, wchar_t** argv) {
         }
     };
     if (!decodeNext()) { std::cout << "no first frame\n"; return 1; }
+    PushCoreStreamInfo si{};
+    si.structSize = sizeof(si);
+    if (synthetic) {
+        si.width = syn.W; si.height = syn.H; si.format = PUSHCORE_INPUT_NV12; si.fpsNum = 30; si.fpsDen = 1;
+        si.range = AVCOL_RANGE_MPEG; si.matrix = AVCOL_SPC_BT709; si.primaries = AVCOL_PRI_BT709; si.transfer = AVCOL_TRC_BT709;
+    } else {
     if (decoded->format != AV_PIX_FMT_D3D11) { std::cout << "decoder did not produce D3D11 frames\n"; return 1; }
-    const AVPixelFormat sw = AVPixelFormat(reinterpret_cast<AVHWFramesContext*>(decoded->hw_frames_ctx->data)->sw_format);
+    sw = AVPixelFormat(reinterpret_cast<AVHWFramesContext*>(decoded->hw_frames_ctx->data)->sw_format);
     {
         D3D11_TEXTURE2D_DESC d{}; reinterpret_cast<ID3D11Texture2D*>(decoded->data[0])->GetDesc(&d);
         std::cout << std::format("decoder: D3D11VA {}x{} texture array {}x{}x{} format {} sw {}\n", decoded->width, decoded->height, d.Width, d.Height,
                                  d.ArraySize, int(d.Format), av_get_pix_fmt_name(sw));
     }
-
-    PushCoreStreamInfo si{};
-    si.structSize = sizeof(si);
     si.width = uint32_t(decoded->width); si.height = uint32_t(decoded->height);
     si.format = sw == AV_PIX_FMT_P010 ? PUSHCORE_INPUT_P010 : PUSHCORE_INPUT_NV12;
     si.fpsNum = st->avg_frame_rate.num; si.fpsDen = st->avg_frame_rate.den ? st->avg_frame_rate.den : 1;
     si.range = decoded->color_range; si.matrix = decoded->colorspace; si.primaries = decoded->color_primaries; si.transfer = decoded->color_trc;
+    }
     si.displayHdr = hdrDisplay ? 1 : 0;
 
     const std::wstring logFile = (outDir / L"pushcore.log").wstring();
@@ -313,6 +420,52 @@ int wmain(int argc, wchar_t** argv) {
     const uint64_t steadyFrom = std::max<uint64_t>(warmup, lastSave + 4);
     double submitMs = 0;
 
+    // G10 --check: the square's position in each generated frame against the interpolation of its two real neighbours'
+    // positions (measured in the real outputs), and on the cut pair the hold (each generated frame = one of the pair's real
+    // frames, not a blend across the cut)
+    struct CheckState {
+        std::map<uint64_t, std::vector<uint8_t>> real;              // source index -> real output
+        std::vector<std::pair<PushCoreFrame, std::vector<uint8_t>>> pendingGen;
+        std::vector<double> posErr; uint64_t gens = 0, holdsOk = 0, holdsBad = 0, noSquare = 0;
+    } chk;
+    auto centroid = [&](const std::vector<uint8_t>& img, double& cx, double& cy) {
+        double sx = 0, sy = 0, n = 0;
+        for (uint32_t y = 0; y < oi.height; ++y) for (uint32_t x = 0; x < oi.width; ++x) {
+            const uint8_t* p = &img[(size_t(y) * oi.width + x) * 4];
+            if (p[0] >= 170 && p[0] > p[1] + 90 && p[0] > p[2] + 90) { sx += x; sy += y; n += 1; }
+        }
+        if (n < 16) return false;
+        cx = sx / n; cy = sy / n; return true;
+    };
+    auto psnr8 = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+        double se = 0; size_t n = 0;
+        for (size_t i = 0; i < a.size(); i += 4) for (int k = 0; k < 3; ++k) { const double d = double(a[i + k]) - b[i + k]; se += d * d; ++n; }
+        const double mse = se / double(n ? n : 1);
+        return mse < 1e-9 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+    };
+    auto checkOutput = [&](const PushCoreFrame& f, std::vector<uint8_t> img) {
+        if (f.kind != PUSHCORE_FRAME_REAL) { chk.pendingGen.push_back({f, std::move(img)}); return; }
+        const uint64_t k = f.sourceIndex;
+        auto prev = chk.real.find(k - 1);
+        for (auto& [g, gi] : chk.pendingGen) {
+            if (g.sourceIndex != k || prev == chk.real.end()) continue;
+            ++chk.gens;
+            if (cutAt && k == cutAt) {   // the cut pair: held (A or B), never a blend of the two shots
+                const double pa = psnr8(gi, prev->second), pb = psnr8(gi, img);
+                if (std::max(pa, pb) >= 35.0) ++chk.holdsOk; else { ++chk.holdsBad; std::cout << std::format("CHECK cut pair {} subframe {}: PSNR vs A {:.1f} dB, vs B {:.1f} dB (not held)\n", k, g.subframe, pa, pb); }
+                continue;
+            }
+            if (cutAt && k > cutAt && k <= cutAt + 1) continue;   // the first pair after the cut: history restarts
+            double ax, ay, bx, by, gx, gy;
+            if (!centroid(prev->second, ax, ay) || !centroid(img, bx, by) || !centroid(gi, gx, gy)) { ++chk.noSquare; continue; }
+            const double ph = double(g.subframe) / double(m);
+            chk.posErr.push_back(std::hypot(gx - (ax + (bx - ax) * ph), gy - (ay + (by - ay) * ph)));
+        }
+        chk.pendingGen.clear();
+        chk.real[k] = std::move(img);
+        if (chk.real.size() > 4) chk.real.erase(chk.real.begin());
+    };
+
     auto present = [&](const PushCoreFrame& f) -> bool {
         if (f.width != oi.width || f.height != oi.height || !f.texture) ++sizeErrors;
         imm4->Wait(f.readyFence, f.readyValue);           // GPU-side wait for the graph's output
@@ -335,6 +488,16 @@ int wmain(int argc, wchar_t** argv) {
                 } else if (savePng((outDir / name).wstring(), static_cast<const uint8_t*>(map.pData), oi.width, oi.height, map.RowPitch)) ++pngs; else ++pngFail;
                 imm->Unmap(staging.Get(), 0);
             } else ++pngFail;
+        }
+        if (checkMotion && oi.dxgiFormat == 28) {   // G10 synthetic check: every output read back (RGBA8)
+            imm->CopyResource(staging.Get(), backbuffer.Get());
+            D3D11_MAPPED_SUBRESOURCE map{};
+            if (SUCCEEDED(imm->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
+                std::vector<uint8_t> img(size_t(oi.width) * oi.height * 4);
+                for (uint32_t y = 0; y < oi.height; ++y) memcpy(&img[size_t(y) * oi.width * 4], static_cast<const uint8_t*>(map.pData) + size_t(y) * map.RowPitch, size_t(oi.width) * 4);
+                imm->Unmap(staging.Get(), 0);
+                checkOutput(f, std::move(img));
+            }
         }
         imm->Flush();
         const auto now = Clock::now();
@@ -366,15 +529,16 @@ int wmain(int argc, wchar_t** argv) {
     while (!failed) {
         // ingest: one decoded frame at a time, as soon as the graph has a free slot
         if (haveFrame && submitted < maxFrames && api->canSubmit(core)) {
-            const int64_t pts = av_rescale_q(decoded->best_effort_timestamp, st->time_base, AVRational{1, 10000000});
+            const int64_t pts = synthetic ? int64_t(synIndex) * 333333 + 10000000 : av_rescale_q(decoded->best_effort_timestamp, st->time_base, AVRational{1, 10000000});
             const auto t = Clock::now();
-            const int r = api->submit(core, reinterpret_cast<ID3D11Texture2D*>(decoded->data[0]), uint32_t(reinterpret_cast<intptr_t>(decoded->data[1])),
-                                      pts, submitted == 0 ? PUSHCORE_SUBMIT_DISCONTINUITY : 0);
+            const int r = synthetic ? api->submit(core, synTex.Get(), 0, pts, submitted == 0 ? PUSHCORE_SUBMIT_DISCONTINUITY : 0)
+                                    : api->submit(core, reinterpret_cast<ID3D11Texture2D*>(decoded->data[0]), uint32_t(reinterpret_cast<intptr_t>(decoded->data[1])),
+                                                  pts, submitted == 0 ? PUSHCORE_SUBMIT_DISCONTINUITY : 0);
             submitMs += msBetween(t, Clock::now());
             if (r == PUSHCORE_ERROR) { std::cout << "SUBMIT FAILED at " << submitted << ": " << api->lastError(core) << "\n"; failed = true; break; }
             if (r == PUSHCORE_OK) {
                 sourcePts.push_back(pts); perSource.push_back(0); ++submitted;
-                av_frame_unref(decoded);
+                if (synthetic) ++synIndex; else av_frame_unref(decoded);
                 haveFrame = submitted < maxFrames && decodeNext();
                 continue;
             }
@@ -449,8 +613,18 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << std::format("TIMING paced: lateness median {:.2f} p95 {:.2f} ms (target 0, interval {:.2f} ms); late>half-interval {}\n",
                                  l.median - 1000, l.p95 - 1000, outIntervalMs, late);
     }
+    bool checkPass = true;
+    if (checkMotion) {
+        std::vector<double> e = chk.posErr; std::sort(e.begin(), e.end());
+        const double med = e.empty() ? -1 : e[e.size() / 2], p90 = e.empty() ? -1 : e[std::min(e.size() - 1, size_t(0.9 * double(e.size())))];
+        const double tol = 2.0 * std::max(1.0, double(oi.width) / double(si.width));   // 2 source pixels
+        checkPass = m == 1 || (!e.empty() && med <= tol && (!cutAt || cutAt >= submitted || (chk.holdsBad == 0 && chk.holdsOk > 0)));
+        std::cout << std::format("CHECK generated frames checked {}: square position error median {:.2f} p90 {:.2f} px (tolerance {:.1f}), no square {}; cut pair {}: held {} not held {}; "
+                                 "cuts counted {}\n", chk.gens, med, p90, tol, chk.noSquare, cutAt, chk.holdsOk, chk.holdsBad, s.cutGuardCuts);
+    }
+    std::cout << std::format("METHOD frame generation {} (fallback {}: {}), upscaler {}\n", s.fgBackend, s.fgFallback, s.fgNote, s.srMethod);
     const bool pass = !failed && submitted > 1 && countMismatch == 0 && orderErrors == 0 && ptsErrors == 0 && sizeErrors == 0 &&
-                      presentedCount == expected && (m == 1 || generated > 0);
+                      presentedCount == expected && (m == 1 || generated > 0) && checkPass;
     std::cout << (pass ? "PASS" : "FAIL") << "\n";
 
     if (idleMs) { std::cout << "IDLE " << idleMs << " ms (core open, no frames)" << std::endl; Sleep(idleMs); std::cout << "IDLE done" << std::endl; }

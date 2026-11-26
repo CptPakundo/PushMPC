@@ -34,11 +34,13 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     if (key == L"fg_quality") { s.fgQuality = is(L"High") ? pm::FgQuality::High : is(L"Low") ? pm::FgQuality::Low : is(L"Medium") ? pm::FgQuality::Medium : pm::FgQuality::Auto; return true; }
     if (key == L"fg_method") {
         s.fgMethod = is(L"VFG") ? pm::FgMethod::Vfg : (is(L"DLSSG") || is(L"DLSS-G")) ? pm::FgMethod::Dlssg : is(L"PushFlow") ? pm::FgMethod::PushFlow
-                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : is(L"NVOF") ? pm::FgMethod::Nvof : pm::FgMethod::Auto;
+                   : is(L"FSR") ? pm::FgMethod::Fsr : (is(L"AMDFRC") || is(L"FRC")) ? pm::FgMethod::AmdFrc : is(L"NVOF") ? pm::FgMethod::Nvof
+                   : (is(L"XeFG") || is(L"XeSSFG")) ? pm::FgMethod::XeFg : is(L"VPL") ? pm::FgMethod::Vpl : pm::FgMethod::Auto;
         return true;
     }
     if (key == L"vrr") { s.vrr = is(L"On") ? pm::VrrMode::On : is(L"Off") ? pm::VrrMode::Off : pm::VrrMode::Auto; return true; }
-    if (key == L"upscaler") { s.upscaler = is(L"RTX") ? pm::Upscaler::Rtx : is(L"FSR") ? pm::Upscaler::Fsr : is(L"NIS") ? pm::Upscaler::Nis : pm::Upscaler::Auto; return true; }
+    if (key == L"upscaler") { s.upscaler = is(L"RTX") ? pm::Upscaler::Rtx : is(L"FSR") ? pm::Upscaler::Fsr : is(L"NIS") ? pm::Upscaler::Nis
+                                             : is(L"XeSS") ? pm::Upscaler::Xess : (is(L"IntelVSR") || is(L"IVSR")) ? pm::Upscaler::IntelVsr : pm::Upscaler::Auto; return true; }
     if (key == L"target") { s.target = is(L"1440p") ? pm::UpscaleTarget::P1440 : is(L"4K") ? pm::UpscaleTarget::K4 : is(L"5K") ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::Screen; return true; }
     if (key == L"vsr_style") { s.vsrStyle = is(L"HighBitrate") ? pm::VsrStyle::HighBitrate : is(L"Streaming") ? pm::VsrStyle::Streaming : is(L"Standard") ? pm::VsrStyle::Standard : pm::VsrStyle::Auto; return true; }
     if (key == L"cleanup_strength") { s.strength = is(L"Subtle") ? pm::CleanStrength::Subtle : is(L"Balanced") ? pm::CleanStrength::Balanced : pm::CleanStrength::Strong; return true; }
@@ -128,7 +130,7 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     p.sr = c.sr ? 1 : 0;
     p.srQuality = c.srLevel >= 1 ? uint32_t(c.srLevel) : 2u;
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
-    p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX;
+    p.srMethod = pm::CoreSrMethod(c.srMethod);   // RTX / FSR / NIS / XeSS SR / Intel VSR (PUSHCORE_SR_METHOD_* = Upscaler - 1)
     p.deband = c.deband ? 1 : 0;
     p.debandStrength = uint32_t(std::clamp(c.debandStrength, 0, 2));
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, d);

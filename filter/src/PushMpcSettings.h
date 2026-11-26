@@ -18,9 +18,9 @@
 //   Osd              Off | Brief | Always            default Brief  (on-screen status: about 3 s at start and on changes)
 //   OnBattery        Light | Same                    default Light  (on battery: 2x at most, VSR level 2 at most, no clean-up / deband)
 //   FgQuality        Auto | High | Medium | Low      default Auto   (Auto: Medium, High only where it fits at the same multiplier; PushFlow: Low/Medium/High = Fast/Balanced/Quality)
-//   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC | NVOF   default Auto (frame generation method; Auto by GPU family and budget)
+//   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC | NVOF | XeFG | VPL   default Auto (frame generation method; Auto by GPU family and budget)
 //   Vrr              Auto | On | Off                 default Auto   (Auto: detected (NVIDIA G-SYNC state); On/Off: assume VRR / fixed refresh)
-//   Upscaler         Auto | RTX | FSR | NIS          default Auto   (RTX VSR on NVIDIA RTX, else FSR)
+//   Upscaler         Auto | RTX | FSR | NIS | XeSS | IntelVSR   default Auto   (RTX VSR on NVIDIA RTX; XeSS SR or Intel VSR on Intel when they fit; else FSR)
 //   UpscaleTarget    Screen | 1440p | 4K | 5K        default Screen
 //   CleanUpStrength  Subtle | Balanced | Strong      default Strong (PushFPS's presets; Strong is its default)
 //   VsrStyle         Auto | Standard | HighBitrate | Streaming   default Auto (RTX VSR model family; Auto picks it by the source bitrate)
@@ -43,9 +43,9 @@ inline constexpr int kMaxSmoother = 16;   // the largest fixed Smoother (NVIDIA 
 
 enum class FgQuality { Low = 0, Medium = 1, High = 2, Auto = 3 };
 // Frame generation method (pushcore PUSHCORE_FG_* + 1; Auto = by GPU family and budget)
-enum class FgMethod { Auto = 0, Vfg = 1, Dlssg = 2, PushFlow = 3, Fsr = 4, AmdFrc = 5, Nvof = 6 };   // index - 1 = PUSHCORE_FG_*
+enum class FgMethod { Auto = 0, Vfg = 1, Dlssg = 2, PushFlow = 3, Fsr = 4, AmdFrc = 5, Nvof = 6, XeFg = 7, Vpl = 8 };   // index - 1 = PUSHCORE_FG_*
 enum class VrrMode { Auto = 0, On = 1, Off = 2 };
-enum class Upscaler { Auto = 0, Rtx = 1, Fsr = 2, Nis = 3 };
+enum class Upscaler { Auto = 0, Rtx = 1, Fsr = 2, Nis = 3, Xess = 4, IntelVsr = 5 };   // index - 1 = PUSHCORE_SR_METHOD_*
 enum class UpscaleTarget { Screen = 0, P1440 = 1, K4 = 2, K5 = 3 };
 enum class CleanStrength { Subtle = 0, Balanced = 1, Strong = 2 };
 // RTX VSR model family (pushcore PUSHCORE_SR_FAMILY_*): Standard = RTX Video SDK (balanced); High bitrate keeps clean
@@ -130,10 +130,10 @@ inline int SubtitleHoldValue(const Settings& s, bool gateSupported, bool autoAll
 inline std::wstring ChoiceStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : std::to_wstring(v); }
 inline std::wstring OnOffStr(int v) { return v == kAuto ? L"Auto" : v == kOff ? L"Off" : L"On"; }
 inline const wchar_t* FgQualityStr(FgQuality q) { return q == FgQuality::High ? L"High" : q == FgQuality::Low ? L"Low" : q == FgQuality::Medium ? L"Medium" : L"Auto"; }
-inline const wchar_t* FgMethodStr(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"VFG"; case FgMethod::Dlssg: return L"DLSSG"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR"; case FgMethod::AmdFrc: return L"AMDFRC"; case FgMethod::Nvof: return L"NVOF"; default: return L"Auto"; } }
-inline const wchar_t* FgMethodLabel(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"NVIDIA VFG"; case FgMethod::Dlssg: return L"DLSS-G"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR FG"; case FgMethod::AmdFrc: return L"AMD FRC"; case FgMethod::Nvof: return L"NVOF FG"; default: return L"Auto"; } }
+inline const wchar_t* FgMethodStr(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"VFG"; case FgMethod::Dlssg: return L"DLSSG"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR"; case FgMethod::AmdFrc: return L"AMDFRC"; case FgMethod::Nvof: return L"NVOF"; case FgMethod::XeFg: return L"XeFG"; case FgMethod::Vpl: return L"VPL"; default: return L"Auto"; } }
+inline const wchar_t* FgMethodLabel(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"NVIDIA VFG"; case FgMethod::Dlssg: return L"DLSS-G"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR FG"; case FgMethod::AmdFrc: return L"AMD FRC"; case FgMethod::Nvof: return L"NVOF FG"; case FgMethod::XeFg: return L"XeSS FG"; case FgMethod::Vpl: return L"Intel VPL FI"; default: return L"Auto"; } }
 inline const wchar_t* VrrStr(VrrMode v) { return v == VrrMode::On ? L"On" : v == VrrMode::Off ? L"Off" : L"Auto"; }
-inline const wchar_t* UpscalerStr(Upscaler u) { return u == Upscaler::Rtx ? L"RTX" : u == Upscaler::Fsr ? L"FSR" : u == Upscaler::Nis ? L"NIS" : L"Auto"; }
+inline const wchar_t* UpscalerStr(Upscaler u) { return u == Upscaler::Rtx ? L"RTX" : u == Upscaler::Fsr ? L"FSR" : u == Upscaler::Nis ? L"NIS" : u == Upscaler::Xess ? L"XeSS" : u == Upscaler::IntelVsr ? L"IntelVSR" : L"Auto"; }
 inline const wchar_t* TargetStr(UpscaleTarget t) { return t == UpscaleTarget::P1440 ? L"1440p" : t == UpscaleTarget::K4 ? L"4K" : t == UpscaleTarget::K5 ? L"5K" : L"Screen"; }
 inline const wchar_t* StrengthStr(CleanStrength s) { return s == CleanStrength::Subtle ? L"Subtle" : s == CleanStrength::Balanced ? L"Balanced" : L"Strong"; }
 inline const wchar_t* VsrStyleStr(VsrStyle v) { return v == VsrStyle::HighBitrate ? L"HighBitrate" : v == VsrStyle::Streaming ? L"Streaming" : v == VsrStyle::Standard ? L"Standard" : L"Auto"; }
@@ -198,11 +198,13 @@ inline Settings LoadSettings()
     const std::wstring fm = RegReadStr(k, L"FgMethod");
     s.fgMethod = _wcsicmp(fm.c_str(), L"VFG") == 0 ? FgMethod::Vfg : (_wcsicmp(fm.c_str(), L"DLSSG") == 0 || _wcsicmp(fm.c_str(), L"DLSS-G") == 0) ? FgMethod::Dlssg
                : _wcsicmp(fm.c_str(), L"PushFlow") == 0 ? FgMethod::PushFlow : _wcsicmp(fm.c_str(), L"FSR") == 0 ? FgMethod::Fsr
-               : (_wcsicmp(fm.c_str(), L"AMDFRC") == 0 || _wcsicmp(fm.c_str(), L"FRC") == 0) ? FgMethod::AmdFrc : _wcsicmp(fm.c_str(), L"NVOF") == 0 ? FgMethod::Nvof : FgMethod::Auto;
+               : (_wcsicmp(fm.c_str(), L"AMDFRC") == 0 || _wcsicmp(fm.c_str(), L"FRC") == 0) ? FgMethod::AmdFrc : _wcsicmp(fm.c_str(), L"NVOF") == 0 ? FgMethod::Nvof
+               : (_wcsicmp(fm.c_str(), L"XeFG") == 0 || _wcsicmp(fm.c_str(), L"XeSSFG") == 0) ? FgMethod::XeFg : _wcsicmp(fm.c_str(), L"VPL") == 0 ? FgMethod::Vpl : FgMethod::Auto;
     const std::wstring vr = RegReadStr(k, L"Vrr");
     s.vrr = _wcsicmp(vr.c_str(), L"On") == 0 ? VrrMode::On : _wcsicmp(vr.c_str(), L"Off") == 0 ? VrrMode::Off : VrrMode::Auto;
     const std::wstring up = RegReadStr(k, L"Upscaler");
-    s.upscaler = _wcsicmp(up.c_str(), L"RTX") == 0 ? Upscaler::Rtx : _wcsicmp(up.c_str(), L"FSR") == 0 ? Upscaler::Fsr : _wcsicmp(up.c_str(), L"NIS") == 0 ? Upscaler::Nis : Upscaler::Auto;
+    s.upscaler = _wcsicmp(up.c_str(), L"RTX") == 0 ? Upscaler::Rtx : _wcsicmp(up.c_str(), L"FSR") == 0 ? Upscaler::Fsr : _wcsicmp(up.c_str(), L"NIS") == 0 ? Upscaler::Nis
+               : _wcsicmp(up.c_str(), L"XeSS") == 0 ? Upscaler::Xess : (_wcsicmp(up.c_str(), L"IntelVSR") == 0 || _wcsicmp(up.c_str(), L"IVSR") == 0) ? Upscaler::IntelVsr : Upscaler::Auto;
     const std::wstring t = RegReadStr(k, L"UpscaleTarget");
     s.target = _wcsicmp(t.c_str(), L"1440p") == 0 ? UpscaleTarget::P1440 : _wcsicmp(t.c_str(), L"4K") == 0 ? UpscaleTarget::K4
              : _wcsicmp(t.c_str(), L"5K") == 0 ? UpscaleTarget::K5 : UpscaleTarget::Screen;

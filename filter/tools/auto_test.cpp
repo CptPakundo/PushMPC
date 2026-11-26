@@ -360,6 +360,50 @@ int main()
         }
         wprintf(L"  vendor paths: %d failed\n", fails);
     }
+    // ---- G10 Intel methods: XeSS FG / XeSS SR / Intel VSR / VPL FI in Auto, pushcore's numbering of them
+    wprintf(L"\n[intel video] G10\n");
+    {
+        int fails = 0;
+        auto check = [&](bool ok, const wchar_t* what, const std::wstring& detail = L"") { wprintf(L"  %-74ls [%ls]%ls%ls\n", what, ok ? L"PASS" : L"FAIL", detail.empty() ? L"" : L"  ", detail.c_str()); fails += ok ? 0 : 1; };
+        const Source film{ 1920, 1080, 23.976, false, 0.5 };
+        Costs cold; cold.card = 6.0;
+        Gpu arc = Family(kIntel, L"Intel(R) Arc(TM) B580 Graphics"); arc.available |= 1u << kCapXefg;
+        const Choice x1 = Decide({}, film, d60, cold, arc);
+        check(x1.fgMethod == FgMethod::XeFg && x1.multiplier >= 2, L"Arc with XeSS FG (self-test passed): XeSS FG first", x1.smootherNote + L" | " + x1.stoppedAt);
+        const Choice x2 = Decide({}, film, d60, cold, Family(kIntel, L"Intel(R) Arc(TM) B580 Graphics"));
+        check(x2.fgMethod != FgMethod::XeFg && x2.fgMethod != FgMethod::Vpl, L"Arc without the Intel capabilities: never XeSS FG / VPL", x2.smootherNote);
+        Gpu arcSr = arc; arcSr.available |= 1u << kCapXessSr; arcSr.reason[kCapXessSr] = L"ms4k=2.50"; ReadMeasured(arcSr);
+        const Display d4k{ L"4K 60", 60.0, 3840, 2160, false };
+        const Choice x3 = Decide({}, film, d4k, cold, arcSr);
+        check(arcSr.xessMs4k > 2.4 && arcSr.xessMs4k < 2.6 && x3.sr && x3.srMethod == Upscaler::Xess,
+              L"Arc with XeSS SR, 4K screen: XeSS SR (measured ms4k read from the capability)", x3.sharperNote);
+        check(CoreFgFor(FgMethod::XeFg) == 6u && CoreFgFor(FgMethod::Vpl) == 7u && CoreSrMethod(Upscaler::Xess) == 3u && CoreSrMethod(Upscaler::IntelVsr) == 4u
+              && UpscalerOfCore(3) == Upscaler::Xess && UpscalerOfCore(4) == Upscaler::IntelVsr, L"XeSS FG 6, VPL 7, XeSS SR 3, Intel VSR 4 (PUSHCORE_FG_* / SR_METHOD_*)");
+        Gpu vplArc = Family(kIntel, L"Intel(R) Arc(TM) A770 Graphics"); vplArc.available |= 1u << kCapVplFi; vplArc.reason[kCapVplFi] = L"gate passed ms=9.50 psnr=31.0 maxM=4";
+        ReadMeasured(vplArc);
+        check(vplArc.vplGate && vplArc.vplMs1080 > 9.4 && vplArc.vplMs1080 < 9.6 && FgOrder(vplArc).front() == FgMethod::Vpl, L"VPL's gate and cost read from the capability; VPL first once gated");
+        // XeSS on the GPUs without a better method (GTX, RX 5000, other): a measured candidate; never on RTX / RX 6000+
+        {
+            Gpu gtx = Family(kGtx, L"NVIDIA GeForce GTX 1080"); gtx.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            gtx.reason[kCapXefg] = L"ms4k=6.00"; gtx.reason[kCapXessSr] = L"ms4k=3.00"; ReadMeasured(gtx);
+            Costs slowPfGtx = cold; slowPfGtx.pfBenched = true; for (int t = 0; t < 3; ++t) { slowPfGtx.pfFirst[t] = 60 + 20 * t; slowPfGtx.pfNext[t] = 50 + 20 * t; }
+            ApplyMeasuredCard(slowPfGtx);
+            const Choice g1 = Decide({}, film, d60, slowPfGtx, gtx);
+            check(gtx.xefgMs4k > 5.9 && g1.fgMethod == FgMethod::XeFg && g1.multiplier >= 2, L"GTX 1080, PushFlow measured too slow: XeSS FG (measured) before NVOF / FSR FG", g1.smootherNote + L" | " + g1.stoppedAt);
+            const Display d4k{ L"4K 60", 60.0, 3840, 2160, false };
+            const Choice g2 = Decide({}, film, d4k, slowPfGtx, gtx);
+            check(g2.sr && g2.srMethod == Upscaler::Xess, L"GTX 1080, 4K screen: XeSS SR (DP4a, measured) over FSR", g2.sharperNote);
+            Gpu rx5 = Family(kRdna1, L"AMD Radeon RX 5700 XT"); rx5.available |= 1u << kCapXefg;
+            check(FgOrder(rx5)[1] == FgMethod::XeFg && FgOrder(Family(kOtherGpu, L"x"))[1] == FgMethod::XeFg, L"RX 5000 and other GPUs: XeSS FG right after PushFlow");
+            Gpu rtx = Family(kRtx40, L"NVIDIA GeForce RTX 4070"); rtx.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            const Choice r1 = Decide({}, film, d4k, cold, rtx);
+            Gpu rx7 = Family(kRdna3, L"AMD Radeon RX 7800 XT"); rx7.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            const Choice r2 = Decide({}, film, d4k, cold, rx7);
+            check(r1.fgMethod != FgMethod::XeFg && r1.srMethod != Upscaler::Xess && r2.fgMethod != FgMethod::XeFg && r2.srMethod != Upscaler::Xess,
+                  L"RTX 40 / RX 7000 with XeSS installed: their own better methods stay", r1.smootherNote + L" | " + r2.smootherNote);
+        }
+        wprintf(L"  intel video: %d failed\n", fails);
+    }
     Display real = QueryDisplay(PlayerWindow());
     wprintf(L"this machine's primary display: %ls %.3f Hz %ux%u HDR %d VRR %d (%ls)\n", real.name.c_str(), real.refreshHz, real.width, real.height, real.hdr, real.vrr, real.vrrHow.c_str());
     return 0;
