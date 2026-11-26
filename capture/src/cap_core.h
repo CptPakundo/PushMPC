@@ -26,7 +26,9 @@ double Now();   // seconds, the monotonic clock the capture timestamps use (CLOC
 // ------------------------------------------------------------------------------------------------ frames
 // 32-bit pixels: BGRX / RGBX = 8 bits each, B (or R) in the lowest byte; RGB10 = 10 bits each, little-endian x2R10G10B10
 // (B in the low 10 bits): an HDR capture, BT.2020 PQ R'G'B' (macOS ScreenCaptureKit 'l10r' in ITU-R 2100 PQ)
-enum class PixFmt { BGRX, RGBX, RGB10 };
+// XBGR10: the same with R in the low 10 bits (PipeWire xBGR_210LE / DRM XBGR2101010)
+enum class PixFmt { BGRX, RGBX, RGB10, XBGR10 };
+inline bool IsHdr10(PixFmt f) { return f == PixFmt::RGB10 || f == PixFmt::XBGR10; }
 
 // a planar YUV 4:2:0 picture, rows packed. bits 8: one byte per sample, BT.709 SDR; bits 9..16: little-endian 16-bit
 // samples. pq: BT.2020 PQ (HDR: an HDR capture, RTX Video HDR), else BT.709 SDR. Limited range either way.

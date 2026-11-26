@@ -22,7 +22,7 @@ layout(push_constant) uniform P {
     int dstWordOff;      // the plane's first word in Dst
     int nwords;
     int rgbx;            // buffer: 1 = R in the low byte
-    int rgb10;           // buffer: x2R10G10B10 (B in the low 10 bits), BT.2020 PQ
+    int rgb10;           // buffer, BT.2020 PQ: 1 x2R10G10B10 (B in the low 10 bits), 2 x2B10G10R10 (R low)
     int bits;            // the staging's sample depth: 8 (one byte) or 9..16 (two bytes)
 } pc;
 
@@ -33,7 +33,10 @@ vec3 Fetch(int x, int y)
     return texelFetch(srcImg, ivec2(x + pc.srcOff, y + pc.srcPitch), 0).rgb;
 #else
     uint v = px[pc.srcOff + y * pc.srcPitch + x];
-    if (pc.rgb10 != 0) return vec3(float((v >> 20) & 1023u), float((v >> 10) & 1023u), float(v & 1023u)) * (1.0 / 1023.0);
+    if (pc.rgb10 != 0) {   // 1: B in the low 10 bits (x2R10G10B10), 2: R in the low bits (x2B10G10R10)
+        vec3 c = vec3(float((v >> 20) & 1023u), float((v >> 10) & 1023u), float(v & 1023u)) * (1.0 / 1023.0);
+        return pc.rgb10 == 2 ? c.bgr : c;
+    }
     vec3 c = vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) * (1.0 / 255.0);
     return pc.rgbx != 0 ? c : c.bgr;
 #endif

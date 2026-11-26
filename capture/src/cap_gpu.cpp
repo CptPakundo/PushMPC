@@ -100,7 +100,7 @@ bool GpuPipeline::RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::Pla
         const int pw = plane ? d.cw : d.width, ph = plane ? d.ch : d.height;
         const VkDeviceSize off = plane == 0 ? 0 : plane == 1 ? d.offU : d.offV;
         ConvPush p{ plane, pw, ph, std::min(w, d.width), std::min(h, d.height), pitchPx, offPx, int(off / 4), int((int64_t(pw) * ph + per - 1) / per),
-                    fmt == PixFmt::RGBX ? 1 : 0, fmt == PixFmt::RGB10 ? 1 : 0, m_bits };
+                    fmt == PixFmt::RGBX ? 1 : 0, fmt == PixFmt::RGB10 ? 1 : fmt == PixFmt::XBGR10 ? 2 : 0, m_bits };
         vkCmdPushConstants(cb, m_conv.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         const uint32_t groups = uint32_t((p.nwords + 63) / 64);
         const uint32_t gx = std::min<uint32_t>(groups, 32768u), gy = (groups + gx - 1) / gx;

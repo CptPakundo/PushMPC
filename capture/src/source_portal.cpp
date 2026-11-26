@@ -164,7 +164,7 @@ private:
     struct Ready { pw_buffer* b = nullptr; double t = 0; };
     Ready m_ready;
     int m_lent = 0;
-    bool m_failed = false, m_dmabuf = false, m_formatDmabuf = false;
+    bool m_failed = false, m_dmabuf = false, m_formatDmabuf = false, m_pq = false;
     std::string m_why;
     uint32_t m_format = 0;
     int m_w = 0, m_h = 0;
@@ -380,7 +380,13 @@ bool PortalSource::Start(std::string& err)
     return StartPipeWire(fd, err);
 }
 
-const spa_pod* BuildFormat(spa_pod_builder* b, bool linear)
+// SMPTE ST 2084 (PQ) in enum spa_video_transfer_function: named in PipeWire's headers from 1.6, the same value
+// before (what Sunshine's PipeWire capture defines for older headers)
+constexpr uint32_t kTransferPq = 14;
+
+// hdr: 10-bit R'G'B' in BT.2020 PQ (colour primaries and transfer mandatory: only a compositor that really delivers
+// PQ takes it); else 8-bit sRGB
+const spa_pod* BuildFormat(spa_pod_builder* b, bool linear, bool hdr)
 {
     spa_rectangle def{ 1920, 1080 }, mn{ 1, 1 }, mx{ 16384, 16384 };
     spa_fraction f0{ 0, 1 }, fmax{ 360, 1 };
@@ -389,7 +395,19 @@ const spa_pod* BuildFormat(spa_pod_builder* b, bool linear)
     spa_pod_builder_add(b,
         SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
+        0);
+    if (hdr) {
+        spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_xBGR_210LE,
+                            SPA_VIDEO_FORMAT_ABGR_210LE, SPA_VIDEO_FORMAT_xRGB_210LE, SPA_VIDEO_FORMAT_ARGB_210LE), 0);
+        spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_id(b, SPA_VIDEO_COLOR_PRIMARIES_BT2020);
+        spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_id(b, kTransferPq);
+    } else {
+        spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                            SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA), 0);
+    }
+    spa_pod_builder_add(b,
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def, &mn, &mx),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&f0, &f0, &fmax),
         0);
@@ -421,13 +439,19 @@ bool PortalSource::StartPipeWire(int fd, std::string& err)
     m_events.process = Process;
     m_events.remove_buffer = RemoveBuffer;
     pw_stream_add_listener(m_stream, &m_listener, &m_events, this);
-    uint8_t buf[2048];
+    uint8_t buf[4096];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-    const spa_pod* params[2];
+    const spa_pod* params[4];
     uint32_t n = 0;
-    // a linear dma-buf first (zero copy when the GPU imports it), else shared memory
-    if (!std::getenv("PUSHMPC_CAPTURE_NO_DMABUF")) params[n++] = BuildFormat(&b, true);
-    params[n++] = BuildFormat(&b, false);
+    // 10-bit BT.2020 PQ first (an HDR desktop's compositor that delivers PQ), then 8-bit sRGB (what KWin, Mutter and
+    // wlroots deliver today); each as a linear dma-buf first (zero copy when the GPU imports it), then shared memory.
+    // An HDR capture on an SDR overlay is brought down to SDR by the presenter. PUSHMPC_CAPTURE_SDR=1: 8 bit only.
+    const bool dmabuf = !std::getenv("PUSHMPC_CAPTURE_NO_DMABUF"), hdr = !std::getenv("PUSHMPC_CAPTURE_SDR");
+    for (const bool h : { true, false }) {
+        if (h && !hdr) continue;
+        if (dmabuf) params[n++] = BuildFormat(&b, true, h);
+        params[n++] = BuildFormat(&b, false, h);
+    }
     const int r = pw_stream_connect(m_stream, PW_DIRECTION_INPUT, m_node, static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, n);
     pw_thread_loop_unlock(m_loop);
     if (r < 0) { err = std::string("PipeWire: cannot connect the stream (") + spa_strerror(r) + ")"; return false; }
@@ -442,10 +466,15 @@ void PortalSource::OnParam(uint32_t id, const spa_pod* param)
     spa_video_info_raw info{};
     if (spa_format_video_raw_parse(param, &info) < 0) return;
     const bool dmabuf = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier) != nullptr;
+    const bool ten = info.format == SPA_VIDEO_FORMAT_xBGR_210LE || info.format == SPA_VIDEO_FORMAT_ABGR_210LE || info.format == SPA_VIDEO_FORMAT_xRGB_210LE
+                     || info.format == SPA_VIDEO_FORMAT_ARGB_210LE;
+    const bool pq = ten && uint32_t(info.transfer_function) == kTransferPq && info.color_primaries == SPA_VIDEO_COLOR_PRIMARIES_BT2020;
     {
         std::lock_guard<std::mutex> lk(m_mx);
-        m_format = info.format; m_w = int(info.size.width); m_h = int(info.size.height); m_formatDmabuf = dmabuf;
+        m_format = info.format; m_w = int(info.size.width); m_h = int(info.size.height); m_formatDmabuf = dmabuf; m_pq = pq;
     }
+    std::fprintf(stderr, "pushmpc-capture: the portal's stream: %dx%d, %s%s\n", int(info.size.width), int(info.size.height),
+                 pq ? "10-bit BT.2020 PQ (HDR)" : ten ? "10 bit without PQ (shown as SDR)" : "8-bit sRGB (SDR)", dmabuf ? ", dma-buf" : ", shared memory");
     uint8_t buf[1024];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
     const spa_pod* params[3];
@@ -540,7 +569,9 @@ bool PortalSource::Next(SourceFrame& f, int timeoutMs)
     w = std::min(w, m_w - x); h = std::min(h, m_h - y);
     f = SourceFrame{};
     f.width = w; f.height = h;
-    f.fmt = m_format == SPA_VIDEO_FORMAT_RGBx || m_format == SPA_VIDEO_FORMAT_RGBA ? PixFmt::RGBX : PixFmt::BGRX;
+    // xRGB_210LE = DRM XRGB2101010 (B in the low 10 bits), xBGR_210LE = XBGR2101010 (R in the low bits)
+    if (m_pq) f.fmt = m_format == SPA_VIDEO_FORMAT_xBGR_210LE || m_format == SPA_VIDEO_FORMAT_ABGR_210LE ? PixFmt::XBGR10 : PixFmt::RGB10;
+    else f.fmt = m_format == SPA_VIDEO_FORMAT_RGBx || m_format == SPA_VIDEO_FORMAT_RGBA ? PixFmt::RGBX : PixFmt::BGRX;
     f.pitch = stride;
     f.time = r.t;
     const uint64_t first = uint64_t(off) + uint64_t(y) * uint64_t(stride) + uint64_t(x) * 4;
@@ -589,7 +620,7 @@ std::string PortalSource::Describe() const
 {
     char b[256];
     std::snprintf(b, sizeof(b), "the screen-capture portal (%s, PipeWire node %u), %dx%d, %s", m_sourceType == 1 ? "a monitor" : "a window", m_node, m_streamW, m_streamH,
-                  m_formatDmabuf ? "linear dma-buf" : "shared memory");
+                  m_formatDmabuf ? (m_pq ? "linear dma-buf, 10-bit BT.2020 PQ" : "linear dma-buf") : (m_pq ? "shared memory, 10-bit BT.2020 PQ" : "shared memory"));
     return b;
 }
 

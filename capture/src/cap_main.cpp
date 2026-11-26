@@ -380,8 +380,8 @@ int Run(const Options& o)
         const bool waitFirst = !tl.Valid();
         while (src->Next(f, waitFirst ? 50 : 0)) {
             const int w = f.width & ~1, h = f.height & ~1;
-            const int fbits = f.fmt == PixFmt::RGB10 ? 10 : 8;
-            const bool fpq = f.fmt == PixFmt::RGB10;
+            const int fbits = IsHdr10(f.fmt) ? 10 : 8;
+            const bool fpq = IsHdr10(f.fmt);
             if (w < 16 || h < 16) { f.Release(); continue; }
             if (!eng.gpu && !eng.host) { if (!openFor(w, h, fbits, fpq)) { f.Release(); rc = 6; g_stop = true; break; } }
             else if (w != eng.w || h != eng.h || fbits != eng.bits || (reopenAt > 0 && Now() >= reopenAt)) {
