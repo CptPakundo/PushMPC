@@ -89,4 +89,6 @@ echo "libMoltenVK.dylib $3 ($(lipo -archs "$out/libMoltenVK.dylib"))"
 # the self-test host (loads Plex's libmpv in its own process)
 clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$here/../hook/libmpv_host.c" -o "$out/pushmpc-plex-selftest"
 codesign -f -s - "$out/pushmpc-plex-selftest"
+# the installer next to its files: this folder is the whole Plex for Mac bundle (Setup / Homebrew run it from here)
+cp "$here/../install/pushmpc-plex-mac.sh" "$here/../ci/SOURCES.txt" "$out/"
 ls -la "$out"

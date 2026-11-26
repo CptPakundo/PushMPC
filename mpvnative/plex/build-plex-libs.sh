@@ -36,12 +36,17 @@ build_tree() {   # build_tree <label>: the tree in $src is checked out
     ref="$out/$name"
 }
 
-# release tags (git.ffmpeg.org)
+# release tags
 tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.load(open(sys.argv[1]))['hookTags'] if re.fullmatch(r'n5\.[01](\.\d+)?', t['tag'])))" "$pins")
 for tag in $tags; do
     commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$pins" "$tag")
-    if [ ! -d "$src/.git" ]; then git clone -q --depth 1 -b "$tag" https://git.ffmpeg.org/ffmpeg.git "$src"
-    else git -C "$src" fetch -q --depth 1 origin tag "$tag" && git -C "$src" checkout -q -f "$tag"; fi
+    # git.ffmpeg.org, else the GitHub mirror (same tags; the commit check below holds either way)
+    [ -d "$src/.git" ] || git init -q "$src"
+    for url in https://git.ffmpeg.org/ffmpeg.git https://github.com/FFmpeg/FFmpeg.git; do
+        git -C "$src" fetch -q --depth 1 "$url" tag "$tag" 2>/dev/null && break
+        echo "$tag: $url unreachable, trying the next source"
+    done
+    git -C "$src" checkout -q -f "$tag"
     [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
     build_tree "$tag"
 done
