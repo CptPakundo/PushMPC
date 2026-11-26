@@ -72,18 +72,55 @@ index 32e47f4..b9d4bd2 100644
 +
  } // namespace veyra::runtime
 diff --git a/include/veyra/engine/EnhancementSettings.h b/include/veyra/engine/EnhancementSettings.h
-index c6f8bf9..1dcfad9 100644
+index c6f8bf9..d12cd75 100644
 --- a/include/veyra/engine/EnhancementSettings.h
 +++ b/include/veyra/engine/EnhancementSettings.h
+@@ -713,7 +713,7 @@ struct EnhancementSettings {
+         // probe measured the same count for 2/3/4 requested frames.
+         if(fsrFrameGeneration(frameGenerationBackend)&&multiplier>2)return "AMD FSR frame generation supports up to 2X";
+         if(frameGenerationBackend==FrameGenerationBackend::AmdFrc&&multiplier>2)return "AMD FRC supports 2X only";
+-        if(frameGenerationBackend==FrameGenerationBackend::PushFlow&&multiplier>4)return "PushFlow supports up to 4X";
++        if(frameGenerationBackend==FrameGenerationBackend::PushFlow&&multiplier>16)return "PushFlow supports up to 16X";   // PushMPC (local addition): flow once above 4X (EnhanceGraph)
+         if(!validVideoSrQuality(videoSrQuality))return "invalid video SR quality";
+         if(dlssSrModel>=kDlssSrModelCount)return "invalid DLSS SR model";
+         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
 @@ -721,7 +721,7 @@ struct EnhancementSettings {
          if(!pipeline::validSrOutput(srOutput))return "invalid SR output";
          if(!pipeline::validSrTarget(dualSrTarget)||!validVideoSrQuality(dualSrQuality))return "invalid second SR target or quality";
          if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";
 -        if(multiplier<1||multiplier>(frameGenerationBackend==FrameGenerationBackend::Vfg?8u:6u))return "unsupported multiplier";
-+        if(multiplier<1||multiplier>(frameGenerationBackend==FrameGenerationBackend::Vfg?16u:6u))return "unsupported multiplier";   // PushMPC (local addition): VFG 16X (FrameBatch::Capacity)
++        if(multiplier<1||multiplier>(frameGenerationBackend==FrameGenerationBackend::Vfg||frameGenerationBackend==FrameGenerationBackend::PushFlow?16u:6u))return "unsupported multiplier";   // PushMPC (local addition): VFG and PushFlow 16X (FrameBatch::Capacity)
          // 0 = auto quality; explicit values are capped at 300 Mbps so a typo
          // cannot ask a driver for a nonsense rate.
          if(exportBitrateMbps>300)return "export bitrate out of range";
+diff --git a/include/veyra/gfx/FsrSrBackend.h b/include/veyra/gfx/FsrSrBackend.h
+index 93a3bc6..7e856ab 100644
+--- a/include/veyra/gfx/FsrSrBackend.h
++++ b/include/veyra/gfx/FsrSrBackend.h
+@@ -46,6 +46,23 @@ public:
+     uint64_t failureCount() const;
+     const char* providerVersion() const;
+ 
++#define VEYRA_FSRSR_PROVIDER_OVERRIDE 1   // PushMPC: pushcore tests for the slot below
++    // PushMPC (local addition, not upstream): another temporal upscaler in this slot (pushcore's Intel XeSS SR). The
++    // graph feeds it exactly what it feeds FSR (render-extent colour, the guidance motion with "previous = current +
++    // motion" in render pixels, constant depth, the reset rule, the frame time). Process-wide; set by the caller while
++    // it builds a graph (a backend binds the override present at initialize and keeps it until release). nullptr = FSR.
++    struct ProviderOverride {
++        void* (*create)(ID3D12Device* device, uint32_t maxRenderWidth, uint32_t maxRenderHeight, uint32_t maxUpscaleWidth,
++                        uint32_t maxUpscaleHeight, bool hdr, void* user);
++        bool (*evaluate)(void* context, ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion,
++                         ID3D12Resource* depth, ID3D12Resource* output, uint32_t renderWidth, uint32_t renderHeight,
++                         uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs);
++        void (*destroy)(void* context);
++        const char* (*version)(void* context);
++        void* user;
++    };
++    static void setProviderOverride(const ProviderOverride* provider);
++
+     struct Impl;
+ 
+ private:
 diff --git a/include/veyra/pipeline/DolbyVisionP5.h b/include/veyra/pipeline/DolbyVisionP5.h
 index 0f501aa..ad0d574 100644
 --- a/include/veyra/pipeline/DolbyVisionP5.h
@@ -98,18 +135,29 @@ index 0f501aa..ad0d574 100644
  
  } // namespace veyra::pipeline
 diff --git a/include/veyra/pipeline/EnhanceGraph.h b/include/veyra/pipeline/EnhanceGraph.h
-index 3deeab3..9abf1df 100644
+index 3deeab3..75fc5d7 100644
 --- a/include/veyra/pipeline/EnhanceGraph.h
 +++ b/include/veyra/pipeline/EnhanceGraph.h
-@@ -55,6 +55,7 @@ struct NVSDK_NGX_Parameter;
+@@ -55,6 +55,8 @@ struct NVSDK_NGX_Parameter;
  struct NVSDK_NGX_Handle;
  namespace veyra::guidance { class AmdOpticalFlow; class GpuDisOpticalFlow; }
  namespace veyra::pipeline { class VfgBackend; class VfxSrBackend; }
++#include "veyra/pipeline/ExternalSr.h" // PushMPC (local addition)
 +#include "veyra/pipeline/PushMpcCutGuard.h" // PushMPC (local addition)
  
  namespace veyra::gfx {
  class D3D12DeviceContext;
-@@ -170,6 +171,14 @@ struct EnhanceGraphDesc {
+@@ -153,6 +155,9 @@ struct EnhanceGraphDesc {
+     // A first DLSS SR / FSR pass runs only when it enlarges; at the source size
+     // its result is the source (as for the Video Effects families).
+     bool firstSrRuns(uint32_t quality)const{return dualSr&&videoSrQuality==quality&&firstSrEnlarges();}
++    // PushMPC (local addition): the RTX VSR standard family (videoSrQuality 1..4, single SR) run by this upscaler instead
++    // of NGX on the same RGBA8 textures (PushMPC: RTX VSR on AMD through ZLUDA); null = NGX as before
++    std::shared_ptr<ExternalSr> externalSr;
+     uint32_t fgMultiplier=2;
+     engine::FrameGenerationBackend frameGenerationBackend=engine::FrameGenerationBackend::Dlss;
+     uint32_t vfgQuality=1;
+@@ -170,6 +175,14 @@ struct EnhanceGraphDesc {
      // then also carries the two frames a recording takes in place of the ones shown.
      bool pushFlowDual=false;
      bool vfgAsyncSubmission=false; // preview-only; export retains synchronous SDK verdicts
@@ -124,7 +172,7 @@ index 3deeab3..9abf1df 100644
      bool vfgAutoRegulate=false;
      bool vfgFastFallback=false; // live 2X with vfgAutoRegulate: also load the next faster VFG model
      uint64_t settingsRevision=1;
-@@ -181,6 +190,11 @@ struct EnhanceGraphDesc {
+@@ -181,6 +194,11 @@ struct EnhanceGraphDesc {
      bool fgMotionRefine=true;
      // DLSS-G performance mode (ngx/DlssgLite.h): DLSS frame generation only.
      bool dlssgLite=false;
@@ -136,7 +184,7 @@ index 3deeab3..9abf1df 100644
      bool hudLock=false; // PushFPS Live HUD Lock (PushHudLock.h), graph frame generation only
      bool hudStill=false; // PushFPS still rule (PushHudStill.h): what stands still in front of a moving picture keeps its real pixels
      bool subtitleHold=false;  // PushFPS Subtitle Hold: the same pass in the subtitle band (overlay::subtitleZoneFor)
-@@ -589,6 +603,10 @@ struct EnhanceGraphDesc {
+@@ -589,6 +607,10 @@ struct EnhanceGraphDesc {
      std::optional<uint32_t> nrAutoPoolLayer;
  };
  
@@ -147,8 +195,13 @@ index 3deeab3..9abf1df 100644
  class EnhanceGraph {
  public:
      EnhanceGraph(gfx::D3D12DeviceContext& context, gfx::CommandSlotRing& ring,
-@@ -748,6 +766,12 @@ public:
+@@ -746,8 +768,17 @@ public:
+     ID3D12Resource* unmaskedVideo(unsigned slot)const{return videoFrame_[slot%2].Get();}
+     bool exclusionEnabled()const{return desc_.exclusion.enabled;}
      bool srEnabled() const { return srEnabled_; }
++    // PushMPC (local addition): EnhanceGraphDesc::externalSr runs (started) / stopped mid-stream (the plain resize runs since)
++    bool externalSrActive() const { return externalSrActive_; }
++    bool externalSrLost() const { return externalSrLost_; }
      bool nrEnabled() const { return nrEnabled_; }
      bool fgEnabled() const { return fgEnabled_; }
 +    // PushMPC (local addition): the scene-cut guard of the running frame generation backend (VFG's own pair test, or
@@ -160,7 +213,7 @@ index 3deeab3..9abf1df 100644
      bool hdrOutput() const { return desc_.hdrOutput; }
      // Whether the *source* is HDR (PQ/HLG ingress). The brightness curve is restricted
      // to real HDR sources: an SDR source has no true highlights, so the roll-off and
-@@ -850,6 +874,10 @@ public:
+@@ -850,6 +881,10 @@ public:
      // PushFPS Subtitle Hold, as Crosshair Hold: 0 not asked, 1 running, 2 could not be made, 3 not with this method.
      int subtitleHoldState() const { if(!pipeline::overlay::subtitlesWanted())return 0; if(subtitles_)return 1; if(!desc_.subtitleHold||!fgEnabled_||presentSinkFg())return 3; return 2; }
      unsigned subtitleHoldPixels() { if(!subtitles_)return 0u; subtitles_->harvest(); return subtitles_->maskedPixels(); }
@@ -171,7 +224,7 @@ index 3deeab3..9abf1df 100644
      int hudStillState() const { if(!desc_.hudStill)return 0; if(hudLock_&&hudLock_->stillActive())return 1; if(!fgEnabled_||presentSinkFg())return 3; return 2; }
      // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
      // an NGX feature, so it also works on non-NVIDIA adapters.
-@@ -971,6 +999,10 @@ private:
+@@ -971,6 +1006,10 @@ private:
      bool initAmfFrc();
      bool initPushFlow();
      std::unique_ptr<VfgBackend> vfgBackend_;
@@ -182,7 +235,7 @@ index 3deeab3..9abf1df 100644
      // RTX 40 series: opens the Blackwell-only multi-frame gate in the mapped
      // DLSS-G runtime. Never touched on any other architecture.
      void applyAdaMfgUnlock();
-@@ -1059,6 +1091,8 @@ private:
+@@ -1059,6 +1098,8 @@ private:
      // (uncovered background). Only with flowRefine_; VEYRA_TEST_FLOW_CONSISTENCY=0 leaves
      // NVOF forward-only (photometric refinement). NR/SR never read it.
      bool flowConsistency_=false;
@@ -191,7 +244,7 @@ index 3deeab3..9abf1df 100644
      ComPtr<ID3D12Resource> nvofReverseTex_,nvofReverseCostTex_;
      // FidelityFX flow has no backward output: FlowClaim's previous-frame claims stand in
      // for the forward-backward check (same VEYRA_TEST_FLOW_CONSISTENCY switch).
-@@ -1091,6 +1125,7 @@ private:
+@@ -1091,6 +1132,7 @@ private:
      ComputePass yuvPass_, encPass_, decPass_, blitPass_, uploadPass_, densifyPass_;
      ComputePass amdHdrEncodePass_, amdHdrRestorePass_;
      float toneMapPeakNits_=0; // latched per graph/source; never varies with frame brightness
@@ -199,7 +252,15 @@ index 3deeab3..9abf1df 100644
      ComputePass rgbPass_,hdrVideoSrPass_;
      ComputePass srPrescalePass_,srResolvePass_; // area shrinks: double SR reduction / supersample shrink after RTX Video SR
      ComputePass firstSrRestorePass_;
-@@ -1275,6 +1310,7 @@ private:
+@@ -1265,6 +1307,7 @@ private:
+     // pass and, under double SR, the first pass when that family is chosen there.
+     std::unique_ptr<VfxSrBackend> vfxSrBackend_;
+     std::unique_ptr<VfxSrBackend> firstVfxSrBackend_;
++    bool externalSrActive_=false,externalSrLost_=false;   // PushMPC: desc_.externalSr
+     std::unique_ptr<ngx::TrueHdrBackend> videoHdrBackend_;
+     std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
+     std::unique_ptr<gfx::FsrFgPresenter> fsrFgBackend_;
+@@ -1275,6 +1318,7 @@ private:
      std::unique_ptr<NisPass> nisPass_;  // PushFPS: NVIDIA Image Scaling SR
      std::unique_ptr<PushHudLock> hudLock_;  // PushFPS: Live HUD Lock
      std::unique_ptr<PushOverlayPass> overlay_;  // PushFPS: Crosshair Hold
@@ -207,6 +268,34 @@ index 3deeab3..9abf1df 100644
      std::unique_ptr<PushOverlayPass> subtitles_; // PushFPS: Subtitle Hold (fills overlay_'s input when both run)
      bool initHudLock();
      void composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity);
+diff --git a/include/veyra/pipeline/ExternalSr.h b/include/veyra/pipeline/ExternalSr.h
+new file mode 100644
+index 0000000..f6714aa
+--- /dev/null
++++ b/include/veyra/pipeline/ExternalSr.h
+@@ -0,0 +1,22 @@
++#pragma once
++// PushMPC (local addition, not upstream): an upscaler the graph runs on its RGBA8 RTX VSR textures without owning it
++// (PushMPC: RTX Video Super Resolution on AMD through ZLUDA, in a worker process). The same hand-off as VfxSrBackend:
++// the graph records copyIn(), submits, calls run() (GPU-side waits only), and records copyOut() in a new list.
++// run() returning false with lost() true is not a graph failure: the graph takes its plain resize for that frame and
++// every later one, so the picture never stops (the host switches the stream to another upscaler at its next rebuild).
++#include <d3d12.h>
++
++namespace veyra::pipeline {
++class ExternalSr {
++public:
++    virtual ~ExternalSr() = default;
++    // the graph's RTX VSR sizes (input = the encoded RGBA8 picture, output = the VSR result) and videoSrQuality 1..4
++    virtual bool initialize(ID3D12Device* device, unsigned inputWidth, unsigned inputHeight, unsigned outputWidth, unsigned outputHeight, unsigned quality) = 0;
++    virtual bool copyIn(ID3D12GraphicsCommandList* list, ID3D12Resource* rgba8CopySource) = 0;   // texture in COPY_SOURCE
++    virtual bool run(ID3D12CommandQueue* queue) = 0;                                              // after copyIn's list was submitted
++    virtual bool copyOut(ID3D12GraphicsCommandList* list, ID3D12Resource* rgba8CopyDest) = 0;     // texture in COPY_DEST
++    virtual bool lost() const = 0;
++    virtual const char* name() const = 0;
++    virtual void shutdown() = 0;
++};
++}
 diff --git a/include/veyra/pipeline/FrameBatch.h b/include/veyra/pipeline/FrameBatch.h
 index 7e6ded2..d0e77b5 100644
 --- a/include/veyra/pipeline/FrameBatch.h
@@ -424,6 +513,22 @@ index f8c2bb5..670a01a 100644
      void shutdown();
  private:
      struct Impl;
+diff --git a/include/veyra/pushflow/PushFlowBackend.h b/include/veyra/pushflow/PushFlowBackend.h
+index 246dbf3..e6cf57e 100644
+--- a/include/veyra/pushflow/PushFlowBackend.h
++++ b/include/veyra/pushflow/PushFlowBackend.h
+@@ -140,6 +140,11 @@ public:
+     // Records the output into an internal picture, then copies it to `output` (left in COPY_DEST).
+     // `previous` / `current` (the same pair, NON_PIXEL_SHADER_RESOURCE) feed the full-resolution rebuild.
+     bool resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* previous, ID3D12Resource* current, ID3D12Resource* output);
++    // PushMPC (local addition), flow once ("synthesize many", as pmml): in place of resolve(), the frame at time `t`
++    // rebuilt at full size from the grids and mask the last pack() / infer() made at `tRef` (motion scaled by
++    // t / tRef and (1 - t) / (1 - tRef)), with no network run. False without grids (status().grids).
++    bool resolveAt(ID3D12GraphicsCommandList* list, ID3D12Resource* previous, ID3D12Resource* current, ID3D12Resource* output, float t,
++                   float tRef);
+     // PushFlow 2's Predict, in place of resolve(): a frame `ahead` of an interval (0..1) AFTER `current`,
+     // from the motion the last pack() / infer() found for this pair at the half-way time (pack it with
+     // timestep 0.5). Copied to `output` (left in COPY_DEST); the pair in NON_PIXEL_SHADER_RESOURCE.
 diff --git a/shaders/HdrToSdr.hlsli b/shaders/HdrToSdr.hlsli
 index 5e06d83..07a33f9 100644
 --- a/shaders/HdrToSdr.hlsli
@@ -448,6 +553,48 @@ index 5e06d83..07a33f9 100644
 +    const float3 sdr=ToneGamut(linear709Nits*(mapped/y),mapped);
 +    return float3(ToneFor22Display(sdr.r),ToneFor22Display(sdr.g),ToneFor22Display(sdr.b));
  }
+diff --git a/shaders/PushFlowReconstruct.hlsl b/shaders/PushFlowReconstruct.hlsl
+index e61b58a..22f263a 100644
+--- a/shaders/PushFlowReconstruct.hlsl
++++ b/shaders/PushFlowReconstruct.hlsl
+@@ -7,6 +7,9 @@
+ // pass enlarges the motion (grids) and the mask, not the picture: every output pixel samples the
+ // FULL-RESOLUTION real frames where the motion points, so texture, text and edges keep their detail.
+ // It mirrors rebuild_scaled() in scripts/pushflow/prepare_runtime.py, which checks it on the CPU.
++// PushMPC (local addition), flow once above 4X: with `scaled` set the grids came from the network at t_ref and
++// this frame is at t: each motion is scaled about the pixel (scale0 = t / t_ref, scale1 = (1 - t) / (1 - t_ref)),
++// the mask kept, as pmml's synth graph does ("flow once, synthesize many").
+ Texture2D<float4> previous : register(t0);
+ Texture2D<float4> current : register(t1);
+ RWStructuredBuffer<float> grid0 : register(u0);
+@@ -16,7 +19,9 @@ RWTexture2D<float4> output : register(u3);
+ cbuffer Constants : register(b0) {
+     uint srcW, srcH, padW, padH;
+     uint modelW, modelH, encoding, alignCorners;
+-    uint maskForFirst, unused0, unused1, unused2;
++    uint maskForFirst;
++    float scale0, scale1;   // PushMPC (local addition): flow once
++    uint scaled;
+ };
+ float3 encodeColor(float3 c) {
+     if (encoding == 1) {
+@@ -76,8 +81,14 @@ float2 gridToSource(float2 g) {
+ void main(uint3 id : SV_DispatchThreadID) {
+     if (id.x >= srcW || id.y >= srcH) return;
+     const float2 q = (float2(id.xy) + 0.5) * float2(modelW, modelH) / float2(srcW, srcH) - 0.5;
+-    const float3 a = encodeColor(tapFrame(previous, gridToSource(tapGrid(grid0, q))));
+-    const float3 b = encodeColor(tapFrame(current, gridToSource(tapGrid(grid1, q))));
++    float2 p0 = gridToSource(tapGrid(grid0, q)), p1 = gridToSource(tapGrid(grid1, q));
++    if (scaled != 0) {   // PushMPC (local addition): flow once
++        const float2 x = float2(id.xy);
++        p0 = x + scale0 * (p0 - x);
++        p1 = x + scale1 * (p1 - x);
++    }
++    const float3 a = encodeColor(tapFrame(previous, p0));
++    const float3 b = encodeColor(tapFrame(current, p1));
+     const float m = saturate(tapMask(q));
+     const float3 c = maskForFirst != 0 ? a * m + b * (1.0 - m) : a * (1.0 - m) + b * m;
+     output[id.xy] = float4(decodeColor(c), 1.0);
 diff --git a/shaders/VfgFourierMellin.hlsl b/shaders/VfgFourierMellin.hlsl
 new file mode 100644
 index 0000000..eeb8dac
@@ -1738,11 +1885,69 @@ index 5c76c5f..02aa97d 100644
 +void setShaderDirectoryOverride(const std::filesystem::path& dir) { shaderOverride() = dir; }
 +
  } // namespace veyra::runtime
+diff --git a/src/gfx/D3D12DeviceContext.cpp b/src/gfx/D3D12DeviceContext.cpp
+index 21a9e1c..64650a2 100644
+--- a/src/gfx/D3D12DeviceContext.cpp
++++ b/src/gfx/D3D12DeviceContext.cpp
+@@ -18,6 +18,14 @@ namespace veyra::gfx {
+ 
+ namespace {
+ 
++// PushMPC (local addition, not upstream): CI and the self-tests run pushcore on Windows' software GPU (WARP, a full D3D12
++// device) when PUSHMPC_TEST_WARP=1 and the caller pinned the adapter by LUID (pushcore pins its D3D11 device's adapter).
++// Never otherwise: a product run keeps "never silently use WARP".
++bool pushMpcTestWarp(uint64_t requiredLuid) {
++    wchar_t v[4]{};
++    return requiredLuid != 0 && GetEnvironmentVariableW(L"PUSHMPC_TEST_WARP", v, 4) == 1 && v[0] == L'1';
++}
++
+ std::string narrow(const std::wstring& text)
+ {
+     if (text.empty()) {
+@@ -208,7 +216,7 @@ bool D3D12DeviceContext::initialize(const DeviceContextDesc& desc, Status& statu
+         const auto candidateLuid=(uint64_t(uint32_t(candidateDesc.AdapterLuid.HighPart))<<32)|candidateDesc.AdapterLuid.LowPart;
+         if (pass == 0 && candidateLuid != preferred) continue;
+         if ((!desc.requiredVendorId||candidateDesc.VendorId==desc.requiredVendorId) &&
+-            (!desc.requiredLuid||candidateLuid==desc.requiredLuid) && !isSoftware &&
++            (!desc.requiredLuid||candidateLuid==desc.requiredLuid) && (!isSoftware || pushMpcTestWarp(desc.requiredLuid)) &&
+             SUCCEEDED(D3D12CreateDevice(candidate.Get(),D3D_FEATURE_LEVEL_12_0,__uuidof(ID3D12Device),nullptr))) {
+             adapter_ = candidate;
+             chosenDesc = candidateDesc;
 diff --git a/src/gfx/FsrSrBackend.cpp b/src/gfx/FsrSrBackend.cpp
-index 98ff308..7d48875 100644
+index 98ff308..3e3aa68 100644
 --- a/src/gfx/FsrSrBackend.cpp
 +++ b/src/gfx/FsrSrBackend.cpp
-@@ -110,7 +110,10 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+@@ -86,11 +86,16 @@ struct DirectoryGuard {
+ } // namespace
+ #endif
+ 
++namespace { const FsrSrBackend::ProviderOverride* gProviderOverride = nullptr; }   // PushMPC
++void FsrSrBackend::setProviderOverride(const ProviderOverride* provider) { gProviderOverride = provider; }
++
+ struct FsrSrBackend::Impl {
+     bool available = false;
+     uint64_t evaluateCount = 0;
+     uint64_t failureCount = 0;
+     std::string providerVersion;
++    const ProviderOverride* override_ = nullptr;   // PushMPC: the provider bound at initialize (nullptr = FidelityFX)
++    void* overrideContext = nullptr;
+ #ifdef VEYRA_HAS_FSR
+     HMODULE loader = nullptr;
+     HMODULE provider = nullptr;
+@@ -107,10 +112,23 @@ FsrSrBackend::~FsrSrBackend() { release(); }
+ 
+ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uint32_t maxRenderHeight,
+                               uint32_t maxUpscaleWidth, uint32_t maxUpscaleHeight, bool hdr) {
++    if (!p_->available && gProviderOverride) {   // PushMPC: the override provider instead of FidelityFX
++        auto& p = *p_;
++        p.overrideContext = gProviderOverride->create(device, maxRenderWidth, maxRenderHeight, maxUpscaleWidth, maxUpscaleHeight, hdr, gProviderOverride->user);
++        if (!p.overrideContext) return false;
++        p.override_ = gProviderOverride;
++        const char* v = p.override_->version(p.overrideContext);
++        p.providerVersion = v ? v : "override";
++        p.available = true;
++        return true;
++    }
  #ifdef VEYRA_HAS_FSR
      auto& p = *p_;
      if (p.available) return true;
@@ -1754,8 +1959,34 @@ index 98ff308..7d48875 100644
      const auto loaderPath = std::filesystem::absolute(root / "amd_fidelityfx_loader_dx12.dll");
      const auto providerPath = std::filesystem::absolute(root / "amd_fidelityfx_upscaler_dx12.dll");
      if (!std::filesystem::exists(loaderPath)) {
+@@ -208,6 +226,13 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion,
+                             ID3D12Resource* depth, ID3D12Resource* output, uint32_t renderWidth, uint32_t renderHeight,
+                             uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs) {
++    if (p_->override_) {   // PushMPC
++        auto& p = *p_;
++        const bool ok = p.available && p.override_->evaluate(p.overrideContext, list, color, motion, depth, output, renderWidth, renderHeight,
++                                                             upscaleWidth, upscaleHeight, reset, frameTimeMs);
++        ++(ok ? p.evaluateCount : p.failureCount);
++        return ok;
++    }
+ #ifdef VEYRA_HAS_FSR
+     auto& p = *p_;
+     if (!p.available || list == nullptr || color == nullptr || motion == nullptr || depth == nullptr ||
+@@ -282,6 +307,11 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
+ }
+ 
+ void FsrSrBackend::release() {
++    if (p_->override_) {   // PushMPC
++        p_->override_->destroy(p_->overrideContext);
++        p_->override_ = nullptr; p_->overrideContext = nullptr; p_->available = false;
++        return;
++    }
+ #ifdef VEYRA_HAS_FSR
+     auto& p = *p_;
+     if (p.context != nullptr) {
 diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
-index 17c476a..e1e1be4 100644
+index 17c476a..33edb9d 100644
 --- a/src/pipeline/EnhanceGraph.cpp
 +++ b/src/pipeline/EnhanceGraph.cpp
 @@ -64,6 +64,7 @@ extern "C" {
@@ -1766,7 +1997,23 @@ index 17c476a..e1e1be4 100644
  using diagnostics::GpuStage;
  static_assert(diagnostics::kTimedNrLayers==engine::kMaxNrInstances&&diagnostics::kTimedColorNodes==engine::kMaxColorInstances&&
                diagnostics::kTimedAaNodes==engine::kMaxAntiAliasInstances&&diagnostics::kTimedBeautyNodes==engine::kMaxBeautyInstances,
-@@ -796,6 +797,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+@@ -81,6 +82,7 @@ float uintBits(uint32_t v) { return std::bit_cast<float>(v); }
+ // may sit beside an RTX Video SR pass.
+ uint32_t finalVideoSrQuality(const EnhanceGraphDesc& d){return d.finalSrQuality();}
+ bool ngxVideoSrPass(const EnhanceGraphDesc& d){
++    if(d.externalSr&&!d.dualSr)return false; // PushMPC: the external upscaler takes the RTX VSR pass (no NGX session for it)
+     return engine::ngxVideoSr(finalVideoSrQuality(d))||(d.dualSr&&engine::ngxVideoSr(d.videoSrQuality));
+ }
+ // The Video Effects families only enlarge: a first double SR result at the
+@@ -719,6 +721,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+     }
+     desc_ = desc;lastSourceColor_={};tracker_={};prevValid_=false;fgHistorySkipped_=false;cadence_.reset();scene_.reset();sceneLastSourceId_=0;previousLuma_.clear();
+     if(!engine::validVideoSrQuality(desc.videoSrQuality)){veyra::log::error("graph",std::format("invalid video SR quality value={}",desc.videoSrQuality));return false;}
++    if(desc.externalSr&&(desc.dualSr||!engine::ngxVideoSr(desc.videoSrQuality))){veyra::log::error("graph","the external upscaler runs only as a single RTX VSR standard pass");return false;}
+     srcW_ = desc.sourceWidth;
+     srcH_ = desc.sourceHeight;
+     workW_ = desc.workWidth;
+@@ -796,6 +799,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
      const bool occlusionCheck=flowRefine_&&!(GetEnvironmentVariableW(L"VEYRA_TEST_FLOW_CONSISTENCY",consistency,4)&&consistency[0]==L'0');
      flowConsistency_=occlusionCheck&&nvidiaFlow;
      flowClaims_=occlusionCheck&&fidelityFlow;
@@ -1777,7 +2024,7 @@ index 17c476a..e1e1be4 100644
      uint64_t budget=0,usage=0;
      // Every NR layer allocates its own full set of textures, and a stabilised
      // layer adds two history/guide pairs on top. The stack is bounded (16 nodes),
-@@ -929,6 +934,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+@@ -929,6 +936,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
          if(firstTemporal&&!createSignedHdrRestore(firstSrHdrRestore_,desc_.firstSrWidth,desc_.firstSrHeight))return false;
      }
      if (!createComputePasses()) return false;
@@ -1785,7 +2032,7 @@ index 17c476a..e1e1be4 100644
  
      initialized_ = true;
      failedBackend_=engine::FailedBackend::None;
-@@ -1109,11 +1115,25 @@ bool EnhanceGraph::createResources()
+@@ -1109,11 +1117,25 @@ bool EnhanceGraph::createResources()
      if(!createAdditionalColorResources())return false;
      if(!createNodeColorResources())return false;
      if(!createBeautyShared())return false;
@@ -1814,7 +2061,7 @@ index 17c476a..e1e1be4 100644
              if(!texture)return false;
          }
          exclusionScratch_=makeTexture(context_.device(),workW_,workH_,outputFormat(),true);
-@@ -1133,7 +1153,7 @@ bool EnhanceGraph::createResources()
+@@ -1133,7 +1155,7 @@ bool EnhanceGraph::createResources()
          // VFG owns only the selected multiplier's outputs; FSR owns one pair.
          const unsigned usedCount=fsrEnabled()?2u:desc_.frameGenerationBackend==engine::FrameGenerationBackend::Vfg?2u*(desc_.fgMultiplier-1u):10u;
          const bool used=fgEnabled_&&i<usedCount;
@@ -1823,7 +2070,7 @@ index 17c476a..e1e1be4 100644
          if(!genFrame_[i])return false;
      }
      nrZeroMotion_ = makeTexture(context_.device(), workW_, workH_, DXGI_FORMAT_R16G16_FLOAT, false);
-@@ -1325,7 +1345,7 @@ bool EnhanceGraph::initNvof()
+@@ -1325,7 +1347,7 @@ bool EnhanceGraph::initNvof()
      const bool inGraphFgFlow=fgEnabled_&&desc_.fgUsesFlow()&&
          (desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss||desc_.frameGenerationBackend==engine::FrameGenerationBackend::Anr||engine::fsrFrameGeneration(desc_.frameGenerationBackend));
      // DLAA takes its motion from the same flow.
@@ -1832,7 +2079,7 @@ index 17c476a..e1e1be4 100644
          mvecSource_="zero motion (no external flow consumer)";
          veyra::log::info("graph", "optical-flow session skipped: no external motion consumer");
          return true;
-@@ -1639,12 +1659,12 @@ bool EnhanceGraph::initCrosshairPass() {
+@@ -1639,12 +1661,12 @@ bool EnhanceGraph::initCrosshairPass() {
      return true;
  }
  ID3D12Resource* EnhanceGraph::fgInput(unsigned parity) const {
@@ -1847,7 +2094,7 @@ index 17c476a..e1e1be4 100644
          veyra::log::warn("subtitle-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
  }
  void EnhanceGraph::composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity){
-@@ -1675,10 +1695,55 @@ bool EnhanceGraph::initVfg()
+@@ -1675,10 +1697,55 @@ bool EnhanceGraph::initVfg()
      failedBackend_=engine::FailedBackend::Fg;
      vfgBackend_=std::make_unique<VfgBackend>();
      if(!vfgBackend_->initialize(context_,desc_.runtimeAbsPath,workW_,workH_,outputFormat(),desc_.fgMultiplier,desc_.vfgQuality,desc_.vfgAsyncSubmission,desc_.vfgFastFallback))return false;
@@ -1903,7 +2150,16 @@ index 17c476a..e1e1be4 100644
  bool EnhanceGraph::amfFrcActive() const { return amfFrc_&&amfFrc_->ready(); }
  bool EnhanceGraph::pushFlowActive() const { return pushFlow_&&pushFlow_->status().ready; }
  bool EnhanceGraph::pushFlowPredicting() const { return pushFlow_ && desc_.pushFlowPredict && !pushFlowPredictPaused_ && pushFlow_->status().predict; }
-@@ -1731,7 +1796,7 @@ bool EnhanceGraph::initNgxFeatures()
+@@ -1707,7 +1774,7 @@ bool EnhanceGraph::initPushFlow()
+     const auto encoding=linear?(desc_.hdrOutput?pushflow::Encoding::ScRgbHdr:pushflow::Encoding::LinearSdr):pushflow::Encoding::Encoded;
+     pushFlow_=std::make_unique<pushflow::PushFlowBackend>();
+     if(!pushFlow_->initialize(context_.device(),ring_.queue(),desc_.runtimeAbsPath,workW_,workH_,format,encoding,desc_.vfgQuality,desc_.pushFlowMotion,desc_.pushFlowEncoderCache,desc_.pushFlowGuard,desc_.pushFlowPredict)){pushFlow_.reset();return false;}
+-    fgCapsAvailable_=true;fgMultiFrameMax_=3;
++    fgCapsAvailable_=true;fgMultiFrameMax_=int(FrameBatch::Capacity)-1;   // PushMPC (local addition): up to 16X (flow once above 4X)
+     failedBackend_=engine::FailedBackend::None;
+     return true;
+ }
+@@ -1731,7 +1798,7 @@ bool EnhanceGraph::initNgxFeatures()
      if(anr){
          failedBackend_=engine::FailedBackend::Fg;
          fgBackend_=std::make_unique<ngx::DlssFgBackend>();unsigned maximum=0;
@@ -1912,7 +2168,7 @@ index 17c476a..e1e1be4 100644
          fgCapsAvailable_=true;fgMultiFrameMax_=int(maximum);
          if(desc_.fgMultiplier<2||desc_.fgMultiplier>maximum+1){log::error("anr","requested multiplier exceeds actual provider capability");return false;}
      }
-@@ -1748,13 +1813,20 @@ bool EnhanceGraph::initNgxFeatures()
+@@ -1748,13 +1815,20 @@ bool EnhanceGraph::initNgxFeatures()
              dlssgLiteState_==1?"active":dlssgLiteState_==2?"runtime missing":"GPU keeps the default runtime",
              utf8Of(dlssgDirectory_)));
      }
@@ -1935,7 +2191,23 @@ index 17c476a..e1e1be4 100644
          // Patched driver/provider state currently belongs to the graph. Keep
          // its complete init/shutdown contract even when FG is temporarily off.
          const bool enabled=!ngx::FgCompatibilitySession::requested(context_.adapter().vendorId,context_.adapter().deviceId)&&
-@@ -3048,7 +3120,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -2010,6 +2084,15 @@ bool EnhanceGraph::initNgxFeatures()
+         }
+         failedBackend_=engine::FailedBackend::Infrastructure;
+     }
++    // PushMPC (local addition): the external upscaler on the RTX VSR textures (its own device work, no NGX list)
++    externalSrActive_=externalSrLost_=false;
++    if(srEnabled_&&!desc_.noFeatures&&desc_.externalSr&&engine::ngxVideoSr(finalVideoSrQuality(desc_))){
++        failedBackend_=engine::FailedBackend::Sr;
++        if(!desc_.externalSr->initialize(context_.device(),srInW_,srInH_,srOutW_,srOutH_,finalVideoSrQuality(desc_)))return false;
++        externalSrActive_=true;
++        veyra::log::info("video-sr",std::format("selected quality={} runtime={} input={}x{} output={}x{}",finalVideoSrQuality(desc_),desc_.externalSr->name(),srInW_,srInH_,srOutW_,srOutH_));
++        failedBackend_=engine::FailedBackend::Infrastructure;
++    }
+     const bool dlssFinal=desc_.finalSrQuality()==0,dlssFirst=desc_.firstSrRuns(0);
+     if (srEnabled_ && !desc_.noFeatures && (dlssFinal||dlssFirst||ngxVideoSrPass(desc_))) {
+         // DLSS SR: the final pass reads the source, or under double SR the reduced
+@@ -3048,7 +3131,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      lastSourceColor_=resolved;
      if(resolved.isHdrPath()&&!desc_.hdrOutput&&!toneMapPeakNits_){
          const auto peak=hdrToneMapPeak(resolved);toneMapPeakNits_=peak.nits;
@@ -1948,7 +2220,7 @@ index 17c476a..e1e1be4 100644
      }
      if(desc_.hdrInput&&!resolved.isHdrPath()){
          veyra::log::error("hdr","HDR source transfer changed to SDR; reopen/rebuild required");return false;
-@@ -3369,7 +3445,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3369,7 +3456,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
          float c[12+kColorGradeConstantCount]={uintBits(srcW_),uintBits(srcH_),uintBits(resolved.transfer==TransferFunction::PQ?4u:resolved.transfer==TransferFunction::HLG?5u:workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
              resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
@@ -1957,7 +2229,7 @@ index 17c476a..e1e1be4 100644
          if(grade)packColorGradeConstants(colorTables_,c+(desc_.packedInput?12:8));
          if(resolved.scRgb){c[4]=desc_.hdrWorking()?1.f:2.f;c[5]=toneMapPeakNits_;}
          rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,gpuRgb?3+parity:0).ptr,gpuHandleOf(rgbPass_,1+uavSlot).ptr,gpuHandleOf(rgbPass_,8).ptr);
-@@ -3380,7 +3456,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3380,7 +3467,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,
              resolved.transfer==TransferFunction::HLG?5.0f:resolved.transfer==TransferFunction::PQ?4.0f:float(workingTransferCode(resolved)), (nv12Texture?(nv12Texture->GetDesc().Format==DXGI_FORMAT_P010?1.0f:0.0f):(desc_.captureBitDepth==16?2.0f:desc_.wideYuvInput()?1.0f:0.0f)),
              uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrWorking()?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
@@ -1966,7 +2238,7 @@ index 17c476a..e1e1be4 100644
          if(grade)packColorGradeConstants(colorTables_,constants+12);
          // Dolby Vision profile 5: written on every frame because the enable flag
          // lives inside the block, so switching source content back to ordinary
-@@ -3396,6 +3472,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3396,6 +3483,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                      p7Ready_ ? 1 : 0, doviElFrame_->width, doviElFrame_->height, int(doviElFrame_->format)));
          }
          bool p7Bound = false;
@@ -1983,7 +2255,54 @@ index 17c476a..e1e1be4 100644
          if (p7Ready_ && doviElFrame_ != nullptr && uploadElLuma(list, doviElFrame_) &&
              uploadElChroma(list, doviElFrame_) && uploadElCurve(list)) {
              std::memcpy(constants + 12 + kColorGradeConstantCount, p7Params_, sizeof(p7Params_));
-@@ -3611,7 +3697,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3532,6 +3629,23 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         tracker_.transition(list,output,D3D12_RESOURCE_STATE_COMMON);
+         return true;
+     };
++    // PushMPC (local addition): the same hand-off for EnhanceGraphDesc::externalSr. 1 = ran; 0 = graph error; -1 = the
++    // upscaler stopped (lost): the list is open again and the caller resizes this frame plainly.
++    auto runExternal=[&](ID3D12Resource* input,ID3D12Resource* output)->int{
++        auto& x=*desc_.externalSr;
++        if(x.lost())return -1;
++        tracker_.transition(list,input,D3D12_RESOURCE_STATE_COPY_SOURCE);
++        if(!x.copyIn(list,input))return x.lost()?-1:0;
++        tracker_.transition(list,input,D3D12_RESOURCE_STATE_COMMON);
++        if(!submitGraph(slot))return 0;
++        const bool ran=x.run(ring_.queue());
++        list=ring_.acquireNext(slot,st);if(!list)return 0;
++        if(!ran)return x.lost()?-1:0;
++        tracker_.transition(list,output,D3D12_RESOURCE_STATE_COPY_DEST);
++        if(!x.copyOut(list,output))return 0;
++        tracker_.transition(list,output,D3D12_RESOURCE_STATE_COMMON);
++        return 1;
++    };
+     // First double SR pass on RTX Video SR: encode the stage input, evaluate,
+     // then leave the linear first result (HDR restored against the source).
+     auto firstVideoSr=[&]()->bool{
+@@ -3582,6 +3696,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         blitPass_.bind(list,enc,gpuHandleOf(blitPass_,prescaled?21:desc_.nrBeforeSr||sourcePostOutput_?18:0).ptr,gpuHandleOf(blitPass_,16).ptr);list->Dispatch((srInW_+15)/16,(srInH_+15)/16,1);tracker_.uavBarrier(list,videoSrInput_.Get());
+         tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_COMMON);tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_COMMON);
+         if(vfxSrBackend_){if(!runVfx(*vfxSrBackend_,videoSrInput_.Get(),videoSrOutput_.Get()))return false;}
++        else if(externalSrActive_){
++            // PushMPC: the external upscaler; when it stops this frame is resized plainly (never a black frame)
++            const int ran=runExternal(videoSrInput_.Get(),videoSrOutput_.Get());
++            if(ran==0){failedBackend_=engine::FailedBackend::Sr;return false;}
++            if(ran<0){
++                externalSrLost_=true;
++                veyra::log::warn("video-sr",std::format("{} stopped: plain resize from this frame on",desc_.externalSr->name()));
++                tracker_.transition(list,srStageInput(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++                tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++                const float resize[8]={uintBits(srcW_),uintBits(srcH_),uintBits(workW_),uintBits(workH_),0,0,0,0};
++                blitPass_.bind(list,resize,gpuHandleOf(blitPass_,18).ptr,gpuHandleOf(blitPass_,1).ptr);
++                list->Dispatch((workW_+15)/16,(workH_+15)/16,1);tracker_.uavBarrier(list,workRgba_.Get());
++                tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++                return true;
++            }
++        }
+         else if(!videoSrBackend_->evaluate(list,videoSrInput_.Get(),videoSrOutput_.Get(),desc_.dualSr?desc_.dualSrQuality:desc_.videoSrQuality)){failedBackend_=engine::FailedBackend::Sr;return false;}
+         tracker_.uavBarrier(list,videoSrOutput_.Get());tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         // HDR restore and the resolve take the base that was encoded.
+@@ -3611,7 +3741,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      };
      // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
      bool haveFlow = false;
@@ -1992,7 +2311,7 @@ index 17c476a..e1e1be4 100644
      if (runMotion && (gpuDis_ || amdOf_ || (nvof_ && nvof_->initialized()))) {
          const float dims[8] = {uintBits(nvofW_),uintBits(nvofH_),uintBits(nvofW_),uintBits(nvofH_),0,0,0,0};
          if (prevValid_) {
-@@ -3662,12 +3748,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3662,12 +3792,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                      if(FAILED(hr))veyra::log::error("graph",std::format("NVOF output queue wait value={} hr=0x{:X}",value,unsigned(hr)));
                      return SUCCEEDED(hr);
                  };
@@ -2007,7 +2326,7 @@ index 17c476a..e1e1be4 100644
                  if(amdOf_)tracker_.transition(list,amdOf_->sceneChanges(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                  tracker_.transition(list,nvofRawTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                  tracker_.transition(list,nvofCostTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-@@ -3729,6 +3815,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3729,6 +3859,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          }
      }
  
@@ -2033,7 +2352,16 @@ index 17c476a..e1e1be4 100644
      // 3. SR into workRgba (or 1:1 blit bypass).
      cpuTrace.mark("flowFinish");
      if(previewCheckpoint&&!reset)previewCheckpoint();
-@@ -4407,16 +4512,42 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3903,7 +4052,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         ++metrics_.srEvaluateCount;
+         finishTemporalOutput(list,srHdrRestore_,workRgba_.Get());
+         gpuTimer_.mark(list,GpuStage::Sr,true);
+-    } else if(!mixed&&srEnabled_&&(videoSrBackend_||vfxSrBackend_)){
++    } else if(!mixed&&srEnabled_&&(videoSrBackend_||vfxSrBackend_||(externalSrActive_&&!externalSrLost_))){
+         if(!runVideoSr())return false;
+     } else if (!mixed && srEnabled_ && srBackend_ && srBackend_->created()) {
+         gpuTimer_.mark(list,GpuStage::Sr);
+@@ -4407,16 +4556,42 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(overlay_&&!overlay_->update(list,tracker_,parity,reset||!prevValid_))veyra::log::warn("crosshair-hold","update skipped");
      // Subtitle Hold after it: with Crosshair Hold it fills the copy that pass has just made.
      if(subtitles_&&!subtitles_->update(list,tracker_,parity,reset||!prevValid_))veyra::log::warn("subtitle-hold","update skipped");
@@ -2077,7 +2405,7 @@ index 17c476a..e1e1be4 100644
      }
      if(runFg&&amfFrc_){
          // As for VFG, the span from here to the copy back brackets AMF's own queue work.
-@@ -4425,6 +4556,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4425,6 +4600,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          if(!amfFrc_->capture(list,fgInput(parity))){failedBackend_=engine::FailedBackend::Fg;return false;}
          tracker_.transition(list,fgInput(parity),D3D12_RESOURCE_STATE_COMMON);
      }
@@ -2091,7 +2419,7 @@ index 17c476a..e1e1be4 100644
      if(!composeExclusion(list,parity,parity,presentSinkFg()))return false;
      // Live HUD Lock learns from this real frame against the previous one (enhanced colours).
      if(hudLock_&&!hudLock_->update(list,tracker_,parity,!prevValid_))veyra::log::warn("hud-lock","update skipped");
-@@ -4444,6 +4582,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4444,6 +4626,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(!runFg)gpuTimer_.resolve(list);
      if (!submitGraph(slot)) return false;
      if(!runFg)gpuTimer_.submitted(ring_.lastSignaledValue());
@@ -2101,7 +2429,45 @@ index 17c476a..e1e1be4 100644
      out.videoFenceValue = ring_.lastSignaledValue();
      out.videoFenceObject = context_.fence();
      if(dualPair){
-@@ -4553,6 +4694,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4529,6 +4714,17 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+                 if(f.pts100ns>out.batch.b100ns&&afterRealCount<afterReal.size())afterReal[afterRealCount++]=std::move(f);
+                 continue;
+             }
++            // PushMPC (local addition), flow once above 4X ("synthesize many", as pmml): the network runs once per pair
++            // at t = 0.5 and every subframe is rebuilt from its grids, scaled to its own time (PushFlowBackend::resolveAt),
++            // so 5X-16X cost one network run plus a cheap rebuild per frame. Up to 4X each subframe keeps its own run.
++            // PUSHMPC_PUSHFLOW_FLOW_ONCE=1 uses it from 3X, =0 never (A/B checks).
++            static const int flowOnceEnv=[]{const char* v=std::getenv("PUSHMPC_PUSHFLOW_FLOW_ONCE");return v&&*v?(v[0]=='0'?0:1):-1;}();
++            const bool flowOnce=pushFlow_->status().grids&&outputMultiplier>2&&(flowOnceEnv==1||(flowOnceEnv<0&&outputMultiplier>4));
++            if(flowOnce){
++                static bool flowOnceLogged=false;
++                if(!flowOnceLogged){flowOnceLogged=true;veyra::log::info("pushflow",std::format("flow once at {}X: one network run per pair at t=0.5, every subframe rebuilt from its grids",outputMultiplier));}
++            }
++            if(!flowOnce||sub==1){
+             auto* plist=ring_.acquireNext(slot,st);if(!plist)return false;
+             if(sub==1){gpuTimer_.mark(plist,GpuStage::FgBatch);gpuTimer_.mark(plist,GpuStage::Fg1);}
+             // With Crosshair Hold the pair PushFlow sees is the filled pair (fgInput is the real frame otherwise).
+@@ -4537,22 +4733,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+             // The pair is packed once; later subframes only rewrite the time plane.
+             // The two real frames' numbers (this graph's own count, from 1) let the encoder cache keep the
+             // second frame's features for the pair after this one, where it is the first.
+-            if(!pushFlow_->pack(plist,fgInput(1-parity),fgInput(parity),float(sub)/float(outputMultiplier),sub>1,realFrameIndex_,realFrameIndex_+1)){failedBackend_=engine::FailedBackend::Fg;return false;}
++            if(!pushFlow_->pack(plist,fgInput(1-parity),fgInput(parity),flowOnce?0.5f:float(sub)/float(outputMultiplier),sub>1,realFrameIndex_,realFrameIndex_+1)){failedBackend_=engine::FailedBackend::Fg;return false;}
+             tracker_.transition(plist,fgInput(1-parity),D3D12_RESOURCE_STATE_COMMON);
+             tracker_.transition(plist,fgInput(parity),D3D12_RESOURCE_STATE_COMMON);
+             if(!submitGraph(slot))return false;
+             if(!pushFlow_->infer()){failedBackend_=engine::FailedBackend::Fg;return false;}
++            }
+             auto* flist=ring_.acquireNext(slot,st);if(!flist)return false;
+             tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
+             // The Fast tier rebuilds the picture from the full-resolution real frames.
+             tracker_.transition(flist,fgInput(1-parity),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+             tracker_.transition(flist,fgInput(parity),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-            if(!pushFlow_->resolve(flist,fgInput(1-parity),fgInput(parity),genFrame_[generatedSlot].Get())){failedBackend_=engine::FailedBackend::Fg;return false;}
++            if(!(flowOnce?pushFlow_->resolveAt(flist,fgInput(1-parity),fgInput(parity),genFrame_[generatedSlot].Get(),float(sub)/float(outputMultiplier),0.5f)
++                          :pushFlow_->resolve(flist,fgInput(1-parity),fgInput(parity),genFrame_[generatedSlot].Get()))){failedBackend_=engine::FailedBackend::Fg;return false;}
+             tracker_.transition(flist,fgInput(1-parity),D3D12_RESOURCE_STATE_COMMON);
+             tracker_.transition(flist,fgInput(parity),D3D12_RESOURCE_STATE_COMMON);
              composeOverlay(flist,generatedSlot,parity,float(sub)/float(outputMultiplier));
              composeHudLock(flist,generatedSlot,1-parity);
              if(!composeExclusion(flist,generatedSlot+2,1-parity,false))return false;
@@ -2109,7 +2475,7 @@ index 17c476a..e1e1be4 100644
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
              if(sub==fgCalls){gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
              if(!submitGraph(slot))return false;
-@@ -4578,6 +4720,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4578,6 +4777,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              if(copied&&!resetFg)composeOverlay(flist,generatedSlot,parity,0.5f);
              composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
              if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
@@ -2117,7 +2483,7 @@ index 17c476a..e1e1be4 100644
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
              gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);
              if(!submitGraph(slot))return false;
-@@ -4601,13 +4744,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4601,13 +4801,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              if(!vfgBackend_->generate(parity,sub,resetFg?2u:outputMultiplier,resetFg,out.fgFast)){failedBackend_=engine::FailedBackend::Fg;return false;}
              auto* flist=ring_.acquireNext(slot,st);if(!flist)return false;
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -2136,7 +2502,7 @@ index 17c476a..e1e1be4 100644
              else{gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
              if(!submitGraph(slot))return false;
              if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
-@@ -4655,8 +4800,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4655,8 +4857,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          // ANR consumes current->previous pixel motion directly. NVIDIA DLSSG
          // consumes normalized reverse motion. Verified against exact translated
          // image truth; keep this conversion at the consumer, not in shared flow.
@@ -2149,7 +2515,7 @@ index 17c476a..e1e1be4 100644
          if(sub==1)gpuTimer_.mark(flist,GpuStage::FgBatch);
          const auto timingStage=static_cast<GpuStage>(unsigned(GpuStage::Fg1)+sub-1);gpuTimer_.mark(flist,timingStage);
          cpuTrace.mark("fgPrepare");
-@@ -4698,6 +4845,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4698,6 +4902,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          if(!resetFg)composeOverlay(flist,generatedSlot,parity,float(sub)/float(outputMultiplier));
          composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
          if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
@@ -2157,7 +2523,7 @@ index 17c476a..e1e1be4 100644
          tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
          tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_COMMON);
          tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
-@@ -5046,6 +5194,7 @@ void EnhanceGraph::shutdown()
+@@ -5046,6 +5251,7 @@ void EnhanceGraph::shutdown()
      }
      (void)ring_.drainQueue();(void)ring_.discardRecording();
      presentationFences_={};presentationValues_={};
@@ -2165,6 +2531,15 @@ index 17c476a..e1e1be4 100644
      for(auto& input:hardwareInputFrames_)input.reset();
      Status st = Status::Ok;
      if (nv12Ctx_ != nullptr) { sws_freeContext(nv12Ctx_); nv12Ctx_ = nullptr; }
+@@ -5082,6 +5288,8 @@ void EnhanceGraph::shutdown()
+     if(firstVideoSrBackend_){featuresReleased=firstVideoSrBackend_->release()&&featuresReleased;firstVideoSrBackend_.reset();}
+     if(videoSrBackend_){featuresReleased=videoSrBackend_->release()&&featuresReleased;videoSrBackend_.reset();}
+     vfxSrBackend_.reset();firstVfxSrBackend_.reset();
++    if(externalSrActive_&&desc_.externalSr)desc_.externalSr->shutdown();   // PushMPC
++    externalSrActive_=false;
+     if(videoHdrBackend_)featuresReleased=videoHdrBackend_->release()&&featuresReleased;
+     videoHdrBackend_.reset();videoHdrInput_.Reset();videoHdrOutput_.Reset();
+     if (srBackend_) featuresReleased=srBackend_->release()&&featuresReleased;
 diff --git a/src/pipeline/PushMpcCutGuard.cpp b/src/pipeline/PushMpcCutGuard.cpp
 new file mode 100644
 index 0000000..d52c683
@@ -2945,7 +3320,7 @@ index 9459157..26925e9 100644
              if(p.outputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.outputSemaphore),"destroy output semaphore");
              if(p.inputSemaphore)p.cu(p.cuDestroyExternalSemaphoreFn(p.inputSemaphore),"destroy input semaphore");
 diff --git a/src/pushflow/PushFlowBackend.cpp b/src/pushflow/PushFlowBackend.cpp
-index f0e52b5..8b084d3 100644
+index f0e52b5..56dd033 100644
 --- a/src/pushflow/PushFlowBackend.cpp
 +++ b/src/pushflow/PushFlowBackend.cpp
 @@ -29,6 +29,9 @@
@@ -2992,7 +3367,17 @@ index f0e52b5..8b084d3 100644
  struct PushFlowBackend::Impl {
      Status status;
      double inferMs = 0;
-@@ -257,6 +287,13 @@ struct PushFlowBackend::Impl {
+@@ -195,6 +225,9 @@ struct PushFlowBackend::Impl {
+     UINT guardRing = 0;
+     bool guardOn = false;
+     float lastTimestep = 0.5f;
++    // PushMPC (local addition), flow once: resolveAt() sets these for one resolve (1, 1 and false otherwise)
++    float flowScale0 = 1.0f, flowScale1 = 1.0f;
++    bool flowScaled = false;
+     static constexpr UINT kGuardRing = 8;
+     uint32_t* guardMapped = nullptr;
+     uint64_t guardWritten = 0;
+@@ -257,6 +290,13 @@ struct PushFlowBackend::Impl {
      std::array<void*, 5> allocations{};
      ComPtr<IDMLDevice> dmlDevice;
      std::string inputName;                                    // the model's one input (the split models share it)
@@ -3006,7 +3391,7 @@ index f0e52b5..8b084d3 100644
      std::vector<std::pair<std::string, int64_t>> fixedDims;   // the free dimensions the main session was fixed to
      // PushFlow 2, Fusion's first step (docs/PUSHFLOW2.md; scripts/pushflow/rife_graph.py split_encoder).
      // The whole model encodes both frames every time it makes a frame. Cut in two, the second frame is
-@@ -590,6 +627,114 @@ struct PushFlowBackend::Impl {
+@@ -590,6 +630,114 @@ struct PushFlowBackend::Impl {
              list->ResourceBarrier(1, &b);
          });
      }
@@ -3121,7 +3506,7 @@ index f0e52b5..8b084d3 100644
      std::vector<float> readRgb() {
          const uint64_t bytes = uint64_t(status.padW) * status.padH * 3 * 4;
          D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
-@@ -722,6 +867,9 @@ struct PushFlowBackend::Impl {
+@@ -722,6 +870,9 @@ struct PushFlowBackend::Impl {
      // wait=true: the call returns only after the GPU finished the network (start-up checks).
      bool run(bool wait = false) {
          if (faulted) return false;
@@ -3131,7 +3516,7 @@ index f0e52b5..8b084d3 100644
          bool crashed = false;
          const bool async = queued && !wait && (syncEvery == 0 || ++sinceSync < syncEvery);
          if (!async) sinceSync = 0;
-@@ -828,6 +976,17 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -828,6 +979,17 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
      const uint32_t block = std::max(p.facts.pad, kBlock);
      p.status.padW = (p.status.modelW + block - 1) / block * block;
      p.status.padH = (p.status.modelH + block - 1) / block * block;
@@ -3149,7 +3534,7 @@ index f0e52b5..8b084d3 100644
      // DirectML first, from our folder, so ONNX Runtime and we use the same (redistributed) copy.
      p.dmlModule = LoadLibraryExW((dir / L"DirectML.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
      p.ortModule = LoadLibraryExW((dir / L"onnxruntime.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-@@ -847,7 +1006,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -847,7 +1009,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
      if (!p.ok(api->CreateMemoryInfo("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault, &p.memory), "memory info")) return false;
  
      // The full-precision model is the reference and the fallback.
@@ -3158,7 +3543,7 @@ index f0e52b5..8b084d3 100644
      bool grids = false;
      if (!p.open(fp32Model, queue, &p.session, p.channels, grids)) return false;
      p.haveGrids = grids && p.facts.known;
-@@ -855,8 +1014,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -855,8 +1017,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
      p.status.precision = "fp32";
  
      // D3D12 buffers for the tensors, always in UNORDERED_ACCESS (as DirectML expects).
@@ -3168,7 +3553,7 @@ index f0e52b5..8b084d3 100644
      const auto makeBuffer = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out) {
          D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
          D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = (bytes + 255) / 256 * 256; bd.Height = 1;
-@@ -927,6 +1085,10 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -927,6 +1088,10 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
              accepted ? "fp16" : "fp32 (half precision does not match on this GPU)"));
      }
  
@@ -3179,7 +3564,7 @@ index f0e52b5..8b084d3 100644
      // Shaders, descriptors and the output picture.
      std::vector<uint8_t> cs;
      if (!p.packPass.loadShader("PushFlowPack.dxil", cs) || !p.packPass.create(device, cs, 1 + 2 * kSrvRing, 2, 1, 12)) return false;
-@@ -998,7 +1160,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -998,7 +1163,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
      // The rebuild is what keeps the Fast tier sharp; at full size the network's own picture is used.
      p.status.rebuild = p.haveGrids && (p.status.modelW != width || p.status.modelH != height);
      p.status.grids = p.haveGrids; p.status.alignCorners = p.facts.alignCorners; p.status.maskForFirst = p.facts.maskForFirst;
@@ -3188,7 +3573,7 @@ index f0e52b5..8b084d3 100644
      {
          D3D12_QUERY_HEAP_DESC qd{}; qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = 2 * Impl::kTimeRing;
          UINT64 frequency = 0;
-@@ -1110,7 +1272,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -1110,7 +1275,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
          if (!p.status.split) veyra::log::warn("pushflow", "the encoder cache was asked for and is not used: " + p.status.splitState);
      }
      // Queued inference (see Impl::runOptions); a failure here only keeps the waits.
@@ -3197,7 +3582,7 @@ index f0e52b5..8b084d3 100644
          if (p.ok(p.api->CreateRunOptions(&p.runOptions), "CreateRunOptions") &&
              p.ok(p.api->AddRunConfigEntry(p.runOptions, "disable_synchronize_execution_providers", "1"), "run option")) p.queued = true;
      }
-@@ -1124,7 +1286,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
+@@ -1124,7 +1289,7 @@ bool PushFlowBackend::initialize(ID3D12Device* device, ID3D12CommandQueue* queue
                                            : std::string("inference waits for the GPU each frame"));
      p.status.ready = true;
      veyra::log::info("pushflow", std::format("ready runtime={} model={} precision={} tier={} size={}x{} model={}x{} padded={}x{} channels={} "
@@ -3206,3 +3591,45 @@ index f0e52b5..8b084d3 100644
          p.status.modelW, p.status.modelH, p.status.padW, p.status.padH, p.channels, p.status.rebuild ? 1 : 0, p.haveGrids ? 1 : 0,
          unsigned(encoding), p.status.splitState.empty() ? std::string("not asked for") : p.status.splitState,
          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count()));
+@@ -1275,7 +1440,8 @@ bool PushFlowBackend::resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* p
+     for (UINT i = 0; i < outputs; ++i) { barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; barriers[i].UAV.pResource = p.buffers[i + 1].Get(); }
+     list->ResourceBarrier(outputs, barriers);
+     p.states.transition(list, p.picture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    if (p.status.rebuild && previous && current) {
++    // flow once rebuilds from the grids even when the network ran at full size (PushMPC, local addition)
++    if ((p.status.rebuild || (p.flowScaled && p.haveGrids)) && previous && current) {
+         const UINT first = 4 + 2 * p.rebuildRing;
+         p.rebuildRing = (p.rebuildRing + 1) % kSrvRing;
+         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+@@ -1285,7 +1451,8 @@ bool PushFlowBackend::resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* p
+         p.stager.stageSrv(current, &view, p.rebuildPass.heap.Get(), first + 1);
+         const float constants[12] = {bits(p.width), bits(p.height), bits(p.status.padW), bits(p.status.padH),
+                                      bits(p.status.modelW), bits(p.status.modelH), bits(uint32_t(p.encoding)), bits(p.facts.alignCorners ? 1u : 0u),
+-                                     bits(p.facts.maskForFirst ? 1u : 0u), 0.0f, 0.0f, 0.0f};
++                                     bits(p.facts.maskForFirst ? 1u : 0u), p.flowScaled ? p.flowScale0 : 1.0f, p.flowScaled ? p.flowScale1 : 1.0f,
++                                     bits(p.flowScaled ? 1u : 0u)};
+         p.rebuildPass.bind(list, constants, gpuSlot(p.rebuildPass, first), gpuSlot(p.rebuildPass, 0));
+     } else {
+         const float constants[8] = {bits(p.width), bits(p.height), bits(p.status.padW), bits(p.status.padH),
+@@ -1344,6 +1511,21 @@ bool PushFlowBackend::resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* p
+     return true;
+ }
+ 
++// PushMPC (local addition): flow once. The grids of the last network run (at tRef) are scaled for time t in the rebuild
++// pass (PushFlowReconstruct.hlsl); Guard judges the frame as one at t (its nearer real frame).
++bool PushFlowBackend::resolveAt(ID3D12GraphicsCommandList* list, ID3D12Resource* previous, ID3D12Resource* current, ID3D12Resource* output, float t,
++                                float tRef) {
++    auto& p = *p_;
++    if (!p.haveGrids || !previous || !current || tRef <= 0.0f || tRef >= 1.0f) return false;
++    t = std::clamp(t, 0.0f, 1.0f);
++    p.flowScale0 = t / tRef; p.flowScale1 = (1.0f - t) / (1.0f - tRef); p.flowScaled = true;
++    const float netTime = p.lastTimestep;
++    p.lastTimestep = t;
++    const bool ok = resolve(list, previous, current, output);
++    p.flowScaled = false; p.flowScale0 = p.flowScale1 = 1.0f; p.lastTimestep = netTime;
++    return ok;
++}
++
+ bool PushFlowBackend::forecast(ID3D12GraphicsCommandList* list, ID3D12Resource* previous, ID3D12Resource* current, ID3D12Resource* output, float ahead,
+                                double intervalSeconds) {
+     auto& p = *p_;

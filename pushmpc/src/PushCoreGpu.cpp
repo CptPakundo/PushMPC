@@ -702,7 +702,7 @@ struct PushCore {
             break;
         case PUSHCORE_FG_PUSHFLOW:
             s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
-            cap = PUSHCORE_MAX_MULTIPLIER;   // flow once above 4x (patches/pushfps-4.5.4-pushflow16.patch)
+            cap = PUSHCORE_MAX_MULTIPLIER;   // flow once above 4x (the PushFlow 16x hunks of patches/pushfps-4.5.4-pushmpc.patch)
             break;
         case PUSHCORE_FG_XEFG:
             // G10: PushFPS's XeSS present-sink mode (the graph makes the real frames at the output size and the motion its
@@ -1132,7 +1132,7 @@ struct PushCore {
                 cache = &ownCache;
             }
         }
-        // G11: the worker takes the graph's RTX VSR pass (patch pushfps-4.5.4-zluda-externalsr.patch: EnhanceGraphDesc::externalSr)
+        // G11: the worker takes the graph's RTX VSR pass (the external SR hunks of patches/pushfps-4.5.4-pushmpc.patch: EnhanceGraphDesc::externalSr)
         zludaSr.reset();
         if (zludaRun) { zludaSr = std::make_shared<pushmpc::ZludaVsrSr>(*zvsr); gd.externalSr = zludaSr; }
         graph = std::make_unique<pipeline::EnhanceGraph>(ctx, ring, cache);

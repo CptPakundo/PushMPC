@@ -18,7 +18,7 @@ on:
     branches: ['track/vendor-intelvp', 'track/vendor-xess']
     paths: ['.github/workflows/intel-video.yml', 'pushmpc/src/PushCoreD3D11Bridge.*', 'pushmpc/src/PushCoreIntelVsr.*', 'pushmpc/src/PushCoreVplFi.*',
             'pushmpc/src/PushCoreIntel.*', 'pushmpc/src/PushCoreXe*', 'pushmpc/src/PushCoreSelfTest.*', 'pushmpc/tools/pushcore_selftest.cpp',
-            'patches/pushfps-4.5.4-xess.patch', 'scripts/xess-fetch.ps1', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp',
+            'patches/pushfps-4.5.4-pushmpc.patch', 'scripts/xess-fetch.ps1', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp',
             'tests/intel-*-manual.ps1', 'tests/xess-fg-manual.ps1']
   workflow_dispatch:
 # a push whose commit message contains [libvpl only] builds and uploads only libvpl's install (a developer convenience)
@@ -115,13 +115,7 @@ jobs:
           if ((git -C PushFPS rev-parse HEAD) -ne $env:PUSHFPS_COMMIT) { Write-Host "::error::tag moved"; exit 1 }
           git -C PushFPS apply --whitespace=nowarn "$env:GITHUB_WORKSPACE/repo/$env:PUSHFPS_PATCH"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          # XeSS SR's slot (FsrSrBackend provider) and pushcore on WARP: until the combined patch carries these hunks
-          $x = "$env:GITHUB_WORKSPACE/repo/patches/pushfps-4.5.4-xess.patch"
-          if (Test-Path $x) {
-            git -C PushFPS apply --reverse --check $x 2>$null
-            if ($LASTEXITCODE -eq 0) { 'the XeSS hunks are already in the PushMPC patch' }
-            else { git -C PushFPS apply --whitespace=nowarn $x; if ($LASTEXITCODE -ne 0) { Write-Host '::error::pushfps-4.5.4-xess.patch does not apply'; exit 1 } }
-          }
+          # the combined patch carries XeSS SR's slot (FsrSrBackend provider) and the other PushMPC hunks
           $wf = Get-Content PushFPS/.github/workflows/build-windows.yml -Raw
           foreach ($n in 'VCPKG_COMMIT', 'DLSS_TAG', 'NVCODEC_TAG', 'CUDART_ZIP', 'XESS_TAG', 'FFX1_TAG', 'FFX2_TAG', 'AMF_COMMIT') {
             $m = [regex]::Match($wf, "(?m)^\s+$($n):\s*(\S+)"); if (-not $m.Success) { exit 1 }
