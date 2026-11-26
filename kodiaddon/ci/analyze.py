@@ -33,7 +33,7 @@ def ts(line):
 # --- addon
 ours = [l for l in lines if "PushMPC:" in l]
 for l in ours:
-    if any(x in l for x in ("video:", "video stays", "decoder ", "engine:", "upscaling", "multiplier:")):
+    if any(x in l for x in ("video:", "video stays", "decoder ", "engine:", "upscaling", "multiplier:", "frame buffers:", "zero copy", "hdr metadata", "fonts:")):
         notes.append(l.split("PushMPC:", 1)[1].strip())
 has_decoder = any("PushMPC: decoder" in l for l in lines)
 kodi_codec = [l for l in lines if "Creating video codec" in l or "CAddonVideoCodec" in l and "Failed" in l]
@@ -109,7 +109,8 @@ for key in ("seek_ok", "chapter_ok", "audio_ok"):
 # subtitles: Kodi's JSON-RPC lists no subtitle streams in this setup even for its own player (subs_kodi), so the check is
 # that Kodi opened the add-on's subtitle stream and libass made a track from it
 if re.search(r"DRIVE subs_ok", drive):
-    res["subs"] = "Creating new ASS track" in text or "CDVDOverlayCodec" in text
+    # Kodi 22 logs the track, Kodi 21 only libass starting for the subtitle stream
+    res["subs"] = any(s in text for s in ("Creating new ASS track", "CDVDOverlayCodec", "Creating m_track", "Added subtitle file", "Creating ASS library structure"))
 if "DRIVE: playing" not in drive and drive_path != "-":
     res["playing"] = False
 audio = any("Creating audio thread" in l or "CVideoPlayerAudio::OpenStream" in l for l in lines)
@@ -117,10 +118,31 @@ notes.append(f"audio stream opened by Kodi: {audio}")
 errors = [l for l in lines if re.search(r"ERROR <general>.*(VideoPlayer|CAddonVideoCodec|InputStream|RenderManager|PushMPC)", l)]
 notes += ["ERROR: " + e.split("ERROR <general>:", 1)[-1].strip() for e in errors[:6]]
 
+if case == "fonts":
+    res["fonts"] = "fonts: 1 attachment(s) written" in text
+if case == "hdr10_x2" and decode:
+    res["hdrmeta"] = bool(re.search(r"hdr metadata: mastering yes \(max 1000\.0, min 0\.0001 cd/m2\).*MaxCLL 1000, MaxFALL 400", text))
+if case.startswith("zerocopy"):
+    # Kodi chose the frame buffers (dma-buf only when its renderer takes them); playback must work either way, and
+    # where the add-on found Kodi's DRM-PRIME renderer the GPU engine must write into the dma-bufs in place
+    res["buffers"] = "PushMPC: frame buffers:" in text
+    if "PushMPC: frame buffers: dma-buf allowed" in text:
+        res["inplace"] = "zero copy: the engine writes into Kodi's dma-buf" in text and "layout differs" not in text
+    notes.append("zero copy used: " + str("zero copy: the engine writes into Kodi" in text))
+if case.startswith("browse"):
+    # Kodi's thumbnail and stream-detail probes: Kodi stays up, the add-on opens the files, its decoder is never asked for
+    res = {"alive": bool(re.search(r"DRIVE browse_ok True", drive)),
+           "probed": sum(1 for l in lines if "PushMPC: colour:" in l) >= 2,
+           "kodi_decoder": not has_decoder and "a probe asked for the add-on's decoder" not in text}
+    notes = [l.strip() for l in drive.splitlines() if l.startswith("DRIVE file")] + [
+        f"add-on opened {sum(1 for l in lines if 'PushMPC: colour:' in l)} files for Kodi's probes"]
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
-required = ["addon", "pictures", "kodi"] + ([] if case in ("seek", "chapter") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+# zerocopy (Wayland, software Vulkan) checks the buffer path only: the GPU engine is far below real time there
+required = ["addon", "pictures"] + ([] if case.startswith("zerocopy") else ["kodi"]) + ([] if case in ("seek", "chapter") or case.startswith("zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("buffers", "inplace") if x in res] + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+if case.startswith("browse"):
+    required = ["alive", "probed", "kodi_decoder"]
 ok = all(res.get(x) for x in required)
 with open(summary, "a", encoding="utf-8") as f:
     f.write(f"### {case}: {'PASS' if ok else 'FAIL'}\n")

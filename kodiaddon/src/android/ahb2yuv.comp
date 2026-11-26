@@ -1,0 +1,24 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC for Kodi on Android: a decoder frame (AHardwareBuffer from AImageReader, imported with its external format)
+// into the GPU engine's source slot (separate R8 / R16 UNORM planes holding code value / maxRaw). The sampler's YCbCr
+// conversion is the identity with full range, so it hands back the stored Y, Cb, Cr (in G, B, R) without a matrix;
+// luma is read at the pixel centres, chroma at the 4:2:0 sample positions (between the two luma rows, on the even
+// columns), with the conversion's linear chroma reconstruction.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D frame;   // immutable sampler with the YCbCr conversion
+layout(binding = 1) uniform writeonly image2D outY;
+layout(binding = 2) uniform writeonly image2D outU;
+layout(binding = 3) uniform writeonly image2D outV;
+layout(push_constant) uniform PC { int w, h, cw, ch; } pc;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    vec2 size = vec2(pc.w, pc.h);
+    if (p.x < pc.w && p.y < pc.h) imageStore(outY, p, vec4(texture(frame, (vec2(p) + 0.5) / size).g));
+    if (p.x < pc.cw && p.y < pc.ch) {
+        vec3 c = texture(frame, vec2(2 * p.x + 0.5, 2 * p.y + 1.0) / size).rgb;
+        imageStore(outU, p, vec4(c.b));
+        imageStore(outV, p, vec4(c.r));
+    }
+}

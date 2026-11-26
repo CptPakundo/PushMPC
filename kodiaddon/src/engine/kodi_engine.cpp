@@ -80,6 +80,8 @@ public:
         if (c.upscaler != pmvs::gpu::Upscaler::None) { c.outWidth = m_cfg.outWidth; c.outHeight = m_cfg.outHeight; }
         c.sharpness = c.upscaler == pmvs::gpu::Upscaler::Nis ? 0.1f : 0.5f;   // the mpv route's defaults
         c.sourceSlots = 6; c.outSlots = 4;
+        c.semiPlanarOut = m_cfg.semiPlanar; c.msbOut = m_cfg.semiPlanar;
+        c.importable = m_cfg.external;
         return m_e.Configure(c, req, why);
     }
     std::string Describe() const override
@@ -101,6 +103,17 @@ public:
         for (int i = 0; i < 3; ++i) { v.data[i] = src.data[i]; v.stride[i] = src.stride[i]; }
         const int slot = m_e.Upload(v, err);
         if (slot < 0) return false;
+        return PushSlot(slot, contiguous, err);
+    }
+    bool PushExternal(const SlotFiller& fill, bool contiguous, std::string& err) override
+    {
+        if (m_prevSlot >= 0 && m_prevPrevPending >= 0) { m_e.ReleaseSlot(m_prevPrevPending); m_prevPrevPending = -1; }
+        const int slot = fill(&m_e, err);
+        if (slot < 0) return false;
+        return PushSlot(slot, contiguous, err);
+    }
+    bool PushSlot(int slot, bool contiguous, std::string& err)
+    {
         ++m_stats.pushed;
         const int oldPair = m_pair;
         m_pair = -1;
@@ -135,7 +148,8 @@ public:
     }
     bool Real(bool current, const pm_yuv_out& out, std::string& err) override
     {
-        if (!m_cfg.upscaler) return false;   // without an upscaler the caller copies its own picture (exact bytes)
+        // without an upscaler the caller copies its own picture (exact bytes), unless the output layout differs (NV12 / P010)
+        if (!m_cfg.upscaler && !m_cfg.semiPlanar && !m_cfg.external) return false;
         const int slot = current || m_prevSlot < 0 ? m_curSlot : m_prevSlot;
         if (slot < 0) return false;
         int o = -1;
@@ -146,6 +160,32 @@ public:
     }
     void Forget() override { ReleaseAll(); }
     EngineStats Stats() const override { return m_stats; }
+    bool Layout(OutLayout& l) const override
+    {
+        const pmvs::gpu::OutputLayout o = m_e.Layout();
+        l.pitchY = o.pitchY; l.pitchC = o.pitchC; l.offU = o.offU; l.offV = o.offV; l.size = o.stride;
+        return true;
+    }
+    bool CanImport() const override { return m_e.DmaBufImport(); }
+    int Import(int fd, uint64_t size, std::string& err) override { return m_e.ImportOutput(fd, size, err); }
+    void ReleaseImport(int id) override { m_e.ReleaseOutput(id); }
+    uint64_t HostAlignment() const override { return m_e.HostImportAlignment(); }
+    int ImportHost(void* ptr, uint64_t size, std::string& err) override { return m_e.ImportHostOutput(ptr, size, err); }
+    bool GenerateInto(float t, int id, std::string& err) override
+    {
+        if (m_pair < 0) { err = "no pair"; return false; }
+        uint64_t ticket = 0;
+        if (!m_e.GenerateInto(m_pair, t, m_cut ? (t < 0.5f ? 1 : 2) : 0, id, ticket, err) || !m_e.Wait(ticket, err)) return false;
+        ++m_stats.generated;
+        return true;
+    }
+    bool RealInto(bool current, int id, std::string& err) override
+    {
+        const int slot = current || m_prevSlot < 0 ? m_curSlot : m_prevSlot;
+        if (slot < 0) { err = "no picture"; return false; }
+        uint64_t ticket = 0;
+        return m_e.RealInto(slot, id, ticket, err) && m_e.Wait(ticket, err);
+    }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         static std::mutex mu;

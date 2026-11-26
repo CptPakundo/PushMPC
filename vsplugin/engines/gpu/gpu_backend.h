@@ -99,7 +99,10 @@ inline GpuCalibration CalibrateGpu(Engine& e, int runs = 3)
     const int ow = e.OutWidth(), oh = e.OutHeight(), ocw = (ow + 1) / 2, och = (oh + 1) / 2;
     std::vector<uint8_t> sink[3];
     YuvOut o;
-    for (int i = 0; i < 3; ++i) { sink[i].resize(size_t(i ? ocw * och : ow * oh) * size_t(bps)); o.data[i] = sink[i].data(); o.stride[i] = ptrdiff_t(i ? ocw : ow) * bps; }
+    // NV12 / P010 output (semiPlanarOut): U and V interleaved in plane 1, twice as wide; no plane 2
+    const int cmul = c.semiPlanarOut ? 2 : 1;
+    for (int i = 0; i < 3; ++i) { sink[i].resize(size_t(i ? ocw * cmul * och : ow * oh) * size_t(bps)); o.data[i] = sink[i].data(); o.stride[i] = ptrdiff_t(i ? ocw * cmul : ow) * bps; }
+    if (c.semiPlanarOut) { o.data[2] = nullptr; o.stride[2] = 0; }
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     std::vector<double> me, gen;
     std::string err;

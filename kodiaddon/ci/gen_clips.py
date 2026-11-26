@@ -34,9 +34,26 @@ run(src[:4] + ["-t", "15", "-c:v", "libx265", "-preset", "fast", "-pix_fmt", "yu
                os.path.join(out, "hevc.mkv")])
 # HEVC 10-bit HDR10 (PQ, BT.2020)
 run(src[:4] + ["-t", "15", "-c:v", "libx265", "-preset", "fast", "-pix_fmt", "yuv420p10le",
-               "-x265-params", "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+               "-x265-params", "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10=1:hdr10-opt=1:"
+               "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
                "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
                os.path.join(out, "hdr10.mkv")])
 # MPEG-2 in a transport stream (not in Kodi's add-on codec list at all)
 run(src[:4] + ["-t", "15", "-c:v", "mpeg2video", "-q:v", "4", "-pix_fmt", "yuv420p", os.path.join(out, "mpeg2.ts")])
+# styled subtitles with an attached font (MKV attachment): the add-on must hand the font to Kodi's libass
+font = next((p for p in ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', r'C:\Windows\Fonts\arialbd.ttf',
+                         '/System/Library/Fonts/Supplemental/Arial Bold.ttf'] if os.path.exists(p)), None)
+if font:
+    ass = os.path.join(out, 'styled.ass')
+    with open(ass, 'w', encoding='utf-8') as f:
+        f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\n\n[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, Bold, Alignment, MarginV\n"
+                "Style: Default,PushMPC Attached,36,&H00FFFFFF,0,2,20\n\n[Events]\n"
+                "Format: Layer, Start, End, Style, Text\n"
+                "Dialogue: 0,0:00:00.00,0:00:14.00,Default,Styled subtitle with an attached font\n")
+    run(src + ['-t', '15', '-i', ass, '-attach', font, '-map', '0:v', '-map', '1:a', '-map', '2:s', '-c:v', 'libx264',
+               '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-c:s', 'ass',
+               '-metadata:s:t', 'mimetype=application/x-truetype-font', '-metadata:s:t', 'filename=pushmpc-attached.ttf',
+               os.path.join(out, 'styled.mkv')])
+    os.remove(ass)   # no external subtitle next to the clip: the embedded one is the case
 print("clips:", sorted(os.listdir(out)))

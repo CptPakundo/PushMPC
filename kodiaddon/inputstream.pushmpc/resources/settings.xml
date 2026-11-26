@@ -37,6 +37,11 @@
           </constraints>
           <control type="list" format="string"/>
         </setting>
+        <setting id="hdr21sdr" type="boolean" label="30043" help="30110">
+          <level>1</level>
+          <default>false</default>
+          <control type="toggle"/>
+        </setting>
         <setting id="hdr" type="boolean" label="30004" help="30104">
           <level>1</level>
           <default>true</default>

@@ -44,6 +44,7 @@ layout(push_constant) uniform PC {
     float t, maxV, kRaw, errLow, errHigh;
     int refined;        // 1: InterpolatePlanesRefined's rule (geometric occlusion gate, patch error, boundary candidates)
     float boundaryPx;
+    int outFlags;       // packed output (target 0): bit 0 chroma interleaved (NV12 / P010), bits 8..15 left shift (P010: 6)
 } pc;
 
 #include "common.glsl"
@@ -242,6 +243,7 @@ void main()
     const int w = pc.plane == 0 ? pc.W : pc.CW, h = pc.plane == 0 ? pc.H : pc.CH;
     const int x0 = gx * per;
     if (x0 >= w || y >= h) return;
+    const uint sh = uint((pc.outFlags >> 8) & 255);
     if (pc.plane == 0) {
         uint word = 0u;
         for (int k = 0; k < per; ++k) {
@@ -249,22 +251,38 @@ void main()
             if (x >= w) break;
             float v = lumaAt(x, y);
             if (pc.target == 1) imageStore(mY, ivec2(x, y), vec4(v / pc.maxV));
-            else word |= uint(v) << uint(k * 8 * pc.bps);
+            else word |= (uint(v) << sh) << uint(k * 8 * pc.bps);
         }
         if (pc.target == 0) ow[(y * pc.pitchY + x0 * pc.bps) >> 2] = word;
     } else {
         uint wu = 0u, wv = 0u;
+        uint su[4] = uint[4](0u, 0u, 0u, 0u), sv[4] = uint[4](0u, 0u, 0u, 0u);
         for (int k = 0; k < per; ++k) {
             int x = x0 + k;
             if (x >= w) break;
             float u, v;
             chromaAt(x, y, u, v);
             if (pc.target == 1) { imageStore(mU, ivec2(x, y), vec4(u / pc.maxV)); imageStore(mV, ivec2(x, y), vec4(v / pc.maxV)); }
-            else { wu |= uint(u) << uint(k * 8 * pc.bps); wv |= uint(v) << uint(k * 8 * pc.bps); }
+            else {
+                su[k] = uint(u) << sh; sv[k] = uint(v) << sh;
+                wu |= su[k] << uint(k * 8 * pc.bps); wv |= sv[k] << uint(k * 8 * pc.bps);
+            }
         }
         if (pc.target == 0) {
-            ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
-            ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+            if ((pc.outFlags & 1) == 0) {
+                ow[(pc.offU + y * pc.pitchC + x0 * pc.bps) >> 2] = wu;
+                ow[(pc.offV + y * pc.pitchC + x0 * pc.bps) >> 2] = wv;
+            } else {
+                // U and V interleaved (NV12 / P010): a word holds U0 V0 U1 V1 (8-bit) or U0 V0 (16-bit)
+                const int base = (pc.offU + y * pc.pitchC + x0 * 2 * pc.bps) >> 2;
+                if (pc.bps == 1) {
+                    ow[base] = su[0] | (sv[0] << 8) | (su[1] << 16) | (sv[1] << 24);
+                    ow[base + 1] = su[2] | (sv[2] << 8) | (su[3] << 16) | (sv[3] << 24);
+                } else {
+                    ow[base] = su[0] | (sv[0] << 16);
+                    ow[base + 1] = su[1] | (sv[1] << 16);
+                }
+            }
         }
     }
 }
