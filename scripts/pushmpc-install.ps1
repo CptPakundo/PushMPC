@@ -2509,7 +2509,9 @@ function Get-AutoPlan {
         gpu = $(if ($g.Name) { $g.Name } else { 'none' }); gpuVendor = ('{0:X4}' -f [int]$g.Vendor); gpuDevice = ('{0:X4}' -f [int]$g.Device); gpuDriver = $g.Driver; gpuSource = $g.Source
         family = $fam; runtimePackage = $GpuVendor
         directshow = $dshow; mpv = $mpv
-        vlc = $(if ($hwGpu) { 'the VLC module on pushcore (frame generation; VLC''s own RTX / Intel super resolution)' } else { 'the VLC module on the portable engine' })
+        vlc = $(if (-not (Find-VlcExe)) { 'VLC not found (Setup adds the VLC module when VLC is installed)' }
+                elseif ($hwGpu) { "the VLC module on pushcore: $fg; upscaling: VLC's own (RTX Video Super Resolution, Intel VPL or NIS)" }
+                else { 'the VLC module on the portable engine (a Vulkan GPU, else the CPU)' })
         pushflow = $(if ($pushflow) { 'installed' } else { 'not installed' })
         pmmlRuntime = $rt; pmmlBackend = $pm.backend; pmmlWhy = $pm.why
         fsrSdk240 = $(if ($fsrOffer) { if ($FidelityFx -eq 'Package') { 'offered, declined (the package''s FSR SDK 2.3 set)' } else { 'on: AMD FSR SDK 2.4.0 (FSR 4.1 INT8 upscaling)' } } else { 'not for this GPU' })
