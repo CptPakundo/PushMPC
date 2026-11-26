@@ -2988,6 +2988,7 @@ function Find-CaptureOnlyPlayers([object[]]$mpvRows) {
     $probe = [ordered]@{
         'KMPlayer 64X' = @('KMPlayer 64X\KMPlayer64.exe'); 'KMPlayer' = @('KMPlayer\KMPlayer.exe')
         'GOM Player' = @('GRETECH\GomPlayer\GOM.exe', 'GRETECH\GOMPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe')
+        'Zoom Player' = @('Zoom Player\zplayer.exe', 'Zoom Player MAX\zplayer.exe')   # G19: until the DirectShow graph test settles its filter entry
         'Emby Theater' = @('Emby Theater\Emby.Theater.exe', 'Emby-Theater\Emby.Theater.exe', 'emby-theater\electron\Emby Theater.exe')
     }
     foreach ($k in $probe.Keys) { foreach ($rel in $probe[$k]) { foreach ($root in $pf) { if (Test-Path -LiteralPath (Join-Path $root $rel)) { $out += $k; break } }; if ($out -contains $k) { break } } }
