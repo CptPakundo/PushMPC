@@ -25,7 +25,8 @@ top=$(find "$src" -maxdepth 2 -name CMakeLists.txt | awk '{ print length, $0 }' 
 cmake -S "$top" -B "$cache/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=ON -DNCNN_SIMPLEOMP=ON -DNCNN_SHARED_LIB=OFF \
     -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_TESTS=OFF -DNCNN_BUILD_BENCHMARK=OFF -DNCNN_PYTHON=OFF >/dev/null
-cmake --build "$cache/build" --parallel >/dev/null
+# a bare --parallel means make -j without a limit: ncnn's hundreds of objects then starve the runner of memory
+cmake --build "$cache/build" --parallel "$(nproc 2>/dev/null || echo 2)" >/dev/null
 cmake --install "$cache/build" --prefix "$prefix" >/dev/null
 [ -d "$prefix/lib/cmake/ncnn" ] || [ -d "$prefix/lib64/cmake/ncnn" ]
 echo "ncnn $(basename "$url" .zip): static, PIC, Vulkan (simplevk) in $prefix"
