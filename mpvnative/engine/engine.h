@@ -45,6 +45,16 @@ Backend* OpenCpu(const pmeng_stream& st, const Options& o, pmeng_output& out, st
 Backend* OpenVulkanHost(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 Backend* OpenVulkan(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 #endif
+#ifdef PME_NVL
+// Windows on Arm (RTX Spark): the CUDA / Video Effects engine for frames in host memory (nvl_pme_backend.cpp);
+// explicitChoice = backend=nvidia (also upscaling alone), else Auto (only when it generates frames)
+Backend* OpenNvl(const pmeng_stream& st, const Options& o, pmeng_output& out, bool explicitChoice, std::string& why);
+#endif
+#ifdef PME_ML
+// PushFlow through pmml for frames in host memory (ml_pme_backend.cpp; Windows on Arm: the QNN EP on the Hexagon NPU or the
+// Adreno GPU); explicitChoice = backend=ml (runs unmeasured too), else Auto (only with a measurement that fits)
+Backend* OpenMl(const pmeng_stream& st, const Options& o, pmeng_output& out, bool explicitChoice, std::string& why);
+#endif
 #ifdef _WIN32
 Backend* OpenD3D11(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 #endif

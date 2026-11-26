@@ -112,6 +112,12 @@ jobs:
       part: extra
       fresh: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}
 
+  # PushMPC's own mpv for Windows on Arm (mpv-native-arm64.yml: windows-11-arm, MSYS2 CLANGARM64; engine with the portable
+  # GPU engine for Adreno and NVIDIA's engine for RTX Spark): a release asset; a failure there leaves it out, nothing else
+  mpvnative-arm64:
+    if: ${{ format('{0}', inputs.components) != 'false' }}
+    uses: ./.github/workflows/mpv-native-arm64.yml
+
   # the Kodi add-on (kodi-addon.yml): Kodi 21 and 22 builds with their installer, for Setup (Windows) and the Linux
   # tarballs; extra: the Android builds. A failure leaves the add-on out (Kodi then plays through mpv), nothing else
   kodi:
@@ -137,7 +143,7 @@ jobs:
   # Setup, the component zips and the signed release.json from the core build and the components' artifacts
   # (the pushmpc-package action, shared with dev-build)
   build:
-    needs: [core, vlc, mpvnative, kodi]
+    needs: [core, vlc, mpvnative, kodi, mpvnative-arm64]
     if: ${{ !cancelled() && needs.core.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 40
@@ -471,7 +477,7 @@ jobs:
   publish:
     # G13: a release goes out only with every component built (vlc, mpvnative, kodi, macos, formula all green)
     # and the extras (macOS VLC module, the mpv AppImage, Kodi for Android)
-    needs: [build, gpu-smoke, linux, macos, formula, extras, vlc, vlc-extra, mpvnative, mpvnative-extra, kodi, kodi-extra]
+    needs: [build, gpu-smoke, linux, macos, formula, extras, vlc, vlc-extra, mpvnative, mpvnative-extra, mpvnative-arm64, kodi, kodi-extra]
     if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.vlc.result == 'success' && needs.vlc-extra.result == 'success' && needs.mpvnative.result == 'success' && needs.mpvnative-extra.result == 'success' && needs.kodi.result == 'success' && needs.kodi-extra.result == 'success' && needs.macos.result == 'success' && needs.formula.result == 'success' && needs.extras.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -32,7 +32,9 @@ double ProbeResult::costMs(int m) const {
 
 int qualityRank(const Candidate& c) {
     const int tier = c.tier == "quality" ? 3 : c.tier == "balanced" ? 2 : 1;
-    return tier * 2 + (c.flowOnce ? 0 : 1);
+    // O4 (qnn-split, the int8 network): just below the same tier and mode in floating point, so it is chosen only where
+    // the float network does not fit (it is faster), never over it; its accuracy gate is in findModel
+    return tier * 4 + (c.flowOnce ? 0 : 2) + (c.backend.ep == "qnn-split" ? 0 : 1);
 }
 
 Choice choose(const std::vector<ProbeResult>& results, double sourceFps, int wantMultiplier, double share) {
@@ -77,6 +79,18 @@ std::vector<Candidate> candidatesFor(const std::vector<DeviceInfo>& devices) {
                 v.push_back(c);
             }
         }
+    }
+    // O4 on Snapdragon: the int8 network on the NPU with the warp on the Adreno GPU, when the QNN EP offers both devices
+    const auto has = [&](const char* ep) { return std::any_of(devices.begin(), devices.end(), [&](const DeviceInfo& d) { return d.backend.ep == ep; }); };
+    if (has("qnn") && has("qnn-gpu")) {
+        for (const char* tier : {"quality", "balanced", "fast"})
+            for (bool once : {false, true}) {
+                Candidate c;
+                c.backend.ep = "qnn-split";
+                c.tier = tier;
+                c.flowOnce = once;
+                v.push_back(c);
+            }
     }
     return v;
 }

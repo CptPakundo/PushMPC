@@ -1,0 +1,103 @@
+# O4 for Snapdragon: PushFlow's network as int8 (QDQ) for the Hexagon NPU, made and accuracy-gated on a hosted x86_64
+# runner (ONNX Runtime's QNN quantisation tools run on x86_64 only; no Snapdragon is involved):
+#   PushFlow's models exactly as PushFPS ships them (its prepare_runtime.py at the pinned tag, SHA-256 against the pins),
+#   pmml's graphs, the public Xiph derf clips CI already uses (more frames: calibration + held-out), then
+#   pmml/scripts/quantize_qnn.py per model role: calibration on the first frames, A8W8 / A16W8, and the gate on the
+#   held-out frames (PSNR-Y loss against the fp16 network <= 0.3 dB on every clip, above a frame repeat).
+# Artifact pmml-qdq: pushflow-<role>-qdq.onnx (the roles that passed), pushflow-<role>-qdq.json (every role, pass or
+# fail), SHA256SUMS. mpv-native-arm64.yml puts them into the ARM64 mpv build (pmml-qdq\), so they ship pinned with that
+# build's SHA-256 (mpvbuild-arm64.json); Setup copies them into <pmml>\qdq. A cancelled or failed run leaves them out.
+# Real-device speed (and that the HTP takes every op) needs a Snapdragon: Qualcomm Device Cloud / AI Hub (a tester).
+name: pmml-qdq
+
+on:
+  # called by mpv-native-arm64.yml (the int8 networks travel in the ARM64 mpv build, pinned with it); by hand to rerun
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: pmml-qdq-${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  PIN: scripts/ml-runtime-pin.json
+  FRAMES: '48'
+  CALIB: '24'
+
+jobs:
+  qdq:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/cache@v4
+        id: data
+        with:
+          path: qdq-data
+          key: pmml-qdq-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', '.github/workflows/pmml-qdq.yml') }}
+      - name: Python packages (PushFPS's model preparation pins; ONNX Runtime with the QNN quantisation tools)
+        timeout-minutes: 8
+        run: |
+          python -m venv ~/pf && ~/pf/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 onnxconverter-common==1.14.0 onnxruntime==1.20.1 numpy==1.26.4
+          python -m venv ~/q && ~/q/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 onnxruntime==1.22.1 numpy==1.26.4
+          ~/q/bin/python -c "import onnxruntime, platform; from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config; print('onnxruntime', onnxruntime.__version__, platform.machine())"
+      - name: PushFlow models (PushFPS's prepare_runtime.py at the pinned tag), checked against the pins
+        if: steps.data.outputs.cache-hit != 'true'
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          repo=$(jq -r .pushfps.repository scripts/pushfps-pin.json); tag=$(jq -r .pushfps.tag scripts/pushfps-pin.json); commit=$(jq -r .pushfps.commit scripts/pushfps-pin.json)
+          git clone -q --depth 1 --branch "$tag" "https://github.com/$repo.git" "$RUNNER_TEMP/PushFPS"
+          [ "$(git -C "$RUNNER_TEMP/PushFPS" rev-parse HEAD)" = "$commit" ] || { echo "::error::PushFPS $tag is not $commit"; exit 1; }
+          ~/pf/bin/python -I "$RUNNER_TEMP/PushFPS/scripts/pushflow/prepare_runtime.py" --out "$RUNNER_TEMP/pf" > "$RUNNER_TEMP/prepare.log" 2>&1 || { tail -50 "$RUNNER_TEMP/prepare.log"; exit 1; }
+          mkdir -p qdq-data/models
+          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/models/." qdq-data/models/
+          cp "$RUNNER_TEMP/pf/runtime/pushflow/models.json" qdq-data/models/
+          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/licenses" qdq-data/models/   # RIFE_LICENSE.txt travels with the int8 networks
+          for role in fast quality; do
+            want=$(jq -r ".models.pushflow.$role.sha256" "$PIN"); file=$(jq -r ".models.pushflow.$role.file" "$PIN")
+            got=$(sha256sum qdq-data/models/$file | cut -d' ' -f1)
+            [ "$got" = "$want" ] || { echo "::error::$file SHA-256 $got, pinned $want"; exit 1; }
+          done
+          ~/pf/bin/python -I pmml/scripts/make_graphs.py --out qdq-data/graphs
+      - name: Public clips (Xiph derf 720p50, the first frames by an HTTP range)
+        if: steps.data.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mkdir -p qdq-data/clips
+          for n in $(jq -r '.clips.names[]' "$PIN"); do
+            curl -fsSL --retry 3 -r 0-$((FRAMES * 1382406 + 200)) -o qdq-data/clips/$n.y4m "https://media.xiph.org/video/derf/y4m/${n}_420_720p50.y4m"
+            echo "$(sha256sum qdq-data/clips/$n.y4m)"
+          done
+      - name: Quantise and gate (per model role)
+        timeout-minutes: 60
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          clips=$(for n in $(jq -r '.clips.names[]' "$PIN"); do printf '%s ' qdq-data/clips/$n.y4m; done)
+          for role in fast quality; do
+            ~/q/bin/python -I pmml/scripts/quantize_qnn.py --models qdq-data/models --graphs qdq-data/graphs --clips $clips \
+              --role $role --out out --calib-frames "$CALIB" --frames "$FRAMES" --gate-db 0.3 | tee out/$role.log
+            rc=${PIPESTATUS[0]}
+            [ $rc -eq 0 ] || [ $rc -eq 1 ] || { echo "::error::quantize_qnn.py $role: exit $rc"; exit 1; }
+            [ $rc -eq 0 ] || echo "::warning title=O4 $role::no int8 variant within the 0.3 dB gate: qnn-split stays off for the $role model"
+          done
+          echo '| model | pass | variant | loss (dB) |' >> $GITHUB_STEP_SUMMARY; echo '|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
+          for j in out/pushflow-*-qdq.json; do jq -r '"| \(.role) | \(.pass) | \(.variant // "-") | \([.variants[] | .loss_overall_db] | map(tostring) | join(" / ")) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
+          (cd out && sha256sum pushflow-*-qdq.* NOTICE.txt RIFE_LICENSE.txt > SHA256SUMS && cat SHA256SUMS NOTICE.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pmml-qdq
+          path: |
+            out/pushflow-*-qdq.onnx
+            out/pushflow-*-qdq.json
+            out/SHA256SUMS
+            out/NOTICE.txt
+            out/RIFE_LICENSE.txt
+            out/*.log
+          if-no-files-found: error
+          retention-days: 7

@@ -65,6 +65,9 @@ runs:
       with: { name: mpvnative-windows, path: '${{ runner.temp }}/mpv-windows' }
     - uses: actions/download-artifact@v4
       continue-on-error: true
+      with: { name: mpvnative-windows-arm64, path: '${{ runner.temp }}/mpv-windows-arm64' }
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
       with: { name: pushmpc-kodi-Windows, path: '${{ runner.temp }}/kodi-windows' }
     - uses: actions/download-artifact@v4
       continue-on-error: true
@@ -89,6 +92,13 @@ runs:
           $tag = if ('${{ steps.version.outputs.tag }}') { '${{ steps.version.outputs.tag }}' } else { 'v${{ steps.version.outputs.version }}' }
           $mpvb = @{ MpvBuildZip = $mz; MpvBuildUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$(Split-Path $mz -Leaf)" }
         } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
+        # its Windows on Arm build (mpv-native-arm64.yml): a second asset; Setup installs it instead on an ARM64 Windows
+        if (Test-Path "$env:RUNNER_TEMP\mpv-windows-arm64\mpv.exe") {
+          $mza = "$env:RUNNER_TEMP\PushMPC-mpv-windows-arm64-${{ steps.version.outputs.version }}.zip"
+          Compress-Archive -Path "$env:RUNNER_TEMP\mpv-windows-arm64\*" -DestinationPath $mza -Force
+          $taga = if ('${{ steps.version.outputs.tag }}') { '${{ steps.version.outputs.tag }}' } else { 'v${{ steps.version.outputs.version }}' }
+          $mpvb += @{ MpvBuildArm64Zip = $mza; MpvBuildArm64Url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$taga/$(Split-Path $mza -Leaf)" }
+        } else { Write-Host '::warning title=mpv build (ARM64)::no mpvnative-windows-arm64 artifact: the release has no Windows on Arm mpv build' }
         # the Kodi add-on (kodi-addon.yml): kodi21\, kodi22\ and its installer, staged as the optional kodi component
         $kodi = @{}; if (Test-Path "$env:RUNNER_TEMP\kodi-windows\kodi21") { $kodi = @{ KodiPackage = "$env:RUNNER_TEMP\kodi-windows" } } else { Write-Host '::warning title=Kodi add-on::no pushmpc-kodi-Windows artifact: the release has no Kodi component' }
         # the Plex proxy (mpv-native.yml): avfilter-8.dll, the pushmpc-avfilter-8.*.dll builds and the engine, staged as the

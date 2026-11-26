@@ -83,8 +83,10 @@ pme::Backend* OpenApple(const pmeng_stream& st, const pme::Options& o, pmeng_out
 #endif
 
 // software frames: backend=auto tries, in order, what can do best on this machine. macOS: the apple engine (VideoToolbox),
-// then the portable GPU engine on its own Vulkan device (MoltenVK), then the CPU engine. Elsewhere: the CPU engine (the
-// decoder's GPU frames take the zero-copy engines above). backend=apple | portable-vulkan | portable-cpu picks one
+// then the portable GPU engine on its own Vulkan device (MoltenVK), then the CPU engine. Windows on Arm: NVIDIA's engine
+// (RTX Spark), the portable GPU engine on its own Vulkan device (Adreno), the CPU engine; D3D11 frames reach this through
+// the filter's copy fallback (no pushcore on ARM64). Elsewhere: the CPU engine (the decoder's GPU frames take the
+// zero-copy engines above). backend=apple | portable-vulkan | portable-cpu picks one
 // (falling back to the CPU engine, with the reason in the description, when it cannot run).
 pme::Backend* OpenSoftware(const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why)
 {
@@ -100,9 +102,27 @@ pme::Backend* OpenSoftware(const pmeng_stream& st, const pme::Options& o, pmeng_
 #ifdef __APPLE__
     if (backend == "auto" || backend == "apple") b = attempt("apple", OpenApple);
 #endif
+#ifdef PME_NVL
+    // Windows on Arm: NVIDIA's engine first (RTX Spark: VFG + RTX VSR); backend=nvidia takes it for upscaling alone too
+    if (backend == "auto" || backend == "nvidia") {
+        const bool explicitChoice = backend == "nvidia";
+        b = attempt("nvidia", [](const pmeng_stream& s, const pme::Options& op, pmeng_output& ou, std::string& w) { return pme::OpenNvl(s, op, ou, op.count("backend") && op.at("backend") == "nvidia", w); });
+        if (!b && explicitChoice) { why = "backend=nvidia: " + tried; return nullptr; }
+    }
+#endif
+#ifdef PME_ML
+    // PushFlow through pmml (Windows on Arm: the QNN EP on the Hexagon NPU or the Adreno GPU), when Setup's measurement
+    // says it fits this clip's frame budget; backend=ml takes it unmeasured too
+    if (!b && (backend == "auto" || backend == "ml")) {
+        b = attempt("ml", [](const pmeng_stream& s, const pme::Options& op, pmeng_output& ou, std::string& w) { return pme::OpenMl(s, op, ou, op.count("backend") && op.at("backend") == "ml", w); });
+        if (!b && backend == "ml") { why = "backend=ml: " + tried; return nullptr; }
+    }
+#endif
 #ifdef PME_VULKAN
     bool vk = backend == "portable-vulkan";
-#ifdef __APPLE__
+#if defined(__APPLE__) || (defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__)))
+    // macOS (MoltenVK) and Windows on Arm (Adreno's Vulkan driver; pushcore has no ARM64 build): the portable GPU
+    // engine on its own device before the CPU engine
     vk = vk || backend == "auto" || backend == "apple";
 #endif
     if (!b && vk) b = attempt("portable-vulkan", pme::OpenVulkanHost);
@@ -147,7 +167,9 @@ void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options,
             why = "this module was built without the Vulkan engine";
 #endif
         } else {
+#ifndef PME_NVL
             if (backend == "nvidia") return fail("backend=nvidia needs D3D11 frames (hwdec=d3d11va)");
+#endif
             b = OpenSoftware(*st, o, *out, why);
         }
         if (!b) return fail(why);

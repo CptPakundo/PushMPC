@@ -40,7 +40,9 @@ struct Frame { const uint16_t* plane[3] = {}; ptrdiff_t stride[3] = {}; };
 struct OutFrame { uint16_t* plane[3] = {}; ptrdiff_t stride[3] = {}; };
 
 // Where the network runs. runtime "ort": flavor = the ONNX Runtime build (core | directml | migraphx), ep = cpu | dml |
-// trt-rtx | openvino | qnn (NPU) | qnn-gpu | amdgpu | coreml | migraphx. runtime "ncnn": ep = vulkan | cpu.
+// trt-rtx | openvino | qnn (NPU) | qnn-gpu | qnn-split | amdgpu | coreml | migraphx. runtime "ncnn": ep = vulkan | cpu.
+// qnn-split (Snapdragon, O4): the network int8 (QDQ, <runtimeDir>/qdq/pushflow-<role>-qdq.onnx, made and accuracy-gated by
+// scripts/quantize_qnn.py) on the Hexagon NPU, pack / synth (the warp) on the Adreno GPU (qnn-gpu), tensors through host memory.
 struct Backend {
     std::string runtime = "ort";
     std::string flavor = "core";

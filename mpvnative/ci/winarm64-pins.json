@@ -1,0 +1,8 @@
+{
+  "note": "Build- and test-time pins of PushMPC's own mpv for Windows on Arm (.github/workflows/mpv-native-arm64.yml). The mpv / FFmpeg / libplacebo / Vulkan-Headers sources are mpvnative/pins.json's; the toolchain and libraries are MSYS2 CLANGARM64 packages (pacman verifies their signatures). Mesa is the CI's Vulkan driver only (lavapipe, a software rasteriser: the portable GPU engine's tests); it is never shipped.",
+  "mesa": {
+    "what": "Mesa 26.3.1 for MSYS2 CLANGARM64 (lavapipe: bin/vulkan_lvp.dll, share/vulkan/icd.d/lvp_icd.aarch64.json; MIT)",
+    "url": "https://mirror.msys2.org/mingw/clangarm64/mingw-w64-clang-aarch64-mesa-26.3.1-1-any.pkg.tar.zst",
+    "sha256": "5269ecdee1087391201988339b24d8c5b128f719192dd89a0cb113264b4599a3"
+  }
+}

@@ -17,6 +17,11 @@ them.
 - **ncnn** (Tencent), in the Linux builds of the PushFlow route: BSD-3-Clause.
 - **Intel VPL dispatcher** (libvpl 2.17.0, Intel): MIT, linked into pushcore.dll for Intel's AI frame interpolation.
 - **Intel XeSS SDK** 3.0.2 headers (Intel): Intel Simplified Software License, with Intel's third-party notices.
+- **RIFE** (Practical-RIFE v4.25 lite and v4.26 weights by hzwer, MIT; ONNX conversions by
+  [vs-mlrt](https://github.com/AmusementClub/vs-mlrt), GPL-3.0; prepared by PushFPS's `prepare_runtime.py`, GPL-3.0),
+  in PushMPC's mpv for Windows on Arm only: the int8 versions of PushFlow's networks for the Snapdragon NPU
+  (`pmml-qdq\`), made from those models by `pmml/scripts/quantize_qnn.py` (`.github/workflows/pmml-qdq.yml`). The MIT
+  licence text and a notice of where every file comes from are next to them (`RIFE_LICENSE.txt`, `NOTICE.txt`).
 
 The licence texts of these two are installed with pushcore in `core\licenses\` (`libvpl-LICENSE.txt`,
 `intel-xess-LICENSE.txt`, `intel-xess-third-party-programs.txt`).
