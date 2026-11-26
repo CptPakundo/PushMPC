@@ -32,7 +32,7 @@ find_package(Threads REQUIRED)
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")   # /MT like pushcore.dll
   add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-  add_compile_options(/W3 /EHsc /O2 /Zi /utf-8)
+  add_compile_options(/W3 /EHsc /O2 /Z7 /utf-8)
   add_link_options(/DEBUG /OPT:REF /PDBALTPATH:%_PDB%)   # only the PDB file name in the binaries
 else()
   add_compile_options(-O2 -Wall -Wextra -Wno-unused-parameter)

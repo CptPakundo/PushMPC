@@ -21,7 +21,8 @@ add_library(PushMpcFilter SHARED src/PushMpcFilter.cpp src/PushMpcFilter.def src
 set_target_properties(PushMpcFilter PROPERTIES SUFFIX ".ax" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/bin")
 target_include_directories(PushMpcFilter PRIVATE "${PUSHMPC_CORE_INCLUDE}" "${PUSHMPC_MPCVR_DIR}/Include" "${PUSHMPC_MPCVR_DIR}/Source")
-target_compile_options(PushMpcFilter PRIVATE /W3 /EHsc /O2 /Zi /utf-8)
+# /Z7: debug info in the objects (the linker still writes the PDB), so compiler caches (ccache, sccache) can store them
+target_compile_options(PushMpcFilter PRIVATE /W3 /EHsc /O2 /Z7 /utf-8)
 target_link_options(PushMpcFilter PRIVATE /DEBUG /OPT:REF /PDBALTPATH:%_PDB%)  # only the PDB file name in the binary, no build path
 target_link_libraries(PushMpcFilter PRIVATE baseclasses strmiids winmm avrt version d3d11 dxgi d3dcompiler dxguid advapi32 ole32 oleaut32 user32 shell32 uuid comctl32 bcrypt gdi32)
 

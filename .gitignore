@@ -21,3 +21,4 @@ setup-payload.bin
 vsplugin/bin/
 build-portable/
 __pycache__/
+pushmpc-build-env.cmd

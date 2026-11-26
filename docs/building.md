@@ -49,13 +49,21 @@ Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools 
 Tools: Visual Studio 2022 or newer with C++ (found with vswhere; `PUSHMPC_VS` overrides), CMake and Ninja (bundled with VS).
 
     git -C PushFPS apply ..\patches\pushfps-4.5.4-pushmpc.patch
-    scripts\build-pushfps.cmd                 (once: configures and builds PushFPS, which also builds the shaders)
-    scripts\build-pushmpc.cmd pushcore_dll
+    scripts\build-pushmpc.cmd release         (the shaders, pushcore.dll and its helpers; pushcore only, no PushFPS app)
     filter\build.cmd                          (PushMpcFilter.ax, PushMpcExit.dll, auto_test.exe)
     updater\build.cmd                         (PushMpcUpdater.exe; developer build: unsigned feeds allowed)
     powershell -File scripts\pushmpc-install.ps1 stage
     powershell -File scripts\pushmpc-install.ps1 install -DryRun            (shows the download of Veyra's package)
     powershell -File scripts\pushmpc-install.ps1 package                    (release\: PushMPC-Setup.exe, zips, release.json + .sig)
+
+`scripts\build-pushmpc.cmd <targets>` builds single targets (for example `pushcore_dll`). `scripts\build-pushfps.cmd`
+builds the whole PushFPS app (with Qt and its streaming clients) and is only needed for that.
+
+The build scripts are incremental: CMake runs only for a new build tree or changed options, and Visual Studio's
+environment is set up once and then reused (kept in `%TEMP%`). For faster rebuilds, install [ccache](https://ccache.dev)
+(or sccache): on `PATH`, or with `PUSHMPC_COMPILER_CACHE` set to its exe, the scripts use it (`PUSHMPC_COMPILER_CACHE=off`
+turns it off). `PUSHMPC_JOBS` limits the parallel compile jobs. Your own settings can go into a `pushmpc-build-env.cmd`
+in the repository folder or next to it; the scripts run it first.
 
 `package` builds Setup itself (`installer\build.cmd <payload>`; `-NoSetup` skips it) and signs `release.json` with
 `-SigningKey <xml>`, the environment variable `PUSHMPC_SIGNING_KEY` (the key's XML text) or

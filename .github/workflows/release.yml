@@ -203,7 +203,32 @@ jobs:
         with:
           arch: x64
 
+      # The SDKs below (and the FidelityFX 1.x optical flow libraries built from one of them) are cached under a hash of
+      # their pins: a run with the same pins restores them in seconds instead of fetching and building them (about 1 min)
+      - name: SDK cache key
+        id: sdk-key
+        shell: bash
+        run: |
+          h=$(printf '%s\n' v1 "$DLSS_TAG" "$NVCODEC_TAG" "$CUDART_ZIP" "$XESS_TAG" "$FFX1_TAG" "$FFX2_TAG" "$AMF_COMMIT" | sha256sum | cut -c1-16)
+          echo "key=pushmpc-sdks-$h" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the SDKs
+        id: sdk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.DEPS }}/dlss
+            ${{ env.DEPS }}/nv-codec-headers
+            ${{ env.DEPS }}/cudart-root
+            ${{ env.DEPS }}/xess
+            ${{ env.DEPS }}/ffx2
+            ${{ env.DEPS }}/amf
+            ${{ env.DEPS }}/ffx1/sdk/bin
+            ${{ env.DEPS }}/ffx1/sdk/include
+          key: ${{ steps.sdk-key.outputs.key }}
+
       - name: NVIDIA DLSS SDK headers, NVENC headers, CUDA driver header, XeSS, FidelityFX, AMF headers
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         timeout-minutes: 15
         working-directory: ${{ env.DEPS }}
         shell: bash
@@ -222,6 +247,8 @@ jobs:
           git -C amf sparse-checkout set amf/public/include && git -C amf checkout -q FETCH_HEAD
 
       - name: FidelityFX 1.x optical flow (static, /MT)
+        id: ffx1
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         timeout-minutes: 20
         working-directory: ${{ env.DEPS }}/ffx1/sdk
         run: |
@@ -230,6 +257,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save the SDKs
+        if: steps.ffx1.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.DEPS }}/dlss
+            ${{ env.DEPS }}/nv-codec-headers
+            ${{ env.DEPS }}/cudart-root
+            ${{ env.DEPS }}/xess
+            ${{ env.DEPS }}/ffx2
+            ${{ env.DEPS }}/amf
+            ${{ env.DEPS }}/ffx1/sdk/bin
+            ${{ env.DEPS }}/ffx1/sdk/include
+          key: ${{ steps.sdk-key.outputs.key }}
 
       - name: Locate SDK roots
         timeout-minutes: 2
@@ -411,12 +453,18 @@ jobs:
           "SCCACHE_EXE=$($exe.Replace('\','/'))" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           & $exe --version
 
+      # the key is taken before the build: the filter, updater and plugin builds write into repo/*/bin
+      - name: Compiler cache key
+        id: sccache-key
+        shell: bash
+        run: echo "key=pushmpc-sccache-core-$PUSHFPS_COMMIT-${{ hashFiles('repo/pushmpc/**', 'repo/patches/**', 'repo/scripts/pushfps-pin.json', 'repo/filter/**', 'repo/updater/**', 'repo/vsplugin/**') }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore the compiler cache
         id: sccache-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: pushmpc-sccache-core-${{ env.PUSHFPS_COMMIT }}-${{ hashFiles('repo/pushmpc/**', 'repo/patches/**', 'repo/scripts/pushfps-pin.json') }}
+          key: ${{ steps.sccache-key.outputs.key }}
           restore-keys: |
             pushmpc-sccache-core-${{ env.PUSHFPS_COMMIT }}-
             pushmpc-sccache-core-
@@ -461,15 +509,6 @@ jobs:
           Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
           & $env:SCCACHE_EXE --show-stats
-          & $env:SCCACHE_EXE --stop-server | Out-Null
-
-      - name: Save the compiler cache
-        # a failed or cancelled build saves what it has under a partial key (picked up by the restore-keys)
-        if: always() && steps.sccache-cache.outputs.cache-hit != 'true' && steps.corebuild.outcome != 'skipped' && env.SCCACHE_EXE != ''
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: ${{ steps.corebuild.outcome == 'success' && format('pushmpc-sccache-core-{0}-{1}', env.PUSHFPS_COMMIT, hashFiles('repo/pushmpc/**', 'repo/patches/**', 'repo/scripts/pushfps-pin.json')) || format('pushmpc-sccache-core-{0}-partial-{1}', env.PUSHFPS_COMMIT, github.run_id) }}
 
       # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
       # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
@@ -518,28 +557,42 @@ jobs:
           git -C MpcVideoRenderer submodule update -q --init --depth 1 external/BaseClasses
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # the filter, the updater and the plugin go through sccache as well (same cache, saved after the last of them)
       - name: Filter (PushMpcFilter.ax, PushMpcExit.dll) and the updater (release build)
+        id: filterbuild
         timeout-minutes: 20
         run: |
-          cmake -S repo/filter -B "$env:RUNNER_TEMP\filter-build" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$env:GITHUB_WORKSPACE\MpcVideoRenderer"
+          $cc = @("-DCMAKE_C_COMPILER_LAUNCHER=$env:SCCACHE_EXE", "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:SCCACHE_EXE")
+          cmake -S repo/filter -B "$env:RUNNER_TEMP\filter-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc "-DPUSHMPC_MPCVR_DIR=$env:GITHUB_WORKSPACE\MpcVideoRenderer"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build "$env:RUNNER_TEMP\filter-build" --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:RUNNER_TEMP\filter-build\auto_test.exe" | Select-Object -First 20
-          cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_UPDATER_DEV=OFF
+          cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc -DPUSHMPC_UPDATER_DEV=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build "$env:RUNNER_TEMP\updater-build" --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # the mpv route's plugin (optional preview component): built with the VapourSynth SDK headers in the repository
       - name: VapourSynth plugin (pushmpc_vs.dll, mpv preview)
+        id: vsbuild
         timeout-minutes: 15
         run: |
-          cmake -S repo/vsplugin -B "$env:RUNNER_TEMP\vsplugin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S repo/vsplugin -B "$env:RUNNER_TEMP\vsplugin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_COMPILER_LAUNCHER=$env:SCCACHE_EXE" "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:SCCACHE_EXE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build "$env:RUNNER_TEMP\vsplugin-build" --target pushmpc_vs --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item repo/vsplugin/bin/pushmpc_vs.dll | Format-List Name, Length
+          & $env:SCCACHE_EXE --show-stats
+          & $env:SCCACHE_EXE --stop-server | Out-Null
+
+      - name: Save the compiler cache
+        # a failed or cancelled build saves what it has under a partial key (picked up by the restore-keys)
+        if: always() && steps.sccache-cache.outputs.cache-hit != 'true' && steps.corebuild.outcome != 'skipped' && env.SCCACHE_EXE != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.vsbuild.outcome == 'success' && steps.sccache-key.outputs.key || format('pushmpc-sccache-core-{0}-partial-{1}', env.PUSHFPS_COMMIT, github.run_id) }}
 
       # what the build job stages: the filter, the updater, the VapourSynth plugin, pushcore, its preflight child and
       # the shaders, at the same relative places

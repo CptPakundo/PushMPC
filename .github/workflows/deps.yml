@@ -20,6 +20,8 @@ on:
       - 'mpvnative/plex-mac/**'
       - 'mpvnative/hook/build-hook*.sh'
       - 'mpvnative/ffmpeg/**'
+      - 'mpvnative/include/**'
+      - 'mpvnative/hook/pushmpc_hook_glue.c'
       - 'kodiaddon/ci/**'
       - 'vlcplugin/display/vlc3/fetch-vlc-sources.sh'
       - 'vsplugin/engines/gpu/gpu-pins.json'
