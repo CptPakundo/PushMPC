@@ -23,12 +23,8 @@
 #include <tuple>
 #include <vector>
 #include "cadence.h"
-// the held-drawing repair's planner (pure C++, shared with pushcore); a tree without it builds without the repair
-#if __has_include("../../../pushmpc/src/HeldFrames.h")
-#include "../../../pushmpc/src/HeldFrames.h"
-#define PMVS_REGION_REPAIR 1
-#endif
 #include "gpu_engine.h"
+#include "region_repair.h"
 #include "schedule.h"
 #include "subtitle_hold.h"
 #include "transitions.h"
@@ -153,9 +149,8 @@ public:
     // The held-drawing repair (pushmpc/src/HeldFrames.h, as on pushcore): the parts of a frame that are held between two
     // of their drawings (a character on twos over a pan) are laid in from their own pair at their own phase before the
     // frame's pairs are estimated. Needs Dedup (the cadence lookahead 3) and Engine::RepairAvailable(); set by the caller.
-    bool regionRepair = false;
-    struct Stats { uint64_t pushed = 0, duplicates = 0, pairs = 0, cuts = 0, guardCuts = 0, generated = 0, holds = 0, heldPairs = 0, heldPixels = 0, flashes = 0, linearBlends = 0;
-                   uint64_t repairedFrames = 0, repairedParts = 0, repairGated = 0, repairBudget = 0; double meMs = 0, waitMs = 0, repairMs = 0; };
+    RegionRepair repair;   // repair.on: set by the caller
+    struct Stats { uint64_t pushed = 0, duplicates = 0, pairs = 0, cuts = 0, guardCuts = 0, generated = 0, holds = 0, heldPairs = 0, heldPixels = 0, flashes = 0, linearBlends = 0; double meMs = 0, waitMs = 0; };
     TransitionRules transitions;
     bool transitionRules = true;   // dissolves and fades blended instead of held, flashes held (transitions.h)
     Stats stats;
@@ -183,13 +178,13 @@ public:
             dup = ds.duplicate;
         }
         stats.pushed++;
-        if (regionRepair && !Classify(s, slot, dup, err)) return false;   // before the slot of a duplicate is released
+        if (!repair.Classify(engine, s, slot, m_lastDistinctSlot, dup, err)) return false;   // before the slot of a duplicate is released
         if (dup) { engine.ReleaseSlot(slot); stats.duplicates++; }
         else {
             m_slotOf[s] = slot;
             m_lastDistinctSlot = slot;
             // with the repair a pair's motion waits until both its frames are repaired (PairFor starts it on demand)
-            if (!regionRepair && m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s, err)) return false;
+            if (!repair.on && m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s, err)) return false;
             m_prevDistinct = s;
             if (subtitleHold) {
                 // the rule runs over the distinct frames in order, on a worker (the frame stays kept until it is used)
@@ -200,7 +195,7 @@ public:
             }
         }
         cadence.Push(s, dup);
-        if (regionRepair && !RepairUpTo(s - cadence.Lookahead(), err)) return false;
+        if (!repair.RepairUpTo(engine, s - cadence.Lookahead(), m_slotOf, double(grid.srcDur100ns) / 10000.0, [&](int64_t f) { ForgetPairsOf(f, err); }, err)) return false;
         std::vector<Settled> settled;
         cadence.Settle(settled);
         for (const Settled& st : settled) if (!Emit(st, err)) return false;
@@ -260,9 +255,7 @@ private:
         cadence.Reset();
         guard.Reset();
         m_last = -1000000;
-#ifdef PMVS_REGION_REPAIR
-        m_grids.clear(); m_regions.clear(); m_cadHist.Reset(); m_spanDecision.clear(); m_repairedUpTo = -1;
-#endif
+        repair.Reset();
         return ok;
     }
     int64_t PtsOf(int64_t n) const { const int64_t s = n / grid.k, j = n % grid.k; return grid.Pts(s) + int64_t(std::llround(double(j) * grid.srcDur100ns / grid.k)); }
@@ -354,7 +347,7 @@ private:
             if (!k) { err = "GPU engine: source frame " + std::to_string(sh.src) + " is gone"; return false; }
             const int kind = sh.kind == Shot::Real ? 0 : 2;
             if (sh.kind == Shot::Hold) stats.holds++;
-            if (!up) {
+            if (!up && !repair.Repaired(sh.src)) {   // a repaired frame comes from its GPU slot
                 if (!CopyReal(sh.src, f, *k, err)) return false;
                 if (tag) tag(pts, kind, f);
                 // queued behind the GPU outputs before it: the Pipeline must see the outputs in order (a real frame
@@ -422,7 +415,7 @@ private:
         for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
             bool usedByPair = false;
             for (auto& [key, p] : m_pairs) usedByPair = usedByPair || key.first == it->first || key.second == it->first;
-            const bool repairNeeds = regionRepair && it->first >= m_last - 2 * int64_t(cadence.Lookahead()) - 2;
+            const bool repairNeeds = repair.Needs(it->first, m_last, cadence.Lookahead());
             if (it->first < front && !usedByPair && !repairNeeds && it->second != m_lastDistinctSlot) { engine.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
             else ++it;
         }
@@ -439,94 +432,16 @@ private:
         stats.waitMs = engine.Times().waitMs;
     }
 
-#ifdef PMVS_REGION_REPAIR
-    // the frame's cell grid and its change against the frame before (a duplicate repeats the last grid: no change)
-    bool Classify(int64_t s, int slot, bool dup, std::string& err)
+    // a pair estimated on frame f before its repair is estimated again
+    void ForgetPairsOf(int64_t f, std::string& err)
     {
-        using namespace pushmpc::held;
-        CellGrid g;
-        auto prev = m_grids.find(s - 1);
-        Engine::CellGridOut c;
-        if (!engine.Cells(slot, m_lastDistinctSlot, c, err)) return false;
-        g.w = uint32_t(c.w); g.h = uint32_t(c.h); g.cell = uint32_t(c.cell); g.v = std::move(c.v); g.unpackAux(c.aux.data());
-        if (prev != m_grids.end()) {
-            // a duplicate (Dedup) repeats the whole frame: its cell changes are the clip's noise (the threshold learns
-            // them), and it counts as unchanged (its picture is the last distinct one: no pair can start or end there)
-            if (dup) { m_noise.Push(CellChangeP99(prev->second, g)); g = prev->second; }
-            m_regions[s] = CompareRegions(prev->second, g, m_noise.Threshold());
-            m_cadHist.Push(uint64_t(s), m_regions[s]);
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first != f && it->first.second != f) { ++it; continue; }
+            if (it->second.pending) { PairStats st; engine.EstimateEnd(it->second.id, st, err); }
+            if (it->second.id == m_lastPair) { m_lastPair = -1; m_lastPairKey = { -1, -1 }; }
+            engine.ReleasePair(it->second.id); it = m_pairs.erase(it);
         }
-        m_grids[s] = std::move(g);
-        while (m_grids.size() > 12) m_grids.erase(m_grids.begin());
-        while (m_regions.size() > 12) m_regions.erase(m_regions.begin());
-        return true;
     }
-    // every distinct frame up to q gets its repair (its next drawings, up to kLookahead ahead, are classified by now)
-    bool RepairUpTo(int64_t q, std::string& err)
-    {
-        using namespace pushmpc::held;
-        for (int64_t s = std::max<int64_t>(m_repairedUpTo + 1, q); s <= q; ++s) {
-            m_repairedUpTo = s;
-            auto frameAt = [&](uint64_t f) -> const RegionFrame* { auto it = m_regions.find(int64_t(f)); return it == m_regions.end() ? nullptr : &it->second; };
-            auto gridAt = [&](uint64_t f) -> const CellGrid* { auto it = m_grids.find(int64_t(f)); return it == m_grids.end() ? nullptr : &it->second; };
-            if (s < 1 || !m_slotOf.count(s)) continue;   // a duplicate: Dedup re-times it whole
-            auto groups = PlanRepairs(uint64_t(s), frameAt, gridAt, kLookahead, PhaseShape::Linear, m_noise.Threshold(), &m_cadHist);
-            bool exact = false;
-            for (const auto& g : groups) exact |= IsExactRepeat(g);
-            m_evidence.Push(exact);
-            if (groups.empty()) continue;
-            // decisions per (part, span), kept for the whole span: the live-action gate and the budget (the repair waits
-            // for the GPU here; a new span starts only while its mean cost stays under half a source frame)
-            for (auto it = m_spanDecision.begin(); it != m_spanDecision.end();) { if (std::get<1>(it->first) <= uint64_t(s)) it = m_spanDecision.erase(it); else ++it; }
-            const double budgetMs = 0.5 * double(grid.srcDur100ns) / 10000.0;
-            const bool gate = m_evidence.Animation();
-            std::vector<Engine::RepairPart> parts;
-            for (const auto& g : groups) {
-                const auto key = std::make_tuple(g.d0, g.d1, g.pairFrom);
-                auto it = m_spanDecision.find(key);
-                if (it == m_spanDecision.end()) {
-                    const bool over = m_repairCostMs > budgetMs;
-                    if (!gate) stats.repairGated++; else if (over) stats.repairBudget++;
-                    it = m_spanDecision.emplace(key, gate && !over).first;
-                }
-                auto a = m_slotOf.find(int64_t(g.pairFrom)), b = m_slotOf.find(int64_t(g.d1));
-                if (!it->second || a == m_slotOf.end() || b == m_slotOf.end() || parts.size() >= 3) continue;
-                Engine::RepairPart p;
-                p.slotA = a->second; p.slotB = b->second; p.t = g.t; p.mask = &g.mask;
-                p.shiftX = g.shiftX * float(m_grids[s].cell); p.shiftY = g.shiftY * float(m_grids[s].cell);
-                parts.push_back(p);
-            }
-            if (parts.empty()) continue;
-            // a pair already estimated on the unrepaired picture is estimated again
-            for (auto it = m_pairs.begin(); it != m_pairs.end();) {
-                if (it->first.first == s || it->first.second == s) {
-                    if (it->second.pending) { PairStats st; engine.EstimateEnd(it->second.id, st, err); }
-                    if (it->second.id == m_lastPair) { m_lastPair = -1; m_lastPairKey = { -1, -1 }; }
-                    engine.ReleasePair(it->second.id); it = m_pairs.erase(it);
-                } else ++it;
-            }
-            const auto t0 = std::chrono::steady_clock::now();
-            const float feather = std::max(0.5f, 8.0f * float(engine.Cfg().width) / 3840.0f / float(std::max(1u, m_grids[s].cell)));
-            if (!engine.RepairSlot(m_slotOf[s], parts.data(), int(parts.size()), feather, !RepairDetailOff(), err)) return false;
-            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            m_repairCostMs = m_repairCostMs <= 0 ? ms : m_repairCostMs + (ms - m_repairCostMs) * 0.1;
-            stats.repairedFrames++; stats.repairedParts += parts.size(); stats.repairMs += ms;
-        }
-        return true;
-    }
-    static bool RepairDetailOff() { const char* e = std::getenv("PUSHMPC_REPAIR_DETAIL"); return e && std::atoi(e) == 0; }
-    std::map<int64_t, pushmpc::held::CellGrid> m_grids;
-    std::map<int64_t, pushmpc::held::RegionFrame> m_regions;
-    pushmpc::held::NoiseFloor m_noise;
-    pushmpc::held::CellCadence m_cadHist;
-    pushmpc::held::CadenceEvidence m_evidence{240};
-    std::map<std::tuple<uint64_t, uint64_t, uint64_t>, bool> m_spanDecision;
-    int64_t m_repairedUpTo = -1;
-    double m_repairCostMs = 0;
-#else
-    bool Classify(int64_t, int, bool, std::string&) { return true; }
-    bool RepairUpTo(int64_t, std::string&) { return true; }
-#endif
     int64_t m_last = -1000000;
     int m_lastDistinctSlot = -1;
     int64_t m_prevDistinct = -1;

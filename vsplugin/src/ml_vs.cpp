@@ -136,7 +136,9 @@ void VS_CC MFree(void* inst, VSCore*, const VSAPI* a)
     {
         std::lock_guard<std::mutex> lk(d->lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
-        Log(std::format("ml: instance closed after {} frames", d->produced));
+        const auto& rc = d->be.repairCounts;
+        Log(std::format("ml: instance closed after {} frames; held-drawing repair: {} frames, {} parts on {} pairs ({} by phase map), {:.1f} ms a frame, spans gated {}, over budget {}",
+            d->produced, rc.frames, rc.parts, rc.pairs, rc.mapRuns, rc.frames ? rc.ms / double(rc.frames) : 0.0, rc.gated, rc.overBudget));
     }
     a->freeNode(d->node);
     delete d;
@@ -295,10 +297,14 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->be.bits = bits;
     d->be.flowOnce = flowOnce;
     d->pipe.Init(k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
+    // the held-drawing repair (HeldRepair.h; PUSHMPC_REGION_REPAIR=0 off): outputs 3 source frames late
+    { const char* rr = std::getenv("PUSHMPC_REGION_REPAIR"); d->be.regionRepair = k > 1 && !(rr && std::atoi(rr) == 0); }
+    d->be.frames = vi->numFrames;
+    d->pipe.SetLookahead(d->be.RepairLookahead());
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     MBind(d);
-    Log(std::format("ml: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{})", bits, w, h, outFps.num, outFps.den, k));
+    Log(std::format("ml: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); held-drawing repair {}", bits, w, h, outFps.num, outFps.den, k, d->be.regionRepair ? "on (lookahead 3)" : "off"));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, MGetFrame, MFree, fmUnordered, deps, 1, d, core);
 }

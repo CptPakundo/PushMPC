@@ -115,11 +115,16 @@ public:
         m_transitions = m_k > 1 && ParseBool(Opt(o, "transitions", ReadSetting("TransitionRules")), true);
         // lookahead 3 (twos, threes and fours) where the output slots allow it, else 2
         const int look = m_dedup ? ((3 + 1) * m_k + 2 <= 28 ? 3 : 2) : 0;
-        if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots) {   // a settle can release (lookahead + 1) x k outputs
-            c.outSlots = std::min(needOuts, 28);
+        // the held-drawing repair (region_repair.h, with Dedup): storage source slots, kLookahead + 1 back and ahead
+        const bool wantRepair = RegionRepairWanted(m_dedup) && look == 3;
+        if (wantRepair) { c.regionRepair = true; c.sourceSlots = std::max(c.sourceSlots, 14); }
+        if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots || wantRepair) {   // a settle can release (lookahead + 1) x k outputs
+            c.outSlots = std::max(c.outSlots, std::min(needOuts, 28));
             if (!m_eng.Configure(c, m_ctx, why) || !MakePipesOnce(why)) return false;
         }
         m_cadence.Configure(m_k, look, 0);
+        m_repair.on = wantRepair && m_eng.RepairAvailable();
+        m_srcMs = srcFps > 0 ? 1000.0 / srcFps : 1000.0 / 23.976;
 
         out.mem = PMENG_MEM_VULKAN;
         out.fmt = m_fmt;
@@ -193,15 +198,17 @@ public:
             if (!m_eng.Duplicate(m_lastDistinctSlot, slot, ds, err)) return PMENG_ERROR;
             dup = ds.duplicate;
         }
+        if (!m_repair.Classify(m_eng, s, slot, m_lastDistinctSlot, dup, err)) return PMENG_ERROR;
         if (dup) { m_eng.ReleaseSlot(slot); ++m_dups; }
         else {
             m_slotOf[s] = slot;
             m_lastDistinctSlot = slot;
-            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;
+            if (!m_repair.on && m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;   // repair: PairFor starts it
             m_prevDistinct = s;
             if (m_holdOn && !HoldFrame(s, slot)) return PMENG_ERROR;
         }
         m_cadence.Push(s, dup);
+        if (!m_repair.RepairUpTo(m_eng, s - m_cadence.Lookahead(), m_slotOf, m_srcMs, [&](int64_t f) { ForgetPairsOf(f); }, err)) return PMENG_ERROR;
         if (!SettleAndEmit()) return PMENG_ERROR;
         Prune();
         return PMENG_OK;
@@ -283,7 +290,9 @@ public:
                       (unsigned long long)m_seq, (unsigned long long)m_dups, (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_holds,
                       (unsigned long long)m_cuts, (unsigned long long)m_flashes, (unsigned long long)m_linear, (unsigned long long)m_heldPairs,
                       t.uploads ? t.uploadMs / double(t.uploads) : 0.0, t.pairs ? t.meMs / double(t.pairs) : 0.0);
-        return b;
+        const auto r = m_repair.Stats();
+        return std::string(b) + (m_repair.on ? "; held-drawing repair: " + std::to_string(r.frames) + " frames, " + std::to_string(r.parts) + " parts, spans gated " +
+                                 std::to_string(r.gated) + ", over budget " + std::to_string(r.overBudget) : std::string());
     }
 
 private:
@@ -369,6 +378,7 @@ private:
         m_slotOf.clear();
         m_lastDistinctSlot = -1; m_prevDistinct = -1;
         m_cadence.Reset();
+        m_repair.Reset();
         m_last = -1000000;
     }
     // the GPU picture of source frame s: its own, or the distinct frame it repeats
@@ -377,6 +387,16 @@ private:
         auto it = m_slotOf.upper_bound(s);
         if (it == m_slotOf.begin()) return m_slotOf.empty() ? -1 : m_slotOf.begin()->second;
         return std::prev(it)->second;
+    }
+    // a pair estimated on frame f before its held-drawing repair is estimated again
+    void ForgetPairsOf(int64_t f)
+    {
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first != f && it->first.second != f) { ++it; continue; }
+            if (it->second.pending) { PairStats st; m_eng.EstimateEnd(it->second.id, st, err); }
+            if (it->second.id == m_lastPair) m_lastPair = -1;
+            m_eng.ReleasePair(it->second.id); it = m_pairs.erase(it);
+        }
     }
     bool StartPair(int64_t d0, int64_t d1)
     {
@@ -486,7 +506,7 @@ private:
         for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
             bool used = false;
             for (auto& [key, p] : m_pairs) used = used || key.first == it->first || key.second == it->first;
-            if (it->first < front && !used && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
+            if (it->first < front && !used && !m_repair.Needs(it->first, m_last, m_cadence.Lookahead()) && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
             else ++it;
         }
         for (auto it = m_thumbs.begin(); it != m_thumbs.end();) { if (it->first < front - 2) it = m_thumbs.erase(it); else ++it; }
@@ -630,6 +650,8 @@ private:
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1;
     // Dedup / Cadence / Subtitle Hold (the VapourSynth GPU backend's scheduling)
     Cadence m_cadence;
+    RegionRepair m_repair;
+    double m_srcMs = 41.7;
     bool m_dedup = false, m_holdOn = false;
     int64_t m_last = -1000000, m_prevDistinct = -1;
     int m_lastDistinctSlot = -1, m_lastPair = -1;

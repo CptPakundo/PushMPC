@@ -55,6 +55,9 @@ public:
         c.nvofHybrid = mo.empty() || mo == "auto" || mo == "hybrid";
         c.blockMatcherOnly = mo != "nvof" && !c.nvofHybrid;
         DeviceRequest req; req.device = Opt(o, "vulkan_device", "auto"); req.allowCpu = Opt(o, "vulkan_allow_cpu") == "1";
+        // the held-drawing repair (region_repair.h, with Dedup on, which is the default): storage source slots, 14 of them
+        const bool wantRepair = RegionRepairWanted(ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true)) && kDedupLookahead == 3;
+        if (wantRepair) { c.regionRepair = true; c.sourceSlots = std::max(c.sourceSlots, 14); }
         if (!m_eng.Configure(c, req, why)) { why = "Vulkan engine: " + why; return false; }
         const double srcFps = st.fps_num > 0 && st.fps_den > 0 ? double(st.fps_num) / st.fps_den : 0;
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
@@ -64,6 +67,8 @@ public:
         m_k = std::clamp(pk.k, 1, 8);
         m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
         m_cadence.Configure(m_k, m_dedup ? kDedupLookahead : 0, 0);
+        m_repair.on = wantRepair && m_dedup && m_eng.RepairAvailable();
+        m_srcMs = srcFps > 0 ? 1000.0 / srcFps : 1000.0 / 23.976;
         const size_t bps = m_bits > 8 ? 2 : 1;
         m_sy = size_t(m_w) * bps; m_sc = size_t((m_w + 1) / 2) * bps;
         const size_t ch = size_t((m_h + 1) / 2);
@@ -100,14 +105,16 @@ public:
             if (!m_eng.Duplicate(m_lastDistinctSlot, slot, ds, err)) { m_eng.ReleaseSlot(slot); return PMENG_ERROR; }
             dup = ds.duplicate;
         }
+        if (!m_repair.Classify(m_eng, s, slot, m_lastDistinctSlot, dup, err)) return PMENG_ERROR;
         if (dup) { m_eng.ReleaseSlot(slot); ++m_dups; }
         else {
             m_slotOf[s] = slot;
             m_lastDistinctSlot = slot;
-            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;
+            if (!m_repair.on && m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;   // repair: started when due
             m_prevDistinct = s;
         }
         m_cadence.Push(s, dup);
+        if (!m_repair.RepairUpTo(m_eng, s - m_cadence.Lookahead(), m_slotOf, m_srcMs, [&](int64_t f) { ForgetPairsOf(f); }, err)) return PMENG_ERROR;
         Settle();
         Prune();
         return PMENG_OK;
@@ -132,6 +139,15 @@ public:
         if (dst.mem != PMENG_MEM_CPU || dst.fmt != m_fmt) { err = "Vulkan engine: unexpected output memory / format"; return PMENG_ERROR; }
         const Shot& sh = it.shot;
         auto real = [&](int64_t f) -> int {
+            if (m_repair.Repaired(f) && m_slotOf.count(f)) {   // the held-drawing repair changed it on the GPU
+                int o = -1; uint64_t tk = 0;
+                if (!m_eng.Real(m_slotOf[f], o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
+                YuvOut yo;
+                for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
+                m_eng.Read(o, yo);
+                FromPlanar(m_gen, dst); ++m_written;
+                return PMENG_OK;
+            }
             auto p = m_src.find(f);
             if (p == m_src.end()) { err = "Vulkan engine: no picture for frame " + std::to_string(f); return PMENG_ERROR; }
             FromPlanar(p->second.p, dst); ++m_written;
@@ -139,6 +155,7 @@ public:
         };
         if (sh.kind != Shot::Generated) return real(sh.src);
         auto pi = m_pairs.find({ sh.d0, sh.d1 });
+        if (pi == m_pairs.end() && m_repair.on && StartPair(sh.d0, sh.d1)) pi = m_pairs.find({ sh.d0, sh.d1 });   // repair: started when due
         if (pi == m_pairs.end()) { err = "Vulkan engine: the pair is gone"; return PMENG_ERROR; }
         if (pi->second.cut) return real(sh.t < 0.5f ? sh.d0 : sh.d1);   // never morph a cut
         int o = -1; uint64_t tk = 0;
@@ -159,7 +176,9 @@ public:
         std::snprintf(b, sizeof(b), "portable-vulkan (%s): %llu sources (%llu repeats, Dedup), %llu outputs (%llu generated), %llu scene cuts; upload %.2f ms, motion %.2f ms a pair",
                       m_eng.Device().name.c_str(), (unsigned long long)m_seq, (unsigned long long)m_dups, (unsigned long long)m_written, (unsigned long long)m_generated,
                       (unsigned long long)m_cuts, t.uploads ? t.uploadMs / double(t.uploads) : 0.0, t.pairs ? t.meMs / double(t.pairs) : 0.0);
-        return b;
+        const auto r = m_repair.Stats();
+        return std::string(b) + (m_repair.on ? "; held-drawing repair: " + std::to_string(r.frames) + " frames, " + std::to_string(r.parts) + " parts, spans gated " +
+                                 std::to_string(r.gated) + ", over budget " + std::to_string(r.overBudget) : std::string());
     }
 
 private:
@@ -176,6 +195,16 @@ private:
         m_src.clear();
         m_lastDistinctSlot = -1; m_prevDistinct = -1; m_lastPair = -1; m_last = -1000000;
         m_cadence.Reset();
+        m_repair.Reset();
+    }
+    // a pair estimated on frame f before its held-drawing repair is estimated again
+    void ForgetPairsOf(int64_t f)
+    {
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first != f && it->first.second != f) { ++it; continue; }
+            if (it->second.id == m_lastPair) m_lastPair = -1;
+            m_eng.ReleasePair(it->second.id); it = m_pairs.erase(it);
+        }
     }
     bool StartPair(int64_t d0, int64_t d1)
     {
@@ -217,7 +246,7 @@ private:
         for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
             bool used = false;
             for (auto& [key, p] : m_pairs) used = used || key.first == it->first || key.second == it->first;
-            if (it->first < keep && !used && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
+            if (it->first < keep && !used && !m_repair.Needs(it->first, m_last, m_cadence.Lookahead()) && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
             else ++it;
         }
         for (auto it = m_src.begin(); it != m_src.end();) { if (it->first < keep) it = m_src.erase(it); else ++it; }
@@ -287,6 +316,8 @@ private:
     size_t m_sy = 0, m_sc = 0, m_ch = 0;
     std::map<int64_t, Planes> m_src;                         // source pictures still shown (real frames, holds, cut frames)
     std::map<int64_t, int> m_slotOf;                         // distinct frame -> engine slot
+    RegionRepair m_repair;                                   // the held-drawing repair (region_repair.h)
+    double m_srcMs = 41.7;
     std::map<std::pair<int64_t, int64_t>, PairInfo> m_pairs; // (d0, d1) -> motion pair
     std::vector<uint8_t> m_gen[3];
     std::deque<Item> m_q;
