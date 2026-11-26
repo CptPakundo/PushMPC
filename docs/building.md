@@ -106,6 +106,9 @@ Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its 
   `runtime\experimental\pushflow` folder tells pushcore which provider to use (a measurement in `pmml-autobench.json`
   wins). Switches: `-Pmml No`, `--no-pmml`.
 - **AMD FSR SDK 2.4:** `scripts/fidelityfx-fetch.ps1` on Radeon RX 6000-9000 (`-FidelityFx Package` declines it).
+- **Repair and update keep the first install's choices:** every install records `choices` (pmml, fsr, plex) in its
+  state; a later run whose options are still `Auto` (Setup's Repair and Update, quiet or not) follows them, so it never
+  adds a download the first install did not have. `-Pmml Yes` / `-PlexSwap Yes` ask for one explicitly.
 - **Plex:** two routes, never both (state `plexNative` / `plexSwap`). First the proxy: the optional `plexnative`
   component (mpv-native.yml's `plexnative` artifact: proxy `avfilter-8.dll`, `pushmpc-avfilter-8.*.dll`,
   `pushmpc_engine.dll`, staged with `-PlexNative`) installed by `mpvnative/install/pushmpc-plex-native.ps1 install -Json

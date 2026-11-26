@@ -138,12 +138,13 @@ param(
     # the pmml runtime folder (PushFlow on other ONNX Runtime EPs); default: PMML_RUNTIME, HKCU MlRuntime, <InstallDir>\pmml
     [string]$PmmlRuntime = '',
     [switch]$Apply,
-    # PushFlow's runtime for this GPU (pmml: TensorRT-RTX on RTX, OpenVINO on Intel) into <InstallDir>\pmml: Auto | No
-    [ValidateSet('Auto', 'No')]
+    # PushFlow's runtime for this GPU (pmml: TensorRT-RTX on RTX, OpenVINO on Intel) into <InstallDir>\pmml: Auto | Yes | No.
+    # Auto on a repair or update follows the first install (Use-EarlierChoices); Yes asks for it then
+    [ValidateSet('Auto', 'Yes', 'No')]
     [string]$Pmml = 'Auto',
     # Plex HTPC / Plex for Windows: a VapourSynth-enabled libmpv in Plex's folder (pushmpc-plex.ps1; asks for
     # administrator permission): Auto (tested Plex versions) | No
-    [ValidateSet('Auto', 'No')]
+    [ValidateSet('Auto', 'Yes', 'No')]
     [string]$PlexSwap = 'Auto',
     [switch]$KeepSettings,
     [switch]$Verify,
@@ -1422,6 +1423,22 @@ function Test-RuntimeCurrent([string]$dir, $pkg = $Runtime) {
     if (-not $m) { return $false }
     if ($m.kv['version'] -ne $pkg.Version -or $m.kv['package-sha256'] -ne $pkg.Sha256 -or $m.kv['subset'] -ne $Runtime.Subset) { return $false }
     return -not (Test-ComponentFiles $dir)
+}
+# A repair or update (quiet ones too) keeps what the first install chose and downloads only what it had: an optional
+# download the caller left at Auto follows the recorded choice (state "choices", written by every install).
+function Use-EarlierChoices($state) {
+    $c = Get-StateValue $state 'choices'
+    if (-not $c) { return }
+    # PushFlow's runtime: kept (and fetched again after a failed download) when the first install chose it for this card
+    if ($Pmml -eq 'Auto' -and $c.pmml -ne 'Yes' -and -not (Get-StateValue $state 'pmmlInstalled')) { $script:Pmml = 'No'; Info 'PushFlow runtime: this install did not have it, so a repair or update does not download it (-Pmml Yes adds it)' }
+    if ($FidelityFx -eq 'Auto' -and $c.fsr -eq 'Package') { $script:FidelityFx = 'Package' }
+    if ($PlexSwap -eq 'Auto' -and $c.plex -eq 'No') { $script:PlexSwap = 'No' }
+}
+function Save-Choices($state) {
+    $fsr = if ($FidelityFx -eq 'Package' -or $GpuVendor -ne 'AMD') { 'Package' } else { 'Auto' }
+    $gi = Get-GpuInfo
+    $pm = if ($Pmml -ne 'No' -and @(Get-PmmlEps (Get-GpuFamily $gi) $gi).Count) { 'Yes' } else { 'No' }
+    Set-StateValue $state 'choices' ([pscustomobject][ordered]@{ pmml = $pm; fsr = $fsr; plex = $(if ($PlexSwap -eq 'No') { 'No' } else { 'Yes' }) })
 }
 # Builds the runtime component for install/update into staging\runtime-<version>: from a staged runtime of the same
 # package and subset (developer builds), else from the package (cache, own download folder, or Veyra's release).
@@ -2952,6 +2969,7 @@ switch ($Action) {
         Step "Installing to $InstallDir"
         if (-not $DryRun) { New-Item -ItemType Directory -Force $InstallDir, (Join-Path $InstallDir 'logs') | Out-Null }
         $state = Read-State
+        Use-EarlierChoices $state
         # the runtime first: a download that fails leaves the installed filter and core untouched
         $rtDir = Join-Path $InstallDir 'runtime'
         if (Test-RuntimeCurrent $rtDir) { Info "runtime $($Runtime.Version) (subset $($Runtime.Subset)) is already installed" }
@@ -3026,6 +3044,7 @@ switch ($Action) {
                 }
             }
         }
+        if (-not $DryRun) { Save-Choices $state }
         $state.installed = (Get-Date).ToString('s')
         Write-State $state
         Progress 100 'Installed'
