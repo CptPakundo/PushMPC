@@ -605,6 +605,7 @@ jobs:
             n=${t%%:*}; r=${t#*:}; a="$RUNNER_TEMP/apps/${r%%:*}"; exe=${r##*:}
             [ -d "$a" ] || { echo "::error::$a missing"; fails=$((fails + 1)); continue; }
             snap() { (cd "$a" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256); ls -la "$HOME/Library/Application Support/$exe/mpv.conf" 2>&1 | awk '{print $5, $NF}'; }
+            echo "$n: libmpv symbols left to the host (flat namespace):"; nm -m "$a/Contents/Frameworks/libmpv.2.dylib" | grep "dynamically looked up" | awk '{print $NF}' | sort -u | tr '\n' ' '; echo
             before=$(snap)
             out=$(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json); echo "install -NoConf: $out"
             out=$(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --opts smoother=2 --json); rc=$?; echo "install again: $out"
