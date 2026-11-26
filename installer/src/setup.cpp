@@ -379,7 +379,8 @@ std::wstring ScratchDir() { return JoinPath(TempDir(), Format(L"PushMPC-Setup-%l
 std::atomic<bool> g_fsrSdk{ true };
 // PushFlow's runtime for this GPU (pmml: TensorRT-RTX on RTX, OpenVINO on Intel), on by default (-Pmml No when unchecked)
 std::atomic<bool> g_pmml{ true };
-// Plex: frame generation through a VapourSynth-enabled libmpv in Plex's folder, on by default (-PlexSwap No when unchecked)
+// Plex: frame generation inside Plex (the proxy avfilter-8.dll, or the VapourSynth-enabled libmpv when the proxy fails its
+// self-test), on by default (-PlexSwap No when unchecked)
 std::atomic<bool> g_plexSwap{ true };
 // PushMPC's own mpv player (a separate download), off by default (-MpvBuild Yes when checked)
 std::atomic<bool> g_mpvBuild{ false };
@@ -828,7 +829,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         mk(L"BUTTON", L"I accept the licence terms", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_ACCEPT);
         Button_SetCheck(mk(L"BUTTON", L"Download AMD's newest FSR upscaling (FSR 4.1) for this Radeon", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"Download faster AI frame generation for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
-        Button_SetCheck(mk(L"BUTTON", L"Give Plex smoother motion (replaces one Plex file, puts it back on uninstall; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
+        Button_SetCheck(mk(L"BUTTON", L"Give Plex smoother motion (changes Plex's folder, undone on uninstall; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
         mk(L"BUTTON", L"Also install PushMPC's own mpv player (a separate download; Start menu: PushMPC mpv)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_MPVBUILD);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);

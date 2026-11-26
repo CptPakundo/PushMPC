@@ -175,7 +175,7 @@ files, Setup reuses them instead of downloading.
 ## 🗺️ Roadmap (after the first release)
 
 - Capture mode on Linux and Mac without OBS, with the best picture PushMPC can make there.
-- Plex support built by PushMPC itself, instead of the community mpv library Setup uses today.
+- Plex on Linux and Mac.
 
 ## 📚 More
 

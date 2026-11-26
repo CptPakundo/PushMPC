@@ -465,6 +465,9 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { name: pushmpc-kodi-Windows, path: '${{ runner.temp }}/kodi-windows' }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: plexnative, path: '${{ runner.temp }}/plexnative' }
       - name: Stage and package (Setup, component zips, release.json + signature)
         timeout-minutes: 20
         env:
@@ -487,7 +490,10 @@ jobs:
           } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
           # the Kodi add-on (kodi-addon.yml): kodi21\, kodi22\ and its installer, staged as the optional kodi component
           $kodi = @{}; if (Test-Path "$env:RUNNER_TEMP\kodi-windows\kodi21") { $kodi = @{ KodiPackage = "$env:RUNNER_TEMP\kodi-windows" } } else { Write-Host '::warning title=Kodi add-on::no pushmpc-kodi-Windows artifact: the release has no Kodi component' }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb @kodi
+          # the Plex proxy (mpv-native.yml): avfilter-8.dll, the pushmpc-avfilter-8.*.dll builds and the engine, staged as the
+          # optional plexnative component (Setup prefers it for Plex; the libmpv swap stays the fallback)
+          $plexn = @{}; if (Test-Path "$env:RUNNER_TEMP\plexnative\avfilter-8.dll") { $plexn = @{ PlexNative = "$env:RUNNER_TEMP\plexnative" } } else { Write-Host '::warning title=Plex proxy::no plexnative artifact: Setup gives Plex the libmpv swap' }
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb @kodi @plexn
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {

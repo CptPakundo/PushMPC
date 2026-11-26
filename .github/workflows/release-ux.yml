@@ -87,7 +87,7 @@ jobs:
     needs: [autoplan, release]
     if: always() && github.event_name == 'workflow_dispatch' && needs.autoplan.result == 'success' && (needs.release.result == 'success' || inputs.release_run != '')
     runs-on: windows-2025
-    timeout-minutes: 50
+    timeout-minutes: 70
     defaults: { run: { shell: pwsh } }
     env:
       GH_TOKEN: ${{ github.token }}
@@ -168,8 +168,8 @@ jobs:
           (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\before-env.txt"
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\before-vlc.txt"
           "PushMPC folder before: $(Test-Path "$env:LOCALAPPDATA\PushMPC"); Start menu PushMPC: $(Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC")" | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
-          Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\before-plex.txt"
-          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\before-plexconf.txt"
+          function PlexSnap([string]$f) { @(foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }) + @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" }) | Set-Content $f }
+          PlexSnap "$s\before-plex.txt"
           exit 0   # reg export of a key the runner does not have returns 1
       - name: PushMPC-Setup.exe /S (simulated RTX 4090; the TensorRT-RTX pmml runtime fetched by its pins)
         timeout-minutes: 30
@@ -192,9 +192,11 @@ jobs:
           $fetched = Get-Content "$pm\fetched.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
           $epj = Get-Content "$pm\eps\trt-rtx\ep.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
           "pmml runtime: onnxruntime.dll $(Test-Path "$pm\ort\core\onnxruntime.dll"); trt-rtx library $($epj.library) (present $(if ($epj) { Test-Path (Join-Path "$pm\eps\trt-rtx" $epj.library) }))" | Tee-Object -Append $log
-          # Plex: swapped where the version is tested; mpv.conf with the CA bundle and PushMPC's block
+          # Plex: the proxy route (Plex's own libmpv, a proxy avfilter-8.dll), never the libmpv swap as well
           $plexState = Get-Content "$env:LOCALAPPDATA\PushMPC\plex\plex.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
           foreach ($r in @($plexState)) { if ($r) { "Plex swapped: $($r.Name) $($r.Version): libmpv now $((Get-FileHash $r.Dll).Hash) (ours $($r.OursSha)); backup $(Test-Path $r.Backup)" | Tee-Object -Append $log } }
+          $plexDirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\libmpv-2.dll" }
+          foreach ($d in $plexDirs) { "Plex proxy in ${d}: renamed original $(Test-Path "$d\avfilter-8-plex.dll"); builds $(@(Get-ChildItem $d -Filter 'pushmpc-avfilter-8.*.dll').Count); engine $(Test-Path "$d\pushmpc_engine.dll")" | Tee-Object -Append $log }
           @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { if (Test-Path $c) { "$c`:"; Get-Content $c | ForEach-Object { "    $_" } } }) | Tee-Object -Append $log
           "Plex logon check task: $([bool](Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue))" | Tee-Object -Append $log
           $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
@@ -212,9 +214,14 @@ jobs:
           if (-not ($pmml -match '(?m)^backend=ort:core:trt-rtx:0')) { $bad += 'pmml.txt not written with the TensorRT-RTX EP' }
           if (-not ($pmml -match [regex]::Escape("runtime=$pm"))) { $bad += 'pmml.txt does not name the installed pmml runtime' }
           if (-not (Test-Path "$pm\ort\core\onnxruntime.dll") -or -not $epj -or -not (Test-Path (Join-Path "$pm\eps\trt-rtx" $epj.library))) { $bad += 'the pmml runtime (ONNX Runtime + TensorRT-RTX EP) is not installed' }
-          foreach ($r in @($plexState)) { if ($r -and (Get-FileHash $r.Dll).Hash -ne $r.OursSha) { $bad += "Plex $($r.Name): the swapped libmpv is not in place" } }
-          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { if ((Test-Path "$d\libmpv-2.dll") -and -not @($plexState | Where-Object { $_ -and $_.Dir -eq $d }).Count) { $bad += "${d}: Plex was not given the VapourSynth-enabled libmpv (version not in the tested list, or the swap failed: see the log)" } }
-          foreach ($r in @($plexState)) { if ($r) { $c = if ($r.Name -eq 'Plex HTPC') { "$env:LOCALAPPDATA\Plex HTPC\mpv.conf" } else { "$env:LOCALAPPDATA\Plex\mpv.conf" }; if (-not ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match 'tls-ca-file=.*cacert\.pem')) { $bad += "Plex $($r.Name): mpv.conf has no PushMPC block with tls-ca-file" } } }
+          if (@($plexState | Where-Object { $_ }).Count -or (Test-Path "$env:LOCALAPPDATA\PushMPC\plex")) { $bad += 'Plex got the libmpv swap: the proxy route should have been taken (its self-test failed? see the log)' }
+          if (-not $plexDirs) { $bad += 'no Plex app on the runner' }
+          foreach ($d in $plexDirs) {
+            if (-not (Test-Path "$d\avfilter-8-plex.dll") -or -not (Test-Path "$d\pushmpc_engine.dll")) { $bad += "${d}: the Plex proxy is not in place" }
+            $c = if ($d -like '*HTPC') { "$env:LOCALAPPDATA\Plex HTPC\mpv.conf" } else { "$env:LOCALAPPDATA\Plex\mpv.conf" }
+            if (-not ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match 'vf-append=@pushmpc:pushmpc')) { $bad += "${c}: no PushMPC filter line" }
+            if ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match '# >>> PushMPC managed') { $bad += "${c}: the mpv route's block is there as well" }
+          }
           # VLC: PushMPC's module (the release's vlc component) through its installer, so not in capture mode
           $vlcrc = Get-Content "$env:APPDATA\vlc\vlcrc" -Raw -ErrorAction SilentlyContinue
           "VLC: plugin $(Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll"); vlcrc video-filter $([regex]::Match("$vlcrc", '(?m)^video-filter=.*$').Value); VLC_PLUGIN_PATH $([Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User'))" | Tee-Object -Append $log
@@ -256,10 +263,11 @@ jobs:
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
           if (Test-Path "$env:APPDATA\PushMPC\kodi-addon.installed") { $bad += 'left: the Kodi add-on marker' }
           if (Test-Path "$env:APPDATA\Kodi\addons\inputstream.pushmpc") { $bad += 'left: the Kodi add-on' }
-          Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\after-plex.txt"
-          if ((@(Get-Content "$s\before-plex.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-plex.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += "Plex's libmpv not put back" }
-          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\after-plexconf.txt"
-          if ((@(Get-Content "$s\before-plexconf.txt") -join "`n") -ne (@(Get-Content "$s\after-plexconf.txt") -join "`n")) { $bad += "Plex's mpv.conf not as before" }
+          function PlexSnap([string]$f) { @(foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }) + @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" }) | Set-Content $f }
+          PlexSnap "$s\after-plex.txt"
+          $pd = Compare-Object @(Get-Content "$s\before-plex.txt") @(Get-Content "$s\after-plex.txt")
+          if ($pd) { $bad += "Plex's folders or mpv.conf not as before: $(($pd | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
+          if (Test-Path "$env:ProgramData\PushMPC\plex-native") { $bad += 'left: the Plex proxy backup folder' }
           if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left: the Plex logon check task' }
           $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)
           if ($left) { $bad += "left in the install folder: $($left -join ', ')" }
@@ -268,9 +276,43 @@ jobs:
           Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
           exit 0
+      - name: Plex fallback (proxy self-test failing), then uninstall restores Plex again
+        if: always()
+        timeout-minutes: 20
+        env:
+          PUSHMPC_TEST_PLEX_PROXY: fail
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"; $s = "$env:RUNNER_TEMP\snap"
+          function PlexSnap([string]$f) { @(foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }) + @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" }) | Set-Content $f }
+          $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
+          $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru
+          $env:PSModulePath = $keep
+          if (-not $p.WaitForExit(900000)) { $p.Kill(); throw 'Setup timed out' }
+          $sl = Get-ChildItem "$env:LOCALAPPDATA\PushMPC\logs" -Filter 'setup*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+          "fallback Setup exit $($p.ExitCode)" | Tee-Object -Append $log
+          (Get-Content $sl.FullName | Select-String -Pattern 'Plex' | ForEach-Object Line) | Tee-Object -Append $log
+          $bad = @()
+          $plexState = @(Get-Content "$env:LOCALAPPDATA\PushMPC\plex\plex.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json | Where-Object { $_ })
+          foreach ($d in @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\libmpv-2.dll" }) {
+            if (Test-Path "$d\avfilter-8-plex.dll") { $bad += "${d}: the proxy stayed although the swap was tried (both)" }
+            if (-not @($plexState | Where-Object { $_.Dir -eq $d }).Count) { $bad += "${d}: no libmpv swap after the proxy failed" }
+          }
+          if (Test-Path "$env:LOCALAPPDATA\PushMPC\plexnative") { $bad += 'the proxy folder stayed after the fallback' }
+          $q = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC' -ErrorAction SilentlyContinue).QuietUninstallString
+          if ($q) { $u = Start-Process cmd.exe -ArgumentList '/c', "`"$q`"" -PassThru; $u.WaitForExit(300000) | Out-Null; "fallback uninstall exit $($u.ExitCode)" | Tee-Object -Append $log }
+          PlexSnap "$s\after2-plex.txt"
+          if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left after the fallback: the Plex logon check task' }
+          if (Test-Path "$env:ProgramData\PushMPC\plex-native") { $bad += 'left after the fallback: the Plex proxy backup folder' }
+          $pd = Compare-Object @(Get-Content "$s\before-plex.txt") @(Get-Content "$s\after2-plex.txt")
+          if ($pd) { $bad += "after the fallback's uninstall, Plex's folders or mpv.conf not as before: $(($pd | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
+          "Plex fallback: $(if ($bad) { $bad -join ' / ' } else { 'proxy out, libmpv swap in; uninstall put Plex back bit for bit' })" | Tee-Object -Append $log
+          @('## Plex fallback', '', '```') + (Get-Content $log | Select-Object -Last 30) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs2" -Recurse -ErrorAction SilentlyContinue
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: win-setup-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs\n${{ runner.temp }}/snap" }
+        with: { name: win-setup-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs\n${{ runner.temp }}/pushmpc-logs2\n${{ runner.temp }}/snap" }
 
   # with the release build (dispatch) its native hook goes into the tarball: Arch's mpv then takes the hook route; a
   # push run tests the VapourSynth route
