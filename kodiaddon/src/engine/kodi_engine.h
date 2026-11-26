@@ -61,6 +61,11 @@ public:
     virtual int ImportHost(void* /*ptr*/, uint64_t /*size*/, std::string& err) { err = "no host import on this engine"; return -1; }
     virtual bool GenerateInto(float /*t*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual bool RealInto(bool /*current*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
+    // held frames (animation on twos, threes, fours): with dedup on, a pushed frame that repeats the last DISTINCT one
+    // (PushFPS's duplicate test: the GPU engine's Duplicate pass, the CPU engine's quarter-size luma) leaves the pair as
+    // it is and LastDup() says so; Real(true) is then still the last distinct frame
+    virtual void SetDedup(bool) {}
+    virtual bool LastDup() const { return false; }
     virtual EngineStats Stats() const = 0;
     // Auto's multiplier for this engine (display refresh / source fps within the measured budget)
     virtual int DecideK(int smoother, double srcFps, double displayHz, std::string& why) = 0;

@@ -162,7 +162,7 @@ void VS_CC PFree(void* inst, VSCore*, const VSAPI* a)
     {
         std::lock_guard<std::mutex> lk(d->lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
-        Log(std::format("portable: instance closed after {} frames ({} scene cuts)", d->produced, d->be.engine.Stat().cuts));
+        Log(std::format("portable: instance closed after {} frames ({} scene cuts, {} held repeats)", d->produced, d->be.engine.Stat().cuts, d->be.repeats));
     }
     a->freeNode(d->node);
     delete d;
@@ -443,10 +443,14 @@ void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, V
     portable::Config c; c.width = w; c.height = h; c.bits = bits; c.threads = s.threads; c.quality = cpuQuality;
     if (!d->be.engine.Configure(c, err)) { a->freeNode(node); delete d; return fail(err); }
     d->pipe.Init(d->k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
+    d->be.dedup = s.dedup != 0;          // held frames: lookahead 3 (twos, threes, fours), as the GPU route
+    d->be.srcFrames = vi->numFrames;
+    d->pipe.SetLookahead(d->be.Lookahead());
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     Bind(d);
-    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}), CPU engine", bits, w, h, outFps.num, outFps.den, d->k));
+    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}), CPU engine; Dedup {} (lookahead {})", bits, w, h, outFps.num, outFps.den, d->k,
+        d->be.dedup ? "on" : "off", d->be.Lookahead()));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, PGetFrame, PFree, fmUnordered, deps, 1, d, core);
 }

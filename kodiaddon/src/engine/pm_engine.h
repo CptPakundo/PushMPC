@@ -60,6 +60,15 @@ int pm_engine_threads(const pm_engine *e);
 int pm_engine_decide_k(int smoother, double src_fps, double display_hz, int width, int height, int bits, int threads,
                        int quality, char *why, size_t whysize);
 
+/* ---- held frames (anime drawn on twos, threes, fours). Off until pm_engine_set_dedup(e, 1). Then a frame that
+ * repeats the last DISTINCT frame pushed (PushFPS's duplicate test on the quarter-size luma) does not advance the pair:
+ * push returns 0, pm_engine_last_dup says 1, and the pair stays (last distinct, the one before) for the held span the
+ * add-on makes when the next distinct frame comes. pm_engine_check_dup: the test alone (1 repeat, 0 a new picture:
+ * push the SAME frame next). Not contiguous: never a repeat. pm_engine_forget drops the held state. */
+void pm_engine_set_dedup(pm_engine *e, int on);
+int pm_engine_check_dup(pm_engine *e, const pm_yuv *src, int contiguous, char *err, size_t errsize);
+int pm_engine_last_dup(const pm_engine *e);
+
 #ifdef __cplusplus
 }
 #endif

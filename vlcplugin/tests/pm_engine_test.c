@@ -64,6 +64,29 @@ int main(void)
            (unsigned long long)st.generated, st.me_ms, st.gen_ms, pm_engine_threads(e));
     pm_engine_close(e);
 
+    /* held frames on the CPU engine (pm_engine_set_dedup): the box moves 16 px per drawing (A at 40, B at 56; its
+     * centre is x0 + 24). A repeat of A neither makes a pair nor moves it; the pair (A, B) stays through a repeat of B. */
+    {
+        pm_engine_cfg cc = { W, H, 8, 2, 1, PM_ENGINE_CPU };
+        pm_engine *d = pm_engine_open(&cc, err, sizeof(err));
+        if (!d) { printf("FAIL open (CPU): %s\n", err); return 1; }
+        pm_engine_set_dedup(d, 1);
+        pm_yuv a = { { Y[0], U[0], V[0] }, { W, W / 2, W / 2 } }, b = { { Y[1], U[1], V[1] }, { W, W / 2, W / 2 } };
+        Frame(0, 40, 220);
+        Frame(1, 56, 220);
+        int ok = pm_engine_push(d, &a, 0, err, sizeof(err)) == 0 && !pm_engine_last_dup(d);
+        ok = ok && pm_engine_check_dup(d, &a, 1, err, sizeof(err)) == 1;                      /* A again: a repeat */
+        ok = ok && pm_engine_push(d, &a, 1, err, sizeof(err)) == 0 && pm_engine_last_dup(d) && !pm_engine_have_pair(d);
+        ok = ok && pm_engine_check_dup(d, &b, 1, err, sizeof(err)) == 0;                      /* B: a new drawing */
+        ok = ok && pm_engine_push(d, &b, 1, err, sizeof(err)) == 0 && !pm_engine_last_dup(d) && pm_engine_have_pair(d);
+        ok = ok && pm_engine_push(d, &b, 1, err, sizeof(err)) == 0 && pm_engine_last_dup(d);  /* B again: the pair stays */
+        pm_engine_generate(d, 0.25f, &out);
+        const double c = BoxCentre(OY);                                                       /* (A, B) at 0.25: 44 + 24 = 68 */
+        printf("held frames: repeats detected %s, box at t=0.25 %.2f (expected 68.00)\n", ok ? "as expected" : "WRONG", c);
+        if (!ok || c < 65 || c > 71) fails++;
+        pm_engine_close(d);
+    }
+
     char why[256];
     int k1 = pm_engine_decide_k(0, 23.976, 240, 1280, 720, 8, 0, 1, why, sizeof(why));
     printf("Auto 720p24 on 240 Hz: x%d (%s)\n", k1, why);

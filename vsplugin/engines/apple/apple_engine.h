@@ -102,6 +102,10 @@ public:
     // gen / cur receive retained buffers (CVPixelBufferRelease them); cur is the input itself when nothing changes it
     bool ProcessBuffer(void* pixelBuffer, const Colour& colour, int64_t pts, bool contiguous, std::vector<void*>& gen, void*& cur, bool& havePair, std::string& err);
     void Forget();                 // a seek
+    // held frames: the NEXT Process / ProcessBuffer pair spans g source intervals (the frames between were repeats of
+    // its first frame): it makes g k - 1 frames at phases j / (g k) (gen must have room for them). Frame-rate
+    // conversion takes any phase; the low-latency grid rounds them (MakePlan). Back to 1 after that call.
+    void SetSpan(int g);
     bool LastPairWasCut() const;
     const Stats& Stat() const;
     std::string Describe() const;  // the active chain, the ladder level
