@@ -40,19 +40,19 @@ a single frame.
 |---|:-:|:-:|:-:|
 | MPC-HC, MPC-BE | ✅ | – | – |
 | PotPlayer | ✅ | – | – |
-| mpv, and PushMPC's own mpv | ✅ | ✅ | 🔜 |
+| mpv, and PushMPC's own mpv | ✅ | ✅ | 🧪 |
 | mpv.net | ✅ | – | – |
 | SMPlayer, MPC-QT | ✅ | ✅ | – |
 | Celluloid, Haruna | – | ✅ | – |
 | IINA | – | – | 🔜 |
 | VLC 3 | ✅ | ✅ | 🔜 |
 | Kodi 21 and 22 | ✅ | ✅ | – |
-| Plex (Plex for Windows, Plex HTPC; on Linux from Flathub) | ✅ | ✅ | 🔜 |
+| Plex (Plex for Windows, Plex HTPC, Plex for Mac; on Linux from Flathub) | ✅ | ✅ | 🧪 |
 | Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – |
 | Stremio 5.0.28 and newer | ✅ | – | – |
 | Any other player (KMPlayer, GOM, Emby Theater, ...) through **capture mode** | ✅ | – | – |
 
-✅ Works · 🔜 Coming soon · – not available
+✅ Works · 🧪 Preview (works, still being tested) · 🔜 Coming soon · – not available
 
 Setup finds the players on your PC and sets up each one. MPC-HC has had the most testing on real hardware; the
 others are checked automatically with every build.
@@ -107,7 +107,15 @@ effects. VLC and the Kodi add-on are in the x86_64 download.
 
 ### Mac
 
-Coming soon, through Homebrew, for mpv, IINA, VLC and Plex.
+Preview, for mpv and Plex (Plex for Mac and Plex HTPC). You need [Homebrew](https://brew.sh). In Terminal:
+
+```sh
+brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
+brew install pushmpc
+pushmpc-setup install
+```
+
+To remove it: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. More in the [user guide](docs/user-guide.md#installing-on-a-mac).
 
 ## Use
 
@@ -191,7 +199,7 @@ uninstalling turns it back on.
 
 ## Roadmap
 
-- PushMPC on the Mac: mpv, IINA, VLC and Plex through Homebrew.
+- On the Mac: IINA and VLC.
 - Capture mode on Linux and Mac (for now, there's a [workaround with OBS](docs/user-guide.md#capture-mode-on-linux-and-mac)).
 - Faster AI frame generation on more graphics cards, including AMD Radeon and Snapdragon on Windows.
 

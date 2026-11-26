@@ -101,7 +101,7 @@ jobs:
           tgz="$RUNNER_TEMP/pushmpc-metal.tar.gz"; git archive --format=tar.gz --prefix=PushMPC-ci/ HEAD > "$tgz"
           brew tap-new --no-git pushmpc/metal 2>/dev/null || true
           tap=$(brew --repository pushmpc/metal)
-          sed -E "s|^  url \".*\"$|  url \"file://$tgz\"\n  version \"0.6.0-metal\"|; s|^  sha256 \".*\"$|  sha256 \"$(shasum -a 256 "$tgz" | cut -d' ' -f1)\"|" packaging/homebrew/pushmpc.rb > "$tap/Formula/pushmpc.rb"
+          sed -E "s|^  url \".*\"$|  url \"file://$tgz\"|; s|^  version \".*\"$|  version \"0.6.0-metal\"|; s|^  sha256 \".*\"$|  sha256 \"$(shasum -a 256 "$tgz" | cut -d' ' -f1)\"|" Formula/pushmpc.rb > "$tap/Formula/pushmpc.rb"
           brew reinstall --build-from-source pushmpc/metal/pushmpc
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install
           unset VSSCRIPT_PATH

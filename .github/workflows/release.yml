@@ -728,8 +728,42 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: pushmpc-macos, path: dist/, if-no-files-found: ignore }
 
+  # The Homebrew formula (Formula/pushmpc.rb; this repository is the tap): the source tarball the formula builds from
+  # (pushmpc-<version>-src.tar.gz, a release asset, so its SHA-256 is ours and never changes), and the formula pointed at
+  # this release's archives by scripts/update-formula.py. Runs on dry runs too (the diff is in the log); the publish job
+  # attaches the tarball and, for a stable release, commits the same update to main once the assets exist.
+  formula:
+    needs: [build, linux, macos]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ needs.build.outputs.sha }}', persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-linux-x86_64, path: a }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # no Plex for Mac archive: the formula goes without it
+        with: { name: pushmpc-macos, path: m }
+      - name: Source tarball and the formula for this release (shown, not committed)
+        run: |
+          set -e
+          ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
+          tag="${{ needs.build.outputs.tag }}"; [ -n "$tag" ] || tag="v$ver"   # a dry run: the tag it would have
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+          mkdir -p src
+          git archive --format=tar.gz --prefix="PushMPC-$ver/" HEAD > "src/pushmpc-$ver-src.tar.gz"
+          python3 -I scripts/update-formula.py Formula/pushmpc.rb --version "$ver" \
+            --src "src/pushmpc-$ver-src.tar.gz" --src-url "$base/pushmpc-$ver-src.tar.gz" \
+            --pmml "a/pmml-graphs-$ver.tar.gz" --pmml-url "$base/pmml-graphs-$ver.tar.gz" \
+            --plex "m/pushmpc-plex-mac-$ver.tar.gz" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"
+          ruby -c Formula/pushmpc.rb
+          git diff --stat; git diff Formula/pushmpc.rb
+      - uses: actions/upload-artifact@v4
+        with: { name: pushmpc-src, path: src/, if-no-files-found: error }
+
   publish:
-    needs: [build, gpu-smoke, linux, macos]
+    needs: [build, gpu-smoke, linux, macos, formula]
     if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -751,6 +785,9 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true   # a release without the Plex for Mac bundle still goes out
         with: { name: pushmpc-macos, path: release }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # the Homebrew source tarball (formula job)
+        with: { name: pushmpc-src, path: release }
       # the release body: docs/release-notes-<version>.md of the built commit when it exists, else the text below
       - uses: actions/checkout@v4
         with:
@@ -778,3 +815,23 @@ jobs:
           fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "PushMPC ${TAG#v}" --notes-file notes.md \
             --target "${{ needs.build.outputs.sha }}" $pre $latest release/*
+      # the Homebrew formula on main, for a stable release: main's own Formula/pushmpc.rb pointed at the assets just
+      # published (the same script as the formula job). A failure here (main protected, a race) leaves the release as it is
+      - name: Homebrew formula on main
+        if: needs.build.outputs.prerelease != 'true' && needs.formula.result == 'success'
+        continue-on-error: true
+        run: |
+          set -e
+          ver="${{ needs.build.outputs.version }}"; [ -n "$ver" ] || ver="${TAG#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          git clone -q --depth 1 --branch main "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" main-repo
+          cd main-repo
+          plex=""; [ ! -f "../release/pushmpc-plex-mac-$ver.tar.gz" ] || plex="../release/pushmpc-plex-mac-$ver.tar.gz"
+          python3 -I scripts/update-formula.py Formula/pushmpc.rb --version "$ver" \
+            --src "../release/pushmpc-$ver-src.tar.gz" --src-url "$base/pushmpc-$ver-src.tar.gz" \
+            --pmml "../release/pmml-graphs-$ver.tar.gz" --pmml-url "$base/pmml-graphs-$ver.tar.gz" \
+            ${plex:+--plex "$plex" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"}
+          git diff --quiet && { echo "the formula on main is already at $TAG"; exit 0; }
+          git -c user.name=CptPakundo -c user.email=CptPakundo@users.noreply.github.com commit -q -am "Homebrew formula: PushMPC $TAG"
+          git push -q origin HEAD:main
+          echo "::notice title=Homebrew formula::Formula/pushmpc.rb on main points at $TAG"

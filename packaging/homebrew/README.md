@@ -1,8 +1,16 @@
-# Homebrew formula (our own tap)
+# Homebrew formula
 
-`pushmpc.rb` is the formula for a PushMPC tap. The tap is not public yet. It does four things:
-- builds `pushmpc_vs` against Homebrew's `vapoursynth`, with the VideoToolbox backend on macOS;
-- installs the plugin into VapourSynth's autoload folder;
+This repository is its own Homebrew tap: the formula is [`Formula/pushmpc.rb`](../../Formula/pushmpc.rb) (Homebrew
+looks in `Formula/`). This folder keeps its helper, `pmml-models.py`.
+
+    brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
+    brew install pushmpc
+    pushmpc-setup install      # mpv's mpv.conf, and Plex for Mac / Plex HTPC when they are in /Applications
+    # to remove: pushmpc-setup uninstall && brew uninstall pushmpc
+
+What the formula does:
+- builds `pushmpc_vs` against Homebrew's `vapoursynth`, with the VideoToolbox backend on macOS, and installs it into
+  VapourSynth's autoload folder;
 - installs `pushmpc.vpy` and `pushmpc-setup`;
 - depends on Homebrew's `mpv`, which is built with VapourSynth because it depends on the `vapoursynth` formula;
 - installs a LuaJIT-FFI helper into Homebrew mpv's global scripts folder (`$(brew --prefix)/etc/mpv/scripts/
@@ -12,18 +20,16 @@
   upstream compute GLSL and an mpv profile (`pushmpc-artcnn`: gpu-next, Vulkan) that `pushmpc-setup install` includes
   (`--no-artcnn` leaves it out);
 - on macOS builds `pushmpc-apple` (probe, Apple's one-time super-resolution model download, benchmarks) and the IINA
-  bridge `lib/pushmpc/pushmpc-iina.so`.
+  bridge `lib/pushmpc/pushmpc-iina.so`;
+- on macOS keeps the Plex for Mac archive (resource `plex-mac`), which `pushmpc-setup install` puts into Plex for Mac and
+  Plex HTPC (`mpvnative/install/pushmpc-plex-mac.sh`, with a LaunchAgent that re-applies it after Plex updates).
 
-Once the tap repository `homebrew-pushmpc` exists (a public action, so it waits for the go-ahead), users run:
+Its `url` / `version` / `sha256` and the `pmml-graphs` and `plex-mac` resources point at a release's assets. The
+release fills them in: `release.yml` builds the source tarball (`pushmpc-<version>-src.tar.gz`), and after a stable
+release its publish job runs `scripts/update-formula.py` on main's formula and commits the result. A release without the
+Plex for Mac asset leaves that resource out.
 
-    brew tap pushmpc/tap <URL of the homebrew-pushmpc tap repository>
-    brew install pushmpc/tap/pushmpc
-    pushmpc-setup install      # puts the filter into ~/.config/mpv/mpv.conf
-    # to remove: pushmpc-setup uninstall && brew uninstall pushmpc
-
-At release time, set `url` and `sha256` to the tag's tarball.
-
-The CI dry run is `.github/workflows/apple.yml`, job `homebrew`, on macos-15:
-1. builds a tarball of the checkout and rewrites `url`/`sha256` to point at it;
-2. puts the formula into a local tap (`brew tap-new`), then runs `brew install --build-from-source` and `brew test`;
-3. runs mpv in encode mode through the installed filter on a short public clip and checks the frame count.
+CI: `.github/workflows/apple.yml`, job `homebrew`, on macos-15: makes the three archives from the checkout, points a
+clone of this repository at them with `scripts/update-formula.py`, runs `brew tap CptPakundo/pushmpc <clone>` and
+`brew install pushmpc`, `brew test`, mpv in encode mode through the installed filter, and Plex for Mac through
+`pushmpc-setup` (install, the re-apply agent, uninstall bit for bit).

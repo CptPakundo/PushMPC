@@ -3,15 +3,18 @@
 # interpolation on any machine), the mpv script and `pushmpc-setup`, which puts the filter into ~/.config/mpv/mpv.conf
 # (and takes it out again exactly).
 #
-# For our own tap (not homebrew-core):
-#   brew tap pushmpc/tap <URL of the homebrew-pushmpc tap repository>
-#   brew install pushmpc/tap/pushmpc
-# The url / sha256 below point at the release tarball; CI (.github/workflows/apple.yml, job homebrew) installs this file from a local tap with
-# the checkout's own tarball (`brew install --build-from-source`), then runs `brew test`.
+# This repository is the tap (Homebrew looks in Formula/):
+#   brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
+#   brew install pushmpc
+#   pushmpc-setup install
+# url / version / sha256 and the release resources below are filled in by the release (scripts/update-formula.py, run by
+# release.yml's publish job on main once the assets exist). CI (.github/workflows/apple.yml, job homebrew) taps a clone
+# of this repository with the same script pointing at the checkout's own archives, then installs and tests.
 class Pushmpc < Formula
   desc "Frame generation and upscaling for mpv (VapourSynth filter)"
   homepage "https://github.com/CptPakundo/PushMPC"
-  url "https://github.com/CptPakundo/PushMPC/archive/refs/tags/v0.6.0.tar.gz"
+  url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-0.6.0-src.tar.gz"
+  version "0.6.0"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "GPL-3.0-or-later"
   head "https://github.com/CptPakundo/PushMPC.git", branch: "main"
@@ -35,7 +38,7 @@ class Pushmpc < Formula
   # PushMPC for Plex for Mac / Plex HTPC (mpv-native.yml builds it, release.yml attaches it): the universal proxy
   # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the self-test and
   # pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into Plex); pushmpc-setup
-  # unpacks it and puts it into the Plex apps. At release time set url / sha256 as for the tarball above
+  # unpacks it and puts it into the Plex apps. A release without that asset leaves this block out
   on_macos do
     resource "plex-mac" do
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
@@ -109,7 +112,7 @@ class Pushmpc < Formula
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
     (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
-    if OS.mac?
+    if OS.mac? && resources.any? { |r| r.name == "plex-mac" }
       (pkgshare/"plex-mac").mkpath
       # packed again as it came (an archive in the keg is neither relocated nor re-signed by Homebrew)
       resource("plex-mac").stage { system "tar", "-czf", pkgshare/"plex-mac/pushmpc-plex-mac.tar.gz", "." }
