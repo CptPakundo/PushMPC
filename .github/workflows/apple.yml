@@ -547,6 +547,15 @@ jobs:
           rc="$HOME/Library/Preferences/org.videolan.vlc/vlcrc"
           grep -E '^(video-filter|vout|pushmpc-smoother)=' "$rc" || { echo "::error::vlcrc has no PushMPC settings"; fails=$((fails + 1)); }
           ls "$HOME/Library/Application Support/PushMPC/vlc"
+          # VLC with VideoToolbox decoding: which path ran for CVPX pictures (zero copy into the apple engine, or the
+          # one-copy path and why); reported, not required (the hosted VMs cannot run VideoToolbox interpolation)
+          ffmpeg -v error -y -f lavfi -i testsrc2=size=640x360:rate=24:duration=3 -c:v h264_videotoolbox -b:v 2M "$RUNNER_TEMP/vt.mp4" 2>/dev/null \
+            || ffmpeg -v error -y -f lavfi -i testsrc2=size=640x360:rate=24:duration=3 -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/vt.mp4"
+          env VLC_PLUGIN_PATH="$HOME/Library/Application Support/PushMPC/vlc" perl -e 'alarm 60; exec @ARGV' /Applications/VLC.app/Contents/MacOS/VLC \
+            -I dummy --vout=dummy --no-audio --play-and-exit --codec=videotoolbox,avcodec --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 \
+            --file-logging --logfile="$RUNNER_TEMP/vlc-vt.log" --log-verbose=2 "$RUNNER_TEMP/vt.mp4" > /dev/null 2>&1 || true
+          vtpath=$(grep -oE 'zero copy on CVPX|CVPX zero copy (not used|stopped) \([^)]*\)|[A-Za-z0-9]{4} converted to [A-Za-z0-9]{4} in front of the engine' "$RUNNER_TEMP/vlc-vt.log" | head -2 | tr '\n' ' ')
+          echo "::notice title=VLC with VideoToolbox decoding::${vtpath:-no CVPX pictures reached PushMPC}; $(grep -o 'PushMPC: close, in=[0-9]* out=[0-9]* generated=[0-9]*' "$RUNNER_TEMP/vlc-vt.log" | tail -1)"
           pushmpc-setup uninstall 2>&1 | sed -n '/IINA and VLC:/,$p' | cut -c1-300
           [ "$(snap /Applications/IINA.app)" = "$iina0" ] && echo "IINA.app bit for bit as installed" || { echo "::error::IINA.app changed"; fails=$((fails + 1)); }
           [ "$(snap /Applications/VLC.app)" = "$vlc0" ] && echo "VLC.app bit for bit as installed" || { echo "::error::VLC.app changed"; fails=$((fails + 1)); }

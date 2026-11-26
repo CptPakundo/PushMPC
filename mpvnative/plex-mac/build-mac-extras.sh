@@ -26,6 +26,22 @@ else echo "::warning::no published SHA-256 for vlc-$vlcver-win64.7z (got $got)";
 7z x -y -o"$work/vlcwin" "$f" "vlc-$vlcver/sdk/include" >/dev/null
 inc="$work/vlcwin/vlc-$vlcver/sdk/include/vlc/plugins"
 sh "$root/vlcplugin/display/vlc3/fetch-vlc-sources.sh" "$work/vlc-src" >/dev/null
+# the CVPX zero copy mirrors VLC's private struct cvpxpic_ctx (vlcplugin/src/pm_cvpx.c): it must be the same text in
+# vt_utils.c at every tag the module allows (pm_cvpx.c PM_CVPX_MIN_REV..MAX_REV), and picture_context_t the same in
+# vlc_picture.h; otherwise the build stops (the allow-list or the mirror needs updating)
+norm() { tr -s ' \t\n' ' ' | sed 's/ *$//'; }
+ours=$(sed -n '/PM_CVPX_LAYOUT_BEGIN/,/PM_CVPX_LAYOUT_END/p' "$root/vlcplugin/src/pm_cvpx.c" | sed -n '/^struct cvpxpic_ctx/,/^};/p' | norm)
+[ -n "$ours" ] || { echo "::error::pm_cvpx.c: no mirrored layout"; exit 1; }
+for rev in 20 21 22 23 24; do
+    tag=3.0.$rev
+    vt=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/videolan/vlc/$tag/modules/codec/vt_utils.c") || { echo "::error::VLC $tag: vt_utils.c not fetched"; exit 1; }
+    theirs=$(printf '%s\n' "$vt" | sed -n '/^struct cvpxpic_ctx/,/^};/p' | norm)
+    [ "$theirs" = "$ours" ] || { echo "::error::VLC $tag: struct cvpxpic_ctx differs from pm_cvpx.c's mirror"; printf '%s\n' "$theirs"; exit 1; }
+    pc=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/videolan/vlc/$tag/include/vlc_picture.h" | sed -n '/^typedef struct picture_context_t/,/} picture_context_t;/p' | norm)
+    case $pc in *"void (*destroy)(struct picture_context_t *); struct picture_context_t *(*copy)(struct picture_context_t *); } picture_context_t;"*) ;;
+        *) echo "::error::VLC $tag: picture_context_t differs"; printf '%s\n' "$pc"; exit 1 ;; esac
+    echo "VLC $tag: the CVPX picture layout matches pm_cvpx.c"
+done
 cmake -S "$root/vlcplugin" -B "$work/vlc" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=$min -DVLC_PLUGIN_INCLUDE="$inc" -DPM_FETCH_GPU_DEPS=ON > "$work/vlc.log" 2>&1 \
     && cmake --build "$work/vlc" --target pushmpc_plugin pushmpc_macosx_plugin >> "$work/vlc.log" 2>&1 || { tail -40 "$work/vlc.log"; exit 1; }
