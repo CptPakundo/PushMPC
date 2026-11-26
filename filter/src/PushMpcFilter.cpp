@@ -53,6 +53,7 @@
 #include "pushmpc/pushcore_abi.h"
 #include "pushmpc/unlocks.h"            // T5b: vendor unlocks (off switches, self-test results)
 #include "pushmpc/content_detect.h"     // what the picture is (class per shot), interlacing and the frame interval, measured
+#include "PushMpcContentModel.h"         // the optional image model behind ContentDetect (pmml, its own thread)
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
@@ -1636,6 +1637,7 @@ public:
         // timed per step (RC1 F7: one close took 9.2 s; the exit helper's line says how long after these steps it ran)
         const int64_t q0 = Qpc();
         ExitMark("filter teardown started");
+        StopContent();   // ContentDetect's worker (the image model's thread ends with m_contentModel)
         if (!m_showKey.empty() && pm::CurrentShow() == m_showKey) pm::SetCurrentShow({});   // round 5: no show playing now
         StopThreads();
         const int64_t q1 = Qpc();
@@ -2074,7 +2076,7 @@ public:
             m_typeIlFlags = il;
             m_inInterlaced = m_typeInterlaced && (il & AMINTERLACE_1FieldPerSample) != 0;
             m_ilDecided = false; m_ilSeen = m_ilCount = 0; m_comb.Reset();   // interlacing: measured in the picture (CheckInterlace)
-            m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentLogged = -1;
+            StopContent(); m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentLogged = -1;
             m_baseStepMs = 0; m_ptsStepMs = 0; m_tracker = pm::StepTracker{}; m_trackReset = false; m_openFps = 0; m_reopenForRate = false; m_openDeferred = false;   // a new stream: measured again
             m_inArX = ax; m_inArY = ay;
             DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;
@@ -2146,7 +2148,7 @@ public:
     {
         if (dir == PINDIR_INPUT) {
             if (!m_teardownTail.watch && m_openStarted) m_teardownTail.watch = StartTeardownWatch();   // RC2 F2: a stuck close explains itself
-            StopThreads(); StopWatcher(); StopAuto(); CloseCore(); m_openStarted = false; m_openDeferred = false; m_mode = Mode::None; m_bitrateProbed = false;
+            StopThreads(); StopWatcher(); StopAuto(); StopContent(); CloseCore(); m_openStarted = false; m_openDeferred = false; m_mode = Mode::None; m_bitrateProbed = false;
         }
         if (dir == PINDIR_OUTPUT) { Out()->ours = nullptr; m_down.Reset(); }
         return S_OK;
@@ -2887,6 +2889,16 @@ private:
     std::atomic<float> m_contentConf = 0.f;
     int m_contentLogged = -1;
     void MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc);
+    // ContentDetect runs on its own thread (~8 ms a 1080p frame, up to ~27 ms when a window is evaluated, measured): the
+    // streaming thread only makes the cell grid and hands it over (a full queue drops frames: a discontinuity there)
+    struct ContentJob { pushmpc::content::Cells cells; double t = 0; bool disc = false; };
+    std::mutex m_cdMx; std::condition_variable m_cdCv; std::deque<ContentJob> m_cdQueue; std::thread m_cdThread; bool m_cdStop = false;
+    void ContentLoop();
+    void StopContent() { { std::lock_guard<std::mutex> lk(m_cdMx); m_cdStop = true; } m_cdCv.notify_all(); if (m_cdThread.joinable()) m_cdThread.join(); m_cdStop = false; m_cdQueue.clear(); }
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+    std::unique_ptr<pm::ContentModel> m_contentModel;   // created at the first sample, gone with the filter
+    double m_contentModelNext = -1;
+#endif
     bool m_showLooked = false;
     std::wstring m_showKey;                     // round 5: this file's show (PushMpcShows.h), empty = none
     std::atomic<int> m_showChoice = -1;
@@ -5226,27 +5238,63 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
 // (NV12 or P010, ~0.5 ms at 1080p), its timestamp; the class goes to Auto through m_contentClass (no names, no flags)
 void CPushMpcFilter::MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc)
 {
-    if (m_contentDisc.exchange(false) || disc) m_content.Discontinuity();
+    const bool d = m_contentDisc.exchange(false) || disc;
     BYTE* src = nullptr;
     if (FAILED(pIn->GetPointer(&src)) || !src || pIn->GetActualDataLength() < LONG(m_inStride * m_inH * 3 / 2) || m_inW < 16 || m_inH < 16) return;
     using namespace pushmpc::content;
     const bool limited = true;   // LAV's NV12 / P010 output is video range
-    const Cells c = m_inP010
+    ContentJob job;
+    job.t = double(pts) / 1e7; job.disc = d;
+    job.cells = m_inP010
         ? CellsFromYuv(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), reinterpret_cast<const uint16_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint16_t*>(nullptr),
                        ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 16, limited)
         : CellsFromYuv(static_cast<const uint8_t*>(src), ptrdiff_t(m_inStride), static_cast<const uint8_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint8_t*>(nullptr),
                        ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 8, limited);
-    if (!m_content.Push(c, double(pts) / 1e7)) return;
-    const State& st = m_content.Current();
-    m_contentConf = st.confidence;
-    if (st.cls != m_contentClass.load()) {
-        m_contentClass = st.cls;
-        // the Auto thread re-decides on its next tick (<= 1 s); the class changes at most once per 2 s (hysteresis)
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+    {   // the image model's evidence: a 224x224 thumbnail about once a second, run on the model's own thread
+        if (!m_contentModel) m_contentModel = std::make_unique<pm::ContentModel>([this](const std::string& m) { Log(m); });
+        if (!m_contentModel->Failed() && (m_contentModelNext < 0 || job.t >= m_contentModelNext || job.t < m_contentModelNext - 5.0)) {
+            m_contentModelNext = job.t + 1.0;
+            auto in = m_inP010
+                ? ClipInput(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), reinterpret_cast<const uint16_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint16_t*>(nullptr),
+                            ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 16, limited)
+                : ClipInput(static_cast<const uint8_t*>(src), ptrdiff_t(m_inStride), static_cast<const uint8_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint8_t*>(nullptr),
+                            ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 8, limited);
+            if (!in.empty()) m_contentModel->Offer(std::move(in), job.t);
+        }
     }
-    if (st.cls != m_contentLogged) {
-        m_contentLogged = st.cls;
-        Log(std::format("content: {} ({:.0f} %), measured in the picture at {:.1f} s; probabilities drawn {:.2f} CG {:.2f} live {:.2f} game {:.2f}; class changes so far {}",
-                        ClassName(st.cls), 100.0 * st.confidence, double(pts) / 1e7, st.prob[kDrawn], st.prob[kCg], st.prob[kLive], st.prob[kGame], st.changes));
+#endif
+    std::lock_guard<std::mutex> lk(m_cdMx);
+    if (!m_cdThread.joinable()) m_cdThread = std::thread([this] { ContentLoop(); });
+    if (m_cdQueue.size() >= 8) { m_cdQueue.clear(); job.disc = true; }   // the detector fell behind: a gap
+    m_cdQueue.push_back(std::move(job));
+    m_cdCv.notify_all();
+}
+void CPushMpcFilter::ContentLoop()
+{
+    using namespace pushmpc::content;
+    while (true) {
+        ContentJob job;
+        {
+            std::unique_lock<std::mutex> lk(m_cdMx);
+            m_cdCv.wait(lk, [&] { return m_cdStop || !m_cdQueue.empty(); });
+            if (m_cdStop) return;
+            job = std::move(m_cdQueue.front()); m_cdQueue.pop_front();
+        }
+        if (job.disc) m_content.Discontinuity();
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+        double p, pt;
+        if (m_contentModel && m_contentModel->Take(p, pt)) m_content.SetImageEvidence(p, pt);
+#endif
+        if (!m_content.Push(job.cells, job.t)) continue;
+        const State& st = m_content.Current();
+        m_contentConf = st.confidence;
+        if (st.cls != m_contentClass.load()) m_contentClass = st.cls;   // the Auto thread re-decides on its next tick (<= 1 s)
+        if (st.cls != m_contentLogged) {
+            m_contentLogged = st.cls;
+            Log(std::format("content: {} ({:.0f} %), measured in the picture at {:.1f} s; drawn probability {:.2f}, evidence {:.1f}{}; class changes so far {}",
+                            ClassName(st.cls), 100.0 * st.confidence, job.t, st.drawnShare, st.logOdds, st.imageEvidence ? " (with the image model)" : " (hand-built cues only)", st.changes));
+        }
     }
 }
 // The user's own animation-mode choice for this show (a preference store addressed by the series folder; nothing is

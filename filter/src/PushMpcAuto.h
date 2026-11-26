@@ -75,9 +75,9 @@ struct Source {
     int showChoice = -1;      // the user's own mode for this show (0 Full, 1 Camera only, 2 Off; -1 none): a preference, not detection
 };
 // Animation (cartoons, anime) is found in the picture, never from a file or folder name: ContentDetect's class (held cels
-// between drawing steps, hold lengths, flat colour and line statistics, measured per shot), else, before its first
-// decision, pushcore's whole-frame held share (a quarter to two thirds of a TV episode's frames repeat the drawing
-// before them; live action and 3D CG at 24 distinct frames have almost none).
+// between drawing steps, hold lengths, flat colour, line and palette statistics, measured with evidence that builds up
+// per shot). Before it has decided, Auto keeps the animation extras off. kAnimationHeldShare is pushcore's whole-frame
+// held share, kept for the log only.
 inline constexpr double kAnimationHeldShare = 0.20;
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
@@ -567,8 +567,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         static const wchar_t* kWhat[5] = { L"", L"", L"3D CG animation", L"live action", L"game footage" };
         r.animation = false; r.animNote = std::format(L"off, {} measured in the picture ({:.0f} %); held frames are still re-timed", kWhat[src.contentClass], 100.0 * src.contentConf);
     }
-    else if (src.heldShare >= kAnimationHeldShare) { r.animation = true; r.animNote = std::format(L"on, held drawings found ({:.0f} % of frames)", 100.0 * std::min(1.0, src.heldShare)); }
-    else { r.animation = false; r.animNote = src.heldShare >= 0 ? std::format(L"off, no held drawings ({:.0f} % of frames); held frames are still re-timed", 100.0 * src.heldShare) : L"Auto, measuring"; }
+    // not decided yet: off (the safe side: line art, sign hold, the anime deband preset and upscaler stay off; held
+    // frames are still re-timed by pushcore's own partial-hold gate). The whole-frame held share alone called 4K live
+    // action "animation" on 62 % of its run time in the round-2 corpus, so it is no longer a decision input.
+    else { r.animation = false; r.animNote = L"Auto, measuring (off until the picture is measured as drawn animation)"; }
     // --- the animation mode (round 5): the setting, else the user's own choice for this show, else Auto's default
     {
         static const wchar_t* kModeName[3] = { L"Full", L"Camera only", L"Off" };

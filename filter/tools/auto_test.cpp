@@ -329,12 +329,12 @@ int main()
             Settings off; off.animation = kOff; Settings on; on.animation = 1;
             const Choice a = Decide({}, held, d, {}, g), b = Decide({}, live, d, {}, g), c2 = Decide({}, hint, d, {}, g), e = Decide(off, held, d, {}, g), f = Decide(on, live, d, {}, g);
             const Choice lh = Decide({}, liveHeld, d, {}, g);
-            check(a.animation && !b.animation && c2.animation && !lh.animation && !e.animation && f.animation, L"Animation Auto: the measured class (else held share >= 20 %); Off / On fixed",
+            check(!a.animation && !b.animation && c2.animation && !lh.animation && !e.animation && f.animation, L"Animation Auto: the measured class only (held share alone: off until measured); Off / On fixed",
                   a.animNote + L" | " + c2.animNote + L" | " + lh.animNote);
-            check(a.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
-                  std::wstring(FgMethodLabel(a.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
+            check(c2.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
+                  std::wstring(FgMethodLabel(c2.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
             // round 5: the animation mode (Auto = Full until the verdict; the user's choice for the show; the setting)
-            Source tv = held; Source picked = held; picked.showChoice = 1;
+            Source tv = hint; Source picked = hint; picked.showChoice = 1;
             Settings cam; cam.animMode = 1; Settings noTrans; noTrans.holdTransients = kOff;
             const Choice m1 = Decide({}, tv, d, {}, g), m2 = Decide({}, picked, d, {}, g), m3 = Decide(cam, picked, d, {}, g), m4 = Decide(noTrans, live, d, {}, g), m5 = Decide({}, live, d, {}, g);
             check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full until the verdict, the user's choice for a show is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
@@ -359,7 +359,7 @@ int main()
             }
             // round 5 (item 5): deband Auto on 8-bit animation whatever the bitrate (anime preset; Low from Blu-ray class);
             // live action keeps the bitrate rule; 10-bit animation stays off
-            Source an = held; an.bppEq = 0.3; Source anBd = held; anBd.bppEq = 0.6; Source lv = live; lv.bppEq = 0.3; Source an10 = an; an10.tenBit = true;
+            Source an = hint; an.bppEq = 0.3; Source anBd = hint; anBd.bppEq = 0.6; Source lv = live; lv.bppEq = 0.3; Source an10 = an; an10.tenBit = true;
             const Choice d1 = Decide({}, an, d, {}, g), d2 = Decide({}, anBd, d, {}, g), d3 = Decide({}, lv, d, {}, g), d4 = Decide({}, an10, d, {}, g);
             check(d1.deband && d1.debandStrength == 3 && d2.deband && d2.debandStrength == 0 && !d3.deband && !d4.deband,
                   L"deband Auto: 8-bit animation on at any bitrate (anime preset, Low from 0.5 bpp), live action by bitrate, 10-bit off",
@@ -446,10 +446,10 @@ int main()
             const Gpu rdna3 = withAnime(Family(kRdna3, L"AMD Radeon RX 7900 XTX")), rtx50 = withAnime(Family(kRtx50, L"NVIDIA GeForce RTX 5090"));
             const Gpu rdnaNo = Family(kRdna3, L"AMD Radeon RX 7900 XTX");   // anime models not installed
             Display d; d.refreshHz = 240; d.width = 3840; d.height = 2160;
-            Source bd{ 1920, 1080, 23.976, false, 0.5 }; bd.heldShare = 0.4;
+            Source bd{ 1920, 1080, 23.976, false, 0.5 }; bd.heldShare = 0.4; bd.contentClass = 1; bd.contentConf = 0.9f;   // measured drawn
             Source dvd = bd; dvd.w = 720; dvd.h = 480;
             Source p720 = bd; p720.w = 1280; p720.h = 720;
-            Source live = bd; live.heldShare = 0.01;
+            Source live = bd; live.heldShare = 0.01; live.contentClass = 3;
             Source uhd = bd; uhd.w = 3840; uhd.h = 2160;
             const Choice a = Decide({}, bd, d, {}, rdna3);
             check(a.srMethod == Upscaler::Anime && (a.animeModel == 3 || a.animeModel == 0), L"anime SR: 1080p animation on a GPU without RTX VSR: ArtCNN C (the best that fits)", a.animeSrNote);

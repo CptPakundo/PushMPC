@@ -27,6 +27,14 @@ target_compile_options(PushMpcFilter PRIVATE /W3 /EHsc /O2 /Z7 /utf-8)
 target_link_options(PushMpcFilter PRIVATE /DEBUG /OPT:REF /PDBALTPATH:%_PDB%)  # only the PDB file name in the binary, no build path
 target_link_libraries(PushMpcFilter PRIVATE baseclasses strmiids winmm avrt version d3d11 dxgi d3dcompiler dxguid advapi32 ole32 oleaut32 user32 shell32 uuid comctl32 bcrypt gdi32)
 
+# The optional image model behind ContentDetect (PushMpcContentModel.h): pmml (../pmml) when the ONNX Runtime headers are
+# given (-DPMML_ORT_INCLUDE=...); without them the filter uses the hand-built cues only
+if(PMML_ORT_INCLUDE)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/../pmml" pmml)
+  target_link_libraries(PushMpcFilter PRIVATE pmml)
+  target_compile_definitions(PushMpcFilter PRIVATE PUSHMPC_CONTENT_MODEL=1)
+endif()
+
 # PushMpcExit.dll: skips the DLL detach handlers of an exiting process (see src/PushMpcExit.cpp); deployed next to the .ax
 add_library(PushMpcExit SHARED src/PushMpcExit.cpp)
 set_target_properties(PushMpcExit PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/bin")

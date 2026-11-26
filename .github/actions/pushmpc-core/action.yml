@@ -489,7 +489,7 @@ runs:
         LDFLAGS: /Brepro
       run: |
         $cc = @("-DCMAKE_C_COMPILER_LAUNCHER=$env:SCCACHE_EXE", "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:SCCACHE_EXE")
-        cmake -S repo/filter -B "$env:RUNNER_TEMP\filter-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc "-DPUSHMPC_MPCVR_DIR=$env:GITHUB_WORKSPACE\MpcVideoRenderer"
+        cmake -S repo/filter -B "$env:RUNNER_TEMP\filter-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc "-DPUSHMPC_MPCVR_DIR=$env:GITHUB_WORKSPACE\MpcVideoRenderer" "-DPMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build "$env:RUNNER_TEMP\filter-build" --parallel
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

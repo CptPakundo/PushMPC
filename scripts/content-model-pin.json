@@ -1,0 +1,15 @@
+{
+ "_comment": "ContentDetect's optional image model (pushmpc/content_detect.h, filter/src/PushMpcContentModel.h): CLIP ViT-B/32's image encoder (OpenAI CLIP, MIT), ONNX export from the Xenova/clip-vit-base-patch32 repository (MIT) at a fixed commit. Fetched by Setup (scripts/content-model-fetch via anime-models-fetch.ps1), checked by size and SHA-256; a mismatch is refused. Without it, ContentDetect uses its hand-built cues only.",
+ "schema": 1,
+ "folder": "content-model",
+ "files": [
+  {
+   "name": "vision_model_fp16.onnx",
+   "component": "clip-vit-b32",
+   "url": "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/6b7c523703ae26e39be4b03774966f8571c7f523/onnx/vision_model_fp16.onnx",
+   "size": 176080659,
+   "sha256": "35c4e0fb0aeee527dcde1693520b214a34424a786babd530f35366bad5844efd",
+   "licence": "MIT"
+  }
+ ]
+}

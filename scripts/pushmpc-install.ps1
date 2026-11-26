@@ -1706,7 +1706,7 @@ function Invoke-Stage {
     foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1', 'dlssg-port-fetch.ps1', 'helixsr-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1', 'pushmpc-libmpv.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the anime upscalers: the pinned fetch and the graphs (no weights: Setup fetches those)
-    foreach ($x in 'anime-models-fetch.ps1', 'anime-models-pin.json') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'anime-models-fetch.ps1', 'anime-models-pin.json', 'content-model-pin.json') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     $pg = $PmmlGraphs
     if (-not $pg -and $env:PUSHFLOW_PYTHON) {
         $pg = Join-Path ([IO.Path]::GetTempPath()) 'pushmpc-pmml-graphs'
@@ -2694,6 +2694,23 @@ function Install-AnimeUpscalers($state) {
     if ($rc -ne 0) { Warn "anime upscalers: some files were not installed (exit $rc); the ones that are run, Auto skips the rest; run Repair to try again" }
     Set-StateValue $state 'animeModels' ((Get-Content -LiteralPath $pin -Raw | ConvertFrom-Json).files.Count)
 }
+# ContentDetect's image model (CLIP ViT-B/32 image encoder, MIT, 168 MB, pinned by size and SHA-256) into <InstallDir>\pmml\content-model:
+# the drawn-vs-not evidence that makes Auto's animation detection reliable; without it the hand-built cues decide alone
+function Install-ContentModel($state) {
+    $dest = Join-Path $InstallDir 'pmml\content-model'
+    $fetch = $null; $pin = $null
+    foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) {
+        if (-not $fetch -and (Test-Path -LiteralPath (Join-Path $d 'anime-models-fetch.ps1')) -and (Test-Path -LiteralPath (Join-Path $d 'content-model-pin.json'))) { $fetch = Join-Path $d 'anime-models-fetch.ps1'; $pin = Join-Path $d 'content-model-pin.json' }
+    }
+    if (-not $fetch) { Warn 'content model: the fetch script or its pin is not in this release: not installed (animation is detected with the hand-built cues)'; return }
+    Info 'content model: CLIP ViT-B/32 image encoder (OpenAI, MIT), pinned by SHA-256'
+    if ($DryRun) { Dry "would fetch the content model into $dest"; return }
+    $out = & $fetch -Pin $pin -Dest $dest -Cache (Join-Path $InstallDir 'download\content-model') 2>&1
+    $rc = $LASTEXITCODE
+    foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|anime-models)') { Info "  $l" } }
+    if ($rc -ne 0) { Warn "content model: not installed (exit $rc); animation is detected with the hand-built cues; run Repair to try again" }
+    else { Set-StateValue $state 'contentModel' 1 }
+}
 function Install-PmmlRuntime($state) {
     $dir = Join-Path $InstallDir 'pmml'
     $gi = Get-GpuInfo
@@ -3495,6 +3512,7 @@ switch ($Action) {
         Set-PotPlayerEntry $state
         # before the Kodi, Plex and mpv routes: their settings name the anime shaders when they are there
         Step 'Anime upscalers (ArtCNN, CuNNy, AnimeSR)'
+        try { Install-ContentModel $state } catch { Warn "content model: not installed ($($_.Exception.Message))" }
         try { Install-AnimeUpscalers $state } catch { Warn "anime upscalers: not installed ($($_.Exception.Message)); RTX VSR / FSR stay the upscalers" }
         Step 'Kodi (the PushMPC add-on)'
         try { Install-KodiRoute $state } catch { Warn "Kodi add-on: not installed ($($_.Exception.Message))" }

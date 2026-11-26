@@ -33,7 +33,7 @@ static Pic Make(int kind, double t, double drawT, int frame, std::mt19937& rng)
             if (kind == 0) {   // drawn: flat bands of colour with dark lines, panning; character on twos
                 const int xx = x + pan;   // non-periodic flat patches (a painted background), dark outlines
                 const uint32_t hsh = uint32_t(xx / 90) * 2654435761u ^ uint32_t(y / 70) * 40503u;
-                v = 60.f + float((hsh >> 7) % 160u);
+                v = 60.f + 20.f * float((hsh >> 7) % 8u);   // a painted background: few flat tones
                 if (xx % 90 < 3 || y % 70 < 3) v = 30.f;
                 if (x >= bx && x < bx + 140 && y >= 180 && y < 420) v = (x - bx < 4 || bx + 140 - x <= 4 || y - 180 < 4 || 420 - y <= 4) ? 20.f : 200.f;
             } else {          // live / game: texture that moves differently everywhere, every frame (no single camera shift)
@@ -68,13 +68,14 @@ int main()
         ContentDetector a, b, c;
         const State sa = Run(0, 23.976, 2, 96, a), sb = Run(1, 23.976, 1, 96, b), sc = Run(2, 60.0, 1, 240, c);
         char buf[256];
-        std::snprintf(buf, sizeof buf, "drawn: hold %.2f twos %.2f flat %.2f / live: hold %.2f flat %.2f noise %.2f", sa.feat[fHold], sa.feat[fTwos], sa.feat[fFlat], sb.feat[fHold], sb.feat[fFlat], sb.feat[fNoise]);
+        std::snprintf(buf, sizeof buf, "drawn: hold %.2f twos %.2f flat %.2f / live: hold %.2f flat %.2f noise %.2f", sa.feat[fHold], sa.feat[fTwos], sa.feat[fAFlat], sb.feat[fHold], sb.feat[fAFlat], sb.feat[fANoise]);
         Check(sa.windows > 0 && sb.windows > 0 && sc.windows > 0, "windows evaluated on every synthetic clip");
         Check(sa.feat[fHold] > sb.feat[fHold] + 0.3f, "partial holds: a character on twos over a pan holds its cels between drawings, non-rigid live motion changes every frame", buf);
-        Check(sa.feat[fFlat] > sb.feat[fFlat], "flat colour: the drawn picture is flatter than the textured one", buf);
+        Check(sa.feat[fAFlat] > sb.feat[fAFlat] + 0.3f, "appearance: the drawn picture is flat where the textured one is not (both grey: the palette is not tested here)", buf);
+        Check(sa.feat[fAStep] > sb.feat[fAStep] && sa.feat[fALine] > 0.01f, "appearance: step edges and dark outlines on the drawn picture", std::to_string(sa.feat[fAStep]) + " vs " + std::to_string(sb.feat[fAStep]) + ", lines " + std::to_string(sa.feat[fALine]));
         Check(sa.feat[fCam] > 0.5f, "the camera pan is taken out (phase correlation)", std::to_string(sa.feat[fCam]));
-        Check(sc.feat[fFps60] == 1.f && sb.feat[fFps60] == 0.f, "frame rate from the timestamps: 60 fps vs 23.976");
-        Check(sc.feat[fHud] > 0.f && sb.feat[fHud] == 0.f, "a fixed textured overlay in a moving picture (HUD) is found", std::to_string(sc.feat[fHud]) + " chg " + std::to_string(sc.feat[fChg]) + " active " + std::to_string(sc.feat[fActive]));
+        Check(std::fabs(sc.feat[fFps] - 60.f) < 0.5f && std::fabs(sb.feat[fFps] - 23.976f) < 0.5f, "frame rate from the timestamps: 60 fps vs 23.976", std::to_string(sc.feat[fFps]));
+        Check(sb.feat[fTnoise] >= 0.f, "the temporal noise floor of still cells is measured", std::to_string(sb.feat[fTnoise]));
         ContentDetector e;
         Run(0, 23.976, 2, 30, e); e.Discontinuity();
         Check(e.Current().windows > 0, "a discontinuity keeps the decision state (same title)");
@@ -93,6 +94,18 @@ int main()
         std::snprintf(buf, sizeof buf, "%d traces, %d rows: %d same decisions; decided rows right %d of %d", traces, rows, same, right, decided);
         Check(rows > 0 && same >= rows * 97 / 100, "replay: C++ classifier + tracker = reference decisions on measured traces (>= 97 % of rows)", buf);
         Check(decided > 0 && right >= decided * 80 / 100, "replay: decided class right on >= 80 % of rows (a consistency check: the shipped model was trained on these titles; held-out accuracy is measured offline)", buf);
+    }
+    {   // 2b. the image model's evidence (zero-shot against the prompt embeddings) and its weight in the tracker
+        const double pd = ImageDrawnProbability(clip::kPrompt[0]), po = ImageDrawnProbability(clip::kPrompt[clip::kPromptsDrawn]);
+        Check(pd > 0.6 && po < 0.4, "image model: a drawn prompt's own embedding reads as drawn, an other prompt's as not", std::to_string(pd) + " / " + std::to_string(po));
+        std::vector<uint8_t> yy(640 * 360, 100), uv(640 * 180, 128);
+        const auto in = ClipInput(yy.data(), 640, uv.data(), static_cast<const uint8_t*>(nullptr), 640, 640, 360, 8, true);
+        Check(in.size() == 3 * 224 * 224, "image model input: 3 x 224 x 224 floats");
+        ContentDetector d; float x[kFeatureCount] = {};
+        for (int i = 0; i < 20; ++i) { const double t = 1.0 + 0.5 * i; d.SetImageEvidence(0.995, t); d.Classify(x, t, 0); }
+        Check(d.Current().cls == kDrawn && d.Current().imageEvidence, "a steady drawn image evidence decides drawn", std::to_string(d.Current().logOdds));
+        ContentDetector e; for (int i = 0; i < 20; ++i) { const double t = 1.0 + 0.5 * i; e.SetImageEvidence(0.01, t); e.Classify(x, t, 0); }
+        Check(e.Current().cls == kOther, "a steady not-drawn image evidence decides not drawn", std::to_string(e.Current().logOdds));
     }
     {   // 3. interlacing and frame interval
         const int w = 720, h = 480;
