@@ -698,8 +698,38 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: 'pushmpc-linux-${{ matrix.arch }}', path: dist/, if-no-files-found: error }
 
+  # Plex for Mac / Plex HTPC: pushmpc-plex-mac-<version>.tar.gz, the bundle mpv-native.yml built and tested on macOS
+  # (universal proxy libavfilter.8.dylib, the vf_pushmpc builds, the engines: VideoToolbox, Vulkan on MoltenVK, CPU;
+  # the self-test and pushmpc-plex-mac.sh). The Homebrew formula's plex-mac resource; pushmpc-setup installs it into
+  # the Plex apps. A failure there leaves it out of the release, nothing else.
+  macos:
+    needs: [mpvnative]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: filter/src, persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: plexmac, path: plexmac }
+      - name: pushmpc-plex-mac-<version>.tar.gz
+        run: |
+          ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
+          mkdir -p dist
+          if [ -f plexmac/pushmpc-plex-mac.sh ] && [ -f plexmac/libavfilter.8.dylib ]; then
+            chmod +x plexmac/pushmpc-plex-selftest plexmac/pushmpc-plex-mac.sh   # artifacts drop the exec bits
+            tar -czf "dist/pushmpc-plex-mac-$ver.tar.gz" -C plexmac .
+            tar -tzvf "dist/pushmpc-plex-mac-$ver.tar.gz"
+            shasum -a 256 "dist/pushmpc-plex-mac-$ver.tar.gz"
+          else
+            echo "::warning title=Plex for Mac::no plexmac artifact (mpv-native.yml plex-macos): the release has no Plex for Mac bundle"
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: pushmpc-macos, path: dist/, if-no-files-found: ignore }
+
   publish:
-    needs: [build, gpu-smoke, linux]
+    needs: [build, gpu-smoke, linux, macos]
     if: ${{ always() && needs.build.result == 'success' && needs.linux.result == 'success' && needs.build.outputs.tag != '' && inputs.dry_run != true && (needs.gpu-smoke.result == 'success' || needs.gpu-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -718,6 +748,9 @@ jobs:
           pattern: pushmpc-linux-*
           path: release
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # a release without the Plex for Mac bundle still goes out
+        with: { name: pushmpc-macos, path: release }
       # the release body: docs/release-notes-<version>.md of the built commit when it exists, else the text below
       - uses: actions/checkout@v4
         with:

@@ -7,6 +7,9 @@ All components are free software; the build uses no --enable-nonfree option and 
                               repository under mpvnative/ffmpeg
   libplacebo 7.387.0          LGPL-2.1-or-later  https://code.videolan.org/videolan/libplacebo (when built here)
   pushmpc_engine              GPL-3.0-or-later   this repository, mpvnative/engine (PushFPS portable core: GPL-3)
+  macOS GPU engines           pushmpc_engine_apple (GPL-3.0-or-later, this repository: mpvnative/engine,
+                              vsplugin/engines/apple; uses Apple's VideoToolbox and Metal); MoltenVK (Apache-2.0,
+                              https://github.com/KhronosGroup/MoltenVK, the release pinned in vsplugin/engines/gpu/gpu-pins.json)
   Windows: MinGW-w64 runtime and MSYS2 UCRT64 libraries (libass, freetype, harfbuzz, fribidi, luajit, zlib, lcms2,
   shaderc, spirv-cross, vulkan-loader, ...) under their own free licences; sources at https://packages.msys2.org
 The exact commits are pinned in mpvnative/pins.json; the build script is mpvnative/ci/build-unix.sh.

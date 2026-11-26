@@ -16,6 +16,11 @@ on:
   # release.yml builds the release's native hook, mpv and the Plex proxy through this workflow (artifacts
   # mpvnative-hook-<runner>, mpvnative-windows, plexnative)
   workflow_call:
+    inputs:
+      release:
+        description: 'a release build (release.yml): also the Plex for Mac bundle (artifact plexmac)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -27,12 +32,12 @@ on:
         type: boolean
         default: false
       plex_macos:
-        description: 'also run the Plex for Mac inspection job'
+        description: 'also run the Plex for Mac job (build, install into both apps, self-test, launch)'
         type: boolean
         default: false
 
 concurrency:
-  group: mpv-native-${{ github.ref }}
+  group: mpv-native-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -511,6 +516,32 @@ jobs:
             $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' -and $_.detail -match ', x2' }).Count
             if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::$hostExe`: install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; $fails++ }
           }
+          # after a Plex update (Plex writes its own avfilter-8.dll again; our builds and engine stay in the folder) and
+          # after a PushMPC upgrade (an older proxy of ours in place): reapply / install, then uninstall must give the
+          # stock folder back bit for bit (powershell.exe 5.1, as Setup runs it)
+          foreach ($case in 'plex-update', 'pushmpc-upgrade') {
+            Write-Host "===== $case"
+            $before = Snap
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" install -From $p -NoConf -Json | Out-Null
+            foreach ($d in $dirs) {
+              $key = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
+              if ($case -eq 'plex-update') { Copy-Item "$env:ProgramData\PushMPC\plex-native\$key\avfilter-8.dll" "$d\avfilter-8.dll" -Force }
+              else { [IO.File]::AppendAllText("$d\avfilter-8.dll", 'older-proxy') }   # still our proxy, another version
+            }
+            $verb = if ($case -eq 'plex-update') { 'reapply' } else { 'install' }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" $verb -From $p -NoConf -Json | ForEach-Object { Write-Host "$verb`: $_" }
+            foreach ($d in $dirs) {
+              $key = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
+              $listed = @(Get-Content "$env:ProgramData\PushMPC\plex-native\$key\added.txt")
+              foreach ($f in @(Get-ChildItem $p -Filter 'pushmpc-avfilter-8.*.dll').Name + 'pushmpc_engine.dll') {
+                if ($listed -notcontains $f) { Write-Host "::error::$case`: $key added.txt lacks $f"; $fails++ }
+              }
+            }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json | ForEach-Object { Write-Host "uninstall: $_" }
+            $diff = Compare-Object $before (Snap)
+            if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host "::error::$case`: the Plex folders are not stock after uninstall"; $fails++ }
+            else { Write-Host "$case`: Plex folders bit for bit stock after uninstall" }
+          }
           if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 4 | ForEach-Object { Write-Host "proxy log: $_" } }
           if ($fails) { exit 1 }
           Write-Host 'plex: all checks passed under Windows PowerShell 5.1 and PowerShell 7'
@@ -579,9 +610,13 @@ jobs:
   # dylibs (libavfilter.8.dylib = 8.29.100). Proxy libavfilter.8.dylib in Contents/Frameworks; self-test through Plex's
   # libmpv, a real launch of the modified app, uninstall bit-exact. Dispatch only (plex_macos input).
   plex-macos:
-    if: github.event_name == 'workflow_dispatch' && inputs.plex_macos
-    runs-on: macos-15
-    timeout-minutes: 45
+    if: inputs.release || (github.event_name == 'workflow_dispatch' && inputs.plex_macos)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: Build the Mac pieces (8.29.100 filter build, proxy, engine, self-test host)
@@ -609,7 +644,9 @@ jobs:
         timeout-minutes: 20
         run: |
           set +e; p="$RUNNER_TEMP/plexmac"; fails=0
+          export PUSHMPC_ENGINE_LOG="$RUNNER_TEMP/engine.log"
           cp mpvnative/install/pushmpc-plex-mac.sh "$p/"
+          sw_vers | tr '\n' ' '; sysctl -n machdep.cpu.brand_string; system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Chipset|Metal' | head -3
           for t in 'desktop:Plex.app:Plex' 'htpc:Plex HTPC.app:Plex HTPC'; do
             n=${t%%:*}; r=${t#*:}; a="$RUNNER_TEMP/apps/${r%%:*}"; exe=${r##*:}
             [ -d "$a" ] || { echo "::error::$a missing"; fails=$((fails + 1)); continue; }
@@ -622,6 +659,11 @@ jobs:
               || { echo "::error::$n: install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
             grep -c 'PushMPC native (Plex): do not edit' "$HOME/Library/Application Support/$exe/mpv.conf"
             echo "status: $(sh "$p/pushmpc-plex-mac.sh" status --app $n --app-path "$a" --from "$p" --json)"
+            # each engine on its own through Plex's libmpv (Auto above picked the best that runs here)
+            for be in apple portable-vulkan portable-cpu; do
+              PUSHMPC_HOST_VF="pushmpc=smoother=2:backend=$be" DYLD_LIBRARY_PATH="$a/Contents/Frameworks" "$p/pushmpc-plex-selftest" "$a/Contents/Frameworks/libmpv.2.dylib" 2>&1                 | grep -E '^host: .*(filter:|end of file)' | sed "s/^/  backend=$be: /" | cut -c1-400
+            done
+            echo "engine log (why an engine was not used):"; grep -E 'not used|open:' "$PUSHMPC_ENGINE_LOG" 2>/dev/null | sort | uniq -c | cut -c1-400
             # the real app with the proxy in place: it must start and load the proxy chain
             open -n "$a"; sleep 25
             pid=$(pgrep -x "$exe" | head -1)
@@ -637,5 +679,25 @@ jobs:
             echo "uninstall: $(sh "$p/pushmpc-plex-mac.sh" uninstall --app $n --app-path "$a" --from "$p" --json)"
             after=$(snap)
             [ "$after" = "$before" ] && echo "$n: bundle and mpv.conf restored bit for bit" || { echo "$before"; echo "$after"; echo "::error::$n: bundle or mpv.conf differ after uninstall"; fails=$((fails + 1)); }
+            # a Plex update writing its own libavfilter.8.dylib again, and a PushMPC upgrade over an older proxy of ours:
+            # install again, then uninstall must give the stock bundle back bit for bit
+            for case in plex-update pushmpc-upgrade; do
+              fw="$a/Contents/Frameworks"; bk="$HOME/Library/Application Support/PushMPC/plex-native/$n"
+              before=$(snap)
+              sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json > /dev/null
+              if [ $case = plex-update ]; then cp "$bk/libavfilter.8.dylib" "$fw/libavfilter.8.dylib"; else printf 'older-proxy' >> "$fw/libavfilter.8.dylib"; fi
+              echo "$case install: $(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json | cut -c1-200)"
+              for f in "$p"/pushmpc-avfilter-8.*.dylib "$p/libpushmpc_engine.dylib" "$p/libpushmpc_engine_apple.dylib" "$p/libMoltenVK.dylib"; do
+                [ -f "$f" ] || continue
+                grep -qxF "${f##*/}" "$bk/added.txt" || { echo "::error::$n $case: added.txt lacks ${f##*/}"; fails=$((fails + 1)); }
+              done
+              sh "$p/pushmpc-plex-mac.sh" uninstall --app $n --app-path "$a" --from "$p" --json > /dev/null
+              [ "$(snap)" = "$before" ] && echo "$n $case: bundle bit for bit stock after uninstall" || { echo "::error::$n $case: bundle not stock after uninstall"; fails=$((fails + 1)); }
+            done
           done
           [ "$fails" = 0 ] && echo "plex-macos: all checks passed" || exit 1
+      # the release's Plex for Mac bundle (release.yml: pushmpc-plex-mac-<version>.tar.gz; the Homebrew formula's
+      # plex-mac resource): what was just tested on this runner
+      - uses: actions/upload-artifact@v4
+        if: matrix.runner == 'macos-15'
+        with: { name: plexmac, path: '${{ runner.temp }}/plexmac/', if-no-files-found: error, retention-days: 7 }

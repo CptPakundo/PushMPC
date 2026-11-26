@@ -89,7 +89,7 @@ if(PME_VULKAN_ON)
     list(APPEND _spv_out "${_spv}/pme_${s}.h")
   endforeach()
   add_custom_target(pme_spv DEPENDS ${_spv_out})
-  list(APPEND PME_SOURCES vulkan_backend.cpp)
+  list(APPEND PME_SOURCES vulkan_backend.cpp vulkan_host_backend.cpp)
 endif()
 add_library(pushmpc_engine SHARED ${PME_SOURCES})
 target_include_directories(pushmpc_engine PRIVATE "${ROOT}/mpvnative/include" "${ROOT}/pushmpc/include" "${ROOT}/vsplugin/src")
@@ -112,6 +112,24 @@ if(WIN32)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/stub")
   target_include_directories(pme_pushcore_stub PRIVATE "${ROOT}/pushmpc/include")
   target_link_libraries(pme_pushcore_stub PRIVATE d3d11 dxgi)
+endif()
+
+# ---- macOS: the apple engine (vsplugin/engines/apple: VideoToolbox VTFrameProcessor, Metal) as its own module,
+# libpushmpc_engine_apple.dylib, next to the engine: it needs macOS 13.3 to load while the engine keeps the deployment
+# target of the player (Plex: 11.0); the engine dlopen()s it and Auto tries it first for software frames.
+option(PME_APPLE "build libpushmpc_engine_apple.dylib (macOS)" ON)
+if(APPLE AND PME_APPLE)
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 20)
+  set(_a "${ROOT}/vsplugin/engines/apple")
+  add_library(pushmpc_engine_apple MODULE apple_backend.mm "${_a}/apple_engine.mm" "${_a}/apple_metal.mm")
+  target_include_directories(pushmpc_engine_apple PRIVATE "${_a}" "${CMAKE_CURRENT_SOURCE_DIR}" "${ROOT}/mpvnative/include" "${ROOT}/vsplugin/src")
+  target_compile_options(pushmpc_engine_apple PRIVATE -fobjc-arc -mmacosx-version-min=13.3)
+  target_link_options(pushmpc_engine_apple PRIVATE -mmacosx-version-min=13.3)
+  target_link_libraries(pushmpc_engine_apple PRIVATE "-framework Foundation" "-framework CoreFoundation" "-framework CoreVideo"
+    "-framework CoreMedia" "-framework VideoToolbox" "-framework Metal")
+  set_target_properties(pushmpc_engine_apple PROPERTIES PREFIX "lib" SUFFIX ".dylib" CXX_VISIBILITY_PRESET hidden OBJCXX_VISIBILITY_PRESET hidden
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
 endif()
 
 add_executable(engine_test "${ROOT}/mpvnative/tests/engine_test.cpp")

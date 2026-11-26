@@ -152,7 +152,20 @@ bool LoadVulkan(std::string& why)
 #endif
         if (state != 1 && volkInitialize() == VK_SUCCESS) state = 1;
 #if defined(__APPLE__)
-        // Homebrew (vulkan-loader + molten-vk, or molten-vk alone) is not on dyld's default search path
+        // a MoltenVK shipped next to this module first (PushMPC for Plex: Contents/Frameworks), then Homebrew
+        // (vulkan-loader + molten-vk, or molten-vk alone), which is not on dyld's default search path
+        if (state != 1) {
+            Dl_info di;
+            if (dladdr(reinterpret_cast<void*>(&LoadVulkan), &di) && di.dli_fname) {
+                std::string dir = di.dli_fname;
+                dir = dir.substr(0, dir.rfind('/') + 1);
+                for (const char* leaf : { "libMoltenVK.dylib", "libvulkan.1.dylib" }) {
+                    void* h = dlopen((dir + leaf).c_str(), RTLD_NOW | RTLD_LOCAL);
+                    if (!h) continue;
+                    if (auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(h, "vkGetInstanceProcAddr"))) { volkInitializeCustom(gipa); state = 1; break; }
+                }
+            }
+        }
         if (state != 1) {
             for (const char* p : { "/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib", "/opt/homebrew/lib/libMoltenVK.dylib", "/usr/local/lib/libMoltenVK.dylib" }) {
                 void* h = dlopen(p, RTLD_NOW | RTLD_LOCAL);

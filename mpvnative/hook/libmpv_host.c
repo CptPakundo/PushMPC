@@ -36,14 +36,15 @@ PM_STUB(cocoa_set_istty)
 
 static int write_y4m(const char *path)
 {
-    unsigned char px[64 * 64 * 3 / 2];
+    enum { W = 320, H = 180 };   /* VideoToolbox's interpolators refuse tiny pictures */
+    static unsigned char px[W * H * 3 / 2];
     int n, k;
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
-    fputs("YUV4MPEG2 W64 H64 F24:1 Ip A1:1 C420jpeg\n", f);
+    fprintf(f, "YUV4MPEG2 W%d H%d F24:1 Ip A1:1 C420jpeg\n", (int)W, (int)H);
     for (n = 0; n < 48; n++) {
-        for (k = 0; k < 64 * 64; k++) px[k] = (unsigned char)((k + n * 5) & 255);
-        memset(px + 64 * 64, 128, 64 * 64 / 2);
+        for (k = 0; k < W * H; k++) px[k] = (unsigned char)(((k % W) + (k / W) / 2 + n * 4) & 255);   /* a moving ramp */
+        memset(px + W * H, 128, W * H / 2);
         fputs("FRAME\n", f);
         fwrite(px, 1, sizeof(px), f);
     }
@@ -81,7 +82,7 @@ int main(int argc, char **argv)
         snprintf(log, sizeof(log), "/tmp/libmpv-host-%d-%d.log", (int)getpid(), f);
         ctx = create();
         set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v"); set(ctx, "input-media-keys", "no");
-        vfrc = set(ctx, "vf", "pushmpc=smoother=2");
+        vfrc = set(ctx, "vf", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc=smoother=2");   /* CI: a forced backend */
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
             const char *args[] = { "loadfile", files[f], NULL };
