@@ -146,7 +146,7 @@ public:
     // Evaluation cadence and window (stream time)
     static constexpr double kWindowSec = 2.0, kStepSec = 0.5, kHudSec = 6.0, kFirstSec = 1.5;
     static constexpr float kFirstProb = 0.55f, kAlpha = 0.20f, kMargin = 0.30f;
-    static constexpr int kHoldSteps = 4;
+    static constexpr int kHoldSteps = 16;   // 8 s of margin before a change (4 s right after a scene cut)
 
     void Reset() { *this = ContentDetector(); }
     // A discontinuity (seek, flush): the window and the previous frame are dropped, the decision stays (same title).
