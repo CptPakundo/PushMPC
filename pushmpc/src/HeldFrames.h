@@ -710,6 +710,71 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
     return out;
 }
 
+// ---- the full cascade (research P8, critique C7) ----
+// A part's pair ends at its next drawing d1 > s. Where d1 itself has held parts (a limb on threes on a body on twos: at
+// the body's drawing d1 the limb is held), the pair's end shows those parts at their held place, not at their own phase,
+// and the repaired s inherits that stale end. So d1 is repaired first (its own plan), and s's parts take the REPAIRED d1
+// (d0 and the substitution frame are behind s and already repaired in place). d1 <= s + kLookahead and d1's plan needs
+// kLookahead more frames classified: the planner, the queue and the ingress ring look kCascadeLookahead ahead. The span
+// search itself (PlanRepairs) and the whole-frame re-timer keep kLookahead (BuildMultiplier, so no larger graph).
+// One level only: d1's own parts use d1's unrepaired future ends (a second level would need 9 frames of lookahead).
+inline constexpr int kCascadeLookahead = 2 * kLookahead;
+// the frames to repair before s (its parts' future ends), in order
+inline std::vector<uint64_t> CascadeEnds(const std::vector<RepairGroup>& groups, uint64_t s)
+{
+    std::vector<uint64_t> e;
+    for (const auto& g : groups) if (g.d1 > s && std::find(e.begin(), e.end(), g.d1) == e.end()) e.push_back(g.d1);
+    std::sort(e.begin(), e.end());
+    return e;
+}
+
+// ---- span streams that only make the midpoint of a pair (AMD AMF FRC, FSR 3.1 frame generation: 2x black boxes) ----
+// Phase t is reached by halving: call 1 makes M = mid(A, B) (t 0.5), call 2 mid(A, M) (0.25) or mid(M, B) (0.75), ...
+// Twos (t 0.5) and fours (0.25, 0.5, 0.75) are exact; threes (1/3, 2/3) get 0.25 / 0.75 at depth 2: an error of 1/12 of
+// the span (0.25 source frames), steps 0.25 / 0.5 / 0.25 of the span instead of 1/3 each, so the part still moves on
+// every frame (stall ratio 0.5 instead of 0 with the drawing held). Depth 3 would give 0.375 / 0.625 (error 1/24 of the
+// span) for a third call on a third-generation picture: not worth its softness.
+struct MidpointPlan {
+    int calls = 0;           // midpoint calls (1..depth)
+    float t = 0.5f;          // the phase reached
+    uint8_t side[4] = {};    // per call after the first: 0 = (lo, previous mid), 1 = (previous mid, hi)
+};
+inline MidpointPlan PlanMidpoints(float t, int depth = 2)
+{
+    MidpointPlan p;
+    float lo = 0.f, hi = 1.f;
+    depth = std::clamp(depth, 1, 4);
+    for (int i = 0; i < depth; ++i) {
+        const float m = 0.5f * (lo + hi);
+        p.calls = i + 1; p.t = m;
+        if (std::fabs(t - m) < 1e-3f || i + 1 == depth) break;
+        if (t < m) { hi = m; p.side[i + 1] = 0; } else { lo = m; p.side[i + 1] = 1; }
+    }
+    return p;
+}
+
+// ---- per-pixel phase for a span stream that takes a phase map (pmml synth_map: PushFlow on AMD, Intel, Mac) ----
+// The parts of one frame that share a pair (pairFrom, d1) need one network run however their phases differ: a
+// substitution sub-part (pair (m, d1) at its body's phase) and a part whose own drawing was m (pair (m, d1) at its own
+// phase) are two phases of one pair. The map holds each part's t inside its mask (weighted where feathered masks
+// meet) and the parts' cell-weighted mean phase elsewhere (the composite keeps the frame's own picture there); alpha is
+// the union of the masks (0..1).
+inline bool PairPhaseMap(const std::vector<RepairGroup>& groups, uint64_t pairFrom, uint64_t d1, std::vector<float>& t, std::vector<float>& alpha)
+{
+    double tw = 0, wsum = 0; size_t n = 0;
+    for (const auto& g : groups) if (g.pairFrom == pairFrom && g.d1 == d1) { tw += double(g.t) * g.cells; wsum += g.cells; n = g.mask.size(); }
+    if (wsum <= 0 || n == 0) return false;
+    const float tMean = float(tw / wsum);
+    t.assign(n, 0.f); alpha.assign(n, 0.f);
+    std::vector<float> w(n, 0.f);
+    for (const auto& g : groups) {
+        if (g.pairFrom != pairFrom || g.d1 != d1 || g.mask.size() != n) continue;
+        for (size_t i = 0; i < n; ++i) if (g.mask[i]) { const float a = g.mask[i] / 255.f; t[i] += a * g.t; w[i] += a; alpha[i] = std::max(alpha[i], a); }
+    }
+    for (size_t i = 0; i < n; ++i) t[i] = w[i] > 0.f ? t[i] / w[i] : tMean;
+    return true;
+}
+
 // Animation evidence for the live-action gate. Anime repeats a drawing to the noise floor: a frame is evidence when it
 // is wholly held, or when a repair group's cells match their drawing at d0 almost exactly (residual under
 // kExactResidual over kExactShare of the picture). Live action has neither: its "held" regions are near-still, not

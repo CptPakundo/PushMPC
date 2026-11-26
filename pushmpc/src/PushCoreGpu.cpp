@@ -37,6 +37,7 @@
 #include "veyra/pipeline/GpuPassUtils.h"
 #include "veyra/pushflow/PushFlowBackend.h"
 #include "veyra/gfx/AmfFrcBackend.h"
+#include "veyra/gfx/FsrFgPresenter.h"   // VEYRA_FSR_PAIR_API: patches/pushfps-4.5.4-anime-fsr.patch
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
 #include <cstddef>
@@ -75,6 +76,7 @@
 #include <filesystem>
 #include <format>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -479,7 +481,7 @@ struct PushCore {
     std::map<uint64_t, uint32_t> gapOf;     // graph source frame id -> source frames its pair spans (re-timed > 1)
 
     // ---- ingress ring ----
-    static constexpr uint32_t kIngressSlots = 14;   // held-frame re-timing keeps up to kMaxQueued frames ahead of the graph and d0 behind it
+    static constexpr uint32_t kIngressSlots = 17;   // held-frame re-timing keeps up to kMaxQueued frames ahead of the graph and d0 behind it (12 + 3 + 2; 14 before the cascade)
     struct InSlot { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D12Resource> res; uint64_t freeValue = 0; };
     InSlot inSlots[kIngressSlots];
     uint32_t inW = 0, inH = 0; DXGI_FORMAT inFormat = DXGI_FORMAT_UNKNOWN;
@@ -504,7 +506,7 @@ struct PushCore {
     std::map<uint64_t, Pending> waiting;   // tested: waiting for the next distinct frame, or for the graph
     struct ReadyGraph { uint64_t seq; uint32_t multiplier, gap; };
     std::deque<ReadyGraph> readyGraph;     // to the graph, in order, when it has a slot
-    static constexpr size_t kMaxQueued = 2 * pushmpc::held::kLookahead + 3;   // waiting held frames + the repair's lookahead + tested + new
+    static constexpr size_t kMaxQueued = pushmpc::held::kLookahead + pushmpc::held::kCascadeLookahead + 3;   // waiting held frames + the repair's lookahead (the cascade: 6) + tested + new (12; 9 before)
     int prevIngestSlot = -1;              // the ingress slot of the source frame before (the test's reference)
     int pumpError = PUSHCORE_OK;           // a graph failure while canSubmit fed the graph: the next submit returns it
     uint64_t ingestSeq = 0;
@@ -540,6 +542,20 @@ struct PushCore {
     struct RgbSlot { ComPtr<ID3D12Resource> res; ComPtr<ID3D11Texture2D> tex; uint64_t seq = UINT64_MAX; uint64_t readyValue11 = 0; };
     std::vector<RgbSlot> rgbSlots; uint32_t rgbNext = 0;
     RgbSlot repSlots[pushmpc::RegionRepair::kMaxParts];        // the span stream's frames of this source frame's parts
+    // Midpoint-only span streams (2x black boxes; HeldFrames.h PlanMidpoints): AMD AMF FRC (AMD driver) or FSR 3.1 frame
+    // generation (any D3D12 GPU, the pair call of the anime-fsr patch), where neither VFG nor PushFlow's runtime runs.
+    // Twos exact (t 0.5); threes from the pair's midpoint M (cached for both held frames): mid(d0, M) 0.25 / mid(M, d1) 0.75.
+    int spanMid = 0;                                           // 0 none, 1 AMD FRC, 2 FSR 3.1
+    veyra::gfx::AmfFrcBackend spanFrc;
+#ifdef VEYRA_FSR_PAIR_API
+    veyra::gfx::FsrFgPresenter spanFsr;
+#endif
+    ComPtr<ID3D12Resource> fsrMotion, fsrDepth;                // zero motion (R16G16 float) and depth (R32 float): FSR estimates its own flow
+    RgbSlot midSlot; uint64_t midA = UINT64_MAX, midB = UINT64_MAX;   // the cached midpoint of the pair (midA, midB)
+    uint64_t midLast = UINT64_MAX;                             // the picture the midpoint stream holds as its previous input (a key)
+    int64_t midPts = 0;
+    uint64_t midCalls = 0, midApprox = 0;                      // midpoint calls; parts at an approximate phase (threes)
+    double midErrSum = 0;                                      // their phase error (sum, in spans)
     // ---- the planner thread: classification (CompareRegions) and PlanRepairs off the submit thread (3-4 + 2-9 ms per
     // source frame, measured offline). It owns gridOf, regionOf, whollyHeld, noiseFloor and cadenceHist; the submit thread
     // queues jobs and takes finished plans. A seek bumps planEpoch: the thread then starts over.
@@ -567,6 +583,10 @@ struct PushCore {
     CostWindow costRepair;
     double pendingRepairMs = 0;   // the repair queued for the frame that goes to the graph next (admission's queue prediction)
     std::map<std::tuple<uint64_t, uint64_t, uint64_t>, bool> spanDecision;   // (d0, d1, pair start) -> repaired for the whole span
+    std::set<uint64_t> repairedAhead;                          // frames repaired as a future end (the cascade), not yet at the graph
+    uint64_t cascadeEnds = 0, cascadeMissed = 0;               // future ends repaired first / without a plan in time
+    // the full cascade (research P8); PUSHMPC_REPAIR_CASCADE=0 turns it off (the queue then still looks 6 ahead)
+    bool cascadeOn() const { const char* e = std::getenv("PUSHMPC_REPAIR_CASCADE"); return !(e && std::atoi(e) == 0); }
     // Repair mode (VFG, the span stream running): held frames are repaired in place and every source frame goes to the
     // graph with k outputs; nothing is dropped and no pair spans more than one source frame.
     bool repairMode() const { return retimingOn() && spanVfgOk && repairPass.ready(); }
@@ -579,13 +599,22 @@ struct PushCore {
     // this graph will run the source repair (decided before the build: the graph is then built at k)
     bool repairPlanned() const {
         if (!haveSettings || settings.heldFrames == 0 || !heldEligible || repairEnvOff()) return false;
-        return (tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE) || veyra::pushflow::runtimeInstalled(runtimeDir);
+        return (tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE) || veyra::pushflow::runtimeInstalled(runtimeDir) || midStreamPossible();
+    }
+    // a midpoint span stream can start: AMD FRC on an AMD GPU with the AMF runtime, else FSR 3.1's pair call
+    bool midStreamPossible() const {
+        if (ctx.adapter().vendorId == 0x1002 && veyra::gfx::AmfFrcBackend::runtimeInstalled()) return true;
+#ifdef VEYRA_FSR_PAIR_API
+        return true;
+#else
+        return false;
+#endif
     }
     double sourceIntervalMs() const { return stream.fpsNum > 0 && stream.fpsDen > 0 ? 1000.0 * double(stream.fpsDen) / double(stream.fpsNum) : 1000.0 / 23.976; }
     void clearRegions() {
         { std::lock_guard<std::mutex> lk(planMx); ++planEpoch; planJobs.clear(); plans.clear(); }
         anyQueued = anyPlanQueued = false; lastQueued = lastPlanQueued = 0;
-        slotOf.clear(); spanDecision.clear(); pairA = pairB = UINT64_MAX; for (auto& r : rgbSlots) r.seq = UINT64_MAX;
+        slotOf.clear(); spanDecision.clear(); repairedAhead.clear(); pairA = pairB = UINT64_MAX; for (auto& r : rgbSlots) r.seq = UINT64_MAX;
     }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
@@ -1158,7 +1187,7 @@ struct PushCore {
             return queuedFrames() == 0 && graph->nextFrameSlotAvailable();
         }
         if ((pumpError = pumpHeld(false)) != PUSHCORE_OK) return true;
-        return queuedFrames() < kMaxQueued && !slotQueued(uint32_t(inIndex % kIngressSlots));   // the ring (14) keeps d0 alive behind the queue
+        return queuedFrames() < kMaxQueued && !slotQueued(uint32_t(inIndex % kIngressSlots));   // the ring (17) keeps d0 alive behind the queue
     }
 
     bool ensureIngress(ID3D11Texture2D* src) {
@@ -1487,15 +1516,31 @@ struct PushCore {
         spanVfgOk = false;
         if (!haveSettings || settings.heldFrames == 0 || !fg || multiplier < 2 || !heldEligible) return;
         const bool useVfg = tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE;   // tryFg: what this graph runs (runFg is set after the build)
-        if (!useVfg && !veyra::pushflow::runtimeInstalled(runtimeDir)) { veyra::log::info("pushcore", "source repair off: the graph is not on VFG and PushFlow's runtime is not installed (held frames re-timed whole)"); return; }
+        const bool useFlow = !useVfg && veyra::pushflow::runtimeInstalled(runtimeDir);
+        if (!useVfg && !useFlow && !midStreamPossible()) { veyra::log::info("pushcore", "source repair off: the graph is not on VFG, PushFlow's runtime is not installed and no midpoint stream (AMD FRC, FSR 3.1) is available (held frames re-timed whole)"); return; }
         if (repairEnvOff()) { veyra::log::info("pushcore", "source repair off (PUSHMPC_REGION_REPAIR=0)"); return; }
         if (!repairPass.ready() && !repairPass.init(d11.Get())) { veyra::log::warn("pushcore", "source repair unavailable (held frames re-timed whole, graph at k): " + repairPass.why()); return; }
         const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
         const bool p010 = stream.format == PUSHCORE_INPUT_P010;
         const DXGI_FORMAT rgbFmt = p010 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
         const auto t = Clock::now();
-        spanIsFlow = !useVfg;
-        if (useVfg) {
+        spanIsFlow = useFlow;
+        spanMid = 0;
+        if (!useVfg && !useFlow) {
+            if (ctx.adapter().vendorId == 0x1002 && veyra::gfx::AmfFrcBackend::runtimeInstalled() && spanFrc.initialize(ctx.device(), ring.queue(), w, h, rgbFmt, false)) spanMid = 1;
+#ifdef VEYRA_FSR_PAIR_API
+            if (!spanMid && spanFsr.initializeIndependent(ctx.device(), w, h, rgbFmt, false)) {
+                auto zeroTex = [&](DXGI_FORMAT f, ComPtr<ID3D12Resource>& r) {   // committed resources start zeroed
+                    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+                    D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = w; d.Height = h; d.DepthOrArraySize = 1; d.MipLevels = 1;
+                    d.Format = f; d.SampleDesc.Count = 1;
+                    return SUCCEEDED(ctx.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)));
+                };
+                if (zeroTex(DXGI_FORMAT_R16G16_FLOAT, fsrMotion) && zeroTex(DXGI_FORMAT_R32_FLOAT, fsrDepth)) spanMid = 2; else spanFsr.shutdown();
+            }
+#endif
+            if (!spanMid) { veyra::log::warn("pushcore", "source repair off: no midpoint span stream (AMD FRC, FSR 3.1) started"); return; }
+        } else if (useVfg) {
             if (!spanVfg.initialize(ctx, runtimeDir, w, h, rgbFmt, veyra::pipeline::FrameBatch::Capacity, std::min<uint32_t>(gd.vfgQuality, 2u), false, false)) {
                 veyra::log::warn("pushcore", "source repair off: the span stream (a second VFG effect) did not start");
                 return;
@@ -1505,7 +1550,7 @@ struct PushCore {
             veyra::log::warn("pushcore", "source repair off: the span stream (PushFlow) did not start");
             return;
         }
-        auto spanShutdown = [&] { if (spanIsFlow) spanFlow.shutdown(); else spanVfg.shutdown(); };
+        auto spanShutdown = [&] { spanFlow.shutdown(); spanVfg.shutdown(); shutdownMid(); };
         // made in D3D11 (UAV for the conversion, shared NT handle) and opened in D3D12, as the ingress ring is
         auto makeShared = [&](RgbSlot& slot) {
             D3D11_TEXTURE2D_DESC d{};
@@ -1522,6 +1567,8 @@ struct PushCore {
         rgbSlots.assign(6, {});
         for (auto& sl : rgbSlots) if (!makeShared(sl)) { veyra::log::warn("pushcore", "source repair off: RGB textures"); spanShutdown(); return; }
         for (auto& rs : repSlots) if (!makeShared(rs)) { veyra::log::warn("pushcore", "source repair off: span texture"); spanShutdown(); return; }
+        if (spanMid && !makeShared(midSlot)) { veyra::log::warn("pushcore", "source repair off: midpoint texture"); spanShutdown(); return; }
+        midA = midB = midLast = UINT64_MAX;
         {
             D3D11_TEXTURE2D_DESC d{};
             d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = p010 ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12; d.SampleDesc = {1, 0};
@@ -1552,7 +1599,8 @@ struct PushCore {
         pairA = pairB = UINT64_MAX;
         startPlanner();
         veyra::log::info("pushcore", std::format("source repair ready in {:.0f} ms: span stream {} at {}x{}, lookahead {}, graph {}x", msSince(t),
-            spanIsFlow ? "PushFlow (tier 1)" : "VFG (timestep mode)", w, h, pushmpc::held::kLookahead, graphMultiplier));
+            spanMid == 1 ? "AMD FRC (midpoints: twos exact, threes at 0.25 / 0.75)" : spanMid == 2 ? "FSR 3.1 (midpoints: twos exact, threes at 0.25 / 0.75)" : spanIsFlow ? "PushFlow (tier 1)" : "VFG (timestep mode)",
+            w, h, cascadeOn() ? pushmpc::held::kCascadeLookahead : pushmpc::held::kLookahead, graphMultiplier));
     }
     ID3D12GraphicsCommandList* regionBegin() {
         const uint32_t a = regionListNext++ % 8;
@@ -1587,6 +1635,55 @@ struct PushCore {
             repairQueryValue[q] = 0;
         }
     }
+    // one midpoint call: out = mid(x, y) on the midpoint stream (keys say what x and y are, so a pair that starts where
+    // the last one ended feeds only its new end)
+    bool midpoint(ID3D12Resource* x, uint64_t xKey, ID3D12Resource* y, uint64_t yKey, RgbSlot& out, uint64_t ready11) {
+        ++midCalls;
+        const int64_t step = int64_t(sourceIntervalMs() * 10000.0);
+        if (spanMid == 1) {
+            auto feed = [&](ID3D12Resource* r, bool reset) {
+                auto* l = regionBegin(); if (!l) return false;
+                ring.queue()->Wait(fence11in12.Get(), ready11);
+                barrier(l, r, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                const bool ok = spanFrc.capture(l, r);
+                barrier(l, r, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+                if (!regionSubmit() || !ok) return false;
+                return spanFrc.generate(midPts += step, reset);
+            };
+            // after a reset AMF needs its warm-up repeat (PushFPS feeds its first frame twice): x twice, then y
+            if (midLast != xKey && !(feed(x, true) && feed(x, false))) { midLast = UINT64_MAX; return false; }
+            if (!feed(y, false)) { midLast = UINT64_MAX; return false; }
+            midLast = yKey;
+            auto* l = regionBegin(); if (!l) return false;
+            if (out.readyValue11) ring.queue()->Wait(fence11in12.Get(), out.readyValue11);
+            barrier(l, out.res.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            const bool copied = spanFrc.copyOutput(l, out.res.Get());
+            barrier(l, out.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+            if (!regionSubmit()) return false;
+            spanFrc.submitted();
+            return copied;
+        }
+#ifdef VEYRA_FSR_PAIR_API
+        if (spanMid == 2) {
+            auto* l = regionBegin(); if (!l) return false;
+            ring.queue()->Wait(fence11in12.Get(), ready11);
+            if (out.readyValue11) ring.queue()->Wait(fence11in12.Get(), out.readyValue11);
+            const bool ok = spanFsr.generatePair(l, x, y, fsrMotion.Get(), fsrDepth.Get(), out.res.Get(), midLast == xKey, float(sourceIntervalMs()));
+            if (!regionSubmit()) return false;
+            midLast = ok ? yKey : UINT64_MAX;
+            return ok;
+        }
+#endif
+        (void)x; (void)y; (void)xKey; (void)yKey; (void)out; (void)ready11; (void)step;
+        return false;
+    }
+    void shutdownMid() {
+        spanFrc.shutdown();
+#ifdef VEYRA_FSR_PAIR_API
+        spanFsr.shutdown();
+#endif
+        fsrMotion.Reset(); fsrDepth.Reset(); midSlot = {}; spanMid = 0; midA = midB = midLast = UINT64_MAX;
+    }
     bool regionSubmit() {
         if (FAILED(regionList->Close())) return false;
         ID3D12CommandList* lists[] = {regionList.Get()};
@@ -1618,13 +1715,15 @@ struct PushCore {
             }
         }
         planCv.notify_all();
-        while (slotOf.size() > 16) slotOf.erase(slotOf.begin());
+        while (slotOf.size() > kIngressSlots) slotOf.erase(slotOf.begin());
     }
     // submit thread: is the plan of seq there? final (end of stream, pause): ask for the plans still missing and wait for
     // this one (at most 100 ms); a frame never classified gets no plan (no repair)
     bool planReady(uint64_t seq, bool final) {
         std::unique_lock<std::mutex> lk(planMx);
-        if (plans.count(seq)) return true;
+        // the cascade: s's parts' future ends (<= s + kLookahead) are repaired first, from their own plans, which need
+        // kLookahead more frames classified (s + kCascadeLookahead); a stream that stops (final) goes on without them
+        if (plans.count(seq)) return final || !cascadeOn() || !anyQueued || lastQueued >= seq + uint64_t(pushmpc::held::kCascadeLookahead);
         if (!final) return !anyQueued || seq > lastQueued;   // never classified: no plan will come, go on
         if (!anyQueued || seq > lastQueued) return true;
         if (!anyPlanQueued || seq > lastPlanQueued) {
@@ -1686,8 +1785,8 @@ struct PushCore {
             cadenceHist.Push(seq, regionOf[seq]);
         }
         gridOf[seq] = std::move(grid);
-        while (gridOf.size() > 12) gridOf.erase(gridOf.begin());
-        while (regionOf.size() > 12) regionOf.erase(regionOf.begin());
+        while (gridOf.size() > 16) gridOf.erase(gridOf.begin());     // d0 - 1 (the step signature) .. s + kCascadeLookahead
+        while (regionOf.size() > 16) regionOf.erase(regionOf.begin());
     }
     // the RGB copy of a source frame (converted once, cached in a small ring)
     RgbSlot* rgbOf(uint64_t seq) {
@@ -1700,17 +1799,41 @@ struct PushCore {
         r.seq = seq; r.readyValue11 = value11;
         return &r;
     }
-    // repairs the held parts of p's frame in place (its ingress slot), before the graph takes it
+    // the plan of seq off the planner (wait: up to 100 ms for one still being made: a future end of the cascade)
+    bool takePlan(uint64_t seq, bool wait, PlanResult& out) {
+        std::unique_lock<std::mutex> lk(planMx);
+        if (wait && !plans.count(seq)) planCv.wait_for(lk, std::chrono::milliseconds(100), [&] { return plans.count(seq) != 0; });
+        auto it = plans.find(seq);
+        if (it == plans.end()) return false;
+        out = std::move(it->second); plans.erase(it);
+        return true;
+    }
+    // repairs the held parts of p's frame in place (its ingress slot), before the graph takes it. The full cascade
+    // (research P8, HeldFrames.h CascadeEnds): the frames its parts' pairs end at are repaired first, from their own
+    // plans, so a part's pair has repaired frames at both ends (d0 is behind p and was repaired when it went to the graph)
     int repairFrame(Pending& p) {
         using namespace pushmpc::held;
+        if (repairedAhead.erase(p.seq)) return PUSHCORE_OK;   // repaired already, as a future end of a frame before it
         collectRepairTimes();
         PlanResult plan;
-        {
-            std::lock_guard<std::mutex> lk(planMx);
-            auto it = plans.find(p.seq);
-            if (it == plans.end()) { ++repairWhy[2]; return PUSHCORE_OK; }
-            plan = std::move(it->second); plans.erase(it);
+        if (!takePlan(p.seq, false, plan)) { ++repairWhy[2]; return PUSHCORE_OK; }
+        if (cascadeOn()) {
+            for (const uint64_t e : CascadeEnds(plan.groups, p.seq)) {
+                if (repairedAhead.count(e)) continue;
+                auto w = waiting.find(e);
+                if (w == waiting.end()) continue;
+                PlanResult pe;
+                if (!takePlan(e, true, pe)) { ++cascadeMissed; continue; }
+                const int rc = repairWith(w->second, pe);
+                if (rc != PUSHCORE_OK) return rc;
+                repairedAhead.insert(e); ++cascadeEnds;
+            }
+            while (repairedAhead.size() > 16) repairedAhead.erase(repairedAhead.begin());
         }
+        return repairWith(p, plan);
+    }
+    int repairWith(Pending& p, PlanResult& plan) {
+        using namespace pushmpc::held;
         auto& groups = plan.groups;
         const bool wholly = plan.wholly;
         bool exact = false;
@@ -1760,7 +1883,25 @@ struct PushCore {
             // the pair: from d0, or from the substitution frame (a part redrawn inside the span and kept: HeldFrames.h)
             RgbSlot* a = rgbOf(g.pairFrom); RgbSlot* b = rgbOf(g.d1);
             if (!a || !b || a == b) { ++repairWhy[3]; continue; }
-            if (spanIsFlow) {
+            if (spanMid) {
+                // a midpoint stream: phase t by halving (twos exact; threes 0.25 / 0.75 from the cached midpoint M)
+                const MidpointPlan mp = PlanMidpoints(g.t, 2);
+                const uint64_t ready = std::max(a->readyValue11, b->readyValue11);
+                bool ok = true;
+                if (mp.calls == 1) ok = midpoint(a->res.Get(), g.pairFrom, b->res.Get(), g.d1, rs, ready);
+                else {
+                    if (midA != g.pairFrom || midB != g.d1) {
+                        midA = midB = UINT64_MAX;
+                        ok = midpoint(a->res.Get(), g.pairFrom, b->res.Get(), g.d1, midSlot, ready);
+                        if (ok) { midA = g.pairFrom; midB = g.d1; }
+                    }
+                    const uint64_t mKey = (1ull << 63) | (g.pairFrom << 20) | g.d1;   // M's key as an input of the stream
+                    if (ok) ok = mp.side[1] == 0 ? midpoint(a->res.Get(), g.pairFrom, midSlot.res.Get(), mKey, rs, ready)
+                                                 : midpoint(midSlot.res.Get(), mKey, b->res.Get(), g.d1, rs, ready);
+                }
+                if (!ok) { midA = midB = midLast = UINT64_MAX; ++repairWhy[5]; continue; }
+                if (std::fabs(mp.t - g.t) > 1e-3f) { ++midApprox; midErrSum += std::fabs(mp.t - g.t); }
+            } else if (spanIsFlow) {
                 // PushFlow: pack the pair at t (only the time plane when the pair is the one it holds), run, resolve
                 auto* l = regionBegin(); if (!l) return PUSHCORE_ERROR;
                 ring.queue()->Wait(fence11in12.Get(), std::max(a->readyValue11, b->readyValue11));
@@ -2011,12 +2152,12 @@ struct PushCore {
             collectRepairTimes();
             veyra::log::info("pushcore", std::format("source repair: {} frames ({} wholly held), {} parts ({} substitution pairs, {} camera-residual shifts, {} cells carved); "
                 "not repaired: spans gated {}, spans over budget {}, frames with no part {}, no RGB copy {}, capture {}, generate {}, copy {}, composite {}; spans held back (one new span per frame over budget) {}; "
-                "GPU per repaired frame p50 {:.2f} p95 {:.2f} ms; cell threshold {:.1f} codes (noise p99 {:.2f}); animation evidence {:.1f} %",
+                "GPU per repaired frame p50 {:.2f} p95 {:.2f} ms; cell threshold {:.1f} codes (noise p99 {:.2f}); animation evidence {:.1f} %; cascade: {} future ends repaired first, {} without a plan in time; midpoint stream: {} calls, {} parts at an approximate phase (mean error {:.3f} of a span)",
                 repairedFrames, repairedWholly, repairedParts, repairSubstitutions, repairShifted, repairCarved,
                 repairWhy[0], repairWhy[1], repairWhy[2], repairWhy[3], repairWhy[4], repairWhy[5], repairWhy[6], repairWhy[7], repairWhy[8],
-                costRepair.p50(), costRepair.pct(0.95), planThr.load(), planNoise.load(), 100.0 * evidence.Ratio()));
+                costRepair.p50(), costRepair.pct(0.95), planThr.load(), planNoise.load(), 100.0 * evidence.Ratio(), cascadeEnds, cascadeMissed, midCalls, midApprox, midApprox ? midErrSum / double(midApprox) : 0.0));
         }
-        spanVfg.shutdown(); spanFlow.shutdown(); spanVfgOk = false; spanIsFlow = false; rgbSlots.clear(); for (auto& rs : repSlots) rs = {}; repairOut.Reset(); repairPass.forgetViews();
+        spanVfg.shutdown(); spanFlow.shutdown(); shutdownMid(); spanVfgOk = false; spanIsFlow = false; rgbSlots.clear(); for (auto& rs : repSlots) rs = {}; repairOut.Reset(); repairPass.forgetViews();
         opened.clear(); outSlots.clear();
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
     }

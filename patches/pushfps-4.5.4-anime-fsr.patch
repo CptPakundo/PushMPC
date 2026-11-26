@@ -1,0 +1,84 @@
+diff --git a/include/veyra/gfx/FsrFgPresenter.h b/include/veyra/gfx/FsrFgPresenter.h
+index 7c5d79e1..58b828e9 100644
+--- a/include/veyra/gfx/FsrFgPresenter.h
++++ b/include/veyra/gfx/FsrFgPresenter.h
+@@ -4,6 +4,9 @@
+ #include <cstdint>
+ #include <memory>
+ 
++// The pair call below (PushMPC's held-drawing repair: a span stream that takes any two pictures).
++#define VEYRA_FSR_PAIR_API 1
++
+ namespace veyra::gfx {
+ // AMD SDK frame interpolation into application-owned GPU textures. The
+ // historical class name is retained, but no HWND / swapchain / presentation
+@@ -21,6 +24,12 @@ public:
+     bool generate(ID3D12GraphicsCommandList*, ID3D12Resource* color,
+                   ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* output,
+                   bool reset, float elapsedMs);
++    // The frame halfway between any two pictures a and b into output (not only consecutive presents). continues: a is
++    // the b of the last call (one dispatch); else a goes in first with reset, its output into an internal scratch
++    // texture. Same resource rules as generate.
++    bool generatePair(ID3D12GraphicsCommandList*, ID3D12Resource* a, ID3D12Resource* b,
++                      ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* output,
++                      bool continues, float elapsedMs);
+     uint32_t maxGeneratedFrames() const;
+     bool available() const;
+     bool failed() const;
+diff --git a/src/gfx/FsrFgPresenter.cpp b/src/gfx/FsrFgPresenter.cpp
+index f87c428c..85397dfe 100644
+--- a/src/gfx/FsrFgPresenter.cpp
++++ b/src/gfx/FsrFgPresenter.cpp
+@@ -89,6 +89,7 @@ const char* returnName(ffxReturnCode_t code) {
+ struct FsrFgPresenter::Impl {
+     uint64_t frameId = 0;
+     uint32_t width = 0, height = 0, backBufferFormat = 0;
++    ID3D12Resource* pairScratch = nullptr;   // generatePair: the output of a pair's first picture (discarded)
+     bool failed = false, available = false;
+     std::string providerVersion;
+ #ifdef VEYRA_HAS_FSR
+@@ -253,6 +254,36 @@ bool FsrFgPresenter::generate(ID3D12GraphicsCommandList* list, ID3D12Resource* c
+ #endif
+ }
+ 
++// The pair call: FSR's frame generation interpolates between the previous present and this one, so a pair (a, b) is a
++// present of a with reset (no history across it; its output is discarded) followed by a present of b. A pair that
++// starts where the last one ended (continues) is one dispatch.
++bool FsrFgPresenter::generatePair(ID3D12GraphicsCommandList* list, ID3D12Resource* a, ID3D12Resource* b,
++                                  ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* output,
++                                  bool continues, float elapsedMs) {
++#ifdef VEYRA_HAS_FSR
++    auto& p = *p_;
++    if (!p.available || p.failed || !list || !a || !b || !output) return false;
++    if (!continues) {
++        if (!p.pairScratch) {
++            ID3D12Device* dev = nullptr;
++            if (FAILED(output->GetDevice(IID_PPV_ARGS(&dev)))) return false;
++            D3D12_RESOURCE_DESC d = output->GetDesc();
++            d.Alignment = 0; d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++            d.Flags &= ~D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
++            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++            const HRESULT hr = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&p.pairScratch));
++            dev->Release();
++            if (FAILED(hr)) { p.pairScratch = nullptr; log::error("fsr-fg", "pair scratch texture failed"); return false; }
++        }
++        if (!generate(list, a, motion, depth, p.pairScratch, true, elapsedMs)) return false;
++    }
++    return generate(list, b, motion, depth, output, false, elapsedMs);
++#else
++    (void)list; (void)a; (void)b; (void)motion; (void)depth; (void)output; (void)continues; (void)elapsedMs;
++    return false;
++#endif
++}
++
+ void FsrFgPresenter::shutdown() {
+ #ifdef VEYRA_HAS_FSR
+     auto& p = *p_;
+@@ -263,6 +294,7 @@ void FsrFgPresenter::shutdown() {
+         log::info("fsr-fg", std::format("independent context destroyed result={}", returnName(result)));
+         p.fgContext = nullptr;
+     }
++    if (p.pairScratch) { p.pairScratch->Release(); p.pairScratch = nullptr; }
+     p.available = false;
+ #endif
+ }
