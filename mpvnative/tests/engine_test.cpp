@@ -192,7 +192,7 @@ static void TestSpacing(const pmeng_api* api, int k)
         std::printf("spacing x%d %s: %zu outputs, steps %.3f..%.3f px (ideal %.3f), %d repeats, %d steps out of range\n", k,
                     m ? "threshold" : "weighted", p.size(), lo, hi, ideal, repeats, bad);
         CHECK(p.size() >= size_t(30 * k), "spacing x%d: only %zu outputs", k, p.size());
-        if (m == 0) { char sb[512]; api->stats(h, sb, sizeof(sb)); std::printf("spacing x%d: %s\n", k, sb); for (size_t i = 0; i < p.size() && i < 14; ++i) std::printf(" %.2f", p[i]); std::printf("\n"); }
+        if (m == 0) { char sb[512]; api->stats(h, sb, sizeof(sb)); std::printf("spacing x%d: %s\n", k, sb); }
         CHECK(repeats == 0 && bad == 0, "spacing x%d (%s): %d repeats, %d steps outside %.2f..%.2f px", k, m ? "threshold" : "weighted",
               repeats, bad, 0.5 * ideal, 1.6 * ideal);
     }
