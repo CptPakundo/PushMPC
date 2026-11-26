@@ -11,6 +11,9 @@
 #include <exception>
 #include <mutex>
 #include <sstream>
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 
 namespace pme {
 
@@ -55,6 +58,65 @@ struct Instance {
 
 const char* Version() { return "pushmpc-engine 1 (" __DATE__ ")"; }
 
+#ifdef __APPLE__
+// libpushmpc_engine_apple.dylib from this module's folder (macOS 13.3+ to load; its self-test decides whether it runs)
+void LogC(const char* s) { pme::Log(s); }
+pme::Backend* OpenApple(const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why)
+{
+    using OpenFn = pme::Backend* (*)(const pmeng_stream*, const pme::Options*, pmeng_output*, std::string*, void (*)(const char*));
+    static OpenFn fn = nullptr;
+    static std::string loadWhy;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Dl_info di;
+        std::string dir;
+        if (dladdr(reinterpret_cast<void*>(&LogC), &di) && di.dli_fname) { dir = di.dli_fname; dir = dir.substr(0, dir.rfind('/') + 1); }
+        const std::string path = dir + "libpushmpc_engine_apple.dylib";
+        void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!h) { loadWhy = std::string("apple engine not loaded (") + dlerror() + ")"; return; }
+        fn = reinterpret_cast<OpenFn>(dlsym(h, "pme_apple_open"));
+        if (!fn) loadWhy = "apple engine: no pme_apple_open in " + path;
+    });
+    if (!fn) { why = loadWhy; return nullptr; }
+    return fn(&st, &o, &out, &why, LogC);
+}
+#endif
+
+// software frames: backend=auto tries, in order, what can do best on this machine. macOS: the apple engine (VideoToolbox),
+// then the portable GPU engine on its own Vulkan device (MoltenVK), then the CPU engine. Elsewhere: the CPU engine (the
+// decoder's GPU frames take the zero-copy engines above). backend=apple | portable-vulkan | portable-cpu picks one
+// (falling back to the CPU engine, with the reason in the description, when it cannot run).
+pme::Backend* OpenSoftware(const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why)
+{
+    const std::string backend = pme::Opt(o, "backend", "auto");
+    std::string tried;
+    auto attempt = [&](const char* name, pme::Backend* (*fn)(const pmeng_stream&, const pme::Options&, pmeng_output&, std::string&)) -> pme::Backend* {
+        std::string w;
+        pme::Backend* b = fn(st, o, out, w);
+        if (!b) { tried += std::string(tried.empty() ? "" : "; ") + name + ": " + w; pme::Log(std::string("software frames: ") + name + " not used: " + w); }
+        return b;
+    };
+    pme::Backend* b = nullptr;
+#ifdef __APPLE__
+    if (backend == "auto" || backend == "apple") b = attempt("apple", OpenApple);
+#endif
+#ifdef PME_VULKAN
+    bool vk = backend == "portable-vulkan";
+#ifdef __APPLE__
+    vk = vk || backend == "auto" || backend == "apple";
+#endif
+    if (!b && vk) b = attempt("portable-vulkan", pme::OpenVulkanHost);
+#endif
+    if (!b) {
+        b = pme::OpenCpu(st, o, out, why);
+        if (b && !tried.empty()) {
+            const size_t n = std::strlen(out.description);
+            std::snprintf(out.description + n, sizeof(out.description) - n, " (GPU engines not used: %s)", tried.c_str());
+        }
+    }
+    return b;
+}
+
 void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options, pmeng_output* out, char* err, uint32_t errSize)
 {
     auto fail = [&](const std::string& why) -> void* {
@@ -86,7 +148,7 @@ void* Open(const pmeng_device* dev, const pmeng_stream* st, const char* options,
 #endif
         } else {
             if (backend == "nvidia") return fail("backend=nvidia needs D3D11 frames (hwdec=d3d11va)");
-            b = pme::OpenCpu(*st, o, *out, why);
+            b = OpenSoftware(*st, o, *out, why);
         }
         if (!b) return fail(why);
         pme::Log(std::string("open: ") + out->engine + ": " + out->description);

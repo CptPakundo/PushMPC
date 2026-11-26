@@ -4,6 +4,9 @@
 //   D3D11Backend  pushcore (Windows): the decoder's D3D11 texture goes straight into pushcore's ingress, the output is
 //                 copied (GPU) into the filter's own texture, so pushcore's leases return at once. One warm pushcore per
 //                 process (mpv rebuilds its filter graph on every seek).
+//   AppleBackend  (macOS, libpushmpc_engine_apple.dylib next to this module) VideoToolbox frame interpolation / frame-rate
+//                 conversion on software frames; Auto's first choice there.
+//   VulkanHostBackend the portable GPU engine on its own device for software frames (macOS: MoltenVK, bundled).
 //   VulkanBackend the portable GPU engine (vsplugin/engines/gpu) on the decoder's own Vulkan device: FFmpeg's Vulkan
 //                 frames in and out with no copy through host memory (builds without its dependencies: open() fails
 //                 with the reason and the filter uses its copy fallback through the CPU engine).
@@ -38,6 +41,8 @@ public:
 // nullptr + why on failure
 Backend* OpenCpu(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 #ifdef PME_VULKAN
+// software frames on the engine's own Vulkan device (MoltenVK on macOS): Auto's GPU choice for frames in host memory
+Backend* OpenVulkanHost(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 Backend* OpenVulkan(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 #endif
 #ifdef _WIN32

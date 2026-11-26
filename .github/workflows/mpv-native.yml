@@ -574,8 +574,12 @@ jobs:
   # libmpv, a real launch of the modified app, uninstall bit-exact. Dispatch only (plex_macos input).
   plex-macos:
     if: github.event_name == 'workflow_dispatch' && inputs.plex_macos
-    runs-on: macos-15
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: Build the Mac pieces (8.29.100 filter build, proxy, engine, self-test host)
@@ -603,7 +607,9 @@ jobs:
         timeout-minutes: 20
         run: |
           set +e; p="$RUNNER_TEMP/plexmac"; fails=0
+          export PUSHMPC_ENGINE_LOG="$RUNNER_TEMP/engine.log"
           cp mpvnative/install/pushmpc-plex-mac.sh "$p/"
+          sw_vers | tr '\n' ' '; sysctl -n machdep.cpu.brand_string; system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Chipset|Metal' | head -3
           for t in 'desktop:Plex.app:Plex' 'htpc:Plex HTPC.app:Plex HTPC'; do
             n=${t%%:*}; r=${t#*:}; a="$RUNNER_TEMP/apps/${r%%:*}"; exe=${r##*:}
             [ -d "$a" ] || { echo "::error::$a missing"; fails=$((fails + 1)); continue; }
@@ -616,6 +622,11 @@ jobs:
               || { echo "::error::$n: install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
             grep -c 'PushMPC native (Plex): do not edit' "$HOME/Library/Application Support/$exe/mpv.conf"
             echo "status: $(sh "$p/pushmpc-plex-mac.sh" status --app $n --app-path "$a" --from "$p" --json)"
+            # each engine on its own through Plex's libmpv (Auto above picked the best that runs here)
+            for be in apple portable-vulkan portable-cpu; do
+              PUSHMPC_HOST_VF="pushmpc=smoother=2:backend=$be" DYLD_LIBRARY_PATH="$a/Contents/Frameworks" "$p/pushmpc-plex-selftest" "$a/Contents/Frameworks/libmpv.2.dylib" 2>&1                 | grep -E '^host: .*(filter:|end of file)' | sed "s/^/  backend=$be: /" | cut -c1-400
+            done
+            echo "engine log (why an engine was not used):"; grep -E 'not used|open:' "$PUSHMPC_ENGINE_LOG" 2>/dev/null | sort | uniq -c | cut -c1-400
             # the real app with the proxy in place: it must start and load the proxy chain
             open -n "$a"; sleep 25
             pid=$(pgrep -x "$exe" | head -1)

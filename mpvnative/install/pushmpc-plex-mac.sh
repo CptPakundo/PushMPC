@@ -10,8 +10,9 @@
 #
 #   --app       desktop = /Applications/Plex.app, htpc = /Applications/Plex HTPC.app, auto = each one there (default)
 #   --app-path  the .app bundle when it is elsewhere (needs --app desktop or htpc)
-#   --from      folder with libavfilter.8.dylib (the proxy), pushmpc-avfilter-8.*.dylib, libpushmpc_engine.dylib and
-#               pushmpc-plex-selftest (default: here)
+#   --from      folder with libavfilter.8.dylib (the proxy), pushmpc-avfilter-8.*.dylib, libpushmpc_engine.dylib,
+#               libpushmpc_engine_apple.dylib and libMoltenVK.dylib (the GPU engines; optional) and pushmpc-plex-selftest
+#               (default: here). The self-test line names the engine that ran (apple, portable-vulkan, portable-cpu).
 #   --json      one JSON object per app on stdout ({"target","action","state","detail"}), the log on stderr
 # install backs up the original (~/Library/Application Support/PushMPC/plex-native/<app>, with its SHA-256), runs a
 # self-test with that Plex's own libmpv and is idempotent (an installed proxy keeps; the conf block is made sure of).
@@ -117,7 +118,8 @@ do_app() {   # do_app <name> <bundle> <mpv.conf>
             || { emit "$name" error "cannot replace $fw/libavfilter.8.dylib"; return 1; }
         sha "$fw/libavfilter.8.dylib" > "$bk/proxy.sha256"
         echo libavfilter.8-plex.dylib > "$bk/added.txt"
-        for f in "$from"/pushmpc-avfilter-8.*.dylib "$from/libpushmpc_engine.dylib"; do
+        for f in "$from"/pushmpc-avfilter-8.*.dylib "$from/libpushmpc_engine.dylib" "$from/libpushmpc_engine_apple.dylib" "$from/libMoltenVK.dylib" "$from/MoltenVK-LICENSE.txt"; do
+            [ -f "$f" ] || continue   # the GPU engines are optional (Auto: VideoToolbox, then Vulkan on MoltenVK, then CPU)
             b=${f##*/}; [ -e "$fw/$b" ] && continue   # never overwrite Plex's own files
             cp "$f" "$fw/$b" && echo "$b" >> "$bk/added.txt"
         done

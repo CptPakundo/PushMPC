@@ -3,7 +3,8 @@
 # libmpv.2.dylib links FFmpeg 5.x as separate universal dylibs (libavfilter.8.dylib is 8.29.100, a FFmpeg master
 # snapshot): pushmpc-avfilter-<ver>.dylib for every pins.json snapshotCommits entry (arm64 + x86_64, only vf_pushmpc,
 # binds @rpath/libavutil.57.dylib = Plex's), the proxy libavfilter.8.dylib (re-exports the renamed original
-# libavfilter.8-plex.dylib, defines avfilter_get_by_name), libpushmpc_engine.dylib (CPU engine) and the self-test host.
+# libavfilter.8-plex.dylib, defines avfilter_get_by_name), libpushmpc_engine.dylib + libpushmpc_engine_apple.dylib + libMoltenVK.dylib (Auto: VideoToolbox,
+# then Vulkan on MoltenVK, then CPU) and the self-test host.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 src=$1; out=$2
@@ -61,12 +62,29 @@ codesign -f -s - "$out/libavfilter.8.dylib"
 echo "proxy libavfilter.8.dylib ($(lipo -archs "$out/libavfilter.8.dylib")): $(otool -L "$out/libavfilter.8.dylib" | sed 1,2d | awk '{print $1}' | tr '\n' ' ')"
 nm -gU "$out/libavfilter.8.dylib" | grep -E ' _(avfilter_get_by_name|pushmpc_proxy_status)$'
 
-# the engine module (portable CPU engine), universal
-cmake -S "$here/../engine" -B "$work/engine" -DCMAKE_BUILD_TYPE=Release -DPME_VULKAN=OFF \
+# the engine module, universal: the CPU engine, the portable GPU engine on its own Vulkan device (MoltenVK, below) and
+# libpushmpc_engine_apple.dylib (VideoToolbox, macOS 13.3+); Auto: apple, then Vulkan, then CPU. Needs glslang (brew).
+command -v glslangValidator >/dev/null || brew install glslang >/dev/null
+cmake -S "$here/../engine" -B "$work/engine" -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON \
     -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=$min > "$work/engine.log" 2>&1 \
-    && cmake --build "$work/engine" --parallel --target pushmpc_engine >> "$work/engine.log" 2>&1 || { tail -30 "$work/engine.log"; exit 1; }
-cp "$work/engine/out/libpushmpc_engine.dylib" "$out/"
-codesign -f -s - "$out/libpushmpc_engine.dylib"
+    && cmake --build "$work/engine" --parallel --target pushmpc_engine pushmpc_engine_apple >> "$work/engine.log" 2>&1 || { tail -40 "$work/engine.log"; exit 1; }
+grep -q 'no Vulkan engine' "$work/engine.log" && { grep 'no Vulkan engine' "$work/engine.log"; echo "::error::the engine was built without Vulkan"; exit 1; }
+for m in libpushmpc_engine.dylib libpushmpc_engine_apple.dylib; do
+    cp "$work/engine/out/$m" "$out/"; codesign -f -s - "$out/$m"
+    echo "$m ($(lipo -archs "$out/$m")), minimum macOS $(otool -l "$out/$m" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+done
+# MoltenVK (Apache-2.0), the release pinned in gpu-pins.json: the Vulkan driver for the GPU engine, loaded from here
+mvk=$(python3 -c "import json,sys; m=json.load(open(sys.argv[1]))['moltenvk']; print(m['url'], m['sha256'], m['version'])" "$here/../../vsplugin/engines/gpu/gpu-pins.json")
+set -- $mvk
+curl -fsSL -o "$work/mvk.tar" "$1"
+echo "$2  $work/mvk.tar" | shasum -a 256 -c - >/dev/null || { echo "::error::MoltenVK $3: SHA-256 mismatch"; exit 1; }
+mkdir -p "$work/mvk" && tar -xf "$work/mvk.tar" -C "$work/mvk"
+lib=$(find "$work/mvk" -path '*dylib/macOS/libMoltenVK.dylib' | head -1)
+[ -n "$lib" ] || { echo "::error::no macOS libMoltenVK.dylib in MoltenVK $3"; find "$work/mvk" -name '*.dylib' | head; exit 1; }
+cp "$lib" "$out/libMoltenVK.dylib"
+codesign -v "$out/libMoltenVK.dylib" 2>/dev/null || codesign -f -s - "$out/libMoltenVK.dylib"
+lic=$(find "$work/mvk" -maxdepth 3 -name 'LICENSE*' | head -1); [ -z "$lic" ] || cp "$lic" "$out/MoltenVK-LICENSE.txt"
+echo "libMoltenVK.dylib $3 ($(lipo -archs "$out/libMoltenVK.dylib"))"
 
 # the self-test host (loads Plex's libmpv in its own process)
 clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$here/../hook/libmpv_host.c" -o "$out/pushmpc-plex-selftest"
