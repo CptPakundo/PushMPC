@@ -20,7 +20,8 @@
 #        [avcodec]  avcodec-hw=none on Linux to start with (software decoding always keeps PushMPC on)
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
 #   macOS: also PushMPC's OpenGL output with FSR 1 upscaling (libpushmpc_macosx_plugin.dylib, [core] vout=pushmpc_macosx,any)
-#      and MoltenVK (libMoltenVK.dylib, the GPU engine's Vulkan driver) from next to the plugin, then a self-test: VLC.app
+#      MoltenVK (libMoltenVK.dylib, the GPU engine's Vulkan driver) and the apple engine (libpushmpc_engine_apple.dylib:
+#      VideoToolbox interpolation, tried first) from next to the plugin, then a self-test: VLC.app
 #      plays a generated 2 s clip headless with PushMPC at x2; the log line names the engine and the generated frames.
 #   vlcrc: uninstall puts the file back byte for byte (or removes it when install created it) as long as nothing else
 #      changed it since; otherwise only PushMPC's own settings are taken out.
@@ -114,7 +115,7 @@ install_one() {
   cp -f "$plug" "$DIR/"
   [ "$OS" = Darwin ] && xattr -d com.apple.quarantine "$DIR/$(basename "$plug")" 2>/dev/null || true
   if [ "$tgt" = macos ]; then   # the FSR output and MoltenVK, when they ship next to the plugin
-    for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib; do
+    for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib libpushmpc_engine_apple.dylib; do
       [ -f "$(dirname "$plug")/$x" ] || continue
       cp -f "$(dirname "$plug")/$x" "$DIR/"; xattr -d com.apple.quarantine "$DIR/$x" 2>/dev/null || true
     done
@@ -188,7 +189,7 @@ selftest_mac() {
   env VLC_PLUGIN_PATH="$DIR" perl -e 'alarm 60; exec @ARGV' "$vlc" -I dummy --vout=dummy --no-audio --play-and-exit \
     --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 --file-logging --logfile="$log" --log-verbose=2 "$clip" >/dev/null 2>&1 || true
   gen="$(sed -n 's/.*PushMPC: close, in=[0-9]* out=[0-9]* generated=\([0-9]*\).*/\1/p' "$log" 2>/dev/null | tail -1)"
-  eng="$(grep -o 'PushMPC [0-9][^:]*: .*-> x[0-9]* ([^;)]*' "$log" 2>/dev/null | head -1 | sed 's/.*(//')"
+  eng="$(sed -n 's/.*PushMPC [0-9][^:]*: .*-> x[0-9]* (\([^;]*\);.*/\1/p' "$log" 2>/dev/null | head -1)"
   if [ "${gen:-0}" -gt 0 ]; then say "self-test (macos): PushMPC generated $gen frames at x2 (engine: ${eng:-unknown})"
   else say "self-test (macos): no generated frames ($(grep -o 'PushMPC[^\r]*' "$log" 2>/dev/null | tail -2 | tr '\n' ' '))"; fi
   rm -f "$clip"
@@ -292,7 +293,7 @@ selftest_hw() {
 uninstall_one() {
   tgt="$1"; paths_for "$tgt"
   rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log" \
-        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/pushmpc-selftest.y4m"
+        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/libpushmpc_engine_apple.dylib" "$DIR/pushmpc-selftest.y4m"
   rmdir "$DIR" 2>/dev/null || true
   case "$tgt" in
     native)

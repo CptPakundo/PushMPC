@@ -100,9 +100,8 @@ gets a short test picture to check that PushMPC really makes extra frames there:
 
 - If macOS says Terminal isn't allowed to change Plex, open **System Settings > Privacy & Security > App Management**,
   turn Terminal on, and run `pushmpc-setup install` again.
-- In mpv, IINA and Plex, PushMPC uses Apple's own frame interpolation (macOS 15.4 or newer) when your Mac can run it.
-  Otherwise it uses the graphics chip, and if that isn't possible, the processor. VLC uses the graphics chip, or the
-  processor.
+- In mpv, IINA, VLC and Plex, PushMPC uses Apple's own frame interpolation (macOS 15.4 or newer) when your Mac can run
+  it. Otherwise it uses the graphics chip, and if that isn't possible, the processor.
 - To remove everything: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. Plex, IINA, VLC and your mpv
   settings go back exactly as they were.
 - To update: `brew upgrade pushmpc`, then `pushmpc-setup install` again.

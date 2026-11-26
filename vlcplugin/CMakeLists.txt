@@ -33,6 +33,11 @@ target_include_directories(pm_pushfps_portable PUBLIC "${VS}/third_party/pushfps
 add_library(pm_engine_portable STATIC "${VS}/engines/portable/portable_engine.cpp" src/engine_portable.cpp)
 target_include_directories(pm_engine_portable PUBLIC "${VS}/engines/portable" "${VS}/src" src)
 target_link_libraries(pm_engine_portable PUBLIC pm_pushfps_portable Threads::Threads)
+# macOS: Auto tries the apple engine (VideoToolbox) first, through libpushmpc_engine_apple.dylib next to the plugin
+if(APPLE)
+  target_include_directories(pm_engine_portable PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../mpvnative/include" "${CMAKE_CURRENT_SOURCE_DIR}/../mpvnative/engine")
+  target_compile_definitions(pm_engine_portable PRIVATE PM_APPLE_MODULE)
+endif()
 
 # the portable GPU engine (vsplugin/engines/gpu: Vulkan 1.2 compute, the Vulkan library loaded at run time through volk;
 # MoltenVK on macOS). Vulkan-Headers and volk at the commits engines/gpu/gpu-pins.json pins (-DPM_FETCH_GPU_DEPS=ON, CI),

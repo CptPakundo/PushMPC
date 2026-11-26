@@ -1,7 +1,8 @@
 #!/bin/bash
 # build-mac-extras.sh <bundle dir>  (macOS): the Mac player pieces next to the Plex for Mac / engine bundle that
 # build-plex-mac.sh made in <bundle dir> (one Mac bundle: the Homebrew formula's plex-mac resource, pushmpc-setup):
-#   vlc/   libpushmpc_plugin.dylib (frame generation: the GPU engine on MoltenVK, else the CPU engine),
+#   vlc/   libpushmpc_plugin.dylib (frame generation: VideoToolbox through libpushmpc_engine_apple.dylib, else the GPU
+#          engine on MoltenVK, else the CPU engine),
 #          libpushmpc_macosx_plugin.dylib (PushMPC's macOS OpenGL output with FSR 1 upscaling), libMoltenVK.dylib,
 #          pushmpc-vlc.sh: universal arm64 + x86_64, built against VLC 3.0.24 (the official SDK headers and sources)
 #   iina/  PushMPC-<version>.iinaplgz (the IINA plugin; integrations/iina/build.py, pinned shaders)
@@ -34,6 +35,7 @@ for p in libpushmpc_plugin.dylib libpushmpc_macosx_plugin.dylib; do
     echo "vlc/$p ($(lipo -archs "$out/vlc/$p"))"
 done
 cp "$out/libMoltenVK.dylib" "$out/vlc/"   # the GPU engine finds it next to the plugin
+cp "$out/libpushmpc_engine_apple.dylib" "$out/vlc/"   # VideoToolbox interpolation, tried first (engine_portable.cpp)
 cp "$root/vlcplugin/install/pushmpc-vlc.sh" "$out/vlc/"
 
 # the IINA plugin (pinned shaders, fetched and hash-checked)
