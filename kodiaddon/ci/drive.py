@@ -1,6 +1,6 @@
 """Drive a running Kodi over JSON-RPC (TCP 9090, enabled by default for local programs) during a test case:
 wait for playback, optionally seek / step a chapter / switch subtitles on, report player properties, then quit.
-usage: drive.py <case> <seconds>   (case: play, seek, chapter, subs)"""
+usage: drive.py <case> <seconds> [clips dir]   (case: play, seek, chapter, subs, browse)"""
 import functools, json, socket, sys, time
 print = functools.partial(print, flush=True)   # the output survives a kill
 
@@ -58,6 +58,39 @@ if case == "enable":
         time.sleep(2)
     else:
         print("DRIVE: JSON-RPC never answered")
+    try:
+        rpc("Application.Quit")
+    except OSError:
+        pass
+    sys.exit(0)
+if case == "browse":
+    # Kodi's Videos window on the clips folder: it extracts thumbnails and stream details of every clip (its probes)
+    path = sys.argv[3].rstrip("/\\") + ("\\" if "\\" in sys.argv[3] else "/")
+    deadline = time.time() + 120
+    up = False
+    while time.time() < deadline and not up:
+        try:
+            up = bool(rpc("JSONRPC.Ping"))
+        except OSError:
+            pass
+        if not up:
+            time.sleep(2)
+    print("DRIVE up", up)
+    print("DRIVE activate", json.dumps(rpc("GUI.ActivateWindow", {"window": "videos", "parameters": [path]}) if up else None))
+    alive = up
+    end = time.time() + secs
+    while alive and time.time() < end:
+        time.sleep(3)
+        try:
+            alive = (rpc("JSONRPC.Ping") or {}).get("result") == "pong"
+        except OSError:
+            alive = False
+    if alive:
+        r = rpc("Files.GetDirectory", {"directory": path, "media": "video", "properties": ["thumbnail", "streamdetails"]}, timeout=15)
+        for f in ((r or {}).get("result") or {}).get("files") or []:
+            sd = (f.get("streamdetails") or {}).get("video") or [{}]
+            print("DRIVE file", f.get("label"), "thumbnail", bool(f.get("thumbnail")), "video", json.dumps(sd[0] if sd else {}))
+    print("DRIVE browse_ok", alive)
     try:
         rpc("Application.Quit")
     except OSError:

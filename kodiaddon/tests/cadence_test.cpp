@@ -151,10 +151,12 @@ int main()
     KodiEngine(0);
     KodiEngine(1);
     ZeroCopy();
+    ZeroCopyP010();
     HostImport();
     SemiPlanar(8);
     SemiPlanar(10);
     ToneMap();
+    PlatformChecks();
     std::printf(g_fail ? "cadence_test: %d failure(s)\n" : "cadence_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

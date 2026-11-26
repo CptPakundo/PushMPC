@@ -16,7 +16,9 @@ ap.add_argument("--major", type=int, required=True)
 ap.add_argument("--out", required=True)
 ap.add_argument("--cases", default="")
 ap.add_argument("--kill", default="", help="command that stops any leftover Kodi")
-ap.add_argument("--gles", action="store_true", help="Kodi renders with GLES (10-bit stays with Kodi's decoder)")
+ap.add_argument("--prime", action="store_true", help="seed Kodi's DRM-PRIME renderer settings (dma-buf frame buffers shown)")
+ap.add_argument("--alloc-off", default="", help="command that takes Kodi's dma-buf allocator away (cases marked _noalloc)")
+ap.add_argument("--alloc-on", default="", help="command that gives it back")
 ap.add_argument("--gpu", action="store_true", help="the GPU engine is expected (Vulkan present)")
 ap.add_argument("--play", type=float, default=14.0)
 a = ap.parse_args()
@@ -40,7 +42,7 @@ CASES = [
     ("upscale2", "h264.mp4", {"smoother": 2, "upscale": 2}, 2, True, "1280x720", "play"),
     ("hevc_x2", "hevc.mkv", {"smoother": 2}, 2, True, "640x360", "play"),
     ("mpeg2_x2", "mpeg2.ts", {"smoother": 2}, 2, True, "640x360", "play"),
-    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22 and not a.gles, "640x360", "play"),
+    ("hdr10_x2", "hdr10.mkv", {"smoother": 2}, 2, kodi22, "640x360", "play"),
     ("hdr10_kodi", "hdr10.mkv", {"enabled": "false"}, 1, False, "640x360", "play"),   # the same file through Kodi alone
     ("fonts", "styled.mkv", {"smoother": 2}, 2, True, "640x360", "subs"),
     ("seek", "h264.mkv", {"smoother": 2}, 2, True, "640x360", "seek"),
@@ -48,7 +50,12 @@ CASES = [
     ("disabled", "h264.mp4", {"enabled": "false"}, 1, False, "640x360", "play"),
 ]
 # run only when named (kodi-wayland): the GPU engine with Kodi's frame buffers, dma-buf or system memory
-EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2, True, "640x360", "play")]
+EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2, True, "640x360", "play"),
+         # without a dma-buf allocator (Kodi's probes then crash if they reach an add-on decoder): the HDR file, whose
+         # stream details Kodi probes from a decoded frame at play start, and a Videos listing of every clip, where Kodi
+         # extracts thumbnails and stream details
+         ("hdr10_noalloc", "hdr10.mkv", {"smoother": 2, "_noalloc": 1}, 2, kodi22, "640x360", "play"),
+         ("browse_noalloc", None, {"smoother": 2, "_noalloc": 1}, 1, False, "*", "browse")]
 if a.cases:
     keep = set(a.cases.split(","))
     CASES = [c for c in CASES + EXTRA if c[0] in keep]
@@ -71,7 +78,11 @@ def kodi_settings():
         <setting id="videoplayer.adjustrefreshrate">0</setting>
         <setting id="services.esenabled">true</setting>
         <setting id="filelists.showparentdiritems">true</setting>
-    </settings>
+        <setting id="myvideos.extractthumb">true</setting>
+        <setting id="myvideos.extractflags">true</setting>
+    """ + ("""        <setting id="videoplayer.useprimedecoder">true</setting>
+        <setting id="videoplayer.useprimerenderer">1</setting>
+    """ if a.prime else "") + """</settings>
     """)
 
 dst = os.path.join(a.home, "addons", "inputstream.pushmpc")
@@ -93,7 +104,7 @@ def launch(args, seconds, drive_case=None, drive_out=None):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     d = None
     if drive_case:
-        d = subprocess.Popen([sys.executable, os.path.join(here, "drive.py"), drive_case, str(seconds)],
+        d = subprocess.Popen([sys.executable, os.path.join(here, "drive.py"), drive_case, str(seconds), a.clips],
                              stdout=open(drive_out, "w"), stderr=subprocess.STDOUT)
     try:
         p.wait(timeout=seconds + 100)
@@ -142,10 +153,15 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
     if a.gpu:
         s.update({"engine": 1, "upscale": 1})
     s.update(settings)
+    noalloc = bool(s.pop("_noalloc", 0))
     write(os.path.join(ud, "addon_data", "inputstream.pushmpc", "settings.xml"),
           "<settings version=\"2\">\n" + "".join(f"    <setting id=\"{k_}\">{v}</setting>\n" for k_, v in s.items()) + "</settings>\n")
     drive_out = os.path.join(a.out, f"{name}.drive.txt")
-    launch([os.path.join(a.clips, clip)], a.play, drive_case, drive_out)
+    if noalloc and a.alloc_off:
+        subprocess.run(a.alloc_off, shell=True, check=False)
+    launch([os.path.join(a.clips, clip)] if clip else [], a.play * 2 if drive_case == "browse" else a.play, drive_case, drive_out)
+    if noalloc and a.alloc_on:
+        subprocess.run(a.alloc_on, shell=True, check=False)
     log = find_log()
     lp = os.path.join(a.out, f"{name}.log")
     if log:

@@ -32,6 +32,7 @@ extern "C" {
 #endif
 #include "tonemap.h"
 #include "kodi_engine.h"
+#include "kodi_platform.h"
 
 #include <algorithm>
 #include <atomic>
@@ -329,7 +330,11 @@ public:
 
         if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
             info.SetStreamType(INPUTSTREAM_TYPE_VIDEO);
-            const bool ours = streamid - 1 == m_videoIndex && m_decode;
+            // DECODE (and on Kodi 21 its crypto session) only once VideoPlayer opened the stream: Kodi's thumbnail and
+            // stream-detail probes never open streams, so they keep Kodi's own decoder (on Wayland a probe hands an add-on
+            // decoder a dma-buf pool with no allocator behind it, which crashes Kodi). Kodi asks for the stream again after
+            // OpenStream and takes the new codec, features and crypto session (CDVDDemuxClient::OpenStream, forceInit).
+            const bool ours = streamid - 1 == m_videoIndex && m_decode && m_prepared;
             int rate = 0, scale = 0;
             StreamFps(st, rate, scale);
             if (ours) {
@@ -413,7 +418,10 @@ public:
     bool OpenStream(int streamid) override
     {
         EnableStream(streamid, true);
-        if (streamid - 1 == m_videoIndex) m_playback = true;
+        if (streamid - 1 == m_videoIndex) {
+            m_playback = true;
+            PrepareEngine();   // engine and benchmark only for playback, never in a probe
+        }
         return true;
     }
     // VideoPlayer opens the streams it plays; Kodi's thumbnail and stream-detail probes never do
@@ -517,6 +525,8 @@ public:
     std::unique_ptr<pmk::IEngine> TakeEngine() { return std::move(m_engine); }
     int OutWidth() const { return m_outW; }
     int OutHeight() const { return m_outH; }
+    bool DmaBufs() const { return m_dma; }
+    bool Force8Bit() const { return m_force8; }
 
     // Kodi tells the add-on the screen size before Open (CInputStreamAddon::DetectScreenResolution)
     void SetVideoResolution(unsigned int width, unsigned int height) override { m_screenW = int(width); m_screenH = int(height); }
@@ -672,11 +682,6 @@ private:
         else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         else if (bits > 10) why = "more than 10 bits per sample";
-#if PM_KODI22 && defined(__linux__) && !defined(__ANDROID__)
-        // Kodi 22 with GLES on Wayland / GBM (where its buffer manager has a dma-buf pool; Wayland CI): its stream-detail probe of a 10-bit file stops Kodi once the add-on decodes it
-        // (open issue); Kodi's own decoder plays those files there for now
-        else if (bits > 8 && KodiUsesGles() && (std::getenv("WAYLAND_DISPLAY") || !std::getenv("DISPLAY")) && !std::getenv("PUSHMPC_GLES_10BIT")) why = "10-bit on Kodi with GLES: Kodi's own decoder for now (open issue)";
-#endif
         if (!why.empty()) {
             Log(ADDON_LOG_INFO, "video stays with Kodi's decoder: %s", why.c_str());
             return;
@@ -684,8 +689,65 @@ private:
         m_decode = true;
         m_toneMap = !PM_KODI22 && IsHdrTransfer(trc);   // only reached with the setting on
         if (m_toneMap) Log(ADDON_LOG_INFO, "HDR on Kodi 21: tone-mapped to SDR BT.709 for frame generation (add-on setting)");
+        m_bits = bits;
+        m_outW = p->width; m_outH = p->height;
+    }
+
+    // Which frame buffers Kodi's renderer shows (Linux): dma-bufs only when Kodi can allocate them, its DRM-PRIME
+    // renderer is on (videoplayer.useprimedecoder, useprimerenderer = EGL) and the GPU's EGL imports the format
+    // (8-bit I420 as DRM YUV420, 10-bit as P010); else system memory. Planar 10-bit in system memory needs 16-bit
+    // textures in Kodi's GLES renderer (GL_EXT_texture_norm16); without them the pictures are dithered to 8 bits.
+    void DecideFrameBuffers(int bits)
+    {
+        m_dma = false;
+        m_force8 = false;
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!KodiUsesGles()) {
+            Log(ADDON_LOG_INFO, "frame buffers: system memory (Kodi renders with desktop GL)");
+            return;
+        }
+        const bool ten = bits > 8 && !m_toneMap;
+        const bool gbm = !std::getenv("WAYLAND_DISPLAY") && !std::getenv("DISPLAY");
+        std::string alloc, prime, fmt = "not checked";
+        const bool hasAlloc = pmk::KodiHasDmaAllocator(gbm, alloc);
+        const bool primeOn = pmk::KodiPrimeRendererOn(kodi::vfs::TranslateSpecialProtocol("special://profile/guisettings.xml"), prime);
+        bool fmtOk = false;
+        if (hasAlloc && primeOn && (!ten || PM_KODI22)) {   // Kodi 21 has no P010 frame format
+            const pmk::EglCaps& caps = pmk::QueryEglCaps();
+            const uint32_t fourcc = ten ? pmk::kDrmP010 : pmk::kDrmYuv420;
+            fmtOk = caps.formatsKnown && caps.formats.count(fourcc) > 0;
+            fmt = std::string(ten ? "P010 " : "YUV420 ") + (!caps.queried ? "unknown (" + caps.how + ")"
+                                                         : !caps.formatsKnown ? "unknown (no dma-buf format query, " + caps.how + ")"
+                                                         : fmtOk ? "imported (" + caps.how + ")" : "not imported (" + caps.how + ")");
+        }
+        if (const char* e = std::getenv("PUSHMPC_KODI_DMABUF")) fmtOk = fmtOk || e[0] == '1';   // tests: trust the format
+        m_dma = hasAlloc && primeOn && fmtOk;
+        Log(ADDON_LOG_INFO, "frame buffers: %s (allocator %s; %s; EGL %s)", m_dma ? (ten ? "dma-buf, P010" : "dma-buf") : "system memory",
+            alloc.c_str(), prime.c_str(), fmt.c_str());
+        if (ten && !m_dma) {
+            const pmk::EglCaps& caps = pmk::QueryEglCaps();
+            m_force8 = caps.norm16 == 0 && !std::getenv("PUSHMPC_KODI_NORM16");
+            Log(ADDON_LOG_INFO, "10-bit pictures: %s", m_force8 ? "dithered to 8 bits (Kodi's GLES renderer has no 16-bit textures here)"
+                                                       : caps.norm16 > 0 ? "planar 10-bit (16-bit textures in Kodi's GLES renderer)"
+                                                                         : "planar 10-bit (16-bit texture support not known)");
+        }
+#else
+        (void)bits;
+#endif
+    }
+
+    // VideoPlayer opened the main video stream: Kodi's frame-buffer path, the engine and its multiplier
+    void PrepareEngine()
+    {
+        if (m_prepared || !m_decode || m_videoIndex < 0) return;
+        m_prepared = true;
+        const AVStream* st = m_fmt->streams[m_videoIndex];
+        const AVCodecParameters* p = st->codecpar;
+        const int bits = m_bits;
+        std::string why;
+        DecideFrameBuffers(bits);
         m_engineCfg = pmk::EngineCfg{};
-        m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 && !m_toneMap ? 10 : 8;
+        m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 && !m_toneMap && !m_force8 ? 10 : 8;
         m_engineCfg.threads = m_settings.threads; m_engineCfg.quality = m_settings.quality;
         m_engineCfg.backend = m_settings.engine;
 #if defined(__ANDROID__) && defined(PM_AHB)
@@ -694,6 +756,7 @@ private:
 #if PM_KODI22 && defined(_WIN32)
         m_engineCfg.semiPlanar = true;   // NV12 / P010: the DXVA renderer uploads them with a plain copy
 #endif
+        if (m_dma && m_engineCfg.bits > 8) m_engineCfg.semiPlanar = true;   // 10-bit dma-bufs as P010 (DRM_FORMAT_P010)
         std::string upWhy, engWhy;
         DecideUpscale(st, m_engineCfg, upWhy);
         m_engine = pmk::OpenEngine(m_engineCfg, engWhy);
@@ -745,7 +808,10 @@ private:
     uint64_t m_reads = 0;
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
     bool m_toneMap = false;
-    bool m_playback = false;
+    bool m_playback = false, m_prepared = false;
+    int m_bits = 8;
+    bool m_dma = false;      // Kodi's dma-buf frame buffers reach a renderer that shows them (DecideFrameBuffers)
+    bool m_force8 = false;   // 10-bit sources as dithered 8-bit (Kodi's GLES renderer without 16-bit textures)
     AVColorPrimaries m_prim = AVCOL_PRI_UNSPECIFIED;
     AVColorSpace m_space = AVCOL_SPC_UNSPECIFIED;
     AVMasteringDisplayMetadata m_mdm{};
@@ -767,6 +833,9 @@ public:
     {
         const AVCodecParameters* par = m_in ? m_in->VideoPar() : nullptr;
         if (!par) return false;
+        // probes (thumbnails, stream details) never open the stream and get Kodi's own decoder; should one still ask us
+        if (!m_in->Playback()) { Log(ADDON_LOG_INFO, "a probe asked for the add-on's decoder: declined"); return false; }
+        m_force8 = m_in->Force8Bit();
         m_cfg = m_in->EngineConfig();
         m_engine = m_in->TakeEngine();
         const bool playback = m_in->Playback();
@@ -992,7 +1061,7 @@ private:
             f = m_sw;
         }
         const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(f->format));
-        const int bits = d && d->comp[0].depth > 8 && !m_toneMap ? 10 : 8;
+        const int bits = d && d->comp[0].depth > 8 && !m_toneMap && !m_force8 ? 10 : 8;   // swscale dithers 10 to 8 bits
         if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
         int64_t pts = f->best_effort_timestamp;
         if (pts == AV_NOPTS_VALUE) pts = m_havePrev ? m_prevPts + int64_t(m_frameUs > 0 ? m_frameUs : 41708) : 0;
@@ -1307,10 +1376,13 @@ private:
             return -1;
         }
         const auto* d = static_cast<const KODI_DRM_FRAME_DESCRIPTOR*>(pb.handle);
+        // planar (3 planes: Y, U, V) or the engine's semi-planar P010 / NV12 (2 planes: Y, interleaved UV)
+        const bool semi = EngineSemi();
+        const auto& L = d->layers[0];
         const bool layoutOk = d->nb_objects == 1 && d->objects[0].fd >= 0 && d->objects[0].size >= m_layout.size && d->nb_layers >= 1 &&
-                              d->layers[0].nb_planes == 3 && d->layers[0].planes[0].offset == 0 &&
-                              d->layers[0].planes[1].offset == m_layout.offU && d->layers[0].planes[2].offset == m_layout.offV &&
-                              int(d->layers[0].planes[0].pitch) == m_layout.pitchY && int(d->layers[0].planes[1].pitch) == m_layout.pitchC;
+                              L.nb_planes == (semi ? 2 : 3) && L.planes[0].offset == 0 && L.planes[1].offset == m_layout.offU &&
+                              (semi || L.planes[2].offset == m_layout.offV) &&
+                              int(L.planes[0].pitch) == m_layout.pitchY && int(L.planes[1].pitch) == m_layout.pitchC;
         if (!layoutOk) {
             Log(ADDON_LOG_WARNING, "zero copy: Kodi's dma-buf layout differs (objects %u, layers %u): copy path", d->nb_objects, d->nb_layers);
             m_zcOff = true;
@@ -1337,23 +1409,21 @@ private:
         return -1;
 #endif
     }
-    // Kodi 22 on Wayland/GBM registers a dma-buf pool first in its buffer manager, so the add-on's frame buffers can be
-    // DRM-PRIME even though it asked for a CPU format. Kodi's GLES renderer takes those; its desktop-GL renderer does not
-    // (CLinuxRendererGL::UploadTexture crashes: Kodi issue 29344). So, unless Kodi renders with GLES, the dma-buf pool is
-    // configured with a decoy size once (the manager reuses a pool only for the same format and size), and every real
-    // request then comes from a system-memory pool. A dma-buf that still arrives is given back and asked for again.
-    static bool KodiRendersWithGles() { return KodiUsesGles(); }
+    // Kodi on Wayland/GBM registers a dma-buf pool first in its buffer manager, so the add-on's frame buffers can be
+    // DRM-PRIME even though it asked for a CPU format. Only Kodi's DRM-PRIME renderer shows those (GLES, with
+    // videoplayer.useprimedecoder on); its other renderers show nothing or crash (desktop GL: Kodi issue 29344). So,
+    // unless the inputstream found that renderer (DecideFrameBuffers), the dma-buf pool is configured with a decoy size
+    // once (the manager reuses a pool only for the same format and size), and every real request then comes from a
+    // system-memory pool. A dma-buf that still arrives is given back and asked for again.
     void CheckBufferPool(const VIDEOCODEC_PICTURE& real)
     {
 #if defined(__linux__) && !defined(__ANDROID__)   // Kodi 21 has the same dma-buf pool on Wayland/GBM
         if (m_poolChecked) return;
         m_poolChecked = true;
-        // 10-bit add-on pictures as dma-bufs (DRM S010) stall Kodi 22's GLES renderer on Wayland (CI): 8-bit only
-        const bool gles = KodiRendersWithGles();
-        m_dmaOk = gles && m_bits == 8;
-        Log(ADDON_LOG_INFO, "frame buffers: %s", m_dmaOk ? "dma-buf allowed (Kodi renders with GLES)"
-                                                    : gles ? "system memory (10-bit pictures as dma-bufs are not shown by Kodi's GLES renderer)"
-                                                           : "system memory (Kodi's renderer cannot take dma-bufs from add-ons)");
+        // dma-bufs as the inputstream decided (allocator, Kodi's DRM-PRIME renderer, EGL format), and 10-bit only as the
+        // engine's P010 (a planar 10-bit dma-buf depends on Kodi's libdrm and is not what its renderer is used to)
+        m_dmaOk = m_in->DmaBufs() && (m_bits == 8 || EngineSemi());
+        Log(ADDON_LOG_INFO, "frame buffers: %s", m_dmaOk ? "dma-buf allowed" : "system memory");
         if (m_dmaOk) return;
         VIDEOCODEC_PICTURE d{};
         // always 8-bit I420, a format the dma-buf pool knows (DRM_FORMAT_YUV420): a 10-bit request may translate to no
@@ -1465,6 +1535,7 @@ private:
 #endif
     bool m_upscaled = false, m_test2x = false, m_warned = false;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_outW = 0, m_outH = 0;
+    bool m_force8 = false;
     double m_frameUs = 0;
     Planes m_pic[2];
     Planes m_gen;

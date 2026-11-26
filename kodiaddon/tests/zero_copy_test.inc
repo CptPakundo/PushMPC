@@ -205,3 +205,84 @@ static void ToneMap()
         prev = oy[0];
     }
 }
+
+// zero copy for 10-bit dma-bufs: the engine's P010 output (2 planes: Y, interleaved UV, high bits) written in place
+static void ZeroCopyP010()
+{
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char* req = std::getenv("PM_REQUIRE_DMABUF");
+    const bool must = req && req[0] == '1';
+    pmk::EngineCfg c;
+    c.width = W; c.height = H; c.bits = 10; c.threads = 2; c.quality = 1; c.backend = 2; c.semiPlanar = true;
+    std::string why, err, kind;
+    auto e = pmk::OpenEngine(c, why);
+    if (!e || !e->IsGpu()) { std::printf("zero copy P010: SKIP (no GPU engine)\n"); if (must) { std::printf("FAIL zero copy required\n"); ++g_fail; } return; }
+    if (!e->CanImport()) { std::printf("zero copy P010: SKIP (no dma-buf import)\n"); if (must) { std::printf("FAIL zero copy required\n"); ++g_fail; } return; }
+    pmk::OutLayout L;
+    CHECK(e->Layout(L));
+    const long page = sysconf(_SC_PAGESIZE);
+    const uint64_t size = (L.size + uint64_t(page) - 1) / uint64_t(page) * uint64_t(page);
+    int buf = -1, mfd = -1;
+    if (!MakeDmaBuf(size, buf, mfd, kind)) { std::printf("zero copy P010: SKIP (%s)\n", kind.c_str()); if (must) { std::printf("FAIL zero copy required\n"); ++g_fail; } return; }
+    const int id = e->Import(buf, size, err);
+    if (id < 0) { close(buf); close(mfd); std::printf("zero copy P010: SKIP (import failed: %s)\n", err.c_str()); if (must) { std::printf("FAIL zero copy required\n"); ++g_fail; } return; }
+    std::vector<uint8_t> yy(size_t(W) * H * 2), uu(size_t(W / 2) * (H / 2) * 2), vv(uu.size());
+    for (int f = 0; f < 3; ++f) {
+        Frame(f, 40 + 8 * f, 220);
+        for (int i = 0; i < W * H; ++i) { const uint16_t s = uint16_t(Y[f & 1][i] * 4); std::memcpy(&yy[size_t(i) * 2], &s, 2); }
+        for (int i = 0; i < W * H / 4; ++i) {
+            const uint16_t a = uint16_t(U[f & 1][i] * 4), b = uint16_t(V[f & 1][i] * 4);
+            std::memcpy(&uu[size_t(i) * 2], &a, 2); std::memcpy(&vv[size_t(i) * 2], &b, 2);
+        }
+        pm_yuv sv{{yy.data(), uu.data(), vv.data()}, {W * 2, W, W}};
+        CHECK(e->Push(sv, f > 0, err));
+    }
+    std::vector<uint8_t> y2(size_t(W) * H * 2), uv2(size_t(W) * (H / 2) * 2);
+    pm_yuv_out o{{y2.data(), uv2.data(), nullptr}, {W * 2, W * 2, 0}};
+    CHECK(e->Generate(0.5f, o, err));
+    CHECK(e->GenerateInto(0.5f, id, err));
+    void* mp = mmap(nullptr, size_t(size), PROT_READ, MAP_SHARED, mfd, 0);
+    CHECK(mp != MAP_FAILED);
+    if (mp != MAP_FAILED) {
+        const unsigned char* m = static_cast<const unsigned char*>(mp);
+        long diff = 0;
+        for (int r = 0; r < H; ++r) diff += std::memcmp(m + size_t(r) * size_t(L.pitchY), y2.data() + size_t(r) * W * 2, size_t(W) * 2) != 0;
+        for (int r = 0; r < H / 2; ++r) diff += std::memcmp(m + L.offU + size_t(r) * size_t(L.pitchC), uv2.data() + size_t(r) * W * 2, size_t(W) * 2) != 0;
+        std::printf("zero copy P010: frame written in place into a dma-buf (2 planes), %ld rows differ from the readback\n", diff);
+        CHECK(diff == 0);
+        munmap(mp, size_t(size));
+    }
+    e->ReleaseImport(id);
+    close(buf); close(mfd);
+#endif
+}
+
+// Kodi's DRM-PRIME renderer settings read from guisettings.xml, and the EGL facts the add-on checks (informational)
+#include "kodi_platform.h"
+static void PlatformChecks()
+{
+    const char* path = "pm_guisettings_test.xml";
+    auto with = [&](const char* body) {
+        FILE* f = std::fopen(path, "wb");
+        if (!f) return false;
+        std::fputs(body, f);
+        std::fclose(f);
+        std::string why;
+        return pmk::KodiPrimeRendererOn(path, why);
+    };
+    CHECK(!with("<settings version=\"2\">\n</settings>\n"));
+    CHECK(with("<settings version=\"2\">\n    <setting id=\"videoplayer.useprimedecoder\">true</setting>\n</settings>\n"));
+    CHECK(!with("<settings version=\"2\">\n    <setting id=\"videoplayer.useprimedecoder\">true</setting>\n"
+                "    <setting id=\"videoplayer.useprimerenderer\">0</setting>\n</settings>\n"));
+    CHECK(with("<settings version=\"2\">\n    <setting id=\"videoplayer.useprimerenderer\" default=\"true\">1</setting>\n"
+               "    <setting id=\"videoplayer.useprimedecoder\">true</setting>\n</settings>\n"));
+    CHECK(!with("<settings version=\"2\">\n    <setting id=\"videoplayer.useprimedecoder\" default=\"true\">false</setting>\n</settings>\n"));
+    std::remove(path);
+    std::string alloc;
+    const bool has = pmk::KodiHasDmaAllocator(false, alloc);
+    const pmk::EglCaps& caps = pmk::QueryEglCaps();
+    std::printf("platform: dma-buf allocator %s (%s); EGL %s, dma-buf formats %s, YUV420 %s, P010 %s, GL_EXT_texture_norm16 %s\n",
+                has ? "yes" : "no", alloc.c_str(), caps.how.c_str(), caps.formatsKnown ? std::to_string(caps.formats.size()).c_str() : "unknown",
+                caps.formats.count(pmk::kDrmYuv420) ? "yes" : "no", caps.formats.count(pmk::kDrmP010) ? "yes" : "no",
+                caps.norm16 > 0 ? "yes" : caps.norm16 == 0 ? "no" : "unknown");
+}

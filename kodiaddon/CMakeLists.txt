@@ -98,7 +98,7 @@ endif()
 # ---- unit tests with no Kodi and no FFmpeg: the cadence (which pictures, which timestamps) and the engine glue
 add_executable(cadence_test tests/cadence_test.cpp)
 target_include_directories(cadence_test PRIVATE src)
-target_link_libraries(cadence_test PRIVATE pm_kodi_engine)
+target_link_libraries(cadence_test PRIVATE pm_kodi_engine ${CMAKE_DL_LIBS})
 enable_testing()
 add_test(NAME cadence_test COMMAND cadence_test)
 

@@ -105,10 +105,10 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
             # zero copy test: udmabuf stands in for Kodi's dma-buf frame buffers
             sudo modprobe udmabuf 2>/dev/null || echo "no udmabuf module"; sudo modprobe vgem 2>/dev/null || echo "no vgem module"
-            sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
+            sudo udevadm settle || true; sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
-          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|platform:|cadence_test|FAIL|Passed|Failed" || true
           ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v4
@@ -153,8 +153,9 @@ jobs:
           path: pkg
 
   kodi-wayland:
-    # Kodi 22 on Wayland (headless Weston, Mesa) gets dma-buf frame buffers (udmabuf): the zero-copy case checks that
-    # the GPU engine writes into them in place
+    # Kodi 22 on Wayland (headless Weston, Mesa) with a dma-buf allocator (udmabuf) and its DRM-PRIME renderer on: the
+    # add-on hands out dma-bufs where the renderer shows them (zero copy: the GPU engine writes into them in place).
+    # The _noalloc cases take the allocator away: Kodi's thumbnail and stream-detail probes must keep working
     needs: build
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
@@ -168,8 +169,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak weston ffmpeg dbus-x11 > /dev/null
-          sudo modprobe udmabuf && sudo chmod 666 /dev/udmabuf || echo "::warning::no udmabuf"
+          # udev sets the node's mode after modprobe returns (root:kvm 0660): a rule, then wait for udev, then check
+          echo 'KERNEL=="udmabuf", MODE="0666"' | sudo tee /etc/udev/rules.d/99-pushmpc-udmabuf.rules > /dev/null
+          sudo udevadm control --reload || true
+          sudo modprobe udmabuf || echo "::warning::no udmabuf"
+          sudo udevadm settle || true
+          sudo chmod 666 /dev/udmabuf || true
           ls -l /dev/udmabuf /dev/dma_heap 2>&1 || true
+          test -w /dev/udmabuf && echo "udmabuf writable" || echo "::warning::udmabuf not writable"
           flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
       - name: Kodi 22 from Flathub beta
@@ -185,9 +192,10 @@ jobs:
           export WAYLAND_DISPLAY=wayland-pm
           home="$HOME/.var/app/tv.kodi.Kodi/data"; mkdir -p "$home"
           dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
-            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --gles \
+            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --prime \
+            --alloc-off "sudo chmod 600 /dev/udmabuf" --alloc-on "sudo chmod 666 /dev/udmabuf" \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
-            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2,hdr10_kodi"
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
       - name: Summary
         if: always()
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true

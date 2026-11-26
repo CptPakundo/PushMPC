@@ -126,11 +126,20 @@ if case == "zerocopy":
     # Kodi chose the frame buffers (dma-buf only when its renderer takes them); playback must work either way
     res["buffers"] = "PushMPC: frame buffers:" in text
     notes.append("zero copy used: " + str("zero copy: the engine writes into Kodi" in text))
+if case.startswith("browse"):
+    # Kodi's thumbnail and stream-detail probes: Kodi stays up, the add-on opens the files, its decoder is never asked for
+    res = {"alive": bool(re.search(r"DRIVE browse_ok True", drive)),
+           "probed": sum(1 for l in lines if "PushMPC: colour:" in l) >= 2,
+           "kodi_decoder": not has_decoder and "a probe asked for the add-on's decoder" not in text}
+    notes = [l.strip() for l in drive.splitlines() if l.startswith("DRIVE file")] + [
+        f"add-on opened {sum(1 for l in lines if 'PushMPC: colour:' in l)} files for Kodi's probes"]
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
 # zerocopy (Wayland, software Vulkan) checks the buffer path only: the GPU engine is far below real time there
 required = ["addon", "pictures"] + ([] if case == "zerocopy" else ["kodi"]) + ([] if case in ("seek", "chapter", "zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + (["buffers"] if "buffers" in res else []) + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+if case.startswith("browse"):
+    required = ["alive", "probed", "kodi_decoder"]
 ok = all(res.get(x) for x in required)
 with open(summary, "a", encoding="utf-8") as f:
     f.write(f"### {case}: {'PASS' if ok else 'FAIL'}\n")
