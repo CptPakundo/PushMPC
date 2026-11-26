@@ -2982,16 +2982,53 @@ function Uninstall-MpvBuild($state) {
 # ------------------------------------------------------------------------------------------------ capture mode (fallback)
 # Players with no PushMPC frame generation route: capture mode (pushmpc-capture.ps1, PushFPS's window capture) is
 # switched on for them, and only for them. -Capture Auto (default) | On | Off.
+# Whether a DirectShow player's own settings list PushMPC Filter (its CLSID or name). Their formats are not documented
+# (the CI job dshow-players records them), so this looks in the places they keep settings: their HKCU keys and the
+# ini / xml / cfg files next to the exe and in %APPDATA%. Read only.
+function Test-DshowPlayerEntry([string]$player, [string]$exe) {
+    $pattern = '798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC|PushMPC Filter'
+    $keys = switch -Regex ($player) {
+        '^KMPlayer' { @('HKCU:\Software\KMPlayer', 'HKCU:\Software\KMPlayer 64X', 'HKCU:\Software\PandoraTV') }
+        '^GOM' { @('HKCU:\Software\GRETECH', 'HKCU:\Software\GOM') }
+        '^Zoom' { @('HKCU:\Software\VirtuaMedia', 'HKCU:\Software\Inmatrix') }
+    }
+    foreach ($key in @($keys)) {
+        if (-not (Test-Path -LiteralPath $key)) { continue }
+        foreach ($item in @(Get-Item -LiteralPath $key) + @(Get-ChildItem -LiteralPath $key -Recurse -ErrorAction SilentlyContinue)) {
+            foreach ($n in $item.GetValueNames()) {
+                $v = $item.GetValue($n)
+                $text = if ($v -is [byte[]]) { [Text.Encoding]::Unicode.GetString($v) + [Text.Encoding]::ASCII.GetString($v) } else { [string]($v -join ' ') }
+                if ("$n $text" -match $pattern) { return $true }
+            }
+        }
+    }
+    $dirs = @((Split-Path -Parent $exe)) + @(Get-ChildItem -LiteralPath $env:APPDATA -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ($player -split ' ')[0] } | ForEach-Object FullName)
+    foreach ($d in $dirs) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $d -Recurse -Include *.ini, *.xml, *.cfg, *.zpl -File -ErrorAction SilentlyContinue | Select-Object -First 200)) {
+            if ($f.Length -lt 4MB -and (Select-String -LiteralPath $f.FullName -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)) { return $true }
+        }
+    }
+    return $false
+}
 function Find-CaptureOnlyPlayers([object[]]$mpvRows) {
     $out = @()
     $pf = @("$env:ProgramFiles", ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ }
     $probe = [ordered]@{
         'KMPlayer 64X' = @('KMPlayer 64X\KMPlayer64.exe'); 'KMPlayer' = @('KMPlayer\KMPlayer.exe')
         'GOM Player' = @('GRETECH\GomPlayer\GOM.exe', 'GRETECH\GOMPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe')
-        'Zoom Player' = @('Zoom Player\zplayer.exe', 'Zoom Player MAX\zplayer.exe')   # G19: until the DirectShow graph test settles its filter entry
+        'Zoom Player' = @('Zoom Player\zplayer.exe', 'Zoom Player MAX\zplayer.exe')
         'Emby Theater' = @('Emby Theater\Emby.Theater.exe', 'Emby-Theater\Emby.Theater.exe', 'emby-theater\electron\Emby Theater.exe')
     }
-    foreach ($k in $probe.Keys) { foreach ($rel in $probe[$k]) { foreach ($root in $pf) { if (Test-Path -LiteralPath (Join-Path $root $rel)) { $out += $k; break } }; if ($out -contains $k) { break } } }
+    foreach ($k in $probe.Keys) {
+        $exe = @(foreach ($rel in $probe[$k]) { foreach ($root in $pf) { $c = Join-Path $root $rel; if (Test-Path -LiteralPath $c) { $c } } })[0]
+        if (-not $exe) { continue }
+        if ($k -notmatch '^(KMPlayer|GOM|Zoom)') { $out += $k; continue }
+        # DirectShow players where the user added PushMPC Filter by hand (docs/players-directshow.md): the filter runs
+        # there, so no capture mode. Checked on every run: Zoom Player's Smart Play Auto-Configure removes user filters,
+        # and capture mode then comes back for it.
+        if (Test-DshowPlayerEntry $k $exe) { Info "${k}: PushMPC Filter is in its filter settings (the full route; no capture mode for it)" }
+        else { $out += $k; Info "${k}: to get the full route instead of capture mode, add PushMPC Filter in its filter settings (docs/players-directshow.md)" }
+    }
     if (Get-AppxPackage -Name 'Microsoft.ZuneMusic' -ErrorAction SilentlyContinue) { $out += 'Media Player (Windows)' }
     # mpv-integration's rows: a player it found but cannot give frame generation (Plex: upscaling only; Stremio before
     # 5.0.28: no config setting)

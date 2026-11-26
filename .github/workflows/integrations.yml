@@ -1022,9 +1022,9 @@ jobs:
 
   # G19: the filter in DirectShow graphs other than MPC-HC's. dshow_graph_test builds the graph the way KMPlayer, GOM
   # Player and Zoom Player do (the system's decoder by Intelligent Connect, the filter, then EVR / VMR-9 / madVR / MPC
-  # Video Renderer / Null) on WARP; MPC-BE plays the clip with the entry Setup wrote. KMPlayer, GOM Player and Zoom
-  # Player are installed and started once, and their settings are dumped (artifact dshow-players-logs) for the
-  # per-player filter entry in Setup. Gating: the filter connects and plays in front of EVR and of MPC Video Renderer,
+  # Video Renderer / Null) on WARP; MPC-BE plays the clip with the entry Setup wrote. KMPlayer (64X and 32-bit), GOM and Zoom
+  # Player are installed, PushMPC Filter is added through each one's own dialog (tests/dshow-players-dump.py) and the
+  # settings diff is kept (artifact dshow-players-logs): the format for Setup's entry. Gating: the filter plays with EVR and MPC VR,
   # and MPC-BE creates it.
   dshow-players:
     needs: release-artifact
@@ -1120,24 +1120,35 @@ jobs:
           "MPC-BE: filter log $(if ($f.Count) { $f[0].Name } else { 'none' })" | Tee-Object -Append "$env:OUT\run.txt"
           if ($f.Count) { Copy-Item $f[0].FullName "$env:OUT\filter-mpcbe.log"; Get-Content $f[0].FullName | Select-Object -First 30 | Tee-Object -Append "$env:OUT\run.txt" }
           "MPCBE_FILTER=$($f.Count -gt 0)" >> $env:GITHUB_ENV
-      - name: KMPlayer, GOM Player, Zoom Player (installed, started once, settings dumped; informational)
-        timeout-minutes: 12
+      - name: KMPlayer, GOM Player, Zoom Player (installed; each one's "add external filter" dialog driven, settings diffed; informational)
+        timeout-minutes: 25
         continue-on-error: true
         run: |
+          # the critic's route (claim 4): their filter-list formats are not documented, so learn them here: snapshot
+          # HKCU\Software and the players' files, add PushMPC Filter through each player's own dialog (pywinauto),
+          # close it, snapshot again, keep the differences (artifact dshow-players-logs, folder dump\<player>)
+          python -m pip install --quiet pywinauto pillow 2>&1 | Select-Object -Last 2
           $players = @(
-            @{ id = 'kmplayer'; exe = @('KMPlayer 64X\KMPlayer64.exe', 'KMPlayer\KMPlayer.exe'); keys = @('HKCU\Software\KMPlayer', 'HKCU\Software\PandoraTV') },
-            @{ id = 'gom-player'; exe = @('GRETECH\GomPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe'); keys = @('HKCU\Software\GRETECH', 'HKCU\Software\GOM') },
-            @{ id = 'zoomplayer'; exe = @('Zoom Player\zplayer.exe'); keys = @('HKCU\Software\VirtuaMedia') })
+            @{ id = 'kmplayer64x'; choco = @('kmplayer64x', 'kmplayer-64x'); exe = @('KMPlayer 64X\KMPlayer64.exe') },
+            @{ id = 'kmplayer'; choco = @('kmplayer'); exe = @('KMPlayer\KMPlayer.exe', 'The KMPlayer\KMPlayer.exe') },
+            @{ id = 'gom'; choco = @('gom-player', 'gomplayer'); exe = @('GRETECH\GomPlayer\GOM.exe', 'GRETECH\GOMPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe') },
+            @{ id = 'zoom'; choco = @('zoomplayer', 'zoom-player'); exe = @('Zoom Player\zplayer.exe', 'Zoom Player MAX\zplayer.exe') })
           foreach ($pkg in $players) {
-            choco install $pkg.id -y --no-progress 2>&1 | Select-Object -Last 3 | Tee-Object -Append "$env:OUT\run.txt"
-            $exe = @(foreach ($rel in $pkg.exe) { foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) { $c = Join-Path $root $rel; if (Test-Path $c) { $c } } })[0]
-            if (-not $exe) { "$($pkg.id): not installed" | Tee-Object -Append "$env:OUT\run.txt"; continue }
-            $m = Start-Process $exe -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"" -PassThru; Start-Sleep 15
+            $find = { @(foreach ($rel in $pkg.exe) { foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) { $c = Join-Path $root $rel; if (Test-Path $c) { $c } } })[0] }
+            $exe = & $find
+            foreach ($id in $pkg.choco) { if ($exe) { break }; choco install $id -y --no-progress 2>&1 | Select-Object -Last 2 | Tee-Object -Append "$env:OUT\run.txt"; $exe = & $find }
+            if (-not $exe) { "$($pkg.id): not installed (choco $($pkg.choco -join ' / '))" | Tee-Object -Append "$env:OUT\run.txt"; continue }
+            # a first start writes the defaults, so the dump shows only what adding the filter changed
+            $m = Start-Process $exe -PassThru; Start-Sleep 12
             if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
-            foreach ($k in $pkg.keys) { reg export $k "$env:OUT\$($pkg.id)-$(($k -split '\\')[-1]).reg" /y 2>&1 | Out-Null }
-            Get-ChildItem (Split-Path $exe) -Include *.ini, *.cfg, *.xml -Recurse -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Copy-Item $_.FullName "$env:OUT\$($pkg.id)-$($_.Name)" }
-            Get-ChildItem $env:APPDATA -Directory | Where-Object { $_.Name -match 'KMPlayer|GOM|Zoom' } | ForEach-Object { Copy-Item $_.FullName "$env:OUT\$($pkg.id)-appdata-$($_.Name)" -Recurse -ErrorAction SilentlyContinue }
-            "$($pkg.id): $exe started once, settings dumped" | Tee-Object -Append "$env:OUT\run.txt"
+            python tests\dshow-players-dump.py "$env:OUT\dump" $pkg.id $exe 2>&1 | Tee-Object -Append "$env:OUT\run.txt"
+            Get-Content "$env:OUT\dump\$($pkg.id)\found.txt" -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { "  $($pkg.id): $_" } | Tee-Object -Append "$env:OUT\run.txt"
+            # what Setup's check (Test-DshowPlayerEntry) concludes from the same settings
+            $t = [System.Management.Automation.Language.Parser]::ParseFile("$PWD\scripts\pushmpc-install.ps1", [ref]$null, [ref]$null)
+            $fn = $t.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Test-DshowPlayerEntry' }, $true) | Select-Object -First 1
+            . ([scriptblock]::Create($fn.Extent.Text))
+            $name = @{ kmplayer64x = 'KMPlayer 64X'; kmplayer = 'KMPlayer'; gom = 'GOM Player'; zoom = 'Zoom Player' }[$pkg.id]
+            "  $($pkg.id): Setup's check sees the entry: $(Test-DshowPlayerEntry $name $exe)" | Tee-Object -Append "$env:OUT\run.txt"
           }
       - name: Summary and gate
         if: always()
