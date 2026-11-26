@@ -48,10 +48,46 @@ function Emit($a, [string]$state, [string]$detail) {
     else { [Console]::Error.WriteLine("$($a.Name): $state" + $(if ($detail) { " ($detail)" } else { '' })) }
 }
 function Hash([string]$p) { if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { '' } }
-function Strip([string[]]$lines) {
-    $out = New-Object System.Collections.Generic.List[string]; $skip = $false
-    foreach ($l in $lines) { if ($l -eq $begin) { $skip = $true; continue }; if ($skip -and $l -eq $end) { $skip = $false; continue }; if (-not $skip) { $out.Add($l) } }
-    return , $out.ToArray()
+# mpv.conf is edited as bytes: the user's encoding (BOM or not), line endings and last newline are kept, and removing
+# our block gives back exactly the bytes that were there (Windows PowerShell 5.1 and 7 alike).
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+function ReadConf([string]$p) {
+    $b = [IO.File]::ReadAllBytes($p)
+    $bom = $b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF
+    $t = if ($bom) { $utf8.GetString($b, 3, $b.Length - 3) } else { $utf8.GetString($b) }
+    return @{ bom = $bom; text = $t; nl = $(if ($t -match "`r`n" -or -not ($t -match "`n")) { "`r`n" } else { "`n" }) }
+}
+function WriteConf([string]$p, [bool]$bom, [string]$text) {
+    $body = $utf8.GetBytes($text)
+    if ($bom) { $body = [byte[]](0xEF, 0xBB, 0xBF) + $body }
+    [IO.File]::WriteAllBytes($p, [byte[]]$body)
+}
+$blockRx = '(?m)^' + [regex]::Escape($begin) + '\r?\n(?:[^\r\n]*\r?\n)*?' + [regex]::Escape($end) + '(?:\r?\n|$)'
+function StripText([string]$t) { [regex]::Replace($t, $blockRx, '') }
+function EnsureConf($a) {   # the block at the top of Plex's mpv.conf (replaced when present: -Opts may differ)
+    if ($NoConf) { return }
+    New-Item -ItemType Directory -Force (Split-Path $a.Conf) | Out-Null
+    $vf = if ($Opts) { "vf-append=@pushmpc:pushmpc=$Opts" } else { 'vf-append=@pushmpc:pushmpc' }
+    if (Test-Path -LiteralPath $a.Conf) {
+        $c = ReadConf $a.Conf
+        if (-not (Test-Path -LiteralPath "$($a.Conf).pushmpc-native-backup") -and -not (Test-Path -LiteralPath "$($a.Conf).pushmpc-native-absent")) {
+            Copy-Item -LiteralPath $a.Conf "$($a.Conf).pushmpc-native-backup"
+        }
+    } else {
+        New-Item -ItemType File "$($a.Conf).pushmpc-native-absent" -Force | Out-Null
+        $c = @{ bom = $false; text = ''; nl = "`r`n" }
+    }
+    $nl = $c.nl
+    WriteConf $a.Conf $c.bom ((($begin, $vf, 'interpolation=no', $end) -join $nl) + $nl + (StripText $c.text))
+}
+function RemoveConf($a) {
+    $cb = "$($a.Conf).pushmpc-native-backup"; $ca = "$($a.Conf).pushmpc-native-absent"
+    if (Test-Path -LiteralPath $a.Conf) {
+        $c = ReadConf $a.Conf; $rest = StripText $c.text
+        if ($rest -ne $c.text) { WriteConf $a.Conf $c.bom $rest }
+        if ((Test-Path -LiteralPath $ca) -and -not $rest.Trim()) { Remove-Item -LiteralPath $a.Conf -Force }
+    }
+    Remove-Item -LiteralPath $cb, $ca -Force -ErrorAction SilentlyContinue
 }
 function BackupDir($a) { Join-Path $env:ProgramData "PushMPC\plex-native\$($a.Key)" }
 
@@ -93,14 +129,14 @@ public static class PlexHost {
         else { $status = 'avfilter-8.dll is not the proxy' }
     }
     function ReadShared($p) { if (-not (Test-Path $p)) { return '' }; $s = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($s)).ReadToEnd() } finally { $s.Dispose() } }   # mpv keeps its log open
-    # what Plex's FFmpeg can open varies (no libavdevice, so no av://lavfi; its own decoder set): a shipped H.264 clip
-    # (pushmpc-selftest-*, next to this script), then a Y4M written here, then av://lavfi
+    # Plex's FFmpeg has no decoders of its own (--disable-decoders; Plex supplies codecs at run time) and no libavdevice:
+    # a Y4M written here (rawvideo), then av://lavfi for other builds
     $y4m = Join-Path ([IO.Path]::GetTempPath()) ('pushmpc-plex-selftest-' + [guid]::NewGuid().ToString('N') + '.y4m')
     $fs = [IO.File]::Create($y4m); $hdr = [Text.Encoding]::ASCII.GetBytes("YUV4MPEG2 W64 H64 F24:1 Ip A1:1 C420jpeg`n"); $fs.Write($hdr, 0, $hdr.Length)
     $fr = [Text.Encoding]::ASCII.GetBytes("FRAME`n"); $px = New-Object byte[] 6144
     for ($n = 0; $n -lt 48; $n++) { for ($k = 0; $k -lt 4096; $k++) { $px[$k] = [byte](($k + $n * 5) % 256) }; for ($k = 4096; $k -lt 6144; $k++) { $px[$k] = 128 }; $fs.Write($fr, 0, $fr.Length); $fs.Write($px, 0, 6144) }
     $fs.Close()
-    $cands = @(Get-ChildItem $PSScriptRoot -Filter 'pushmpc-selftest*' -ErrorAction SilentlyContinue | ForEach-Object FullName) + @($y4m, 'av://lavfi:testsrc=size=320x180:rate=24:duration=2')
+    $cands = @($y4m, 'av://lavfi:testsrc=size=320x180:rate=24:duration=2')
     $reason = 'none'; $f = ''; $tried = @()
     foreach ($c in $cands) {
         [void][PlexHost]::mpv_command_string($ctx, [PlexHost]::U("loadfile `"$($c.Replace('\', '/'))`""))
@@ -125,7 +161,10 @@ public static class PlexHost {
 }
 
 function SelfTest($a) {
-    $r = & pwsh -NoProfile -File $PSCommandPath selftest -PlexDir $a.Dir 2>&1 | Out-String
+    # a child process of the same host (powershell.exe 5.1 or pwsh 7): libmpv stays out of this process
+    $ErrorActionPreference = 'Continue'
+    $exe = (Get-Process -Id $PID).Path
+    $r = & $exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath selftest -PlexDir $a.Dir 2>&1 | ForEach-Object { "$_" } | Out-String
     return @{ ok = ($LASTEXITCODE -eq 0); text = $r.Trim() }
 }
 function ProxyHash($a) { $p = Join-Path (BackupDir $a) 'proxy.sha256'; if (Test-Path $p) { (Get-Content $p).Trim() } else { Hash (Join-Path $From 'avfilter-8.dll') } }
@@ -141,8 +180,13 @@ function Install($a) {
     if (-not $AllowBoth) {
         if ((Test-Path $a.Conf) -and ((Get-Content $a.Conf) -match [regex]::Escape($vsMark))) { Emit $a 'refused' "Plex's mpv.conf holds the VapourSynth route's block (pass -AllowBoth)"; return 1 }
     }
-    if (Installed $a) { Emit $a 'installed' 'already in place'; return 0 }
-    if ($DryRun) { Emit $a 'would-install' $d; return 0 }
+    if ($DryRun) { Emit $a $(if (Installed $a) { 'installed' } else { 'would-install' }) $d; return 0 }
+    if (Installed $a) {   # idempotent: the proxy stays, the conf block is made sure of, the self-test runs again
+        EnsureConf $a
+        $st = SelfTest $a
+        if (-not $st.ok) { Emit $a 'installed-inactive' "already in place; $($st.text)"; return 3 }
+        Emit $a 'installed' "already in place; $($st.text)"; return 0
+    }
     Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     try {
         New-Item -ItemType Directory -Force $bk | Out-Null
@@ -159,14 +203,7 @@ function Install($a) {
         }
         $added | Set-Content (Join-Path $bk 'added.txt')
     } catch { Emit $a 'error' "cannot write $d ($($_.Exception.Message)); run elevated"; return 1 }
-    if (-not $NoConf) {
-        New-Item -ItemType Directory -Force (Split-Path $a.Conf) | Out-Null
-        $old = @()
-        if (Test-Path $a.Conf) { if (-not (Test-Path "$($a.Conf).pushmpc-native-backup")) { Copy-Item $a.Conf "$($a.Conf).pushmpc-native-backup" }; $old = Strip (Get-Content $a.Conf) }
-        else { New-Item -ItemType File "$($a.Conf).pushmpc-native-absent" -Force | Out-Null }
-        $vf = if ($Opts) { "vf-append=@pushmpc:pushmpc=$Opts" } else { 'vf-append=@pushmpc:pushmpc' }
-        Set-Content $a.Conf (@($begin, $vf, 'interpolation=no', $end) + $old) -Encoding utf8
-    }
+    EnsureConf $a
     $st = SelfTest $a
     if (-not $st.ok) { Emit $a 'installed-inactive' $st.text; return 3 }
     Emit $a 'installed' $st.text
@@ -190,12 +227,7 @@ function Uninstall($a) {
     if (Test-Path (Join-Path $bk 'added.txt')) {
         foreach ($f in Get-Content (Join-Path $bk 'added.txt')) { if ($f -ne 'avfilter-8-plex.dll' -and (Test-Path (Join-Path $d $f))) { Remove-Item (Join-Path $d $f) -Force } }
     }
-    if (Test-Path $a.Conf) {
-        $rest = Strip (Get-Content $a.Conf); $cb = "$($a.Conf).pushmpc-native-backup"; $ca = "$($a.Conf).pushmpc-native-absent"
-        if ((Test-Path $cb) -and ((Compare-Object @(Get-Content $cb) @($rest)) -eq $null)) { Move-Item $cb $a.Conf -Force }
-        elseif ((Test-Path $ca) -and -not ($rest | Where-Object { $_.Trim() })) { Remove-Item $a.Conf, $ca -Force }
-        else { Set-Content $a.Conf $rest -Encoding utf8; Remove-Item $cb, $ca -Force -ErrorAction SilentlyContinue }
-    }
+    RemoveConf $a
     if (Test-Path $bk) { Remove-Item $bk -Recurse -Force }
     Emit $a 'uninstalled' $detail
     return 0
