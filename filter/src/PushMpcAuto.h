@@ -349,6 +349,9 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
     // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
     // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
+    // RX 6000 (RDNA 2): FSR Upscaling 4.1 came with AMD FSR SDK 2.4.0 / upscaler 4.1.2 (October 2026; SDK release notes:
+    // "Added support for AMD FSR Upscaling 4.1 on AMD Radeon RX 6000 Series (RDNA 2 architecture) discrete GPUs") and
+    // Adrenalin 26.10.1; with an older driver the same DLL runs FSR 3.1 there, and the measurement corrects the prior.
     if ((g.family == kRdna3 || g.family == kRdna2) && !c.learnedVsr) c.fsrSr *= 2.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;

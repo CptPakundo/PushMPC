@@ -2586,7 +2586,7 @@ function Get-AutoPlan {
         'GTX' { if (Test-Gtx16 $g) { 'RTX Video Super Resolution on GTX 16 (unlock, after its self-test), else NIS' } else { 'NIS' } }
         'RX 9000' { 'FSR 4.1 (RTX VSR through ZLUDA after its self-test)' }
         'RX 7000' { 'FSR 4.1 INT8 (RTX VSR through ZLUDA after its self-test)' }
-        'RX 6000' { 'FSR 4.1 INT8 through AMD FSR SDK 2.4 (offered by Setup), else FSR' }
+        'RX 6000' { 'FSR 4.1 INT8 through AMD FSR SDK 2.4 (offered by Setup) with AMD driver 26.10.1 or newer; FSR 3.1 with an older driver or without the SDK' }
         { $_ -in 'RX 5000', 'Radeon' } { 'FSR' }
         'Intel' { 'NIS (Intel VPL super resolution after its self-test)' }
         'other' { 'NIS' }

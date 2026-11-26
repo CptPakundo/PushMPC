@@ -290,6 +290,13 @@ int main()
                 check(!liteWithoutCap, L"RTX 30 without FG Lite (no port self-test): never FG Lite");
                 check(FgKeyOf(FgMethod::Dlssg, kDlssgLiteQ) == kKeyDlssgLite && FgKeyOf(FgMethod::Dlssg, 0) == kKeyDlssg, L"FG Lite has its own learned cost key");
             }
+            {   // FSR 4.1 INT8 upscaling: RX 6000 (SDK 2.4.0 / upscaler 4.1.2) gets the same INT8 prior as RX 7000
+                Costs k = cold; k.card = 3.0;
+                const Source sd{ 1280, 720, 23.976, false, 0.5 };
+                const Choice r6 = Decide({}, sd, d144, k, Family(kRdna2, L"AMD Radeon RX 6800 XT"));
+                const Choice r7 = Decide({}, sd, d144, k, Family(kRdna3, L"AMD Radeon RX 7800 XT"));
+                check(r6.sr == r7.sr && std::abs(r6.predictedMs - r7.predictedMs) < 0.01, L"RX 6000 and RX 7000: the same FSR 4.1 INT8 prior", std::format(L"{:.2f} vs {:.2f} ms", r6.predictedMs, r7.predictedMs));
+            }
             Settings fm; fm.fgMethod = FgMethod::Nvof;
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;
