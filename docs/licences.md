@@ -32,5 +32,10 @@ them.
 - **VapourSynth** R82 portable (LGPL-2.1) and Python's embeddable package (PSF licence), for the mpv route on Windows.
 - **mpv** for Plex, when Plex's own player can't take PushMPC's filter: shinchiro's libmpv build (GPL/LGPL).
 - **ArtCNN** weights (MIT), for the Mac's Homebrew package.
+- **Anime upscalers** (on by default; Setup's `-AnimeUpscalers No` leaves them out): ArtCNN (MIT) from its GitHub
+  release, CuNNy (LGPL-3.0) from its authors' repository and AnimeSR v2 (Apache-2.0) from its authors' Google Drive.
+  Each file is checked against its pinned SHA-256 before it is used, and each project's licence text is installed next
+  to its files. CuNNy stays a separate, replaceable component: PushMPC reads its weights straight from CuNNy's own file,
+  so you can swap in your own CuNNy weights and remake the graph with `pmml/scripts/anime_sr_graphs.py`.
 
 See [release model](release-model.md) for how downloads are pinned and checked.

@@ -248,6 +248,16 @@ def main():
         path = out / f"synth_map-{fmt}.onnx"
         onnx.save(synth(fmt, per_pixel=True), str(path))
         print(f"wrote {path}")
+    # PushMPC's anime upscalers: the wrappers sr_in_* / sr_out_* here, the model graphs in <out>/anime-sr (their
+    # weights stay in the pinned upstream files that Setup fetches into that folder; see anime_sr_graphs.py)
+    import json
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import anime_sr_graphs
+    anime_sr_graphs.write_wrappers(out)
+    pins = Path(__file__).resolve().parents[2] / "scripts" / "anime-models-pin.json"
+    if pins.exists():
+        anime_sr_graphs.write_models(json.loads(pins.read_text(encoding="utf-8")), out / "anime-sr")
 
 
 if __name__ == "__main__":

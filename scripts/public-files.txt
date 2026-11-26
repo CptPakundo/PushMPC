@@ -79,3 +79,5 @@ pmml/scripts/**
 scripts/ml-runtime-pin.json
 kodiaddon/**
 mpvnative/**
+scripts/anime-models-pin.json
+scripts/anime-models-fetch.ps1

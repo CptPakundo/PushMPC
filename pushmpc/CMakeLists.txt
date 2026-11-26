@@ -34,13 +34,19 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h src/PushCoreAnimeSr.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
 target_compile_options(pushcore_dll PRIVATE /utf-8)
 target_include_directories(pushcore_dll PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
 # d3dcompiler: PushMPC's deband compute shader (PushCoreDeband.h) is compiled at open with the system's d3dcompiler_47.dll
 target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler)
+# anime upscalers (src/PushCoreAnimeSr.h): pmml, when PushFPS's tree builds it (PUSHMPC_PMML_ORT_INCLUDE); without it the
+# capability says so and srMethod PMML falls back to RTX VSR / FSR
+if(TARGET pmml)
+  target_link_libraries(pushcore_dll PRIVATE pmml)
+  target_compile_definitions(pushcore_dll PRIVATE PUSHMPC_HAVE_PMML=1)
+endif()
 
 # GPU harness: loads pushcore.dll by path, decodes with D3D11VA on its own D3D11 device (as LAV does),
 # feeds the textures in and "presents" the outputs in D3D11. FFmpeg is delay-loaded so the

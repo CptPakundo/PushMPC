@@ -29,6 +29,7 @@
 #include "PushCoreHeld.h"          // held-frame re-timing (HeldFrames.h): animation on twos / threes
 #include "HoldPlan.h"              // anime round 5: hold plans for generated frames (motion classes, transients)
 #include "PushCoreHold.h"          // ... and their compose pass
+#include "PushCoreAnimeSr.h"        // anime upscalers (srMethod PMML) through pmml in the RTX VSR slot
 #include "PushCoreRegion.h"        // per-region re-timing: source repair (held parts between their drawings)
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
@@ -341,6 +342,11 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         "the FidelityFX files are not installed (runtime_local\\amd\\fidelityfx)");
     const auto shaders = veyra::runtime::shaderDirectory();
     set(PUSHCORE_CAP_NIS, true, fileExists(shaders / L"NisScalerSdr.dxil") && fileExists(shaders / L"NisColor.dxil"), "", "the NIS shaders are missing");
+    // anime upscalers (srMethod PMML): any DirectX 12 GPU through DirectML, TensorRT-RTX on RTX; the default model's files
+    {
+        const std::string miss = pushmpc::animeSrMissing(PUSHCORE_ANIME_SR_ARTCNN_C4F16, nvidia && rtx);
+        set(PUSHCORE_CAP_ANIME_SR, true, miss.empty(), "", miss.c_str());
+    }
     set(PUSHCORE_CAP_RTX_HDR, nvidia && rtx, fileExists(runtimeDir / L"nvngx_truehdr.dll"), "needs an NVIDIA RTX card", "nvngx_truehdr.dll is not installed");
     // AI clean-up: NVIDIA's original (RTX 50) or the community SF build (RTX 20-50); AMD: lmxxf (RX 9000) or the
     // RedDuke ZLUDA worker (RX 7000)
@@ -401,6 +407,12 @@ struct PushCore {
     // PushMPC 0.6: the frame generation method that is tried now (the fallback chain moves it), what runs, why
     uint32_t tryFg = PUSHCORE_FG_VFG, tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER;
     uint32_t runFg = PUSHCORE_FG_NONE, runSr = PUSHCORE_SR_METHOD_RTX;
+    // anime upscaler (PUSHCORE_FEATURE_ANIME_SR): the running one; failed = not available / stopped: RTX VSR or FSR until reopen
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+    std::shared_ptr<pushmpc::AnimeSr> animeSr;
+#endif
+    bool animeSrFailed = false;
+    uint32_t builtAnimeSr = ~0u;
     bool fgFellBack = false, cutGuardOn = false;
     uint64_t cutBase = 0;                    // cuts of graphs torn down (the guard's count restarts with each graph)
     std::atomic<uint64_t> cutsSeen{0};       // cuts the guard held so far (PushCoreStats.cutGuardCuts)
@@ -778,6 +790,14 @@ struct PushCore {
         if (settings.srQuality >= 1 && settings.srQuality <= 4) s.videoSrQuality = settings.srQuality;
         // the upscaler: RTX VSR, or AMD FSR / NVIDIA Image Scaling (any GPU; on a non-NVIDIA GPU RTX VSR becomes FSR)
         runSr = settings.srMethod;
+        // the anime upscaler: in the RTX VSR slot (standard quality); without its files or after a failure RTX VSR / FSR
+        if (runSr == PUSHCORE_SR_METHOD_PMML) {
+            const std::string miss = animeSrFailed ? std::string("it stopped earlier in this stream") : pushmpc::animeSrMissing(settings.animeSrModel, nvidia && rtxFamily(family));
+            if (!miss.empty()) {
+                veyra::log::warn("pushcore", std::format("anime upscaler {} not used: {}", pushmpc::animeSrModelId(settings.animeSrModel), miss));
+                runSr = PUSHCORE_SR_METHOD_RTX;
+            }
+        }
         if (!nvidia && runSr == PUSHCORE_SR_METHOD_RTX) runSr = PUSHCORE_SR_METHOD_FSR;
         if (runSr == PUSHCORE_SR_METHOD_FSR) {
             s.videoSrQuality = kVideoSrFsr;   // FidelityFX picks FSR 4.1 (ML / INT8) where the driver offers it
@@ -960,7 +980,7 @@ struct PushCore {
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
     uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false; int32_t builtAnimMode = 0; uint32_t builtHoldFlags = 0;
     int buildGraph() {
-        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0; builtAnimMode = settings.animationMode; builtHoldFlags = settings.holdFlags;
+        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0; builtAnimMode = settings.animationMode; builtHoldFlags = settings.holdFlags; builtAnimeSr = settings.animeSrModel;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
@@ -1015,6 +1035,8 @@ struct PushCore {
         r.stillImage = false; r.exportJob = false; r.liveSource = false; r.uncompressedSource = false;
         r.nvidiaAdapter = ctx.adapter().isNvidia; r.amdNr = ctx.adapter().vendorId == 0x1002;   // AMD: NR on the AMD runtimes
         r.nodeOrder = options.nodeOrder ? &*options.nodeOrder : nullptr;
+        const bool animeRun = haveSettings && runSr == PUSHCORE_SR_METHOD_PMML && options.sr;
+        if (animeRun) r.nvidiaAdapter = true;   // the RTX VSR stage is described; the anime upscaler takes it (externalSr)
         // PushFPS Crosshair Hold / Subtitle Hold: process-wide switches PushFPS's UI sets (PushOverlay.h), read by
         // describeStages. Crosshair Hold is never for video; Subtitle Hold follows PushMPC's setting, set right before each
         // graph is described (instances in one process describe their graphs one at a time, under the open / reload path).
@@ -1025,6 +1047,10 @@ struct PushCore {
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+        animeSr.reset();
+        if (animeRun) { animeSr = std::make_shared<pushmpc::AnimeSr>(settings.animeSrModel, ctx.adapter().vendorId == 0x10DE && rtxFamily(family)); gd.externalSr = animeSr; }
+#endif
         // initializePreview(), file branch:
         gd.vfgAsyncSubmission = options.settings.frameGenerationBackend == engine::FrameGenerationBackend::Vfg;
         gd.vfgFastFallback = false;          // live 2X sources only
@@ -1087,6 +1113,15 @@ struct PushCore {
         const auto t = Clock::now();
         if (!graph->initialize(gd) || !graph->createViews()) {
             lastFailed = graph->failedBackend();
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+            if (animeRun && !animeSrFailed && lastFailed == engine::FailedBackend::Sr) {   // the anime upscaler did not start: again without it
+                animeSrFailed = true;
+                veyra::log::warn("pushcore", std::format("anime upscaler {} did not start ({}): RTX VSR / FSR instead", pushmpc::animeSrModelId(settings.animeSrModel), animeSr ? animeSr->error() : std::string()));
+                teardownGraph();
+                error.clear();
+                return buildGraphOnce();
+            }
+#endif
             return fail(std::format("enhancement graph did not start (failed backend {})", int(graph->failedBackend())));
         }
         graph->recordGpuTimings();
@@ -1104,6 +1139,9 @@ struct PushCore {
             engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier == graphMultiplier ? std::format("{}X", multiplier) : std::format("{}X (graph {}X for held-frame spans)", multiplier, graphMultiplier), gd.vfgQuality,
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+        if (animeRun) description += std::format("; upscaler {} ({})", animeSr->name(), graph->externalSrActive() ? animeSr->describe() : std::string("not active"));
+#endif
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
         const int er = buildEgress();
         if (er == PUSHCORE_OK) { initHoldModes(); initRepair(); initHold(); }
@@ -1274,6 +1312,13 @@ struct PushCore {
 
     void collectTimings() {
         if (!graph) return;
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+        if (animeSr && !animeSrFailed && graph->externalSrLost()) {
+            // the anime upscaler stopped mid-stream: plain resize from that frame on, RTX VSR / FSR from the next rebuild
+            animeSrFailed = true;
+            veyra::log::warn("pushcore", std::format("anime upscaler {} stopped ({}): RTX VSR / FSR from the next graph rebuild", animeSr->name(), animeSr->error()));
+        }
+#endif
         cutsSeen.store(cutBase + graph->cutGuardCuts(), std::memory_order_relaxed);
         for (const auto& t : graph->takeGpuTimings()) {
             using veyra::diagnostics::GpuStage;
@@ -2385,6 +2430,9 @@ struct PushCore {
 
     int flush() {
         clearHeldQueues();   // source frames from before the seek
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+        if (animeSr) animeSr->reset();   // AnimeSR's carry starts again after a seek
+#endif
         if (!leases.empty()) return PUSHCORE_BUSY;
         dropQueued();
         return PUSHCORE_OK;
@@ -2417,7 +2465,7 @@ struct PushCore {
         using namespace veyra;
         if (!graph) return fail("not open");
         const auto t = Clock::now();
-        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld || settings.animationMode != builtAnimMode || settings.holdFlags != builtHoldFlags)) {
+        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld || settings.animationMode != builtAnimMode || settings.holdFlags != builtHoldFlags || settings.animeSrModel != builtAnimeSr)) {
             veyra::log::info("pushcore", "frame generation method, upscaler, cut guard, Subtitle Hold or held-frame re-timing changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
@@ -2563,7 +2611,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_HELD_FRAMES; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -2695,6 +2743,10 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.holdActive = core->holdOn ? 1u : 0u;
     core->st.animClass = core->animClassNow.load(std::memory_order_relaxed);
     core->st.holdPairs = core->holdPairs; core->st.holdFrames = core->holdFrames; core->st.holdFlashes = core->holdFlashes;
+    core->st.animeSrModel = ~0u; core->st.animeSrMs = -1.f;
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML && PUSHMPC_HAVE_EXTERNAL_SR
+    if (core->animeSr && !core->animeSrFailed && core->runSr == PUSHCORE_SR_METHOD_PMML) { core->st.animeSrModel = core->animeSr->model(); core->st.animeSrMs = core->animeSr->lastMs(); }
+#endif
     {
         const auto f = core->costFull.recentP50(std::chrono::milliseconds(3000));
         const auto r = core->costReduced.recentP50(std::chrono::milliseconds(3000));
