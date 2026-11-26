@@ -337,7 +337,7 @@ static std::atomic<uint32_t> g_settingsSerial = 0; // the page saved new setting
 // NgxCoreCache::Key is device + runtime folder (fixed within a process) + FG on + FG backend + multiplier; a graph
 // with another key closes the warm core (NGX Shutdown + Init: ~2 s of a cold 2.6-s open).
 struct NgxKey { bool fg = false; uint32_t backend = 0; uint32_t mult = 1; bool operator==(const NgxKey&) const = default; };
-static NgxKey NgxKeyOf(const PushCoreSettings& p) { const bool fg = p.multiplier > 1; return { fg, fg ? p.fgBackend : 0u, fg ? p.multiplier : 1u }; }
+static NgxKey NgxKeyOf(const PushCoreSettings& p) { const bool fg = p.multiplier > 1 && p.fgBackend == PUSHCORE_FG_DLSSG; return { fg, fg ? p.fgBackend : 0u, fg ? p.multiplier : 1u }; }   // as pushcore: only DLSS-G keys the NGX core
 static std::mutex g_ngxLock;
 static NgxKey g_lastNgx;
 static bool g_haveNgx = false;
@@ -645,6 +645,8 @@ static std::wstring g_libRoot;
 static PushCoreCapabilitiesFn g_capsFn = nullptr;   // pushcore_capabilities (PUSHCORE_FEATURE_FG_METHODS)
 static PushCoreFlowBenchFn g_benchFn = nullptr;     // pushcore_pushFlowBench
 static PushCorePrewarmFn g_prewarmFn = nullptr;     // pushcore_prewarm (fast start; absent in older cores)
+static PushCorePrewarmReleaseFn g_prewarmReleaseFn = nullptr;   // pushcore_prewarmRelease
+static PushCorePrewarm2Fn g_prewarm2Fn = nullptr;   // pushcore_prewarm2 (with the NGX core)
 static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
 {
     std::lock_guard<std::mutex> lk(g_libLock);
@@ -665,6 +667,8 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     g_capsFn = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     g_benchFn = reinterpret_cast<PushCoreFlowBenchFn>(GetProcAddress(h, "pushcore_pushFlowBench"));
     g_prewarmFn = reinterpret_cast<PushCorePrewarmFn>(GetProcAddress(h, "pushcore_prewarm"));
+    g_prewarmReleaseFn = reinterpret_cast<PushCorePrewarmReleaseFn>(GetProcAddress(h, "pushcore_prewarmRelease"));
+    g_prewarm2Fn = reinterpret_cast<PushCorePrewarm2Fn>(GetProcAddress(h, "pushcore_prewarm2"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
     return api;
 }
@@ -1610,6 +1614,7 @@ public:
         StopAuto();
         const int64_t q2 = Qpc();
         CloseCore();
+        if (m_prewarmed && g_prewarmReleaseFn) g_prewarmReleaseFn();   // nothing of the prewarm outlives the filter
         const int64_t q3 = Qpc();
         for (HANDLE h : { m_hWake, m_hLease, m_hSubmit, m_hTimer }) if (h) CloseHandle(h);
         if (m_csv) fclose(m_csv);
@@ -2639,7 +2644,20 @@ private:
         m_prewarmed = true;
         std::wstring err;
         if (!LoadApi(m_rt, err)) return;
-        if (g_prewarmFn) { const int r = g_prewarmFn(0); Log(std::format("fast start: pushcore prewarm started -> {}", r)); }
+        if (g_prewarm2Fn) {
+            // with the NGX core for the settings Auto picks now (no VRR probe: the core does not depend on the multiplier)
+            EnsureGpu(0);
+            const pm::Display d = pm::QueryDisplay(pm::PlayerWindow(), pm::VrrMode::Off, m_gpu.nvidia());
+            PushCoreSettings ps = ToCore(m_cfg.user, DecideNow(m_cfg.user, d));
+            PushCoreConfig pc = {};
+            pc.structSize = sizeof(pc); pc.abiVersion = PUSHCORE_ABI_VERSION;
+            pc.pushfpsDir = m_rt.root.c_str();
+            pc.shaderDir = m_rt.shaderDir.empty() ? nullptr : m_rt.shaderDir.c_str();
+            pc.settings = &ps;
+            pc.sr = pc.fg = pc.multiplier = pc.vfgQuality = -1;
+            const int r = g_prewarm2Fn(&pc, &ps, 0);
+            Log(std::format("fast start: pushcore prewarm started (NGX core {}) -> {}", (ps.sr && ps.srMethod == PUSHCORE_SR_METHOD_RTX) || ps.nr ? "too" : "not needed", r));
+        } else if (g_prewarmFn) { const int r = g_prewarmFn(0); Log(std::format("fast start: pushcore prewarm started -> {}", r)); }
     }
     std::atomic<bool> m_reloading = false, m_faulted = false, m_deviceLostSeen = false;
     std::string m_openError;
@@ -3400,7 +3418,9 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     std::string quickWhy;
     const bool quick = !legacy && QuickStartWanted(ps, quickWhy);
     PushCoreSettings psQuick = ps;
-    if (quick) { psQuick.srMethod = PUSHCORE_SR_METHOD_NIS; psQuick.nr = 0; }
+    // the quick graph: Image Scaling for RTX VSR, no AI clean-up, and the cut guard without NVIDIA's optical flow (its
+    // session costs ~85 ms at the open; the guard's pair test still runs); everything else as the full graph
+    if (quick) { psQuick.srMethod = PUSHCORE_SR_METHOD_NIS; psQuick.nr = 0; if (psQuick.cutGuard & 2) psQuick.cutGuard &= ~2; }
     if (!legacy) Log(quick ? "quick start: a quick graph (NVIDIA Image Scaling instead of RTX VSR, the same frame generation) opens first; the full graph follows and takes over"
                            : "quick start: not used (" + quickWhy + ")");
     struct Ctx { std::shared_ptr<OpenJob> job; PushCoreStreamInfo si; ComPtr<ID3D11Device> dev; Config cfg; Runtime rt; HMODULE self; int64_t q0; PushCoreSettings ps; bool legacy; bool quick; PushCoreSettings psQuick; };

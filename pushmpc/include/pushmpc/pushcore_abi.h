@@ -64,6 +64,9 @@ typedef struct PushCore PushCore; /* opaque */
 #define PUSHCORE_FLAG_EGRESS_COPY 1u /* force the fallback egress (one D3D12 copy per output into a shared ring) */
 #define PUSHCORE_FLAG_NO_WARMUP   2u /* skip the warm-up frames pushcore_open runs through the graph (first-frame stalls) */
 #define PUSHCORE_FLAG_NO_WARM_CACHE 4u /* do not keep the NGX core (and its D3D12 device) alive for the next instance */
+#define PUSHCORE_FLAG_WARMUP_GPU_ONLY 8u /* the warm-up never uses the D3D11 immediate context (it is busy on the caller's other
+                                            threads, e.g. mpv's decoder): the ingress slots go into the graph as they are, so
+                                            pushcore_open can run on a worker thread without the caller's context lock */
 
 /* Egress modes (PushCoreOutputInfo.egressMode) */
 #define PUSHCORE_EGRESS_DIRECT 0u /* graph output pool shared and opened in D3D11 (design option A) */
@@ -383,6 +386,16 @@ PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* roo
    after 30 s. adapterLuid 0 = the first hardware adapter in DXGI's high-performance order. */
 PUSHCORE_API int pushcore_prewarm(uint64_t adapterLuid);
 typedef int (*PushCorePrewarmFn)(uint64_t);
+/* As pushcore_prewarm, plus the NGX core when these settings need one (RTX VSR, AI clean-up, RTX Video HDR; not for DLSS-G):
+   it is initialised on the prewarm thread, outside the graph lock, and kept in the process-wide cache under the key the
+   graph builds; the next graph that needs it waits for it instead of initialising a second one. config gives the runtime
+   root (pushfpsDir / runtimeDir) exactly as pushcore_open gets it. Additive export (GetProcAddress). */
+PUSHCORE_API int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* settings, uint64_t adapterLuid);
+typedef int (*PushCorePrewarm2Fn)(const PushCoreConfig*, const PushCoreSettings*, uint64_t);
+/* Drops what pushcore_prewarm holds at once (its thread then ends): the filter calls it when it is destroyed, so nothing
+   of PushMPC stays active once no player uses it. */
+PUSHCORE_API int pushcore_prewarmRelease(void);
+typedef int (*PushCorePrewarmReleaseFn)(void);
 typedef int (*PushCoreCapabilitiesFn)(uint64_t, const wchar_t*, PushCoreCaps*);
 typedef int (*PushCoreFlowBenchFn)(uint64_t, const wchar_t*, PushCoreFlowBench*);
 PUSHCORE_API int pushcore_submit2(PushCore* core, ID3D11Texture2D* texture, uint32_t arraySlice,

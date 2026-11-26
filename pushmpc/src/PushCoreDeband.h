@@ -111,6 +111,23 @@ inline constexpr DebandPreset kDebandPresets[3] = {
 
 class Deband {
 public:
+    // The pass's bytecode, compiled once per process (thread-safe); precompile() starts it early
+    struct Compiled { Microsoft::WRL::ComPtr<ID3DBlob> y, uv; std::string error; };
+    static const Compiled& compiled()
+    {
+        static const Compiled c = [] {
+            Compiled r; Microsoft::WRL::ComPtr<ID3DBlob> err;
+            const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+            if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandY", "cs_5_0", flags, 0, &r.y, &err)))
+                { r.error = std::string("compile CS_DebandY: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); r.y.Reset(); return r; }
+            err.Reset();
+            if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandUV", "cs_5_0", flags, 0, &r.uv, &err)))
+                { r.error = std::string("compile CS_DebandUV: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); r.uv.Reset(); }
+            return r;
+        }();
+        return c;
+    }
+    static void precompile() { (void)compiled(); }
     // Compiles the shaders and checks NV12 plane UAV support. False = the pass is not available on this device (logged
     // by the caller with why()).
     bool init(ID3D11Device* device)
@@ -120,12 +137,9 @@ public:
         if (FAILED(dev_.As(&dev3_))) return failWith("no ID3D11Device3 (plane views)");
         // NV12 plane UAVs (R8 / R8G8 typed stores) are tried when the textures are made (ensure): that is the real test;
         // CheckFeatureSupport's answer for planar formats differs between drivers.
-        ComPtr<ID3DBlob> y, uv, err;
-        const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
-        if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandY", "cs_5_0", flags, 0, &y, &err)))
-            return failWith(std::string("compile CS_DebandY: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
-        if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandUV", "cs_5_0", flags, 0, &uv, &err)))
-            return failWith(std::string("compile CS_DebandUV: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
+        const Compiled& c = compiled();   // once per process (pushcore_prewarm compiles it during the player's connect)
+        if (!c.y || !c.uv) return failWith(c.error);
+        ComPtr<ID3DBlob> y = c.y, uv = c.uv;
         if (FAILED(dev_->CreateComputeShader(y->GetBufferPointer(), y->GetBufferSize(), nullptr, &csY_)) ||
             FAILED(dev_->CreateComputeShader(uv->GetBufferPointer(), uv->GetBufferSize(), nullptr, &csUV_)))
             return failWith("CreateComputeShader");

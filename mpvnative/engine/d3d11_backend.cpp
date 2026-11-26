@@ -72,8 +72,37 @@ struct Warm {
     PushCoreOutputInfo out{};
     bool owned = false;
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, int32_t, int32_t>, std::array<int32_t, 4>> colours;   // last seen per stream
+    // fast start (as the MPC-HC filter): on a cold open "core" is first a quick graph (NVIDIA Image Scaling for RTX VSR,
+    // no NGX: ~0.5 s); the full graph opens on a worker thread (pushcore's GPU-only warm-up: no use of mpv's immediate
+    // context, so no decoder lock) and takes over at a submit (Handover)
+    bool quick = false;              // core is the quick graph and the full one is on its way
+    uint64_t gen = 0;                // open generation: a worker of an older one closes what it opened
+    bool nextDone = false;
+    PushCore* next = nullptr;        // the full graph, ready (nextDone) and not handed over yet
+    std::string nextErr;
+    PushCore* old = nullptr;         // after the handover: the quick graph until its last frame was taken
+    int64_t handoverPts = 0, discardUpTo = INT64_MIN;   // 100 ns
+    PushCore* retired = nullptr;     // the quick graph after its last frame: closed at the next seek or close
+    bool fullOpened = false;         // a full graph opened in this process (its NGX core may still be warm: no quick start)
+    ULONGLONG quickTick = 0;
 };
 Warm& W() { static Warm* w = new Warm(); return *w; }   // never destroyed: the core may outlive every instance
+// a core closed on its own thread (a close waits for any graph build in the process; mpv's threads never do)
+void CloseAsync(const PushCoreApi* api, PushCore* core, const char* what)
+{
+    if (!api || !core) return;
+    std::thread([api, core, what] { const ULONGLONG t0 = GetTickCount64(); api->close(core); Log(std::format("d3d11: {} closed in {} ms (own thread)", what, GetTickCount64() - t0)); }).detach();
+}
+// the quick-start state dropped (a reopen, another stream): what is open closes; a worker still opening closes its own core
+void DropQuick(Warm& w)
+{
+    ++w.gen;
+    w.quick = false; w.nextDone = false;
+    if (w.next) { CloseAsync(w.api, w.next, "the full graph (not taken over)"); w.next = nullptr; }
+    if (w.old) { CloseAsync(w.api, w.old, "the quick graph"); w.old = nullptr; }
+    if (w.retired) { CloseAsync(w.api, w.retired, "the quick graph"); w.retired = nullptr; }
+    w.discardUpTo = INT64_MIN;
+}
 
 bool LoadCore(const Options& o, std::wstring& coreDir, std::string& why)
 {
@@ -181,6 +210,7 @@ public:
         Lock();
         ReturnAll();
         Unlock();
+        if (w.retired) { CloseAsync(w.api, w.retired, "the quick graph"); w.retired = nullptr; }
         w.owned = false;   // the core stays warm for the next instance
     }
 
@@ -321,6 +351,7 @@ public:
         const bool disc = (flags & PMENG_SUBMIT_DISCONTINUITY) || m_sinceOpen == 0;
         const int r = w.api->submit2(w.core, static_cast<ID3D11Texture2D*>(src.d3d11_texture), src.d3d11_slice, ptsUs * 10,
                                      disc ? PUSHCORE_SUBMIT_DISCONTINUITY : 0u, &t);
+        if (r == PUSHCORE_OK && w.quick) Handover(w, src, ptsUs * 10);
         Unlock();
         if (r == PUSHCORE_BUSY) return PMENG_BUSY;
         if (r != PUSHCORE_OK) { err = std::format("pushcore_submit2 -> {}: {}", r, w.api->lastError(w.core)); return r == PUSHCORE_DEVICE_LOST ? PMENG_DEVICE_LOST : PMENG_ERROR; }
@@ -337,12 +368,19 @@ public:
                 std::lock_guard<std::mutex> lk(w.lock);
                 if (m_pending.empty()) {
                     PushCoreFrame fr[16]; uint32_t n = 0;
+                    PushCore* src = w.old ? w.old : w.core;   // fast start: the quick graph until its last frame
                     Lock();
-                    const int r = w.api->poll(w.core, fr, 16, &n, 0);   // never wait while holding the decoder's lock
+                    const int r = w.api->poll(src, fr, 16, &n, 0);   // never wait while holding the decoder's lock
+                    PushCoreStats ps{}; ps.structSize = sizeof(ps);
+                    if (r == PUSHCORE_OK && !n && src == w.old && w.api->stats(src, &ps) == PUSHCORE_OK && ps.pendingFrames == 0) RetireOld(w, "drained");
                     Unlock();
-                    if (r != PUSHCORE_OK && r != PUSHCORE_BUSY) { err = std::format("pushcore_poll -> {}: {}", r, w.api->lastError(w.core)); return PMENG_ERROR; }
+                    if (r != PUSHCORE_OK && r != PUSHCORE_BUSY) { err = std::format("pushcore_poll -> {}: {}", r, w.api->lastError(src)); return PMENG_ERROR; }
                     for (uint32_t i = 0; i < n; ++i) {
-                        Item it; it.fr = fr[i];
+                        if (src == w.core && w.discardUpTo != INT64_MIN) {
+                            if (fr[i].pts100ns <= w.discardUpTo) { Lock(); w.api->presented(src, fr[i].lease, nullptr); Unlock(); continue; }
+                            w.discardUpTo = INT64_MIN;
+                        }
+                        Item it; it.fr = fr[i]; it.core = src;
                         // the n-th real output belongs to the n-th submit; generated frames to the next real one
                         it.info.source = m_realOut;
                         it.info.subframe = fr[i].kind == PUSHCORE_FRAME_REAL ? 0 : std::max<uint32_t>(fr[i].subframe, 1);
@@ -350,6 +388,7 @@ public:
                         it.info.generated = fr[i].kind == PUSHCORE_FRAME_REAL ? 0 : 1;
                         if (fr[i].kind == PUSHCORE_FRAME_REAL) ++m_realOut;
                         m_pending.push_back(it);
+                        if (src == w.old && fr[i].kind == PUSHCORE_FRAME_REAL && fr[i].pts100ns >= w.handoverPts) RetireOld(w, "after its last frame");
                     }
                 }
                 if (!m_pending.empty()) { info = m_pending.front().info; return 1; }
@@ -366,7 +405,7 @@ public:
         if (m_pending.empty()) { err = "write without an output"; return PMENG_ERROR; }
         Item it = m_pending.front();
         m_pending.pop_front();
-        if (dst.mem != PMENG_MEM_D3D11 || !dst.d3d11_texture) { w.api->presented(w.core, it.fr.lease, nullptr); err = "pushcore: expected a D3D11 output texture"; return PMENG_ERROR; }
+        if (dst.mem != PMENG_MEM_D3D11 || !dst.d3d11_texture) { w.api->presented(it.core, it.fr.lease, nullptr); err = "pushcore: expected a D3D11 output texture"; return PMENG_ERROR; }
         auto* out = static_cast<ID3D11Texture2D*>(dst.d3d11_texture);
         Lock();
         if (it.fr.readyFence && m_ctx4) m_ctx4->Wait(it.fr.readyFence, it.fr.readyValue);
@@ -383,7 +422,7 @@ public:
         } else {
             ok = Draw(it.fr.texture, sd.Format, out, dd, dst.d3d11_slice, ow, oh, e);
         }
-        w.api->presented(w.core, it.fr.lease, m_ctx.Get());
+        w.api->presented(it.core, it.fr.lease, m_ctx.Get());
         Unlock();
         if (!ok) { err = e; return PMENG_ERROR; }
         ++m_written;
@@ -397,7 +436,7 @@ public:
         std::lock_guard<std::mutex> lk(w.lock);
         if (m_pending.empty()) return PMENG_OK;
         Lock();
-        w.api->presented(w.core, m_pending.front().fr.lease, nullptr);
+        w.api->presented(m_pending.front().core, m_pending.front().fr.lease, nullptr);
         Unlock();
         m_pending.pop_front();
         return PMENG_OK;
@@ -413,6 +452,13 @@ public:
         std::lock_guard<std::mutex> lk(w.lock);
         Lock();
         ReturnAll();
+        if (w.old) {
+            PushCoreFrame of[16]; uint32_t on = 0;
+            while (w.api->poll(w.old, of, 16, &on, 0) == PUSHCORE_OK && on) { for (uint32_t i = 0; i < on; ++i) w.api->presented(w.old, of[i].lease, nullptr); on = 0; }
+            RetireOld(w, "seek");
+        }
+        w.discardUpTo = INT64_MIN;
+        if (w.retired) { CloseAsync(w.api, w.retired, "the quick graph"); w.retired = nullptr; }   // a seek: a quiet moment
         const int r = w.api->flush(w.core);
         Unlock();
         m_realOut = m_submitted;
@@ -433,14 +479,14 @@ public:
     }
 
 private:
-    struct Item { PushCoreFrame fr{}; pmeng_out_info info{}; };
+    struct Item { PushCoreFrame fr{}; pmeng_out_info info{}; PushCore* core = nullptr; };
 
     void Lock() { if (m_lock) m_lock(m_lockCtx); }
     void Unlock() { if (m_unlock) m_unlock(m_lockCtx); }
     void ReturnAll()
     {
         Warm& w = W();
-        for (auto& it : m_pending) w.api->presented(w.core, it.fr.lease, nullptr);
+        for (auto& it : m_pending) w.api->presented(it.core, it.fr.lease, nullptr);
         m_pending.clear();
     }
 
@@ -460,11 +506,16 @@ private:
         const ULONGLONG t0 = GetTickCount64();
         const char* how = "open (cold)";
         Lock();
+        if (w.core && w.quick && !(w.device == m_dev.Get() && w.key == key && w.settings == settings)) {
+            // the quick graph cannot take other settings (a reload there would start NGX inline): open again
+            DropQuick(w); w.api->close(w.core); w.core = nullptr; how = "reopen (quick start dropped)";
+        }
         if (w.core && w.device == m_dev.Get() && w.key == key) {
-            if (w.settings == settings) { w.api->flush(w.core); how = "flush (warm core reused)"; }
+            if (w.settings == settings) { w.api->flush(w.core); how = w.quick ? "flush (quick graph reused, the full graph follows)" : "flush (warm core reused)"; }
             else if (w.api->setSettings(w.core, &m_ps) == PUSHCORE_OK && w.api->reload(w.core) == PUSHCORE_OK) { how = "setSettings + reload (warm)"; }
             else { w.api->close(w.core); w.core = nullptr; }
         } else if (w.core) {
+            DropQuick(w);
             w.api->close(w.core); w.core = nullptr; how = "reopen (stream or device changed)";
         }
         if (!w.core) {
@@ -480,7 +531,22 @@ private:
             cfg.shaderDir = DirExists(shaders) ? shaders.c_str() : nullptr;
             cfg.settings = &m_ps;
             char eb[1024] = {};
-            w.core = w.api->open(&cfg, &si, m_dev.Get(), eb, sizeof(eb));
+            std::string qwhy;
+            if (QuickWanted(w, qwhy)) {
+                PushCoreSettings qs = m_ps;
+                qs.srMethod = PUSHCORE_SR_METHOD_NIS; qs.nr = 0; if (qs.cutGuard & 2) qs.cutGuard &= ~2;
+                cfg.settings = &qs;
+                cfg.flags = PUSHCORE_FLAG_NO_WARM_CACHE;   // the quick graph has no NGX stage; the full graph keeps the cache
+                w.core = w.api->open(&cfg, &si, m_dev.Get(), eb, sizeof(eb));
+                cfg.settings = &m_ps; cfg.flags = 0;
+                if (w.core) { how = "open (cold): quick graph, the full graph follows"; StartFull(w, root, shaders, si); }
+                else Log(std::string("d3d11: quick graph did not open (") + (eb[0] ? eb : "failed") + "): the full graph opens now");
+            } else Log("d3d11: quick start not used (" + qwhy + ")");
+            if (!w.core) {
+                eb[0] = 0;
+                w.core = w.api->open(&cfg, &si, m_dev.Get(), eb, sizeof(eb));
+                if (w.core) w.fullOpened = true;
+            }
             if (!w.core) { Unlock(); why = std::string("pushcore_open: ") + (eb[0] ? eb : "failed"); return false; }
         }
         w.device = m_dev.Get(); w.key = key; w.settings = settings;
@@ -490,6 +556,77 @@ private:
         m_sinceOpen = 0; m_realOut = m_submitted;
         Log(std::format("d3d11: core {} in {} ms: {}", how, GetTickCount64() - t0, w.out.description));
         return true;
+    }
+
+    // as the filter's QuickStartWanted: NVIDIA, frame generation that starts without NGX, an NGX stage in the full graph
+    // (RTX VSR / AI clean-up), no RTX Video HDR, and no full graph opened before in this process (its NGX core is warm)
+    bool QuickWanted(const Warm& w, std::string& why) const
+    {
+        wchar_t v[8] = {};
+        if (GetEnvironmentVariableW(L"PUSHMPC_FILTER_QuickStart", v, 8) && v[0] == L'0') { why = "switched off (QuickStart 0)"; return false; }
+        DXGI_ADAPTER_DESC ad{};
+        if (!AdapterOf(m_dev.Get(), ad) || ad.VendorId != 0x10DE) { why = "not an NVIDIA GPU"; return false; }
+        if (m_ps.multiplier < 2) { why = "no frame generation"; return false; }
+        if (m_ps.fgBackend != PUSHCORE_FG_VFG && m_ps.fgBackend != PUSHCORE_FG_NVOF && m_ps.fgBackend != PUSHCORE_FG_FSR) { why = "the frame generation method needs NGX"; return false; }
+        if (m_ps.videoHdr) { why = "RTX Video HDR sets the output signal"; return false; }
+        if (!((m_ps.sr && m_ps.srMethod == PUSHCORE_SR_METHOD_RTX) || m_ps.nr)) { why = "no NGX stage: the full graph opens fast"; return false; }
+        if (w.fullOpened) { why = "a full graph opened before in this mpv: its NGX core is warm"; return false; }
+        return true;
+    }
+    // the full graph on a worker: pushcore_open with the GPU-only warm-up, no decoder lock; handed to Submit through Warm
+    void StartFull(Warm& w, const std::wstring& root, const std::wstring& shaders, const PushCoreStreamInfo& si)
+    {
+        w.quick = true; w.nextDone = false; w.next = nullptr; w.nextErr.clear(); w.quickTick = GetTickCount64();
+        const uint64_t gen = ++w.gen;
+        const PushCoreApi* api = w.api;
+        ComPtr<ID3D11Device> dev = m_dev;
+        const PushCoreSettings ps = m_ps;
+        const bool shaderDir = DirExists(shaders);
+        std::thread([api, dev, ps, si, root, shaders, shaderDir, gen] {
+            { Warm& w0 = W(); std::lock_guard<std::mutex> lk(w0.lock); if (w0.gen != gen) return; }
+            PushCoreConfig cfg = {};
+            cfg.structSize = sizeof(cfg); cfg.abiVersion = PUSHCORE_ABI_VERSION;
+            cfg.pushfpsDir = root.c_str(); cfg.dataDir = L""; cfg.runtimeDir = nullptr;
+            cfg.sr = -1; cfg.fg = -1; cfg.multiplier = -1; cfg.vfgQuality = -1;
+            cfg.shaderDir = shaderDir ? shaders.c_str() : nullptr;
+            cfg.settings = &ps;
+            cfg.flags = PUSHCORE_FLAG_WARMUP_GPU_ONLY;
+            char eb[1024] = {};
+            const ULONGLONG t0 = GetTickCount64();
+            PushCore* core = api->open(&cfg, &si, dev.Get(), eb, sizeof(eb));
+            Log(std::format("d3d11: quick start: the full graph {} in {} ms{}", core ? "opened" : "did not open", GetTickCount64() - t0, core ? std::string() : std::string(": ") + eb));
+            Warm& w = W();
+            std::lock_guard<std::mutex> lk(w.lock);
+            if (w.gen != gen || !w.quick) { if (core) CloseAsync(api, core, "the full graph (no longer wanted)"); return; }
+            w.next = core; w.nextErr = eb; w.nextDone = true;
+            if (core) w.fullOpened = true;
+        }).detach();
+    }
+    // at a submit (w.lock and the decoder lock held; source frame pts just went into the quick graph): the full graph gets the
+    // same frame as its first one (its own output for it is dropped), the quick graph delivers up to and including it
+    void Handover(Warm& w, const pmeng_image& src, int64_t pts100ns)
+    {
+        if (!w.quick || w.old || !w.nextDone) return;
+        PushCore* next = w.next; w.next = nullptr; w.quick = false;
+        if (!next) { Log("d3d11: quick start: the full graph did not open (" + w.nextErr + "): the quick graph stays"); return; }
+        PushCoreSubmitTiming t = {};
+        t.structSize = PUSHCORE_SUBMIT_TIMING_SIZE_V2;
+        t.streamNow100ns = INT64_MIN;
+        const int r = w.api->submit2(next, static_cast<ID3D11Texture2D*>(src.d3d11_texture), src.d3d11_slice, pts100ns, PUSHCORE_SUBMIT_DISCONTINUITY, &t);
+        if (r != PUSHCORE_OK) { Log(std::format("d3d11: quick start: the full graph refused its first frame ({}): the quick graph stays", r)); CloseAsync(w.api, next, "the full graph"); return; }
+        w.old = w.core; w.core = next;
+        w.handoverPts = pts100ns; w.discardUpTo = pts100ns;
+        PushCoreOutputInfo oi{}; w.api->outputInfo(next, &oi);
+        Log(std::format("d3d11: quick start: handover at {:.3f} s, {} ms after the quick graph opened: {} ({}x{} x{}; quick graph {}x{} x{})", pts100ns / 1e7,
+            GetTickCount64() - w.quickTick, oi.description, oi.width, oi.height, oi.multiplier, w.out.width, w.out.height, w.out.multiplier));
+        w.out = oi;
+    }
+    void RetireOld(Warm& w, const char* why)
+    {
+        if (!w.old) return;
+        if (w.retired) CloseAsync(w.api, w.retired, "the quick graph");
+        w.retired = w.old; w.old = nullptr;
+        Log(std::format("d3d11: quick start: the quick graph retired ({}); it closes at the next seek or close", why));
     }
 
     void Describe(pmeng_output& out)
