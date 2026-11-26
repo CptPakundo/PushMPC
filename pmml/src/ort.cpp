@@ -737,6 +737,9 @@ public:
     }
     size_t outputCount() const override { return outputs_.size(); }
     bool run(const float* input, const std::vector<int64_t>& shape, const std::vector<float*>& outs, const std::vector<size_t>& bytes, std::string* err) override {
+        // tests: PMML_TEST_FAIL_RUN_AFTER=N makes every run after the first N fail (a host's mid-stream fallback)
+        if (failAfter_ < 0) { const char* e = std::getenv("PMML_TEST_FAIL_RUN_AFTER"); failAfter_ = e && *e ? std::max(0, std::atoi(e)) : 0x7fffffff; }
+        if (runs_++ >= failAfter_) { if (err) *err = "Run: failure injected by PMML_TEST_FAIL_RUN_AFTER"; return false; }
         size_t count = 1;
         for (auto d : shape) count *= size_t(d);
         OrtValue* in = nullptr;
@@ -776,6 +779,7 @@ private:
     OrtMemoryInfo* cpu_ = nullptr;
     std::string input_, describe_;
     std::vector<std::string> outputs_;
+    int failAfter_ = -1, runs_ = 0;
 };
 
 }  // namespace
