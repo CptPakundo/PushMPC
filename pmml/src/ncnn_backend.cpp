@@ -244,7 +244,7 @@ public:
             return true;
         }
 #endif
-        synthCpu(rgbA_.data(), rgbB_.data(), o_.width, o_.height, g0_.data(), g1_.data(), mask_.data(), n_, affine_, s0, s1, out_.data(), threadsHint());
+        synthCpu(rgbA_.data(), rgbB_.data(), o_.width, o_.height, g0_.data(), g1_.data(), mask_.data(), n_, affine_, s0, s1, out_.data(), threadsHint(), o_.lineArt);
         rgbToPlanes(out_.data(), o_.format, o_.colour, o_.width, o_.height, out);
         stats_.synthMs = nowMs() - t0;
         ++stats_.synthRuns;

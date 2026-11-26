@@ -157,6 +157,32 @@ static void cpuGraphs() {
     std::fill(m.begin(), m.end(), 1.f);
     pmml::detail::synthCpu(rgb.data(), fb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 0.5f, 0.5f, out.data(), 1);
     NEAR(out[size_t(10) * w + 20], rgb[size_t(10) * w + 22], 1e-4);
+    // synth_line (anime round 5): identical to synth where there are no lines (smooth gradients, any mask)
+    for (int yy = 0; yy < h; ++yy)
+        for (int xx = 0; xx < w; ++xx) g[(size_t(yy) * w + xx) * 2] = 2.f * xx / (w - 1) - 1.f;
+    const size_t P = size_t(w) * h;
+    std::vector<float> ga(rgb.size()), gb(rgb.size()), o1(rgb.size()), o2(rgb.size());
+    for (int c = 0; c < 3; ++c)
+        for (int yy = 0; yy < h; ++yy)
+            for (int xx = 0; xx < w; ++xx) { ga[c * P + size_t(yy) * w + xx] = 0.2f + 0.005f * xx; gb[c * P + size_t(yy) * w + xx] = 0.7f - 0.004f * yy; }
+    std::fill(m.begin(), m.end(), 0.5f);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o1.data(), 1);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o2.data(), 1, true);
+    double d = 0;
+    for (size_t i = 0; i < o1.size(); ++i) d = std::max(d, double(std::fabs(o1[i] - o2[i])));
+    CHECK(d < 1e-6);
+    // a dark line in a at x = 20 and in b at x = 26 (a doubled line in the blend): with mask 0.6 the plain blend shows
+    // two faint lines; synth_line one, nearly a's (smoothstep(0.35, 0.65, 0.6) = 0.94)
+    std::fill(ga.begin(), ga.end(), 0.8f); std::fill(gb.begin(), gb.end(), 0.8f);
+    for (int c = 0; c < 3; ++c)
+        for (int yy = 0; yy < h; ++yy) { ga[c * P + size_t(yy) * w + 20] = 0.1f; gb[c * P + size_t(yy) * w + 26] = 0.1f; }
+    std::fill(m.begin(), m.end(), 0.6f);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o1.data(), 1);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o2.data(), 1, true);
+    const size_t at20 = size_t(24) * w + 20, at26 = size_t(24) * w + 26;
+    CHECK(o1[at20] > 0.3f && o1[at26] > 0.45f);          // plain: 0.38 and 0.52, two faint lines
+    CHECK(o2[at20] < 0.16f && o2[at26] > 0.7f);          // line: a's line (0.15), b's nearly gone (0.75)
+    CHECK(std::fabs(o2[size_t(24) * w + 40] - 0.8f) < 1e-5);   // flat elsewhere untouched
 }
 
 int main() {

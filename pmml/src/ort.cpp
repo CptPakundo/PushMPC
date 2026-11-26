@@ -420,10 +420,14 @@ public:
         if (!session(joinPath(o.graphsDir, "pack-" + fmt_ + ".onnx"), dims,
                      sizes, &pack, err)) return false;
         if (!session(joinPath(o.graphsDir, "addt.onnx"), dims, {}, &addt, err)) return false;
-        if (!session(joinPath(o.graphsDir, "synth-" + fmt_ + ".onnx"), dims, sizes, &synth, err)) return false;
+        // line-art protection (Options.lineArt): synth_line / synth_map_line pick one warped frame on line pixels where
+        // the two disagree (no doubled lines); a graphs folder made before them runs the plain graphs
+        const bool line = o.lineArt && fileExists(joinPath(o.graphsDir, "synth_line-" + fmt_ + ".onnx"));
+        if (!session(joinPath(o.graphsDir, (line ? "synth_line-" : "synth-") + fmt_ + ".onnx"), dims, sizes, &synth, err)) return false;
         // optional: the per-pixel phase graph (renderMap); graph folders made before it run without
         {
-            const std::string mapPath = joinPath(o.graphsDir, "synth_map-" + fmt_ + ".onnx");
+            std::string mapPath = joinPath(o.graphsDir, "synth_map_line-" + fmt_ + ".onnx");
+            if (!line || !fileExists(mapPath)) mapPath = joinPath(o.graphsDir, "synth_map-" + fmt_ + ".onnx");
             if (FILE* f = std::fopen(mapPath.c_str(), "rb")) {
                 std::fclose(f);
                 std::string e;

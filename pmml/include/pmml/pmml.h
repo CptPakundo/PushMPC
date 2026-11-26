@@ -66,6 +66,10 @@ struct Options {
     PlaneFormat format = PlaneFormat::Yuv420;
     Colour colour;
     int width = 0, height = 0;    // full size (even for Yuv420)
+    // Appended (anime round 5): line-art protection. Where either warped frame has a dark line pixel (3x3 black top-hat
+    // above kLineTau) and the two warped frames disagree there, the blend mask is pushed towards one frame
+    // (smoothstep 0.35..0.65): one sharp line instead of two faint ones. synth_line graphs / synthCpu(lineArt).
+    bool lineArt = false;
 };
 
 struct Stats {

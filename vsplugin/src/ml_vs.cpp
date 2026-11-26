@@ -279,6 +279,9 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     }
     if (!reqTier.empty()) o.tier = reqTier;
     if (const std::string v = MArg(in, a, "ml_flow_once"); !v.empty()) flowOnce = ParseBool(v, flowOnce);
+    // line-art protection (anime round 5, pmml synth_line): ml_line_art=1 (off unless asked: the held-share gate of the
+    // portable path decides it after the anime-g22 merge)
+    if (const std::string v = MArg(in, a, "ml_line_art"); !v.empty()) o.lineArt = ParseBool(v, false);
     std::string e;
     auto interp = pmml::Interpolator::create(o, &e);
     if (!interp) return fail(e);

@@ -66,7 +66,11 @@ std::vector<DeviceInfo> listNcnn(const std::string& runtimeDir, std::string* log
 // CPU reference of the synth graph (used by the ncnn backend and the tests): rebuild at full size from grids/mask.
 //   frames: RGB float planar [3][h][w]; grids [ph][pw][2]; mask [ph][pw]
 void synthCpu(const float* fa, const float* fb, int w, int h, const float* g0, const float* g1, const float* mask,
-              const NetworkSize& n, const std::array<float, 4>& affine, float s0, float s1, float* out, int threads);
+              const NetworkSize& n, const std::array<float, 4>& affine, float s0, float s1, float* out, int threads,
+              bool lineArt = false);
+// line-art protection (synth_line, make_graphs.py): a line pixel has a 3x3 black top-hat of luma above kLineTau, and the
+// two warped frames differ there by more than kLineDelta (luma, 0..1)
+inline constexpr float kLineTau = 0.05f, kLineDelta = 0.04f;
 void planesToRgb(const Frame& f, PlaneFormat fmt, const Colour& c, int w, int h, float* rgb);
 void rgbToPlanes(const float* rgb, PlaneFormat fmt, const Colour& c, int w, int h, const OutFrame& out);
 void resizeLinear(const float* src, int c, int h, int w, int oh, int ow, float* dst);
