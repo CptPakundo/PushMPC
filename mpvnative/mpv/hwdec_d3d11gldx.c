@@ -10,7 +10,8 @@
  */
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <d3d11_1.h>
+#include <dxgi1_4.h>
 
 #include <libavutil/hwcontext.h>
 
@@ -101,9 +102,9 @@ static int init(struct ra_hwdec *hw)
     const int want = vendor_of((const char *)gl->GetString(GL_VENDOR));
     IDXGIFactory1 *factory = NULL;
     IDXGIAdapter1 *adapter = NULL, *a = NULL;
+    typedef HRESULT (WINAPI *create_factory_fn)(REFIID, void **);
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
-    HRESULT (WINAPI *create_factory)(REFIID, void **) =
-        dxgi ? (void *)GetProcAddress(dxgi, "CreateDXGIFactory1") : NULL;
+    create_factory_fn create_factory = dxgi ? (create_factory_fn)(void *)GetProcAddress(dxgi, "CreateDXGIFactory1") : NULL;
     if (create_factory && SUCCEEDED(create_factory(&IID_IDXGIFactory1, (void **)&factory))) {
         for (UINT i = 0; IDXGIFactory1_EnumAdapters1(factory, i, &a) == S_OK; i++) {
             DXGI_ADAPTER_DESC1 d;
@@ -113,8 +114,8 @@ static int init(struct ra_hwdec *hw)
         }
         IDXGIFactory1_Release(factory);
     }
-    HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
-    PFN_D3D11_CREATE_DEVICE create = d3d11 ? (void *)GetProcAddress(d3d11, "D3D11CreateDevice") : NULL;
+    d3d_load_dlls();   // mpv's own d3d11.dll handle (video/d3d.h)
+    PFN_D3D11_CREATE_DEVICE create = d3d11_D3D11CreateDevice;
     if (!create) { SAFE_RELEASE(adapter); return -1; }
     static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1 };
     hr = create((IDXGIAdapter *)adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, NULL,
@@ -192,7 +193,7 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
 
     if (sub == pixfmt2imgfmt(AV_PIX_FMT_BGRA))         { p->fmt = DXGI_FORMAT_B8G8R8A8_UNORM;     rafmt = "rgba8";    dst = IMGFMT_RGB0; }
     else if (sub == pixfmt2imgfmt(AV_PIX_FMT_X2BGR10)) { p->fmt = DXGI_FORMAT_R10G10B10A2_UNORM;  rafmt = "rgb10_a2"; dst = sub; }
-    else if (sub == pixfmt2imgfmt(AV_PIX_FMT_RGBAF16)) { p->fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; rafmt = "rgba16hf"; dst = sub; }
+    else if (sub == pixfmt2imgfmt(AV_PIX_FMT_RGBAF16)) { p->fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; rafmt = "rgba16f";  dst = sub; }   // GL's name (the D3D11 ra calls it rgba16hf)
     else if (sub == IMGFMT_NV12)                        { p->fmt = DXGI_FORMAT_B8G8R8A8_UNORM;     rafmt = "rgba8";    dst = IMGFMT_RGB0; yuv = true; }
     else if (sub == IMGFMT_P010)                        { p->fmt = DXGI_FORMAT_R10G10B10A2_UNORM;  rafmt = "rgb10_a2"; dst = pixfmt2imgfmt(AV_PIX_FMT_X2BGR10); yuv = true; }
     else {
@@ -246,6 +247,26 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE out = { .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 };
         ID3D11VideoContext_VideoProcessorSetStreamColorSpace(p->vctx, p->vproc, 0, &in);
         ID3D11VideoContext_VideoProcessorSetOutputColorSpace(p->vctx, p->vproc, &out);
+        // BT.2020 and PQ / HLG need the DXGI colour spaces (ID3D11VideoContext1): the output keeps the stream's primaries
+        // and transfer (dst_params carries them), only the matrix and the range are undone here
+        ID3D11VideoContext1 *vctx1 = NULL;
+        if (SUCCEEDED(ID3D11VideoContext_QueryInterface(p->vctx, &IID_ID3D11VideoContext1, (void **)&vctx1))) {
+            const bool full = sp->repr.levels == PL_COLOR_LEVELS_FULL;
+            const bool bt2020 = sp->repr.sys == PL_COLOR_SYSTEM_BT_2020_NC || sp->color.primaries == PL_COLOR_PRIM_BT_2020;
+            // same transfer on both sides = no transfer conversion (HLG stays HLG-coded in "G22", as mpv expects)
+            const bool pq = sp->color.transfer == PL_COLOR_TRC_PQ;
+            DXGI_COLOR_SPACE_TYPE ics, ocs;
+            if (pq)        { ics = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020; ocs = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020; }
+            else if (bt2020) { ics = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
+                             ocs = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020; }
+            else if (sp->repr.sys == PL_COLOR_SYSTEM_BT_601) { ics = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601 : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
+                             ocs = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; }
+            else           { ics = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709 : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
+                             ocs = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; }
+            ID3D11VideoContext1_VideoProcessorSetStreamColorSpace1(vctx1, p->vproc, 0, ics);
+            ID3D11VideoContext1_VideoProcessorSetOutputColorSpace1(vctx1, p->vproc, ocs);
+            ID3D11VideoContext1_Release(vctx1);
+        }
         ID3D11VideoContext_VideoProcessorSetStreamAutoProcessingMode(p->vctx, p->vproc, 0, FALSE);
     }
 

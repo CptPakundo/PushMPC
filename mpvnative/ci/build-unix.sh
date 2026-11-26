@@ -78,13 +78,15 @@ if ! done_ "$MPVPM" mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ];
     extra=()
     case $OS in
         linux) extra+=(-Dc_link_args="-Wl,-rpath,\$ORIGIN/../lib") ;;
+        msys2) extra+=(-Dgl-dxinterop=enabled -Dd3d11=enabled -Dd3d-hwaccel=enabled) ;;   # hwdec_d3d11gldx.c needs all three
         macos) ;;   # mpv 0.42 builds its macOS player with Swift (Xcode's): cplayer needs it
     esac
     CC="$CC" meson setup "$S/mpv/b" "$S/mpv" --prefix="$P" --libdir=lib --buildtype=release -Dlibmpv=true -Dcplayer=true \
         -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled -Dc_args=-DPUSHMPC_BUILD=1 ${extra[@]+"${extra[@]}"} > "$S/mpv-setup.log" 2>&1 \
         || { tail -60 "$S/mpv-setup.log"; exit 1; }
     grep -iE "ffmpeg|libplacebo|vulkan|d3d11|lua|enabled features" "$S/mpv-setup.log" | head -20 || true
-    ninja -C "$S/mpv/b" install >/dev/null
+    ninja -C "$S/mpv/b" install > "$S/mpv-build.log" 2>&1 || { grep -E "error|FAILED" "$S/mpv-build.log" | head -60; tail -40 "$S/mpv-build.log"; exit 1; }
+    if [ "$OS" = msys2 ] && ! grep -q "hwdec_d3d11gldx" "$S/mpv/b/build.ninja"; then echo "hwdec_d3d11gldx.c is not in the mpv build"; exit 1; fi
     mark "$MPVPM" mpv
 fi
 "$P/bin/mpv" --version | head -3 || true
