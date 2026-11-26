@@ -225,6 +225,36 @@ static void TestD3D11(const pmeng_api* api)
     std::printf("d3d11: %d outputs (%d real); %s\n", outputs, reals, sbuf);
     api->close(h);
 }
+
+// R-MN1: Auto alone (no force_multiplier) must turn frame generation on. The stub pushcore answers
+// pushcore_capabilities like the real one (an RTX 50 class GPU with every capability) only when the caller fills in
+// structSize; a failed query must still leave frame generation on (judged by the adapter). 24 fps on a 48 Hz display:
+// Auto's only fitting multiplier is x2.
+static void TestD3D11Auto(const pmeng_api* api, bool capsFail)
+{
+    const char* name = capsFail ? "d3d11 auto (capabilities fail)" : "d3d11 auto";
+    _putenv_s("PUSHCORE_STUB_CAPS_FAIL", capsFail ? "1" : "0");
+    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+    D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1 };
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+    CHECK(SUCCEEDED(hr), "%s: WARP device: 0x%08lx", name, hr);
+    if (FAILED(hr)) return;
+    ComPtr<ID3D10Multithread> mt; if (SUCCEEDED(ctx.As(&mt))) mt->SetMultithreadProtected(TRUE);
+    pmeng_device pd{}; pd.struct_size = sizeof(pd); pd.mem = PMENG_MEM_D3D11; pd.d3d11_device = dev.Get();
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 320; st.height = 180; st.fmt = PMENG_FMT_NV12; st.fps_num = 24; st.fps_den = 1;
+    st.range = 1; st.matrix = 1; st.primaries = 1; st.transfer = 1;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = std::string("core_dir=") + PME_STUB_DIR + "\nsharper=off\ndisplay_fps=48\n";
+    void* h = api->open(&pd, &st, opts.c_str(), &out, err, sizeof(err));
+    CHECK(h, "%s: open: %s", name, err);
+    if (h) {
+        std::printf("%s: %s | x%u\n", name, out.description, out.multiplier);
+        CHECK(out.multiplier == 2, "%s: multiplier %u, expected 2 (Auto must generate frames)", name, out.multiplier);
+        api->close(h);
+    }
+    _putenv_s("PUSHCORE_STUB_CAPS_FAIL", "0");
+}
 #endif
 
 int main()
@@ -247,6 +277,8 @@ int main()
     }
 #ifdef _WIN32
     TestD3D11(api);
+    TestD3D11Auto(api, false);
+    TestD3D11Auto(api, true);
 #endif
     std::printf(g_fail ? "engine_test: %d FAILED\n" : "engine_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;
