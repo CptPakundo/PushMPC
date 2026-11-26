@@ -5,12 +5,16 @@
 //   PUSHCORE_STUB_SKIP_EVERY=N  : no generated frames for every N-th pair (as pushcore's skippedGenerated)
 //   PUSHCORE_STUB_OPEN_MS=N     : pushcore_open sleeps N ms (a cold open)
 //   PUSHCORE_STUB_NO_FENCE=1    : hand out frames without a fence
+//   PUSHCORE_STUB_FAST_START=1  : pushcore_features() also reports PUSHCORE_FEATURE_FAST_START (read at each call), so the
+//                                 hosts run their quick-start + handover path (tests; with PUSHMPC_TEST_QUICK_ANY_GPU=1)
+//   PUSHCORE_STUB_FULL_OPEN_MS=N: an open with PUSHCORE_FLAG_WARMUP_GPU_ONLY (the hosts' full graph) sleeps N ms
 // Every call is logged to PUSHCORE_STUB_LOG when set (the tests count opens, flushes and submits there).
 #define PUSHCORE_BUILD
 #include <windows.h>
 #include <d3d11_4.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -34,7 +38,7 @@ void StubLog(const char* fmt, ...)
     va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
     fputs("\r\n", f); fclose(f);
 }
-uint32_t g_opens = 0;
+std::atomic<uint32_t> g_opens{0};
 } // namespace
 
 struct PushCore {
@@ -118,7 +122,7 @@ static bool Emit(PushCore* c, const std::vector<uint32_t>& px, int64_t pts, uint
 
 extern "C" {
 PUSHCORE_API uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-PUSHCORE_API uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT; }
+PUSHCORE_API uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | (EnvInt("PUSHCORE_STUB_FAST_START", 0) ? PUSHCORE_FEATURE_FAST_START : 0u); }
 PUSHCORE_API int pushcore_capabilities(uint64_t, const wchar_t*, PushCoreCaps* out)
 {
     if (!out || out->structSize < sizeof(PushCoreCaps)) return PUSHCORE_ERROR;
@@ -135,6 +139,7 @@ PUSHCORE_API PushCore* pushcore_open(const PushCoreConfig* cfg, const PushCoreSt
 {
     if (!cfg || cfg->abiVersion != PUSHCORE_ABI_VERSION || !si || !dev) { if (eb && ebn) strcpy_s(eb, ebn, "stub: bad arguments"); return nullptr; }
     if (const int ms = EnvInt("PUSHCORE_STUB_OPEN_MS", 0)) Sleep(DWORD(ms));
+    if (cfg->flags & PUSHCORE_FLAG_WARMUP_GPU_ONLY) if (const int ms = EnvInt("PUSHCORE_STUB_FULL_OPEN_MS", 0)) Sleep(DWORD(ms));
     auto* c = new PushCore();
     c->dev = dev; dev->GetImmediateContext(&c->ctx); c->ctx.As(&c->ctx4);
     c->si = *si;
@@ -150,8 +155,8 @@ PUSHCORE_API PushCore* pushcore_open(const PushCoreConfig* cfg, const PushCoreSt
     snprintf(c->oi.description, sizeof(c->oi.description), "stub: source %ux%u %s -> output %ux%u; FG blend %uX%s", si->width, si->height, si->format ? "P010" : "NV12",
              si->width, si->height, c->k, c->hdrOut ? "; HDR10" : "");
     c->st.structSize = sizeof(c->st);
-    ++g_opens;
-    StubLog("open %u %ux%u fmt %u k %u transfer %d displayHdr %u fence %d", g_opens, si->width, si->height, si->format, c->k, si->transfer, si->displayHdr, c->fence ? 1 : 0);
+    const uint32_t n = ++g_opens;
+    StubLog("open %u %ux%u fmt %u k %u transfer %d displayHdr %u fence %d flags %u", n, si->width, si->height, si->format, c->k, si->transfer, si->displayHdr, c->fence ? 1 : 0, cfg->flags);
     return c;
 }
 PUSHCORE_API int pushcore_canSubmit(PushCore* c) { return c && c->leased.size() + c->queue.size() < 4u * c->k + 4u; }

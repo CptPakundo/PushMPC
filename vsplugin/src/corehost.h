@@ -20,6 +20,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -125,7 +126,8 @@ private:
     CoreKey m_key;
     // fast start: m_core is the quick graph while m_quick; the full graph arrives in m_next (m_nextLock: the worker never
     // takes m_lock); after the handover the quick graph is m_old until its last frame was taken
-    bool m_quick = false, m_fullOpened = false;
+    bool m_quick = false;
+    std::atomic<bool> m_fullOpened{false};   // written by the worker
     std::mutex m_nextLock;
     uint64_t m_gen = 0;
     bool m_nextDone = false;

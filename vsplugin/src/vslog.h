@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <cstdio>
+#include <share.h>
 #include <format>
 #include <mutex>
 #include <string>
@@ -68,7 +69,7 @@ inline void Log(const std::string& line)
             SYSTEMTIME st; GetLocalTime(&st);
             if (!dir.empty()) {
                 s.path = std::format(L"{}\\vsplugin-{:04}{:02}{:02}-{:02}{:02}{:02}-{}.log", dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, GetCurrentProcessId());
-                _wfopen_s(&s.f, s.path.c_str(), L"ab");
+                s.f = _wfsopen(s.path.c_str(), L"ab", _SH_DENYNO);   // shared: readable while the player runs (and by core_test)
             }
         }
     }

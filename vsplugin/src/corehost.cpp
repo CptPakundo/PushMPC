@@ -179,13 +179,16 @@ bool CoreHost::QuickWanted(const PushCoreSettings& ps, std::string& why)
     wchar_t v[8] = {};
     if (GetEnvironmentVariableW(L"PUSHMPC_FILTER_QuickStart", v, 8) && v[0] == L'0') { why = "switched off (QuickStart 0)"; return false; }
     if (!(m_features & PUSHCORE_FEATURE_FAST_START)) { why = "the core has no fast start"; return false; }
+    // PUSHMPC_TEST_QUICK_ANY_GPU=1 (tests only: the stub core on WARP): no GPU and no warm-core condition
+    wchar_t anyGpu[8] = {};
+    const bool test = GetEnvironmentVariableW(L"PUSHMPC_TEST_QUICK_ANY_GPU", anyGpu, 8) && anyGpu[0] == L'1';
     ComPtr<IDXGIDevice> dd; ComPtr<IDXGIAdapter> ad; DXGI_ADAPTER_DESC d{};
-    if (m_warp || !m_dev || FAILED(m_dev.As(&dd)) || FAILED(dd->GetAdapter(&ad)) || FAILED(ad->GetDesc(&d)) || d.VendorId != 0x10DE) { why = "not an NVIDIA GPU"; return false; }
+    if (!test && (m_warp || !m_dev || FAILED(m_dev.As(&dd)) || FAILED(dd->GetAdapter(&ad)) || FAILED(ad->GetDesc(&d)) || d.VendorId != 0x10DE)) { why = "not an NVIDIA GPU"; return false; }
     if (ps.multiplier < 2) { why = "no frame generation"; return false; }
     if (ps.fgBackend != PUSHCORE_FG_VFG && ps.fgBackend != PUSHCORE_FG_NVOF && ps.fgBackend != PUSHCORE_FG_FSR) { why = "the frame generation method needs NGX"; return false; }
     if (ps.videoHdr) { why = "RTX Video HDR sets the output signal"; return false; }
     if (!((ps.sr && ps.srMethod == PUSHCORE_SR_METHOD_RTX) || ps.nr)) { why = "no NGX stage: the full graph opens fast"; return false; }
-    if (m_fullOpened) { why = "a full graph opened before in this process: its NGX core is warm"; return false; }
+    if (m_fullOpened && !test) { why = "a full graph opened before in this process: its NGX core is warm"; return false; }
     return true;
 }
 // the full graph on a worker: pushcore_open with the GPU-only warm-up, no lock of ours; handed to Submit through m_next
