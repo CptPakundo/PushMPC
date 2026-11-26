@@ -228,8 +228,8 @@ do_native() {
     fi
 }
 # PushFlow's models: from PushFPS's release zip (the same files and pins as the Windows Setup takes)
-PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip
-PF_ZIP_SHA=8466ab7187d9ad7f8db7ac54582e3482ffa4e75d3ff97b28e434816b8fa7ff31
+PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip
+PF_ZIP_SHA=4bf3fe869eb8a2ca579dd7ade849c0c6cb2bf959f1a434fd53849f8e715f0af5
 pmml_eps() {   # the runtime for this GPU: "<ONNX Runtime flavors> <EPs>", "ncnn" (ncnn on Vulkan), or nothing
     case $fam in
         'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') if [ "$nvprop" = 1 ]; then echo "core trt-rtx"; else echo ncnn; fi ;;

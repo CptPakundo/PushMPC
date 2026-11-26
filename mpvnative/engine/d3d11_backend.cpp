@@ -95,6 +95,65 @@ bool LoadCore(const Options& o, std::wstring& coreDir, std::string& why)
     return true;
 }
 
+// The runtime root, as the filter and the VapourSynth route pass it to pushcore_capabilities and pushcore_open (the
+// VFG / VSR / FidelityFX files live there, not in the core folder)
+std::wstring RuntimeRoot(const Options& o, const std::wstring& coreDir)
+{
+    std::wstring r = Widen(Opt(o, "runtime_dir"));
+    if (r.empty()) r = RegFilterStr(L"RuntimeRoot");
+    if (r.empty()) r = LocalAppData() + L"\\PushMPC\\runtime";
+    return DirExists(r) ? r : coreDir;
+}
+
+// pushcore calls that may raise (an NVIDIA stack failure): SEH, in a function without C++ unwinding
+int SehCaps(PushCoreCapabilitiesFn fn, uint64_t luid, const wchar_t* root, PushCoreCaps* c)
+{
+    __try { return fn(luid, root, c); } __except (EXCEPTION_EXECUTE_HANDLER) { return PUSHCORE_ERROR; }
+}
+
+// The adapter behind mpv's D3D11 device (the decoder's): the one Auto must judge, not DXGI's first adapter
+bool AdapterOf(ID3D11Device* dev, DXGI_ADAPTER_DESC& d)
+{
+    ComPtr<IDXGIDevice> dx; ComPtr<IDXGIAdapter> ad;
+    return dev && SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&dx))) && SUCCEEDED(dx->GetAdapter(&ad)) && SUCCEEDED(ad->GetDesc(&d));
+}
+
+// pushcore's family rule (PushCoreGpu.cpp familyOf), for when pushcore_capabilities cannot answer
+uint32_t FamilyOfAdapter(uint32_t vendor, const std::wstring& name)
+{
+    std::wstring a = name; for (auto& c : a) c = wchar_t(towupper(c));
+    auto has = [&](const wchar_t* s) { return a.find(s) != std::wstring::npos; };
+    if (vendor == 0x10DE) {
+        if (has(L"RTX 50") || has(L"BLACKWELL") || has(L"RTX PRO")) return pm::kRtx50;
+        if (has(L"RTX 40") || has(L"ADA")) return pm::kRtx40;
+        if (has(L"RTX 30") || has(L"RTX A")) return pm::kRtx30;
+        if (has(L"RTX 20") || has(L"TITAN RTX") || has(L"QUADRO RTX")) return pm::kRtx20;
+        return has(L"RTX") ? pm::kRtx40 : pm::kGtx;
+    }
+    if (vendor == 0x1002) {
+        for (size_t i = 0; i + 3 < a.size(); ++i) {
+            if (a[i] != L'R' || a[i + 1] != L'X') continue;
+            size_t n = i + 2;
+            while (n < a.size() && a[n] == L' ') ++n;
+            if (n >= a.size() || !iswdigit(a[n])) continue;
+            switch (a[n]) { case L'9': return pm::kRdna4; case L'7': return pm::kRdna3; case L'6': return pm::kRdna2; case L'5': return pm::kRdna1; default: break; }
+        }
+        return pm::kAmdOther;
+    }
+    if (vendor == 0x8086) return pm::kIntel;
+    return pm::kOtherGpu;
+}
+
+// What Auto assumes when pushcore_capabilities fails: what the GPU class can run with the files Setup installs, so
+// frame generation stays on (an open that then fails is retried once without frame generation, see Init)
+uint32_t AssumedCaps(uint32_t fam)
+{
+    uint32_t c = (1u << pm::kCapPushFlow) | (1u << pm::kCapFsrFg) | (1u << pm::kCapFsrSr) | (1u << pm::kCapNis);
+    if (fam == pm::kRtx50 || fam == pm::kRtx40 || fam == pm::kRtx30) c |= (1u << pm::kCapVfg) | (1u << pm::kCapDlssg);
+    if (fam >= pm::kRtx50 && fam <= pm::kRtx20) c |= (1u << pm::kCapRtxVsr) | (1u << pm::kCapVsrFamilies) | (1u << pm::kCapRtxHdr);
+    return c;
+}
+
 // ------------------------------------------------------------------------------------------------ the copy pass
 const char kShader[] = R"(
 Texture2D<float4> src : register(t0);
@@ -163,11 +222,36 @@ public:
         m_col = col;
 
         // the GPU and the display as Auto sees them
+        // R-MN1: the query once ran with structSize 0 and the core folder as the root, so it always failed and Auto
+        // fell to x1 with frame generation off. Now: the right struct, the runtime root, mpv's own adapter.
         pm::Gpu g; g.available = 0; g.hardware = 0; g.family = pm::kFamUnknown;
+        DXGI_ADAPTER_DESC ad{};
+        const bool haveAdapter = AdapterOf(m_dev.Get(), ad);
+        const uint64_t luid = haveAdapter ? (uint64_t(uint32_t(ad.AdapterLuid.HighPart)) << 32) | ad.AdapterLuid.LowPart : 0;
+        const std::wstring runtimeRoot = RuntimeRoot(o, coreDir);
         PushCoreCaps caps{};
-        if (w.caps && w.caps(0, coreDir.c_str(), &caps) == PUSHCORE_OK) {
+        caps.structSize = sizeof(caps);
+        int cr = w.caps ? SehCaps(w.caps, luid, runtimeRoot.c_str(), &caps) : PUSHCORE_ERROR;
+        if (cr != PUSHCORE_OK && luid && w.caps) {   // an adapter pushcore does not list (a software device): its first one
+            caps = {}; caps.structSize = sizeof(caps);
+            cr = SehCaps(w.caps, 0, runtimeRoot.c_str(), &caps);
+        }
+        m_assumedCaps = false;
+        if (cr == PUSHCORE_OK) {
             g.family = caps.family; g.available = caps.available; g.hardware = caps.hardware; g.name = Widen(caps.adapter);
             for (uint32_t i = 0; i < pm::kCapCount && i < PUSHCORE_CAP_COUNT; ++i) g.reason[i] = Widen(caps.reason[i]);
+            Log(std::format("d3d11: capabilities: {} ({}, vendor {:04X} device {:04X}), available 0x{:X}", caps.adapter,
+                Narrow(pm::FamilyName(g.family)), caps.vendorId, caps.deviceId, g.available));
+        } else {
+            // no answer: judge mpv's adapter by its name and vendor, assume what that class runs with Setup's files
+            g.name = haveAdapter ? std::wstring(ad.Description) : L"";
+            g.family = haveAdapter ? FamilyOfAdapter(ad.VendorId, g.name) : uint32_t(pm::kOtherGpu);
+            g.hardware = g.available = AssumedCaps(g.family);
+            for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) g.reason[i] = L"capabilities unknown (pushcore did not answer)";
+            m_assumedCaps = true;
+            Log(std::format("d3d11: capabilities: pushcore_capabilities {} ({}); judged by the adapter: {} ({}, vendor {:04X}), assumed 0x{:X}",
+                w.caps ? "failed" : "missing", caps.reason[0][0] ? caps.reason[0] : "no reason given", Narrow(g.name),
+                Narrow(pm::FamilyName(g.family)), haveAdapter ? uint32_t(ad.VendorId) : 0u, g.available));
         }
         pm::Costs costs;
         costs.card = pm::CardFactor(g.name, g.family);
@@ -183,7 +267,7 @@ public:
         m_settings = s;
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);
-        // tests: a fixed multiplier whatever Auto says (the stub pushcore reports no frame generation capability)
+        // tests: a fixed multiplier whatever Auto says
         m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, 8);
         if (m_forceK) m_ps.multiplier = uint32_t(m_forceK);
         Log(std::format("d3d11: {}x{} {}, colour {}/{}/{}/{}; display {:.3f} Hz HDR {}; GPU {} ({}); Auto x{} SR {} -> {}x{}{}{}",
@@ -191,7 +275,17 @@ public:
             Narrow(pm::FamilyName(g.family)), m_choice.multiplier, m_choice.sr ? "on" : "off", m_choice.outW, m_choice.outH,
             overrides.empty() ? "" : "; overridden:", overrides));
 
-        if (!Acquire(coreDir, why)) return false;
+        m_runtimeRoot = runtimeRoot;
+        if (!Acquire(coreDir, why)) {
+            if (!m_assumedCaps || m_forceK || m_ps.multiplier <= 1) return false;
+            // the assumed capabilities were wrong (files missing): play without frame generation rather than not at all
+            Log("d3d11: open with the assumed frame generation failed (" + why + "): retrying without it");
+            m_choice.multiplier = 1;
+            m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, nullptr);
+            m_ps.multiplier = 1;
+            why.clear();
+            if (!Acquire(coreDir, why)) return false;
+        }
         w.owned = true;
         m_owns = true;
         Describe(out);
@@ -374,11 +468,14 @@ private:
             w.api->close(w.core); w.core = nullptr; how = "reopen (stream or device changed)";
         }
         if (!w.core) {
-            const std::wstring runtime = [&] { std::wstring r = RegFilterStr(L"RuntimeRoot"); if (r.empty()) r = LocalAppData() + L"\\PushMPC\\runtime"; return DirExists(r) ? r : coreDir; }();
+            // as the filter and the VapourSynth route open it: the runtime root is PushFPS's folder for pushcore (its
+            // runtime\ and runtime_local\ hold the VFG, VSR and FidelityFX files); the core folder only gives the shaders.
+            // (R-MN1: with the core folder as that root, every frame generation backend failed to start.)
+            const std::wstring root = m_runtimeRoot.empty() ? coreDir : m_runtimeRoot;
             const std::wstring shaders = coreDir + L"\\shaders";
             PushCoreConfig cfg = {};
             cfg.structSize = sizeof(cfg); cfg.abiVersion = PUSHCORE_ABI_VERSION;
-            cfg.pushfpsDir = coreDir.c_str(); cfg.dataDir = L""; cfg.runtimeDir = runtime.c_str();
+            cfg.pushfpsDir = root.c_str(); cfg.dataDir = L""; cfg.runtimeDir = nullptr;
             cfg.sr = -1; cfg.fg = -1; cfg.multiplier = -1; cfg.vfgQuality = -1;
             cfg.shaderDir = DirExists(shaders) ? shaders.c_str() : nullptr;
             cfg.settings = &m_ps;
@@ -466,6 +563,8 @@ private:
     }
 
     bool m_owns = false;
+    bool m_assumedCaps = false;      // pushcore_capabilities did not answer: Auto judged the adapter (R-MN1)
+    std::wstring m_runtimeRoot;
     ComPtr<ID3D11Device> m_dev;
     ComPtr<ID3D11DeviceContext> m_ctx;
     ComPtr<ID3D11DeviceContext4> m_ctx4;

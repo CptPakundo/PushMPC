@@ -18,11 +18,16 @@ $clips = Join-Path $Scratch 'clips'; $out = Join-Path $Scratch 'results'
 New-Item -ItemType Directory -Force $clips, $out, (Join-Path $out 'y4m') | Out-Null
 $csv = Join-Path $out 'bench.csv'; $md = Join-Path $out 'results.md'
 $haveFfmpeg = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
+# VMAF needs an ffmpeg built with libvmaf (many builds lack it): without it the VMAF column is skipped
+$haveVmaf = $haveFfmpeg -and [bool]((ffmpeg -hide_banner -filters 2>&1 | Out-String) -match '\blibvmaf\b')
+if ($haveFfmpeg -and -not $haveVmaf) { Write-Host 'ffmpeg has no libvmaf: no VMAF column (PSNR-Y / SSIM-Y only)' }
 
 function Get-Range($url, $file, $bytes) {
     if (Test-Path $file) { return }
     Write-Host "fetch $url ($([math]::Round($bytes / 1MB)) MB)"
-    Invoke-WebRequest -Uri $url -OutFile $file -Headers @{ Range = "bytes=0-$bytes" }
+    # a clip the server does not have (crowd_run exists at 1080p50 only) is skipped, not the run
+    try { Invoke-WebRequest -Uri $url -OutFile $file -Headers @{ Range = "bytes=0-$bytes" } }
+    catch { Write-Warning "skipped $url : $($_.Exception.Message)"; Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
 }
 if (-not $NoDownload) {
     foreach ($n in 'park_joy', 'ducks_take_off', 'in_to_tree', 'old_town_cross', 'crowd_run') {
@@ -55,13 +60,14 @@ foreach ($s in 'synthetic1080', 'synthetic2160') {
 $gpuTest = Join-Path (Split-Path $Bench) 'gpu_test.exe'
 if (Test-Path $gpuTest) { '```' | Add-Content $md; & $gpuTest --require | Where-Object { $_ -match 'timing|of which|optical|passed' } | Add-Content $md; '```' | Add-Content $md }
 
-if ($haveFfmpeg) {
+if ($haveVmaf) {
     '' | Add-Content $md; '| clip | method | VMAF |' | Add-Content $md; '|---|---|---|' | Add-Content $md
     foreach ($r in Get-ChildItem (Join-Path $out 'y4m') -Filter '*_ref.y4m') {
         $n = $r.Name -replace '_ref\.y4m$', ''
         foreach ($d in Get-ChildItem (Join-Path $out 'y4m') -Filter "${n}_*.y4m" | Where-Object { $_.Name -ne $r.Name }) {
             $m = $d.BaseName.Substring($n.Length + 1)
-            $v = (ffmpeg -hide_banner -i $d.FullName -i $r.FullName -lavfi libvmaf -f null - 2>&1 | Select-String 'VMAF score: ([0-9.]+)').Matches.Groups[1].Value
+            $hit = ffmpeg -hide_banner -i $d.FullName -i $r.FullName -lavfi libvmaf -f null - 2>&1 | Select-String 'VMAF score: ([0-9.]+)' | Select-Object -First 1
+            $v = if ($hit) { $hit.Matches[0].Groups[1].Value } else { 'n/a' }
             "| $n | $m | $v |" | Add-Content $md
         }
     }

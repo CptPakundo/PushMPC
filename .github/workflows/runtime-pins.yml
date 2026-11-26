@@ -1,10 +1,11 @@
 name: runtime-pins
 # Checks the Veyra runtime pins in scripts/pushmpc-install.ps1 against Veyra's official packages:
 # package SHA-256, then every pinned file (SHA-256 and size) inside the extracted package, for NVIDIA and AMD.
+# Plus PushFPS's release zip that PushFlow and capture mode take (job pushflow).
 on:
   workflow_dispatch:
   push:
-    paths: ['scripts/pushmpc-install.ps1', '.github/workflows/runtime-pins.yml']
+    paths: ['scripts/pushmpc-install.ps1', 'scripts/pushmpc-capture.ps1', '.github/workflows/runtime-pins.yml']
 
 permissions:
   contents: read
@@ -74,3 +75,49 @@ jobs:
           }
           "$n pinned files checked, $bad problems"
           if ($bad) { exit 1 }
+
+  # PushFlow (scripts/pushmpc-install.ps1 $PushFlow) and capture mode's PushFPS (scripts/pushmpc-capture.ps1 $PushFps):
+  # the pinned PushFPS release zip's SHA-256 and size, then every pinned PushFlow file inside it.
+  pushflow:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Download and check PushFPS's release zip and its PushFlow files
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $inst = Get-Content scripts/pushmpc-install.ps1 -Raw
+          $cap = Get-Content scripts/pushmpc-capture.ps1 -Raw
+          $pf = [regex]::Match($inst, "\`$PushFlow = @\{[\s\S]*?Url\s*=\s*'([^']+)'[\s\S]*?Files = @\{([\s\S]*?)\r?\n    \}")
+          if (-not $pf.Success) { throw 'no $PushFlow table' }
+          $c = [regex]::Match($cap, "\`$PushFps = @\{[\s\S]*?Url\s*=\s*'([^']+)'[\s\S]*?Sha256\s*=\s*'([0-9A-Fa-f]{64})'[\s\S]*?Size\s*=\s*(\d+)")
+          if (-not $c.Success) { throw 'no $PushFps pin in pushmpc-capture.ps1' }
+          if ($pf.Groups[1].Value -ne $c.Groups[1].Value) { "note: PushFlow's zip ($($pf.Groups[1].Value)) is not capture mode's ($($c.Groups[1].Value)): checking both" }
+          $zip = Join-Path $env:RUNNER_TEMP (Split-Path -Leaf $c.Groups[1].Value)
+          curl.exe -sSfL --retry 3 -o $zip $c.Groups[1].Value
+          $h = (Get-FileHash $zip -Algorithm SHA256).Hash; $len = (Get-Item $zip).Length
+          if ($h -ne $c.Groups[2].Value.ToUpper() -or $len -ne [int64]$c.Groups[3].Value) { throw "capture mode's zip: SHA-256 $h size $len != pin" }
+          "capture mode's PushFPS zip OK: $h $len"
+          if ($pf.Groups[1].Value -ne $c.Groups[1].Value) { $zip = Join-Path $env:RUNNER_TEMP (Split-Path -Leaf $pf.Groups[1].Value); curl.exe -sSfL --retry 3 -o $zip $pf.Groups[1].Value }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $x = Join-Path $env:RUNNER_TEMP 'pf'
+          $z = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            foreach ($e in $z.Entries) {
+              $m = [regex]::Match($e.FullName, '(?i)(^|/)runtime/experimental/pushflow/(.+)$')
+              if (-not $m.Success -or -not $e.Name) { continue }
+              $o = Join-Path $x ($m.Groups[2].Value.Replace('/', '\')); New-Item -ItemType Directory -Force (Split-Path $o) | Out-Null
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $o, $true)
+            }
+          } finally { $z.Dispose() }
+          $bad = 0; $n = 0
+          foreach ($r in [regex]::Matches($pf.Groups[2].Value, "'([^']+)'\s*=\s*'([0-9A-Fa-f]{64}) (\d+)'")) {
+            $n++; $f = Join-Path $x $r.Groups[1].Value
+            if (-not (Test-Path -LiteralPath $f)) { "MISSING $($r.Groups[1].Value)"; $bad++; continue }
+            $fh = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash; $fl = (Get-Item -LiteralPath $f).Length
+            if ($fh -ne $r.Groups[2].Value -or $fl -ne [int64]$r.Groups[3].Value) { "MISMATCH $($r.Groups[1].Value) actual $fh $fl"; $bad++ }
+          }
+          "$n PushFlow files checked in $(Split-Path -Leaf $zip), $bad problems"
+          if ($n -lt 10 -or $bad) { exit 1 }

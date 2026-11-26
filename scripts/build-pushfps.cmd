@@ -11,7 +11,7 @@ set DEPS=%PUSHMPC_DEPS%
 set REPO=%PUSHMPC_PUSHFPS_SRC%
 set BUILD=%PUSHMPC_BUILD_DIR%
 rem The PushFPS version this tree is (tag vX.Y.Z of PushFPS) plus our suffix; also stamps pushcore.dll's PushFPSVersion
-set PUSHFPS_DISPLAY_VERSION=4.5.3-pushmpc
+set PUSHFPS_DISPLAY_VERSION=4.5.4-pushmpc
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not defined PUSHMPC_VS for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set PUSHMPC_VS=%%i
 call "%PUSHMPC_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1

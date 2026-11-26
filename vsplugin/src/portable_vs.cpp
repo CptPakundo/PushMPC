@@ -303,10 +303,14 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     c.outWidth = up.w; c.outHeight = up.h;
     c.sharpness = float(std::clamp(PArgF(in, a, "sharpness", up.kind == GpuUpscaler::Nis ? kDefaultSharpnessNis : kDefaultSharpnessFsr), 0.0, 1.0));
     c.sourceSlots = 8; c.outSlots = 10;
-    // the block matcher unless asked: motion=nvof (NVIDIA optical flow as the field) or motion=hybrid (the flow as one more
-    // block-matcher candidate); PortableMotion the same
-    c.blockMatcherOnly = s.motion != "nvof" && s.motion != "hybrid";
-    c.nvofHybrid = s.motion == "hybrid";
+    // motion: Auto = hybrid where the device has NVIDIA optical flow (VK_NV_optical_flow, RTX): the flow is one more
+    // block-matcher candidate and the block matcher's SAD picks. The release test matrix (RTX 5090, 11 clips, held-out
+    // frames): hybrid 34.44 / 31.55 dB PSNR-Y at distance 2 / 4 against the block matcher's 34.42 / 31.50, and faster at
+    // 1080p x4 (477 vs 426 outputs/s); the flow alone was worse (34.06 dB, 4 dB under on zooms). Without the flow hardware
+    // the engine runs the block matcher. motion=blocks / nvof / hybrid (PortableMotion the same) choose by hand.
+    const bool hybrid = s.motion == "hybrid" || s.motion == "auto" || s.motion.empty();
+    c.blockMatcherOnly = s.motion != "nvof" && !hybrid;
+    c.nvofHybrid = hybrid;
     if (!d->be.engine.Configure(c, req, why)) { delete d; return false; }
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);
@@ -324,7 +328,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     if (!cal.ok) { why = "the GPU engine failed its trial run on " + d->be.engine.Device().name; delete d; return false; }
     const PortableK pk = DecidePortableK(s.smoother, srcFps, displayHz, h, cal.meMs, cal.genMs, true);
     Log(std::format("portable: GPU engine on {}; motion from {}; {}x{} {}-bit, {}/{} fps, {} frames; display {:.3f} Hz{}; quality {}; settings from {}{}",
-        d->be.engine.Device().Describe(), d->be.engine.OpticalFlowActive() ? "NVIDIA optical flow (VK_NV_optical_flow)" : "PushFPS's block matcher on the GPU",
+        d->be.engine.Device().Describe(), !d->be.engine.OpticalFlowActive() ? "PushFPS's block matcher on the GPU" : c.nvofHybrid ? "PushFPS's block matcher with NVIDIA optical flow as a candidate (hybrid)" : "NVIDIA optical flow (VK_NV_optical_flow)",
         w, h, bits, vi->fpsNum, vi->fpsDen, vi->numFrames, displayHz, displayHz > 1 ? " (mpv's display_fps)" : " (unknown)",
         c.quality == 0 ? "fast" : c.quality == 1 ? "balanced" : "high",
 #ifdef _WIN32

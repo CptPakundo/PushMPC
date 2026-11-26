@@ -768,6 +768,10 @@ jobs:
           flatpak info --user io.mpv.Mpv | grep -E 'Version|Runtime' | tee -a /tmp/versions.txt
           echo "--- extension points of io.mpv.Mpv:"; flatpak info --user --show-metadata io.mpv.Mpv | grep -A3 '^\[Extension' | tee -a /tmp/versions.txt || echo "none" | tee -a /tmp/versions.txt
           flatpak override --user --show io.mpv.Mpv
+          # the native hook's activation probe puts its clip in the app's own cache folder (the sandbox has its own /tmp)
+          mkdir -p ~/.var/app/io.mpv.Mpv/cache/pushmpc-probe-ci; echo ok > ~/.var/app/io.mpv.Mpv/cache/pushmpc-probe-ci/x
+          flatpak run --command=cat io.mpv.Mpv "$HOME/.var/app/io.mpv.Mpv/cache/pushmpc-probe-ci/x" | grep -q ok || { echo "::error::the sandbox cannot read ~/.var/app/io.mpv.Mpv/cache"; exit 1; }
+          rm -r ~/.var/app/io.mpv.Mpv/cache/pushmpc-probe-ci
           cat ~/.var/app/io.mpv.Mpv/config/mpv/mpv.conf | head -6
           mkdir -p ~/.var/app/io.mpv.Mpv/config/pushmpc; printf 'Smoother=2\n' > ~/.var/app/io.mpv.Mpv/config/pushmpc/settings.ini
           mkdir -p /tmp/fpout

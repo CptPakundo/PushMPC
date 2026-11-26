@@ -21,7 +21,7 @@ matches its pinned SHA-256, else downloaded at install time.
 |---|---|---|
 | `Veyra-2.2.1-NVIDIA-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `E09150D1...544386B` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
 | `Veyra-2.2.1-AMD-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `B6440744...0077BF8` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
-| `PushFPS-4.5.3-win64.zip` (PushFPS's release v4.5.3), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
+| `PushFPS-4.5.4-win64.zip` (PushFPS's release v4.5.4), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
 | `VapourSynth64-Portable-R82.zip` (VapourSynth's release R82) and `python-3.12.10-embed-amd64.zip` (python.org), only for the mpv route | each zip's SHA-256 (`scripts/vapoursynth-pin.json`) | the VapourSynth runtime in `%LOCALAPPDATA%\PushMPC\vapoursynth` (R82's wheel unpacked to `lib\site-packages`) |
 
 ## Install
