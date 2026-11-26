@@ -215,7 +215,7 @@ jobs:
           cp build-engine/pmml/Release/pmml_cli.exe "$d/"
           mkdir -p "$d/pmml-graphs" && cp $R/pmml/graphs/*.onnx "$d/pmml-graphs/"
           # O4: the int8 networks that passed their accuracy gate, with their reports (pmml uses one only when "pass": true)
-          if ls $R/pmml-qdq/pushflow-*-qdq.json >/dev/null 2>&1; then mkdir -p "$d/pmml-qdq" && cp $R/pmml-qdq/pushflow-*-qdq.* $R/pmml-qdq/SHA256SUMS "$d/pmml-qdq/" && ls -la "$d/pmml-qdq"; else echo "::warning title=O4::no pmml-qdq artifact: the ARM64 mpv has no int8 network (the fp16 NPU path stays)"; fi
+          if ls $R/pmml-qdq/pushflow-*-qdq.json >/dev/null 2>&1; then mkdir -p "$d/pmml-qdq" && cp $R/pmml-qdq/pushflow-*-qdq.* $R/pmml-qdq/SHA256SUMS $R/pmml-qdq/NOTICE.txt $R/pmml-qdq/RIFE_LICENSE.txt "$d/pmml-qdq/" && ls -la "$d/pmml-qdq"; else echo "::warning title=O4::no pmml-qdq artifact: the ARM64 mpv has no int8 network (the fp16 NPU path stays)"; fi
           cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
           ls "$d" | tr '\n' ' '; echo; du -sh "$d"
       - name: Every binary is ARM64 (no emulated x64 piece)

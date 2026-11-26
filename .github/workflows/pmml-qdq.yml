@@ -56,6 +56,7 @@ jobs:
           mkdir -p qdq-data/models
           cp -r "$RUNNER_TEMP/pf/runtime/pushflow/models/." qdq-data/models/
           cp "$RUNNER_TEMP/pf/runtime/pushflow/models.json" qdq-data/models/
+          cp -r "$RUNNER_TEMP/pf/runtime/pushflow/licenses" qdq-data/models/   # RIFE_LICENSE.txt travels with the int8 networks
           for role in fast quality; do
             want=$(jq -r ".models.pushflow.$role.sha256" "$PIN"); file=$(jq -r ".models.pushflow.$role.file" "$PIN")
             got=$(sha256sum qdq-data/models/$file | cut -d' ' -f1)
@@ -87,7 +88,7 @@ jobs:
           done
           echo '| model | pass | variant | loss (dB) |' >> $GITHUB_STEP_SUMMARY; echo '|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
           for j in out/pushflow-*-qdq.json; do jq -r '"| \(.role) | \(.pass) | \(.variant // "-") | \([.variants[] | .loss_overall_db] | map(tostring) | join(" / ")) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
-          (cd out && sha256sum pushflow-*-qdq.* > SHA256SUMS && cat SHA256SUMS)
+          (cd out && sha256sum pushflow-*-qdq.* NOTICE.txt RIFE_LICENSE.txt > SHA256SUMS && cat SHA256SUMS NOTICE.txt)
       - uses: actions/upload-artifact@v4
         with:
           name: pmml-qdq
@@ -95,6 +96,8 @@ jobs:
             out/pushflow-*-qdq.onnx
             out/pushflow-*-qdq.json
             out/SHA256SUMS
+            out/NOTICE.txt
+            out/RIFE_LICENSE.txt
             out/*.log
           if-no-files-found: error
           retention-days: 7

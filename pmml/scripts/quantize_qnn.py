@@ -121,6 +121,58 @@ def evaluate(models, graphs, clips, tier, net):
     return out
 
 
+RIFE_MIT = """RIFE (Real-Time Intermediate Flow Estimation), Practical-RIFE v4 weights: https://github.com/hzwer/Practical-RIFE
+ONNX conversions: https://github.com/AmusementClub/vs-mlrt (external-models)
+
+MIT License
+
+Copyright (c) 2021 hzwer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+
+def write_licence(models: Path, out: Path, report: dict) -> None:
+    """RIFE_LICENSE.txt (PushFPS's copy when the models folder has it, else the same MIT text) and NOTICE.txt (what the
+    int8 networks are made from, how, and under which terms) next to the networks"""
+    src = next((p for p in (models / "licenses" / "RIFE_LICENSE.txt", models.parent / "licenses" / "RIFE_LICENSE.txt") if p.exists()), None)
+    (out / "RIFE_LICENSE.txt").write_text(src.read_text(encoding="utf-8") if src else RIFE_MIT, encoding="utf-8")
+    notice = out / "NOTICE.txt"
+    lines = notice.read_text(encoding="utf-8").splitlines() if notice.exists() else [
+        "int8 (QDQ) versions of PushFlow's RIFE networks, for the Snapdragon NPU (PushMPC, pmml backend qnn-split).",
+        "",
+        "Made from: the RIFE models PushFPS ships (Practical-RIFE v4.25 lite and v4.26 weights by hzwer, MIT, see",
+        "RIFE_LICENSE.txt; ONNX conversions by vs-mlrt, https://github.com/AmusementClub/vs-mlrt, GPL-3.0; prepared by",
+        "PushFPS's scripts/pushflow/prepare_runtime.py, GPL-3.0, https://github.com/DosukaSOL/PushFPS, at the tag pinned",
+        "in PushMPC's scripts/pushfps-pin.json).",
+        "Made by: PushMPC's pmml/scripts/quantize_qnn.py with ONNX Runtime's QNN quantisation tools, calibrated on public",
+        "Xiph test clips; built by .github/workflows/pmml-qdq.yml.",
+        "These files are distributed under the GPL-3.0-or-later with PushMPC (the conversions they derive from are",
+        "GPL-3.0); the RIFE weights' MIT notice in RIFE_LICENSE.txt applies to them as well. The source to rebuild them",
+        "is PushMPC's repository at the release tag together with the pinned PushFPS tag.",
+        "",
+        "Files:"]
+    if report.get("pass"):
+        lines.append(f"  {report['file']}  sha256 {report['sha256']}  from {report['source']} (sha256 {report['source_sha256']}), {report['variant']}")
+    notice.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True)
@@ -198,6 +250,7 @@ def main() -> int:
             report.update({"pass": True, "variant": vname, "file": dst.name, "sha256": sha256(dst)})
             break
     (out / f"pushflow-{a.role}-qdq.json").write_text(json.dumps(report, indent=2))
+    write_licence(models, out, report)
     print("PASS" if report["pass"] else "FAIL: no int8 variant within the gate; qnn-split stays off for this model")
     return 0 if report["pass"] else 1
 
