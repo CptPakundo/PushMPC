@@ -181,10 +181,8 @@ selftest_mac() {
   vlc=/Applications/VLC.app/Contents/MacOS/VLC; [ -x "$vlc" ] || vlc="$HOME/Applications/VLC.app/Contents/MacOS/VLC"
   [ -x "$vlc" ] || { say "self-test: VLC.app not found"; return 0; }
   clip="$DIR/pushmpc-selftest.y4m"; log="$DIR/pushmpc-selftest.log"
-  perl -e 'open(my $f, ">", $ARGV[0]) or die; binmode $f; print $f "YUV4MPEG2 W320 H180 F24:1 Ip A1:1 C420jpeg
-";
-           for my $n (0..47) { print $f "FRAME
-"; for my $y (0..179) { print $f pack("C*", map { ($_ + int($y / 2) + 4 * $n) & 255 } 0..319); }
+  perl -e 'open(my $f, ">", $ARGV[0]) or die; binmode $f; print $f "YUV4MPEG2 W320 H180 F24:1 Ip A1:1 C420jpeg\n";
+           for my $n (0..47) { print $f "FRAME\n"; for my $y (0..179) { print $f pack("C*", map { ($_ + int($y / 2) + 4 * $n) & 255 } 0..319); }
                                print $f chr(128) x (160 * 90 * 2); }' "$clip"
   rm -f "$log"
   env VLC_PLUGIN_PATH="$DIR" perl -e 'alarm 60; exec @ARGV' "$vlc" -I dummy --vout=dummy --no-audio --play-and-exit \

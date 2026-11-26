@@ -27,6 +27,11 @@ class Pushmpc < Formula
   # PushFlow (RIFE) through pmml, the plugin's ml backend: Homebrew's ONNX Runtime (built with CoreML on macOS)
   depends_on "onnxruntime"
   depends_on "vapoursynth"
+  # the portable GPU engine's Vulkan driver on macOS (Apple silicon and Intel Macs, any macOS Homebrew supports): the
+  # engine finds Homebrew's libMoltenVK.dylib by itself
+  on_macos do
+    depends_on "molten-vk"
+  end
 
   # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release time
   # set url / sha256 as for the tarball above (CI replaces both with a freshly generated archive)
@@ -44,6 +49,16 @@ class Pushmpc < Formula
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
+  end
+
+  # the portable GPU engine (vsplugin/engines/gpu): Vulkan-Headers and volk, the commits vsplugin/engines/gpu/gpu-pins.json pins
+  resource "vulkan-headers" do
+    url "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz"
+    sha256 "7937d8ec21785736436d9ff52564db7d55992070b5ac98324472cce6e425a7ba"
+  end
+  resource "volk" do
+    url "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz"
+    sha256 "ff6facfca90161325a1f817c08c7edb6f892bd3bf4745449b735d7e13585ec4c"
   end
 
   # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
@@ -95,8 +110,13 @@ class Pushmpc < Formula
     # the ml backend: ONNX Runtime's C API headers from Homebrew's onnxruntime (loaded at run time, nothing linked)
     ort = Formula["onnxruntime"].opt_include
     ort /= "onnxruntime" if (ort/"onnxruntime/onnxruntime_c_api.h").exist?
+    # the portable GPU engine (Vulkan: MoltenVK on macOS): the pinned headers and volk, the checked-in SPIR-V
+    gpu = buildpath/"gpu-deps"
+    resource("vulkan-headers").stage(gpu/"vulkan-headers")
+    resource("volk").stage(gpu/"volk")
+    gpu_args = ["-DPMVS_GPU=ON", "-DPMVS_VULKAN_HEADERS_DIR=#{gpu}/vulkan-headers", "-DPMVS_VOLK_DIR=#{gpu}/volk"]
     system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", "-DPMML_ORT_INCLUDE=#{ort}",
-           *bridge, *std_cmake_args
+           *bridge, *gpu_args, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"

@@ -314,7 +314,11 @@ jobs:
 
   homebrew:
     if: inputs.jobs == 'all' || contains(inputs.jobs, 'homebrew')
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]   # Apple silicon and Intel (MoltenVK on both; VideoToolbox interpolation needs Apple silicon)
+    runs-on: ${{ matrix.runner }}
     # a green run takes about 4 min (bottles 1.5, the formula's own build 1, tests 1); 25 leaves room for a cold cache
     timeout-minutes: 100
     env:
@@ -556,7 +560,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: homebrew-logs
+          name: homebrew-logs-${{ matrix.runner }}
           path: |
             ${{ runner.temp }}/brewlogs
             ${{ runner.temp }}/brewlogs-ml

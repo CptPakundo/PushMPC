@@ -318,10 +318,8 @@ bool ConfigureModule(Bridge& b, const AVFrame* f)
     if (fps > 0) { st.fps_num = int32_t(std::lround(fps * 1000)); st.fps_den = 1000; }
     st.range = f->color_range; st.matrix = f->colorspace; st.primaries = f->color_primaries; st.transfer = f->color_trc;
     pmeng_output out{}; out.struct_size = sizeof(out);
-    std::string opts = "smoother=" + std::to_string(b.k) + "
-";
-    if (const char* be = getenv("PUSHMPC_IINA_BACKEND"); be && *be) opts += std::string("backend=") + be + "
-";
+    std::string opts = "smoother=" + std::to_string(b.k) + "\n";
+    if (const char* be = getenv("PUSHMPC_IINA_BACKEND"); be && *be) opts += std::string("backend=") + be + "\n";
     char err[512] = {};
     void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
     if (!h) { b.why += std::string("; engine module: ") + err; return false; }

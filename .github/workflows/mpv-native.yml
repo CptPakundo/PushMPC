@@ -614,7 +614,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-26]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
+        runner: [macos-15, macos-26, macos-15-intel]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation; Intel: MoltenVK on an Intel Mac
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
