@@ -369,6 +369,7 @@ struct Config {
     int simulateLostSec = 0, simulateLostMode = 1;
     std::wstring forceFallback; // debug: pass-through with this reason
     bool forceP010 = false;     // debug ForceP010: skip Y416/Y410 (tests the P010 HDR output)
+    bool skipY416 = false;      // debug SkipY416: no Y416 at all
     bool skipManifest = false;  // debug SkipManifestCheck: do not check the runtime manifest
     bool itmBypass = false;     // debug ItmBypass: SDR to HDR by the plain 203 cd/m2 mapping (A/B timing of the curve)
 };
@@ -422,6 +423,7 @@ static Config ReadConfig()
     ReadDw(k, L"SimulateDeviceLostMode", c.simulateLostMode);
     ReadS(k, L"ForceFallback", c.forceFallback);
     ReadB(k, L"ForceP010", c.forceP010);
+    ReadB(k, L"SkipY416", c.skipY416);
     ReadB(k, L"SkipManifestCheck", c.skipManifest);
     ReadB(k, L"ItmBypass", c.itmBypass);
     if (k) RegCloseKey(k);
@@ -1929,7 +1931,10 @@ public:
                 m_display.width, m_display.height, m_display.hdr ? "on" : "off", Narrow(c.hdrNote)));
         }
         if ((InputHdr() && !m_cfg.hdrPushFps) || sdrToHdr) {
-            if (!m_cfg.forceP010) { fmts.push_back({ Fmt::Y416, w, h }); fmts.push_back({ Fmt::Y410, w, h }); }
+            // Y410 before Y416 (R-HDR1): MPC Video Renderer draws Y416 sheared, with green blocks, in some small windows
+            // (3840x2160 or 1920x1080 into ~590x330 in a tall window); Y410 and P010 are clean there. Both are 4:4:4, and
+            // the Y410 pass dithers its 10-bit codes
+            if (!m_cfg.forceP010) { fmts.push_back({ Fmt::Y410, w, h }); if (!m_cfg.skipY416) fmts.push_back({ Fmt::Y416, w, h }); }
             fmts.push_back({ Fmt::P010H, w, h });
         }
         fmts.push_back({ Fmt::BGRA, w, h });
@@ -2157,6 +2162,7 @@ public:
         if (std::fabs(r - was) > 1e-6) {
             const double base = m_baseStepMs.load();
             if (base > 0) m_ptsStepMs = base / r;
+            m_rateQpc = Qpc();         // R-RATE1: the GPU timings of the next 3 s are not learned from
             m_rateSerial++;            // the Auto thread wakes on it (round 2, F9)
             m_admRateChanged = true;   // FG admission re-decides at once against the new interval (round 2, F9)
             Log(std::format("playback rate {} -> {}: source interval {:.3f} ms ({:.3f} fps){}", was, r, base > 0 ? base / r : double(m_atpf) / 1e4 / r,
@@ -2489,6 +2495,11 @@ private:
     std::atomic<double> m_baseStepMs = 0;
     std::atomic<bool> m_trackReset = false;
     std::atomic<uint32_t> m_rateSerial = 0;
+    std::atomic<int64_t> m_rateQpc = 0;   // when the playback rate last changed
+    // R-RATE1: the graph each playback rate ran last (Auto's own choice, held), with what it was decided for: a rate change
+    // back to a rate seen before takes that graph again instead of a decision on costs learned at the other rate
+    struct RateGraph { PushCoreSettings graph; pm::Choice choice; pm::Settings settings; pm::Display display; };
+    std::map<int, RateGraph> m_rateGraphs;   // key: the rate in hundredths; Auto thread only
     pm::StepTracker m_tracker;        // streaming thread only
     double m_openFps = 0;             // the source rate the open's Auto decision used
     bool m_reopenForRate = false;     // the running open was for another frame rate: reopen when it is done
@@ -4468,7 +4479,9 @@ void CPushMpcFilter::LearnCosts()
     const UINT w = m_oi.width, h = m_oi.height;
     if (!w || !h) return;
     const double pix = pm::Pix(w, h);
-    const int64_t from = m_graphQpc + int64_t(3.0 * QpcFreq());
+    // 3 s after the graph started, and 3 s after a playback-rate change (R-RATE1: the admission's reduced groups and the
+    // old rate's frames are still in the timings then and taught Auto that High at 5x costs 8 ms)
+    const int64_t from = std::max<int64_t>(m_graphQpc, m_rateQpc.load()) + int64_t(3.0 * QpcFreq());
     std::vector<double> fg, sr, nr, hdr;
     for (const auto& s : m_autoTimings) {
         if (s.qpc < from) continue;
@@ -4782,6 +4795,15 @@ void CPushMpcFilter::AutoLoop()
         const bool inputs = !(s == appliedS) || !(d == appliedD) || (appliedFps > 0 && std::fabs(src.fps - appliedFps) / appliedFps > 0.03);
         const uint32_t rateSerial = m_rateSerial.load();
         const char* why = !(s == appliedS) ? "settings" : !(d == appliedD) ? "display" : rateSerial != rateSeen ? "playback rate" : "measured frame rate";
+        const int rateKey = int(std::lround(m_rate.load() * 100.0));
+        if (inputs && rateSerial != rateSeen && s == appliedS && d == appliedD) {
+            // R-RATE1: back at a rate this playback ran before, with the same settings and display: its graph again (it
+            // was measured there), not a decision from the costs learned at the other rate
+            if (auto it = m_rateGraphs.find(rateKey); it != m_rateGraphs.end() && it->second.settings == s && it->second.display == d) {
+                next = it->second.graph; c = it->second.choice;
+                why = "playback rate (the graph this rate ran before)";
+            }
+        }
         if (inputs) { std::lock_guard<std::mutex> lk(m_autoLock); m_appliedSettings = s; m_appliedDisplay = d; m_appliedFps = src.fps; rateSeen = rateSerial; }
         if (inputs) { bool hdrFmt = false; { std::lock_guard<std::mutex> lk(m_fmtLock); hdrFmt = IsHdrFmt(m_outFmt.fmt); } SetItm(c, c.hdr && hdrFmt && !InputHdr()); m_sceneCll = InputHdr() && hdrFmt && !d.hdr; if (d.hdr) ConfigureMpcVr(); }   // the boost needs no rebuild
         // the display's reported peak changes with its mode (some monitors): re-read every 5 s, re-apply when it moved
@@ -4796,7 +4818,12 @@ void CPushMpcFilter::AutoLoop()
                 if (d.hdr) ConfigureMpcVr();
             }
         }
-        if (SameGraph(next, cur)) { std::lock_guard<std::mutex> lk(m_autoLock); m_choice = c; continue; }
+        if (SameGraph(next, cur)) {
+            std::lock_guard<std::mutex> lk(m_autoLock); m_choice = c;
+            // R-RATE1: the graph this rate holds (steady, full groups): kept for a later return to this rate
+            if (!inputs && rateSerial == rateSeen && m_fgLevel == 0) m_rateGraphs[rateKey] = { cur, c, s, d };
+            continue;
+        }
         const bool up = IsUpgrade(cur, next);
         if (!inputs) {
             // measured costs only
