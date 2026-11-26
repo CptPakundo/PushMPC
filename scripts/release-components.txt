@@ -1,0 +1,19 @@
+# The components every release must contain. release.yml's build job checks each line after packaging: a release
+# (a tag, not a dry run) fails when one is missing; a dry run lists what is missing as a warning.
+#
+# One component per line: <name> <where> <path>
+#   where = stage    <path> is relative to the staged release folder (repo/stage/PushMPC): what Setup installs
+#   where = release  <path> is a file name (wildcards allowed) in the release folder: a separate release asset
+#   where = extra    <path> is a file name (wildcards allowed) among the extras job's assets (release.yml): a separate
+#                    release asset from a component's extra part, which the build job does not wait for
+# Add a line here when a new component ships; nothing else needs to change.
+vlc         stage    vlc/libpushmpc_plugin.dll
+kodi        stage    kodi/kodi21
+kodi22      stage    kodi/kodi22
+plexnative  stage    plexnative/avfilter-8.dll
+mpvbuild    stage    filter/mpvbuild.json
+mpvbuild    release  PushMPC-mpv-windows-*.zip
+vlcmac      extra    pushmpc-vlc-macos-*.zip
+appimage    extra    PushMPC-mpv-linux-x86_64-*.AppImage
+kodiandroid extra    pushmpc-kodi21-android-arm64-*.zip
+kodiandroid extra    pushmpc-kodi22-android-arm64-*.zip

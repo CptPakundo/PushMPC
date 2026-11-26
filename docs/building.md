@@ -49,13 +49,28 @@ Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools 
 Tools: Visual Studio 2022 or newer with C++ (found with vswhere; `PUSHMPC_VS` overrides), CMake and Ninja (bundled with VS).
 
     git -C PushFPS apply ..\patches\pushfps-4.5.4-pushmpc.patch
-    scripts\build-pushfps.cmd                 (once: configures and builds PushFPS, which also builds the shaders)
-    scripts\build-pushmpc.cmd pushcore_dll
+    scripts\build-pushmpc.cmd release         (the shaders, pushcore.dll and its helpers; pushcore only, no PushFPS app)
     filter\build.cmd                          (PushMpcFilter.ax, PushMpcExit.dll, auto_test.exe)
     updater\build.cmd                         (PushMpcUpdater.exe; developer build: unsigned feeds allowed)
     powershell -File scripts\pushmpc-install.ps1 stage
     powershell -File scripts\pushmpc-install.ps1 install -DryRun            (shows the download of Veyra's package)
     powershell -File scripts\pushmpc-install.ps1 package                    (release\: PushMPC-Setup.exe, zips, release.json + .sig)
+
+`scripts\build-pushmpc.cmd <targets>` builds single targets (for example `pushcore_dll`). `scripts\build-pushfps.cmd`
+builds the whole PushFPS app (with Qt and its streaming clients) and is only needed for that.
+
+The build scripts are incremental: CMake runs only for a new build tree or changed options, and Visual Studio's
+environment is set up once and then reused (kept in `%TEMP%`). For faster rebuilds, install [ccache](https://ccache.dev)
+(or sccache): on `PATH`, or with `PUSHMPC_COMPILER_CACHE` set to its exe, the scripts use it (`PUSHMPC_COMPILER_CACHE=off`
+turns it off). With several checkouts, give each the same layout, `<folder>\pushfps` (`PUSHMPC_PUSHFPS_SRC`) and
+`<folder>\build` (`PUSHMPC_BUILD_DIR`) side by side: ccache then shares its results between them. `PUSHMPC_JOBS` sets
+the parallel compile jobs, `PUSHMPC_LOAD` makes the build wait while the machine is busier than that (useful with two
+builds at once). Your own settings can go into a `pushmpc-build-env.cmd` in the repository folder or next to it; the
+scripts run it first.
+
+Every MSVC build uses `/d2NoLUR` (`cmake/msvc-loop-guard.cmake`, also passed to PushFPS's build): it turns off a loop
+unroller in MSVC (19.44, 19.52) that can silently drop loop iterations at `/O2`; `tests/msvc-loop-guard.cpp` checks it
+on each configure and in CI.
 
 `package` builds Setup itself (`installer\build.cmd <payload>`; `-NoSetup` skips it) and signs `release.json` with
 `-SigningKey <xml>`, the environment variable `PUSHMPC_SIGNING_KEY` (the key's XML text) or
@@ -98,7 +113,10 @@ and approve pull requests", for the watch's branch and pull request.
 
 | Workflow | What it checks or builds |
 |---|---|
-| `release.yml` | the release: Windows build, Setup, component zips, signed manifest, Linux tarballs; calls the VLC, mpv-native and Kodi workflows |
+| `release.yml` | the release: Windows build, Setup, component zips, signed manifest, Linux tarballs, and the separate downloads (VLC for macOS, the mpv AppImage, Kodi for Android, Plex for Mac); builds the VLC, mpv-native and Kodi pieces through their workflows (build jobs and one smoke test each; their full test suites run on their own pushes) |
+| `core.yml` | the Windows core build (pushcore, filter, updater, VapourSynth plugin), for `release.yml` and `dev-build.yml`; its steps are the `pushmpc-core` and `pushmpc-package` actions |
+| `dev-build.yml` | a quick Windows test build (below) |
+| `deps.yml` | builds the dependencies on `main` once per pin change, so other runs restore them (below) |
 | `release-ux.yml` | Setup on Windows and `setup.sh` on Linux with real players, including a clean uninstall |
 | `integrations.yml`, `players-layout.yml` | the player configuration writers, MPC-BE and PotPlayer settings layouts |
 | `vsplugin*.yml` | the VapourSynth route: the pushcore, portable CPU, Vulkan and Linux NVIDIA backends |
@@ -111,6 +129,21 @@ and approve pull requests", for the watch's branch and pull request.
 
 Hosted runners have no GPU, so these run on synthetic clips, stand-in GPUs or software Vulkan (lavapipe); the real-GPU
 checks run on a self-hosted runner (below) or by hand.
+
+### Test builds
+
+For a Windows build to try out, use `dev-build.yml`, not a release dry run. It builds pushcore, the filter, the
+updater, the VapourSynth plugin and `PushMPC-Setup.exe` with the same steps as a release (`core.yml`, with the
+`pushmpc-core` and `pushmpc-package` actions in `.github/actions`), in one Windows job, without the VLC, mpv, Plex, Kodi
+and Linux pieces. It takes about 3 minutes with a warm compiler cache, and less when nothing that goes into the core
+changed. It runs on every push to a `track/**` branch that touches the Windows build, or by hand:
+`gh workflow run dev-build.yml --ref <branch>`. The result is the `pushmpc-release` artifact (Setup, the component
+zips, `release.json`), the same as a dry run's: `gh run download <run id> -n pushmpc-release`.
+
+The caches are keyed by what goes into them (pins, build scripts, sources) and saved right after each build step.
+Caches made on `main` are the ones every branch can restore: `deps.yml` builds the dependencies there when a pin or a
+dependency build script changes, and by hand. A tag build compiles PushMPC's own code fresh (no cached core or
+compiler output), with MSVC's reproducible-output switch (`/Brepro`), so its binaries can be compared with a dry run's.
 
 ### GPU runner
 

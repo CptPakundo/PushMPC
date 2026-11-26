@@ -17,6 +17,14 @@ on:
         description: 'also run the Kodi-on-Wayland test job (it builds no artifact)'
         type: boolean
         default: true
+      tests:
+        description: 'run the unit tests and the playback test jobs (release.yml: false, build + package + installer round trip only)'
+        type: boolean
+        default: true
+      part:
+        description: 'release.yml: "release" = what its build and linux jobs take (Windows and Linux add-on); "extra" = what only its publish job takes (Android); empty = everything'
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       macos:
@@ -29,8 +37,8 @@ on:
         default: ''
 
 concurrency:
-  group: kodi-addon-${{ github.workflow }}-${{ github.ref }}   # called from release.yml: its own group (github.workflow is the caller's)
-  cancel-in-progress: true
+  group: kodi-addon-${{ github.workflow }}-${{ github.ref }}-${{ inputs.part }}   # called from release.yml: its own group (github.workflow is the caller's)
+  cancel-in-progress: ${{ github.workflow == 'kodi-addon' }}   # a release run's builds are never cancelled midway
 
 env:
   FFMPEG_VERSION: '8.1'
@@ -39,6 +47,7 @@ env:
 
 jobs:
   build:
+    if: ${{ inputs.part != 'extra' }}
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +79,7 @@ jobs:
         if: runner.os == 'Linux' && steps.ffcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+          sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -qq && sudo apt-get install -y -qq nasm
           bash kodiaddon/ci/build-ffmpeg.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg"
 
       - name: FFmpeg shared (Windows, BtbN build)
@@ -106,10 +115,11 @@ jobs:
           fi
 
       - name: Unit tests (on Linux the GPU engine runs on lavapipe and is required)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
             # zero copy test: udmabuf stands in for Kodi's dma-buf frame buffers
             sudo modprobe udmabuf 2>/dev/null || echo "no udmabuf module"; sudo modprobe vgem 2>/dev/null || echo "no vgem module"
             sudo udevadm settle || true; sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
@@ -127,7 +137,7 @@ jobs:
     # one folder per OS: kodi21/ and kodi22/ builds plus the installer (what the PushMPC Setup ships and passes as
     # PUSHMPC_KODI_DIR); the installer's round trip runs on it
     needs: build
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     strategy:
       fail-fast: false
       matrix:
@@ -172,11 +182,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: addon-Linux-kodi22, path: addon }
-      - uses: LABSN/sound-ci-helpers@v1
+      - name: Audio (a PulseAudio null sink for Kodi's audio output; replaces sound-ci-helpers, which took about 15 min)
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends pulseaudio pulseaudio-utils > /dev/null
+          pulseaudio -D --exit-idle-time=-1 --system=false
+          pactl load-module module-null-sink sink_name=pmnull > /dev/null && pactl set-default-sink pmnull
+          pactl info | grep -E 'Server Name|Default Sink'
       - name: Flatpak, Weston, ffmpeg, udmabuf
         id: udmabuf
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak weston ffmpeg dbus-x11 > /dev/null
           # udmabuf is built into some runner kernels (the node exists, modprobe finds no module: azure 6.x has it as
           # a module, aws 7.x builds it in) and missing from others' base modules (linux-modules-extra has it)
@@ -233,7 +248,7 @@ jobs:
 
   kodi-linux:
     needs: build
-    if: ${{ !cancelled() }}   # each OS runs with its own build even if the other OS's build failed
+    if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # each OS runs with its own build even if the other OS's build failed; release.yml: off
     strategy:
       fail-fast: false
       matrix:
@@ -246,10 +261,15 @@ jobs:
         with:
           name: addon-Linux-kodi${{ matrix.kodi }}
           path: addon
-      - uses: LABSN/sound-ci-helpers@v1
+      - name: Audio (a PulseAudio null sink for Kodi's audio output; replaces sound-ci-helpers, which took about 15 min)
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends pulseaudio pulseaudio-utils > /dev/null
+          pulseaudio -D --exit-idle-time=-1 --system=false
+          pactl load-module module-null-sink sink_name=pmnull > /dev/null && pactl set-default-sink pmnull
+          pactl info | grep -E 'Server Name|Default Sink'
       - name: Flatpak, Xvfb, ffmpeg
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak xvfb ffmpeg dbus-x11 > /dev/null
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
@@ -281,7 +301,7 @@ jobs:
 
   kodi-windows:
     needs: build
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # release.yml: off
     strategy:
       fail-fast: false
       matrix:
@@ -294,7 +314,7 @@ jobs:
         with:
           name: addon-Windows-kodi${{ matrix.kodi }}
           path: addon
-      - uses: LABSN/sound-ci-helpers@v1
+      - uses: LABSN/sound-ci-helpers@d08c889a7bba7d9b1b059f8f76dac4672ea3a9cf   # v1, pinned by commit
       - name: Kodi (official build, unpacked; portable mode)
         shell: bash
         run: |
@@ -330,6 +350,7 @@ jobs:
           path: out
 
   build-android:
+    if: ${{ inputs.part != 'release' }}   # release.yml: part extra (the Android zips are release assets)
     # Android TV / Fire TV / Shield (arm64-v8a): build and package only. Kodi has no headless Android test path on a
     # hosted runner yet; the engine is the GPU one (Vulkan, loaded at run time) with the CPU fallback.
     strategy:
@@ -353,7 +374,7 @@ jobs:
       - name: FFmpeg static (NDK)
         if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq nasm > /dev/null
+          sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -qq && sudo apt-get install -y -qq nasm > /dev/null
           bash kodiaddon/ci/build-ffmpeg-android.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" "$ANDROID_NDK_LATEST_HOME"
       - uses: actions/cache/save@v4
         if: steps.ffcache.outputs.cache-hit != 'true'

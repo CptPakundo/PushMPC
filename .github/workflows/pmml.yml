@@ -262,7 +262,7 @@ jobs:
           python -I pmml/scripts/fetch_runtime.py --pin "$PIN" --platform win-x64 --out rt --cache ~/pmml-dl --flavors core,directml --eps trt-rtx,openvino,qnn --ncnn --headers --list
           cp rt/ort/directml/include/dml_provider_factory.h rt/ort/directml/include/DirectML*.h rt/ort/core/include/ 2>/dev/null || true
           ls rt/ort/core/include rt/ort/directml
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756   # v1, pinned by commit
       - name: Build
         run: |
           ncnn=""; [ -f pmml/src/ncnn_backend.cpp ] && ncnn=$(dirname "$(find "$PWD/rt/ncnn" -name ncnnConfig.cmake | grep -v -i 'arm\|x86/\|shared' | head -1)" 2>/dev/null || true)

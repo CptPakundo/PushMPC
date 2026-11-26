@@ -10,6 +10,15 @@ on:
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
   workflow_call:
+    inputs:
+      tests:
+        description: 'run the test jobs (release.yml: false, build jobs only; push and dispatch always test)'
+        type: boolean
+        default: true
+      part:
+        description: 'release.yml: "release" = what its build and linux jobs take (Windows and Linux modules, the bridge, clips); "extra" = what only its publish job takes (the macOS module); empty = everything'
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       macos:
@@ -22,14 +31,16 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  # called from release.yml, github.workflow is the caller's name: its own group there, never cancelled midway
+  group: vlc-plugin-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.part }}
+  cancel-in-progress: ${{ github.workflow == 'vlc-plugin' }}
 
 env:
   VLC_WIN_VERSION: '3.0.24'
 
 jobs:
   clips:
+    if: ${{ inputs.part != 'extra' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -55,6 +66,7 @@ jobs:
         with: { name: clips, path: clips, retention-days: 5 }
 
   build-linux:
+    if: ${{ inputs.part != 'extra' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -106,6 +118,7 @@ jobs:
         with: { name: plugin-linux, path: out/linux, retention-days: 7 }
 
   build-windows:
+    if: ${{ inputs.part != 'extra' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -151,6 +164,7 @@ jobs:
 
   test-linux:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -224,6 +238,7 @@ jobs:
   # Ubuntu 22.04: 3.0.16): it must load (entry name, glibc) and multiply frames
   test-distros:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     strategy:
       fail-fast: false
       matrix:
@@ -253,6 +268,7 @@ jobs:
   # drivers that lose uploads must make PushMPC fall back to pass-through. Then the installer's self-test, both ways.
   test-hw:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -350,6 +366,7 @@ jobs:
   # exported getters and hands the postproc slot (and one rarely used filter, for pushmpc_out) to PushMPC, or does nothing.
   snap-spike:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -450,6 +467,7 @@ jobs:
 
   # pm_pushcore.dll (MSVC: vsplugin's pushcore host + the filter's Auto) and the stub pushcore.dll for the tests
   build-bridge:
+    if: ${{ inputs.part != 'extra' }}   # release.yml stages it into the vlc component (build waits for it)
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -477,6 +495,7 @@ jobs:
 
   test-windows:
     needs: [clips, build-windows, build-bridge]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: windows-latest
     timeout-minutes: 30
     defaults: { run: { shell: bash } }
@@ -583,22 +602,28 @@ jobs:
         with: { name: results-windows, path: res, retention-days: 7 }
 
   macos:
-    # public repository: standard macOS runners are free, so macOS runs on every push
+    # public repository: standard macOS runners are free, so macOS runs on every push. release.yml: part extra, build
+    # only (the module is a release asset); the clips job is not in that part
     needs: [clips]
+    if: ${{ !cancelled() && inputs.part != 'release' && needs.clips.result != 'failure' }}
     runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         with: { name: clips, path: art/clips }
       - uses: actions/cache@v4
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         with: { path: ~/Library/Caches/Homebrew/downloads, key: brew-vlc-cask-v1 }
       - uses: actions/cache@v4
         with: { path: ~/vlc-dl, key: 'vlc-win64-${{ env.VLC_WIN_VERSION }}' }
-      - name: VLC.app (cask) and the VLC 3 plugin headers (from the official SDK)
+      - name: VLC.app (cask, for the tests) and the VLC 3 plugin headers (from the official SDK)
+        env:
+          TESTS: ${{ format('{0}', inputs.tests) != 'false' }}
         run: |
           set -eu
-          brew install --cask vlc >/dev/null
+          [ "$TESTS" != true ] || brew install --cask vlc >/dev/null
           brew install p7zip ninja >/dev/null 2>&1 || true
           mkdir -p ~/vlc-dl && cd ~/vlc-dl
           f=vlc-${VLC_WIN_VERSION}-win64.7z
@@ -616,7 +641,11 @@ jobs:
             -DMODULE_STRING='"pushdump"' -I"$inc" vlcplugin/spike/pushspike.c -o out/mac/libpushdump_plugin.dylib
           codesign -s - -f out/mac/*.dylib
           lipo -info out/mac/libpushmpc_plugin.dylib
+      # the release asset (release.yml publishes it as pushmpc-vlc-macos-<version>.zip)
+      - uses: actions/upload-artifact@v4
+        with: { name: plugin-macos, path: out/mac/libpushmpc_plugin.dylib, if-no-files-found: error, retention-days: 7 }
       - name: Module cases and the macosx display (VLC_PLUGIN_PATH, plugin outside the signed bundle)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
         run: |
           d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
           export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP10=art/clips/clip10.mkv \

@@ -2,6 +2,7 @@
 # at run time and falls back to the portable engine when it or pushcore.dll is missing.
 cmake_minimum_required(VERSION 3.20)
 project(pm_pushcore CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 if(NOT MSVC)
   message(FATAL_ERROR "pm_pushcore is built with MSVC (pushcore host uses structured exception handling)")
 endif()

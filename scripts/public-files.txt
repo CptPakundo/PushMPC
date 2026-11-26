@@ -16,6 +16,7 @@ scripts/check-public.ps1
 scripts/public-files.txt
 scripts/build-pushmpc.cmd
 scripts/build-pushfps.cmd
+scripts/release-components.txt
 patches/**
 scripts/new-signing-key.ps1
 scripts/pushfps-pin.json
@@ -78,3 +79,6 @@ pmml/scripts/**
 scripts/ml-runtime-pin.json
 kodiaddon/**
 mpvnative/**
+scripts/build-env.cmd
+scripts/cmake-configure.cmd
+cmake/**
