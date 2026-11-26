@@ -369,7 +369,15 @@ jobs:
           git config --global --add safe.directory "$PWD"
           [ -f /tmp/mpvnative-art/hook/pushmpc_hook.so ] && export PUSHMPC_MPVNATIVE_DIR=/tmp/mpvnative-art/hook && echo "native hook: $(ls /tmp/mpvnative-art/hook | tr '\n' ' ')"
           [ -f /tmp/kodi-art/install.sh ] && export PUSHMPC_KODI_DIR=/tmp/kodi-art && echo "Kodi add-on: $(ls /tmp/kodi-art | tr '\n' ' ')"
+          # Plex (Flathub) as release.yml packs it: the preload and the self-test host next to the hook's builds
+          if [ -n "${PUSHMPC_MPVNATIVE_DIR:-}" ]; then
+            mkdir -p /tmp/plexlin
+            cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o /tmp/plexlin/pushmpc_preload.so -ldl -lpthread
+            cc -O2 -Wall mpvnative/hook/libmpv_host.c -o /tmp/plexlin/pushmpc-plex-selftest -ldl
+            export PUSHMPC_PLEX_DIR=/tmp/plexlin
+          fi
           PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
+          if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/plex/pushmpc-plex-linux.sh$'; fi
           tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -E '/setup.sh$|/pmml/' | head
           tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
       - name: setup.sh into a fresh HOME (detection, engine choice, players, the pmml runtime), mpv through the installed block, uninstall

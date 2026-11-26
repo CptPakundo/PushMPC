@@ -2641,14 +2641,20 @@ function Uninstall-VlcRoute($state) {
 # result as a failed self-test, so the fallback runs.
 function Invoke-PlexNative([string]$dir, [string]$verb, [string[]]$more = @()) {
     $script = Join-Path $dir 'pushmpc-plex-native.ps1'
-    $pw = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    $exe = if ($pw) { $pw.Source } else { Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+    # Windows PowerShell 5.1, which every Windows has (a pwsh found on PATH can be the Store's alias stub)
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $q = { param($x) "'" + ($x -replace "'", "''") + "'" }
     $rf = Join-Path ([IO.Path]::GetTempPath()) "pushmpc-plexnative-$PID.txt"
     if (Test-Path -LiteralPath $rf) { Remove-Item -LiteralPath $rf -Force }
     # an elevated process has no pipes to this one: a wrapper runs the installer as a child (its JSON lines on stdout and
     # its log on stderr are written by [Console], so only a process pipe catches them), into one file, and passes its exit code
-    $wrapped = "& $(& $q $exe) -NoProfile -ExecutionPolicy Bypass -File $(& $q $script) $verb -From $(& $q $dir) -Json $($more -join ' ') 2>&1 | ForEach-Object { [string]`$_ } | Set-Content -Encoding UTF8 -LiteralPath $(& $q $rf); exit `$LASTEXITCODE"
+    $wrapped = "& $(& $q $exe) -NoProfile -ExecutionPolicy Bypass -File $(& $q $script) $verb -From $(& $q $dir) -Json $($more -join ' ') 2>&1 | ForEach-Object { [string]`$_ } | Set-Content -Encoding UTF8 -LiteralPath $(& $q $rf); `$rc = `$LASTEXITCODE"
+    if ($verb -eq 'uninstall') {
+        # the installer removes its per-app backup folders; their parents in ProgramData (made elevated) go here when empty
+        $pd = Join-Path $env:ProgramData 'PushMPC'
+        $wrapped += "; foreach (`$x in $(& $q (Join-Path $pd 'plex-native')), $(& $q $pd)) { if ((Test-Path -LiteralPath `$x) -and -not (Get-ChildItem -LiteralPath `$x -Force)) { Remove-Item -LiteralPath `$x -Force } }"
+    }
+    $wrapped += "; exit `$rc"
     $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapped)))
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     try {

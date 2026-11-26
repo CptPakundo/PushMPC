@@ -254,7 +254,7 @@ do_pmml() {
     if [ "$sel" = ncnn ]; then
         # PushFlow's RIFE models as ncnn models, on the GPU through Vulkan (no ONNX Runtime needed)
         flv=''; ep=''; extra=--ncnn-models
-        say "PushFlow runtime for $fam: the RIFE models for ncnn on Vulkan (a small download, checked by SHA-256)"
+        say "PushFlow runtime for $fam: the RIFE models for ncnn on Vulkan and PushFlow's model settings (a download of about 150 MB, checked by SHA-256)"
     else
         flv=${sel%% *}; ep=${sel#* }; [ "$ep" = - ] && ep=''; extra=''
         say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
@@ -267,9 +267,9 @@ do_pmml() {
     if [ "$rc" != 0 ]; then
         say "  the fetch failed: PushFlow runtime not installed (the GPU engine interpolates)"; rm -rf "$pm/pmml.part" "$dl"; return 0
     fi
-    # PushFlow's models (pushflow-fast / -quality with the grid and mask outputs) out of PushFPS's release zip; the
-    # ncnn route has its own models
-    if [ "$sel" != ncnn ] && ! "$py" -I - "$PF_ZIP_URL" "$PF_ZIP_SHA" "$dl" "$pm/pmml.part/models" "$here/pmml/ml-runtime-pin.json" <<'PY'
+    # PushFlow's models (pushflow-fast / -quality with the grid and mask outputs) out of PushFPS's release zip; the ncnn
+    # route needs them too: its network size and padding come from their settings (.onnx.txt, models.json)
+    if ! "$py" -I - "$PF_ZIP_URL" "$PF_ZIP_SHA" "$dl" "$pm/pmml.part/models" "$here/pmml/ml-runtime-pin.json" <<'PY'
 import hashlib, json, sys, urllib.request, zipfile, pathlib
 url, want, cache, dest, pin = sys.argv[1:6]
 cache = pathlib.Path(cache); cache.mkdir(parents=True, exist_ok=True); dest = pathlib.Path(dest); dest.mkdir(parents=True, exist_ok=True)
