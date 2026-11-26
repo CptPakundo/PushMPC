@@ -3,6 +3,9 @@
 #   jobs: spike = inspect the players' bundles and try each route once (what the routes are built on)
 name: players
 on:
+  push:
+    branches: ['track/players']
+    paths: ['.github/workflows/players.yml']
   workflow_dispatch:
     inputs:
       jobs:
@@ -22,13 +25,13 @@ permissions:
 
 jobs:
   spike-linux:
-    if: contains(inputs.jobs, 'spike')
+    if: contains(inputs.jobs || 'spike', 'spike')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: mpvnative-hook-ubuntu-24.04, path: '${{ runner.temp }}/h', run-id: '${{ inputs.hook_run }}', github-token: '${{ github.token }}' }
+        with: { name: mpvnative-hook-ubuntu-24.04, path: '${{ runner.temp }}/h', run-id: "${{ inputs.hook_run || '45799363716' }}", github-token: '${{ github.token }}' }
       - name: Build the preload, the hook and the self-test host
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libmpv-dev xvfb xauth flatpak binutils >/dev/null
@@ -107,7 +110,7 @@ jobs:
           grep -rn -E 'config_dir|mpv_ext|Application Support|def confdir|input_conf|config=' x --include=*.py | grep -vE 'tests?/' | head -60
 
   spike-macos:
-    if: contains(inputs.jobs, 'spike')
+    if: contains(inputs.jobs || 'spike', 'spike')
     runs-on: macos-15
     timeout-minutes: 40
     steps:
