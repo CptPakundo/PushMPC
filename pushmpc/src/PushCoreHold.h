@@ -32,6 +32,7 @@ cbuffer Params : register(b0) {
     float2 cam; float camScale; float t; // camera of the pair at output scale (pixels), phase of this frame
     uint flags; float split; uint side; float feather;   // flags: 1 whole, 2 nearest, 4 line art, 8 mask, 16 divider
     float gainMax; float doubled; float2 tap;   // tap: one feather step in mask uv
+    float tSwitch; float3 pad3;                  // nearest: B from this t (0.5; P9 film time: the drawing's film time)
 };
 Texture2D<float4> G : register(t0);
 Texture2D<float4> A : register(t1);
@@ -63,7 +64,7 @@ void CS_Hold(uint3 id : SV_DispatchThreadID)
     if ((flags & 16) && abs(x.x - split) < 1.0) { O[id.xy] = float4(0.5, 0.5, 0.5, g.a); return; }
     const bool inside = split < 0.0 || (side == 0 ? x.x < split : x.x >= split);
     if (!inside) { O[id.xy] = g; return; }
-    const bool fromB = (flags & 2) != 0 && t >= 0.5;
+    const bool fromB = (flags & 2) != 0 && t >= tSwitch;
     float m = 0.0;
     if (flags & 1) m = 1.0;
     else if (flags & 8) {
@@ -116,6 +117,7 @@ public:
         uint32_t flags = 0;
         float camX = 0, camY = 0, camScale = 1.f;   // pixels at the frame's size
         float t = 0.5f;
+        float tSwitch = 0.5f;                        // nearest: B from this t (P9 film time)
         float split = -1.f;                          // pixel x, < 0 = whole width
         uint32_t side = 0;                           // 0: x < split, 1: x >= split
         float gainMax = 1.6f, doubled = 0.6f;       // line art: highest gain; energy ratio below which a line is doubled
@@ -128,7 +130,7 @@ public:
             return failWith(std::string("compile CS_Hold: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
         if (FAILED(dev_->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &cs_))) return failWith("CreateComputeShader(hold)");
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 64; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = 80; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         if (FAILED(dev_->CreateBuffer(&bd, nullptr, &cb_))) return failWith("CreateBuffer(hold)");
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
@@ -175,14 +177,14 @@ public:
         ID3D11ShaderResourceView* sg = srv(g); ID3D11ShaderResourceView* sa = srv(a); ID3D11ShaderResourceView* sb = srv(b);
         if (!sg || !sa || !sb) return false;
         if ((p.flags & kMask) && !maskSrv_) return false;
-        struct P { uint32_t w, h; float msx, msy; float cx, cy, cs, t; uint32_t flags; float split; uint32_t side; float feather; float gainMax, doubled, pad[2]; } c{};
-        static_assert(sizeof(P) == 64, "hold constants");
+        struct P { uint32_t w, h; float msx, msy; float cx, cy, cs, t; uint32_t flags; float split; uint32_t side; float feather; float gainMax, doubled, pad[2]; float tSwitch, pad3[3]; } c{};
+        static_assert(sizeof(P) == 80, "hold constants");
         c.w = d.Width; c.h = d.Height;
         c.msx = coverW_ / float(d.Width); c.msy = coverH_ / float(d.Height);
         c.cx = p.camX; c.cy = p.camY; c.cs = p.camScale > 0.f ? p.camScale : 1.f; c.t = p.t;
         c.flags = p.flags; c.split = p.split; c.side = p.side;
         c.feather = feather_;
-        c.gainMax = p.gainMax; c.doubled = p.doubled;
+        c.gainMax = p.gainMax; c.doubled = p.doubled; c.tSwitch = p.tSwitch;
         c.pad[0] = feather_ / float(std::max(1u, mw_)); c.pad[1] = feather_ / float(std::max(1u, mh_));
         imm->UpdateSubresource(cb_.Get(), 0, nullptr, &c, 0, 0);
         ID3D11Buffer* cbs[] = { cb_.Get() };

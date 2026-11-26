@@ -32,6 +32,7 @@ inline constexpr uint32_t kHoldTransients = 1u;   // flashes, impact frames, une
 inline constexpr uint32_t kHoldLineArt = 2u;      // line-art protection in the compose (contrast matching, doubled lines)
 inline constexpr uint32_t kHoldSigns = 4u;        // typeset signs held (the PushFPS Subtitle Hold sign zone)
 inline constexpr uint32_t kHoldLiveTransients = 8u;   // flash / impact hold also when the picture is not animation
+inline constexpr uint32_t kHoldFilmTime = 16u;        // P9: drawn parts of 24p-grid shots in 29.97 video switch at film time
 
 // ---- block match (CPU; 8 x 8 cells per block) ----
 struct BlockMotion {
@@ -434,7 +435,8 @@ struct HoldPlan {
     enum Kind : uint8_t { Flash = 1, Insert = 2, Unexplained = 4, Redrawn = 8 };
     uint8_t kinds = 0;
     bool whole = false;          // the whole picture (a flash, an impact frame)
-    bool nearest = false;        // true: A for t < 0.5, B from 0.5 (transients); false: A camera-warped for every t (as drawn)
+    bool nearest = false;        // true: A for t < tSwitch, B from it (transients: 0.5); false: A camera-warped for every t (as drawn)
+    float tSwitch = 0.5f;        // P9 film time: the drawn parts switch to B at this t (the drawing's film time inside the pair)
     float camDx = 0, camDy = 0, camScale = 1.f;   // the pair's camera (cells; content moved by +dx, +dy, scale about the centre)
     uint32_t w = 0, h = 0, cells = 0;             // mask size and cells set
     uint32_t objects = 0, slid = 0, redrawn = 0, unexplained = 0;   // counters for the log
@@ -469,7 +471,7 @@ inline void PaintSweep(const ObjectClass& o, uint32_t W, uint32_t H, std::vector
 // camera (BlockMotion::camFixX / Y), added to the compose's camera warp (a slow roll is otherwise up to half a cell off).
 inline HoldPlan PlanHolds(AnimMode mode, uint32_t flags, bool animation, const RegionFrame& r, const std::vector<ObjectClass>& objs,
                           const TransientMarks& atPrev2, const TransientMarks& atPrev, const TransientMarks& atCur, uint32_t W, uint32_t H,
-                          float camFixX = 0.f, float camFixY = 0.f)
+                          float camFixX = 0.f, float camFixY = 0.f, float filmSwitch = -1.f)
 {
     HoldPlan p;
     if (!r.valid) return p;
@@ -488,6 +490,10 @@ inline HoldPlan PlanHolds(AnimMode mode, uint32_t flags, bool animation, const R
         }
     }
     if (r.cut || objs.empty() || size_t(W) * H != r.changed.size()) return p;
+    // P9 film time (filmSwitch in [0, 1): the drawn layer of a 24p-grid shot changes at the end of this pair): the drawn
+    // parts are held and switch to the new drawing at its film time; camera and effects (slid objects) keep the generator's
+    // own 30p motion. Camera only mode only (Full re-times drawings with the source repair).
+    const bool film = filmSwitch >= 0.f && filmSwitch < 1.f && (flags & kHoldFilmTime) != 0 && mode == AnimMode::CameraOnly && animation;
     const bool redrawnHold = mode == AnimMode::CameraOnly && animation;
     const bool unexplHold = transients && animation;
     if (!redrawnHold && !unexplHold) return p;
@@ -504,10 +510,61 @@ inline HoldPlan PlanHolds(AnimMode mode, uint32_t flags, bool animation, const R
     }
     // Camera only holds as drawn (A until B's own time); Full holds only unexplained objects, nearest in time. Owner
     // rule: a slid object inside a held object's mask is held with it (the redrawn one wins where they overlap).
-    p.nearest = !redrawnHold;
+    p.nearest = !redrawnHold || film;
+    if (film) p.tSwitch = filmSwitch;
     if (!p.cells) { p.mask.clear(); p.w = p.h = 0; }
     return p;
 }
+
+// ---- P9 film time: is the drawn layer of this shot on a 24p grid inside 29.97 video (internal cadence report) ----
+// Fed once per pair (n-1, n) with whether the DRAWN layer changed (redrawn / unexplained objects; camera and slid
+// effects excluded), the pair's cut flag and the source interval. Over the last 30 frames of the shot:
+//   a run of >= 6 consecutive drawn changes            -> 30p motion (not engaged);
+//   one phase of every 5 never changes, others do      -> 24p grid (engaged; that phase is the repeated one);
+//   all 5 phases change                                 -> native 30p (not engaged);
+//   gaps of exactly 3, three times in a row (3,3,3)    -> native 30p on threes: disengaged at once;
+//   a cut, or an interval that is not 1/29.97 (a VFR file's 23.976 body: its timestamps already time it) -> reset.
+class FilmTimeDetector {
+public:
+    static constexpr int kWindow = 30, kMinFrames = 20, kRun30p = 6;
+    void Reset() { hist_.clear(); dup_ = -1; lastChange_ = -1; gaps_ = 0; }
+    void Push(uint64_t n, bool drawnChanged, bool cut, double intervalMs) {
+        if (cut || !(intervalMs > 33.0 && intervalMs < 34.1)) { Reset(); return; }
+        hist_.push_back({ n, drawnChanged });
+        while (hist_.size() > size_t(kWindow)) hist_.erase(hist_.begin());
+        if (drawnChanged) {
+            const int64_t gap = lastChange_ >= 0 ? int64_t(n) - lastChange_ : 0;
+            gaps_ = gap == 3 ? gaps_ + 1 : 0;
+            lastChange_ = int64_t(n);
+        }
+        dup_ = -1;
+        if (gaps_ >= 3 || hist_.size() < size_t(kMinFrames)) return;
+        int run = 0, total = 0, perPhase[5] = {};
+        for (const auto& h : hist_) { run = h.changed ? run + 1 : 0; if (run >= kRun30p) return; if (h.changed) { ++total; ++perPhase[h.n % 5]; } }
+        int zero = -1, zeros = 0;
+        for (int k = 0; k < 5; ++k) if (!perPhase[k]) { zero = k; ++zeros; }
+        if (zeros == 1 && total >= 4) dup_ = zero;
+    }
+    bool Engaged() const { return dup_ >= 0; }
+    // a drawn change landing at frame n: the t inside the pair (n-1, n) where its film time lies (1 = at n itself)
+    float SwitchT(uint64_t n) const {
+        if (dup_ < 0) return 1.f;
+        auto film = [&](uint64_t m) {   // film frames before m: 4 a cycle of 5, the repeated phase not counted
+            const uint64_t cyc = m / 5, ph = m % 5;
+            uint64_t f = cyc * 4;
+            for (uint64_t k = 0; k < ph; ++k) f += k != uint64_t(dup_) ? 1 : 0;
+            return double(f) * 1.25;   // in 29.97 frames (30 / 24)
+        };
+        // the grid's origin: film(m) is measured from a cycle start; the offset of the cycle start is the same for every m
+        return std::clamp(float(film(n) - (double(n) - 1.0)), 0.f, 1.f);
+    }
+    int DupPhase() const { return dup_; }
+private:
+    struct H { uint64_t n; bool changed; };
+    std::vector<H> hist_;
+    int dup_ = -1, gaps_ = 0;
+    int64_t lastChange_ = -1;
+};
 
 // ---- the show's class (Auto per show) from the cadence of its moving parts over the first minutes ----
 enum class ShowClass : uint8_t { Unknown = 0, Feature = 1, TvLimited = 2, MixedCg = 3 };

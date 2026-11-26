@@ -735,6 +735,55 @@ static void TestRound5Compose()
     }
 }
 
+// P9 film time: the detector on drawn-layer change patterns, and the plan holding drawn parts only
+static void TestFilmTime()
+{
+    using namespace pushmpc::held;
+    const double i30 = 1000.0 * 1001.0 / 30000.0, i24 = 1000.0 * 1001.0 / 24000.0;
+    // 4,4,4,3 drawings (24p threes in 29.97) under a pan: the drawn layer changes on that grid
+    {
+        FilmTimeDetector d; int engagedAt = -1; float t4 = -1;
+        const int holds[4] = { 4, 4, 4, 3 }; int next = 1, k = 0;
+        for (int n = 1; n < 90; ++n) {
+            const bool ch = n == next; if (ch) { next += holds[k % 4]; ++k; }
+            d.Push(uint64_t(n), ch, false, i30);
+            if (d.Engaged() && engagedAt < 0) engagedAt = n;
+            if (n == 64 && d.Engaged()) t4 = d.SwitchT(64);
+        }
+        Check(engagedAt > 0 && engagedAt <= 30 && d.Engaged(), "P9: 4,4,4,3 drawings engage film time (from frame " + std::to_string(engagedAt) + ", repeated phase " + std::to_string(d.DupPhase()) + ")");
+        Check(t4 > 0.f && t4 <= 1.f, "P9: a drawing change lands at its film time inside the pair (t " + std::to_string(t4) + ")");
+        // the plan: Camera only + film time holds the redrawn object (switching at that t), never the slid pan
+        RegionFrame r; r.valid = true; r.changed.assign(size_t(32) * 18, 0);
+        ObjectClass pan; pan.kind = ObjectClass::Slid; pan.cells = 200; ObjectClass ch; ch.kind = ObjectClass::Redrawn; ch.cells = 40;
+        for (uint32_t i = 0; i < 40; ++i) ch.idx.push_back(5 * 32 + 5 + i % 8 + (i / 8) * 32);
+        ch.x0 = 5; ch.x1 = 12; ch.y0 = 5; ch.y1 = 9;
+        const TransientMarks z{};
+        const HoldPlan hp = PlanHolds(AnimMode::CameraOnly, kHoldFilmTime, true, r, { pan, ch }, z, z, z, 32, 18, 0.f, 0.f, 0.6f);
+        const HoldPlan hn = PlanHolds(AnimMode::CameraOnly, 0u, true, r, { pan, ch }, z, z, z, 32, 18, 0.f, 0.f, 0.6f);
+        Check(hp.nearest && std::fabs(hp.tSwitch - 0.6f) < 1e-6f && hp.redrawn == 1 && hp.slid == 1 && hp.cells > 0 && !hn.nearest,
+              "P9: film time holds the drawn part (switch at 0.6), the pan stays the generator's; off without the flag");
+    }
+    // 3,3,3 (native 30p on threes): never
+    {
+        FilmTimeDetector d; bool ever = false;
+        for (int n = 1; n < 120; ++n) { d.Push(uint64_t(n), n % 3 == 0, false, i30); ever = ever || d.Engaged(); }
+        Check(!ever, "P9: 3,3,3 holds never engage film time");
+    }
+    // 30p motion (every frame changes) and a 23.976 body of a VFR file: never
+    {
+        FilmTimeDetector a, b; bool ever = false;
+        for (int n = 1; n < 120; ++n) { a.Push(uint64_t(n), true, false, i30); b.Push(uint64_t(n), n % 2 == 0, false, i24); ever = ever || a.Engaged() || b.Engaged(); }
+        Check(!ever, "P9: 30p motion and a 23.976 VFR body are left alone");
+    }
+    // a cut disengages at once
+    {
+        FilmTimeDetector d; const int holds[4] = { 4, 4, 4, 3 }; int next = 1, k = 0;
+        for (int n = 1; n < 60; ++n) { const bool ch = n == next; if (ch) { next += holds[k % 4]; ++k; } d.Push(uint64_t(n), ch, false, i30); }
+        const bool before = d.Engaged(); d.Push(60, true, true, i30);
+        Check(before && !d.Engaged(), "P9: a cut disengages film time at once");
+    }
+}
+
 int main()
 {
     TestRules();
@@ -744,6 +793,7 @@ int main()
     TestRound3();
     TestRound5Plans();
     TestRound5Compose();
+    TestFilmTime();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }

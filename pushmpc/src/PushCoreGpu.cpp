@@ -592,6 +592,8 @@ struct PushCore {
     std::atomic<bool> holdAnimNow{false};
     std::atomic<double> holdMatchMs{0.0};                       // planner CPU per pair for the block match (running mean)
     std::map<uint64_t, std::pair<float, float>> camFixOf;      // planner thread: MatchBlocks' camera correction per pair (compose warp)
+    pushmpc::held::FilmTimeDetector filmTime;                  // P9 (off unless PUSHCORE_HOLD_FILM_TIME): 24p-grid drawings in 29.97
+    std::map<uint64_t, float> filmSwitchOf;                    // per pair: the drawn layer's film-time switch t (-1: none)
     std::atomic<uint64_t> holdScrollPairs{0};                   // pairs with a scrolling layer (credits; ScrollPair), planner thread
     // Budget (research §9): line-art protection and the sign hold are dropped before anything else, before the filter's
     // admission has to lower the multiplier: shed while the graph's p95 + their reserve is over 85 % of a source frame,
@@ -1604,7 +1606,8 @@ struct PushCore {
         if (name == "full") m = AnimMode::Full; else if (name == "camera") m = AnimMode::CameraOnly; else if (name == "off") m = AnimMode::Off; else return false;
         while (k != std::string::npos && k + 1 < v.size()) {
             const bool on = v[k] == '+'; const char w = v[k + 1];
-            const uint32_t bit = w == 't' ? pushmpc::held::kHoldTransients : w == 'l' ? pushmpc::held::kHoldLineArt : w == 's' ? pushmpc::held::kHoldSigns : 0u;
+            const uint32_t bit = w == 't' ? pushmpc::held::kHoldTransients : w == 'l' ? pushmpc::held::kHoldLineArt : w == 's' ? pushmpc::held::kHoldSigns
+                               : w == 'f' ? pushmpc::held::kHoldFilmTime : 0u;
             if (on) f |= bit; else f &= ~bit;
             k = v.find_first_of("+-", k + 1);
         }
@@ -1669,8 +1672,13 @@ struct PushCore {
             slidX.swap(nx); slidY.swap(ny);
             if (ScrollPair(rit->second, bm, objs)) holdScrollPairs.fetch_add(1, std::memory_order_relaxed);
             camFixOf[seq] = { bm.camFixX, bm.camFixY };
+            // P9 film time: the drawn layer (redrawn / unexplained objects; slid camera and effects excluded) of this pair
+            bool drawn = false;
+            for (const auto& o : objs) drawn = drawn || (o.kind != ObjectClass::Slid && o.cells >= kMinObjectCells);
+            filmTime.Push(seq, drawn, false, sourceIntervalMs());
+            filmSwitchOf[seq] = drawn && filmTime.Engaged() ? filmTime.SwitchT(seq) : -1.f;
             holdMatchMs = holdMatchMs.load() * 0.98 + msSince(t0) * 0.02;
-        } else { slidX.clear(); slidY.clear(); }
+        } else { slidX.clear(); slidY.clear(); filmTime.Reset(); }
         objOf[seq] = std::move(objs);
         if (rit != regionOf.end() && rit->second.valid) {
             const RegionFrame& r = rit->second;
@@ -1697,16 +1705,19 @@ struct PushCore {
             const CellGrid* gs = gr(s);
             std::pair<float, float> cf{ 0.f, 0.f };
             if (auto c = camFixOf.find(s); c != camFixOf.end()) cf = c->second;
+            float fs = -1.f;
+            if (auto c = filmSwitchOf.find(s); c != filmSwitchOf.end()) fs = c->second;
             std::array<HoldPlan, 2> plans;
             if (r0 && gs)
                 for (int side = 0; side < (holdSplit ? 2 : 1); ++side)
                     plans[size_t(side)] = PlanHolds(holdMode[side], holdFlg[side], true, *r0, oit == objOf.end() ? noObjs : oit->second, mk(s - 2), mk(s - 1), tm, gs->w, gs->h,
-                                                    cf.first, cf.second);
+                                                    cf.first, cf.second, fs);
             holdOf[s] = std::move(plans);
         }
         while (meanOf.size() > 16) meanOf.erase(meanOf.begin());
         while (objOf.size() > 8) objOf.erase(objOf.begin());
         while (camFixOf.size() > 8) camFixOf.erase(camFixOf.begin());
+        while (filmSwitchOf.size() > 8) filmSwitchOf.erase(filmSwitchOf.begin());
         while (marksOf.size() > 16) marksOf.erase(marksOf.begin());
         while (holdOf.size() > 32) holdOf.erase(holdOf.begin());
     }
@@ -1785,6 +1796,7 @@ struct PushCore {
                 if (sp[k].hold) {
                     pass.flags |= p.whole ? pushmpc::HoldCompose::kWhole : pushmpc::HoldCompose::kMask;
                     if (p.nearest) pass.flags |= pushmpc::HoldCompose::kNearest;
+                    pass.tSwitch = p.tSwitch;
                     if (!p.whole && !holdPass.setMask(imm.Get(), p.mask, p.w, p.h, holdCoverW.load(), holdCoverH.load(), 2.0f)) { ++holdFail; continue; }
                     pairHeld = true; pairFlash = pairFlash || p.whole;
                 }
@@ -2061,7 +2073,7 @@ struct PushCore {
                 if (planStop) return;
                 j = std::move(planJobs.front()); planJobs.pop_front();
             }
-            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); meanOf.clear(); objOf.clear(); marksOf.clear(); holdOf.clear(); camFixOf.clear(); slidX.clear(); slidY.clear(); }
+            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); meanOf.clear(); objOf.clear(); marksOf.clear(); holdOf.clear(); camFixOf.clear(); filmSwitchOf.clear(); filmTime.Reset(); slidX.clear(); slidY.clear(); }
             if (!j.plan) { classifyRegion(j.seq, std::move(j.grid), j.wholly); continue; }
             PlanResult r;
             try {

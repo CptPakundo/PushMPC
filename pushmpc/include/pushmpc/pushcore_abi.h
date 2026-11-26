@@ -167,6 +167,8 @@ typedef struct PushCoreSettings {
                                             objects no motion explains (smears, appearing objects) on animation */
 #define PUSHCORE_HOLD_LINE_ART 2u        /* line contrast of generated frames matched to the drawing; doubled lines replaced */
 #define PUSHCORE_HOLD_SIGNS 4u           /* typeset signs (text drawn into the picture) held with the Subtitle Hold pass */
+#define PUSHCORE_HOLD_FILM_TIME 16u      /* P9: drawn parts of 24p-grid shots in 29.97 video switch at film time (Camera only;
+                                            off by default until the verdict) */
 #define PUSHCORE_HOLD_LIVE_TRANSIENTS 8u /* flash / impact hold on every video, live action too */
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
