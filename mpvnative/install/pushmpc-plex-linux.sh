@@ -29,7 +29,8 @@
 #          every stream converted to 10 bits ahead of the filter (vf-append=@pushmpcdepth:lavfi=[format=yuv420p10le]),
 #          the filter with source_depth=-1 (the engine reads SDR or HDR from the first frame)
 #   vf     otherwise: vf-append=@pushmpc:pushmpc[=<opts>]
-# Snap Plex is not supported: snap-confine is setuid, and glibc drops LD_PRELOAD for it.
+# Snap Plex: snap-confine is setuid, and glibc drops LD_PRELOAD for it; pushmpc-apps-linux.sh loads the hook from
+# the Snap's mpv.conf instead.
 # Exit: 0 done, 1 error, 2 usage, 3 not supported here (no Plex found).
 set -u
 
@@ -121,7 +122,7 @@ selftest() {
     d=$1; lib=$2; shift 2
     [ -x "$d/pushmpc-plex-selftest" ] || { st_detail="no self-test (pushmpc-plex-selftest not shipped)"; return 2; }
     [ -n "$lib" ] || { st_detail="no libmpv.so found in Plex"; return 2; }
-    out=$("$@" env PUSHMPC_HOST_SCRIPT="${st_script:-}" "$d/pushmpc-plex-selftest" "$lib" 2>&1); r=$?
+    out=$("$@" env PUSHMPC_HOST_PROBE_SCRIPT="${st_script:-}" "$d/pushmpc-plex-selftest" "$lib" 2>&1); r=$?
     st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
     case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
 }

@@ -451,7 +451,16 @@ bool InstallHooks(std::string& why)
         return false;
     }
     const mach_header_64* mpv = nullptr;
-    for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
+    {   // the image that defines the client API: a PushMPC libmpv stand-in (pushmpc-apps-mac.sh) re-exports the app's
+        // original libmpv, and that original is the one whose imports go to libavfilter
+        Dl_info di{};
+        void* s = dlsym(RTLD_DEFAULT, "mpv_create");
+        if (s && dladdr(s, &di) && di.dli_fbase && di.dli_fbase != _dyld_get_image_header(0)) {
+            mpv = static_cast<const mach_header_64*>(di.dli_fbase);
+            Log("libmpv: %s", di.dli_fname ? di.dli_fname : "?");
+        }
+    }
+    for (uint32_t i = 0; !mpv && i < _dyld_image_count(); ++i) {
         const char* n = _dyld_get_image_name(i);
         if (n && strstr(n, "libmpv")) { mpv = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(i)); Log("libmpv: %s", n); break; }
     }

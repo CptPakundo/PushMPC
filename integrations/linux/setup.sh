@@ -10,7 +10,8 @@
 #   pushmpc-vlc.sh    VLC 3 (native, Flathub, Snap), when this download has the VLC module (vlc/)
 #   kodi/install.sh   the Kodi add-on, when this download has it (kodi/)
 #   plex/             Plex desktop / HTPC from Flathub: PushMPC's filter in Plex's own player (LD_PRELOAD), when it
-#                     passes its self-test there (Snap Plex: not changed)
+#                     passes its self-test there; plex/pushmpc-apps-linux.sh: Snap Plex / Plex HTPC, Flathub Stremio and
+#                     Jellyfin Desktop, Stremio 4, Emby Theater (each self-tested through its own libmpv)
 #   pmml              PushFlow (RIFE) on the GPU for the mpv route: ONNX Runtime and the EP for this GPU (TensorRT-RTX on an
 #                     NVIDIA RTX card, OpenVINO on Intel, MIGraphX on AMD with ROCm installed) fetched by pmml's own
 #                     fetch_runtime.py and ml-runtime-pin.json (official sources, SHA-256 checked), PushFlow's models from
@@ -188,11 +189,13 @@ list_players() {
     fi
     pt=$(plex_tarball_dir) && add "Plex ($pt)"
     have snap && snap list vlc >/dev/null 2>&1 && add 'vlc (Snap)'
+    if have snap; then for s in plex-desktop plex-htpc emby-theater; do snap list "$s" >/dev/null 2>&1 && add "$s (Snap)"; done; fi
+    if [ -d /opt/emby-theater ] || have emby-theater; then add 'Emby Theater'; fi
     say "Players found: ${found:-none}"
-    # players with no PushMPC route here (Stremio ships its own mpv without a filter slot on Linux)
+    # players with no PushMPC route here
     none=''
-    for p in stremio totem clapper dragon; do have "$p" && none="$none${none:+, }$p"; done
-    if have flatpak && flatpak info com.stremio.Stremio >/dev/null 2>&1; then none="$none${none:+, }com.stremio.Stremio"; fi
+    for p in totem clapper dragon; do have "$p" && none="$none${none:+, }$p"; done
+    [ -n "$none" ] && say "No PushMPC route yet for: $none (play through mpv instead; capture mode is Windows only)"
     [ -n "$none" ] && say "No plug-in route for: $none (capture mode covers them; or play through mpv)"
     return 0
 }
@@ -360,7 +363,8 @@ plex_tarball_dir() {
 }
 # Plex desktop / Plex HTPC from Flathub: PushMPC's filter inside Plex's own player through LD_PRELOAD (plex/, the
 # installer self-tests it through Plex's libmpv in its sandbox). A target that does not pass is undone again. Snap Plex
-# cannot take LD_PRELOAD: it is left as it is (capture mode covers it: do_capture).
+# cannot take LD_PRELOAD: do_apps puts the filter into it as an mpv C plugin from its own mpv.conf instead (capture mode
+# covers what neither route reaches: do_capture).
 do_plex() {
     pi=$here/plex/pushmpc-plex-linux.sh
     [ -f "$pi" ] || return 0
@@ -392,6 +396,31 @@ plex_uninstall() {   # every target, the folder Plex recorded at install
     td=''; [ -f "$pm/plex-installer/tarball-dir" ] && td=$(cat "$pm/plex-installer/tarball-dir")
     sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall ${td:+--tarball-dir "$td"}
 }
+# Players with their own libmpv (Snap Plex / Plex HTPC, Flathub Stremio and Jellyfin Desktop, Emby Theater as .deb /
+# .rpm / Snap / Flatpak): PushMPC's filter inside each player's own libmpv (plex/pushmpc-apps-linux.sh: a C plugin from
+# the player's mpv.conf in Snaps and for Emby Theater, LD_PRELOAD in Flatpaks). Each one is self-tested through that
+# player's libmpv; one that does not pass is left unchanged, with the reason.
+do_apps() {
+    ai=$here/plex/pushmpc-apps-linux.sh
+    [ -f "$ai" ] && [ -f "$here/mpvnative/pushmpc_hook.so" ] && [ -f "$here/plex/pushmpc_preload.so" ] || return 0
+    sh "$ai" status --json >/dev/null 2>&1; [ $? = 3 ] && return 0   # none of those players here
+    say "Players with their own mpv (Snap Plex, Stremio, Jellyfin Desktop, Emby Theater):"
+    if [ "$dry" = 1 ]; then say "  would: sh plex/pushmpc-apps-linux.sh install"; return 0; fi
+    if recorded apps && [ -f "$pm/apps-installer/pushmpc-apps-linux.sh" ]; then sh "$pm/apps-installer/pushmpc-apps-linux.sh" uninstall >/dev/null 2>&1; fi
+    mkdir -p "$pm/apps-installer"; cp "$ai" "$pm/apps-installer/pushmpc-apps-linux.sh"
+    out=$(sh "$ai" install --from "$here/mpvnative" --kit "$here/plex" --json 2>"$pm/apps-installer/install.log")
+    on=0
+    for t in plex-snap plex-htpc-snap stremio-flatpak jellyfin-desktop-flatpak stremio emby emby-snap emby-flatpak; do
+        st=$(printf '%s\n' "$out" | sed -n "s/.*\"target\":\"$t\".*\"state\":\"\([^\"]*\)\".*/\1/p" | head -n 1)
+        dt=$(printf '%s\n' "$out" | sed -n "s/.*\"target\":\"$t\".*\"detail\":\"\([^\"]*\)\".*/\1/p" | head -n 1)
+        [ -n "$st" ] || continue
+        case $st in
+            installed) on=1; say "  $t: smoother motion inside its own player" ;;
+            *) say "  $t: not changed ($st: $(printf '%s' "$dt" | cut -c1-160))" ;;
+        esac
+    done
+    if [ "$on" = 1 ]; then record apps; else rm -rf "$pm/apps-installer"; fi
+}
 do_kodi_addon() {
     [ -f "$here/kodi/install.sh" ] || return 0
     have kodi || [ -d "$HOME/.kodi" ] || { have flatpak && flatpak info tv.kodi.Kodi >/dev/null 2>&1; } || return 0
@@ -414,7 +443,8 @@ capture_players() {   # the launcher's keys of the players found here that PushM
     for p in totem clapper dragon; do
         if have "$p" || { have flatpak && flatpak list --app --columns=application 2>/dev/null | grep -qi "$p"; }; then out="$out $p"; fi
     done
-    # Plex: the Flathub one has its own route (do_plex); the Snap one cannot take it
+    # Plex: the Flathub one has its own route (do_plex); the Snap one gets do_apps' C-plugin route when its self-test
+    # passes, and keeps this menu entry as the fallback
     if have snap && snap list plex-desktop >/dev/null 2>&1 && ! recorded plex; then out="$out plex"; fi
     printf '%s\n' "$out"
 }
@@ -461,6 +491,8 @@ case $action in
             # shellcheck disable=SC2086
             PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }
+            # after install.sh: Emby Theater shares the native hook block in ~/.config/mpv/mpv.conf when there is one
+            do_apps
         fi
         do_vlc
         [ "$os" = Darwin ] && do_kodi_addon
@@ -478,6 +510,8 @@ case $action in
         [ "$dry" = 1 ] || rm -rf "$pm/mpvnative-installer"
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
         if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then say "Plex:"; plex_uninstall 2>&1 | sed 's/^/  /'; fi
+        if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then say "Plex (Flathub):"; sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall 2>&1 | sed 's/^/  /'; fi
+        if recorded apps && [ -f "$pm/apps-installer/pushmpc-apps-linux.sh" ]; then say "Players with their own mpv:"; sh "$pm/apps-installer/pushmpc-apps-linux.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
@@ -486,7 +520,7 @@ case $action in
             [ -f "$pm/capture/pushmpc-capture.sh" ] && sh "$pm/capture/pushmpc-capture.sh" disable --all >/dev/null 2>&1
             rm -rf "$pm/capture"; say "Capture mode removed"
         fi
-        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer" "$pm/plex-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
+        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer" "$pm/plex-installer" "$pm/apps-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
         if [ -f "$pm/install.sh" ]; then
             # shellcheck disable=SC2086
             sh "$pm/install.sh" uninstall $pass

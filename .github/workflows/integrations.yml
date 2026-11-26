@@ -533,8 +533,8 @@ jobs:
         run: |
           set -eu
           git config --global --add safe.directory "$PWD"
-          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} 0.6.0
-          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-0.6.0.tar.gz
+          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)"
+          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-*.tar.gz
       - uses: actions/upload-artifact@v4
         with: { name: 'pushmpc-linux-${{ matrix.arch }}', path: dist/ }
 
@@ -580,8 +580,8 @@ jobs:
           # dconf's cache (written when gsettings runs without a session bus) is not a setting: left out
           snap() { (cd $HOME && find . -type f ! -path './.cache/dconf/*' | LC_ALL=C sort | xargs -r sha256sum); }
           snap > /tmp/before.txt
-          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no | tee /tmp/install.txt
           head -n 8 $HOME/.config/mpv/mpv.conf || true
           echo "::notice title=arch VSScript::$(grep -i vapoursynth /tmp/install.txt | tr '\n' ' ') libs: $(find /usr/lib -maxdepth 4 \( -name 'libvsscript.so*' -o -name 'libvapoursynth-script.so*' \) 2>/dev/null | tr '\n' ' ') toml: $(head -c 600 $HOME/.config/vapoursynth/vapoursynth.toml 2>/dev/null | tr '\n' ' ')"
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
@@ -614,8 +614,8 @@ jobs:
           printf '[advanced]\nmplayer_additional_options=\n' > $HOME/.config/smplayer/smplayer.ini
           export GSETTINGS_BACKEND=keyfile XDG_RUNTIME_DIR=/tmp/xdg-run; mkdir -p $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR
           useradd -m pmtest 2>/dev/null || true
-          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install-fe.txt
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no | tee /tmp/install-fe.txt
           gsettings list-keys io.github.celluloid-player.Celluloid | grep mpv-config || echo "Celluloid schema keys not found"
           gsettings get io.github.celluloid-player.Celluloid mpv-config-enable; gsettings get io.github.celluloid-player.Celluloid mpv-config-file
           cat $HOME/.config/haruna/custom-commands.conf 2>/dev/null | head -8
@@ -666,14 +666,14 @@ jobs:
         run: |
           set -eu
           export HOME=/tmp/home-fedora; mkdir -p $HOME
-          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no | tee /tmp/install.txt
           echo "::notice title=fedora install (mpv only)::$(grep -i 'VapourSynth\|python3-vapoursynth\|mpv.conf' /tmp/install.txt | tr '\n' ' ')"
           if [ "$FEDORA_VS" = 1 ]; then
             sh $HOME/.local/share/pushmpc/install.sh uninstall
             dnf -y -q install python3-vapoursynth >/dev/null 2>&1 || dnf -y -q install vapoursynth-python3 >/dev/null 2>&1 || true
             rpm -qa | grep -i vapoursynth | tee -a /tmp/versions.txt
-            sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak no | tee /tmp/install.txt
+            sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no | tee /tmp/install.txt
             mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
             export PUSHMPC_VS_LOG_DIR=/tmp/vslog-fedora
             mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv-fedora.txt 2>&1 || true
@@ -763,8 +763,8 @@ jobs:
           snap() { (cd $HOME && find .config .var .local/share/flatpak/overrides -type f 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum); }
           had=0; flatpak info --user io.mpv.Mpv >/dev/null 2>&1 && had=1
           snap > /tmp/before.txt
-          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-0.6.0/install.sh --flatpak yes | tee /tmp/install.txt
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak yes | tee /tmp/install.txt
           flatpak info --user io.mpv.Mpv | grep -E 'Version|Runtime' | tee -a /tmp/versions.txt
           echo "--- extension points of io.mpv.Mpv:"; flatpak info --user --show-metadata io.mpv.Mpv | grep -A3 '^\[Extension' | tee -a /tmp/versions.txt || echo "none" | tee -a /tmp/versions.txt
           flatpak override --user --show io.mpv.Mpv

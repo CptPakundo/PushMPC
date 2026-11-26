@@ -48,11 +48,13 @@ if [ -n "${PUSHMPC_MPVNATIVE_DIR:-}" ] && [ -f "$PUSHMPC_MPVNATIVE_DIR/pushmpc_h
     install -m 755 mpvnative/install/pushmpc-native.sh "$d/mpvnative/pushmpc-native.sh"
 fi
 # optional: Plex (Flathub) through LD_PRELOAD (PUSHMPC_PLEX_DIR: pushmpc_preload.so and pushmpc-plex-selftest) with its
-# installer; the libavfilter 8 builds and the engine are the native hook's (symlinks into mpvnative/, no second copy)
+# installer and pushmpc-apps-linux.sh (Snap Plex, Flathub Stremio / Jellyfin Desktop, Stremio 4, Emby Theater: it
+# takes the hook and the libavfilter builds from mpvnative/); the libavfilter 8 builds and the engine are the native hook's (symlinks into mpvnative/, no second copy)
 if [ -n "${PUSHMPC_PLEX_DIR:-}" ] && [ -f "$PUSHMPC_PLEX_DIR/pushmpc_preload.so" ] && [ -f "$d/mpvnative/libpushmpc_engine.so" ] && ls "$d"/mpvnative/libpushmpc-avfilter-8.*.so >/dev/null 2>&1; then
     mkdir -p "$d/plex"; install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc_preload.so" "$d/plex/pushmpc_preload.so"
     if [ -f "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" ]; then install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" "$d/plex/pushmpc-plex-selftest"; fi
     install -m 755 mpvnative/install/pushmpc-plex-linux.sh "$d/plex/pushmpc-plex-linux.sh"
+    install -m 755 mpvnative/install/pushmpc-apps-linux.sh "$d/plex/pushmpc-apps-linux.sh"
     for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d"/mpvnative/libpushmpc_engine*.so "$d/mpvnative/SOURCES.txt" "$d/mpvnative/pushmpc-nvvfx-selftest" "$d/mpvnative/pmml_cli" "$d/mpvnative/pushmpc_hook.so"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
 fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi

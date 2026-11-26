@@ -293,6 +293,25 @@ class Pushmpc < Formula
         fi
         rm -rf "$data/pushmpc/pmml-download"
       fi
+      # Stremio, Jellyfin Desktop and the Jellyfin / Plex MPV shims on macOS (pushmpc-apps-mac.sh in the Mac bundle): the
+      # bridge inside the apps' own player (a small stand-in libmpv in the app, self-tested; a LaunchAgent puts it back
+      # after an app update), the shims switched to Homebrew's mpv with the PushMPC block beside their conf.json
+      appsdir="$data/pushmpc/plex-mac"; appstgz="#{opt_pkgshare}/plex-mac/pushmpc-plex-mac.tar.gz"
+      if [ "$(uname -s)" = Darwin ]; then
+        if [ "$action" = install ] && [ -f "$appstgz" ]; then
+          rm -rf "$appsdir.new" && mkdir -p "$appsdir.new" && tar -xzf "$appstgz" -C "$appsdir.new" && rm -rf "$appsdir" && mv "$appsdir.new" "$appsdir"
+        fi
+        if [ -f "$appsdir/pushmpc-apps-mac.sh" ]; then
+          ax=''; [ "$artcnn" = 0 ] || ax="include=\\"#{opt_pkgshare}/mpv/pushmpc-artcnn.conf\\""
+          ag=''; [ "$action" != install ] || ag=--agent
+          aout=$(/bin/sh "$appsdir/pushmpc-apps-mac.sh" "$action" --from "$appsdir" --bridge "#{opt_lib}/pushmpc/pushmpc-iina.so" \\
+            --mpv "#{Formula["mpv"].opt_bin}/mpv" --integration "#{opt_libexec}/mpv-integration.sh" --vpy "#{opt_pkgshare}/pushmpc.vpy" \\
+            --vsscript "#{HOMEBREW_PREFIX}/etc/mpv/scripts/pushmpc-vsscript.lua" ${ax:+--extra "$ax"} $ag 2>&1); arc=$?
+          if [ "$arc" != 3 ] || ! printf '%s' "$aout" | grep -q 'none of these players'; then
+            echo "Stremio, Jellyfin Desktop, MPV shims:"; printf '%s\\n' "$aout" | sed 's/^/  /'
+          fi
+        fi
+      fi
       if [ "$action" = uninstall ] && [ -f "$pm/.pushmpc-setup" ]; then
         rm -rf "$pm"; rmdir "$data/pushmpc" "$data" 2>/dev/null || true; echo "PushFlow for the ml backend removed"
       fi

@@ -175,6 +175,29 @@ static void list_builds(const char *dir)
     logf_(n ? "; " : " none; ");
 }
 
+/* a loaded library by its file-name stem ("libavfilter.so"), also when it sits in a private (RTLD_LOCAL) namespace:
+ * python-mpv in the shims and Emby Theater's plugin dlopen libmpv locally, so dlsym(RTLD_DEFAULT) cannot see it */
+struct pm_find { const char *stem; char path[1024]; };
+static int find_one(struct dl_phdr_info *info, size_t size, void *data)
+{
+    struct pm_find *f = data;
+    const char *n = info->dlpi_name ? info->dlpi_name : "";
+    (void)size;
+    if (!f->path[0] && strstr(n, f->stem) && !strstr(n, "libpushmpc-avfilter"))
+        snprintf(f->path, sizeof(f->path), "%s", n);
+    return 0;
+}
+static void *loaded_lib(const char *stem, const char *sym)
+{
+    struct pm_find f = { stem, "" };
+    Dl_info di;
+    void *s = dlsym(RTLD_DEFAULT, sym);
+    if (s && dladdr(s, &di) && di.dli_fname && strstr(di.dli_fname, stem))
+        return dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    dl_iterate_phdr(find_one, &f);
+    return f.path[0] ? dlopen(f.path, RTLD_NOW | RTLD_NOLOAD) : NULL;
+}
+
 static int install(void)
 {
     char dir[1024] = "", path[1200];
@@ -193,17 +216,16 @@ static int install(void)
     }
 #endif
     g_sys_handle = dlopen("libavfilter.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!g_sys_handle) {
-        /* the soname carries the major version: find the loaded one through the symbol */
-        void *sym = dlsym(RTLD_DEFAULT, "avfilter_version");
-        if (sym && dladdr(sym, &di) && di.dli_fname)
-            g_sys_handle = dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-    }
+    if (!g_sys_handle)
+        g_sys_handle = loaded_lib("libavfilter.so", "avfilter_version");
     if (!g_sys_handle) { logf_("this mpv has no libavfilter loaded; "); return -1; }
     g_real = (get_by_name_fn)dlsym(g_sys_handle, "avfilter_get_by_name");
     g_real_parse2 = (parse2_fn)dlsym(g_sys_handle, "avfilter_graph_parse2");
     sys_ver = (version_fn)dlsym(g_sys_handle, "avfilter_version");
-    sys_avutil = (version_fn)dlsym(RTLD_DEFAULT, "avutil_version");
+    {
+        void *u = loaded_lib("libavutil.so", "avutil_version");
+        sys_avutil = (version_fn)(u ? dlsym(u, "avutil_version") : dlsym(RTLD_DEFAULT, "avutil_version"));
+    }
     if (!g_real || !sys_ver) { logf_("missing libavfilter symbols; "); return -1; }
     v = sys_ver();
 
@@ -281,7 +303,103 @@ __attribute__((visibility("default"))) const void *avfilter_get_by_name(const ch
     pthread_once(&g_once, preload_init);
     return hook_get_by_name(name);
 }
+
+/* PUSHMPC_PRELOAD_VF=auto|<vf_pushmpc options>: for libmpv programs that read no mpv.conf (Stremio, Jellyfin Desktop
+ * Flatpaks): mpv_initialize is interposed too; after the real one the filter is appended ("vf append"), and a client of
+ * the program's own mpv core puts it back whenever the program replaces the vf list (Stremio does on display changes).
+ * Programs that dlopen libmpv privately and call it through dlsym on that handle bypass this (they use mpv.conf). */
+typedef struct { int event_id; int error; uint64_t reply_userdata; void *data; } pm_event;
+typedef int (*pm_init_fn)(void *);
+typedef int (*pm_cmd_fn)(void *, const char **);
+typedef void *(*pm_client_fn)(void *, const char *);
+typedef int (*pm_observe_fn)(void *, uint64_t, const char *, int);
+typedef pm_event *(*pm_wait_fn)(void *, double);
+typedef char *(*pm_getstr_fn)(void *, const char *);
+typedef void (*pm_free_fn)(void *);
+static pm_cmd_fn pm_cmd;
+static pm_getstr_fn pm_getstr;
+static pm_free_fn pm_free, pm_destroy;
+static pm_wait_fn pm_wait;
+static char g_vfarg[1024];
+
+static int vf_has_ours(void *h)
+{
+    char *v = pm_getstr(h, "vf");
+    const int has = v && strstr(v, "@pushmpc") != NULL;
+    if (v) pm_free(v);
+    return has;
+}
+static void vf_add(void *h, const char *why)
+{
+    const char *args[] = { "vf", "append", g_vfarg, NULL };
+    const int r = pm_cmd(h, args);
+    fprintf(stderr, "[pushmpc_preload] vf append %s (%s) -> %d\n", g_vfarg, why, r);
+}
+static void *vf_watch(void *client)
+{
+    int again = 0;
+    for (;;) {
+        pm_event *ev = pm_wait(client, -1);
+        if (ev->event_id == 1)   /* MPV_EVENT_SHUTDOWN */
+            break;
+        if (ev->event_id == 22 && !vf_has_ours(client) && again++ < 200)   /* MPV_EVENT_PROPERTY_CHANGE "vf" */
+            vf_add(client, "the program replaced the filter list");
+    }
+    pm_destroy(client);
+    return NULL;
+}
+__attribute__((visibility("default"))) int mpv_initialize(void *h)
+{
+    static pm_init_fn real;
+    const char *opt = getenv("PUSHMPC_PRELOAD_VF");
+    int r;
+    if (!real)
+        real = (pm_init_fn)dlsym(RTLD_NEXT, "mpv_initialize");
+    if (!real)
+        return -1;
+    r = real(h);
+    if (r < 0 || !opt || !*opt || !strcmp(opt, "no"))
+        return r;
+    pthread_once(&g_once, preload_init);
+    pm_cmd = (pm_cmd_fn)dlsym(RTLD_NEXT, "mpv_command");
+    pm_getstr = (pm_getstr_fn)dlsym(RTLD_NEXT, "mpv_get_property_string");
+    pm_free = (pm_free_fn)dlsym(RTLD_NEXT, "mpv_free");
+    pm_destroy = (pm_free_fn)dlsym(RTLD_NEXT, "mpv_destroy");
+    pm_wait = (pm_wait_fn)dlsym(RTLD_NEXT, "mpv_wait_event");
+    if (!g_filter || !pm_cmd || !pm_getstr || !pm_free || !pm_destroy || !pm_wait)
+        return r;
+    if (!strcmp(opt, "auto") || !strcmp(opt, "yes"))
+        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc");
+    else
+        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc=%s", opt);
+    if (!vf_has_ours(h))
+        vf_add(h, "after mpv_initialize");
+    {
+        pm_client_fn mk = (pm_client_fn)dlsym(RTLD_NEXT, "mpv_create_client");
+        pm_observe_fn obs = (pm_observe_fn)dlsym(RTLD_NEXT, "mpv_observe_property");
+        void *c = mk ? mk(h, "pushmpc") : NULL;
+        pthread_t t;
+        if (c && obs && obs(c, 1, "vf", 0) >= 0 && pthread_create(&t, NULL, vf_watch, c) == 0)
+            pthread_detach(t);
+        else if (c)
+            pm_destroy(c);
+    }
+    return r;
+}
 #else
+/* The hook calls libmpv only through these pointers and references no mpv_* symbol, so it also loads where libmpv sits
+ * in a private namespace (python-mpv in the shims, Emby Theater's plugin: dlopen RTLD_LOCAL). mpv 0.36+ fills them
+ * right after loading a C plugin (the MPV_CPLUGIN_DYNAMIC_SYM protocol: it writes &mpv_xxx into pfn_mpv_xxx); older
+ * mpv: the global namespace. */
+#define PM_SYM(ret, name, args) __attribute__((visibility("default"))) ret (*pfn_##name) args = NULL;
+PM_SYM(char *, mpv_get_property_string, (mpv_handle *, const char *))
+PM_SYM(void, mpv_free, (void *))
+PM_SYM(int, mpv_command, (mpv_handle *, const char **))
+PM_SYM(const char *, mpv_error_string, (int))
+PM_SYM(mpv_event *, mpv_wait_event, (mpv_handle *, double))
+PM_SYM(int, mpv_observe_property, (mpv_handle *, uint64_t, const char *, mpv_format))
+#define PM_RESOLVE(name) do { if (!pfn_##name) pfn_##name = (__typeof__(pfn_##name))dlsym(RTLD_DEFAULT, #name); } while (0)
+
 /* the filter's options with what the hook learned at play time: the display's refresh rate (Auto aims at its multiple;
  * without it the engines take x2) and source_depth=8 when the stream is converted to 10 bits for the engine */
 static void with_extras(char *out, size_t n, const char *base, double fps, int depth8)
@@ -297,29 +415,38 @@ static void with_extras(char *out, size_t n, const char *base, double fps, int d
 /* the engine's request for a deeper stream, from the filter's frame metadata (vf_pushmpc: pushmpc.want_depth) */
 static int wanted_depth(mpv_handle *h)
 {
-    char *v = mpv_get_property_string(h, "vf-metadata/pushmpc/by-key/pushmpc.want_depth");
+    char *v = pfn_mpv_get_property_string(h, "vf-metadata/pushmpc/by-key/pushmpc.want_depth");
     int d = 0;
     if (!v) {   /* older mpv: the whole map as a string */
-        char *all = mpv_get_property_string(h, "vf-metadata/pushmpc");
+        char *all = pfn_mpv_get_property_string(h, "vf-metadata/pushmpc");
         const char *q = all ? strstr(all, "pushmpc.want_depth") : NULL;
         if (q && (q = strpbrk(q, "0123456789")))
             d = atoi(q);
         if (all)
-            mpv_free(all);
+            pfn_mpv_free(all);
         return d;
     }
     d = atoi(v);
-    mpv_free(v);
+    pfn_mpv_free(v);
     return d;
 }
 
 int mpv_open_cplugin(mpv_handle *h)
 {
-    char *opts = mpv_get_property_string(h, "script-opts");
+    char *opts;
     char cmd[2048] = "@pushmpc:pushmpc", cur[2200];
     int append = 1, own_fps = 0, own_depth = 0, depth8 = 0, checks = 0;
     double applied = 0;
-    const int ok = install() == 0;
+    int ok;
+    PM_RESOLVE(mpv_get_property_string); PM_RESOLVE(mpv_free); PM_RESOLVE(mpv_command); PM_RESOLVE(mpv_error_string);
+    PM_RESOLVE(mpv_wait_event); PM_RESOLVE(mpv_observe_property);
+    if (!pfn_mpv_get_property_string || !pfn_mpv_free || !pfn_mpv_command || !pfn_mpv_error_string || !pfn_mpv_wait_event || !pfn_mpv_observe_property) {
+        fprintf(stderr, "[pushmpc_hook] not active: this libmpv gives C plugins no client API (mpv older than 0.36 in a private namespace)
+");
+        return -1;
+    }
+    opts = pfn_mpv_get_property_string(h, "script-opts");
+    ok = install() == 0;
     if (opts) {   /* script-opts=pushmpc-vf=smoother=4:display_fps=144 -> the filter's options */
         const char *p = strstr(opts, "pushmpc-vf=");
         if (p) {
@@ -333,19 +460,26 @@ int mpv_open_cplugin(mpv_handle *h)
             own_fps = 1;
         if (strstr(opts, "pushmpc-depth=no"))
             own_depth = 1;
-        mpv_free(opts);
+        pfn_mpv_free(opts);
     }
     if (strstr(cmd, "display_fps="))
         own_fps = 1;
     if (strstr(cmd, "source_depth="))
         own_depth = 1;
+    if (ok && append) {   /* another copy of the hook (a second mpv.conf block) may have added it already */
+        char *vf = pfn_mpv_get_property_string(h, "vf");
+        if (vf && strstr(vf, "@pushmpc"))
+            append = 0;
+        if (vf)
+            pfn_mpv_free(vf);
+    }
     if (ok && append) {
         const char *args[] = { "vf", "append", cmd, NULL };
-        const int r = mpv_command(h, args);
-        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, mpv_error_string(r));
+        const int r = pfn_mpv_command(h, args);
+        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, pfn_mpv_error_string(r));
         /* the display's rate is known once the video output runs: then the filter is set again with it (one rebuild) */
         if (!own_fps)
-            mpv_observe_property(h, 1, "display-fps", MPV_FORMAT_DOUBLE);
+            pfn_mpv_observe_property(h, 1, "display-fps", MPV_FORMAT_DOUBLE);
     } else if (ok) {
         fprintf(stderr, "[pushmpc_hook] %s(no vf append)\n", g_log);
     } else {
@@ -353,7 +487,7 @@ int mpv_open_cplugin(mpv_handle *h)
     }
     for (;;) {
         /* while a request of the engine may be on its way (after a start or a seek), look every half second */
-        mpv_event *ev = mpv_wait_event(h, checks > 0 ? 0.5 : -1);
+        mpv_event *ev = pfn_mpv_wait_event(h, checks > 0 ? 0.5 : -1);
         double fps = applied;
         int want = depth8, change = 0;
         if (ev->event_id == MPV_EVENT_SHUTDOWN)
@@ -392,18 +526,18 @@ int mpv_open_cplugin(mpv_handle *h)
             const char *add[] = { "vf", "append", cur, NULL };
             int r;
             with_extras(cur, sizeof(cur), cmd, fps > 1 ? fps : 0, want);
-            mpv_command(h, rm);
+            pfn_mpv_command(h, rm);
             if (want != depth8) {
                 if (want)
-                    mpv_command(h, addfmt);
+                    pfn_mpv_command(h, addfmt);
                 else
-                    mpv_command(h, rmfmt);
+                    pfn_mpv_command(h, rmfmt);
             }
-            r = mpv_command(h, add);
+            r = pfn_mpv_command(h, add);
             applied = fps;
             depth8 = want;
             fprintf(stderr, "[pushmpc_hook] set up again (display %.3f Hz%s): vf append %s -> %s\n", applied,
-                    depth8 ? "; 10-bit stream for the engine" : "", cur, mpv_error_string(r));
+                    depth8 ? "; 10-bit stream for the engine" : "", cur, pfn_mpv_error_string(r));
         }
     }
     return 0;
