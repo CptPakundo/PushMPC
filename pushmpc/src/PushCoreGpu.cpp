@@ -539,6 +539,7 @@ struct PushCore {
     ComPtr<ID3D12GraphicsCommandList> regionList;
     uint32_t regionListNext = 0, regionCurAlloc = 0;
     uint64_t repairedFrames = 0, repairedParts = 0;
+    uint64_t repairWhy[8]{};   // not repaired: re-timed pair, gate (live action / not yet animation), no group, no RGB copy, capture, generate, copy, composite
     bool repairOn() const { return retimingOn() && spanVfgOk && repairPass.ready() && animationLikely(); }
     // the live-action gate: only where held drawings are common (anime repeats drawings exactly; live action does not)
     bool animationLikely() const { return settings.heldFrames >= 2 || (heldRatio.Size() >= 96 && heldRatio.Ratio() >= 0.15); }
@@ -1425,7 +1426,8 @@ struct PushCore {
             if (it == waiting.end()) continue;
             Pending p = it->second;
             waiting.erase(it);
-            if (repairOn() && r.gap == 1) { const int rr = repairFrame(p); if (rr != PUSHCORE_OK) return rr; }
+            if (repairOn()) { if (r.gap == 1) { const int rr = repairFrame(p); if (rr != PUSHCORE_OK) return rr; } else ++repairWhy[0]; }
+            else if (spanVfgOk && retimingOn()) ++repairWhy[1];
             const int rc = processFrame(p.slot, p.copyValue, p.pts, p.flags, p.haveTiming ? &p.timing : nullptr, r.multiplier, r.gap, p.seq, Clock::now());
             if (rc != PUSHCORE_OK) return rc;
         }
@@ -1525,12 +1527,12 @@ struct PushCore {
         auto frameAt = [&](uint64_t q) -> const RegionFrame* { auto it = regionOf.find(q); return it == regionOf.end() ? nullptr : &it->second; };
         auto gridAt = [&](uint64_t q) -> const CellGrid* { auto it = gridOf.find(q); return it == gridOf.end() ? nullptr : &it->second; };
         const auto groups = PlanRepairs(p.seq, frameAt, gridAt, kLookahead);
-        if (groups.empty()) return PUSHCORE_OK;
+        if (groups.empty()) { ++repairWhy[2]; return PUSHCORE_OK; }
         const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
         bool any = false;
         for (const auto& g : groups) {
             RgbSlot* a = rgbOf(g.d0); RgbSlot* b = rgbOf(g.d1);
-            if (!a || !b || a == b) continue;
+            if (!a || !b || a == b) { ++repairWhy[3]; continue; }
             // the pair into the span stream (parity: A then B), unless it holds it already
             if (pairA != g.d0 || pairB != g.d1) {
                 auto* l = regionBegin(); if (!l) return PUSHCORE_ERROR;
@@ -1541,22 +1543,22 @@ struct PushCore {
                 const bool ok = spanVfg.capture(l, a->res.Get(), pa, false) && spanVfg.capture(l, b->res.Get(), pb, true);
                 barrier(l, a->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
                 barrier(l, b->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-                if (!regionSubmit() || !ok) { pairA = pairB = UINT64_MAX; continue; }
+                if (!regionSubmit() || !ok) { pairA = pairB = UINT64_MAX; ++repairWhy[4]; continue; }
                 pairA = g.d0; pairB = g.d1; pairParity ^= 1;   // B's parity is the generate parity
             }
             const unsigned gp = unsigned(pairParity);   // after the flip: the parity B went into
-            if (!spanVfg.generateAt(gp, g.t, 1)) { pairA = pairB = UINT64_MAX; continue; }
+            if (!spanVfg.generateAt(gp, g.t, 1)) { pairA = pairB = UINT64_MAX; ++repairWhy[5]; continue; }
             auto* l = regionBegin(); if (!l) return PUSHCORE_ERROR;
             if (repSlot.readyValue11) ring.queue()->Wait(fence11in12.Get(), repSlot.readyValue11);   // the last repair read it
             barrier(l, repSlot.res.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
             const bool copied = spanVfg.copyOutput(l, repSlot.res.Get(), gp, g.t > 0.5f);
             barrier(l, repSlot.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
             if (!regionSubmit()) return PUSHCORE_ERROR;
-            if (!copied) continue;
+            if (!copied) { ++repairWhy[6]; continue; }
             // D3D11: the part laid into the slot (via the scratch: the pass reads the slot and writes the scratch)
             imm4->Wait(fence12in11.Get(), value12);
             if (!repairPass.setMask(imm.Get(), g.mask, g.w, g.h, std::max(0.5f, 8.0f * float(stream.width) / 3840.0f / float(std::max(1u, gridOf.rbegin()->second.cell)))) ||
-                !repairPass.repair(imm.Get(), inSlots[p.slot].tex.Get(), repSlot.tex.Get(), repairOut.Get(), w, h)) continue;
+                !repairPass.repair(imm.Get(), inSlots[p.slot].tex.Get(), repSlot.tex.Get(), repairOut.Get(), w, h)) { ++repairWhy[7]; continue; }
             imm->CopySubresourceRegion(inSlots[p.slot].tex.Get(), 0, 0, 0, 0, repairOut.Get(), 0, nullptr);
             if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(repair)")) return PUSHCORE_ERROR;
             repSlot.readyValue11 = value11;
@@ -1742,6 +1744,8 @@ struct PushCore {
     void teardownGraph() {
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
+        if (spanVfgOk) veyra::log::info("pushcore", std::format("source repair: {} frames ({} parts); not repaired: re-timed pair {}, gate {}, no part {}, no RGB copy {}, capture {}, generate {}, copy {}, composite {}",
+            repairedFrames, repairedParts, repairWhy[0], repairWhy[1], repairWhy[2], repairWhy[3], repairWhy[4], repairWhy[5], repairWhy[6], repairWhy[7]));
         spanVfg.shutdown(); spanVfgOk = false; rgbSlots.clear(); repSlot = {}; repairOut.Reset(); repairPass.forgetViews();
         opened.clear(); outSlots.clear();
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
