@@ -15,6 +15,7 @@
 #include "VapourSynth4.h"
 #include "backend.h"
 #include "ml_backend.h"
+#include "vs_content.h"
 #include "pmml/upscale.h"
 #include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: model table, costs, Auto's pick
 #include "platform.h"
@@ -42,6 +43,7 @@ struct MInst {
     VSFrameContext* fc = nullptr;
     const VSFrame* curSrc = nullptr;
     std::vector<const VSFrame*> held;
+    pmvs::VsContent content;
     // the anime upscaler (pmml::Upscaler) on each source frame before frame generation; its result per source frame
     // (the repair asks for a frame more than once), AnimeSR's carry restarts when the sources are not consecutive
     std::unique_ptr<pmml::Upscaler> up;
@@ -116,6 +118,7 @@ void MBind(MInst* d)
         const VSFrame* f = d->api->getFrameFilter(int(s), d->node, d->fc);
         if (!f) return false;
         d->held.push_back(f);
+        d->content.Push(d->api, f, s);
         d->curSrc = f;
         const VSMap* p = d->api->getFramePropertiesRO(f);
         int e1 = 0, e2 = 0;
@@ -263,7 +266,12 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
 {
     auto fail = [&](const std::string& m) { Log("ml: create failed: " + m); a->freeNode(node); a->mapSetError(out, ("pushmpc.Enhance (ml): " + m).c_str()); };
     Log("backend: " + why);
-    const VSVideoInfo* vi = a->getVideoInfo(node);
+    // the declared rate is replaced by the one measured on this stream by an earlier instance (vs_content.h)
+    VSVideoInfo viM = *a->getVideoInfo(node);
+    std::string rateNote; const std::string cdKey = pmvs::ApplyMeasuredRate(viM, &rateNote);
+    if (!rateNote.empty()) Log(rateNote);
+    const pmvs::StreamMemo cdMemo = pmvs::Recall(cdKey);
+    const VSVideoInfo* vi = &viM;
     const std::string rt = MlRuntimeDir(in, a);
     if (!MlRuntimePresent(rt)) return fail("no pmml runtime (graphs/synth-yuv.onnx) in '" + rt + "'");
     const int w = vi->width, h = vi->height, bits = vi->format.bitsPerSample;
@@ -276,7 +284,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     // the anime upscaler (upscaler=anime [anime_model=<id>], or upscaler=auto with animation=on): enlarged pictures only
     const std::string upArg = MArg(in, a, "upscaler"), modelArg = MArg(in, a, "anime_model"), animArg = MArg(in, a, "animation");
     const bool animeAsked = upArg == "anime" || upArg == "Anime";
-    const bool animeAuto = (upArg.empty() || upArg == "auto" || upArg == "Auto") && (animArg == "on" || animArg == "1");
+    const bool animeAuto = (upArg.empty() || upArg == "auto" || upArg == "Auto") && (animArg == "on" || animArg == "1" || (animArg.empty() && cdMemo.cls == 1));   // or measured drawn (vs_content.h)
     int dispW = 0, dispH = 0;
     { int e1 = 0, e2 = 0; dispW = int(a->mapGetInt(in, "display_w", 0, &e1)); dispH = int(a->mapGetInt(in, "display_h", 0, &e2)); if (e1 || e2) dispW = dispH = 0; }
     int animeModel = -1;
@@ -369,6 +377,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     auto* d = new MInst();
     d->node = node;
     d->inVi = *vi;
+    d->content.Init(cdKey, *vi, cdMemo.cls);
     d->k = k;
     d->vi = *vi;
     if (up) { d->vi.width = up->outWidth(); d->vi.height = up->outHeight(); d->up = std::move(up); }

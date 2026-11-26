@@ -250,8 +250,21 @@ static void EngineDedup()
 
 #include "zero_copy_test.inc"
 
+// Auto's anime upscaler switch keeps the output size in both directions (no mid-stream picture size change in Kodi)
+static void AnimeAutoSwitch()
+{
+    pmk::EngineCfg c; c.width = 1280; c.height = 720; c.animeAutoModel = "artcnn-c4f16"; c.animeAutoOutW = 2560; c.animeAutoOutH = 1440;
+    c.upscaler = 1; c.outWidth = 2560; c.outHeight = 1440;   // the plain route as DecideUpscale prepares it
+    const pmk::EngineCfg on = pmk::AnimeAutoConfig(c, true), off = pmk::AnimeAutoConfig(on, false);
+    CHECK(on.animeModel == "artcnn-c4f16" && off.animeModel.empty());
+    CHECK(on.outWidth == c.outWidth && on.outHeight == c.outHeight && off.outWidth == c.outWidth && off.outHeight == c.outHeight);
+    pmk::EngineCfg none; none.outWidth = 0;
+    CHECK(pmk::AnimeAutoConfig(none, true).animeModel.empty() && pmk::AnimeAutoConfig(none, true).outWidth == 0);
+}
+
 int main()
 {
+    AnimeAutoSwitch();
     Schedule();
     HeldSchedule();
     Engine();

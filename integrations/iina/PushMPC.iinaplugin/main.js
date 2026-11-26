@@ -93,7 +93,11 @@ function ensureShaders() {
 let lastApplied = "";
 async function apply(reason) {
   const quality = pref("quality", "auto");
-  const content = pref("content", "live");
+  // Content Auto: what PushMPC's bridge measures in the picture (user-data/pushmpc/content), never the file name;
+  // live action until it has measured drawn animation
+  const contentPref = pref("content", "auto");
+  const measured = (mpv.getString("user-data/pushmpc/content") || "").replace(/^"|"$/g, "");
+  const content = contentPref === "auto" ? (measured === "anime" ? "anime" : "live") : contentPref;
   const motion = pref("motion", true) !== false && pref("motion", true) !== "false";
   const tscale = pref("tscale", "oversample");
   const framegen = pref("framegen", true) !== false && pref("framegen", true) !== "false";
@@ -138,7 +142,8 @@ function buildMenu() {
   for (const q of QUALITIES) {
     root.addSubMenuItem(menu.item(LABELS[q], () => { preferences.set("quality", q); buildMenu(); apply("menu"); }, { selected: q === quality }));
   }
-  const content = pref("content", "live");
+  const content = pref("content", "auto");
+  root.addSubMenuItem(menu.item("Content: Auto (measured)", () => { preferences.set("content", "auto"); buildMenu(); apply("menu"); }, { selected: content === "auto" }));
   root.addSubMenuItem(menu.item("Content: live action", () => { preferences.set("content", "live"); buildMenu(); apply("menu"); }, { selected: content === "live" }));
   root.addSubMenuItem(menu.item("Content: anime", () => { preferences.set("content", "anime"); buildMenu(); apply("menu"); }, { selected: content === "anime" }));
   const framegen = pref("framegen", true) !== false && pref("framegen", true) !== "false";
@@ -151,4 +156,13 @@ function buildMenu() {
 
 event.on("iina.window-loaded", () => { buildMenu(); });
 event.on("iina.file-loaded", () => { apply("file"); });
+// the measured content changed (the bridge publishes it at most every 0.5 s; its class changes at most once per shot)
+let lastMeasured = "";
+const onMeasured = () => {
+  if (pref("content", "auto") !== "auto") return;
+  const m = (mpv.getString("user-data/pushmpc/content") || "").replace(/^"|"$/g, "");
+  if (m && m !== lastMeasured) { lastMeasured = m; apply("measured " + m); }
+};
+if (typeof setInterval === "function") setInterval(onMeasured, 2000);
+else event.on("mpv.user-data/pushmpc/content.changed", onMeasured);
 apply("start");

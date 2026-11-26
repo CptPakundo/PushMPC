@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #include <vlc_common.h>
 #include <vlc_plugin.h>
@@ -370,6 +371,10 @@ struct filter_sys_t {
     int fs;                /* the vout's live "fullscreen" (our parent object), re-read every 30 input pictures */
     int fs_smoother;       /* what Auto decided with, for the re-decision on a fullscreen toggle */
     double fs_fps, fs_hz;
+    /* the source rate measured from the picture dates (VLC 3 shows pictures by their date; the format's rate only sets
+     * the late-drop threshold, src/video_output/video_output.c ThreadDisplayPreparePicture): k is re-decided from it,
+     * within the pools made at open (sized for the rate 20 % below the declared one) */
+    mtime_t rate_last; int rate_n; mtime_t rate_steps[16]; double rate_fps; int rate_done;
     int alloc;
     int bits, bps;
     picture_t *prev;
@@ -954,6 +959,23 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (!cur) return NULL;
     }
     if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
+    if (!sys->rate_done && sys->eng) {   /* the measured source rate (16 date steps, the median) */
+        if (sys->rate_last > 0 && cur->date > sys->rate_last && cur->date - sys->rate_last < 250000) sys->rate_steps[sys->rate_n++] = cur->date - sys->rate_last;
+        sys->rate_last = cur->date;
+        if (sys->rate_n == 16) {
+            mtime_t v[16]; memcpy(v, sys->rate_steps, sizeof(v));
+            for (int a = 1; a < 16; a++) { mtime_t x = v[a]; int b = a - 1; while (b >= 0 && v[b] > x) { v[b + 1] = v[b]; b--; } v[b + 1] = x; }
+            const double fps = 1e6 / (double)v[8];
+            sys->rate_done = 1; sys->rate_fps = fps;
+            if (sys->fs_fps <= 0 || fabs(fps - sys->fs_fps) / fps > 0.05) {
+                char why[256] = "";
+                int k = pm_engine_decide(sys->eng, sys->fs_smoother, fps, sys->fs_hz, why, sizeof(why));
+                k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
+                msg_Info(f, "PushMPC: source rate measured from the picture dates %.3f fps (the format says %.3f): x%d (%s)", fps, sys->fs_fps, k, why);
+                sys->fs_fps = fps; sys->k = k;
+            }
+        }
+    }
     if (sys->in % 30 == 0) {   /* a fullscreen toggle mid-file: var_Inherit reads the vout's live variable */
         const int fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
         if (fs != sys->fs) {
@@ -1355,11 +1377,16 @@ static int Open(vlc_object_t *obj)
         snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
 
+    sys->k_open = sys->k;
+    if (sys->eng && sys->k > 1 && fps > 1.0) {   /* pools for a measured rate up to 20 % below the declared one (29.97 tag, 24p body) */
+        char why2[256] = "";
+        const int klo = pm_engine_decide(sys->eng, smoother, fps * 0.8, hz, why2, sizeof(why2));
+        if (klo > sys->k_open) sys->k_open = klo > 16 ? 16 : klo;
+    }
     if (sys->hw) {
-        if (sys->k > 1) pm_hw_set_pool_size(sys->hw, (sys->dedup && sys->eng ? 2 + PM_HOLD : 3) * sys->k + 4);   /* the job's pictures (a held span: up to (PM_HOLD + 1) x k), those queued for display, a spare */
+        if (sys->k > 1) pm_hw_set_pool_size(sys->hw, (sys->dedup && sys->eng ? 2 + PM_HOLD : 3) * (sys->k_open > sys->k ? sys->k_open : sys->k) + 4);   /* the job's pictures (a held span: up to (PM_HOLD + 1) x k), those queued for display, a spare */
         else { pm_hw_release(sys->hw); sys->hw = NULL; }
     }
-    sys->k_open = sys->k;
     sys->fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
     sys->fs_smoother = smoother; sys->fs_fps = fps; sys->fs_hz = hz;
     if (f->fmt_out.video.i_frame_rate)

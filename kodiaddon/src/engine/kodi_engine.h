@@ -37,6 +37,18 @@ struct EngineCfg {
     std::string pmmlBackend;           // e.g. ort:directml:dml:0, ort:core:trt-rtx:0 ("" = the first GPU EP the runtime has)
 };
 
+// Auto's anime upscaler switch (ContentDetect measured drawn / not drawn): the engine config for each state. The
+// output size never changes: while the switch is possible, the plain route already upscales (NIS) to the same size
+// the anime route ends at, so Kodi never sees a mid-stream picture size change.
+inline EngineCfg AnimeAutoConfig(const EngineCfg& cur, bool drawn)
+{
+    EngineCfg c = cur;
+    if (cur.animeAutoModel.empty()) return c;
+    c.upscaler = 1; c.outWidth = cur.animeAutoOutW; c.outHeight = cur.animeAutoOutH;
+    if (drawn) c.animeModel = cur.animeAutoModel; else c.animeModel.clear();
+    return c;
+}
+
 // the GPU engine's output layout (packed rows); a player buffer laid out like this can be written in place
 struct OutLayout { int pitchY = 0, pitchC = 0; uint64_t offU = 0, offV = 0, size = 0; };
 

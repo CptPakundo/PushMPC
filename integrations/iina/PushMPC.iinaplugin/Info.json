@@ -11,7 +11,7 @@
   "preferencesPage": "preferences.html",
   "preferenceDefaults": {
     "quality": "auto",
-    "content": "live",
+    "content": "auto",
     "framegen": true,
     "motion": true,
     "tscale": "oversample"

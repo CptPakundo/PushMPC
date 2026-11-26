@@ -589,6 +589,10 @@ private:
                     int ow = m_screenW, oh = int(std::lround(m_screenW / dar0));
                     if (oh > m_screenH) { oh = m_screenH; ow = int(std::lround(m_screenH * dar0)); }
                     c.animeAutoOutW = ow & ~1; c.animeAutoOutH = oh & ~1;
+                    // the plain route upscales to that same size from the start (NIS), so switching the anime model on or off
+                    // later never changes the decoder's output size (AnimeAutoConfig)
+                    if (m_screenW > 0) mode = 3;
+                    why = "upscaling: NIS to the screen; the anime upscaler takes over once the picture is measured as drawn animation";
                 } else if (pick.model >= 0) {
                     const std::wstring id = pm::AnimeSrModel(pick.model).id;
                     c.animeModel.assign(id.begin(), id.end());
@@ -1376,12 +1380,14 @@ private:
         const bool want = st.cls == kDrawn;
         const auto now = std::chrono::steady_clock::now();
         if (want == !m_cfg.animeModel.empty() || (m_animeSwitched && now - m_animeSwitchAt < std::chrono::seconds(30))) return;
-        pmk::EngineCfg c2 = m_cfg;
-        if (want) { c2.animeModel = c2.animeAutoModel; c2.upscaler = 1; c2.outWidth = c2.animeAutoOutW; c2.outHeight = c2.animeAutoOutH; }
-        else { c2.animeModel.clear(); c2.upscaler = m_in ? m_in->EngineConfig().upscaler : 0; c2.outWidth = m_in ? m_in->EngineConfig().outWidth : 0; c2.outHeight = m_in ? m_in->EngineConfig().outHeight : 0; }
+        const pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, want);
         std::string why;
         auto e = pmk::OpenEngine(c2, why);
         if (!e) { Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: %s", why.c_str()); m_cfg.animeAutoModel.clear(); return; }
+        if (e->OutWidth() != m_engine->OutWidth() || e->OutHeight() != m_engine->OutHeight()) {   // never resize mid-stream
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: output %dx%d would replace %dx%d", e->OutWidth(), e->OutHeight(), m_engine->OutWidth(), m_engine->OutHeight());
+            m_cfg.animeAutoModel.clear(); return;
+        }
         m_engine = std::move(e); m_cfg = c2;
         m_animeSwitched = true; m_animeSwitchAt = now;
         m_upscaled = m_engine->OutWidth() != m_w || m_engine->OutHeight() != m_h;

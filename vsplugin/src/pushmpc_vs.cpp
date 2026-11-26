@@ -35,6 +35,7 @@
 #ifdef _WIN32
 #include "autopick.h"
 #include "corehost.h"
+#include "vs_content.h"
 static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable ceiling follows PUSHCORE_MAX_MULTIPLIER (backend.h)");
 #endif
 #include "schedule.h"
@@ -92,6 +93,7 @@ struct Enhance {
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
     std::vector<const VSFrame*> held;
+    pmvs::VsContent content;   // class + frame rate measured on the frames (vs_content.h)
 };
 
 std::wstring ArgStr(const VSMap* in, const VSAPI* a, const char* key)
@@ -166,6 +168,7 @@ void BindHost(Enhance* d, CoreHost& h)
         const VSFrame* f = d->api->getFrameFilter(int(s), d->node, d->fc);
         if (!f) return false;
         d->held.push_back(f);
+        d->content.Push(d->api, f, s);
         const VSMap* p = d->api->getFramePropertiesRO(f);
         Meta m;
         m.durNum = PropInt(p, d->api, "_DurationNum", 0); m.durDen = PropInt(p, d->api, "_DurationDen", 0);
@@ -345,7 +348,12 @@ HostPaths NvidiaPaths(const VSMap* in, const VSAPI* a)
 void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node)
 {
     auto fail = [&](const std::string& m) { Log("create failed: " + m); a->mapSetError(out, ("pushmpc.Enhance: " + m).c_str()); };
-    const VSVideoInfo* vi = a->getVideoInfo(node);
+    // the declared rate is replaced by the one measured on this stream by an earlier instance (vs_content.h)
+    VSVideoInfo viM = *a->getVideoInfo(node);
+    std::string rateNote; const std::string cdKey = pmvs::ApplyMeasuredRate(viM, &rateNote);
+    if (!rateNote.empty()) Log(rateNote);
+    const pmvs::StreamMemo cdMemo = pmvs::Recall(cdKey);
+    const VSVideoInfo* vi = &viM;
     const VSVideoFormat& f = vi->format;
 
     // settings: HKCU\Software\PushMPC, then the plugin arguments
@@ -372,6 +380,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     auto* d = new Enhance();
     d->node = node;
     d->inVi = *vi;
+    d->content.Init(cdKey, *vi, cdMemo.cls);
     d->settings = s;
     d->waitMs = uint32_t(std::clamp<int64_t>(ArgInt(in, a, "wait_ms", 10000), 100, 120000));
     CoreHost& h = CoreHost::Get();
@@ -405,6 +414,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
 
     d->src.w = UINT(w); d->src.h = UINT(hh);
     d->src.fps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
+    d->src.contentClass = cdMemo.cls; d->src.contentConf = cdMemo.cls ? 0.9f : 0.f;   // measured on this stream (earlier instance)
     d->src.hdr = IsHdrTransfer(col.transfer); d->src.tenBit = f.bitsPerSample > 8; d->src.bppEq = -1;
     const HWND wnd = MpvWindow();
     d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg, int(ArgInt(in, a, "display_fs", -1)));

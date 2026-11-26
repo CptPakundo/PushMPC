@@ -20,6 +20,10 @@
 #include "portable_backend.h"
 #include "cadence.h"
 #include "transitions.h"
+#if __has_include("VapourSynth4.h")
+#include "vs_content.h"
+#define PM_TEST_VS_CONTENT 1
+#endif
 #include <functional>
 #include "veyra/portable/Interpolate.h"
 
@@ -507,8 +511,27 @@ static void TestCalibrate()
     std::printf("  calibration 2160p 10-bit, %d threads: motion %.1f ms, one generated frame %.1f ms -> %s\n", c4.threads, c4.meMs, c4.genMs, k4.why.c_str());
 }
 
+// ContentDetect on the VapourSynth routes: a stream whose measured rate differs from the declared one starts the next
+// instance (mpv reloads the script) with the measured rate; the same rate stays as declared
+static void TestMeasuredRate()
+{
+#if PM_TEST_VS_CONTENT
+    VSVideoInfo vi{}; vi.width = 1920; vi.height = 1080; vi.format.bitsPerSample = 8; vi.fpsNum = 30000; vi.fpsDen = 1001;
+    const std::string key = pmvs::StreamKey(vi);
+    VSVideoInfo a = vi; pmvs::ApplyMeasuredRate(a);
+    CHECK(a.fpsNum == 30000 && a.fpsDen == 1001, "nothing measured: the declared rate stays (%lld/%lld)", (long long)a.fpsNum, (long long)a.fpsDen);
+    { std::lock_guard<std::mutex> lk(pmvs::MemoLock()); pmvs::Memo()[key] = pmvs::StreamMemo{ 23.98, 1 }; }
+    VSVideoInfo b = vi; std::string note; pmvs::ApplyMeasuredRate(b, &note);
+    CHECK(b.fpsNum == 24000 && b.fpsDen == 1001 && !note.empty(), "a 29.97 tag on a 24p body: 24000/1001 from the measurement (%lld/%lld)", (long long)b.fpsNum, (long long)b.fpsDen);
+    { std::lock_guard<std::mutex> lk(pmvs::MemoLock()); pmvs::Memo()[key] = pmvs::StreamMemo{ 29.95, 3 }; }
+    VSVideoInfo c = vi; pmvs::ApplyMeasuredRate(c);
+    CHECK(c.fpsNum == 30000 && c.fpsDen == 1001 && pmvs::Recall(key).cls == 3, "a measurement within 5 %% keeps the exact declared fraction");
+#endif
+}
+
 int main()
 {
+    TestMeasuredRate();
     TestSelect();
     TestBudget();
     TestPlatform();

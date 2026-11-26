@@ -22,7 +22,7 @@ local options = require 'mp.options'
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
 -- Anime upscaling shaders (pushmpc-anime-shaders: "id=path;..." best first; ArtCNN (MIT) and CuNNy (LGPL-3.0) as their
 -- authors publish them, fetched and checked by Setup): used instead of the set above for animation MEASURED in the
--- picture (never from the file name: a signalstats tap counts frames that repeat the drawing before them; on at 20 % of
+-- picture (never from the file name: mpv's fingerprint filter counts frames that repeat the drawing before them; on at 20 % of
 -- the last ~4 s, off again below 10 % for ~8 s), only when the picture is enlarged (their
 -- //!WHEN guard), the "-ds" (denoise + sharpen) variant at a low bitrate. After a few seconds their measured render time
 -- (vo-passes) must stay within anime-share of a frame's time, else the next lighter one takes over. They are compute
@@ -43,25 +43,47 @@ local function source_fps()
     if e and e > 1 then return e end
     return mp.get_property_number("container-fps", 24)
 end
--- measured animation (whole-frame holds, as pushcore's held share): a pass-through signalstats filter on software frames
--- (decoding without hwdec or with a -copy hwdec; never inserted on a hardware-frame chain); YDIF = mean |frame - previous|
-local meter = { on = false, held = {}, anim = false, since = 0, cb = nil }
+-- measured animation (whole-frame holds, as pushcore's held share) where no PushMPC engine runs: mpv's own fingerprint
+-- filter (an 8x8 gray thumbnail per frame, passed through unchanged) and a comparison of consecutive thumbnails. The
+-- fingerprint filter reads only CPU frames (vf_fingerprint.c has no hardware path), so with a hardware decoder this
+-- file switches to the same decoder's copy-back mode once at the start (d3d11va -> d3d11va-copy: one NV12 copy per
+-- frame, no software tap of the full picture).
+local meter = { on = false, held = {}, anim = false, since = 0, timer = nil, last = nil, copied = false }
 local function meter_stop()
-    if meter.on then mp.commandv("vf", "remove", "@pmcd"); mp.unobserve_property(meter.cb) end
-    meter.on, meter.held, meter.anim, meter.since = false, {}, false, 0
+    if meter.timer then meter.timer:kill() end
+    if meter.on then mp.commandv("vf", "remove", "@pmcd") end
+    meter.on, meter.held, meter.anim, meter.since, meter.timer, meter.last = false, {}, false, 0, nil, nil
+end
+local function fp_diff(a, b)
+    if not a or not b or #a ~= #b then return 255 end
+    local s = 0
+    for i = 1, #a, 2 do s = s + math.abs(tonumber(a:sub(i, i + 1), 16) - tonumber(b:sub(i, i + 1), 16)) end
+    return s / (#a / 2)
 end
 local function meter_start(on_change)
     if meter.on then return true end
     local hw = mp.get_property("hwdec-current") or "no"
-    if hw ~= "no" and hw ~= "" and not hw:find("%-copy$") then msg.info("animation measure: hardware frames (" .. hw .. "), not measured: the live-action set stays"); return false end
-    if not mp.commandv("vf", "append", "@pmcd:lavfi=[signalstats]") then return false end
+    if hw ~= "no" and hw ~= "" and not hw:find("%-copy$") and not meter.copied then
+        meter.copied = true
+        mp.set_property("file-local-options/hwdec", hw .. "-copy")
+        msg.info("animation measure: " .. hw .. " -> " .. hw .. "-copy for this file (the fingerprint filter needs CPU frames)")
+    end
+    if not mp.commandv("vf", "append", "@pmcd:fingerprint=type=gray-hex-8x8:clear-on-query=yes") then return false end
     meter.on = true
-    meter.cb = function(_, md)
-        local y = md and tonumber(md["lavfi.signalstats.YDIF"])
-        if not y then return end
+    meter.timer = mp.add_periodic_timer(0.1, function()
+        local md = mp.get_property_native("vf-metadata/pmcd")
+        if not md then return end
+        for i = 0, 9 do
+            local hx = md["fp" .. i .. ".hex"]
+            if not hx then break end
+            if meter.last then
+                local h = meter.held
+                h[#h + 1] = fp_diff(hx, meter.last) <= 0.75 and 1 or 0
+                if #h > 96 then table.remove(h, 1) end
+            end
+            meter.last = hx
+        end
         local h = meter.held
-        h[#h + 1] = y < 0.5 and 1 or 0
-        if #h > 96 then table.remove(h, 1) end
         if #h < 48 then return end
         local n = 0; for _, v in ipairs(h) do n = n + v end
         local share, now = n / #h, mp.get_time()
@@ -74,8 +96,7 @@ local function meter_start(on_change)
                 on_change(want)
             end
         else meter.since = 0 end
-    end
-    mp.observe_property("vf-metadata/pmcd", "native", meter.cb)
+    end)
     return true
 end
 local function low_bitrate()
@@ -142,7 +163,7 @@ local function shaders(why)
         end)
     end
 end
-mp.register_event("end-file", function() meter_stop(); if anime.timer then anime.timer:kill() end; if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end; shaders_on = false end)
+mp.register_event("end-file", function() meter_stop(); meter.copied = false; if anime.timer then anime.timer:kill() end; if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end; shaders_on = false end)
 
 if opts.mode == "vsr" then
     local failed_for, last = nil, nil
@@ -232,6 +253,29 @@ local native_last = nil
 local native_up_failed = nil   -- the file on which the upload could not start: vf_pushmpc on CPU frames then
 
 local failed_for = nil   -- the file the filter failed on: no retry until the next file
+-- the VapourSynth filter measures the class and the real frame rate on the frames (vsplugin/src/vs_content.h) and writes
+-- them to <temp>/pushmpc-vs-<pid>.txt; when the running instance was created with another rate or class (reload=1),
+-- the filter is added again once (as a seek does: mpv reloads the script) and the new instance starts with them
+local vs_watch = { timer = nil, reloads = 0 }
+local function vs_status_path()
+    local dir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
+    local sep = package.config:sub(1, 1)
+    return dir .. (dir:sub(-1) == sep and "" or sep) .. "pushmpc-vs-" .. tostring(mp.get_property_number("pid", 0)) .. ".txt"
+end
+mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; os.remove(vs_status_path()) end)
+function vs_status_watch()
+    if vs_watch.timer then vs_watch.timer:kill() end
+    vs_watch.timer = mp.add_periodic_timer(2, function()
+        local f = io.open(vs_status_path(), "r")
+        if not f then return end
+        local t = f:read("*a"); f:close()
+        if not t:find("reload=1", 1, true) or vs_watch.reloads >= 2 then return end
+        vs_watch.reloads = vs_watch.reloads + 1
+        msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
+        mp.commandv("vf", "remove", "@pushmpc")
+        mp.commandv("vf", "append", spec)
+    end)
+end
 local busy = false
 
 local function remove_native()
@@ -287,6 +331,7 @@ local function ensure()
             return
         end
         msg.info("PushMPC's filter added")
+        vs_status_watch()
     end
     if opts["drop-d3d11vpp"] == "yes" then
         local list, dropped = {}, false

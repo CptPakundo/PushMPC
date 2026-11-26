@@ -24,6 +24,7 @@
 #include "platform.h"
 #include "portable_backend.h"
 #include "schedule.h"
+#include "vs_content.h"
 #include "vslog.h"
 #ifdef PMVS_GPU
 #include "gpu_backend.h"
@@ -50,6 +51,7 @@ struct PInst {
     VSFrameContext* fc = nullptr;
     const VSFrame* curSrc = nullptr;           // the source frame being submitted (the outputs copy its props)
     std::vector<const VSFrame*> held;
+    pmvs::VsContent content;
 };
 
 std::string PArg(const VSMap* in, const VSAPI* a, const char* key)
@@ -93,6 +95,7 @@ void Bind(PInst* d)
         const VSFrame* f = d->api->getFrameFilter(int(s), d->node, d->fc);
         if (!f) return false;
         d->held.push_back(f);
+        d->content.Push(d->api, f, s);
         d->curSrc = f;
         const VSMap* p = d->api->getFramePropertiesRO(f);
         int e1 = 0, e2 = 0;
@@ -190,6 +193,7 @@ struct GInst {
     int k = 1;
     std::mutex lock;
     Pipeline<void*> pipe;
+    pmvs::VsContent content;
     gpu::GpuBackend<void*> be;
     std::map<int64_t, PMeta> meta;
     uint64_t produced = 0, lastLogged = 0;
@@ -204,6 +208,7 @@ void BindGpu(GInst* d)
         const VSFrame* f = d->api->getFrameFilter(int(s), d->node, d->fc);
         if (!f) return false;
         keep = const_cast<VSFrame*>(f);
+        d->content.Push(d->api, f, s);
         const VSMap* p = d->api->getFramePropertiesRO(f);
         int e1 = 0, e2 = 0;
         PMeta m; m.durNum = d->api->mapGetInt(p, "_DurationNum", 0, &e1); m.durDen = d->api->mapGetInt(p, "_DurationDen", 0, &e2);
@@ -289,7 +294,12 @@ struct GpuCalKey { int w, h, bits, ow, oh, up, quality; std::string device; bool
 // the GPU path, or false (with the reason) when there is no usable Vulkan device: the caller then runs the CPU engine
 bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const PortableSettings& s, const std::string& overrides, std::string& why)
 {
-    const VSVideoInfo* vi = a->getVideoInfo(node);
+    // the declared rate is replaced by the one measured on this stream by an earlier instance (vs_content.h)
+    VSVideoInfo viM = *a->getVideoInfo(node);
+    std::string rateNote; const std::string cdKey = pmvs::ApplyMeasuredRate(viM, &rateNote);
+    if (!rateNote.empty()) Log(rateNote);
+    const pmvs::StreamMemo cdMemo = pmvs::Recall(cdKey);
+    const VSVideoInfo* vi = &viM;
     const int w = vi->width, h = vi->height, bits = vi->format.bitsPerSample;
     gpu::DeviceRequest req;
     req.device = s.device;
@@ -353,6 +363,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     }
     d->node = node;
     d->inVi = *vi;
+    d->content.Init(cdKey, *vi, cdMemo.cls);
     d->k = std::max(1, pk.k);
     d->vi = *vi;
     d->vi.width = d->be.engine.OutWidth(); d->vi.height = d->be.engine.OutHeight();
@@ -384,7 +395,12 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
 void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode* node, const std::string& why)
 {
     auto fail = [&](const std::string& m) { Log("portable: create failed: " + m); a->mapSetError(out, ("pushmpc.Enhance (portable): " + m).c_str()); };
-    const VSVideoInfo* vi = a->getVideoInfo(node);
+    // the declared rate is replaced by the one measured on this stream by an earlier instance (vs_content.h)
+    VSVideoInfo viM = *a->getVideoInfo(node);
+    std::string rateNote; const std::string cdKey = pmvs::ApplyMeasuredRate(viM, &rateNote);
+    if (!rateNote.empty()) Log(rateNote);
+    const pmvs::StreamMemo cdMemo = pmvs::Recall(cdKey);
+    const VSVideoInfo* vi = &viM;
     PortableSettings s = LoadPortableSettings([](const char* n) { return ReadSetting(n); });
     std::string overrides;
     if (const std::string v = PArg(in, a, "enable"); !v.empty()) { s.enable = ParseBool(v, s.enable); overrides += " enable=" + v; }
@@ -435,6 +451,7 @@ void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, V
     auto* d = new PInst();
     d->node = node;
     d->inVi = *vi;
+    d->content.Init(cdKey, *vi, cdMemo.cls);
     d->k = pk.k;
     d->vi = *vi;
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, d->k);

@@ -28,6 +28,7 @@
 #include <mach/mach.h>
 #include <algorithm>
 #include <atomic>
+#include "pushmpc/content_detect.h"
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -123,6 +124,10 @@ AVRational (*o_get_frame_rate)(const AVFilterContext*) = nullptr;
 
 // ------------------------------------------------------------------------------------------------ one marked graph
 mpv_handle* g_mpv = nullptr;
+// ContentDetect's class of the picture (measured in Feed on the frames; published to the plugin as
+// user-data/pushmpc/content by the event thread: the filter thread never calls into mpv)
+std::atomic<int> g_contentClass{0};
+pushmpc::content::ContentDetector g_content;   // filter thread only
 
 void ReleasePixelBuffer(void* opaque, uint8_t*) { CVPixelBufferRelease(static_cast<CVPixelBufferRef>(opaque)); }
 
@@ -374,6 +379,29 @@ bool Feed(Bridge& b, AVFrame* f)
     }
     if (b.mode == Bridge::Mode::Pass) return false;
     const int64_t inPts = f->pts;
+    {   // what the picture is, measured (pts in mpv's lavfi time base, microseconds)
+        using namespace pushmpc::content;
+        Cells c;
+        if (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUV420P10) {
+            c = f->format == AV_PIX_FMT_YUV420P
+                ? CellsFromYuv(static_cast<const uint8_t*>(f->data[0]), f->linesize[0], static_cast<const uint8_t*>(f->data[1]), static_cast<const uint8_t*>(f->data[2]), f->linesize[1], f->width, f->height, 8, true)
+                : CellsFromYuv(reinterpret_cast<const uint16_t*>(f->data[0]), f->linesize[0] / 2, reinterpret_cast<const uint16_t*>(f->data[1]), reinterpret_cast<const uint16_t*>(f->data[2]), f->linesize[1] / 2, f->width, f->height, 10, true);
+        } else if (f->format == AV_PIX_FMT_VIDEOTOOLBOX && f->data[3]) {
+            CVPixelBufferRef pb = reinterpret_cast<CVPixelBufferRef>(f->data[3]);
+            if (CVPixelBufferGetPlaneCount(pb) == 2 && CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+                const OSType t = CVPixelBufferGetPixelFormatType(pb);
+                const bool p10 = t == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || t == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+                const int w = int(CVPixelBufferGetWidth(pb)), h = int(CVPixelBufferGetHeight(pb));
+                const void* y = CVPixelBufferGetBaseAddressOfPlane(pb, 0); const void* uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+                const ptrdiff_t ys = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 0)), cs = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 1));
+                c = p10 ? CellsFromYuv(static_cast<const uint16_t*>(y), ys / 2, static_cast<const uint16_t*>(uv), static_cast<const uint16_t*>(nullptr), cs / 2, w, h, 16, true)
+                        : CellsFromYuv(static_cast<const uint8_t*>(y), ys, static_cast<const uint8_t*>(uv), static_cast<const uint8_t*>(nullptr), cs, w, h, 8, true);
+                CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+            }
+        }
+        if (b.lastPts == AV_NOPTS_VALUE || f->pts == AV_NOPTS_VALUE || f->pts <= b.lastPts) g_content.Discontinuity();
+        if (c.ok() && f->pts != AV_NOPTS_VALUE && g_content.Push(c, double(f->pts) / 1e6)) g_contentClass.store(g_content.Current().cls);
+    }
     const bool contiguous = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE && f->pts > b.lastPts &&
                             (b.prevPts == AV_NOPTS_VALUE || f->pts - b.lastPts <= 3 * std::max<int64_t>(1, b.lastPts - b.prevPts));
     const int64_t step = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE ? f->pts - b.lastPts : 0;
@@ -644,7 +672,13 @@ extern "C" __attribute__((visibility("default"))) int mpv_open_cplugin(mpv_handl
     mpv_observe_property(handle, 1, "display-fps", MPV_FORMAT_DOUBLE);
     mpv_observe_property(handle, 2, "container-fps", MPV_FORMAT_DOUBLE);
     while (true) {
-        mpv_event* e = mpv_wait_event(handle, -1);
+        mpv_event* e = mpv_wait_event(handle, 0.5);
+        {   // ContentDetect's class for the IINA plugin's Auto content mode (main.js reads user-data/pushmpc/content)
+            static int published = -1;
+            const int cls = g_contentClass.load();
+            if (cls != published) { published = cls; mpv_set_property_string(handle, "user-data/pushmpc/content", cls == 1 ? "anime" : cls == 0 ? "measuring" : "live"); }
+        }
+        if (e->event_id == MPV_EVENT_NONE) continue;
         if (e->event_id == MPV_EVENT_SHUTDOWN) break;
         if (e->event_id == MPV_EVENT_PROPERTY_CHANGE) {
             auto* pr = static_cast<mpv_event_property*>(e->data);
