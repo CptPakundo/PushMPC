@@ -8,6 +8,8 @@
 #                     else the VapourSynth route (never both)
 #   pushmpc-vlc.sh    VLC 3 (native, Flathub, Snap), when this download has the VLC module (vlc/)
 #   kodi/install.sh   the Kodi add-on, when this download has it (kodi/)
+#   plex/             Plex desktop / HTPC from Flathub: PushMPC's filter in Plex's own player (LD_PRELOAD), when it
+#                     passes its self-test there (Snap Plex: not changed)
 #   pmml              PushFlow (RIFE) on the GPU for the mpv route: ONNX Runtime and the EP for this GPU (TensorRT-RTX on an
 #                     NVIDIA RTX card, OpenVINO on Intel, MIGraphX on AMD with ROCm installed) fetched by pmml's own
 #                     fetch_runtime.py and ml-runtime-pin.json (official sources, SHA-256 checked), PushFlow's models from
@@ -304,6 +306,30 @@ PY
     record pmml
     say "  PushFlow runtime installed in $pm/pmml (the mpv route's ml backend finds it there)"
 }
+# Plex desktop / Plex HTPC from Flathub: PushMPC's filter inside Plex's own player through LD_PRELOAD (plex/, the
+# installer self-tests it through Plex's libmpv in its sandbox). A target that does not pass is undone again. Snap Plex
+# cannot take LD_PRELOAD: it is left as it is (capture mode is Windows-only; the OBS workaround in the user guide).
+do_plex() {
+    pi=$here/plex/pushmpc-plex-linux.sh
+    [ -f "$pi" ] && have flatpak || return 0
+    flatpak info tv.plex.PlexDesktop >/dev/null 2>&1 || flatpak info tv.plex.PlexHTPC >/dev/null 2>&1 || return 0
+    say "Plex (Flathub):"
+    if [ "$dry" = 1 ]; then say "  would: sh plex/pushmpc-plex-linux.sh install"; return 0; fi
+    mkdir -p "$pm/plex-installer"; cp "$pi" "$pm/plex-installer/pushmpc-plex-linux.sh"
+    out=$(sh "$pi" install --from "$here/plex" --json 2>"$pm/plex-installer/install.log"); rc=$?
+    sed 's/^/  /' "$pm/plex-installer/install.log" | tail -n 5
+    on=0
+    for t in desktop htpc; do
+        st=$(printf '%s\n' "$out" | sed -n "s/.*\"target\":\"$t\".*\"state\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1)
+        [ -n "$st" ] || continue
+        case $st in
+            installed) on=1; say "  Plex ($t): smoother motion inside Plex's own player" ;;
+            refused|unsupported) say "  Plex ($t): not changed ($st)" ;;
+            *) say "  Plex ($t): the self-test did not pass ($st): undone"; sh "$pi" uninstall --target "$t" >/dev/null 2>&1 ;;
+        esac
+    done
+    if [ "$on" = 1 ]; then record plex; else [ "$rc" = 0 ] || say "  Plex is not changed (exit $rc)"; rm -rf "$pm/plex-installer"; fi
+}
 do_kodi_addon() {
     [ -f "$here/kodi/install.sh" ] || return 0
     have kodi || [ -d "$HOME/.kodi" ] || { have flatpak && flatpak info tv.kodi.Kodi >/dev/null 2>&1; } || return 0
@@ -336,6 +362,7 @@ case $action in
             do_native
             # the Kodi add-on first: install.sh leaves a Kodi that has it alone
             do_kodi_addon
+            do_plex
             # shellcheck disable=SC2086
             PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }
@@ -354,10 +381,11 @@ case $action in
         if recorded native && [ -f "$pm/mpvnative-installer/pushmpc-native.sh" ]; then say "mpv (native hook):"; sh "$pm/mpvnative-installer/pushmpc-native.sh" uninstall --target native 2>&1 | sed 's/^/  /'; fi
         [ "$dry" = 1 ] || rm -rf "$pm/mpvnative-installer"
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
+        if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then say "Plex (Flathub):"; sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
-        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
+        if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer" "$pm/plex-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
         if [ -f "$pm/install.sh" ]; then
             # shellcheck disable=SC2086
             sh "$pm/install.sh" uninstall $pass

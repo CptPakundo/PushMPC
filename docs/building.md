@@ -116,6 +116,11 @@ Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its 
   backup; a logon task (`\PushMPC\Plex libmpv check`) re-applies it after Plex updates; mpv-integration then writes
   PushMPC's block and `tls-ca-file=<Plex>\resources\cacert.pem` into Plex's `mpv.conf`. Uninstall reverses whichever
   ran. `-PlexSwap No` declines both; `PUSHMPC_TEST_PLEX_PROXY=fail` forces the fallback in tests.
+- **Plex on Linux (Flathub):** the tarball's `plex/` holds `pushmpc_preload.so` and `pushmpc-plex-selftest` (built in
+  the release's manylinux job from `mpvnative/hook/pushmpc_preload.c` and `libmpv_host.c`), `pushmpc-plex-linux.sh`, and
+  symlinks to the native hook's `libpushmpc-avfilter-8.*.so` and `libpushmpc_engine.so` (`PUSHMPC_PLEX_DIR` for
+  make-tarball.sh). setup.sh runs `pushmpc-plex-linux.sh install --from plex --json` when a Plex Flatpak is installed;
+  a target that is not `installed` is uninstalled again; state `plex`. Snap Plex is skipped.
 - **VLC, Kodi:** optional `vlc` and `kodi` components (`stage -VlcPlugin`, `-KodiPackage`), installed by
   `vlcplugin/install/pushmpc-vlc.ps1` and `kodiaddon/install/install.ps1` when the player is found.
 - **Linux mpv:** `setup.sh` tries the native hook first (`mpvnative/install/pushmpc-native.sh`); when it does not activate
