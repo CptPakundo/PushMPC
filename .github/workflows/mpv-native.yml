@@ -19,6 +19,7 @@ on:
         description: 'also run the macOS job'
         type: boolean
         default: false
+plex_linux:        description: 'also run the Plex on Linux job (unfinished)'        type: boolean        default: false
 
 concurrency:
   group: mpv-native-${{ github.ref }}
@@ -501,6 +502,7 @@ jobs:
   # Plex desktop / HTPC on Linux (Flathub): Plex bundles libmpv + FFmpeg 5.x (libavfilter.so.8); pushmpc_preload.so via
   # `flatpak override --env=LD_PRELOAD` adds vf_pushmpc. Self-test inside the sandbox with Plex's own libmpv.
   plex-linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.plex_linux
     needs: [hook-libs, selftest-clips]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
