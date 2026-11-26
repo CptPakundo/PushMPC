@@ -95,14 +95,14 @@ def find_log():
     c = glob.glob(os.path.join(a.home, "**", "kodi.log"), recursive=True)
     return max(c, key=os.path.getmtime) if c else None
 
-def launch(args, seconds, drive_case=None, drive_out=None):
+def launch(args, seconds, drive_case=None, drive_out=None, stdout_path=None):
     cmd = shlex.split(a.kodi, posix=(os.name != "nt")) + args
     print("+", cmd, flush=True)
     log = find_log()
     if log:
         os.remove(log)
     kodi_settings()
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    p = subprocess.Popen(cmd, stdout=open(stdout_path, "w") if stdout_path else subprocess.DEVNULL, stderr=subprocess.STDOUT)
     d = None
     if drive_case:
         d = subprocess.Popen([sys.executable, os.path.join(here, "drive.py"), drive_case, str(seconds), a.clips],
@@ -160,7 +160,16 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
     drive_out = os.path.join(a.out, f"{name}.drive.txt")
     if noalloc and a.alloc_off:
         subprocess.run(a.alloc_off, shell=True, check=False)
-    launch([os.path.join(a.clips, clip)] if clip else [], a.play * 2 if drive_case == "browse" else a.play, drive_case, drive_out)
+    # a start that never got as far as Kodi's log (the previous Flatpak instance still going away) is tried once more
+    for attempt in range(2):
+        launch([os.path.join(a.clips, clip)] if clip else [], a.play * 2 if drive_case == "browse" else a.play, drive_case, drive_out,
+               os.path.join(a.out, f"{name}.stdout.txt"))
+        log = find_log()
+        if log and os.path.getsize(log) > 0:
+            break
+        print(f"{name}: Kodi wrote no log (start {attempt + 1}); its output:", flush=True)
+        print(open(os.path.join(a.out, f"{name}.stdout.txt"), encoding="utf-8", errors="replace").read()[-3000:], flush=True)
+        time.sleep(5)
     if noalloc and a.alloc_on:
         subprocess.run(a.alloc_on, shell=True, check=False)
     log = find_log()
