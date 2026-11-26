@@ -110,6 +110,14 @@ pme::Backend* OpenSoftware(const pmeng_stream& st, const pme::Options& o, pmeng_
         if (!b && explicitChoice) { why = "backend=nvidia: " + tried; return nullptr; }
     }
 #endif
+#ifdef PME_ML
+    // PushFlow through pmml (Windows on Arm: the QNN EP on the Hexagon NPU or the Adreno GPU), when Setup's measurement
+    // says it fits this clip's frame budget; backend=ml takes it unmeasured too
+    if (!b && (backend == "auto" || backend == "ml")) {
+        b = attempt("ml", [](const pmeng_stream& s, const pme::Options& op, pmeng_output& ou, std::string& w) { return pme::OpenMl(s, op, ou, op.count("backend") && op.at("backend") == "ml", w); });
+        if (!b && backend == "ml") { why = "backend=ml: " + tried; return nullptr; }
+    }
+#endif
 #ifdef PME_VULKAN
     bool vk = backend == "portable-vulkan";
 #if defined(__APPLE__) || (defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__)))

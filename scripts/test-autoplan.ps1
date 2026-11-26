@@ -69,6 +69,9 @@ $p = Get-Plan '10DE:2184:NVIDIA GeForce GTX 1660' $id @('-PmmlRuntime', $rt)
 Test-That ($p['pmmlEps'] -eq 'trt-rtx' -and $p['pmmlBackend'] -eq 'ort:core:trt-rtx:0') "GTX 1660: candidate $($p['pmmlEps']), backend '$($p['pmmlBackend'])' ($($p['pmmlWhy']))"
 $p = Get-Plan '10DE:1B80:NVIDIA GeForce GTX 1080' $id @('-PmmlRuntime', $rt)
 Test-That (-not $p['pmmlEps']) "GTX 1080: no runtime candidate ('$($p['pmmlEps'])')"
+# G15: Snapdragon (Adreno; DXGI's vendor "QCOM"): the QNN EP for the ARM64 mpv's ml engine
+$p = Get-Plan '4D4F4351:0C36:Qualcomm(R) Adreno(TM) X1-85 GPU' $id @('-PmmlRuntime', $rt)
+Test-That ($p['pmmlEps'] -eq 'qnn') "Snapdragon X: candidate '$($p['pmmlEps'])' (QNN EP)"
 # an AMD card keeps DirectML (pmml's order without a measurement): pmml.txt goes again
 $p = Get-Plan '1002:744C:AMD Radeon RX 7900 XTX' $id @('-PmmlRuntime', $rt, '-Apply')
 Test-That (-not $p['pmmlBackend'] -and -not (Test-Path $txt)) "RX 7900 XTX without a measurement: DirectML, pmml.txt removed ($($p['pmmlWhy']))"

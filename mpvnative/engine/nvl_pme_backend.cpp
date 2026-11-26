@@ -297,7 +297,17 @@ private:
         };
         const int shift = Semi(m_fmt) && out10 ? 6 : 0;   // P010: MSB-aligned
         auto put = [&](uint8_t* row, int x, uint32_t v) { if (out10) reinterpret_cast<uint16_t*>(row)[x] = uint16_t(v << shift); else row[x] = uint8_t(v); };
-        for (int y = 0; y < h; ++y) { uint8_t* row = d.data[0] + d.linesize[0] * y; for (int x = 0; x < w; ++x) put(row, x, sample(0, x, y)); }
+        const size_t bps = out10 ? 2 : 1;
+        if (in10 == out10 && shift == 0) {   // the same depth: rows as they are (luma; chroma too when planar)
+            for (int y = 0; y < h; ++y) std::memcpy(d.data[0] + d.linesize[0] * y, o.data[0] + o.pitch[0] * size_t(y), size_t(w) * bps);
+            if (!Semi(m_fmt)) {
+                for (int i = 1; i < 3; ++i)
+                    for (int y = 0; y < ch; ++y) std::memcpy(d.data[i] + d.linesize[i] * y, o.data[i] + o.pitch[i] * size_t(y), size_t(cw) * bps);
+                return;
+            }
+        } else {
+            for (int y = 0; y < h; ++y) { uint8_t* row = d.data[0] + d.linesize[0] * y; for (int x = 0; x < w; ++x) put(row, x, sample(0, x, y)); }
+        }
         if (Semi(m_fmt)) {
             for (int y = 0; y < ch; ++y) {
                 uint8_t* row = d.data[1] + d.linesize[1] * y;

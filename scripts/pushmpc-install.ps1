@@ -2479,10 +2479,14 @@ function Find-PmmlRuntime {
 # The pmml runtime Setup installs for this GPU (the quality path for PushFlow; default on, -Pmml No declines it):
 # TensorRT-RTX on an NVIDIA RTX card, OpenVINO on Intel. Every other GPU keeps PushFlow on DirectML, pushcore's own
 # zero-copy session: Radeon (the AMD GPU EP is not published as a plugin EP; MIGraphX is Linux / ROCm only),
-# GeForce GTX (TensorRT-RTX needs RTX), Snapdragon (QNN's NPU path for PushFlow is not built yet).
+# GeForce GTX (TensorRT-RTX needs RTX). Snapdragon: the QNN EP for PushMPC's ARM64 mpv (G15, below).
 # GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5, the oldest TensorRT-RTX supports): TensorRT-RTX as on RTX
 # (Get-PmmlChoice); pushcore keeps DirectML when the EP does not load or its session fails
 function Get-PmmlEps([string]$fam, $g = $null) {
+    # G15: Snapdragon (Qualcomm: PCI vendor 0x5143, DXGI's "QCOM", or Adreno by name: its ACPI id has no VEN_) on Windows on
+    # Arm: the QNN EP (Hexagon NPU / Adreno GPU) for the ARM64 mpv's ml engine (PushFlow through pmml, ARM64 in-process);
+    # pushcore (x64 under emulation) keeps DirectML
+    if ($g -and ([uint32]$g.Vendor -in 0x5143, 0x4D4F4351 -or "$($g.Name)" -match 'Adreno|Qualcomm|Snapdragon')) { return @('qnn') }
     switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } default { return @() } }
 }
 function Get-PmmlFetchFiles { foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) { $s = Join-Path $d 'pmml-fetch.ps1'; $p = Join-Path $d 'ml-runtime-pin.json'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath $p)) { return @($s, $p) } }; return @() }
@@ -2505,17 +2509,51 @@ function Install-PmmlRuntime($state) {
     if (Test-Path -LiteralPath (Join-Path $dir 'fetched.json')) {
         try { $f = Get-Content -LiteralPath (Join-Path $dir 'fetched.json') -Raw | ConvertFrom-Json; $have = (@($f.ort.PSObject.Properties | ForEach-Object { "ort/$($_.Name) $($_.Value.version)" }) + @($f.eps.PSObject.Properties | ForEach-Object { "eps/$($_.Name) $($_.Value.version)" })) -join ', ' } catch { }
     }
-    if ($have -eq $want) { Info "PushFlow runtime ($want) is already installed"; if (-not $DryRun) { Set-StateValue $state 'pmmlInstalled' $want }; return }
+    if ($have -eq $want) { Info "PushFlow runtime ($want) is already installed"; if (-not $DryRun) { Set-StateValue $state 'pmmlInstalled' $want; Complete-PmmlArm64 $dir $state }; return }
     Info "PushFlow runtime for $fam`: $want (ONNX Runtime and the EP from nuget.org / pypi.org, pinned by SHA-256)"
     Progress 93 'Installing PushFlow''s runtime for this GPU'
     if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors core -Eps $($eps -join ',')"; return }
-    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform 'win-x64' -Flavors core -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
+    # Windows on Arm: the ARM64 libraries (ONNX Runtime arm64, the QNN EP's libs\arm64) for the ARM64 mpv's ml engine
+    $plat = if ((Get-NativeArch) -eq 'ARM64') { 'win-arm64' } else { 'win-x64' }
+    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform $plat -Flavors core -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
     $rc = $LASTEXITCODE
     foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|cached|skip|pmml-fetch)') { Info "  $l" } }
     Remove-Item -LiteralPath (Join-Path $InstallDir 'download\pmml') -Recurse -Force -ErrorAction SilentlyContinue
     if ($rc -ne 0) { Warn "PushFlow runtime not installed (pmml-fetch exit $rc): PushFlow runs on DirectML; run Repair to try again"; return }
     Set-StateValue $state 'pmmlInstalled' $want
     Info "PushFlow runtime installed in $dir"
+    Complete-PmmlArm64 $dir $state
+}
+# G15, Windows on Arm with PushMPC's ARM64 mpv: the rest the ml engine (PushFlow through pmml, the QNN EP) needs next to
+# ONNX Runtime and the EP: pmml's graphs (shipped in the mpv build), the PushFlow models (the installed runtime's, through
+# the MlModels setting: no second copy), and the measurement Auto decides with (pmml_cli auto: every EP x tier on this
+# PC, each in its own process, at the sizes the engine looks up; pmml-autobench.json). Without a measurement the engine
+# leaves PushFlow out and the portable GPU engine runs. Runs at install and update only (never during playback).
+function Complete-PmmlArm64([string]$dir, $state) {
+    if ((Get-NativeArch) -ne 'ARM64') { return }
+    $mpv = Join-Path $InstallDir 'mpv-native'
+    $cli = Join-Path $mpv 'pmml_cli.exe'
+    if (-not (Test-Path -LiteralPath $cli)) { Info "PushFlow on this PC's NPU: PushMPC's ARM64 mpv is not installed (its ml engine is what uses it)"; return }
+    if ($DryRun) { Dry "would copy pmml's graphs into $dir\graphs, point MlModels at the runtime's PushFlow models and measure with pmml_cli auto"; return }
+    $g = Join-Path $mpv 'pmml-graphs'
+    if (Test-Path -LiteralPath $g) { New-Item -ItemType Directory -Force (Join-Path $dir 'graphs') | Out-Null; Copy-Item (Join-Path $g '*.onnx') (Join-Path $dir 'graphs') -Force }
+    $models = Join-Path (Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel) 'models'
+    if (-not (Test-Path -LiteralPath (Join-Path $models 'pushflow-fast.onnx'))) { Warn "PushFlow on this PC's NPU: the PushFlow models are not installed ($models): the portable GPU engine runs"; return }
+    if (-not $NoRegister) {
+        New-RegKey 'HKCU:\Software\PushMPC'
+        foreach ($kv in @(@('MlModels', $models, 'mlModelsSet'), @('MlRuntime', $dir, 'mlRuntimeSet'))) {
+            $cur = (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name $kv[0] -ErrorAction SilentlyContinue).($kv[0])
+            if (-not $cur) { Set-ItemProperty 'HKCU:\Software\PushMPC' -Name $kv[0] -Value $kv[1]; Set-StateValue $state $kv[2] $kv[1] }
+        }
+    }
+    # pmml_cli keeps its results per device + driver + size: a measured PC is not measured again until its driver changes
+    Progress 95 'Measuring PushFlow on this PC (NPU and GPU)'
+    foreach ($size in '1280x720', '1920x1080', '3840x2160') {
+        $o = & $cli auto --runtime $dir --models $models --graphs (Join-Path $dir 'graphs') --size $size --fps 23.976 --mult 4 --cache $dir 2>&1
+        $rc = $LASTEXITCODE
+        foreach ($l in @($o) | Select-Object -Last 3) { Info "  pmml_cli auto $size`: $l" }
+        if ($rc -ne 0) { Info "  pmml_cli auto $size`: exit $rc (no candidate ran: the portable GPU engine runs at this size)" }
+    }
 }
 # PushFlow's EP for pushcore: the pmml Auto benchmark's measurement when this card has one (pmml-autobench.json: the
 # backend with the fastest network among the candidates that ran), else pmml's order without a measurement (trt-rtx,
@@ -2523,6 +2561,8 @@ function Install-PmmlRuntime($state) {
 # pmml.txt then).
 function Get-PmmlChoice([string]$rt, [string]$fam, $g) {
     if (-not $rt) { return @{ backend = ''; why = 'no pmml runtime installed: PushFlow on DirectML (pushcore''s own session)' } }
+    # G15: on Windows on Arm the pmml runtime is ARM64 (the ARM64 mpv's ml engine); pushcore is x64 under emulation
+    if ((Get-NativeArch) -eq 'ARM64') { return @{ backend = ''; why = 'Windows on Arm: the pmml runtime is ARM64 (PushMPC''s ARM64 mpv); pushcore (x64, emulated) keeps DirectML' } }
     $cache = Join-Path $rt 'pmml-autobench.json'
     if (Test-Path -LiteralPath $cache) {
         try {
@@ -3317,6 +3357,9 @@ switch ($Action) {
         Uninstall-MpvRoute $state
         Uninstall-VlcRoute $state
         if ((Get-StateValue $state 'capture') -or (Test-Path (Join-Path $InstallDir 'capture'))) { Invoke-Capture 'disable' }
+        # the PushFlow models path Setup gave the ARM64 mpv's ml engine (G15; only when Setup set it)
+        $mm = Get-StateValue $state 'mlModelsSet'
+        if ($mm -and -not $DryRun -and (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlModels -ErrorAction SilentlyContinue).MlModels -eq $mm) { Remove-ItemProperty 'HKCU:\Software\PushMPC' -Name MlModels -ErrorAction SilentlyContinue }
         # the pmml runtime path Setup gave the mpv route (only when Setup set it)
         $ml = Get-StateValue $state 'mlRuntimeSet'
         if ($ml -and -not $DryRun -and (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime -eq $ml) { Remove-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue }

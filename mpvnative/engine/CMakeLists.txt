@@ -132,7 +132,25 @@ elseif(PME_NVL)
   message(STATUS "pushmpc_engine: no NVIDIA engine (PME_NVL_FATBIN not set)")
 endif()
 
+# ---- PushFlow through pmml (G15: Windows on Arm, the QNN EP on Snapdragon's Hexagon NPU / Adreno GPU): pmml (../../pmml)
+# with ONNX Runtime's C API headers (-DPMML_ORT_INCLUDE=..., pmml/scripts/fetch_runtime.py --headers); ONNX Runtime and
+# its EPs load at run time from the pmml runtime folder Setup installs (nothing of them is linked or shipped here).
+# pmml_cli (built alongside) is what Setup runs to measure the candidates (pmml-autobench.json), which Auto needs.
+set(PMML_ORT_INCLUDE "" CACHE STRING "ONNX Runtime C API headers for pmml (the ml engine)")
+set(PME_ML_ON OFF)
+if(PMML_ORT_INCLUDE)
+  add_subdirectory("${ROOT}/pmml" pmml)
+  set(PME_ML_ON ON)
+  list(APPEND PME_SOURCES ml_pme_backend.cpp)
+  message(STATUS "pushmpc_engine: the ml engine (PushFlow through pmml)")
+endif()
+
 add_library(pushmpc_engine SHARED ${PME_SOURCES})
+if(PME_ML_ON)
+  target_compile_definitions(pushmpc_engine PRIVATE PME_ML)
+  target_include_directories(pushmpc_engine PRIVATE "${ROOT}/vsplugin/engines/ml")
+  target_link_libraries(pushmpc_engine PRIVATE pmml)
+endif()
 if(PME_NVL_ON)
   target_compile_definitions(pushmpc_engine PRIVATE PME_NVL)
   target_link_libraries(pushmpc_engine PRIVATE pme_nvl)

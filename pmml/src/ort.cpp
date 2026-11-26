@@ -361,6 +361,20 @@ bool appendEp(Ort* ort, OrtSessionOptions* so, const Options& o, EpChoice* choic
         if (devs.empty()) { if (err) *err = it->epName + " reports no " + type + " device here"; return false; }
         if (o.backend.device < 0 || size_t(o.backend.device) >= devs.size()) { if (err) *err = it->epName + " has no device " + std::to_string(o.backend.device); return false; }
         const OrtEpDevice* d = devs[size_t(o.backend.device)];
+        if (ep == "qnn" || ep == "qnn-gpu") {
+            // G15: Snapdragon. The backend that matches the device (HTP = the Hexagon NPU, or the Adreno GPU); on the NPU the
+            // fp32 PushFlow models run in fp16 (Hexagon v73+ has fp16; no int8 calibration needed) at the highest clocks
+            // (playback is real time); PMML_EP_OPTIONS overrides any of these
+            auto put = [&](const char* key, const char* value) {
+                if (std::find(keys.begin(), keys.end(), key) == keys.end()) { keys.push_back(key); vals.push_back(value); }
+            };
+            put("backend_type", ep == "qnn" ? "htp" : "gpu");
+            if (ep == "qnn") {
+                put("htp_performance_mode", "burst");
+                put("enable_htp_fp16_precision", "1");
+                put("htp_graph_finalization_optimization_mode", "3");
+            }
+        }
         if (ep == "trt-rtx" && !o.cacheDir.empty()) {
             // TensorRT-RTX's runtime cache keeps the JIT-compiled kernels across runs (key per the EP's docs)
             if (std::find(keys.begin(), keys.end(), "nv_runtime_cache_path") == keys.end()) { keys.push_back("nv_runtime_cache_path"); vals.push_back(joinPath(o.cacheDir, "trt-rtx")); }

@@ -2,6 +2,8 @@
 # hosted windows-11-arm runner:
 #   nvl-fatbin  ubuntu-24.04: the NVIDIA engine's CUDA kernels (nvcc, build time only) and the GPU cut guard (Slang, pinned)
 #               as fatbins; cached by their sources, so CUDA is installed only when the kernels change
+#   pmml-winarm64 ubuntu-24.04: pmml's graphs and ONNX Runtime's C API headers (pinned) for the ml engine (PushFlow through
+#               pmml: the QNN EP on Snapdragon's NPU / Adreno GPU)
 #   windows     windows-11-arm: the engine module with MSVC ARM64 (CPU engine, the portable GPU engine for Adreno's Vulkan
 #               driver, NVIDIA's engine for RTX Spark; no pushcore: x64 only), engine_test; FFmpeg 9.1 + vf_pushmpc and
 #               mpv 0.42 in MSYS2 CLANGARM64 (mpvnative/ci/build-unix.sh msys2-arm64); the portable folder; the headless
@@ -15,7 +17,7 @@ name: mpv-native-arm64
 on:
   push:
     branches: ['track/vendor-arm64', 'track/vendor-arm64-*']
-    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'scripts/pushmpc-install.ps1', 'scripts/nvidia-vfx-*', '.github/workflows/mpv-native-arm64.yml']
+    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'pmml/**', 'scripts/pmml-fetch.ps1', 'scripts/ml-runtime-pin.json', 'scripts/pushmpc-install.ps1', 'scripts/nvidia-vfx-*', '.github/workflows/mpv-native-arm64.yml']
   workflow_call:
   workflow_dispatch:
 
@@ -69,14 +71,34 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: nvl-fatbin-winarm64, path: fatbin, retention-days: 7, if-no-files-found: error }
 
+  # G15: PushFlow through pmml in the ARM64 engine (the QNN EP on Snapdragon): pmml's graphs (make_graphs.py, plain ONNX,
+  # the same on every platform) for the portable folder, and ONNX Runtime's C API headers by their pin for the build
+  pmml-winarm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Graphs and ONNX Runtime headers (pinned)
+        run: |
+          set -eu
+          python3 -m venv "$RUNNER_TEMP/g" && "$RUNNER_TEMP/g/bin/python" -m pip install --disable-pip-version-check -q onnx numpy
+          "$RUNNER_TEMP/g/bin/python" -I pmml/scripts/make_graphs.py --out out/graphs >/dev/null
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform win-arm64 --out "$RUNNER_TEMP/rt" --cache "$RUNNER_TEMP/dl" --flavors core --headers >/dev/null
+          cp -r "$RUNNER_TEMP/rt/ort/core/include" out/ort-include
+          ls out/graphs out/ort-include
+      - uses: actions/upload-artifact@v4
+        with: { name: pmml-winarm64, path: out, retention-days: 7, if-no-files-found: error }
+
   windows:
-    needs: nvl-fatbin
+    needs: [nvl-fatbin, pmml-winarm64]
     runs-on: windows-11-arm
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: nvl-fatbin-winarm64, path: '${{ runner.temp }}/fatbin' }
+      - uses: actions/download-artifact@v4
+        with: { name: pmml-winarm64, path: '${{ runner.temp }}/pmml' }
       - name: Engine module, stub pushcore and engine_test (MSVC ARM64, D3D11 on WARP)
         shell: pwsh
         run: |
@@ -87,10 +109,11 @@ jobs:
           Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'glslang') -Force
           $g = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'glslang') -Recurse -Filter glslang*.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1).FullName
           $fb = "$env:RUNNER_TEMP\fatbin"
-          cmake -S mpvnative/engine -B build-engine -A ARM64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g" "-DPME_NVL_FATBIN=$fb\nvl_kernels.fatbin" "-DPME_NVL_GUARD_DIR=$fb" 2>&1 | Tee-Object -Variable cfg | Out-Host
+          cmake -S mpvnative/engine -B build-engine -A ARM64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g" "-DPME_NVL_FATBIN=$fb\nvl_kernels.fatbin" "-DPME_NVL_GUARD_DIR=$fb" "-DPMML_ORT_INCLUDE=$env:RUNNER_TEMP\pmml\ort-include" 2>&1 | Tee-Object -Variable cfg | Out-Host
           if ($LASTEXITCODE) { throw 'configure' }
           if (-not ($cfg -match 'the NVIDIA engine \(Windows on Arm\), GPU cut guard ON')) { throw 'the NVIDIA engine (with the GPU cut guard) is not in the build' }
           if ($cfg -match 'no Vulkan engine') { throw 'the portable GPU engine is not in the build' }
+          if (-not ($cfg -match 'the ml engine \(PushFlow through pmml\)')) { throw 'the ml engine (PushFlow through pmml, QNN) is not in the build' }
           cmake --build build-engine --config Release --parallel
           if ($LASTEXITCODE) { throw 'build' }
           ./build-engine/out/engine_test.exe
@@ -168,6 +191,10 @@ jobs:
             done
           done
           cp build-engine/out/pushmpc_engine.dll "$d/"
+          # PushFlow through pmml: pmml_cli (Setup measures this PC's candidates with it) and pmml's graphs; ONNX Runtime and
+          # the QNN EP come from Setup (pinned, fetched on the user's PC), the PushFlow models from the runtime
+          cp build-engine/pmml/Release/pmml_cli.exe "$d/"
+          mkdir -p "$d/pmml-graphs" && cp $R/pmml/graphs/*.onnx "$d/pmml-graphs/"
           cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
           ls "$d" | tr '\n' ' '; echo; du -sh "$d"
       - name: Every binary is ARM64 (no emulated x64 piece)
@@ -234,6 +261,31 @@ jobs:
           "$B/ffmpeg" -v info -y -i "$t/clip.mkv" -frames:v 24 -vf "pushmpc=smoother=2" -f null - > "$t/nv2.log" 2>&1
           grep -q "nvidia not used: .*nvcuda.dll" "$t/engine-nv2.log" && ok nvidia-no-driver-with-runtime || { cat "$t/engine-nv2.log"; bad nvidia-no-driver-with-runtime; }
           [ $fails = 0 ] || exit 1
+      # G15: PushFlow through pmml on Windows on Arm: Setup's pinned fetch of ONNX Runtime + the QNN EP for win-arm64, the
+      # QNN EP registering with ONNX Runtime in an ARM64 process (pmml_cli list; no Hexagon / Adreno on the runner, so it
+      # reports no NPU / GPU device), and the ml engine's refusals: Auto without a measurement goes on to the next engine,
+      # backend=ml without the PushFlow models refuses with the reason (the video passes through)
+      - name: PushFlow through pmml (QNN EP registration on ARM64, the ml engine's refusals)
+        if: success() || failure()
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $B = "$env:RUNNER_TEMP\PushMPC-mpv-windows-arm64"; $rt = "$env:RUNNER_TEMP\pmml-rt"; $t = "$env:RUNNER_TEMP\t"; $fails = 0
+          & pwsh -File scripts/pmml-fetch.ps1 -Pin scripts/ml-runtime-pin.json -Out $rt -Platform win-arm64 -Flavors core -Eps qnn -Cache "$env:RUNNER_TEMP\pmml-dl"
+          if ($LASTEXITCODE) { throw "pmml-fetch.ps1 (win-arm64, qnn) failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force "$rt\graphs" | Out-Null; Copy-Item "$B\pmml-graphs\*.onnx" "$rt\graphs"
+          Get-Content "$rt\eps\qnn\ep.json" | Write-Host
+          $list = & "$B\pmml_cli.exe" list --runtime $rt 2>&1 | Out-String
+          Write-Host $list
+          if ($list -match 'plugin EP qnn registered') { Write-Host 'check qnn-registers: PASS' } else { Write-Host 'check qnn-registers: FAIL'; $fails++ }
+          $env:PUSHMPC_ENGINE = "$PWD\build-engine\out\pushmpc_engine.dll"; $env:PMML_RUNTIME = $rt
+          $env:PUSHMPC_ENGINE_LOG = "$t\engine-ml-auto.log"
+          & "$B\ffmpeg.exe" -v info -y -i "$t\clip.mkv" -frames:v 24 -vf "pushmpc=smoother=2" -f null - *> "$t\ml-auto.log"
+          if ((Get-Content "$t\engine-ml-auto.log" -Raw) -match 'ml not used: PushFlow is not measured') { Write-Host 'check ml-auto-unmeasured-declines: PASS' } else { Get-Content "$t\engine-ml-auto.log" | Write-Host; Write-Host 'check ml-auto-unmeasured-declines: FAIL'; $fails++ }
+          $env:PUSHMPC_ENGINE_LOG = "$t\engine-ml.log"
+          & "$B\ffmpeg.exe" -v info -y -i "$t\clip.mkv" -frames:v 24 -vf "pushmpc=backend=ml" -f null - *> "$t\ml.log"
+          if ((Get-Content "$t\ml.log" -Raw) -match 'backend=ml') { Write-Host 'check ml-explicit-refuses-without-models: PASS' } else { Get-Content "$t\ml.log" -Tail 8 | Write-Host; Write-Host 'check ml-explicit-refuses-without-models: FAIL'; $fails++ }
+          if ($fails) { exit 1 }
       - name: Setup's entry point (pushmpc-native.ps1) into a temporary folder; Setup's OS check; the NVIDIA runtime pin
         if: success() || failure()
         shell: pwsh

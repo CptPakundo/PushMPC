@@ -69,6 +69,10 @@ $runs = @(
     @{ id = 'nvidia'; vf = 'pushmpc=backend=nvidia' },
     @{ id = 'portable-vulkan'; vf = 'pushmpc=backend=portable-vulkan' },
     @{ id = 'portable-cpu'; vf = 'pushmpc=backend=portable-cpu' },
+    # G15: PushFlow through pmml on Snapdragon (Setup's pmml runtime: ONNX Runtime ARM64 + the QNN EP): the Hexagon NPU,
+    # and the Adreno GPU through QNN; Auto takes ml only after Setup's measurement (pmml_cli auto) says it fits
+    @{ id = 'ml-qnn-npu'; vf = 'pushmpc=backend=ml:extra=ml_backend\=qnn' },
+    @{ id = 'ml-qnn-gpu'; vf = 'pushmpc=backend=ml:extra=ml_backend\=qnn-gpu' },
     @{ id = 'auto-x4'; vf = 'pushmpc=smoother=4' },
     @{ id = 'auto-d3d11'; vf = 'format=nv12,hwupload,pushmpc,hwdownload,format=nv12'; hw = $true }
 )
@@ -83,7 +87,7 @@ foreach ($c in $clips) {
         & $ff @a > $log 2>&1; $rc = $LASTEXITCODE
         $sw.Stop()
         $n = if (Test-Path $o) { [int](Frames $o) } else { 0 }
-        $line = (Select-String -Path $log -Pattern '\] (nvidia|portable-vulkan|portable-cpu|pushcore) \(' | Select-Object -First 1).Line
+        $line = (Select-String -Path $log -Pattern '\] (nvidia|portable-vulkan|portable-cpu|pushcore|ml) \(' | Select-Object -First 1).Line
         $pass = (Select-String -Path $log -Pattern 'passes through|did not open' | Select-Object -First 1).Line
         $k = if ($c.N) { [math]::Round($n / $c.N, 2) } else { 0 }
         R ("{0,-24} exit {1}, {2} of {3} frames (x{4}), {5:N1} output fps in {6:N1} s" -f $tag, $rc, $n, $c.N, $k, ($n / [math]::Max(0.001, $sw.Elapsed.TotalSeconds)), $sw.Elapsed.TotalSeconds)
