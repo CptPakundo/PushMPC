@@ -22,6 +22,7 @@ struct EngineCfg {
     int upscaler = 0;                  // 0 none, 1 NIS, 2 FSR1
     int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
     bool semiPlanar = false;
+    int fullscreen = -1;               // Kodi's window covers its screen: 1 / 0 / -1 unknown (Auto: the window composition per shown frame)
     bool external = false;             // frames arrive on the GPU (PushExternal: Android hardware buffers), not as planes           // GPU engine output NV12 / P010 (U and V interleaved; 10-bit in the high bits)
 };
 

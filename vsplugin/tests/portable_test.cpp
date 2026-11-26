@@ -207,6 +207,13 @@ static void TestBudget()
     r = DecidePortableK(4, 23.976, 60, 2160, 40, 10); CHECK(r.k == 4 && r.why.find("over the CPU budget") != std::string::npos, "fixed x4 kept: %s", r.why.c_str());
     r = DecidePortableK(1, 23.976, 240, 1080, 1, 1); CHECK(r.k == 1, "off");
     r = DecidePortableK(0, 29.97, 120, 720, 2, 1); CHECK(r.k == 4, "720p30 on 120 Hz -> x4: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 1080, 8, 3, false, -1, 1); CHECK(r.k == 6, "VRR running (vrr_probe): the largest that fits, x6: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 0.0); CHECK(r.k == 5 && r.costMs < 7.5, "GPU, player full screen: no composition share (%.1f ms)", r.costMs);
+    {   // the DRM VRR probe runs without crashing anywhere (CI runners: no /dev/dri -> unknown); its answer is a tri-state
+        const int v = LinuxVrrActive();
+        CHECK(v >= -1 && v <= 1, "LinuxVrrActive: %d", v);
+        std::printf("  VRR probe: %d\n", v);
+    }
     CHECK(CadenceK(8, 23.976, 240) == 5 && CadenceK(6, 23.976, 240) == 5 && CadenceK(4, 23.976, 240) == 4 && CadenceK(2, 23.976, 60) == 2 && CadenceK(8, 23.976, 0) == 8,
           "CadenceK: the even cadence at a fixed refresh");
 }

@@ -1147,6 +1147,7 @@ static int Open(vlc_object_t *obj)
             sys->k = 1;
         } else {
             char why[256] = "";
+            pm_engine_set_fullscreen(sys->eng, var_InheritBool(f, "fullscreen") ? 1 : 0);   /* VLC's start state (the filter sees no vout events) */
             sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }

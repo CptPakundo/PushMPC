@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include "vrr_probe.h"   // LinuxVrrActive: VRR for Auto's cadence (DecidePortableK callers)
 
 namespace pmvs {
 
@@ -172,10 +173,11 @@ inline int CadenceK(int maxK, double srcFps, double displayHz)
 // aims at x2)
 // gpu: the GPU engine (no cap at 2 above 1080p: its costs are measured the same way, the cap was the CPU's)
 // showMs: the player's GPU work per shown frame (< 0: the prior kPortableShowMs4k at a 16:9 picture of this height)
-// These routes cannot see VRR or whether the player is full screen: a fixed refresh and a window are assumed, so Auto
-// takes the multiplier with the shortest longest hold on screen, a tie going to the even cadence, then to the larger
-// (PushMpcAuto.h's rule; 240 Hz: 5x rather than an uneven 6x-9x).
-inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, int height, double meMs, double genMs, bool gpu = false, double showMs = -1)
+// showMs 0: the player is full screen (no composition). vrr: 1 = variable refresh runs (vrr_probe.h; any multiplier that
+// fits, the larger), 0 / -1 = a fixed refresh (known / assumed): Auto takes the multiplier with the shortest longest hold
+// on screen, a tie going to the even cadence, then to the larger (PushMpcAuto.h's rule; 240 Hz: 5x rather than an
+// uneven 6x-9x), and one new frame per refresh needs kPortableSpareMs more.
+inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, int height, double meMs, double genMs, bool gpu = false, double showMs = -1, int vrr = -1)
 {
     PortableK r;
     if (srcFps <= 0) srcFps = 23.976;
@@ -184,13 +186,13 @@ inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, 
     auto cost = [&](int k) { return k <= 1 ? 0.0 : meMs + (k - 1) * genMs + (gpu ? k * showMs : 0.0); };
     auto hold = [&](int k) {
         const double out = srcFps * k;
-        if (displayHz <= 0) return 1000.0 / out;
+        if (displayHz <= 0 || vrr == 1) return 1000.0 / out;
         const double q = displayHz / out, n = std::round(q);
         const bool even = n >= 1 && std::fabs(q - n) / n <= 0.02;
         return std::max(1.0, even ? n : std::ceil(q)) * 1000.0 / displayHz;
     };
-    auto evenAt = [&](int k) { const double q = displayHz / (srcFps * k), n = std::round(q); return displayHz > 0 && n >= 1 && std::fabs(q - n) / n <= 0.02; };
-    auto spare = [&](int k) { return displayHz > 0 && displayHz / (srcFps * k) < 1.5 ? kPortableSpareMs : 0.0; };
+    auto evenAt = [&](int k) { const double q = displayHz / (srcFps * k), n = std::round(q); return vrr == 1 || (displayHz > 0 && n >= 1 && std::fabs(q - n) / n <= 0.02); };
+    auto spare = [&](int k) { return vrr != 1 && displayHz > 0 && displayHz / (srcFps * k) < 1.5 ? kPortableSpareMs : 0.0; };
     char b[256];
     if (smoother == 1) { r.k = 1; r.why = "Smoother off: no frame generation"; return r; }
     if (smoother >= 2) {
@@ -217,7 +219,7 @@ inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, 
     if (want <= 1) snprintf(b, sizeof(b), "Auto: the display (%.2f Hz) is not faster than the source (%.3f fps): x1", displayHz, srcFps);
     else if (k == 1) snprintf(b, sizeof(b), gpu ? "Auto: the GPU path is too slow here (x2 needs %.1f ms per source frame, budget %.1f ms): x1" : "Auto: the CPU is too slow here (x2 needs %.1f ms per source frame, budget %.1f ms): x1", cost(2), r.budgetMs);
     else snprintf(b, sizeof(b), "Auto: x%d (display x%d%s%s; %.1f ms per source frame of %.1f ms; motion %.1f ms, each generated frame %.1f ms%s)", k, displayK,
-                  cap < displayK ? ", capped at x2 above 1080p" : "", lastFit > k ? ", the even cadence at a fixed refresh (assumed)" : "", r.costMs, r.budgetMs, meMs, genMs,
+                  cap < displayK ? ", capped at x2 above 1080p" : "", lastFit > k ? (vrr == 0 ? ", the even cadence at a fixed refresh" : ", the even cadence at a fixed refresh (assumed)") : vrr == 1 ? ", VRR" : "", r.costMs, r.budgetMs, meMs, genMs,
                   gpu ? ", the player's share per shown frame included" : "");
     r.why = b;
     return r;

@@ -59,7 +59,7 @@ public:
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
 
         const portable::Calibration cal = CalibrateCached(m_w, m_h, m_bits, s.threads, s.quality);
-        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.meMs, cal.genMs)
+        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.meMs, cal.genMs, false, -1, LinuxVrrActive())   // vrr_probe.h
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
         portable::Config c; c.width = m_w; c.height = m_h; c.bits = m_bits; c.threads = s.threads; c.quality = s.quality;

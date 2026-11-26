@@ -236,7 +236,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     // Auto with the user's PushMPC settings; VLC keeps the source size and shows its own real frames
     pm::Settings s = pm::LoadSettings();
     if (cfg->smoother == 1) s.smoother = pm::kOff;
-    else if (cfg->smoother >= 2) s.smoother = std::clamp(cfg->smoother, 2, pm::kMaxSmoother);
+    else if (cfg->smoother >= 2) s.smoother = std::clamp(cfg->smoother, 2, std::max(2, pm::VfgCeiling()));   // the core's own ceiling (16 with PUSHCORE_FEATURE_VFG16, else 8)
     s.sharper = pm::kOff; s.cleanUp = pm::kOff; s.deband = pm::kOff; s.sdrToHdr = pm::kOff;
     pm::Gpu g; g.available = 0; g.hardware = 0; g.family = pm::kFamUnknown;
     PushCoreCaps caps;
