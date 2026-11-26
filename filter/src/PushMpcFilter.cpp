@@ -377,6 +377,7 @@ struct Config {
     bool itmBypass = false;     // debug ItmBypass: SDR to HDR by the plain 203 cd/m2 mapping (A/B timing of the curve)
     bool prewarm = true;        // Prewarm 0: no pushcore_prewarm at the input connection (fast start)
     bool quickStart = true;     // QuickStart 0: no quick-start graph while the full one opens (fast start)
+    bool quickVsr = true;       // QuickVsr 0: the quick graph upscales with NVIDIA Image Scaling, not the driver's RTX VSR (D3D11)
     bool paceWarmup = true;     // PaceWarmup 0: the source frames shown during the open are taken as fast as the decoder sends them
 };
 static bool EnvStr(const wchar_t* name, std::wstring& out)
@@ -423,6 +424,7 @@ static Config ReadConfig()
     ReadB(k, L"WarmCache", c.warmCache);
     ReadB(k, L"Prewarm", c.prewarm);
     ReadB(k, L"QuickStart", c.quickStart);
+    ReadB(k, L"QuickVsr", c.quickVsr);
     ReadB(k, L"PaceWarmup", c.paceWarmup);
     ReadS(k, L"RuntimeRoot", c.runtimeRoot);
     ReadS(k, L"CoreFolder", c.coreFolder);
@@ -3421,7 +3423,8 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     // the quick graph: Image Scaling for RTX VSR, no AI clean-up, and the cut guard without NVIDIA's optical flow (its
     // session costs ~85 ms at the open; the guard's pair test still runs); everything else as the full graph
     if (quick) { psQuick.srMethod = PUSHCORE_SR_METHOD_NIS; psQuick.nr = 0; if (psQuick.cutGuard & 2) psQuick.cutGuard &= ~2; }
-    if (!legacy) Log(quick ? "quick start: a quick graph (NVIDIA Image Scaling instead of RTX VSR, the same frame generation) opens first; the full graph follows and takes over"
+    if (!legacy) Log(quick ? std::string("quick start: a quick graph (") + (m_cfg.quickVsr && (g_coreFeatures & PUSHCORE_FEATURE_QUICK_VSR) ? "the driver's RTX VSR through D3D11 if it answers, else NVIDIA Image Scaling" : "NVIDIA Image Scaling")
+                               + " instead of NGX RTX VSR, the same frame generation) opens first; the full graph follows and takes over"
                            : "quick start: not used (" + quickWhy + ")");
     struct Ctx { std::shared_ptr<OpenJob> job; PushCoreStreamInfo si; ComPtr<ID3D11Device> dev; Config cfg; Runtime rt; HMODULE self; int64_t q0; PushCoreSettings ps; bool legacy; bool quick; PushCoreSettings psQuick; };
     auto* ctx = new Ctx{ std::make_shared<OpenJob>(), si, m_device, m_cfg, m_rt, nullptr, m_openQpc, ps, legacy, quick, psQuick };
@@ -3457,7 +3460,13 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
             std::string openErr;
             bool published = false;
             if (c->quick) {
-                core = openOne(&c->psQuick, PUSHCORE_FLAG_NO_WARM_CACHE, openErr);
+                // Route B: the driver's RTX VSR through the D3D11 video processor where it answers (pushcore checks it)
+                const uint32_t qf = c->cfg.quickVsr && (g_coreFeatures & PUSHCORE_FEATURE_QUICK_VSR) ? PUSHCORE_FLAG_QUICK_VSR : 0u;
+                core = openOne(&c->psQuick, PUSHCORE_FLAG_NO_WARM_CACHE | qf, openErr);
+                if (core && qf && api->stats) {
+                    PushCoreStats qs = {}; qs.structSize = sizeof(qs);
+                    if (api->stats(core, &qs) == PUSHCORE_OK) Log(std::string("quick start: the quick graph upscales with ") + (qs.quickVsr ? "the driver's RTX VSR (D3D11 video processor)" : "NVIDIA Image Scaling (the driver's RTX VSR did not answer; see quick-vsr in the engine log)"));
+                }
                 const double ms = QpcMs(Qpc() - c->q0);
                 bool abandoned = false;
                 if (core) {

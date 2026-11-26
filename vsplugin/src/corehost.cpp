@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <thread>
 #include "vslog.h"
 
 namespace pmvs {
@@ -124,20 +125,127 @@ bool CoreHost::AdoptDevice(ID3D11Device* dev, std::string& err)
 }
 
 // ------------------------------------------------------------------------------------------------ acquire / release
+void CoreHost::ReturnFrom(PushCore* core)
+{
+    if (!core) return;
+    PushCoreFrame fr[16]; uint32_t n = 0; int dropped = 0;
+    while (m_api->poll(core, fr, 16, &n, 0) == PUSHCORE_OK && n) { for (uint32_t i = 0; i < n; i++) m_api->presented(core, fr[i].lease, nullptr); dropped += int(n); n = 0; }
+    if (dropped) Log(std::format("returned {} undelivered pushcore frames", dropped));
+}
 void CoreHost::ReturnAll()
 {
-    if (!m_core) return;
-    PushCoreFrame fr[16]; uint32_t n = 0; int dropped = 0;
-    while (m_api->poll(m_core, fr, 16, &n, 0) == PUSHCORE_OK && n) { for (uint32_t i = 0; i < n; i++) m_api->presented(m_core, fr[i].lease, nullptr); dropped += int(n); n = 0; }
-    if (dropped) Log(std::format("returned {} undelivered pushcore frames", dropped));
+    if (m_old) RetireOld("frames returned");
+    ReturnFrom(m_core);
 }
 void CoreHost::CloseCore()
 {
+    DropQuick();
     if (!m_core) return;
     ReturnAll();
     SehClose(m_api, m_core);
     m_core = nullptr;
     m_srv.clear();
+}
+
+// ------------------------------------------------------------------------------------------------ fast start
+// a core closed on its own thread (a close waits for any graph build in the process)
+void CoreHost::CloseAsync(PushCore* core, const char* what)
+{
+    if (!core) return;
+    const PushCoreApi* api = m_api;
+    std::thread([api, core, what] { const uint64_t t0 = GetTickCount64(); SehClose(api, core); Log(std::format("{} closed in {} ms (own thread)", what, GetTickCount64() - t0)); }).detach();
+}
+void CoreHost::RetireOld(const char* why)
+{
+    if (!m_old) return;
+    ReturnFrom(m_old);
+    CloseAsync(m_old, "the quick graph");
+    m_old = nullptr;
+    Log(std::format("quick start: the quick graph retired ({}), {} ms after it opened", why, GetTickCount64() - m_quickTick));
+}
+void CoreHost::DropQuick()
+{
+    std::lock_guard<std::mutex> lk(m_nextLock);
+    ++m_gen;
+    m_quick = false; m_nextDone = false;
+    if (m_next) { CloseAsync(m_next, "the full graph (not taken over)"); m_next = nullptr; }
+    if (m_old) { ReturnFrom(m_old); CloseAsync(m_old, "the quick graph"); m_old = nullptr; }
+    m_discardUpTo = INT64_MIN;
+}
+// as the filter's QuickStartWanted: NVIDIA, frame generation that starts without NGX, an NGX stage in the full graph,
+// no RTX Video HDR, and no full graph opened before in this process (its NGX core is warm then)
+bool CoreHost::QuickWanted(const PushCoreSettings& ps, std::string& why)
+{
+    wchar_t v[8] = {};
+    if (GetEnvironmentVariableW(L"PUSHMPC_FILTER_QuickStart", v, 8) && v[0] == L'0') { why = "switched off (QuickStart 0)"; return false; }
+    if (!(m_features & PUSHCORE_FEATURE_FAST_START)) { why = "the core has no fast start"; return false; }
+    ComPtr<IDXGIDevice> dd; ComPtr<IDXGIAdapter> ad; DXGI_ADAPTER_DESC d{};
+    if (m_warp || !m_dev || FAILED(m_dev.As(&dd)) || FAILED(dd->GetAdapter(&ad)) || FAILED(ad->GetDesc(&d)) || d.VendorId != 0x10DE) { why = "not an NVIDIA GPU"; return false; }
+    if (ps.multiplier < 2) { why = "no frame generation"; return false; }
+    if (ps.fgBackend != PUSHCORE_FG_VFG && ps.fgBackend != PUSHCORE_FG_NVOF && ps.fgBackend != PUSHCORE_FG_FSR) { why = "the frame generation method needs NGX"; return false; }
+    if (ps.videoHdr) { why = "RTX Video HDR sets the output signal"; return false; }
+    if (!((ps.sr && ps.srMethod == PUSHCORE_SR_METHOD_RTX) || ps.nr)) { why = "no NGX stage: the full graph opens fast"; return false; }
+    if (m_fullOpened) { why = "a full graph opened before in this process: its NGX core is warm"; return false; }
+    return true;
+}
+// the full graph on a worker: pushcore_open with the GPU-only warm-up, no lock of ours; handed to Submit through m_next
+void CoreHost::StartFull(const PushCoreStreamInfo& si, const PushCoreSettings& ps)
+{
+    uint64_t gen;
+    {
+        std::lock_guard<std::mutex> lk(m_nextLock);
+        m_quick = true; m_nextDone = false; m_next = nullptr; m_nextErr.clear();
+        gen = ++m_gen;
+    }
+    m_quickTick = GetTickCount64();
+    const PushCoreApi* api = m_api;
+    ComPtr<ID3D11Device> dev = m_dev;
+    const HostPaths paths = m_paths;
+    std::thread([this, api, dev, paths, si, ps, gen] {   // the host is never destroyed
+        { std::lock_guard<std::mutex> lk(m_nextLock); if (m_gen != gen) return; }
+        PushCoreConfig pc = {};
+        pc.structSize = sizeof(pc); pc.abiVersion = PUSHCORE_ABI_VERSION;
+        pc.pushfpsDir = paths.runtimeDir.c_str();
+        pc.dataDir = L"";
+        pc.logFile = paths.logFile.empty() ? nullptr : paths.logFile.c_str();
+        pc.shaderDir = paths.shaderDir.empty() ? nullptr : paths.shaderDir.c_str();
+        pc.settings = &ps;
+        pc.sr = pc.fg = pc.multiplier = pc.vfgQuality = -1;
+        pc.flags = PUSHCORE_FLAG_WARMUP_GPU_ONLY;
+        char eb[1024] = {};
+        const uint64_t t0 = GetTickCount64();
+        PushCore* core = SehOpen(api, &pc, &si, dev.Get(), eb, sizeof(eb));
+        Log(std::format("quick start: the full graph {} in {} ms{}", core ? "opened" : "did not open", GetTickCount64() - t0, core ? std::string() : std::string(": ") + eb));
+        std::lock_guard<std::mutex> lk(m_nextLock);
+        if (m_gen != gen || !m_quick) { if (core) CloseAsync(core, "the full graph (no longer wanted)"); return; }
+        m_next = core; m_nextErr = eb; m_nextDone = true;
+        if (core) m_fullOpened = true;
+    }).detach();
+}
+// after a submit of source frame pts into the quick graph (m_lock held): the full graph gets the same frame as its first
+// one (its own output for it is dropped); the quick graph delivers up to and including it
+void CoreHost::Handover(ID3D11Texture2D* tex, uint32_t slice, int64_t pts)
+{
+    PushCore* next = nullptr; std::string nextErr;
+    {
+        std::lock_guard<std::mutex> lk(m_nextLock);
+        if (!m_quick || m_old || !m_nextDone) return;
+        next = m_next; m_next = nullptr; m_quick = false; nextErr = m_nextErr;
+    }
+    if (!next) { Log("quick start: the full graph did not open (" + nextErr + "): the quick graph stays"); return; }
+    PushCoreSubmitTiming t = {};
+    t.structSize = PUSHCORE_SUBMIT_TIMING_SIZE_V2;
+    t.streamNow100ns = INT64_MIN;
+    const int r = m_api->submit2(next, tex, slice, pts, PUSHCORE_SUBMIT_DISCONTINUITY, &t);
+    if (r != PUSHCORE_OK) { Log(std::format("quick start: the full graph refused its first frame ({} {}): the quick graph stays", r, m_api->lastError(next))); CloseAsync(next, "the full graph"); return; }
+    const PushCoreOutputInfo before = m_out;
+    m_old = m_core; m_core = next;
+    m_handoverPts = pts; m_discardUpTo = pts;
+    m_out = {};
+    m_api->outputInfo(m_core, &m_out);
+    m_srv.clear();
+    Log(std::format("quick start: handover at pts {:.3f} s, {} ms after the quick graph opened: {} (output {}x{} x{}; quick graph {}x{} x{})",
+        pts / 1e7, GetTickCount64() - m_quickTick, m_out.description, m_out.width, m_out.height, m_out.multiplier, before.width, before.height, before.multiplier));
 }
 uint64_t CoreHost::Acquire(const CoreKey& key, const PushCoreStreamInfo& si, const PushCoreSettings& ps, Reuse& how, double& ms, std::string& err)
 {
@@ -145,6 +253,8 @@ uint64_t CoreHost::Acquire(const CoreKey& key, const PushCoreStreamInfo& si, con
     if (m_owner) Log("a new script instance takes the core over from the previous one (mpv reload)");
     m_owner = 0;
     how = DecideReuse(m_core != nullptr, m_key, key);
+    // fast start: the quick graph cannot take other settings (a reload there would start NGX inline): open again
+    if (how == Reuse::Reload) { bool quick; { std::lock_guard<std::mutex> lk(m_nextLock); quick = m_quick; } if (quick) how = Reuse::Reopen; }
     if (how == Reuse::Flush || how == Reuse::Reload) {
         ReturnAll();
         int r = m_api->flush(m_core);
@@ -166,7 +276,33 @@ uint64_t CoreHost::Acquire(const CoreKey& key, const PushCoreStreamInfo& si, con
         pc.sr = pc.fg = pc.multiplier = pc.vfgQuality = -1;
         pc.flags = 0;
         char eb[1024] = {};
-        m_core = SehOpen(m_api, &pc, &si, m_dev.Get(), eb, sizeof(eb));
+        std::string qwhy;
+        if (QuickWanted(ps, qwhy)) {
+            // the quick graph: the driver's RTX VSR through D3D11 where it answers (else NVIDIA Image Scaling), no AI
+            // clean-up, the cut guard without NVIDIA's optical flow; everything else as the full graph
+            PushCoreSettings qs = ps;
+            qs.srMethod = PUSHCORE_SR_METHOD_NIS; qs.nr = 0; if (qs.cutGuard & 2) qs.cutGuard &= ~2;
+            wchar_t qv[8] = {};
+            const bool quickVsr = (m_features & PUSHCORE_FEATURE_QUICK_VSR) && !(GetEnvironmentVariableW(L"PUSHMPC_FILTER_QuickVsr", qv, 8) && qv[0] == L'0');
+            pc.settings = &qs;
+            pc.flags = PUSHCORE_FLAG_NO_WARM_CACHE | (quickVsr ? PUSHCORE_FLAG_QUICK_VSR : 0u);
+            m_core = SehOpen(m_api, &pc, &si, m_dev.Get(), eb, sizeof(eb));
+            pc.settings = &ps; pc.flags = 0;
+            if (m_core) {
+                PushCoreStats qst = {}; qst.structSize = sizeof(qst);
+                const bool vsr = quickVsr && m_api->stats(m_core, &qst) == PUSHCORE_OK && qst.quickVsr;
+                Log(std::format("quick start: quick graph open in {} ms ({}); the full graph follows", GetTickCount64() - t0,
+                    vsr ? "the driver's RTX VSR through the D3D11 video processor" : "NVIDIA Image Scaling"));
+                StartFull(si, ps);
+            } else {
+                Log(std::string("quick start: the quick graph did not open (") + (eb[0] ? eb : "failed") + "): the full graph opens now");
+                eb[0] = 0;
+            }
+        } else Log("quick start: not used (" + qwhy + ")");
+        if (!m_core) {
+            m_core = SehOpen(m_api, &pc, &si, m_dev.Get(), eb, sizeof(eb));
+            if (m_core) m_fullOpened = true;
+        }
         if (!m_core) { err = eb[0] ? eb : "pushcore_open failed"; ms = double(GetTickCount64() - t0); return 0; }
     }
     m_out = {};
@@ -219,6 +355,7 @@ bool CoreHost::Submit(int64_t s, int64_t pts, bool discontinuity, std::string& e
         t.streamNow100ns = INT64_MIN;
         const int r = m_api->submit2(m_core, tex, slice, pts, discontinuity ? PUSHCORE_SUBMIT_DISCONTINUITY : 0u, &t);
         if (r != PUSHCORE_OK) { err = std::format("pushcore_submit2 -> {} {}", r, m_api->lastError(m_core)); return false; }
+        if (m_quick) Handover(tex, slice, pts);
         return true;
     }
     PlaneView v;
@@ -261,11 +398,13 @@ bool CoreHost::Submit(int64_t s, int64_t pts, bool discontinuity, std::string& e
     t.presentLead100ns = 0; t.fgLevel = 0;
     const int r = m_api->submit2(m_core, u.tex.Get(), 0, pts, discontinuity ? PUSHCORE_SUBMIT_DISCONTINUITY : 0u, &t);
     if (r != PUSHCORE_OK) { err = std::format("pushcore_submit2 -> {} {}", r, m_api->lastError(m_core)); return false; }
+    if (m_quick) Handover(u.tex.Get(), 0, pts);
     return true;
 }
 bool CoreHost::Flush(std::string& err)
 {
-    ReturnAll();
+    ReturnAll();   // also retires the quick graph after a handover (a seek: a quiet moment)
+    m_discardUpTo = INT64_MIN;
     const int r = m_api->flush(m_core);
     if (r != PUSHCORE_OK) { err = std::format("pushcore_flush -> {} {}", r, m_api->lastError(m_core)); return false; }
     return true;
@@ -347,23 +486,23 @@ static DXGI_FORMAT Typed(DXGI_FORMAT f)
     default: return f;
     }
 }
-bool CoreHost::Readback(const PushCoreFrame& fr, OutImage& img, std::string& err)
+bool CoreHost::Readback(PushCore* core, const PushCoreFrame& fr, OutImage& img, std::string& err)
 {
     D3D11_TEXTURE2D_DESC td = {};
     fr.texture->GetDesc(&td);
     const uint32_t w = fr.width ? fr.width : td.Width, h = fr.height ? fr.height : td.Height;
     if (fr.readyFence) {
-        if (!m_ctx4) { m_api->presented(m_core, fr.lease, nullptr); err = "pushcore hands out fences and this device has no ID3D11DeviceContext4"; return false; }
+        if (!m_ctx4) { m_api->presented(core, fr.lease, nullptr); err = "pushcore hands out fences and this device has no ID3D11DeviceContext4"; return false; }
         m_ctx4->Wait(fr.readyFence, fr.readyValue);
     }
-    if (!EnsureStaging(td.Format, td.Width, td.Height, err)) { m_api->presented(m_core, fr.lease, nullptr); return false; }
+    if (!EnsureStaging(td.Format, td.Width, td.Height, err)) { m_api->presented(core, fr.lease, nullptr); return false; }
     if (OutIs420(m_fmt)) {
         auto& srv = m_srv[fr.texture];
         if (!srv) {
             D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
             sd.Format = Typed(td.Format); sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = 1;
             const HRESULT hr = m_dev->CreateShaderResourceView(fr.texture, &sd, &srv);
-            if (FAILED(hr)) { m_srv.erase(fr.texture); m_api->presented(m_core, fr.lease, nullptr); err = std::format("the output texture cannot be read by a shader (0x{:08X}): use chroma=444", uint32_t(hr)); return false; }
+            if (FAILED(hr)) { m_srv.erase(fr.texture); m_api->presented(core, fr.lease, nullptr); err = std::format("the output texture cannot be read by a shader (0x{:08X}): use chroma=444", uint32_t(hr)); return false; }
         }
         const bool tenBit = m_fmt == OutFmt::Yuv420P10;
         struct { float kr, kb, scale, maxCode; uint32_t w, h, p0, p1; } cb = {
@@ -384,7 +523,7 @@ bool CoreHost::Readback(const PushCoreFrame& fr, OutImage& img, std::string& err
     } else {
         m_ctx->CopyResource(m_stage.Get(), fr.texture);
     }
-    m_api->presented(m_core, fr.lease, m_ctx.Get());   // the release fence follows the copy on our context
+    m_api->presented(core, fr.lease, m_ctx.Get());   // the release fence follows the copy on our context
     if (OutIs420(m_fmt)) {
         for (int i = 0; i < 3; ++i) {
             D3D11_MAPPED_SUBRESOURCE m = {};
@@ -430,32 +569,52 @@ bool CoreHost::Readback(const PushCoreFrame& fr, OutImage& img, std::string& err
 bool CoreHost::Poll(uint32_t timeoutMs, std::vector<Out<void*>>& out, std::string& err)
 {
     PushCoreFrame fr[16]; uint32_t n = 0;
-    const int r = m_api->poll(m_core, fr, 16, &n, timeoutMs);
-    if (r != PUSHCORE_OK && r != PUSHCORE_BUSY) { err = std::format("pushcore_poll -> {} {}", r, m_api->lastError(m_core)); return false; }
+    // fast start: the quick graph until its last frame (the real one at the handover), then the full graph
+    PushCore* src = m_old ? m_old : m_core;
+    const int r = m_api->poll(src, fr, 16, &n, src == m_old ? 0 : timeoutMs);
+    if (r != PUSHCORE_OK && r != PUSHCORE_BUSY) { err = std::format("pushcore_poll -> {} {}", r, m_api->lastError(src)); return false; }
+    if (src == m_old && !n) {
+        PushCoreStats ps = {}; ps.structSize = sizeof(ps);
+        if (m_api->stats(src, &ps) == PUSHCORE_OK && ps.pendingFrames == 0) RetireOld("drained");
+    }
+    // the full graph's own output for the handover frame (and anything before it) is not shown: the quick graph's is
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (src == m_core && m_discardUpTo != INT64_MIN) {
+            if (fr[i].pts100ns <= m_discardUpTo) { m_api->presented(src, fr[i].lease, nullptr); continue; }
+            m_discardUpTo = INT64_MIN;
+        }
+        fr[kept++] = fr[i];
+    }
+    n = kept;
+    bool retire = false;
+    for (uint32_t i = 0; i < n; ++i) if (src == m_old && fr[i].kind == PUSHCORE_FRAME_REAL && fr[i].pts100ns >= m_handoverPts) retire = true;
     if (rawOut) {      // zero copy: the caller converts on the device; nothing is read back
         for (uint32_t i = 0; i < n; ++i) {
             const bool drawn = rawOut(fr[i], err);
-            m_api->presented(m_core, fr[i].lease, drawn ? m_ctx.Get() : nullptr);
+            m_api->presented(src, fr[i].lease, drawn ? m_ctx.Get() : nullptr);
             out.push_back({ fr[i].pts100ns, fr[i].kind == PUSHCORE_FRAME_GENERATED, nullptr });
         }
+        if (retire) RetireOld("after its last frame");
         return true;
     }
     for (uint32_t i = 0; i < n; ++i) {
         OutImage img;
         const uint32_t w = fr[i].width ? fr[i].width : m_out.width, h = fr[i].height ? fr[i].height : m_out.height;
         if (!alloc || !alloc(w, h, img)) {
-            for (uint32_t j = i; j < n; ++j) m_api->presented(m_core, fr[j].lease, nullptr);
+            for (uint32_t j = i; j < n; ++j) m_api->presented(src, fr[j].lease, nullptr);
             err = "cannot allocate an output frame"; return false;
         }
-        if (!Readback(fr[i], img, err)) {
+        if (!Readback(src, fr[i], img, err)) {
             if (release) release(img.handle);
-            for (uint32_t j = i + 1; j < n; ++j) m_api->presented(m_core, fr[j].lease, nullptr);
+            for (uint32_t j = i + 1; j < n; ++j) m_api->presented(src, fr[j].lease, nullptr);
             return false;
         }
         const bool gen = fr[i].kind == PUSHCORE_FRAME_GENERATED;
         if (tag) tag(fr[i].pts100ns, gen, img.handle);
         out.push_back({ fr[i].pts100ns, gen, img.handle });
     }
+    if (retire) RetireOld("after its last frame");
     return true;
 }
 

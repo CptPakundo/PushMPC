@@ -4,6 +4,12 @@
 // pushcore_flush when the stream matches, re-set with setSettings + reload when only the settings differ, and reopened
 // otherwise (pushcore's own NGX warm cache keeps the models across that).
 //
+// Fast start (as the MPC-HC filter and mpv's own route): a cold open whose full graph waits for NGX (RTX VSR / AI clean-up,
+// ~2 s) opens a quick graph first (the driver's RTX VSR through the D3D11 video processor where it answers, else NVIDIA
+// Image Scaling; no NGX: ~0.5 s) and the full graph on a worker thread (pushcore's GPU-only warm-up: no use of the
+// immediate context, so no lock). At a submit after the full graph is ready, that source frame also goes into the full
+// graph as its first one; the quick graph delivers up to and including it, the full graph from the next one on.
+//
 // Ingress: VapourSynth YUV420P8 / P10..P16 planes -> a staging NV12 / P010 texture (UV interleaved on the CPU) -> a
 // DEFAULT texture -> pushcore_submit2 (streamNow = INT64_MIN: the full group, always).
 // Egress: wait on the frame's fence, copy to a staging texture (4:4:4), or convert to 4:2:0 in a compute shader first
@@ -91,11 +97,19 @@ public:
 
 private:
     CoreHost() = default;
-    bool Readback(const PushCoreFrame& fr, OutImage& img, std::string& err);
+    bool Readback(PushCore* core, const PushCoreFrame& fr, OutImage& img, std::string& err);
     bool EnsureStaging(DXGI_FORMAT fmt, uint32_t w, uint32_t h, std::string& err);
     bool EnsureUpload(uint32_t w, uint32_t h, bool p010, std::string& err);
     void ReturnAll();
     void CloseCore();
+    // fast start
+    bool QuickWanted(const PushCoreSettings& ps, std::string& why);
+    void StartFull(const PushCoreStreamInfo& si, const PushCoreSettings& ps);
+    void Handover(ID3D11Texture2D* tex, uint32_t slice, int64_t pts);
+    void RetireOld(const char* why);
+    void DropQuick();
+    void CloseAsync(PushCore* core, const char* what);
+    void ReturnFrom(PushCore* core);
 
     std::mutex m_lock;
     HMODULE m_dll = nullptr;
@@ -109,6 +123,17 @@ private:
     uint64_t m_luid = 0; bool m_warp = false; std::string m_deviceName;
     PushCore* m_core = nullptr;
     CoreKey m_key;
+    // fast start: m_core is the quick graph while m_quick; the full graph arrives in m_next (m_nextLock: the worker never
+    // takes m_lock); after the handover the quick graph is m_old until its last frame was taken
+    bool m_quick = false, m_fullOpened = false;
+    std::mutex m_nextLock;
+    uint64_t m_gen = 0;
+    bool m_nextDone = false;
+    PushCore* m_next = nullptr;
+    std::string m_nextErr;
+    PushCore* m_old = nullptr;
+    int64_t m_handoverPts = 0, m_discardUpTo = INT64_MIN;
+    uint64_t m_quickTick = 0;
     PushCoreOutputInfo m_out{};
     uint64_t m_owner = 0, m_nextToken = 1;
     // ingress ring

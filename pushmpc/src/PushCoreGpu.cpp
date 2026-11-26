@@ -24,6 +24,7 @@
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
+#include "PushCoreQuickVsr.h"        // fast start Route B: driver RTX VSR through the D3D11 video processor
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
@@ -484,6 +485,34 @@ struct PushCore {
     bool debandEligible = false;           // 8-bit SDR stream and the pass initialised on this device
     int debandLogged = -1;                 // last state logged (on/off/strength), to log changes only
     bool debandWanted() const { return debandEligible && haveSettings && settings.deband != 0; }
+    // ---- fast start, Route B (PUSHCORE_FLAG_QUICK_VSR, PushCoreQuickVsr.h) ----
+    pushmpc::QuickVsr qvsr;
+    uint32_t qvsrSrcW = 0, qvsrSrcH = 0;   // the source size before the video processor (stream holds the scaled size)
+    // The quick graph asked for Route B: when upscaling is wanted, the source gets larger, this is an NVIDIA adapter and
+    // the driver's VSR answers the check, the video processor scales into the ingress ring and the graph runs on the SR
+    // target size with its own SR stage off. Otherwise nothing changes (the caller's settings, e.g. NVIDIA Image Scaling).
+    void setupQuickVsr() {
+        if (!(flags & PUSHCORE_FLAG_QUICK_VSR)) return;
+        auto skip = [](const std::string& why) { veyra::log::info("quick-vsr", "not used: " + why); };
+        if (!haveSettings || !settings.sr) return skip("no upscaling asked for");
+        if (!ctx.adapter().isNvidia) return skip("not an NVIDIA GPU");
+        const auto target = settings.srTarget == PUSHCORE_SR_TARGET_1440P ? veyra::pipeline::SrTarget::Qhd
+                          : settings.srTarget == PUSHCORE_SR_TARGET_5K ? veyra::pipeline::SrTarget::Uhd5K : veyra::pipeline::SrTarget::Uhd4K;
+        const auto e = veyra::pipeline::srStageExtents({stream.width, stream.height}, target).evaluated;
+        if (e.width <= stream.width || e.height <= stream.height) return skip("the source is already at the target size");
+        const auto t = Clock::now();
+        if (!qvsr.init(d11.Get(), imm.Get(), stream.width, stream.height, e.width, e.height, stream.format == PUSHCORE_INPUT_P010,
+                       stream.range, stream.matrix, stream.transfer)) {
+            veyra::log::info("quick-vsr", std::format("not used ({:.0f} ms): {}", msSince(t), qvsr.why()));
+            qvsr.reset();
+            return;
+        }
+        qvsrSrcW = stream.width; qvsrSrcH = stream.height;
+        stream.width = e.width; stream.height = e.height;           // the graph's source is the scaled picture
+        frame->width = int(e.width); frame->height = int(e.height);
+        settings.sr = 0;                                            // its SR is done; the graph keeps frame generation etc.
+        veyra::log::info("quick-vsr", std::format("on in {:.0f} ms: {}", msSince(t), qvsr.why()));
+    }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
     bool dvP5Logged = false;
@@ -1031,14 +1060,18 @@ struct PushCore {
             fail(std::format("input texture format {} does not match the stream", int(sd.Format)));
             return false;
         }
-        if (sd.Width == inW && sd.Height == inH && sd.Format == inFormat && inSlots[0].tex) return true;
+        // Route B: the ring holds the video processor's output (the SR target size), whatever the decoder's surface size
+        const UINT wantW = qvsr.active() ? qvsr.outWidth() : sd.Width, wantH = qvsr.active() ? qvsr.outHeight() : sd.Height;
+        if (wantW == inW && wantH == inH && sd.Format == inFormat && inSlots[0].tex) return true;
         if (inSlots[0].tex) ring.drainQueue();
         for (auto& slot : inSlots) {
+            if (slot.tex) qvsr.forget(slot.tex.Get());
             slot = {};
             D3D11_TEXTURE2D_DESC d{};
-            d.Width = sd.Width; d.Height = sd.Height; d.MipLevels = 1; d.ArraySize = 1;
+            d.Width = wantW; d.Height = wantH; d.MipLevels = 1; d.ArraySize = 1;
             d.Format = sd.Format == DXGI_FORMAT_P016 ? DXGI_FORMAT_P010 : sd.Format;
-            d.SampleDesc = {1, 0}; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            d.SampleDesc = {1, 0}; d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (qvsr.active() ? D3D11_BIND_RENDER_TARGET : 0u);   // the processor's output view
             d.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
             if (hrFail(d11->CreateTexture2D(&d, nullptr, &slot.tex), "ingress ring texture")) return false;
             ComPtr<IDXGIResource1> dr; HANDLE h = nullptr;
@@ -1049,7 +1082,7 @@ struct PushCore {
             CloseHandle(h);
             if (hrFail(hr, "D3D12 OpenSharedHandle(ingress ring)")) return false;
         }
-        inW = sd.Width; inH = sd.Height; inFormat = sd.Format;
+        inW = wantW; inH = wantH; inFormat = sd.Format;
         veyra::log::info("pushcore", std::format("ingress ring: {} shared textures {}x{} format {} (source mips {} array {})",
                                                  kIngressSlots, inW, inH, int(inFormat), sd.MipLevels, sd.ArraySize));
         return true;
@@ -1144,7 +1177,12 @@ struct PushCore {
             }
         }
         if (slot.freeValue) imm4->Wait(fence12in11.Get(), slot.freeValue);   // GPU-side: graph consumed it
-        imm->CopySubresourceRegion(slot.tex.Get(), 0, 0, 0, 0, copySrc, copySub, nullptr);
+        if (qvsr.active()) {   // Route B: driver RTX VSR scales the source into the slot
+            std::string vpErr;
+            if (!qvsr.blit(copySrc, copySub, slot.tex.Get(), vpErr)) return fail("quick VSR: " + vpErr);
+        } else {
+            imm->CopySubresourceRegion(slot.tex.Get(), 0, 0, 0, 0, copySrc, copySub, nullptr);
+        }
         if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(ingress)")) return PUSHCORE_ERROR;
         imm4->Flush();
         }   // gpuOnlyInput (PUSHCORE_FLAG_WARMUP_GPU_ONLY warm-up): the slot as it is, no D3D11 work, no new fence value
@@ -1549,6 +1587,7 @@ struct PushCore {
             }
             cache = nullptr;
         }
+        qvsr.reset();
         for (auto& s : inSlots) s = {};
         deband = pushmpc::Deband{}; debandEligible = false;
         copyList.Reset();
@@ -1751,7 +1790,7 @@ int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* sett
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -1799,6 +1838,7 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
         veyra::log::info("pushcore", std::format("open root={} shaders={} runtime={} data={}", narrow(root.wstring()),
                                                  narrow(veyra::runtime::shaderDirectory().wstring()), narrow(core->runtimeDir), narrow(core->dataDir)));
         int built = core->openDevices(device);
+        if (built == PUSHCORE_OK) core->setupQuickVsr();
         if (built == PUSHCORE_OK) {
             std::lock_guard<std::mutex> lk(gGraphLock);
             built = core->buildGraph();
@@ -1815,6 +1855,7 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
         veyra::Logger::instance().flush();   // the open's timeline on disk now (a player's fast exit skips the buffered rest)
         ++gOpenInstances;
         core->description += std::format("; GPU priority class {}", veyra::gfx::gpuPriorityStatus().actual);
+        if (core->qvsr.active()) core->description += std::format("; quick start: driver RTX VSR (D3D11) from {}x{}", core->qvsrSrcW, core->qvsrSrcH);
         return core;
     } catch (const std::exception& e) {
         report(std::string("exception: ") + e.what());
@@ -1895,6 +1936,7 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.cutGuardCuts = core->cutsSeen.load(std::memory_order_relaxed);
     core->st.subtitleHoldState = core->subtitleState.load(std::memory_order_relaxed);
     core->st.subtitleHoldPixels = core->subtitlePixels.load(std::memory_order_relaxed);
+    core->st.quickVsr = core->qvsr.active() ? 1u : 0u;
     std::snprintf(core->st.fgNote, sizeof(core->st.fgNote), "%s", core->fgNote.c_str());
     std::memcpy(s, &core->st, size);
     return PUSHCORE_OK;

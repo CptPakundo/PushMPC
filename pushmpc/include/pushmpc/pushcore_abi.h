@@ -64,9 +64,18 @@ typedef struct PushCore PushCore; /* opaque */
 #define PUSHCORE_FLAG_EGRESS_COPY 1u /* force the fallback egress (one D3D12 copy per output into a shared ring) */
 #define PUSHCORE_FLAG_NO_WARMUP   2u /* skip the warm-up frames pushcore_open runs through the graph (first-frame stalls) */
 #define PUSHCORE_FLAG_NO_WARM_CACHE 4u /* do not keep the NGX core (and its D3D12 device) alive for the next instance */
-#define PUSHCORE_FLAG_WARMUP_GPU_ONLY 8u /* the warm-up never uses the D3D11 immediate context (it is busy on the caller's other
-                                            threads, e.g. mpv's decoder): the ingress slots go into the graph as they are, so
-                                            pushcore_open can run on a worker thread without the caller's context lock */
+/* Fast start (PushMPC 1.0). These two flags carry the values of their feature bits (FastStart's numbers in the shared
+   registry), so they cannot collide with flags other branches add. */
+#define PUSHCORE_FLAG_WARMUP_GPU_ONLY 8192u /* PUSHCORE_FEATURE_FAST_START: the warm-up never uses the D3D11 immediate context
+                                            (it is busy on the caller's other threads, e.g. mpv's decoder): the ingress slots
+                                            go into the graph as they are, so pushcore_open can run on a worker thread
+                                            without the caller's context lock */
+#define PUSHCORE_FLAG_QUICK_VSR 4096u /* PUSHCORE_FEATURE_QUICK_VSR, for the quick-start graph: when the settings upscale on
+                                         an NVIDIA GPU and the driver's RTX Video Super Resolution answers a check through the
+                                         D3D11 video processor (NVIDIA's stream extension; no NGX, ready in milliseconds),
+                                         the source is scaled to the SR target size by it in the ingress and the graph's own
+                                         SR stage is off; otherwise the given settings run unchanged (e.g. NVIDIA Image
+                                         Scaling). PushCoreStats.quickVsr / OutputInfo.description say which. */
 
 /* Egress modes (PushCoreOutputInfo.egressMode) */
 #define PUSHCORE_EGRESS_DIRECT 0u /* graph output pool shared and opened in D3D11 (design option A) */
@@ -254,6 +263,10 @@ typedef struct PushCoreStats {
        method without it), 4 Auto: running and detecting, not holding (no burned-in text found); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
     uint32_t subtitleHoldState;
     uint32_t subtitleHoldPixels;
+    /* Appended (PUSHCORE_FEATURE_QUICK_VSR): 1 = this instance upscales with the driver's RTX VSR through the D3D11 video
+       processor (PUSHCORE_FLAG_QUICK_VSR took effect) */
+    uint32_t quickVsr;
+    uint32_t quickVsrReserved;
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -317,6 +330,8 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
+#define PUSHCORE_FEATURE_QUICK_VSR 4096u /* PUSHCORE_FLAG_QUICK_VSR and PushCoreStats.quickVsr (fast start, Route B) */
+#define PUSHCORE_FEATURE_FAST_START 8192u /* pushcore_prewarm / prewarm2 / prewarmRelease and PUSHCORE_FLAG_WARMUP_GPU_ONLY */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */
 
 /* What this GPU and the installed runtime can run (PUSHCORE_FEATURE_FG_METHODS). No instance and no D3D12 device needed;

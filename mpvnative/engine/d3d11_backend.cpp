@@ -84,6 +84,7 @@ struct Warm {
     int64_t handoverPts = 0, discardUpTo = INT64_MIN;   // 100 ns
     PushCore* retired = nullptr;     // the quick graph after its last frame: closed at the next seek or close
     bool fullOpened = false;         // a full graph opened in this process (its NGX core may still be warm: no quick start)
+    uint32_t features = 0;           // pushcore_features() of the loaded core
     ULONGLONG quickTick = 0;
 };
 Warm& W() { static Warm* w = new Warm(); return *w; }   // never destroyed: the core may outlive every instance
@@ -121,6 +122,7 @@ bool LoadCore(const Options& o, std::wstring& coreDir, std::string& why)
     if (!api) { why = "pushcore.dll has no ABI " + std::to_string(PUSHCORE_ABI_VERSION) + " table"; return false; }
     w.dll = h; w.api = api; w.dllPath = dll;
     w.caps = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
+    if (auto feat = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(h, "pushcore_features"))) w.features = feat();
     return true;
 }
 
@@ -537,8 +539,17 @@ private:
                 qs.srMethod = PUSHCORE_SR_METHOD_NIS; qs.nr = 0; if (qs.cutGuard & 2) qs.cutGuard &= ~2;
                 cfg.settings = &qs;
                 cfg.flags = PUSHCORE_FLAG_NO_WARM_CACHE;   // the quick graph has no NGX stage; the full graph keeps the cache
+                // Route B: the driver's RTX VSR through the D3D11 video processor where it answers (pushcore checks it);
+                // PUSHMPC_FILTER_QuickVsr=0 keeps NVIDIA Image Scaling
+                wchar_t qv[8] = {};
+                const bool quickVsr = (w.features & PUSHCORE_FEATURE_QUICK_VSR) && !(GetEnvironmentVariableW(L"PUSHMPC_FILTER_QuickVsr", qv, 8) && qv[0] == L'0');
+                if (quickVsr) cfg.flags |= PUSHCORE_FLAG_QUICK_VSR;
                 w.core = w.api->open(&cfg, &si, m_dev.Get(), eb, sizeof(eb));
                 cfg.settings = &m_ps; cfg.flags = 0;
+                if (w.core && quickVsr) {
+                    PushCoreStats qs = {}; qs.structSize = sizeof(qs);
+                    if (w.api->stats(w.core, &qs) == PUSHCORE_OK) Log(std::string("d3d11: quick graph upscales with ") + (qs.quickVsr ? "the driver's RTX VSR (D3D11 video processor)" : "NVIDIA Image Scaling (driver RTX VSR did not answer)"));
+                }
                 if (w.core) { how = "open (cold): quick graph, the full graph follows"; StartFull(w, root, shaders, si); }
                 else Log(std::string("d3d11: quick graph did not open (") + (eb[0] ? eb : "failed") + "): the full graph opens now");
             } else Log("d3d11: quick start not used (" + qwhy + ")");
