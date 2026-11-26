@@ -15,7 +15,7 @@
 #   --json     one JSON object per target on stdout ({"target","action","state","detail"}), the log on stderr
 # Flatpak: files in ~/.var/app/<id>/pushmpc (the sandbox always sees them), `flatpak override --user
 #   --env=LD_PRELOAD=...` (refused when another LD_PRELOAD override is set), a marked block in
-#   ~/.var/app/<id>/data/plex/mpv.conf. Uninstall: --unset-env=LD_PRELOAD, the files, the block (exact restore).
+#   ~/.var/app/<id>/data/plex/mpv.conf. Uninstall: our LD_PRELOAD key out of the override keyfile (restored exactly), the files, the block (exact restore).
 # Tarball: files in <dir>/pushmpc and a launcher ~/.local/bin/plex-pushmpc (LD_PRELOAD + Plex.sh); mpv.conf in
 #   ~/.local/share/plex/mpv.conf.
 # Snap Plex is not supported: snap-confine is setuid, and glibc drops LD_PRELOAD for it.
@@ -114,11 +114,12 @@ do_flatpak() {   # do_flatpak <target name> <app id>
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$dest"; return 0; }
         ovf=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/overrides/$id
         if [ "$cur" = "$dest/pushmpc_preload.so" ]; then
-            flatpak override --user --unset-env=LD_PRELOAD "$id"
-            # the keyfile as it was before install (unset-env can leave an empty [Environment] group behind)
+            # our key out of the keyfile (flatpak --unset-env would write "LD_PRELOAD=" plus unset-environment instead),
+            # then the keyfile as it was before install when nothing else changed meanwhile
+            grep -vxF "LD_PRELOAD=$dest/pushmpc_preload.so" "$ovf" > "$ovf.pushmpc-tmp"; mv "$ovf.pushmpc-tmp" "$ovf"
             keys() { grep -v -e "^\[" -e "^$" "$1" 2>/dev/null; }
             if [ -f "$dest/override.backup" ] && [ "$(keys "$ovf")" = "$(keys "$dest/override.backup")" ]; then cp "$dest/override.backup" "$ovf"
-            elif [ -f "$dest/override.absent" ] && ! grep -q = "$ovf" 2>/dev/null; then rm -f "$ovf"; fi
+            elif [ -f "$dest/override.absent" ] && [ -z "$(keys "$ovf")" ]; then rm -f "$ovf"; fi
         fi
         remove_files "$dest"; conf_remove "$conf"
         emit "$name" uninstalled "$id" ;;

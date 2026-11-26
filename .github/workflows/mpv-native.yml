@@ -466,27 +466,45 @@ jobs:
             "== $d ($($exe.Name) $($exe.VersionInfo.ProductVersion)): libavfilter $($v -shr 16).$(($v -shr 8) -band 255).$($v -band 255); configure: $($cfg.Substring(0, [Math]::Min(300, $cfg.Length)))"
           }
           exit 0
-      - name: Proxy install, self-test through Plex's own libmpv, uninstall bit-exact
-        timeout-minutes: 15
+      - name: Proxy install, self-test through Plex's own libmpv, uninstall bit-exact (Windows PowerShell 5.1 and PowerShell 7)
+        timeout-minutes: 20
         run: |
           $p = "$env:RUNNER_TEMP\plexlibs"
+          Copy-Item mpvnative/install/test-plex-conf.ps1 $p
           $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\libmpv-2.dll" }
           if (-not $dirs) { Write-Host '::error::no Plex app installed on the runner'; exit 1 }
           $confs = "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf"
+          # a user's own mpv.conf for HTPC (UTF-8 with BOM, LF line ends); none for the desktop app
+          New-Item -ItemType Directory -Force (Split-Path $confs[0]) | Out-Null
+          [IO.File]::WriteAllBytes($confs[0], [byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes("hwdec=auto`nvolume=70`n"))
+          Remove-Item $confs[1] -ErrorAction SilentlyContinue
           function Snap { foreach ($d in $dirs) { Get-ChildItem $d -Recurse -File | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }; foreach ($c in $confs) { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" } }
-          $before = Snap
+          $fails = 0
           $env:PUSHMPC_PROXY_LOG = "$env:RUNNER_TEMP\proxy.log"
-          $out = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" install -From $p -Opts 'smoother=2' -Json; $rc = $LASTEXITCODE
-          $out | ForEach-Object { Write-Host "install: $_" }
-          if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 6 | ForEach-Object { Write-Host "  $_" } }
-          $st = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" status -From $p -Json; $st | ForEach-Object { Write-Host "status: $_" }
-          $un = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json; $un | ForEach-Object { Write-Host "uninstall: $_" }
-          $after = Snap
-          $diff = Compare-Object $before $after
-          if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host '::error::uninstall did not restore the Plex folders and configs bit for bit'; exit 1 }
-          Write-Host 'uninstall: Plex folders and mpv.conf files restored bit for bit'
-          $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' }).Count
-          if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; exit 1 }
+          foreach ($hostExe in 'powershell.exe', 'pwsh.exe') {
+            Write-Host "===== $hostExe"
+            & $hostExe -NoProfile -ExecutionPolicy Bypass -File "$p\test-plex-conf.ps1" | ForEach-Object { Write-Host "conf test: $_" }
+            if ($LASTEXITCODE) { Write-Host "::error::$hostExe`: mpv.conf edit test failed"; $fails++ }
+            $before = Snap
+            # -NoConf first, then a plain install on the installed proxy: must still write the conf block (idempotent)
+            $o1 = & $hostExe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" install -From $p -NoConf -Json; $o1 | ForEach-Object { Write-Host "install -NoConf: $_" }
+            $out = & $hostExe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" install -From $p -Opts 'smoother=2' -Json; $rc = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host "install again: $_" }
+            foreach ($c in $confs) {
+              $n = if (Test-Path $c) { ([regex]::Matches([IO.File]::ReadAllText($c), 'PushMPC native \(Plex\): do not edit')).Count } else { 0 }
+              if ($n -ne 1) { Write-Host "::error::$hostExe`: $c holds $n PushMPC blocks after the second install"; $fails++ }
+            }
+            $st = & $hostExe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" status -From $p -Json; $st | ForEach-Object { Write-Host "status: $_" }
+            $un = & $hostExe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json; $un | ForEach-Object { Write-Host "uninstall: $_" }
+            $diff = Compare-Object $before (Snap)
+            if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host "::error::$hostExe`: uninstall did not restore the Plex folders and mpv.conf files bit for bit"; $fails++ }
+            else { Write-Host "$hostExe`: Plex folders and mpv.conf files (one with a BOM, one absent) restored bit for bit" }
+            $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' -and $_.detail -match ', x2' }).Count
+            if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::$hostExe`: install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; $fails++ }
+          }
+          if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 4 | ForEach-Object { Write-Host "proxy log: $_" } }
+          if ($fails) { exit 1 }
+          Write-Host 'plex: all checks passed under Windows PowerShell 5.1 and PowerShell 7'
 
   # Plex desktop / HTPC on Linux (Flathub): Plex bundles libmpv + FFmpeg 5.x (libavfilter.so.8); pushmpc_preload.so via
   # `flatpak override --env=LD_PRELOAD` adds vf_pushmpc. Self-test inside the sandbox with Plex's own libmpv.
