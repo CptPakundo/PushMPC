@@ -32,6 +32,9 @@
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
 #include "veyra/pipeline/Rdna3NrBackend.h"
+#include "PushCoreIntel.h"                   // Intel VSR (before the graph) and Intel VPL frame interpolation (after it)
+#include "PushCoreIntelVsr.h"
+#include "veyra/pipeline/ResolutionPlan.h"   // srStageExtents: Intel VSR's output size = PushFPS's SR size rule
 #include "veyra/pipeline/AmdNrProvider.h"
 #include "veyra/pipeline/AmdHipPreflight.h"
 #include "veyra/pipeline/GpuPassUtils.h"
@@ -382,6 +385,17 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
     } else {
         set(PUSHCORE_CAP_NR, false, false, "AI clean-up needs an NVIDIA RTX or AMD RX 7000 / 9000 card", "");
     }
+    // Intel video methods (PushCoreIntel.cpp): Intel VSR and VPL frame interpolation behind their self-tests (run here once
+    // per adapter + driver on an Intel GPU, cached in SelfTest\IntelVsr / VplFi); when available, reason[] carries the
+    // measured numbers Auto uses (the cost; VPL's default-on gate)
+    {
+        const pushmpc::IntelCaps ic = pushmpc::intelCaps(d, driverVersionOf(d.AdapterLuid), true);
+        set(PUSHCORE_CAP_IVSR, ic.ivsrHw, ic.ivsrOn, ic.ivsrWhy.c_str(), ic.ivsrWhy.c_str());
+        if (ic.ivsrOn) std::snprintf(c.reason[PUSHCORE_CAP_IVSR], sizeof(c.reason[0]), "ms4k=%.2f", ic.ivsrMs4k);
+        set(PUSHCORE_CAP_VPL_FI, ic.vplHw, ic.vplOn, ic.vplWhy.c_str(), ic.vplWhy.c_str());
+        if (ic.vplOn) std::snprintf(c.reason[PUSHCORE_CAP_VPL_FI], sizeof(c.reason[0]), "%s ms=%.2f psnr=%.2f maxM=%u", ic.vplGate ? "gate passed" : "candidate",
+                                    ic.vplMs1080, ic.vplPsnr, ic.vplMaxMultiplier);
+    }
 }
 }  // namespace
 
@@ -423,6 +437,24 @@ struct PushCore {
     uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
+    // ---- Intel video methods (PushCoreIntel.h): a D3D11 device beside the graph on the same adapter (the bridge),
+    // Intel VSR on it before the graph (the graph then takes the upscaled frame, its own upscaler off), Intel VPL frame
+    // interpolation on it after the graph (graph frame generation off)
+    pushmpc::D3D11Bridge bridge;
+    ComPtr<ID3D11Fence> fence11inBridge, fence12inBridge;   // pushcore's two fences as the bridge device sees them
+    pushmpc::IntelVsrStage ivsr;
+    bool ivsrOn = false; uint32_t ivsrW = 0, ivsrH = 0, ivsrFallback = PUSHCORE_SR_METHOD_FSR;
+    std::string ivsrNote;
+    pushmpc::VplEgress vpl;
+    bool vplWanted = false, vplOn = false; uint32_t vplWant = 2;
+    int64_t lastRealPts = 0;              // VPL: the previous real frame's time (the generated frames' timestamps)
+    bool ensureBridge(std::string& why) {
+        if (bridge.ready()) return true;
+        if (!bridge.init(ctx.device(), ctx.adapter().luid, why)) return false;
+        if (!bridge.importFence11(fence11.Get(), fence11inBridge, why) || !bridge.importFence12(fence12.Get(), fence12inBridge, why)) { bridge.reset(); return false; }
+        veyra::log::info("pushcore", "D3D11 bridge device ready on " + narrow(bridge.adapterName()));
+        return true;
+    }
 
     // ---- D3D11 side (borrowed device, our objects) ----
     ComPtr<ID3D11Device> d11;
@@ -493,7 +525,7 @@ struct PushCore {
 
     // ---- ingress ring ----
     static constexpr uint32_t kIngressSlots = 8;
-    struct InSlot { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D12Resource> res; uint64_t freeValue = 0; };
+    struct InSlot { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D12Resource> res; uint64_t freeValue = 0; ComPtr<ID3D11Texture2D> br; /* on the bridge (Intel VSR) */ };
     InSlot inSlots[kIngressSlots];
     uint32_t inW = 0, inH = 0; DXGI_FORMAT inFormat = DXGI_FORMAT_UNKNOWN;
     uint64_t inIndex = 0;
@@ -553,6 +585,10 @@ struct PushCore {
         int64_t realPts = 0;
         uint64_t readyValue = 0;          // fence12 value covering every list of this batch
         uint32_t next = 0;
+        // Intel VPL (after the graph): the frames between the previous real frame and this one, handed out before it
+        bool vplReset = false, vplStarted = false, vplDone = false;
+        std::vector<pushmpc::VplEgress::Gen> vplGen;
+        uint64_t vplReady = 0; int64_t prevPts = 0; uint32_t vplNext = 0; int32_t fgLevel = 0;
     };
     std::deque<Batch> batches;
     struct Lease { std::shared_ptr<veyra::pipeline::FrameLease> graphLease; uint32_t kind = 0, parity = 0; int outSlot = -1; int xefgSlot = -1, vplSlot = -1; };
@@ -573,6 +609,7 @@ struct PushCore {
 
     PushCoreStats st{};
     std::deque<PushCoreGpuTiming> timings;
+    std::deque<double> ivsrMs, vplMs;    // Intel VSR blit GPU ms, VPL ms per source frame (wall time of its job)
     std::string error, description;
 
     // ------------------------------------------------------------------------------------------
@@ -659,6 +696,12 @@ struct PushCore {
             s.frameGenerationBackend = FrameGenerationBackend::AmdFrc;
             cap = 2;
             break;
+        case PUSHCORE_FG_VPL:
+            // Intel VPL AI frame interpolation runs after the graph (VplEgress, buildGraphOnce); the graph itself makes no
+            // frames (multiplier 1 below)
+            s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
+            cap = 4;
+            break;
         default:
             s.frameGenerationBackend = FrameGenerationBackend::Vfg;
             break;
@@ -667,12 +710,50 @@ struct PushCore {
         // VFG: the NvVFX model (0..2); PushFlow: its tier (EnhancementSettings keeps PushFlow's tier in vfgQuality)
         s.vfgQuality = tryFg == PUSHCORE_FG_PUSHFLOW ? std::min<uint32_t>(settings.fgTier, 2u) : std::min<uint32_t>(settings.vfgQuality, 2u);
         s.multiplier = settings.multiplier >= 2 && tryFg != PUSHCORE_FG_NONE ? std::min<uint32_t>(settings.multiplier, cap) : 1u;
+        if (settingsProbe) { if (vplOn || vplWanted) s.multiplier = 1; }   // a live settings check: the stages stay as built
+        else {
+            vplWanted = tryFg == PUSHCORE_FG_VPL && s.multiplier >= 2;
+            if (vplWanted) { vplWant = s.multiplier; s.multiplier = 1; }
+        }
         if (s.multiplier > 1) s.content = ContentRate::Auto;   // WatchPage ensureVideoCadence (ignored for files)
         s.sr = settings.sr != 0;
         if (settings.srQuality >= 1 && settings.srQuality <= 4) s.videoSrQuality = settings.srQuality;
         // the upscaler: RTX VSR, or AMD FSR / NVIDIA Image Scaling (any GPU; on a non-NVIDIA GPU RTX VSR becomes FSR)
         runSr = settings.srMethod;
         if (!nvidia && runSr == PUSHCORE_SR_METHOD_RTX) runSr = PUSHCORE_SR_METHOD_FSR;
+        // Intel VSR: the driver's video processor before the graph, to PushFPS's SR size (srStageExtents); the graph runs
+        // without its own upscaler. Not an Intel GPU, or the stage does not start: FSR (NIS without the FidelityFX files).
+        if (settingsProbe) { if (ivsrOn) s.sr = false; else if (runSr == PUSHCORE_SR_METHOD_IVSR) runSr = ivsrFallback; }
+        else { ivsrOn = false; ivsrNote.clear(); }
+        if (!settingsProbe && runSr == PUSHCORE_SR_METHOD_IVSR) {
+            std::string why;
+            const auto target = settings.srTarget == PUSHCORE_SR_TARGET_1440P ? veyra::pipeline::SrTarget::Qhd
+                              : settings.srTarget == PUSHCORE_SR_TARGET_5K ? veyra::pipeline::SrTarget::Uhd5K : veyra::pipeline::SrTarget::Uhd4K;
+            const auto ext = veyra::pipeline::srStageExtents({stream.width, stream.height}, target);
+            if (!s.sr || !ext.enlarges()) {
+                why = "nothing to upscale"; s.sr = false;   // Intel VSR only enlarges (no artifact reduction at the source size)
+            } else if (vendor != 0x8086) {
+                why = "not an Intel GPU";
+            } else if (pmu::ReadUnlockMode(pmu::Unlock::IntelVsr) == pmu::UnlockMode::Off) {
+                why = "switched off (PUSHMPC_DISABLE_INTELVSR / Unlocks IntelVsr = 0)";
+            } else if (ensureBridge(why)) {
+                const DXGI_FORMAT f = stream.format == PUSHCORE_INPUT_P010 ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+                const bool bt709 = stream.matrix != AVCOL_SPC_BT470BG && stream.matrix != AVCOL_SPC_SMPTE170M;
+                if (ivsr.init(bridge, stream.width, stream.height, ext.evaluated.width, ext.evaluated.height, f, bt709, stream.range != AVCOL_RANGE_JPEG,
+                              kIngressSlots, why)) {
+                    ivsrOn = true; ivsrW = ext.evaluated.width; ivsrH = ext.evaluated.height;
+                    s.sr = false;   // the graph gets the upscaled frame
+                    ivsrNote = std::format("Intel VSR {}x{} -> {}x{} (driver video processor, super resolution on)", stream.width, stream.height, ivsrW, ivsrH);
+                    veyra::log::info("pushcore", ivsrNote);
+                }
+            }
+            if (!ivsrOn && s.sr) {
+                const std::filesystem::path fsr = veyra::runtime::localDataDirectory() / L"amd" / L"fidelityfx";
+                runSr = fileExists(fsr / L"amd_fidelityfx_upscaler_dx12.dll") ? PUSHCORE_SR_METHOD_FSR : PUSHCORE_SR_METHOD_NIS;
+                ivsrFallback = runSr;
+                veyra::log::warn("pushcore", std::format("Intel VSR did not start ({}): {} instead", why, runSr == PUSHCORE_SR_METHOD_FSR ? "FSR" : "NIS"));
+            }
+        }
         if (runSr == PUSHCORE_SR_METHOD_FSR) {
             s.videoSrQuality = kVideoSrFsr;   // FidelityFX picks FSR 4.1 (ML / INT8) where the driver offers it
             s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;   // FSR is temporal: its motion from FidelityFX flow
@@ -842,6 +923,7 @@ struct PushCore {
         auto add = [&](uint32_t b, uint32_t cap) {
             if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
             if (b == PUSHCORE_FG_DLSSG && family == PUSHCORE_FAMILY_RTX20) return;
+            if (b == PUSHCORE_FG_VPL && ctx.adapter().vendorId != 0x8086) return;
             for (const auto& e : c) if (e.first == b && e.second == cap) return;
             c.push_back({b, cap});
         };
@@ -853,6 +935,7 @@ struct PushCore {
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); break;
         case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); break;
+        case PUSHCORE_FG_VPL: add(PUSHCORE_FG_VPL, 8); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_FSR, 2); break;
         default: add(PUSHCORE_FG_VFG, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
@@ -860,8 +943,10 @@ struct PushCore {
     }
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
     uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false;
+    bool builtIntelSr = false, settingsProbe = false; uint32_t builtIntelTarget = 0, builtIntelMult = 0;   // Intel VSR / VPL rebuild test; probe = no stage side effects
     int buildGraph() {
         builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0;
+        builtIntelSr = settings.sr != 0; builtIntelTarget = settings.srTarget; builtIntelMult = settings.multiplier;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
@@ -871,7 +956,7 @@ struct PushCore {
             lastFailed = veyra::engine::FailedBackend::None;
             const int r = buildGraphOnce();
             if (r == PUSHCORE_OK) {
-                runFg = fg ? tryFg : PUSHCORE_FG_NONE;
+                runFg = fg || vplOn ? tryFg : PUSHCORE_FG_NONE;
                 fgFellBack = i > 0;
                 fgNote = notes.empty() ? std::string() : notes + std::string(fgName(runFg));
                 if (fgFellBack) veyra::log::warn("pushcore", "frame generation fallback: " + fgNote);
@@ -906,7 +991,10 @@ struct PushCore {
 
         const bool hdrTransfer = stream.transfer == AVCOL_TRC_SMPTE2084 || stream.transfer == AVCOL_TRC_ARIB_STD_B67;
         gd = {};
-        gd.sourceWidth = stream.width; gd.sourceHeight = stream.height;
+        // Intel VSR before the graph: the graph's source is the upscaled frame
+        const uint32_t srcW = ivsrOn ? ivsrW : stream.width, srcH = ivsrOn ? ivsrH : stream.height;
+        frame->width = int(srcW); frame->height = int(srcH);
+        gd.sourceWidth = srcW; gd.sourceHeight = srcH;
         initCostWindows();
         // EngineController: hdrInput = the source's colour is on the HDR path (PQ/HLG)
         gd.hdrInput = hdrTransfer;
@@ -914,7 +1002,7 @@ struct PushCore {
         gd.captureBitDepth = stream.format == PUSHCORE_INPUT_P010 ? 10 : 8;
         engine::StageRequest r;              // EngineController stageRequest() for an ordinary file
         r.nr = options.nr; r.sr = options.sr; r.fg = options.fg; r.fgMultiplier = options.fgMultiplier;
-        r.width = stream.width; r.height = stream.height;
+        r.width = srcW; r.height = srcH;
         r.stillImage = false; r.exportJob = false; r.liveSource = false; r.uncompressedSource = false;
         r.nvidiaAdapter = ctx.adapter().isNvidia; r.amdNr = ctx.adapter().vendorId == 0x1002;   // AMD: NR on the AMD runtimes
         r.nodeOrder = options.nodeOrder ? &*options.nodeOrder : nullptr;
@@ -956,7 +1044,7 @@ struct PushCore {
             // only the guard takes the flow (VFG, PushFlow, AMD FRC without NR): a small flow extent is enough
             if (gd.pushMpcGuardFlow && !gd.fgUsesFlow() && !options.settings.nr) {
                 const uint32_t fw = guardFlowWidth();
-                if (stream.width > fw) { gd.flowWidth = fw; gd.flowHeight = std::max(64u, ((stream.height * fw / stream.width) + 1u) & ~1u); }
+                if (srcW > fw) { gd.flowWidth = fw; gd.flowHeight = std::max(64u, ((srcH * fw / srcW) + 1u) & ~1u); }
             }
         }
         if (options.fg && options.settings.frameGenerationBackend == engine::FrameGenerationBackend::AmdFrc) preferSystemD3dCompiler();
@@ -1023,6 +1111,22 @@ struct PushCore {
         if (haveSettings && settings.activeArea[2] > settings.activeArea[0] && settings.activeArea[3] > settings.activeArea[1])
             graph->setCutGuardActiveArea(settings.activeArea[0], settings.activeArea[1], settings.activeArea[2], settings.activeArea[3]);
         cutGuardOn = fg && graph->cutGuardActive();
+        // Intel VPL frame interpolation after the graph (its frames at the graph's output size and format); not starting
+        // is a frame generation failure: the fallback chain moves on (VPL -> PushFlow -> FSR FG)
+        vplOn = false;
+        if (vplWanted) {
+            std::string why;
+            const double fps = stream.fpsNum > 0 && stream.fpsDen > 0 ? double(stream.fpsNum) / stream.fpsDen : 24.0;
+            if (pmu::ReadUnlockMode(pmu::Unlock::VplFi) == pmu::UnlockMode::Off) why = "switched off (PUSHMPC_DISABLE_VPLFI / Unlocks VplFi = 0)";
+            else if (ensureBridge(why) && vpl.init(bridge, ctx.device(), ring.queue(), d11_1.Get(), fence11.Get(), fence12.Get(), graph->workWidth(), graph->workHeight(),
+                                                   graph->outputFormat(), vplWant, fps, !haveSettings || settings.cutGuard != 0, why)) {
+                vplOn = true;
+                multiplier = vpl.multiplier();
+                cutGuardOn = vpl.cutGuardActive();
+                veyra::log::info("pushcore", "frame generation: " + vpl.describe());
+            }
+            if (!vplOn) { lastFailed = engine::FailedBackend::Fg; return fail("Intel VPL frame interpolation did not start: " + why); }
+        }
         description = std::format(
             "source {}x{} {}{} -> output {}x{} {}; SR {} (videoSrQuality {}); FG {} {} {}X (quality/tier {}, async {}, cut guard {}); NR {}; egress {}; GPU family {}",
             stream.width, stream.height, stream.format == PUSHCORE_INPUT_P010 ? "P010" : "NV12",
@@ -1033,6 +1137,8 @@ struct PushCore {
             engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier, gd.vfgQuality,
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
+        if (ivsrOn) description += "; " + ivsrNote;
+        if (vplOn) description += "; " + vpl.describe();
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
         return buildEgress();
     }
@@ -1338,7 +1444,8 @@ struct PushCore {
 
     void collectTimings() {
         if (!graph) return;
-        cutsSeen.store(cutBase + graph->cutGuardCuts(), std::memory_order_relaxed);
+        cutsSeen.store(cutBase + graph->cutGuardCuts() + (vplOn ? vpl.cuts() : 0), std::memory_order_relaxed);
+        if (ivsrOn) for (double v : ivsr.takeTimings()) { if (ivsrMs.size() < 64) ivsrMs.push_back(v); }
         for (const auto& t : graph->takeGpuTimings()) {
             using veyra::diagnostics::GpuStage;
             auto ms = [&](GpuStage s) { const auto& g = t.gpu[size_t(s)]; return g.state == veyra::diagnostics::SampleState::Measured && g.milliseconds ? *g.milliseconds : -1.0; };
@@ -1354,6 +1461,9 @@ struct PushCore {
                 p.nrMs = sum;
             }
             p.videoHdrMs = ms(GpuStage::VideoHdr);
+            // the stages outside the graph: Intel VSR (bridge timestamps) as the upscaler, Intel VPL as the frame generation
+            if (ivsrOn && p.srMs < 0 && !ivsrMs.empty()) { p.srMs = ivsrMs.front(); ivsrMs.pop_front(); }
+            if (vplOn && p.fgBatchMs < 0 && !vplMs.empty()) { p.fgBatchMs = vplMs.front(); p.fg1Ms = p.fgBatchMs; vplMs.pop_front(); }
             if (auto it = decisionOf.find(p.sourceFrameId); it != decisionOf.end()) {
                 // GPU work of the frame = its measured stages (colour, VSR, the FG group). The graph's execution span
                 // also contains the queue's waits (presentation release fence, VFG's CUDA hand-off) and overstated
@@ -1415,11 +1525,25 @@ struct PushCore {
         hw.texture = slot.res.Get(); hw.subresourceIndex = 0;
         hw.waitFence = fence11in12.Get(); hw.waitValue = value11;
         hw.textureWidth = inW; hw.textureHeight = inH;
+        if (ivsrOn) {
+            // Intel VSR on the bridge: the ingress slot (after the copy above) into the stage's slot at the output size;
+            // the graph waits for the bridge's fence instead of the ingress one
+            const uint32_t k = uint32_t((inIndex - 1) % kIngressSlots);
+            std::string why;
+            if (!slot.br && !bridge.open11(slot.tex.Get(), slot.br, why)) return fail("Intel VSR: " + why);
+            const uint64_t w = ivsr.run(slot.br.Get(), k, fence11inBridge.Get(), value11, fence12inBridge.Get(), slot.freeValue, why);
+            if (!why.empty()) veyra::log::warn("pushcore", why);
+            if (!w) return fail("Intel VSR: " + why);
+            hw.texture = ivsr.slot(k).res.Get(); hw.waitFence = ivsr.fence().in12.Get(); hw.waitValue = w;
+            hw.textureWidth = ivsrW; hw.textureHeight = ivsrH;
+        }
 
         const bool reset = needReset || (submitFlags & PUSHCORE_SUBMIT_DISCONTINUITY) || !haveReal;
         Batch b;
         b.sourceIndex = submittedCount;
         b.realPts = pts;
+        b.vplReset = reset; b.prevPts = lastRealPts; lastRealPts = pts;
+        b.fgLevel = timing && timing->structSize >= PUSHCORE_SUBMIT_TIMING_SIZE_V2 && timing->streamNow100ns != INT64_MIN ? std::clamp<int32_t>(timing->fgLevel, 0, 2) : 0;
         // admission context: the GPU work still queued ahead of this frame (predicted finish of earlier frames)
         const double nowMs = std::chrono::duration<double, std::milli>(t0.time_since_epoch()).count();
         {
@@ -1461,7 +1585,7 @@ struct PushCore {
         if (!graph->process(frame, double(pts) / 10000.0, reset, b.out, frameId, &color, &hw,
                             /*retainReferences*/ false,
                             useAdmission ? veyra::pipeline::EnhanceGraph::FgAdmission(admitFn) : veyra::pipeline::EnhanceGraph::FgAdmission{},
-                            /*previewMultiplier*/ multiplier))
+                            /*previewMultiplier*/ fg ? multiplier : 1u))
             return fail(std::format("graph process failed (failed backend {})", int(graph->failedBackend())));
         if (!useAdmission) decision = fg ? 0 : 2;
         if (fg && !reset) {
@@ -1556,6 +1680,55 @@ struct PushCore {
             const uint32_t i = b.next;
             if (!graph->resolveFrame(b.out, i)) break;
             auto& f = b.out.batch.frames[i];
+            if (vplOn && f.kind == FrameKind::Real && f.lease) {
+                // Intel VPL: the frames between the previous real frame and this one first (VplEgress job on the bridge)
+                if (!b.vplDone) {
+                    std::string why;
+                    if (!b.vplStarted) {
+                        if (vpl.start(f.lease->texture.Get(), b.readyValue, b.vplReset, why)) b.vplStarted = true;
+                        else if (why.empty()) break;   // busy: the caller holds the generated textures; return frames first
+                        else vplFailed(why);
+                    }
+                    if (vplOn && b.vplStarted) {
+                        if (vpl.busy()) break;         // poll() waits for the job
+                        if (vpl.finish(value12, b.vplGen, why)) {
+                            b.vplReady = value12;
+                            if (vpl.lastMs() > 0 && vplMs.size() < 64) vplMs.push_back(vpl.lastMs());
+                            // the renderer's level: 1 = the 2X midpoint only, 2 = none (VPL's history is kept either way)
+                            const uint32_t m = vpl.multiplier();
+                            for (uint32_t k = 0; k < b.vplGen.size(); ++k) b.vplGen[k].slot |= int((k + 1) << 16);   // + the subframe
+                            if (b.fgLevel >= 1 && !b.vplGen.empty()) {
+                                std::vector<pushmpc::VplEgress::Gen> keep;
+                                for (uint32_t k = 0; k < b.vplGen.size(); ++k) {
+                                    const bool mid = b.fgLevel == 1 && k == (m % 2 == 0 ? m / 2 - 1 : 0);
+                                    if (mid) keep.push_back(b.vplGen[k]); else { vpl.released(b.vplGen[k].slot & 0xFFFF, 0); ++st.skippedGenerated; }
+                                }
+                                b.vplGen.swap(keep);
+                            }
+                        } else vplFailed(why);
+                    }
+                    b.vplDone = true;
+                }
+                while (count < capacity && b.vplNext < b.vplGen.size()) {
+                    const auto& g = b.vplGen[b.vplNext++];
+                    const uint32_t sub = uint32_t(g.slot >> 16), m = std::max(2u, vpl.multiplier());
+                    PushCoreFrame& o = frames[count];
+                    o = {};
+                    o.texture = g.texture;
+                    o.readyFence = fence12in11.Get();
+                    o.readyValue = b.vplReady;
+                    o.kind = PUSHCORE_FRAME_GENERATED;
+                    o.pts100ns = b.prevPts + (b.realPts - b.prevPts) * int64_t(sub) / int64_t(m);
+                    o.sourceIndex = b.sourceIndex;
+                    o.subframe = sub;
+                    o.width = graph->workWidth(); o.height = graph->workHeight();
+                    Lease l; l.kind = PUSHCORE_FRAME_GENERATED; l.vplSlot = g.slot & 0xFFFF;
+                    o.lease = nextLease++;
+                    leases.emplace(o.lease, std::move(l));
+                    ++count; ++st.outputs; ++st.generated;
+                }
+                if (b.vplNext < b.vplGen.size() || count >= capacity) break;   // the caller's array is full: the real frame next time
+            }
             if (f.kind == FrameKind::Generated && f.validity != GenerationValidity::Valid) {
                 ++st.skippedGenerated; f.lease.reset(); ++b.next; continue;
             }
@@ -1610,6 +1783,13 @@ struct PushCore {
         return PUSHCORE_OK;
     }
     std::vector<std::shared_ptr<veyra::pipeline::FrameLease>> pendingCopyLeases;
+    // Intel VPL failing mid-stream: the real frames go on alone (never a black frame); the next reload tries the chain again
+    void vplFailed(const std::string& why) {
+        veyra::log::error("pushcore", "Intel VPL frame interpolation failed: " + why + "; real frames only from now on");
+        vplOn = false; runFg = PUSHCORE_FG_NONE; multiplier = 1; fgFellBack = true; cutGuardOn = false;
+        fgNote = "Intel VPL failed mid-stream (" + why.substr(0, 100) + "): none";
+        vpl.dropJobs();
+    }
 
     int poll(PushCoreFrame* frames, uint32_t capacity, uint32_t* countOut, uint32_t timeoutMs) {
         if (!graph) return fail("not open");
@@ -1634,7 +1814,9 @@ struct PushCore {
             auto& b = batches.front();
             const auto& f = b.out.batch.frames[b.next];
             const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-            if (f.lease && !f.lease->ready() && f.lease->readyFenceObject) {
+            if (vplOn && vpl.busy()) {
+                vpl.waitDone(uint32_t(std::max<long long>(1, left)));
+            } else if (f.lease && !f.lease->ready() && f.lease->readyFenceObject) {
                 f.lease->readyFenceObject->SetEventOnCompletion(f.lease->readyFence, waitEvent);
                 WaitForSingleObject(waitEvent, DWORD(std::max<long long>(1, left)));
             } else if (egressMode == PUSHCORE_EGRESS_COPY && outSlots[outNext % outSlots.size()].held) {
@@ -1665,6 +1847,7 @@ struct PushCore {
             return PUSHCORE_OK;
         }
         auto& l = it->second;
+        if (l.vplSlot >= 0) { vpl.released(l.vplSlot, c ? value11 : 0); leases.erase(it); return PUSHCORE_OK; }
         if (egressMode == PUSHCORE_EGRESS_DIRECT) {
             // The real frame comes last in its batch, so its value also covers the batch's generated reads.
             if (l.kind == PUSHCORE_FRAME_REAL && value11) graph->presentationSubmitted(l.parity, fence11in12.Get(), value11);
@@ -1677,6 +1860,7 @@ struct PushCore {
     }
 
     void dropQueued() {
+        vpl.dropJobs();
         batches.clear();
         pendingCopyLeases.clear();
         if (xefg) { xefg->flush(); xlastPts = INT64_MIN; }
@@ -1704,6 +1888,7 @@ struct PushCore {
             if (ring.initialized()) ring.drainQueue();
         }
         opened.clear(); outSlots.clear();
+        vpl.shutdown(); vplOn = false; ivsr.reset(); ivsrOn = false;
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
     }
 
@@ -1719,9 +1904,17 @@ struct PushCore {
             veyra::log::info("pushcore", "frame generation method, upscaler, cut guard or Subtitle Hold changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
+        // the stages outside the graph (Intel VSR, Intel VPL) are sized at build time: a change of what they do rebuilds
+        if ((ivsrOn || vplOn) && haveSettings && ((settings.sr != 0) != builtIntelSr || settings.srTarget != builtIntelTarget || settings.multiplier != builtIntelMult)) {
+            veyra::log::info("pushcore", "Intel VSR / VPL settings changed: graph rebuild");
+            return PUSHCORE_NEEDS_REBUILD;
+        }
         engine::EnhancementSettings s;
         std::optional<engine::ChainRuntimeOrder> order;
-        if (!loadSettings(s, order)) return PUSHCORE_NEEDS_REBUILD;
+        settingsProbe = true;
+        const bool loaded = loadSettings(s, order);
+        settingsProbe = false;
+        if (!loaded) return PUSHCORE_NEEDS_REBUILD;
         if (engine::requiresGraphRebuild(loadedSettings, s) || !(order == loadedOrder)) {
             veyra::log::info("pushcore", "settings change needs a graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
@@ -1847,6 +2040,9 @@ struct PushCore {
         copyList.Reset();
         for (auto& a : copyAlloc) a.Reset();
         if (ring.initialized()) ring.shutdown();
+        vpl.shutdown(); ivsr.reset();
+        fence11inBridge.Reset(); fence12inBridge.Reset();
+        bridge.reset();
         fence11in12.Reset(); fence12.Reset();
         if (ctx.initialized()) ctx.shutdown();
         if (frame) { frame->data[0] = nullptr; av_frame_free(&frame); }

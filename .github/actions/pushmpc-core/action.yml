@@ -302,6 +302,25 @@ runs:
         & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core,directml --headers
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    # G10: Intel VPL frame interpolation in pushcore needs Intel's MIT dispatcher (libvpl), pinned by tag + SHA-256 (as
+    # intel-video.yml), static with the static CRT; the runtime itself comes with Intel's graphics driver
+    - name: Intel VPL dispatcher (libvpl, pinned)
+      shell: pwsh
+      env:
+        LIBVPL_TAG: v2.17.0
+        LIBVPL_SHA256: 4DE3E2FAF1E8307FB282E4A43F443191810F6A6B0A484FFFA7995BA1C814C6EC
+      run: |
+        $d = "$env:RUNNER_TEMP\vpl-dl"; New-Item -ItemType Directory -Force $d | Out-Null
+        Invoke-WebRequest -Uri "https://github.com/intel/libvpl/archive/refs/tags/$env:LIBVPL_TAG.tar.gz" -OutFile "$d\libvpl.tar.gz"
+        if ((Get-FileHash "$d\libvpl.tar.gz" -Algorithm SHA256).Hash -ne $env:LIBVPL_SHA256) { throw 'libvpl SHA-256 mismatch' }
+        tar -xzf "$d\libvpl.tar.gz" -C $d
+        $src = (Get-ChildItem $d -Directory -Filter 'libvpl-*' | Select-Object -First 1).FullName
+        cmake -S $src -B "$env:RUNNER_TEMP\vplb" -A x64 -DBUILD_SHARED_LIBS=OFF -DUSE_MSVC_STATIC_RUNTIME=ON -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DINSTALL_EXAMPLES=OFF "-DCMAKE_INSTALL_PREFIX=$env:DEPS\vpl"
+        if ($LASTEXITCODE -ne 0) { throw 'libvpl configure failed' }
+        cmake --build "$env:RUNNER_TEMP\vplb" --config Release --target install
+        if ($LASTEXITCODE -ne 0) { throw 'libvpl build failed' }
+        Copy-Item "$src\LICENSE" "$env:DEPS\vpl\LICENSE.libvpl.txt"
+
     # sccache (Mozilla's official release build, pinned) in front of MSVC for PushFPS and pushcore: the compiler
     # output is cached by content; the cache is keyed by the PushFPS commit and our sources, restored from the
     # nearest earlier entry and saved right after the build
@@ -353,6 +372,7 @@ runs:
         if ($env:LIBDOVI_ROOT -and (Test-Path "$env:LIBDOVI_ROOT\bin\dolby_vision.dll")) { $dovi = @('-DVEYRA_ENABLE_LIBDOVI=ON', "-DVEYRA_LIBDOVI_ROOT=$env:LIBDOVI_ROOT") }
         else { Write-Host '::warning::libdovi was not built: no Dolby Vision RPU parsing in this build' }
         $nvof = @(); if ($env:NVOF_SDK_ROOT) { $nvof = @("-DVEYRA_NVOF_SDK_ROOT=$env:NVOF_SDK_ROOT") }
+        $vpl = @(); if (Test-Path "$env:DEPS\vpl\lib\vpl.lib") { $vpl = @("-DPUSHMPC_VPL_ROOT=$($env:DEPS.Replace('\','/'))/vpl") } else { Write-Host '::warning::no libvpl: Intel VPL frame interpolation not in this build' }
         cmake -S PushFPS -B $env:BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release `
           "-DCMAKE_PREFIX_PATH=$ffmpeg" "-DCMAKE_C_COMPILER_LAUNCHER=$env:SCCACHE_EXE" "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:SCCACHE_EXE" `
           -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF `
@@ -369,7 +389,7 @@ runs:
           "-DVEYRA_ONNXRUNTIME_ROOT=$env:DEPS\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=$env:DEPS\pushflow\dml" `
           "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" `
           "-DCMAKE_PROJECT_INCLUDE=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/cmake/msvc-loop-guard.cmake" `
-          "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi
+          "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi @vpl
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and
@@ -385,6 +405,24 @@ runs:
         Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
         Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
         & $env:SCCACHE_EXE --show-stats
+
+    # Third-party licence texts of what is built into pushcore.dll go with the core component (core\licenses\; staged by
+    # pushmpc-install.ps1 stage, listed in docs/licences.md): libvpl (MIT, linked statically) and the Intel XeSS SDK's
+    # licence + third-party notices (its headers are compiled in; pins = scripts/xess-fetch.ps1's, XeSS SDK v3.0.2)
+    - name: Third-party notices for the core (licenses folder)
+      shell: pwsh
+      run: |
+        $lic = "$env:BUILD\pushmpc\licenses"; New-Item -ItemType Directory -Force $lic | Out-Null
+        $vplLic = "$env:DEPS\vpl\LICENSE.libvpl.txt"
+        if (Test-Path $vplLic) { Copy-Item $vplLic "$lic\libvpl-LICENSE.txt" } else { Write-Host '::warning::no libvpl licence (libvpl not built)' }
+        $pins = @{ 'LICENSE.txt' = '784BE42C39A4A4D03CF85D88E15E59D75828FCA773CE45B8DBFFFBD7EAF208DF'; 'third-party-programs.txt' = 'E8D8899DBFC4DE0E8CA25560BE9358E03C1405D7C956D20A1838C3C709B9B51C' }
+        foreach ($n in $pins.Keys) {
+          $src = Join-Path $env:XESS_ROOT $n
+          if (-not (Test-Path $src)) { Write-Host "::error::XeSS SDK $n missing in $env:XESS_ROOT"; exit 1 }
+          if ((Get-FileHash $src -Algorithm SHA256).Hash -ne $pins[$n]) { Write-Host "::warning::XeSS SDK $n differs from the v3.0.2 pin (PushFPS moved XESS_TAG): shipped as found" }
+          Copy-Item $src "$lic\intel-xess-$n"
+        }
+        Get-ChildItem $lic | Format-Table Name, Length
 
     # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
     # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
@@ -501,6 +539,7 @@ runs:
         Copy-Item repo/vsplugin/bin/pushmpc_vs.dll "$o\vsplugin-bin"
         Copy-Item "$env:BUILD\pushmpc\pushcore.dll" "$o\build\pushmpc"
         if (Test-Path "$env:BUILD\pushmpc\pushcore_hip_preflight.exe") { Copy-Item "$env:BUILD\pushmpc\pushcore_hip_preflight.exe" "$o\build\pushmpc" }
+        if (Test-Path "$env:BUILD\pushmpc\licenses") { Copy-Item "$env:BUILD\pushmpc\licenses" "$o\build\pushmpc" -Recurse }   # libvpl, XeSS SDK notices
         Copy-Item "$env:BUILD\shaders" "$o\build\shaders" -Recurse
         New-Item -ItemType Directory -Force "$o\harness" | Out-Null
         Copy-Item "$env:BUILD\pushmpc\pushcore_gpu_harness.exe" "$o\harness"

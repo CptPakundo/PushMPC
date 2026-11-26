@@ -116,3 +116,21 @@ function(pushmpc_add_release_target)
   add_dependencies(pushmpc_release ${_shaders} pushcore_dll pushcore_hip_preflight pushcore_gpu_harness)
 endfunction()
 cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL pushmpc_add_release_target)
+
+# G10 Intel video: the D3D11 bridge device beside the graph, Intel VSR (driver video processor) before it, Intel VPL frame
+# interpolation after it (PushCoreIntel.h)
+target_sources(pushcore_dll PRIVATE src/PushCoreD3D11Bridge.cpp src/PushCoreD3D11Bridge.h src/PushCoreIntelVsr.cpp src/PushCoreIntelVsr.h
+  src/PushCoreVplFi.cpp src/PushCoreVplFi.h src/PushCoreIntel.cpp src/PushCoreIntel.h)
+# Intel VPL (Intel Video Processing Library): its MIT dispatcher, static with the static CRT, linked into pushcore.dll for
+# PUSHCORE_FG_VPL (AI frame interpolation; the runtime itself comes with Intel's graphics driver). PUSHMPC_VPL_ROOT = a
+# libvpl install (.github/workflows/intel-video.yml and release.yml build it from the pinned tag). Without it pushcore
+# builds and reports VPL as "built without Intel VPL".
+set(PUSHMPC_VPL_ROOT "" CACHE PATH "libvpl install (include/vpl, lib/vpl.lib) for Intel VPL frame interpolation")
+if(PUSHMPC_VPL_ROOT AND EXISTS "${PUSHMPC_VPL_ROOT}/include/vpl/mfx.h" AND EXISTS "${PUSHMPC_VPL_ROOT}/lib/vpl.lib")
+  message(STATUS "pushcore: Intel VPL dispatcher from ${PUSHMPC_VPL_ROOT}")
+  target_include_directories(pushcore_dll PRIVATE "${PUSHMPC_VPL_ROOT}/include")
+  target_compile_definitions(pushcore_dll PRIVATE PUSHMPC_HAVE_VPL ONEVPL_EXPERIMENTAL)
+  target_link_libraries(pushcore_dll PRIVATE "${PUSHMPC_VPL_ROOT}/lib/vpl.lib" ole32 uuid advapi32)
+else()
+  message(STATUS "pushcore: no Intel VPL dispatcher (PUSHMPC_VPL_ROOT): VPL frame interpolation not built")
+endif()
