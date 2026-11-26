@@ -142,6 +142,13 @@ param(
     # Auto on a repair or update follows the first install (Use-EarlierChoices); Yes asks for it then
     [ValidateSet('Auto', 'Yes', 'No')]
     [string]$Pmml = 'Auto',
+    # the anime upscalers (ArtCNN MIT, CuNNy LGPL-3.0, AnimeSR Apache-2.0) for pmml: their weights from the authors' own
+    # release places, pinned by size and SHA-256 (anime-models-fetch.ps1, anime-models-pin.json), into <InstallDir>\pmml\graphs\anime-sr;
+    # with them pmml's runtime (DirectML) on GPUs that get no PushFlow runtime. Yes (default) | No
+    [ValidateSet('Yes', 'No')]
+    [string]$AnimeUpscalers = 'Yes',
+    # stage: pmml's graphs (make_graphs.py output) to ship for the anime upscalers; default: made with PUSHFLOW_PYTHON
+    [string]$PmmlGraphs = '',
     # Plex HTPC / Plex for Windows: a VapourSynth-enabled libmpv in Plex's folder (pushmpc-plex.ps1; asks for
     # administrator permission): Auto (tested Plex versions) | No
     [ValidateSet('Auto', 'Yes', 'No')]
@@ -1561,6 +1568,20 @@ function Invoke-Stage {
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
     foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    # the anime upscalers: the pinned fetch and the graphs (no weights: Setup fetches those)
+    foreach ($x in 'anime-models-fetch.ps1', 'anime-models-pin.json') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    $pg = $PmmlGraphs
+    if (-not $pg -and $env:PUSHFLOW_PYTHON) {
+        $pg = Join-Path ([IO.Path]::GetTempPath()) 'pushmpc-pmml-graphs'
+        & $env:PUSHFLOW_PYTHON -I (Join-Path $repo 'pmml\scripts\make_graphs.py') --out $pg | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "make_graphs.py failed ($LASTEXITCODE)" }
+    }
+    if ($pg -and (Test-Path -LiteralPath (Join-Path $pg 'anime-sr'))) {
+        $ag = Join-Path $f 'anime-sr-graphs'
+        New-Item -ItemType Directory -Force (Join-Path $ag 'anime-sr') | Out-Null
+        Copy-Item (Join-Path $pg 'sr_*.onnx') $ag
+        Copy-Item (Join-Path $pg 'anime-sr\*.onnx') (Join-Path $ag 'anime-sr')
+    } else { Warn 'anime upscalers: no pmml graphs to ship (-PmmlGraphs or PUSHFLOW_PYTHON): Setup will not offer them' }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -2473,13 +2494,43 @@ function Get-PmmlEps([string]$fam, $g = $null) {
     switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } default { return @() } }
 }
 function Get-PmmlFetchFiles { foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) { $s = Join-Path $d 'pmml-fetch.ps1'; $p = Join-Path $d 'ml-runtime-pin.json'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath $p)) { return @($s, $p) } }; return @() }
+# The anime upscalers' weights (ArtCNN, CuNNy, AnimeSR), fetched by anime-models-fetch.ps1 against anime-models-pin.json
+# (size + SHA-256; a mismatch is refused) into <InstallDir>\pmml\graphs\anime-sr, with the graphs this release ships
+# (filter\anime-sr-graphs). -AnimeUpscalers No removes what an earlier install put there.
+function Install-AnimeUpscalers($state) {
+    $dest = Join-Path $InstallDir 'pmml\graphs\anime-sr'
+    if ($AnimeUpscalers -eq 'No') {
+        if ((Get-StateValue $state 'animeModels') -and (Test-Path -LiteralPath $dest)) {
+            if ($DryRun) { Dry "would remove $dest" } else { Remove-Item -LiteralPath $dest -Recurse -Force; Get-ChildItem -LiteralPath (Split-Path -Parent $dest) -Filter 'sr_*.onnx' -File | Remove-Item -Force; $state.PSObject.Properties.Remove('animeModels'); Info "removed $dest" }
+        } else { Info 'anime upscalers: not installed (-AnimeUpscalers No)' }
+        return
+    }
+    $fetch = $null; $pin = $null; $graphs = $null
+    foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) {
+        if (-not $fetch -and (Test-Path -LiteralPath (Join-Path $d 'anime-models-fetch.ps1')) -and (Test-Path -LiteralPath (Join-Path $d 'anime-models-pin.json'))) { $fetch = Join-Path $d 'anime-models-fetch.ps1'; $pin = Join-Path $d 'anime-models-pin.json' }
+        if (-not $graphs -and (Test-Path -LiteralPath (Join-Path $d 'anime-sr-graphs\anime-sr'))) { $graphs = Join-Path $d 'anime-sr-graphs' }
+    }
+    if (-not $fetch -or -not $graphs) { Warn 'anime upscalers: anime-models-fetch.ps1 / its pins / the graphs are not in this release: not installed'; return }
+    Info 'anime upscalers: ArtCNN (MIT, GitHub release), CuNNy (LGPL-3.0, its repository), AnimeSR v2 (Apache-2.0, the authors'' Google Drive), pinned by SHA-256'
+    if ($DryRun) { Dry "would run anime-models-fetch.ps1 -Dest $dest -Graphs $graphs"; return }
+    $out = & $fetch -Pin $pin -Dest $dest -Graphs $graphs -Cache (Join-Path $InstallDir 'download\anime-models') 2>&1
+    $rc = $LASTEXITCODE
+    foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|anime-models)') { Info "  $l" } }
+    if ($rc -ne 0) { Warn "anime upscalers: some files were not installed (exit $rc); the ones that are run, Auto skips the rest; run Repair to try again" }
+    Set-StateValue $state 'animeModels' ((Get-Content -LiteralPath $pin -Raw | ConvertFrom-Json).files.Count)
+}
 function Install-PmmlRuntime($state) {
     $dir = Join-Path $InstallDir 'pmml'
     $gi = Get-GpuInfo
     $fam = Get-GpuFamily $gi
     $eps = @(Get-PmmlEps $fam $gi)
     $ours = [bool](Get-StateValue $state 'pmmlInstalled')
-    if ($Pmml -eq 'No' -or -not $eps.Count) {
+    $flavors = @('core')
+    if (($Pmml -eq 'No' -or -not $eps.Count) -and $AnimeUpscalers -ne 'No') {
+        # no PushFlow runtime here, but the anime upscalers want ONNX Runtime: the DirectML build (any DirectX 12 GPU)
+        $eps = @(); $flavors = @('directml')
+        Info "pmml runtime for the anime upscalers: ONNX Runtime with DirectML ($fam)"
+    } elseif ($Pmml -eq 'No' -or -not $eps.Count) {
         Info $(if ($Pmml -eq 'No') { 'PushFlow runtime: not installed (-Pmml No); PushFlow runs on DirectML' } else { "PushFlow runtime: none needed for $fam (PushFlow runs on DirectML, pushcore's own session)" })
         if ($ours -and (Test-Path -LiteralPath $dir)) { if ($DryRun) { Dry "would remove $dir" } else { Remove-Item -LiteralPath $dir -Recurse -Force; $state.PSObject.Properties.Remove('pmmlInstalled'); Info "removed $dir" } }
         return
@@ -2487,7 +2538,7 @@ function Install-PmmlRuntime($state) {
     $ff = @(Get-PmmlFetchFiles)
     if (-not $ff.Count) { Warn 'PushFlow runtime: pmml-fetch.ps1 / ml-runtime-pin.json not found: not installed'; return }
     $pins = Get-Content -LiteralPath $ff[1] -Raw | ConvertFrom-Json
-    $want = (@("ort/core $($pins.onnxruntime.core.version)") + @($eps | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
+    $want = (@($flavors | ForEach-Object { "ort/$_ $($pins.onnxruntime.$_.version)" }) + @($eps | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
     $have = ''
     if (Test-Path -LiteralPath (Join-Path $dir 'fetched.json')) {
         try { $f = Get-Content -LiteralPath (Join-Path $dir 'fetched.json') -Raw | ConvertFrom-Json; $have = (@($f.ort.PSObject.Properties | ForEach-Object { "ort/$($_.Name) $($_.Value.version)" }) + @($f.eps.PSObject.Properties | ForEach-Object { "eps/$($_.Name) $($_.Value.version)" })) -join ', ' } catch { }
@@ -2495,8 +2546,8 @@ function Install-PmmlRuntime($state) {
     if ($have -eq $want) { Info "PushFlow runtime ($want) is already installed"; if (-not $DryRun) { Set-StateValue $state 'pmmlInstalled' $want }; return }
     Info "PushFlow runtime for $fam`: $want (ONNX Runtime and the EP from nuget.org / pypi.org, pinned by SHA-256)"
     Progress 93 'Installing PushFlow''s runtime for this GPU'
-    if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors core -Eps $($eps -join ',')"; return }
-    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform 'win-x64' -Flavors core -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
+    if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors $($flavors -join ',') -Eps $($eps -join ',')"; return }
+    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform 'win-x64' -Flavors $flavors -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
     $rc = $LASTEXITCODE
     foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|cached|skip|pmml-fetch)') { Info "  $l" } }
     Remove-Item -LiteralPath (Join-Path $InstallDir 'download\pmml') -Recurse -Force -ErrorAction SilentlyContinue
@@ -3084,6 +3135,9 @@ switch ($Action) {
         Set-MpcBeEntry $state
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
+        # before the Kodi, Plex and mpv routes: their settings name the anime shaders when they are there
+        Step 'Anime upscalers (ArtCNN, CuNNy, AnimeSR)'
+        try { Install-AnimeUpscalers $state } catch { Warn "anime upscalers: not installed ($($_.Exception.Message)); RTX VSR / FSR stay the upscalers" }
         Step 'Kodi (the PushMPC add-on)'
         try { Install-KodiRoute $state } catch { Warn "Kodi add-on: not installed ($($_.Exception.Message))" }
         Step 'Plex (smoother motion inside Plex)'

@@ -32,6 +32,7 @@ extern "C" {
 #endif
 #include "tonemap.h"
 #include "kodi_engine.h"
+#include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: models, costs, Auto's pick
 #include "kodi_platform.h"
 
 #include <algorithm>
@@ -47,6 +48,7 @@ extern "C" {
 #endif
 #include <cstdlib>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -263,6 +265,7 @@ public:
     {
         m_settings = Settings::Read();
         const std::string url = props.GetURL();
+        m_path = url;
         Log(ADDON_LOG_INFO, "%s, Kodi API %s: opening %s", PM_ADDON_VERSION, PM_KODI22 ? "22" : "21", url.c_str());
         // as Kodi's own file input opens files: Kodi's read cache only for network sources. Kodi also opens add-on inputs on its
         // GUI thread (stream-detail probes), where a cached seek can wait on the cache thread for good.
@@ -550,7 +553,29 @@ private:
     void DecideUpscale(const AVStream* st, pmk::EngineCfg& c, std::string& why) const
     {
         const AVCodecParameters* p = st->codecpar;
-        int mode = m_settings.upscale;   // 0 Auto, 1 Kodi's scaler, 2 x2 (test), 3 NIS, 4 FSR1
+        int mode = m_settings.upscale;   // 0 Auto, 1 Kodi's scaler, 2 x2 (test), 3 NIS, 4 FSR1, 5 anime upscaler
+        // the anime upscaler (pmml: ArtCNN / CuNNy / AnimeSR, Setup's anime models): asked for (5), or Auto on animation
+        // (the path names it) when the picture is enlarged; the engine then runs at its output size (anime_sr_engine.h)
+        if (mode == 5 || (mode == 0 && AnimationPath(m_path))) {
+            const std::string rt = PmmlRuntime();
+            const AVCodecParameters* q = st->codecpar;
+            const bool bigger = m_screenW > q->width * 11 / 10 || m_screenH > q->height * 11 / 10;
+            if (!rt.empty() && bigger && q->height <= 1080) {
+                const auto pick = pm::PickAnimeSr(unsigned(q->width), unsigned(q->height), unsigned(std::max(m_screenW, q->width)), unsigned(std::max(m_screenH, q->height)),
+                                                  m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
+                if (pick.model >= 0) {
+                    const std::wstring id = pm::AnimeSrModel(pick.model).id;
+                    c.animeModel.assign(id.begin(), id.end());
+                    c.pmmlRuntime = rt;
+                    why = "upscaling: anime upscaler " + std::string(pick.note.begin(), pick.note.end()) + (mode == 5 ? " (your setting)" : " (Auto, animation)");
+                    if (m_screenW > 0) { mode = 3; }   // NIS from its output to the screen when that is still larger
+                }
+            } else if (mode == 5) {
+                why = rt.empty() ? "upscaling: anime upscaler: pmml's runtime with the anime models is not installed" : "upscaling: anime upscaler: the picture is not enlarged";
+                mode = 0;
+            }
+            if (mode == 5) mode = 0;
+        }
 #if defined(_WIN32)
         if (mode == 0) { why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)"; return; }
 #endif
@@ -568,6 +593,35 @@ private:
         c.outWidth = ow; c.outHeight = oh;
         why = std::string("upscaling: ") + (mode == 4 ? "FSR1" : "NIS") + " to " + std::to_string(ow) + "x" + std::to_string(oh) +
               (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
+    }
+
+    static bool AnimationPath(const std::string& p)
+    {
+        std::string s(p);
+        for (auto& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        for (const char* w : {"anime", "animation", "animations", "animated", "cartoon", "cartoons"}) {
+            const size_t n = std::strlen(w);
+            for (size_t at = s.find(w); at != std::string::npos; at = s.find(w, at + 1)) {
+                const bool l = at == 0 || !std::isalnum(static_cast<unsigned char>(s[at - 1])), r = at + n >= s.size() || !std::isalnum(static_cast<unsigned char>(s[at + n]));
+                if (l && r) return true;
+            }
+        }
+        return false;
+    }
+    // pmml's runtime with the anime models: PMML_RUNTIME, else PushMPC's per-user folder
+    static std::string PmmlRuntime()
+    {
+        std::vector<std::string> c;
+        if (const char* e = std::getenv("PMML_RUNTIME")) c.push_back(e);
+#if defined(_WIN32)
+        if (const char* la = std::getenv("LOCALAPPDATA")) c.push_back(std::string(la) + "\\PushMPC\\pmml");
+#else
+        if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x == '/') c.push_back(std::string(x) + "/pushmpc/pmml");
+        if (const char* h = std::getenv("HOME")) c.push_back(std::string(h) + "/.local/share/pushmpc/pmml");
+#endif
+        for (const auto& d : c)
+            if (FILE* f = std::fopen((d + "/graphs/anime-sr/ArtCNN_C4F16.onnx").c_str(), "rb")) { std::fclose(f); return d; }
+        return {};
     }
 
     // MKV font attachments, as Kodi's own demuxer handles them (DVDDemuxFFmpeg.cpp, AVMEDIA_TYPE_ATTACHMENT): written to
@@ -808,6 +862,7 @@ private:
     int m_k = 1;
     double m_fps = 0;
     int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
+    std::string m_path;   // the stream's URL (the anime upscaler's animation hint)
     uint64_t m_reads = 0;
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
     bool m_toneMap = false;

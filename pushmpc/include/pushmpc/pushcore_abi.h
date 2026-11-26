@@ -159,6 +159,9 @@ typedef struct PushCoreSettings {
        generation cannot be right; default 0 (a smaller struct). */
     int32_t animationMode;
     uint32_t holdFlags;
+    /* Appended (PUSHCORE_FEATURE_ANIME_SR): the anime upscaler that srMethod PUSHCORE_SR_METHOD_PMML runs
+       (PUSHCORE_ANIME_SR_*; default ArtCNN C4F16 for a smaller struct). */
+    uint32_t animeSrModel;
 } PushCoreSettings;
 #define PUSHCORE_ANIM_FULL 0
 #define PUSHCORE_ANIM_CAMERA_ONLY 1
@@ -184,6 +187,21 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
 #define PUSHCORE_SR_METHOD_NIS 2u  /* NVIDIA Image Scaling (shaders, any GPU) */
+#define PUSHCORE_SR_METHOD_PMML 6u /* PUSHCORE_FEATURE_ANIME_SR: an anime upscaler (ArtCNN / CuNNy / AnimeSR, settings.animeSrModel)
+                                      through pmml (ONNX Runtime: TensorRT-RTX on RTX, DirectML on any DirectX 12 GPU) in
+                                      the graph's RTX VSR slot; not available or stopped: RTX VSR on NVIDIA, else FSR */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16 0u     /* ArtCNN (MIT) 2x luma: real time at 1080p on most GPUs */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16_DS 1u  /* ... denoise + sharpen (low bitrate sources) */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16_DN 2u  /* ... denoise (grainy sources) */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32 3u
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32_DS 4u
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32_DN 5u
+#define PUSHCORE_ANIME_SR_ARTCNN_R8F64 6u     /* heavy: DVD-class (480p / 576p) sources only */
+#define PUSHCORE_ANIME_SR_CUNNY_FAST 7u       /* CuNNy (LGPL-3.0, a separate replaceable component) 2x luma */
+#define PUSHCORE_ANIME_SR_CUNNY_4X16 8u       /* ... 2x RGB */
+#define PUSHCORE_ANIME_SR_CUNNY_8X32 9u
+#define PUSHCORE_ANIME_SR_ANIMESR_V2 10u      /* AnimeSR v2 (Apache-2.0) 4x recurrent: DVD-class sources only */
+#define PUSHCORE_ANIME_SR_COUNT 11u
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
@@ -299,6 +317,9 @@ typedef struct PushCoreStats {
     uint64_t holdPairs;           /* source pairs with a hold */
     uint64_t holdFrames;          /* generated frames composed */
     uint64_t holdFlashes;         /* flash / impact pairs held whole */
+    /* Appended (PUSHCORE_FEATURE_ANIME_SR) */
+    uint32_t animeSrModel;        /* PUSHCORE_ANIME_SR_* running (srMethod PMML), ~0u = none */
+    float animeSrMs;              /* its last frame: readback + model + upload, CPU wall time */
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -360,6 +381,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_HELD_FRAMES 2048u /* PushCoreSettings.heldFrames, PushCoreStats.held* */
+#define PUSHCORE_FEATURE_ANIME_SR (1u << 18) /* srMethod PUSHCORE_SR_METHOD_PMML, PushCoreSettings.animeSrModel, PushCoreStats.animeSr*, PUSHCORE_CAP_ANIME_SR */
 #define PUSHCORE_FEATURE_ANIME_HOLD (1u << 19) /* PushCoreSettings.animationMode / holdFlags, PushCoreStats.hold* / animClass */
 #define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
 #define PUSHCORE_MAX_MULTIPLIER 16u
@@ -397,7 +419,9 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
-#define PUSHCORE_CAP_COUNT 14u
+#define PUSHCORE_CAP_ANIME_SR 21u     /* PUSHCORE_FEATURE_ANIME_SR: pmml's runtime (TensorRT-RTX or DirectML) + the anime models */
+#define PUSHCORE_CAP_COUNT 22u       /* highest index + 1 (the orchestrator sets it at the merge) */
+#define PUSHCORE_SELFTEST_ANIME_SR 256u /* self-test id: the chosen anime upscaler on a synthetic picture (pushmpc::animeSrSelfTest) */
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;

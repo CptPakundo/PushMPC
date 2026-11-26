@@ -694,10 +694,11 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
     }
     if (log) {
         std::wstring s = std::format(L"GPU {} ({}, vendor {:04X} device {:04X}): available", g.name, pm::FamilyName(g.family), c.vendorId, c.deviceId);
-        static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG" };
-        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += std::wstring(L" ") + names[i];
+        static const wchar_t* names[pm::kCapCount] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG" };
+        auto nm = [&](uint32_t i) -> std::wstring { return i == pm::kCapAnimeSr ? std::wstring(L"anime upscalers") : names[i] ? std::wstring(names[i]) : std::format(L"capability {}", i); };
+        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += L" " + nm(i);
         s += L"; not:";
-        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", names[i], g.reason[i]);
+        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", nm(i), g.reason[i]);
         if (c.nrRuntime[0]) s += L" NR runtime " + Widen(c.nrRuntime);
         *log = s;
     }
@@ -2651,6 +2652,8 @@ private:
     uint32_t m_graphGen = 0; int64_t m_graphQpc = 0;
     std::atomic<bool> m_settingsPending = false;
     std::atomic<double> m_debandMsNow = -1.0;   // pushcore's measured deband pass (median), < 0 = off / not measured
+    std::atomic<double> m_animeSrMsNow = -1.0;  // the anime upscaler's last frame (PushCoreStats.animeSrMs), < 0 = not running
+    std::atomic<int> m_animeSrModelNow = -1;
     uint32_t m_settingsSeen = 0;
     std::thread m_autoThread; HANDLE m_hAutoStop = nullptr;
     int64_t m_lastCostChangeQpc = 0, m_lastUpgradeQpc = 0;
@@ -4395,6 +4398,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.srQuality = c.srLevel >= 1 ? uint32_t(c.srLevel) : 2u;
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
     p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX;
+    if (c.srMethod == pm::Upscaler::Anime && c.animeModel >= 0 && (g_coreFeatures & PUSHCORE_FEATURE_ANIME_SR)) { p.srMethod = PUSHCORE_SR_METHOD_PMML; p.animeSrModel = uint32_t(c.animeModel); }
     p.deband = c.deband ? 1 : 0;
     // the anime preset (3) only on cores with PUSHCORE_FEATURE_ANIME_HOLD; an older core gets Medium
     p.debandStrength = c.debandStrength == 3 ? ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) ? PUSHCORE_DEBAND_ANIME : PUSHCORE_DEBAND_MEDIUM) : uint32_t(std::clamp(c.debandStrength, 0, 2));
@@ -4456,7 +4460,7 @@ void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
         deband += std::format(L" ({} strength{})", pm::DebandStrengthStr(pm::DebandStrength(c.debandStrength)),
                               ms > 0 ? std::format(L", {:.2f} ms per frame", ms) : std::wstring());
     }
-    SetNotes(c.smootherNote, c.sharperNote, c.cleanNote, hdr, deband);
+    SetNotes(c.smootherNote, c.animeSrNote.empty() ? c.sharperNote : c.sharperNote + L"; anime upscaler: " + c.animeSrNote, c.cleanNote, hdr, deband);
 }
 void CPushMpcFilter::LogChoice(const char* why, const pm::Choice& c)
 {
@@ -4482,6 +4486,7 @@ void CPushMpcFilter::LoadLearned()
         num(L"NrMs", m_costs.nrMs, &m_costs.learnedNr, 0.05, 200);
         num(L"Hdr4kMs", m_costs.hdr4k, &m_costs.learnedHdr, 0.05, 30);
         num(L"Deband1080Ms", m_costs.deband1080, &m_costs.learnedDeband, 0.001, 20);
+        for (int i = 0; i < pm::kAnimeSrModels; ++i) num(std::wstring(L"AnimeSr-") + pm::AnimeSrModel(i).id, m_costs.animeSrLearned[i], nullptr, 0.01, 500);
         bool bench = true;
         for (int t = 0; t < 3; ++t) {
             bench = num(std::format(L"PfFirst{}", t), m_costs.pfFirst[t], nullptr, 0.1, 500) && bench;
@@ -4500,6 +4505,7 @@ void CPushMpcFilter::SaveLearned()
     pm::Costs c;
     { std::lock_guard<std::mutex> lk(m_autoLock); c = m_costs; }
     bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband;
+    for (double v : c.animeSrLearned) any = any || v > 0;
     for (bool b : c.fgLearned) any = any || b;
     if (m_gpuName.empty() || !any) return;
     HKEY k = nullptr;
@@ -4516,6 +4522,7 @@ void CPushMpcFilter::SaveLearned()
     if (c.learnedNr) str(L"NrMs", std::format(L"{:.3f}", c.nrMs));
     if (c.learnedHdr) str(L"Hdr4kMs", std::format(L"{:.3f}", c.hdr4k));
     if (c.learnedDeband) str(L"Deband1080Ms", std::format(L"{:.4f}", c.deband1080));
+    for (int i = 0; i < pm::kAnimeSrModels; ++i) if (c.animeSrLearned[i] > 0) str(std::wstring(L"AnimeSr-") + pm::AnimeSrModel(i).id, std::format(L"{:.3f}", c.animeSrLearned[i]));
     RegCloseKey(k);
 }
 // PushFlow's once-per-card speed test (pushcore_pushFlowBench, a port of PushFPS's PushFlowBench): run lazily, the first
@@ -4612,6 +4619,13 @@ void CPushMpcFilter::LearnCosts()
         if (x > 0.1 && x < 10 && um == pm::Upscaler::Rtx) { if (!c.learnedVsr) c.vsrScale = x; else ema(c.vsrScale, x); c.learnedVsr = true; }
     }
     if (nr.size() >= 48) { const double x = p95(nr); if (!c.learnedNr) c.nrMs = x; else ema(c.nrMs, x); c.learnedNr = true; }
+    // the anime upscaler: its own time per input megapixel on this card (the transfer prior taken off), per model
+    if (const int am = m_animeSrModelNow.load(); am >= 0 && m_animeSrMsNow.load() > 0 && m_choice.outW && m_choice.outH) {
+        const pm::Source src = SourceInfo();
+        const double inMpx = double(src.w) * src.h / 1e6, outMpx = double(m_choice.outW) * m_choice.outH / 1e6;
+        const double x = (m_animeSrMsNow.load() - pm::kAnimeSrTransferMsPerMpx * (inMpx + outMpx)) / std::max(1e-3, inMpx);
+        if (std::isfinite(x) && x > 0.01 && x < 500) { double& v = c.animeSrLearned[am]; if (v <= 0) v = x; else ema(v, x); }
+    }
     if (hdr.size() >= 48) { const double x = p95(hdr) / pix; if (!c.learnedHdr) c.hdr4k = x; else ema(c.hdr4k, x); c.learnedHdr = true; }
     // deband: pushcore's median of the last 64 passes, back to the medium-strength 1080p equivalent (x1.3 for the p95)
     if (a.deband && m_debandMsNow.load() > 0 && m_visW && m_visH) {
@@ -4802,6 +4816,8 @@ void CPushMpcFilter::AutoLoop()
             bool ok = false;
             { std::lock_guard<std::mutex> lk(m_coreLock); if (m_core && !m_faulted) ok = m_api->stats(m_core, &st) == PUSHCORE_OK; }
             m_debandMsNow = ok && st.debandActive ? st.debandMs : -1.0;
+            const bool animeSrRuns = ok && (g_coreFeatures & PUSHCORE_FEATURE_ANIME_SR) && st.animeSrModel < uint32_t(pm::kAnimeSrModels) && st.animeSrMs > 0;
+            m_animeSrModelNow = animeSrRuns ? int(st.animeSrModel) : -1; m_animeSrMsNow = animeSrRuns ? double(st.animeSrMs) : -1.0;
             if (ok && (g_coreFeatures & PUSHCORE_FEATURE_FG_METHODS)) {
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
@@ -4884,7 +4900,9 @@ void CPushMpcFilter::AutoLoop()
                 const pm::FgMethod rm = MethodOf(m_fgRun);
                 const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : int(applied.vfgQuality);
                 if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
-                if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel) : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : L" \u00B7 NIS");
+                if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel)
+                               : c.srMethod == pm::Upscaler::Anime && c.animeModel >= 0 ? std::wstring(L" \u00B7 ") + pm::AnimeSrModel(c.animeModel).label
+                               : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : L" \u00B7 NIS");
                 osd += std::format(L" \u00B7 {:.0f} fps", fps);
                 if (c.hdr) osd += L" \u00B7 SDR\u2192HDR";
                 if (d.vrr) osd += L" \u00B7 VRR";
@@ -5308,7 +5326,7 @@ private:
                                    item(m_capsGpu.family == pm::kRdna4 ? L"FSR 4 FG" : L"FSR 3.1 FG", pm::kCapFsrFg), item(L"AMD FRC", pm::kCapFrc), item(L"NVOF FG (NVIDIA optical flow + FSR)", pm::kCapNvofFg) };
         SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_RESETCONTENT, 0, 0);
         for (const auto& s : f) SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_ADDSTRING, 0, (LPARAM)s.c_str());
-        const std::wstring u[] = { L"Auto", item(L"RTX VSR", pm::kCapRtxVsr), item(L"FSR", pm::kCapFsrSr), item(L"NIS", pm::kCapNis) };
+        const std::wstring u[] = { L"Auto", item(L"RTX VSR", pm::kCapRtxVsr), item(L"FSR", pm::kCapFsrSr), item(L"NIS", pm::kCapNis), item(L"Anime upscaler", pm::kCapAnimeSr) };
         SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_RESETCONTENT, 0, 0);
         for (const auto& s : u) SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_ADDSTRING, 0, (LPARAM)s.c_str());
         if (fsel >= 0) ComboSet(m_Dlg, IDC_PM_FGMETHOD, fsel);
@@ -5394,7 +5412,7 @@ private:
         { const int q = ComboSel(m_Dlg, IDC_PM_FGQ); s.fgQuality = q <= 0 ? pm::FgQuality::Auto : pm::FgQuality(std::clamp(q - 1, 0, 2)); }
         s.fgMethod = pm::FgMethod(std::clamp(ComboSel(m_Dlg, IDC_PM_FGMETHOD), 0, 6));
         s.vrr = pm::VrrMode(std::clamp(ComboSel(m_Dlg, IDC_PM_VRR), 0, 2));
-        s.upscaler = pm::Upscaler(std::clamp(ComboSel(m_Dlg, IDC_PM_UPSCALER), 0, 3));
+        s.upscaler = pm::Upscaler(std::clamp(ComboSel(m_Dlg, IDC_PM_UPSCALER), 0, 4));
         s.target = pm::UpscaleTarget(std::clamp(ComboSel(m_Dlg, IDC_PM_TARGET), 0, 3));
         s.strength = pm::CleanStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_STRENGTH), 0, 2));
         { const int v = ComboSel(m_Dlg, IDC_PM_STYLE); s.vsrStyle = v <= 0 ? pm::VsrStyle::Auto : pm::VsrStyle(std::clamp(v - 1, 0, 2)); }

@@ -323,6 +323,49 @@ int main()
             check(o1.multiplier == 5 && o2.multiplier == 8 && o3.multiplier == 8, L"VFG16: a core without 16x: 5x windowed, 8x VRR, Smoother 12x stops at 8x",
                   std::format(L"{}x / {}x / {}x", o1.multiplier, o2.multiplier, o3.multiplier));
         }
+        {   // Anime upscalers (round 5 item 7): candidates for animation only, by source class and cost; RTX VSR stays first on RTX
+            // until the verdict; on GPUs without RTX VSR the best fitting one is the anime default; R8F64 / AnimeSR on DVD only
+            auto withAnime = [](Gpu g) { g.available |= 1u << kCapAnimeSr; g.reason[kCapAnimeSr].clear(); return g; };
+            const Gpu rdna3 = withAnime(Family(kRdna3, L"AMD Radeon RX 7900 XTX")), rtx50 = withAnime(Family(kRtx50, L"NVIDIA GeForce RTX 5090"));
+            const Gpu rdnaNo = Family(kRdna3, L"AMD Radeon RX 7900 XTX");   // anime models not installed
+            Display d; d.refreshHz = 240; d.width = 3840; d.height = 2160;
+            Source bd{ 1920, 1080, 23.976, false, 0.5 }; bd.heldShare = 0.4;
+            Source dvd = bd; dvd.w = 720; dvd.h = 480;
+            Source p720 = bd; p720.w = 1280; p720.h = 720;
+            Source live = bd; live.heldShare = 0.01;
+            Source uhd = bd; uhd.w = 3840; uhd.h = 2160;
+            const Choice a = Decide({}, bd, d, {}, rdna3);
+            check(a.srMethod == Upscaler::Anime && (a.animeModel == 3 || a.animeModel == 0), L"anime SR: 1080p animation on a GPU without RTX VSR: ArtCNN C (the best that fits)", a.animeSrNote);
+            const Choice b = Decide({}, dvd, d, {}, rdna3);
+            check(b.srMethod == Upscaler::Anime && b.animeModel == 6, L"anime SR: DVD animation: ArtCNN R8F64 (heavy, DVD-class only) when it fits", b.animeSrNote);
+            Costs slow; slow.card = 4.0;   // a slower card: R8F64 no longer fits a DVD's frame share, a C model does
+            const Choice b2 = Decide({}, dvd, d, slow, rdna3);
+            check(b2.srMethod == Upscaler::Anime && b2.animeModel != 6 && b2.animeModel != 10, L"anime SR: a slow card falls back to a lighter model", b2.animeSrNote);
+            const Choice c3 = Decide({}, live, d, {}, rdna3);
+            check(c3.srMethod != Upscaler::Anime, L"anime SR: never for live action", c3.animeSrNote);
+            const Choice e = Decide({}, uhd, d, {}, rdna3);
+            check(e.srMethod != Upscaler::Anime, L"anime SR: not on a source at the output size (2x / 4x models only)");
+            const Choice f = Decide({}, bd, d, {}, rtx50);
+            check(f.srMethod == Upscaler::Rtx && f.animeSrNote.find(L"candidate") == 0, L"anime SR: RTX VSR stays first on RTX until the verdict; the candidate is named", f.animeSrNote);
+            Settings asked; asked.upscaler = Upscaler::Anime;
+            Settings askedSr = asked; askedSr.animeModel = L"animesr-v2";
+            const Choice g1 = Decide(asked, bd, d, {}, rtx50), g2 = Decide(askedSr, dvd, d, {}, rtx50);
+            check(g1.srMethod == Upscaler::Anime && g1.animeModel >= 0 && g2.animeModel == 10, L"anime SR: Upscaler Anime on RTX: Auto's model, or the setting's (AnimeSR on DVD)", g2.animeSrNote);
+            Settings askedR8 = asked; askedR8.animeModel = L"cunny-8x32";
+            check(Decide(askedR8, bd, d, {}, rdna3).animeModel == 9, L"anime SR: the setting's CuNNy model is used");
+            const Choice h = Decide({}, bd, d, {}, rdnaNo);
+            check(h.srMethod == Upscaler::Fsr, L"anime SR: without its files the GPU keeps FSR");
+            Source lowRate = bd; lowRate.bppEq = 0.02;
+            const Choice l = Decide({}, lowRate, d, {}, rdna3);
+            check(l.animeModel == 1 || l.animeModel == 4, L"anime SR: a low-bitrate source gets the denoise + sharpen variant", l.animeSrNote);
+            Costs learned; learned.animeSrLearned[3] = 40.0; learned.animeSrLearned[0] = 40.0;   // measured slow on this card
+            const Choice m = Decide({}, bd, d, learned, rdna3);
+            check(m.animeModel != 3 && m.animeModel != 0, L"anime SR: this card's measurement replaces the prior", m.animeSrNote);
+            const Choice n = Decide({}, p720, d, {}, rdna3);
+            check(n.animeModel != 6 && n.animeModel != 10, L"anime SR: 720p never gets the DVD-only models", n.animeSrNote);
+            check(AnimeSrModelIndex(L"ARTCNN-C4F32") == 3 && AnimeSrModelIndex(L"apisr") == -1 && AnimeSrModel(10).scale == 4, L"anime SR: model table");
+            check(!Decide({}, bd, d, {}, rdna3).sameGraph(Decide({}, dvd, d, {}, rdna3)), L"anime SR: another model is another graph");
+        }
         check(!CoreOutputStalled(800, 40, true) && !CoreOutputStalled(5000, 10, true) && !CoreOutputStalled(5000, 40, false) && CoreOutputStalled(1600, 24, true),
               L"no-output guard: source frames shown after 1.5 s and 24 frames in, nothing out (playing)");
         wprintf(L"  vendor paths: %d failed\n", fails);

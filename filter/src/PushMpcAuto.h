@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 #include "PushMpcSettings.h"
+#include "PushMpcAnimeSr.h"   // anime upscalers: models, costs, PickAnimeSr
 
 namespace pm {
 
@@ -84,7 +85,7 @@ inline bool AnimationHint(const std::wstring& path)
 }
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
-enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg, kCapCount };
+enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg, kCapAnimeSr = 21, kCapCount };   // kCapAnimeSr: PUSHCORE_CAP_ANIME_SR
 struct Gpu {
     uint32_t family = kRtx50;          // default for the headless test: this machine
     uint32_t available = 0xFFFFFFFFu;  // bit per Cap
@@ -172,12 +173,17 @@ struct Costs {
     double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
+    // anime upscalers (PushMpcAnimeSr.h): measured ms per input megapixel on this card per model (< 0 = not yet)
+    double animeSrLearned[11] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    double animeSrMs = 0;                           // set by Decide: the chosen anime upscaler's cost a frame
 };
 
 struct Choice {               // resolved values for pushcore and the filter
     bool sr = false; int srLevel = 0; bool artifactReduction = false; UINT outW = 0, outH = 0;
     int srFamily = 0;         // VsrStyle actually used (Standard for artifact reduction)
     Upscaler srMethod = Upscaler::Rtx;
+    int animeModel = -1;      // srMethod Anime: the model (PushMpcAnimeSr.h index = PUSHCORE_ANIME_SR_*)
+    std::wstring animeSrNote; // what Auto made of the anime upscalers
     int multiplier = 1; bool nr = false; bool hdr = false; bool hdrItm = false;
     HdrBoost hdrBoost = HdrBoost::Off;   // resolved boost (never Auto): PushMPC's curve M, or RTX Video HDR's peak
     int rtxHdrPeak = 1000;               // RTX Video HDR peakNits for the boost (Low 500 / Medium 700 / High 1000)
@@ -195,7 +201,7 @@ struct Choice {               // resolved values for pushcore and the filter
     std::wstring animModeNote;
     double predictedMs = 0, budgetMs = 0;
     std::wstring smootherNote, sharperNote, cleanNote, hdrNote, debandNote, stoppedAt, fgNote, qualityNote;
-    bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod; }
+    bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod && animeModel == o.animeModel; }
 };
 
 // ------------------------------------------------------------------------------------------------ rules
@@ -249,6 +255,7 @@ inline double VsrCost(const Costs& c, int level, bool ar, double pix, int family
     if (level < 1) return 0;
     if (method == Upscaler::Fsr) return c.fsrSr * pix * c.vsrP95 * c.card;
     if (method == Upscaler::Nis) return c.nisSr * pix * c.vsrP95 * c.card;
+    if (method == Upscaler::Anime) return c.animeSrMs;   // absolute (PickAnimeSr)
     const double* table = ar ? c.vsrAr : family == int(VsrStyle::HighBitrate) ? c.vsrUpHb : family == int(VsrStyle::Streaming) ? c.vsrUpSt : c.vsrUp;
     return table[std::min(level, 4) - 1] * pix * c.vsrP95 * c.vsrScale * c.card;
 }
@@ -414,9 +421,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     std::wstring methodNote;
     if (s.upscaler == Upscaler::Rtx && !g.has(kCapRtxVsr)) methodNote = L" (RTX VSR: " + g.reason[kCapRtxVsr] + L")";
     else if (s.upscaler == Upscaler::Fsr && !g.has(kCapFsrSr)) methodNote = L" (FSR: " + g.reason[kCapFsrSr] + L")";
+    else if (s.upscaler == Upscaler::Anime && !g.has(kCapAnimeSr)) methodNote = L" (anime upscaler: " + g.reason[kCapAnimeSr] + L")";
     else if (s.upscaler != Upscaler::Auto) method = s.upscaler;
     r.srMethod = method;
-    const bool rtxSr = method == Upscaler::Rtx;
+    bool rtxSr = method == Upscaler::Rtx;
 
     // --- output size: VSR to the target, or the source size (a source at or above the target: artifact reduction)
     UINT tw, th; TargetExtent(s.target, d, tw, th);
@@ -425,6 +433,25 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     const bool atOutput = scale <= 1.05 || (fillsScreen && s.sharper == kAuto);
     UINT upW = src.w, upH = src.h;
     if (!atOutput) { upW = Even(src.w * scale); upH = Even(src.h * scale); }
+
+    // --- anime upscalers (PushMpcAnimeSr.h): animation only, and only when the picture is enlarged (they are 2x / 4x
+    // models, no artifact reduction at the output size). Asked for (Upscaler Anime): the setting's model or Auto's; Auto:
+    // the best fitting one where RTX VSR is not available (and before RTX VSR once the verdict sets kAnimeSrBeforeRtxVsr)
+    r.animeModel = -1;
+    c.animeSrMs = 0;
+    if (g.has(kCapAnimeSr) && r.animation && !atOutput && src.h <= 1080) {
+        const bool asked = s.upscaler == Upscaler::Anime;
+        const bool autoWants = s.upscaler == Upscaler::Auto && (!g.has(kCapRtxVsr) || kAnimeSrBeforeRtxVsr);
+        const AnimeSrPick pick = PickAnimeSr(src.w, src.h, upW, upH, src.fps, lowBitrate, c.card, c.animeSrLearned, asked ? AnimeSrModelIndex(s.animeModel) : -1);
+        r.animeSrNote = pick.note;
+        if ((asked || autoWants) && pick.model >= 0) { method = Upscaler::Anime; r.animeModel = pick.model; c.animeSrMs = pick.ms; }
+        else if (!asked && !autoWants && pick.model >= 0) r.animeSrNote = L"candidate " + pick.note + L"; RTX VSR stays first until the verdict";
+    } else if (s.upscaler == Upscaler::Anime) {
+        r.animeSrNote = !g.has(kCapAnimeSr) ? L"not available" : !r.animation ? L"not used: not animation" : L"not used: the picture is not enlarged";
+    }
+    if (method == Upscaler::Anime && r.animeModel < 0) method = g.has(kCapRtxVsr) ? Upscaler::Rtx : g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
+    r.srMethod = method;
+    rtxSr = method == Upscaler::Rtx;
 
     // --- SDR to HDR (display mode first: it is part of the base cost)
     if (s.sdrToHdr == kOff) { r.hdr = false; r.hdrNote = L"off"; }
@@ -625,7 +652,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- the rest goes to VSR (Auto): raise 1 -> 4 while it fits; frame generation is never lowered for it
     const double fixedCost = baseCost(nr) + FgCost(c, r.fgMethod, r.fgQuality, r.multiplier, pixFg);
-    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : L"NIS";
+    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : method == Upscaler::Anime && r.animeModel >= 0 ? AnimeSrModel(r.animeModel).label : L"NIS";
     if (s.sharper == kAuto) {
         if (!atOutput) {
             if (rtxSr) while (level < 4 && fixedCost + vsr(level + 1) <= r.budgetMs) ++level;

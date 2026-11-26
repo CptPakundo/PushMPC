@@ -15,6 +15,8 @@
 #include "VapourSynth4.h"
 #include "backend.h"
 #include "ml_backend.h"
+#include "pmml/upscale.h"
+#include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: model table, costs, Auto's pick
 #include "platform.h"
 #include "pmml/autobench.h"
 #include "schedule.h"
@@ -40,6 +42,14 @@ struct MInst {
     VSFrameContext* fc = nullptr;
     const VSFrame* curSrc = nullptr;
     std::vector<const VSFrame*> held;
+    // the anime upscaler (pmml::Upscaler) on each source frame before frame generation; its result per source frame
+    // (the repair asks for a frame more than once), AnimeSR's carry restarts when the sources are not consecutive
+    std::unique_ptr<pmml::Upscaler> up;
+    struct UpFrame { std::vector<uint16_t> p16[3]; std::vector<uint8_t> p8[3]; };
+    std::map<int64_t, UpFrame> upFrames;
+    int64_t upLast = -2;
+    std::vector<uint16_t> upIn[3];
+    double upMs = 0;
 };
 
 std::string MArg(const VSMap* in, const VSAPI* a, const char* key)
@@ -62,6 +72,44 @@ void MSetProps(MInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
 }
 
+// the source frame through the anime upscaler; v then points at the upscaled planes (same bit depth, scale x the size)
+bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
+{
+    auto it = d->upFrames.find(s);
+    if (it == d->upFrames.end()) {
+        if (s != d->upLast + 1) d->up->reset();   // a seek: AnimeSR's carry starts again
+        d->upLast = s;
+        pmml::Frame in;
+        for (int i = 0; i < 3; ++i) {
+            const int w = i ? v.width / 2 : v.width, h = i ? v.height / 2 : v.height;
+            if (v.bits > 8) { in.plane[i] = reinterpret_cast<const uint16_t*>(v.data[i]); in.stride[i] = v.stride[i] / 2; continue; }
+            d->upIn[i].resize(size_t(w) * h);
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) d->upIn[i][size_t(y) * w + x] = v.data[i][y * v.stride[i] + x];
+            in.plane[i] = d->upIn[i].data(); in.stride[i] = w;
+        }
+        MInst::UpFrame u;
+        const int ow = d->up->outWidth(), oh = d->up->outHeight();
+        pmml::OutFrame out;
+        for (int i = 0; i < 3; ++i) { const int w = i ? ow / 2 : ow, h = i ? oh / 2 : oh; u.p16[i].resize(size_t(w) * h); out.plane[i] = u.p16[i].data(); out.stride[i] = w; }
+        std::string err;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!d->up->run(in, out, &err)) { Log("ml: anime upscaler failed (" + err + "): plain frames from now on"); d->up.reset(); return true; }
+        d->upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (v.bits <= 8)
+            for (int i = 0; i < 3; ++i) { u.p8[i].resize(u.p16[i].size()); for (size_t k = 0; k < u.p16[i].size(); ++k) u.p8[i][k] = uint8_t(u.p16[i][k]); u.p16[i].clear(); }
+        it = d->upFrames.emplace(s, std::move(u)).first;
+        while (d->upFrames.size() > 8) d->upFrames.erase(d->upFrames.begin());
+    }
+    const int ow = d->up->outWidth(), oh = d->up->outHeight();
+    for (int i = 0; i < 3; ++i) {
+        const int w = i ? ow / 2 : ow;
+        if (v.bits > 8) { v.data[i] = reinterpret_cast<const uint8_t*>(it->second.p16[i].data()); v.stride[i] = w * 2; }
+        else { v.data[i] = it->second.p8[i].data(); v.stride[i] = w; }
+    }
+    v.width = ow; v.height = oh;
+    return true;
+}
+
 void MBind(MInst* d)
 {
     d->be.source = [d](int64_t s, portable::YuvView& v) -> bool {
@@ -78,6 +126,7 @@ void MBind(MInst* d)
         for (int i = 0; i < 3; ++i) { v.data[i] = d->api->getReadPtr(f, i); v.stride[i] = d->api->getStride(f, i); }
         v.width = d->api->getFrameWidth(f, 0); v.height = d->api->getFrameHeight(f, 0);
         v.bits = d->api->getVideoFrameFormat(f)->bitsPerSample;
+        if (d->up) return MUpscale(d, s, v);
         return true;
     };
     d->be.alloc = [d](portable::YuvOut& o, void*& h) -> bool {
@@ -224,7 +273,24 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const std::string smoother = MArg(in, a, "smoother");
     const int fixedK = smoother.empty() ? 0 : std::atoi(smoother.c_str());
     const int wantK = fixedK >= 2 ? std::min(fixedK, 8) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8) : 2);
-    if (wantK <= 1) { Log("ml: x1: the clip passes through"); a->mapConsumeNode(out, "clip", node, maReplace); return; }
+    // the anime upscaler (upscaler=anime [anime_model=<id>], or upscaler=auto with animation=on): enlarged pictures only
+    const std::string upArg = MArg(in, a, "upscaler"), modelArg = MArg(in, a, "anime_model"), animArg = MArg(in, a, "animation");
+    const bool animeAsked = upArg == "anime" || upArg == "Anime";
+    const bool animeAuto = (upArg.empty() || upArg == "auto" || upArg == "Auto") && (animArg == "on" || animArg == "1");
+    int dispW = 0, dispH = 0;
+    { int e1 = 0, e2 = 0; dispW = int(a->mapGetInt(in, "display_w", 0, &e1)); dispH = int(a->mapGetInt(in, "display_h", 0, &e2)); if (e1 || e2) dispW = dispH = 0; }
+    int animeModel = -1;
+    std::string animeNote;
+    if (animeAsked || animeAuto) {
+        const double scale = dispW > 0 && dispH > 0 ? std::min(double(dispW) / w, double(dispH) / h) : (animeAsked ? 2.0 : 0.0);
+        if (scale > 1.05 && h <= 1080) {
+            const int forced = modelArg.empty() ? -1 : pm::AnimeSrModelIndex(std::wstring(modelArg.begin(), modelArg.end()));
+            const auto pick = pm::PickAnimeSr(unsigned(w), unsigned(h), unsigned(w * scale), unsigned(h * scale), srcFps, false, 1.0, nullptr, forced);
+            animeModel = pick.model;
+            animeNote = std::string(pick.note.begin(), pick.note.end());   // ASCII labels
+        } else animeNote = "not used: the picture is not enlarged (display_w / display_h) or above 1080 lines";
+    }
+    if (wantK <= 1 && animeModel < 0) { Log("ml: x1: the clip passes through"); a->mapConsumeNode(out, "clip", node, maReplace); return; }
 
     pmml::Options o;
     o.runtimeDir = rt;
@@ -283,6 +349,18 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     // portable path decides it after the anime-g22 merge)
     if (const std::string v = MArg(in, a, "ml_line_art"); !v.empty()) o.lineArt = ParseBool(v, false);
     std::string e;
+    std::unique_ptr<pmml::Upscaler> up;
+    if (animeModel >= 0) {
+        pmml::UpscaleOptions u;
+        u.runtimeDir = rt; u.graphsDir = rt + "/graphs"; u.cacheDir = rt; u.backend = o.backend;
+        const std::wstring id = pm::AnimeSrModel(animeModel).id;
+        u.model = std::string(id.begin(), id.end());
+        u.io = pmml::UpscaleIo::Yuv420; u.colour = o.colour; u.width = w; u.height = h;
+        std::string ue;
+        up = pmml::Upscaler::create(u, &ue);
+        if (up) { o.width = up->outWidth(); o.height = up->outHeight(); Log("ml: anime upscaler " + animeNote + "; " + up->describe()); }
+        else Log("ml: anime upscaler not used (" + ue + ")");
+    } else if (!animeNote.empty()) Log("ml: anime upscaler " + animeNote);
     auto interp = pmml::Interpolator::create(o, &e);
     if (!interp) return fail(e);
     Log("ml: " + decision);
@@ -293,6 +371,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->inVi = *vi;
     d->k = k;
     d->vi = *vi;
+    if (up) { d->vi.width = up->outWidth(); d->vi.height = up->outHeight(); d->up = std::move(up); }
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, k);
     d->vi.fpsNum = outFps.num; d->vi.fpsDen = outFps.den;
     d->vi.numFrames = int(OutputFrames(vi->numFrames, k));
@@ -307,7 +386,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     MBind(d);
-    Log(std::format("ml: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); held-drawing repair {}", bits, w, h, outFps.num, outFps.den, k, d->be.regionRepair ? "on (lookahead 3)" : "off"));
+    Log(std::format("ml: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); held-drawing repair {}", bits, d->vi.width, d->vi.height, outFps.num, outFps.den, k, d->be.regionRepair ? "on (lookahead 3)" : "off"));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, MGetFrame, MFree, fmUnordered, deps, 1, d, core);
 }

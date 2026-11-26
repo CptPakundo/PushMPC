@@ -102,6 +102,16 @@ shader_lines() {
     f=$(dirname "$script")/shaders/ArtCNN_${m}_fragment.glsl
     [ -f "$f" ] || return 0
     printf 'script-opts-append=pushmpc-shaders=%s%sscript-opts-append=pushmpc-shaders-when=%s%s' "$(cfg_quote "$f")" "$1" "$w" "$1"
+    # the anime upscaling shaders (ArtCNN, CuNNy as their authors publish them), best first, each lighter than the last:
+    # pushmpc.lua uses them for animation. Where Setup put them: pmml/graphs/anime-sr in PushMPC's data folder
+    a=${PUSHMPC_ANIME_SHADERS:-${XDG_DATA_HOME:-$HOME/.local/share}/pushmpc/pmml/graphs/anime-sr}
+    [ -f "$a/ArtCNN_C4F16.glsl" ] || return 0
+    set_=""
+    for e in artcnn-c4f32=ArtCNN_C4F32.glsl artcnn-c4f32-ds=ArtCNN_C4F32_DS.glsl artcnn-c4f16=ArtCNN_C4F16.glsl              artcnn-c4f16-ds=ArtCNN_C4F16_DS.glsl cunny-4x16=CuNNy-4x16-DS.glsl cunny-fast=CuNNy-fast-DS.glsl; do
+        [ -f "$a/${e#*=}" ] && set_="${set_:+$set_;}${e%%=*}=$a/${e#*=}"
+    done
+    [ -n "$set_" ] && printf 'script-opts-append=pushmpc-anime-shaders=%s%s' "$(cfg_quote "$set_")" "$1"
+    return 0
 }
 block() {
     if [ "$1" = crlf ]; then nl=$(printf '\r\n_'); nl=${nl%_}; else nl='

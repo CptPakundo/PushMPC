@@ -481,6 +481,18 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { name: plexnative, path: '${{ runner.temp }}/plexnative' }
+      - name: pmml graphs for the anime upscalers (make_graphs.py; no weights, Setup fetches those pinned)
+        timeout-minutes: 5
+        env:
+          PUSHFLOW_PYTHON: ${{ steps.pushflow-python.outputs.python-path }}
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'graphs-venv'
+          & $env:PUSHFLOW_PYTHON -m venv $venv
+          $py = Join-Path $venv 'Scripts\python.exe'
+          & $py -m pip install --disable-pip-version-check -q onnx==1.17.0 numpy==1.26.4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $py -I repo/pmml/scripts/make_graphs.py --out "$env:RUNNER_TEMP\pmml-graphs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Stage and package (Setup, component zips, release.json + signature)
         timeout-minutes: 20
         env:
@@ -506,7 +518,7 @@ jobs:
           # the Plex proxy (mpv-native.yml): avfilter-8.dll, the pushmpc-avfilter-8.*.dll builds and the engine, staged as the
           # optional plexnative component (Setup prefers it for Plex; the libmpv swap stays the fallback)
           $plexn = @{}; if (Test-Path "$env:RUNNER_TEMP\plexnative\avfilter-8.dll") { $plexn = @{ PlexNative = "$env:RUNNER_TEMP\plexnative" } } else { Write-Host '::warning title=Plex proxy::no plexnative artifact: Setup gives Plex the libmpv swap' }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb @kodi @plexn
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" -PmmlGraphs "$env:RUNNER_TEMP\pmml-graphs" @nvofReq @vlc @mpvb @kodi @plexn
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {

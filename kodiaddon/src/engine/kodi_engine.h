@@ -22,6 +22,9 @@ struct EngineCfg {
     int upscaler = 0;                  // 0 none, 1 NIS, 2 FSR1
     int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
     bool semiPlanar = false;
+    std::string animeModel;            // the anime upscaler before the engine (pmml model id; "" none; builds with pmml only)
+    std::string pmmlRuntime;           // pmml's runtime folder (ort/, eps/, graphs/ with anime-sr/)
+    std::string pmmlBackend;           // e.g. ort:directml:dml:0, ort:core:trt-rtx:0 ("" = the first GPU EP the runtime has)
     bool external = false;             // frames arrive on the GPU (PushExternal: Android hardware buffers), not as planes           // GPU engine output NV12 / P010 (U and V interleaved; 10-bit in the high bits)
 };
 
