@@ -271,6 +271,20 @@ int main()
             check(ShowKeyFor(L"media/Show/Season 1/e01.mkv") == ShowKeyFor(L"Media/show/season 2/e05.mkv") && ShowKeyFor(L"media/Show/S01/e01.mkv") == ShowKeyFor(L"media/Show/e09.mkv")
                   && ShowKeyFor(L"media/Show/e01.mkv") != ShowKeyFor(L"media/Other/e01.mkv") && ShowKeyFor(L"media/Show/e01.mkv").size() == 16,
                   L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"media/Show/e01.mkv"));
+            // round 5 (item 4): sign hold on animation; line art and sign hold go before a frame generation step
+            {
+                bool found = false, same = true;
+                Settings noLine; noLine.lineArt = kOff;
+                for (double card = 1.0; card < 40.0 && !found; card += 0.05) {
+                    Costs cc; cc.card = card;
+                    const Choice with = Decide({}, tv, d, cc, g);
+                    if (with.animModeNote.find(L"would cost a frame generation step") != std::wstring::npos) {
+                        found = true; same = with.multiplier == Decide(noLine, tv, d, cc, g).multiplier && !(with.holdFlags & 6u);
+                    }
+                }
+                check((m1.holdFlags & 4) && !(m5.holdFlags & 4) && found && same,
+                      L"sign hold Auto on animation only; line art + sign hold dropped where they would cost a frame generation step (same multiplier as without)", std::to_wstring(m1.holdFlags));
+            }
             // round 5 (item 5): deband Auto on 8-bit animation whatever the bitrate (anime preset; Low from Blu-ray class);
             // live action keeps the bitrate rule; 10-bit animation stays off
             Source an = held; an.bppEq = 0.3; Source anBd = held; anBd.bppEq = 0.6; Source lv = live; lv.bppEq = 0.3; Source an10 = an; an10.tenBit = true;

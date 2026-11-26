@@ -367,6 +367,11 @@ inline constexpr int kAnimModeFeature = 0, kAnimModeTv = 0, kAnimModeMixedCg = 0
 // V5-V7: transient hold and line-art protection on by default for animation (flash / impact hold on every video:
 // the user's rule, 2026-11-26)
 inline constexpr bool kHoldTransientsAuto = true, kHoldLiveTransientsAuto = true, kLineArtAuto = true;
+// item 4: the sign hold (typeset signs, burned-in lines and credits standing over a pan) on animation
+inline constexpr bool kSignsAuto = true;
+// Budget priors of line-art protection (compose on every generated frame, ms per generated frame at 4K) and of the sign
+// FIND (ms per source frame at 4K work size); research §9: 1-2 ms per source frame at 8x 4K, 0.3-0.6 ms
+inline constexpr double kLineArtMs4k = 0.2, kSignsMs4k = 0.45;
 inline Choice Decide(const Settings& s, const Source& src, const Display& d, const Costs& costsIn, const Gpu& g = Gpu{})
 {
     Choice r;
@@ -398,7 +403,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         }
         const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
         const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation) : true;
-        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
+        const bool signs = kSignsAuto && r.animation && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)
+        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (signs ? 4u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
     }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);
@@ -497,8 +503,9 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // NR cost by family until measured (heavy on RTX 30 and on the RX 7000 worker)
     const double nrPrior = c.learnedNr ? c.nrMs : g.family == kRtx50 ? c.nrMs : g.family == kRtx40 ? c.nrMs * 1.5 : g.family == kRtx30 ? c.nrMs * 4
                          : g.family == kRdna4 ? 6.0 * 1.2 : g.family == kRdna3 ? 30.0 : c.nrMs * 4;
+    double holdMs = 0;   // line-art protection and the sign hold while their admission is tried (below)
     auto baseCost = [&](bool nr) {
-        return c.base4k * pixFg * c.card + debandMs + (nr ? nrPrior : 0) + (r.hdr ? (r.hdrItm ? c.itm4k : c.hdr4k * c.card) * pixFg : 0);
+        return c.base4k * pixFg * c.card + debandMs + holdMs + (nr ? nrPrior : 0) + (r.hdr ? (r.hdrItm ? c.itm4k : c.hdr4k * c.card) * pixFg : 0);
     };
     auto vsr = [&](int l) { return srOn ? VsrCost(c, l, atOutput, pixOut, family, method) : 0.0; };
 
@@ -577,6 +584,14 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (chooseFg(baseCost(false)).mult < without) { deband = false; debandMs = 0; r.debandNote = L"off, it would cost a frame generation step"; }
     }
     r.deband = deband;
+
+    // line-art protection and the sign hold never cost a frame generation step: they are the first to go (research §9;
+    // pushcore drops them at run time too when the measured p95 has no room)
+    if (r.holdFlags & 6u) {
+        const int without = chooseFg(baseCost(false)).mult;
+        holdMs = ((r.holdFlags & 2u) ? kLineArtMs4k * pixFg * c.card * std::max(0, without - 1) : 0.0) + ((r.holdFlags & 4u) ? kSignsMs4k * pixFg * c.card : 0.0);
+        if (chooseFg(baseCost(false)).mult < without) { r.holdFlags &= ~6u; holdMs = 0; r.animModeNote += L"; line art and sign hold off (they would cost a frame generation step)"; }
+    }
 
     // --- clean up: fixed, off, or Auto (low bitrate, an NR runtime on this GPU; never at the cost of 2x)
     const int mNoNr = chooseFg(baseCost(false)).mult;

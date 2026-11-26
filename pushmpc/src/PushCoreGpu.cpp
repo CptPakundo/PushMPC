@@ -409,6 +409,8 @@ struct PushCore {
     // Subtitle Hold Auto (settings.subtitleHold == 2): the pass detects on every frame, composes only while burned-in
     // text is found (gate below); counters of consecutive polls above / below the thresholds
     bool subAutoInit = false, subCompose = false;
+    bool signsOn = false, signsCompose = false;       // anime round 5: the sign hold (the subtitle pass over the whole picture)
+    bool lineNvofOn = false, lineNvofCompose = true;  // anime round 5: NVOF FG line-art protection (PushMpcLinePass)
     uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
@@ -589,6 +591,26 @@ struct PushCore {
     std::atomic<uint32_t> animClassNow{0};
     std::atomic<bool> holdAnimNow{false};
     std::atomic<double> holdMatchMs{0.0};                       // planner CPU per pair for the block match (running mean)
+    std::map<uint64_t, std::pair<float, float>> camFixOf;      // planner thread: MatchBlocks' camera correction per pair (compose warp)
+    std::atomic<uint64_t> holdScrollPairs{0};                   // pairs with a scrolling layer (credits; ScrollPair), planner thread
+    // Budget (research §9): line-art protection and the sign hold are dropped before anything else, before the filter's
+    // admission has to lower the multiplier: shed while the graph's p95 + their reserve is over 85 % of a source frame,
+    // back once it is under 75 %. holdShedPairs counts the pairs without them.
+    static constexpr double kHoldReserveMs = 1.5;                // line-art compose at 8x 4K (1-2 ms) + sign FIND (0.3-0.6 ms), priors
+    std::atomic<bool> holdShed{false};
+    uint64_t holdShedPairs = 0;
+    void holdBudget() {
+        const double graphP95 = costFull.pct(0.95), interval = sourceIntervalMs();
+        if (graphP95 <= 0) return;
+        const bool shed = holdShed.load(std::memory_order_relaxed);
+        if (!shed && graphP95 + kHoldReserveMs > 0.85 * interval) {
+            holdShed = true;
+            veyra::log::info("pushcore", std::format("budget: line-art protection and sign hold off (graph p95 {:.1f} ms + {:.1f} ms over 85 % of {:.1f} ms), before the multiplier", graphP95, kHoldReserveMs, interval));
+        } else if (shed && graphP95 + kHoldReserveMs < 0.75 * interval) {
+            holdShed = false;
+            veyra::log::info("pushcore", std::format("budget: line-art protection and sign hold back (graph p95 {:.1f} ms)", graphP95));
+        }
+    }
     std::map<uint64_t, std::array<pushmpc::held::HoldPlan, 2>> holdReady;   // submit thread: plans taken with their frame
     ID3D12Resource* holdPrevReal = nullptr;
     uint64_t holdPairs = 0, holdFrames = 0, holdFlashes = 0, holdLineFrames = 0, holdFail = 0, holdGated = 0;
@@ -1019,9 +1041,26 @@ struct PushCore {
         // describeStages. Crosshair Hold is never for video; Subtitle Hold follows PushMPC's setting, set right before each
         // graph is described (instances in one process describe their graphs one at a time, under the open / reload path).
         veyra::pipeline::overlay::setWanted(false);
-        veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && settings.subtitleHold != 0);
+        // Anime round 5 (item 4): the sign hold is that Subtitle Hold pass over the whole picture with PushFPS's text gate
+        // (patch pushfps-4.5.4-anime-signs: overlay::signZoneFor / signGate), for PUSHCORE_HOLD_SIGNS; it composes only
+        // while the picture is animation and the budget has room (signsPoll below).
+        signsOn = haveSettings && (settings.holdFlags & PUSHCORE_HOLD_SIGNS) != 0 && settings.heldFrames != 0;
+#ifdef PUSHFPS_ANIME_SIGNS
+        veyra::pipeline::overlay::setSignsWanted(signsOn);
+#else
+        signsOn = false;   // a PushFPS without the anime-signs patch: no sign zone
+#endif
+        veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && (settings.subtitleHold != 0 || signsOn));
+        // item 6: NVOF FG line-art protection (patch pushfps-4.5.4-anime-nvof-line: PushMpcLinePass after FidelityFX's blend);
+        // the graph makes it only for NVOF FG, it composes on animation while the budget has room (signsPoll below)
+        lineNvofOn = haveSettings && (settings.holdFlags & PUSHCORE_HOLD_LINE_ART) != 0 && settings.heldFrames != 0;
+#ifdef PUSHMPC_NVOF_LINE_PASS
+        veyra::pipeline::lineart::setWanted(lineNvofOn);
+#else
+        lineNvofOn = false;
+#endif
         subtitleState.store(0, std::memory_order_relaxed); subtitlePixels.store(0, std::memory_order_relaxed);
-        subAutoInit = false; subCompose = false; subOnRun = subOffRun = 0;
+        subAutoInit = false; subCompose = false; subOnRun = subOffRun = 0; signsCompose = false; lineNvofCompose = true;
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
@@ -1459,13 +1498,24 @@ struct PushCore {
         collectTimings();
         // PushFPS Subtitle Hold: its state and the pixels it held, about twice a second at 24 fps (the pixel count reads
         // the pass's own mapped sample; PushOverlayPass::harvest runs on this thread in update(), so it is read here too)
-        if (graph && haveSettings && settings.subtitleHold == 2 && !subAutoInit) { graph->setSubtitleCompose(false); subAutoInit = true; }
+        if (graph && signsOn) {
+            // the sign hold composes on animation only, and it is the first thing the budget drops (holdShed, with line art)
+            const bool want = holdAnimNow.load(std::memory_order_relaxed) && !holdShed.load(std::memory_order_relaxed);
+            if (want != signsCompose || !subAutoInit) { graph->setSubtitleCompose(want); signsCompose = want; subAutoInit = true; }
+        }
+        else if (graph && haveSettings && settings.subtitleHold == 2 && !subAutoInit) { graph->setSubtitleCompose(false); subAutoInit = true; }
+#ifdef PUSHMPC_NVOF_LINE_PASS
+        if (graph && lineNvofOn && graph->lineActive()) {
+            const bool want = holdAnimNow.load(std::memory_order_relaxed) && !holdShed.load(std::memory_order_relaxed);
+            if (want != lineNvofCompose) { graph->setLineCompose(want); lineNvofCompose = want; }
+        }
+#endif
         if (graph && (++subtitlePoll % 12) == 0) {
             const uint32_t state = uint32_t(graph->subtitleHoldState()), px = graph->subtitleHoldPixels();
             // Auto gate: burned-in subtitles (two lines over a 1080p picture upscaled to 4K) hold 78-91 k pixels of the
             // band; natural video without text held at most 6.4 k (study on four shows, eight segments, RTX 5090,
             // 2026-11-25). On at >= 0.4 % of the frame for 3 polls (~1.5 s at 24 fps), off below 0.05 % for 10 polls (~5 s).
-            if (state == 1 && haveSettings && settings.subtitleHold == 2) {
+            if (state == 1 && haveSettings && settings.subtitleHold == 2 && !signsOn) {
                 const double area = double(graph->workWidth()) * graph->workHeight();
                 subOnRun = px >= area * 0.004 ? subOnRun + 1 : 0;
                 subOffRun = px < area * 0.0005 ? subOffRun + 1 : 0;
@@ -1542,7 +1592,8 @@ struct PushCore {
 
     // ---- anime round 5: the hold compose ----
     // The verdict split (test only, not in the UI): PUSHMPC_SPLIT=<A>|<B> (or HKCU\Software\PushMPC\Test\Split, a string),
-    // each side "full", "camera" or "off", optionally followed by +t / -t (transient hold), +l / -l (line art):
+    // each side "full", "camera" or "off", optionally followed by +t / -t (transient hold), +l / -l (line art), +s / -s
+    // (sign hold: one graph runs it or not, so +s / -s only make sense on both sides alike or as an A/B of whole runs):
     // e.g. "full|camera", "full-t|full+t", "full|full+l". Left half = A, right half = B, a 2-pixel divider on generated
     // frames. PUSHMPC_AB_SWAP=<source frame>: the sides swap from that frame on (a side bias shows up).
     static bool parseSide(std::string v, pushmpc::held::AnimMode& m, uint32_t& f) {
@@ -1553,7 +1604,7 @@ struct PushCore {
         if (name == "full") m = AnimMode::Full; else if (name == "camera") m = AnimMode::CameraOnly; else if (name == "off") m = AnimMode::Off; else return false;
         while (k != std::string::npos && k + 1 < v.size()) {
             const bool on = v[k] == '+'; const char w = v[k + 1];
-            const uint32_t bit = w == 't' ? pushmpc::held::kHoldTransients : w == 'l' ? pushmpc::held::kHoldLineArt : 0u;
+            const uint32_t bit = w == 't' ? pushmpc::held::kHoldTransients : w == 'l' ? pushmpc::held::kHoldLineArt : w == 's' ? pushmpc::held::kHoldSigns : 0u;
             if (on) f |= bit; else f &= ~bit;
             k = v.find_first_of("+-", k + 1);
         }
@@ -1593,7 +1644,7 @@ struct PushCore {
         holdOn = true;
         holdPrevReal = nullptr; holdReady.clear();
         showClass.Reset(); animClassNow = 0;
-        holdPairs = holdFrames = holdFlashes = holdLineFrames = holdFail = holdGated = 0;
+        holdPairs = holdFrames = holdFlashes = holdLineFrames = holdFail = holdGated = 0; holdScrollPairs = 0; holdShedPairs = 0; holdShed = false;
         startPlanner();
         auto modeName = [](AnimMode m) { return m == AnimMode::CameraOnly ? "Camera only" : m == AnimMode::Off ? "Off" : "Full"; };
         veyra::log::info("pushcore", std::format("hold compose on: animation mode {}, transients {}{}, line art {}{}", modeName(holdMode[0]),
@@ -1616,6 +1667,8 @@ struct PushCore {
             std::vector<int16_t> nx, ny;
             objs = ClassifyObjects(rit->second, bm, slidX, slidY, &nx, &ny);
             slidX.swap(nx); slidY.swap(ny);
+            if (ScrollPair(rit->second, bm, objs)) holdScrollPairs.fetch_add(1, std::memory_order_relaxed);
+            camFixOf[seq] = { bm.camFixX, bm.camFixY };
             holdMatchMs = holdMatchMs.load() * 0.98 + msSince(t0) * 0.02;
         } else { slidX.clear(); slidY.clear(); }
         objOf[seq] = std::move(objs);
@@ -1642,14 +1695,18 @@ struct PushCore {
             const auto oit = objOf.find(s);
             static const std::vector<ObjectClass> noObjs;
             const CellGrid* gs = gr(s);
+            std::pair<float, float> cf{ 0.f, 0.f };
+            if (auto c = camFixOf.find(s); c != camFixOf.end()) cf = c->second;
             std::array<HoldPlan, 2> plans;
             if (r0 && gs)
                 for (int side = 0; side < (holdSplit ? 2 : 1); ++side)
-                    plans[size_t(side)] = PlanHolds(holdMode[side], holdFlg[side], true, *r0, oit == objOf.end() ? noObjs : oit->second, mk(s - 2), mk(s - 1), tm, gs->w, gs->h);
+                    plans[size_t(side)] = PlanHolds(holdMode[side], holdFlg[side], true, *r0, oit == objOf.end() ? noObjs : oit->second, mk(s - 2), mk(s - 1), tm, gs->w, gs->h,
+                                                    cf.first, cf.second);
             holdOf[s] = std::move(plans);
         }
         while (meanOf.size() > 16) meanOf.erase(meanOf.begin());
         while (objOf.size() > 8) objOf.erase(objOf.begin());
+        while (camFixOf.size() > 8) camFixOf.erase(camFixOf.begin());
         while (marksOf.size() > 16) marksOf.erase(marksOf.begin());
         while (holdOf.size() > 32) holdOf.erase(holdOf.begin());
     }
@@ -1683,6 +1740,9 @@ struct PushCore {
         if (!realNow || !realPrev || gap != 1 || !(b.out.batch.b100ns > b.out.batch.a100ns)) return PUSHCORE_OK;
         const bool anim = holdAnimNow.load();
         const bool swap = seq >= holdSwapAt;
+        holdBudget();
+        const bool shed = holdShed.load(std::memory_order_relaxed);
+        if (shed) ++holdShedPairs;
         struct SidePass { const HoldPlan* plan = nullptr; bool hold = false, line = false; uint32_t side = 0; };
         SidePass sp[2];
         const int sides = holdSplit ? 2 : 1;
@@ -1696,7 +1756,7 @@ struct PushCore {
             const bool liveOk = (holdFlg[i] & kHoldLiveTransients) != 0;
             sp[i].hold = p.whole ? (anim || liveOk) : (p.cells > 0 && anim);
             if (!p.whole && p.cells > 0 && !anim) ++holdGated;
-            sp[i].line = (holdFlg[i] & kHoldLineArt) != 0 && anim && !p.whole;
+            sp[i].line = (holdFlg[i] & kHoldLineArt) != 0 && anim && !p.whole && !shed;
             any = any || sp[i].hold || sp[i].line;
         }
         if (!any) return PUSHCORE_OK;
@@ -1744,8 +1804,10 @@ struct PushCore {
     }
     void holdLogClose() {
         veyra::log::info("pushcore", std::format("hold compose: {} pairs held ({} flash / impact pairs whole), {} generated frames composed, {} with line art; "
-            "{} pairs gated (not animation), {} failures; block match {:.2f} ms a pair (planner thread); class {} (0 unknown, 1 feature, 2 TV limited, 3 mixed CG)",
-            holdPairs, holdFlashes, holdFrames, holdLineFrames, holdGated, holdFail, holdMatchMs.load(), animClassNow.load()));
+            "{} pairs gated (not animation), {} failures; block match {:.2f} ms a pair (planner thread); class {} (0 unknown, 1 feature, 2 TV limited, 3 mixed CG); "
+            "scroll layer: {} pairs (smooth, never held); {} pairs without line art / sign hold (budget); sign hold {}",
+            holdPairs, holdFlashes, holdFrames, holdLineFrames, holdGated, holdFail, holdMatchMs.load(), animClassNow.load(), holdScrollPairs.load(), holdShedPairs,
+            signsOn ? "on (the subtitle pass over the whole picture; see sign-hold lines)" : "off"));
         holdPass.forgetViews();
     }
     // ---- source repair: setup ----
@@ -1999,7 +2061,7 @@ struct PushCore {
                 if (planStop) return;
                 j = std::move(planJobs.front()); planJobs.pop_front();
             }
-            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); meanOf.clear(); objOf.clear(); marksOf.clear(); holdOf.clear(); slidX.clear(); slidY.clear(); }
+            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); meanOf.clear(); objOf.clear(); marksOf.clear(); holdOf.clear(); camFixOf.clear(); slidX.clear(); slidY.clear(); }
             if (!j.plan) { classifyRegion(j.seq, std::move(j.grid), j.wholly); continue; }
             PlanResult r;
             try {

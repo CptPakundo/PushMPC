@@ -376,6 +376,20 @@ inline std::vector<ObjectClass> ClassifyObjects(const RegionFrame& r, const Bloc
     return out;
 }
 
+// ---- a scrolling layer (credits): counted for the close log ("scroll layer: N pairs") ----
+// A pair scrolls when a steady, mostly vertical slide (>= 1/4 cell, |vx| <= |vy| / 2) moves the picture: the camera
+// itself on a rigid move (a roll on black: the text is all the texture), or a Slid object of >= 64 cells that slid the
+// same way on the pair before (a text layer over a held or slower picture). It needs no extra work: Slid objects keep
+// the generator's output in every mode (smooth); the counter shows the classification did its job on a credit roll.
+inline bool ScrollPair(const RegionFrame& r, const BlockMotion& m, const std::vector<ObjectClass>& objs)
+{
+    auto vertical = [](float vx, float vy) { return std::fabs(vy) >= 0.25f && std::fabs(vx) <= 0.5f * std::fabs(vy); };
+    if (m.rigid && vertical(r.dx + m.camFixX, r.dy + m.camFixY)) return true;
+    for (const auto& o : objs)
+        if (o.kind == ObjectClass::Slid && o.consistent && o.cells >= kMinUnexplainedCells && vertical(r.dx + m.camFixX + o.vx, r.dy + m.camFixY + o.vy)) return true;
+    return false;
+}
+
 // ---- transients over the whole picture ----
 inline float GridMean(const CellGrid& g)
 {
@@ -451,13 +465,15 @@ inline void PaintSweep(const ObjectClass& o, uint32_t W, uint32_t H, std::vector
 
 // mode: the stream's AnimMode; flags: kHold*; animation: the live-action gate is open (or Animation On); W x H: the cell
 // grid. atPrev2 / atPrev / atCur: the transient marks of s-2, s-1 and s (the pair's ends are s-1 and s; a two-frame flash
-// marks its first frame, so s-2's mark covers s-1 and s too).
+// marks its first frame, so s-2's mark covers s-1 and s too). camFixX / Y: MatchBlocks' quarter-cell correction of the
+// camera (BlockMotion::camFixX / Y), added to the compose's camera warp (a slow roll is otherwise up to half a cell off).
 inline HoldPlan PlanHolds(AnimMode mode, uint32_t flags, bool animation, const RegionFrame& r, const std::vector<ObjectClass>& objs,
-                          const TransientMarks& atPrev2, const TransientMarks& atPrev, const TransientMarks& atCur, uint32_t W, uint32_t H)
+                          const TransientMarks& atPrev2, const TransientMarks& atPrev, const TransientMarks& atCur, uint32_t W, uint32_t H,
+                          float camFixX = 0.f, float camFixY = 0.f)
 {
     HoldPlan p;
     if (!r.valid) return p;
-    p.camDx = r.dx; p.camDy = r.dy; p.camScale = r.scale;
+    p.camDx = r.dx + camFixX; p.camDy = r.dy + camFixY; p.camScale = r.scale;
     // flash / impact: every mode but Off, and on live action too with kHoldLiveTransients (the user's rule: a flash is
     // never blended, whatever the video)
     const bool transients = (flags & kHoldTransients) != 0 && mode != AnimMode::Off;

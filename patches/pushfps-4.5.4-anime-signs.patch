@@ -1,0 +1,209 @@
+diff --git a/include/veyra/pipeline/PushOverlay.h b/include/veyra/pipeline/PushOverlay.h
+index 8024511d..d8abcdbc 100644
+--- a/include/veyra/pipeline/PushOverlay.h
++++ b/include/veyra/pipeline/PushOverlay.h
+@@ -49,6 +49,7 @@ struct Rule {
+     int grow = 3;        // the mask is the bars and this many pixels round them
+     int reach = 24;      // how far the fill looks for a pixel outside the mask
+     int hole = 9;        // a pixel with an accepted bar this near on all four sides is inside a small shape, and masked
++    int signDensity = 0; // PushMPC anime signs (signZoneFor): 0 off; else the text gate (signGate below), accepted bar pixels
+ };
+ inline constexpr float kContrast = 0.10f;       // a bar differs this much from its flanks (the picture as encoded, 0..1)
+ inline constexpr float kMoveRatio = 2.0f;       // a block moves when its change is this many times its own detail
+@@ -101,6 +102,22 @@ inline Zone subtitleZoneFor(uint32_t width, uint32_t height) {
+     z.y = (height - gap - h) & ~1u;
+     return z;
+ }
++// PushMPC anime signs: the whole picture, whole blocks on even pixels (a typeset sign, a burned-in line or a credit
++// standing over a pan can be anywhere in a drawing). The FIND, FILL and COMPOSE are the subtitle band's; the mask is
++// gated to text (signGate), because the bar rule alone also takes the outline of a held character over a pan.
++inline Zone signZoneFor(uint32_t width, uint32_t height) {
++    Zone z;
++    const uint32_t w = width / kBlock * kBlock, h = height / kBlock * kBlock;
++    if (w < 4 * kBlock || h < 4 * kBlock) return z;
++    z.w = z.size = w; z.h = h;
++    z.x = ((width - w) / 2) & ~1u; z.y = ((height - h) / 2) & ~1u;
++    return z;
++}
++// The text gate's threshold: accepted bar pixels of each direction in 3 x 3 blocks (the number is for 2160 lines;
++// replay on labelled anime clips, PushMPC round 5: the outlines of held characters over a pan on TV anime drop to
++// nothing, burned-in subtitles and credit text over a pan stay).
++inline constexpr int kSignDensity2160 = 120;
++inline int signDensityFor(uint32_t height) { return scaled(double(kSignDensity2160), height, 1, 4 * kSignDensity2160); }
+ // How a frame's values become the 0..1 the thresholds are in (as Live HUD Lock): sRGB and PQ are used as
+ // they are, scRGB is linear with 1 = 80 nits.
+ inline float perceptual(float v, unsigned outputMode) { return outputMode == 1 ? std::sqrt(std::max(v, 0.0f) / 2.5f) : v; }
+@@ -261,6 +278,29 @@ inline bool enclosed(const Plane& accepted, int x, int y, int hole) {
+     return true;
+ }
+ // One real frame: counts, memory, and the mask (1 where frame generation is not to see the picture).
++// PushMPC anime signs: the text gate. A block of 16 x 16 is dense when the 3 x 3 blocks round it hold at least
++// signDensity accepted bar pixels running across AND as many running along (glyph strokes go both ways; the outline
++// of a held character is a few long curves); a mask pixel stays when its block or one next to it is dense (the ends
++// of a line of text are less dense). `accepted` holds the kinds of each accepted pixel as bits (1 << kind).
++inline bool signBlockDense(const Plane& accepted, int bx, int by, int density) {
++    const int bw = accepted.w / kBlock, bh = accepted.h / kBlock;
++    int across = 0, along = 0;
++    for (int j = std::max(by - 1, 0); j <= std::min(by + 1, bh - 1); ++j)
++        for (int i = std::max(bx - 1, 0); i <= std::min(bx + 1, bw - 1); ++i)
++            for (int y = j * kBlock; y < (j + 1) * kBlock; ++y)
++                for (int x = i * kBlock; x < (i + 1) * kBlock; ++x) {
++                    const int k = int(accepted.at(x, y));
++                    across += (k & 10) ? 1 : 0; along += (k & 5) ? 1 : 0;
++                }
++    return across >= density && along >= density;
++}
++inline bool signGate(const Plane& accepted, int x, int y, int density) {
++    const int bw = accepted.w / kBlock, bh = accepted.h / kBlock, bx = std::min(x / kBlock, bw - 1), by = std::min(y / kBlock, bh - 1);
++    for (int j = std::max(by - 1, 0); j <= std::min(by + 1, bh - 1); ++j)
++        for (int i = std::max(bx - 1, 0); i <= std::min(bx + 1, bw - 1); ++i)
++            if (signBlockDense(accepted, i, j, density)) return true;
++    return false;
++}
+ inline Plane step(State& s, const Plane& luma, const Rule& r) {
+     const int nw = s.w, nh = s.h, blocksX = nw / kBlock, blocksY = nh / kBlock;
+     const std::vector<unsigned char> flags = s.hasBefore ? movingBlocks(s.before, luma) : std::vector<unsigned char>(size_t(blocksX) * blocksY, 0);
+@@ -275,7 +315,7 @@ inline Plane step(State& s, const Plane& luma, const Rule& r) {
+         for (int y = 0; y < nh; ++y)
+             for (int x = 0; x < nw; ++x) {
+                 const Decision d = judge(s.count[k], s.memory[k], x, y, k, r);
+-                if (d.accepted) accepted.at(x, y) = 1;
++                if (d.accepted) accepted.at(x, y) = float(int(accepted.at(x, y)) | (1 << k));   // the kinds as bits (signGate)
+                 memory.at(x, y) = d.found ? float(r.memory) : std::max(s.memory[k].at(x, y) - 1.0f, 0.0f);
+             }
+         s.memory[k] = memory;
+@@ -287,7 +327,8 @@ inline Plane step(State& s, const Plane& luma, const Rule& r) {
+             for (int j = -r.grow; j <= r.grow && !any; ++j)
+                 for (int i = -r.grow; i <= r.grow && !any; ++i)
+                     any = within(i, j, r.grow) && accepted.inside(x + i, y + j) && accepted.at(x + i, y + j) > 0;
+-            mask.at(x, y) = any || enclosed(accepted, x, y, r.hole) ? 1.0f : 0.0f;
++            const bool held = any || enclosed(accepted, x, y, r.hole);
++            mask.at(x, y) = held && (r.signDensity <= 0 || signGate(accepted, x, y, r.signDensity)) ? 1.0f : 0.0f;
+         }
+     s.before = luma; s.hasBefore = true;
+     return mask;
+@@ -354,4 +395,10 @@ inline bool wanted() { return wantedStore(); }
+ inline bool& subtitlesWantedStore() { static bool wanted = false; return wanted; }
+ inline void setSubtitlesWanted(bool on) { subtitlesWantedStore() = on; }
+ inline bool subtitlesWanted() { return subtitlesWantedStore(); }
++// PushMPC anime signs: the subtitle pass over the whole picture (signZoneFor) with the text gate, for animation. Off
++// unless switched on; it needs Subtitle Hold switched on as well (it is that pass in a bigger zone).
++#define PUSHFPS_ANIME_SIGNS 1
++inline bool& signsWantedStore() { static bool wanted = false; return wanted; }
++inline void setSignsWanted(bool on) { signsWantedStore() = on; }
++inline bool signsWanted() { return signsWantedStore(); }
+ }
+diff --git a/include/veyra/pipeline/PushOverlayPass.h b/include/veyra/pipeline/PushOverlayPass.h
+index b0413875..5935ad3b 100644
+--- a/include/veyra/pipeline/PushOverlayPass.h
++++ b/include/veyra/pipeline/PushOverlayPass.h
+@@ -35,6 +35,8 @@ public:
+     bool compose(ID3D12GraphicsCommandList* list, StateTracker& tracker, unsigned slot, unsigned parity, float t);
+     bool composes(unsigned slot) const { return slot < generatedCount_ && writable_[slot]; }
+     overlay::Zone zone() const { return zone_; }
++    // PushMPC anime signs: the text gate on the mask (overlay::signGate), for the whole-picture sign zone.
++    void setSignGate(bool on) { rule_.signDensity = on ? overlay::signDensityFor(height_) : 0; }
+     // For tests: what the last update left (the zone's size).
+     ID3D12Resource* maskTexture(unsigned parity) const { return parity < 2 ? mask_[parity].Get() : nullptr; }
+     ID3D12Resource* countTexture() const { return state_.Get(); }
+diff --git a/shaders/PushOverlay.hlsl b/shaders/PushOverlay.hlsl
+index 2d178daa..4c5fb510 100644
+--- a/shaders/PushOverlay.hlsl
++++ b/shaders/PushOverlay.hlsl
+@@ -23,7 +23,7 @@ cbuffer Constants : register(b0) {
+     uint grow, reach, blocks, hole;
+     // PushFPS Subtitle Hold: a zone may be a rectangle. zoneSize and blocks are its width, these its height
+     // (for the crosshair's square, zoneHeight = zoneSize and blocksY = blocks).
+-    uint zoneHeight, blocksY, pad0, pad1;
++    uint zoneHeight, blocksY, signDensity, pad1;   // signDensity: PushMPC anime signs, the text gate (0 off)
+ };
+ static const float kContrast = 0.10;
+ static const float kMoveRatio = 2.0;
+@@ -143,13 +143,15 @@ void main(uint3 id : SV_DispatchThreadID) {
+         const float4 before = reset != 0 ? float4(0, 0, 0, 0) : texB[p];
+         float4 after;
+         bool accepted = false;
++        float kinds = 0;
+         [unroll] for (int kind = 0; kind < 4; ++kind) {
+             const float2 j = judge(p, kind);
+             accepted = accepted || j.x > 0.5;
++            if (j.x > 0.5) kinds += float(1 << kind);
+             const float m = j.y > 0.5 ? float(memory) : max(pick(before, kind) - 1.0, 0.0);
+             if (kind == 0) after.x = m; else if (kind == 1) after.y = m; else if (kind == 2) after.z = m; else after.w = m;
+         }
+-        outA[p] = float4(accepted ? 1 : 0, 0, 0, 0);
++        outA[p] = float4(kinds, 0, 0, 0);   // the kinds as bits (1 << kind): 0 = not accepted (the text gate counts them)
+         outB[p] = after;
+         return;
+     }
+@@ -175,6 +177,33 @@ void main(uint3 id : SV_DispatchThreadID) {
+             }
+             any = all;
+         }
++        if (any && signDensity > 0) {       // PushMPC anime signs: the text gate (PushOverlay.h signGate), only where a mask pixel would be
++            int2 counts[5][5];
++            const int2 b = min(p / kBlock, int2(int(blocks) - 1, int(blocksY) - 1));
++            [loop] for (int bj = 0; bj < 5; ++bj)
++                [loop] for (int bi = 0; bi < 5; ++bi) {
++                    int2 n = int2(0, 0);
++                    const int2 q0 = (b + int2(bi - 2, bj - 2)) * kBlock;
++                    if (q0.x >= 0 && q0.y >= 0 && q0.x < int(blocks) * kBlock && q0.y < int(blocksY) * kBlock)
++                        [loop] for (int y = 0; y < kBlock; ++y)
++                            [loop] for (int x = 0; x < kBlock; ++x) {
++                                const uint k = uint(texA[q0 + int2(x, y)].x + 0.5);
++                                n += int2((k & 10u) != 0 ? 1 : 0, (k & 5u) != 0 ? 1 : 0);
++                            }
++                    counts[bj][bi] = n;
++                }
++            bool dense = false;
++            [loop] for (int cj = 1; cj <= 3 && !dense; ++cj)
++                [loop] for (int ci = 1; ci <= 3 && !dense; ++ci) {
++                    const int2 c = b + int2(ci - 2, cj - 2);
++                    if (c.x < 0 || c.y < 0 || c.x >= int(blocks) || c.y >= int(blocksY)) continue;
++                    int2 sum = int2(0, 0);
++                    [unroll] for (int v = -1; v <= 1; ++v)
++                        [unroll] for (int u = -1; u <= 1; ++u) sum += counts[cj + v][ci + u];
++                    dense = sum.x >= int(signDensity) && sum.y >= int(signDensity);
++                }
++            any = dense;
++        }
+         outA[p] = float4(any ? 1 : 0, 0, 0, 0);
+         return;
+     }
+diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
+index a79a0e5a..12ef2d42 100644
+--- a/src/pipeline/EnhanceGraph.cpp
++++ b/src/pipeline/EnhanceGraph.cpp
+@@ -1630,14 +1630,17 @@ bool EnhanceGraph::initOverlay() {
+             desc_.subtitleHold,fgEnabled_,int(desc_.frameGenerationBackend),presentSinkFg()));
+         return true;
+     }
+-    const auto band=overlay::subtitleZoneFor(workW_,workH_);
++    // PushMPC anime signs: the same pass over the whole picture with the text gate (overlay::signsWanted, animation)
++    const bool signs=overlay::signsWanted();
++    const auto band=signs?overlay::signZoneFor(workW_,workH_):overlay::subtitleZoneFor(workW_,workH_);
+     const auto centre=overlay::zoneFor(workW_,workH_);
+     const bool overlaps=overlay_&&band.x<centre.x+centre.w&&centre.x<band.x+band.w&&band.y<centre.y+centre.h&&centre.y<band.y+band.h;
+     auto pass=std::make_unique<PushOverlayPass>();
+-    if(overlaps||!pass->initialize(context_.device(),workW_,workH_,outputFormat(),hdr10Output()?2u:desc_.hdrOutput?1u:0u,&band,overlay_.get(),"subtitle-hold")){
++    if(overlaps||!pass->initialize(context_.device(),workW_,workH_,outputFormat(),hdr10Output()?2u:desc_.hdrOutput?1u:0u,&band,overlay_.get(),signs?"sign-hold":"subtitle-hold")){
+         veyra::log::error("subtitle-hold",std::format("unavailable at {}x{}{}; frame generation runs without it",workW_,workH_,overlaps?" (the band meets the crosshair's zone)":""));
+         return true;
+     }
++    if(signs)pass->setSignGate(true);
+     subtitles_=std::move(pass);
+     return true;
+ }
+diff --git a/src/pipeline/PushOverlayPass.cpp b/src/pipeline/PushOverlayPass.cpp
+index 74de4412..4ddf6e0a 100644
+--- a/src/pipeline/PushOverlayPass.cpp
++++ b/src/pipeline/PushOverlayPass.cpp
+@@ -162,7 +162,7 @@ void PushOverlayPass::constants(float* c, unsigned stage, bool reset) const {
+     const uint32_t values[kConstants] = {zone_.x, zone_.y, zone_.w, stage, outputMode_, reset ? 1u : 0u, uint32_t(rule_.flank), uint32_t(rule_.stand),
+                                          uint32_t(rule_.longest), uint32_t(rule_.shortest), uint32_t(rule_.fresh), uint32_t(rule_.memory),
+                                          uint32_t(rule_.grow), uint32_t(rule_.reach), blocks_, uint32_t(rule_.hole),
+-                                         zone_.h, blocksY_, 0u, 0u};
++                                         zone_.h, blocksY_, uint32_t(std::max(rule_.signDensity, 0)), 0u};
+     for (UINT i = 0; i < kConstants; ++i) c[i] = std::bit_cast<float>(values[i]);
+ }
+ 
