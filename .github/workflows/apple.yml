@@ -495,7 +495,7 @@ jobs:
           before=$(snap); fails=0
           export HOME="$RUNNER_TEMP/home-plex"; mkdir -p "$HOME"
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-plex.txt" | grep -A3 "Plex for Mac" | cut -c1-400
-          grep -q '"state":"installed"' "$RUNNER_TEMP/setup-plex.txt" && grep -q ', x2' "$RUNNER_TEMP/setup-plex.txt" || { echo "::error::pushmpc-setup did not put PushMPC into Plex for Mac"; fails=$((fails + 1)); }
+          grep -q '^desktop: installed' "$RUNNER_TEMP/setup-plex.txt" && grep -q ', x2' "$RUNNER_TEMP/setup-plex.txt" || { echo "::error::pushmpc-setup did not put PushMPC into Plex for Mac"; fails=$((fails + 1)); }
           grep -aq pushmpc_proxy_status "$fw/libavfilter.8.dylib" || { echo "::error::no proxy in Plex.app"; fails=$((fails + 1)); }
           agent="$HOME/Library/LaunchAgents/com.pushmpc.plex-reapply.plist"
           plutil -lint "$agent" || fails=$((fails + 1))

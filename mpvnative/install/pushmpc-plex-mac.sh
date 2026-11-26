@@ -183,6 +183,8 @@ agent_write() {
   <key>Label</key><string>com.pushmpc.plex-reapply</string>
   <key>ProgramArguments</key>
   <array><string>/bin/sh</string><string>$from/pushmpc-plex-mac.sh</string><string>install</string><string>--from</string><string>$from</string><string>--if-needed</string><string>--json</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>HOME</key><string>$HOME</string></dict>
   <key>RunAtLoad</key><true/>
   <key>WatchPaths</key>
   <array><string>/Applications/Plex.app/Contents/Info.plist</string><string>/Applications/Plex HTPC.app/Contents/Info.plist</string></array>
