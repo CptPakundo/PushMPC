@@ -24,6 +24,7 @@
 //   Deband           Auto | Off | On                 default Auto   (PushMPC's own deband pass, 8-bit SDR sources)
 //   DebandStrength   Low | Medium | High             default Medium
 //   SubtitleHold     Auto | Off | On                 default Auto   (PushFPS's Subtitle Hold: burned-in subtitles kept out of frame generation; Auto = kSubtitleHoldAuto)
+//   Animation        Auto | Off | On                 default Auto   (cartoons and anime: held drawings re-timed, the animation tuning; Auto = when the picture is found to be animation)
 //   FrameLog         DWORD 1/0                       default 0 (troubleshooting only; the filter log is always written)
 // Debug and test values stay in HKCU\Software\PushMPC\Filter (see ReadConfig in PushMpcFilter.cpp).
 #pragma once
@@ -78,6 +79,7 @@ struct Settings {
     int deband = kAuto;     // kAuto, kOff, 1 = on
     DebandStrength debandStrength = DebandStrength::Medium;
     int subtitleHold = kAuto;  // kAuto, kOff, 1 = on (PushFPS 4.5's Subtitle Hold, only while frame generation runs)
+    int animation = kAuto;     // kAuto, kOff, 1 = on: held-frame re-timing (pushcore heldFrames) and Auto's animation tuning
     bool frameLog = false;   // the per-frame CSVs (about 150 kB a minute): for troubleshooting, off unless asked for
     bool operator==(const Settings&) const = default;
 };
@@ -206,6 +208,7 @@ inline Settings LoadSettings()
     s.deband = ParseOnOff(RegReadStr(k, L"Deband"), kAuto);
     const std::wstring ds = RegReadStr(k, L"DebandStrength");
     s.subtitleHold = ParseOnOff(RegReadStr(k, L"SubtitleHold"), kAuto);
+    s.animation = ParseOnOff(RegReadStr(k, L"Animation"), kAuto);
     s.debandStrength = _wcsicmp(ds.c_str(), L"Low") == 0 ? DebandStrength::Low : _wcsicmp(ds.c_str(), L"High") == 0 ? DebandStrength::High : DebandStrength::Medium;
     const std::wstring hb = RegReadStr(k, L"HdrBoost");
     s.hdrBoost = _wcsicmp(hb.c_str(), L"Off") == 0 ? HdrBoost::Off : _wcsicmp(hb.c_str(), L"Low") == 0 ? HdrBoost::Low
@@ -244,6 +247,7 @@ inline bool SaveSettings(const Settings& s)
     str(L"Deband", OnOffStr(s.deband));
     str(L"DebandStrength", DebandStrengthStr(s.debandStrength));
     str(L"SubtitleHold", OnOffStr(s.subtitleHold));
+    str(L"Animation", OnOffStr(s.animation));
     str(L"HdrBoost", HdrBoostStr(s.hdrBoost));
     str(L"HdrMethod", HdrMethodStr(s.hdrMethod));
     dw(L"HdrLimit", s.hdrLimit);

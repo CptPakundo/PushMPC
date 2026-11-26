@@ -144,6 +144,12 @@ typedef struct PushCoreSettings {
        is found (>= 0.4 % of the frame for ~1.5 s; off after ~5 s below 0.05 %); PushCoreStats.subtitleHoldState 4 =
        running, waiting for text. */
     int32_t subtitleHold;
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): held-frame re-timing. 1 = a source frame that repeats the one before it
+       (animation drawn on twos or threes) is not given to frame generation; the frames generated between the two
+       distinct frames around it are spread over the whole held span, so the motion no longer moves in one step and
+       holds in the next. Runs of more than three held frames (a still) are shown as they are. The outputs keep the
+       source timestamps; pushcore takes up to 6 source frames ahead to wait for the next distinct one. Default 0. */
+    int32_t heldFrames;
 } PushCoreSettings;
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
@@ -251,6 +257,14 @@ typedef struct PushCoreStats {
        method without it), 4 Auto: running and detecting, not holding (no burned-in text found); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
     uint32_t subtitleHoldState;
     uint32_t subtitleHoldPixels;
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): held-frame re-timing (PushCoreSettings.heldFrames) */
+    uint32_t heldActive;          /* 1 = the held-frame test runs on this graph (asked for, frame generation on) */
+    uint32_t heldRatioPermille;   /* held frames among the last heldTested (up to 240) source frames, per mille */
+    uint32_t heldTested;
+    uint32_t heldGraphMultiplier; /* the graph's built multiplier (the largest per-span multiplier) */
+    uint64_t heldFrames;          /* source frames found held since open */
+    uint64_t heldDropped;         /* held frames covered by a re-timed span (not given to the graph) */
+    uint64_t heldSpans;           /* re-timed spans */
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -311,6 +325,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
+#define PUSHCORE_FEATURE_HELD_FRAMES 2048u /* PushCoreSettings.heldFrames, PushCoreStats.held* */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */

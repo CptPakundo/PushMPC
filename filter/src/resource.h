@@ -53,6 +53,9 @@
 #define IDC_PM_SUBHOLD_LBL   1057
 #define IDC_PM_SUBHOLD       1058
 #define IDC_PM_SUBHOLD_NOTE  1059
+#define IDC_PM_ANIM_LBL      1060
+#define IDC_PM_ANIM          1061
+#define IDC_PM_ANIM_NOTE     1062
 #define IDC_AB_DIAG          1106
 #define IDC_AB_DIAG_NOTE     1107
 #define IDC_AB_UPDATE        1108

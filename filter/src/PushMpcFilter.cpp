@@ -2425,6 +2425,7 @@ private:
     void LogChoice(const char* why, const pm::Choice& c);
     void StartAuto();
     void StopAuto();
+    void AnimationHintOnce();
     void AutoLoop();
     void LearnCosts();
     void LoadLearned();
@@ -2647,6 +2648,10 @@ private:
     void ConvBegin(); void ConvEnd();
     uint32_t m_fgRun = PUSHCORE_FG_NONE, m_srRun = 0; bool m_cutGuardRun = false; std::wstring m_fgRunNote;   // what pushcore runs
     uint32_t m_subtitleState = 0, m_subtitlePixels = 0;   // PushFPS Subtitle Hold as pushcore reports it (PushCoreStats)
+    // Animation Auto: the path hint (once per file) and pushcore's held-frame share (sticky once it says animation)
+    std::atomic<int> m_animHint = -1;          // -1 not looked at yet, 0 / 1
+    std::atomic<double> m_heldShare = -1.0;
+    bool m_heldLogged = false;
 };
 
 // ------------------------------------------------------------------------------------------------ device
@@ -3212,6 +3217,7 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     if (m_openStarted) return;
     if (ShouldDeferOpen()) return;
     m_openStarted = true;
+    AnimationHintOnce();
     PushCoreStreamInfo si = {};
     si.structSize = sizeof(si);
     si.width = m_visW; si.height = m_visH;
@@ -4220,6 +4226,8 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.hdr = InputHdr();
     s.tenBit = m_inP010;
     s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
+    s.animHint = m_animHint.load() == 1;
+    s.heldShare = m_heldShare.load();
     return s;
 }
 // The stream's bitrate, for Clean up's Auto rule: the splitter's video type (dwBitRate), else the file's size over its
@@ -4318,13 +4326,16 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     // PushFPS 4.5's Subtitle Hold: only with frame generation (pushcore leaves it out of a graph without it anyway)
     p.subtitleHold = (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) && p.multiplier > 1
         ? pm::SubtitleHoldValue(s, (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) != 0, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
+    // held-frame re-timing (animation drawn on twos / threes): with frame generation, unless Animation is Off. pushcore
+    // re-times only where it finds held frames, so it is on for every video (live action has none and is unchanged).
+    p.heldFrames = (g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && p.multiplier > 1 && s.enable && s.animation != pm::kOff ? 1 : 0;
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
 {
     if (a.sr != b.sr || a.multiplier != b.multiplier || a.nr != b.nr || a.videoHdr != b.videoHdr) return false;
     if (a.videoHdr && a.videoHdrPeak != b.videoHdrPeak) return false;
-    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold)) return false;
+    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold || a.heldFrames != b.heldFrames)) return false;
     if (a.sr && (a.srQuality != b.srQuality || a.srTarget != b.srTarget || a.srFamily != b.srFamily || a.srMethod != b.srMethod)) return false;
     if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier)) return false;
     if (a.nr && (a.nrTone != b.nrTone || a.nrStructure != b.nrStructure)) return false;
@@ -4339,8 +4350,8 @@ static bool IsUpgrade(const PushCoreSettings& from, const PushCoreSettings& to)
 }
 static std::wstring GraphKey(const PushCoreSettings& p)
 {
-    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{} sub{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
-                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1, p.subtitleHold);
+    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{} sub{} held{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
+                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1, p.subtitleHold, p.heldFrames);
 }
 void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
 {
@@ -4359,9 +4370,9 @@ void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
 }
 void CPushMpcFilter::LogChoice(const char* why, const pm::Choice& c)
 {
-    Log(std::format("Auto ({}): frame generation {} [stopped at: {}]; sharpen {}; clean up {}; SDR to HDR {}; deband {}; output {}x{}; predicted {:.1f} ms of {:.1f} ms budget; "
+    Log(std::format("Auto ({}): frame generation {} [stopped at: {}]; sharpen {}; clean up {}; SDR to HDR {}; deband {}; animation {}; output {}x{}; predicted {:.1f} ms of {:.1f} ms budget; "
         "display {} {:.3f} Hz HDR {} VRR {} ({}); GPU {} ({}, prior factor {:.1f})",
-        why, Narrow(c.smootherNote), Narrow(c.stoppedAt), Narrow(c.sharperNote), Narrow(c.cleanNote), Narrow(c.hdrNote), Narrow(c.debandNote), c.outW, c.outH, c.predictedMs, c.budgetMs,
+        why, Narrow(c.smootherNote), Narrow(c.stoppedAt), Narrow(c.sharperNote), Narrow(c.cleanNote), Narrow(c.hdrNote), Narrow(c.debandNote), Narrow(c.animNote), c.outW, c.outH, c.predictedMs, c.budgetMs,
         Narrow(m_display.name), m_display.refreshHz, m_display.hdr ? "on" : "off", m_display.vrr ? "on" : "off", Narrow(m_display.vrrHow),
         Narrow(m_gpu.name), Narrow(pm::FamilyName(m_gpu.family)), m_costs.card));
 }
@@ -4633,8 +4644,16 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
         if (!file.empty() && !RequestReopen()) SetStatus(L"no PushFPS (source frames converted by the filter, not deinterlaced): " + why);
     }
 }
+// Animation Auto's early hint: the file's path (once per file, before the first decision)
+void CPushMpcFilter::AnimationHintOnce()
+{
+    if (m_animHint.load() >= 0) return;
+    m_animHint = pm::AnimationHint(SourceFile()) ? 1 : 0;
+    if (m_animHint.load() == 1) Log("animation: the file name or folder says animation");
+}
 void CPushMpcFilter::StartAuto()
 {
+    AnimationHintOnce();
     if (m_autoThread.joinable()) return;
     m_hAutoStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_autoThread = std::thread([this] { AutoLoop(); });
@@ -4690,6 +4709,17 @@ void CPushMpcFilter::AutoLoop()
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
                 if (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) { m_subtitleState = st.subtitleHoldState; m_subtitlePixels = st.subtitleHoldPixels; }
+                if ((g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && st.heldActive && st.heldTested >= 96) {
+                    // ~4 s of frames tested: the share of held drawings (kept once it says animation: a still or a 3D CG
+                    // scene in a cartoon does not undo it)
+                    const double share = st.heldRatioPermille / 1000.0;
+                    if (m_heldShare.load() < pm::kAnimationHeldShare) m_heldShare = share;
+                    if (!m_heldLogged && share >= pm::kAnimationHeldShare) {
+                        m_heldLogged = true;
+                        Log(std::format("held drawings: {:.1f} % of the last {} frames (animation); re-timed spans {}, held frames given no graph pair {}, graph {}x",
+                                        share * 100.0, st.heldTested, st.heldSpans, st.heldDropped, st.heldGraphMultiplier));
+                    }
+                }
                 if (changed && st.fgFallback) {
                     // the method Auto asked for did not start on this GPU: not offered again in this session
                     PushCoreSettings asked;
@@ -4739,6 +4769,8 @@ void CPushMpcFilter::AutoLoop()
             if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF && m_subtitleState)
                 running += m_subtitleState == 1 ? (m_subtitlePixels ? std::format(L", subtitle hold on ({} px held)", m_subtitlePixels) : std::wstring(L", subtitle hold on"))
                          : m_subtitleState == 2 ? std::wstring(L", subtitle hold unavailable") : std::wstring(L", subtitle hold not with this method");
+            if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF && applied.heldFrames)
+                running += c.animation ? L", animation: " + c.animNote : std::wstring(L", held frames re-timed");
             if (!m_fgRunNote.empty()) running += L" (" + m_fgRunNote + L")";
         }
         {
@@ -5013,6 +5045,7 @@ public:
         FillCombo(m_Dlg, IDC_PM_VRR, { L"Auto", L"Assume VRR", L"Assume fixed" });
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
+        FillCombo(m_Dlg, IDC_PM_ANIM, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_SUBHOLD, { (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) && pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off ? L"Auto (on text)" : pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
         // drop-down widths in dialog units (they scale with the font and the display's DPI, as the template does)
         for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, Dlu(95), 0);
@@ -5230,6 +5263,7 @@ private:
         ComboSet(m_Dlg, IDC_PM_DEBAND, OnOffIdx(s.deband));
         ComboSet(m_Dlg, IDC_PM_DBSTR, int(s.debandStrength));
         ComboSet(m_Dlg, IDC_PM_SUBHOLD, OnOffIdx(s.subtitleHold));
+        ComboSet(m_Dlg, IDC_PM_ANIM, OnOffIdx(s.animation));
         CheckDlgButton(m_Dlg, IDC_PM_FRAMELOG, s.frameLog ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(m_Dlg, IDC_PM_HDRLIMIT, s.hdrLimit ? BST_CHECKED : BST_UNCHECKED);
     }
@@ -5257,6 +5291,7 @@ private:
         s.deband = OnOffVal(ComboSel(m_Dlg, IDC_PM_DEBAND));
         s.debandStrength = pm::DebandStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_DBSTR), 0, 2));
         s.subtitleHold = OnOffVal(ComboSel(m_Dlg, IDC_PM_SUBHOLD));
+        s.animation = OnOffVal(ComboSel(m_Dlg, IDC_PM_ANIM));
         s.frameLog = IsDlgButtonChecked(m_Dlg, IDC_PM_FRAMELOG) == BST_CHECKED;
         s.hdrLimit = IsDlgButtonChecked(m_Dlg, IDC_PM_HDRLIMIT) == BST_CHECKED;
         return s;
@@ -5269,7 +5304,8 @@ private:
                         IDC_PM_STYLE_LBL, IDC_PM_STYLE, IDC_PM_DEBAND_LBL, IDC_PM_DEBAND, IDC_PM_DBSTR_LBL, IDC_PM_DBSTR, IDC_PM_DEBAND_NOW,
                         IDC_PM_FGMETHOD_LBL, IDC_PM_FGMETHOD, IDC_PM_VRR_LBL, IDC_PM_VRR, IDC_PM_UPSCALER_LBL, IDC_PM_UPSCALER, IDC_PM_CAPS_NOTE,
                         IDC_PM_HDRMETHOD_LBL, IDC_PM_HDRMETHOD, IDC_PM_HDRLIMIT, IDC_PM_DISPPEAK_LBL, IDC_PM_DISPPEAK,
-                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE })
+                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE,
+                        IDC_PM_ANIM_LBL, IDC_PM_ANIM, IDC_PM_ANIM_NOTE })
             ShowWindow(GetDlgItem(m_Dlg, id), on ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), on && !m_pushFpsData.empty() ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_GSYNC), on && m_gsyncOffer ? SW_SHOW : SW_HIDE);

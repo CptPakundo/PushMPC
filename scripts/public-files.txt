@@ -6,6 +6,7 @@ filter/CMakeLists.txt
 filter/build.cmd
 filter/src/**
 filter/tools/auto_test.cpp
+filter/tools/held_test.cpp
 pushmpc/CMakeLists.txt
 pushmpc/include/**
 pushmpc/src/**

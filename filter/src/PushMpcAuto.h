@@ -58,7 +58,28 @@ struct Source {
     bool hdr = false;         // PQ / HLG
     double bppEq = -1;        // H.264-equivalent bits per pixel per frame (< 0 = unknown)
     bool tenBit = false;      // P010 input (10-bit)
+    bool animHint = false;    // the file's path names it animation (AnimationHint)
+    double heldShare = -1;    // held frames pushcore found (share of the last ~10 s; < 0 = not measured); sticky once >= kAnimationHeldShare
 };
+// Animation (cartoons, anime): drawn on twos or threes, a quarter to two thirds of a TV episode's frames repeat the drawing
+// before them (pushcore's held-frame test); live action and 3D CG at 24 distinct frames have almost none. The path is the
+// early hint, before ~4 s of frames are measured: a folder or file named with a whole word anime / animation / animated /
+// cartoon(s).
+inline constexpr double kAnimationHeldShare = 0.20;
+inline bool AnimationHint(const std::wstring& path)
+{
+    std::wstring p = path;
+    for (auto& ch : p) ch = wchar_t(towlower(ch));
+    for (const wchar_t* w : { L"anime", L"animation", L"animations", L"animated", L"cartoon", L"cartoons" }) {
+        const size_t n = wcslen(w);
+        for (size_t i = p.find(w); i != std::wstring::npos; i = p.find(w, i + 1)) {
+            const bool before = i == 0 || !iswalpha(p[i - 1]);
+            const bool after = i + n >= p.size() || !iswalpha(p[i + n]);
+            if (before && after) return true;
+        }
+    }
+    return false;
+}
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
 enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg, kCapCount };
@@ -163,6 +184,8 @@ struct Choice {               // resolved values for pushcore and the filter
     FgMethod fgMethod = FgMethod::Vfg;   // the method in use (Auto never)
     int fgQuality = 1;        // VFG model 0..2, or PushFlow tier 0..2
     bool deband = false; int debandStrength = 1;
+    bool animation = false;   // treated as animation (Settings.animation On, or Auto: AnimationHint / held frames found)
+    std::wstring animNote;
     double predictedMs = 0, budgetMs = 0;
     std::wstring smootherNote, sharperNote, cleanNote, hdrNote, debandNote, stoppedAt, fgNote, qualityNote;
     bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod; }
@@ -331,6 +354,12 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if ((g.family == kRdna3 || g.family == kRdna2) && !c.learnedVsr) c.fsrSr *= 2.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;
+    // --- animation: held drawings are re-timed by pushcore whenever frame generation runs (unless Off)
+    if (s.animation == kOff) { r.animation = false; r.animNote = L"off (held drawings are not re-timed)"; }
+    else if (s.animation != kAuto) { r.animation = true; r.animNote = L"on"; }
+    else if (src.heldShare >= kAnimationHeldShare) { r.animation = true; r.animNote = std::format(L"on, held drawings found ({:.0f} % of frames)", 100.0 * std::min(1.0, src.heldShare)); }
+    else if (src.animHint) { r.animation = true; r.animNote = L"on, the file name or folder says animation"; }
+    else { r.animation = false; r.animNote = src.heldShare >= 0 ? std::format(L"off, no held drawings ({:.0f} % of frames); held frames are still re-timed", 100.0 * src.heldShare) : L"Auto, measuring"; }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);
 

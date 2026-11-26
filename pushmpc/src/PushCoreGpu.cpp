@@ -20,10 +20,13 @@
 // SDR sources, before the graph), the RTX VSR model family (PushCoreSettings.srFamily), the frame generation method
 // (VFG, DLSS-G, PushFlow, FSR FG, AMD FRC) with a fallback chain, the upscaler (RTX VSR, FSR, NIS), the scene-cut guard
 // for every method (PushMpcCutGuard in the patched PushFPS tree), non-NVIDIA GPUs, pushcore_capabilities and
-// pushcore_pushFlowBench (PushFPS's PushFlowBench, ported).
+// pushcore_pushFlowBench (PushFPS's PushFlowBench, ported), and held-frame re-timing (PushCoreSettings.heldFrames:
+// a held source frame is not given to the graph, the next distinct one comes with a per-call multiplier that spreads
+// the generated frames over the whole held span; HeldFrames.h).
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
+#include "PushCoreHeld.h"          // held-frame re-timing (HeldFrames.h): animation on twos / threes
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
@@ -167,7 +170,7 @@ bool copySettings(const PushCoreSettings* in, PushCoreSettings& out) {
     if (!in || in->structSize < PUSHCORE_SETTINGS_SIZE_BASE) return false;
     PushCoreSettings s{};
     s.srFamily = PUSHCORE_SR_FAMILY_STANDARD; s.deband = 0; s.debandStrength = PUSHCORE_DEBAND_MEDIUM;
-    s.fgBackend = PUSHCORE_FG_VFG; s.fgTier = 1; s.srMethod = PUSHCORE_SR_METHOD_RTX; s.cutGuard = 1; s.fgLite = 0;
+    s.fgBackend = PUSHCORE_FG_VFG; s.fgTier = 1; s.srMethod = PUSHCORE_SR_METHOD_RTX; s.cutGuard = 1; s.fgLite = 0; s.heldFrames = 0;
     std::memcpy(&s, in, std::min<size_t>(in->structSize, sizeof(PushCoreSettings)));
     s.structSize = sizeof(PushCoreSettings);
     out = s;
@@ -428,7 +431,9 @@ struct PushCore {
     ComPtr<ID3D12Fence> fence12;          // D3D12 signals on the graph queue
     uint64_t value12 = 0;
     HANDLE waitEvent = nullptr;
-    uint32_t multiplier = 1;
+    uint32_t multiplier = 1;              // outputs per source frame (what the renderer paces by)
+    uint32_t graphMultiplier = 1;         // the graph's built multiplier (> multiplier only with held-frame re-timing)
+    uint32_t retimeK = 0;                 // buildFromPushMpc: multiplier when the graph is built larger for re-timing
     bool fg = false;
     bool hdrIn = false, hdrOut = false;
     bool hdrHint = false, hdrCurveOn = false;
@@ -468,6 +473,7 @@ struct PushCore {
     CostWindow costFull, costReduced, costFirst, costFirstBatch; // graph span (full/reduced groups), FG1, FG batch
     void initCostWindows() { costFull.keep = costFirst.keep = costFirstBatch.keep = 8; costReduced.keep = 4; }
     std::map<uint64_t, int> decisionOf;     // graph source frame id -> 0 full, 1 reduced, 2 none
+    std::map<uint64_t, uint32_t> gapOf;     // graph source frame id -> source frames its pair spans (re-timed > 1)
 
     // ---- ingress ring ----
     static constexpr uint32_t kIngressSlots = 8;
@@ -480,6 +486,35 @@ struct PushCore {
     bool debandEligible = false;           // 8-bit SDR stream and the pass initialised on this device
     int debandLogged = -1;                 // last state logged (on/off/strength), to log changes only
     bool debandWanted() const { return debandEligible && haveSettings && settings.deband != 0; }
+    // ---- held-frame re-timing (PushCoreSettings.heldFrames; HeldFrames.h, PushCoreHeld.h) ----
+    pushmpc::HeldDetector held;
+    bool heldEligible = false;             // the test pass initialised on this device
+    bool warming = false;                  // warmUp(): synthetic frames go straight to the graph
+    pushmpc::held::Retimer retimer;
+    pushmpc::held::HeldRatio heldRatio{240};
+    struct Pending {
+        uint32_t slot = 0; uint64_t seq = 0; int64_t pts = 0; uint32_t flags = 0; uint64_t copyValue = 0;
+        bool compared = false, haveTiming = false;
+        PushCoreSubmitTiming timing{};
+    };
+    std::deque<Pending> pendingIn;         // ingested, the test result not read yet
+    std::map<uint64_t, Pending> waiting;   // tested: waiting for the next distinct frame, or for the graph
+    struct ReadyGraph { uint64_t seq; uint32_t multiplier, gap; };
+    std::deque<ReadyGraph> readyGraph;     // to the graph, in order, when it has a slot
+    static constexpr size_t kMaxQueued = pushmpc::held::kLookahead + 3;   // waiting held frames + tested + new
+    int prevIngestSlot = -1;
+    int pumpError = PUSHCORE_OK;           // a graph failure while canSubmit fed the graph: the next submit returns it               // the ingress slot of the source frame before (the test's reference)
+    uint64_t ingestSeq = 0;
+    Clock::time_point lastIngest{};
+    bool heldLogged = false;
+    bool retimingOn() const { return heldEligible && haveSettings && settings.heldFrames != 0 && fg && multiplier >= 2 && !warming; }
+    size_t queuedFrames() const { return pendingIn.size() + waiting.size(); }
+    bool slotQueued(uint32_t slot) const {
+        for (const auto& p : pendingIn) if (p.slot == slot) return true;
+        for (const auto& kv : waiting) if (kv.second.slot == slot) return true;
+        return false;
+    }
+    void clearHeldQueues() { pendingIn.clear(); waiting.clear(); readyGraph.clear(); retimer.Reset(); prevIngestSlot = -1; }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
     bool dvP5Logged = false;
@@ -599,6 +634,16 @@ struct PushCore {
         s.vfgQuality = tryFg == PUSHCORE_FG_PUSHFLOW ? std::min<uint32_t>(settings.fgTier, 2u) : std::min<uint32_t>(settings.vfgQuality, 2u);
         s.multiplier = settings.multiplier >= 2 && tryFg != PUSHCORE_FG_NONE ? std::min<uint32_t>(settings.multiplier, cap) : 1u;
         if (s.multiplier > 1) s.content = ContentRate::Auto;   // WatchPage ensureVideoCadence (ignored for files)
+        // held-frame re-timing: the graph is built with the multiplier the longest re-timed span can use (HeldFrames.h
+        // BuildMultiplier; the engine's batch capacity and the method's cap bound it); each pair then asks for its own
+        retimeK = 0;
+        if (s.multiplier >= 2 && settings.heldFrames != 0) {
+            const uint32_t build = pushmpc::held::BuildMultiplier(s.multiplier, std::min<uint32_t>(cap, veyra::pipeline::FrameBatch::Capacity));
+            if (build > s.multiplier) {
+                veyra::log::info("pushcore", std::format("held-frame re-timing: graph built for {}x (spans of held frames), {}x per source frame", build, s.multiplier));
+                retimeK = s.multiplier; s.multiplier = build;
+            }
+        }
         s.sr = settings.sr != 0;
         if (settings.srQuality >= 1 && settings.srQuality <= 4) s.videoSrQuality = settings.srQuality;
         // the upscaler: RTX VSR, or AMD FSR / NVIDIA Image Scaling (any GPU; on a non-NVIDIA GPU RTX VSR becomes FSR)
@@ -749,6 +794,9 @@ struct PushCore {
             debandEligible = deband.init(d11.Get());
             if (!debandEligible) veyra::log::warn("pushcore", "deband pass unavailable: " + deband.why());
         }
+        // Held-frame test: prepared for every stream (8-bit and 10-bit); it runs only while re-timing is asked for
+        heldEligible = held.init(d11.Get());
+        if (!heldEligible) veyra::log::warn("pushcore", "held-frame test unavailable (no re-timing): " + held.why());
         return PUSHCORE_OK;
     }
 
@@ -778,9 +826,9 @@ struct PushCore {
         return c;
     }
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
-    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false;
+    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false;
     int buildGraph() {
-        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0;
+        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = 8; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
@@ -879,7 +927,10 @@ struct PushCore {
         if (options.fg && options.settings.frameGenerationBackend == engine::FrameGenerationBackend::AmdFrc) preferSystemD3dCompiler();
 
         fg = options.fg;
-        multiplier = fg ? options.fgMultiplier : 1;
+        graphMultiplier = fg ? options.fgMultiplier : 1;
+        multiplier = fg && retimeK >= 2 && retimeK < graphMultiplier ? retimeK : graphMultiplier;
+        retimer.Configure(multiplier, graphMultiplier);
+        clearHeldQueues();
         hdrIn = gd.hdrInput; hdrOut = gd.hdrOutput;
         resolveHdrHint();
         veyra::log::info("display-color", std::format("hdrInput={} hdrOutput={} displayHdr={} forceSdrPreview={} hdrOutputMode={} hdrMetadataHint={} hdrCurve={} videoHdr={} masteringPeak={} maxCLL={} maxFALL={}",
@@ -912,13 +963,13 @@ struct PushCore {
             graph->setCutGuardActiveArea(settings.activeArea[0], settings.activeArea[1], settings.activeArea[2], settings.activeArea[3]);
         cutGuardOn = fg && graph->cutGuardActive();
         description = std::format(
-            "source {}x{} {}{} -> output {}x{} {}; SR {} (videoSrQuality {}); FG {} {} {}X (quality/tier {}, async {}, cut guard {}); NR {}; egress {}; GPU family {}",
+            "source {}x{} {}{} -> output {}x{} {}; SR {} (videoSrQuality {}); FG {} {} {} (quality/tier {}, async {}, cut guard {}); NR {}; egress {}; GPU family {}",
             stream.width, stream.height, stream.format == PUSHCORE_INPUT_P010 ? "P010" : "NV12",
             !gd.hdrInput ? "" : stream.transfer == AVCOL_TRC_ARIB_STD_B67 ? " HLG" : " PQ",
             graph->workWidth(), graph->workHeight(),
             graph->hdr10Output() ? "HDR10 (PQ BT.2020)" : gd.hdrInput ? "SDR (PushFPS BT.2390 tone map)" : "SDR",
             graph->srEnabled() ? "on" : "off", gd.videoSrQuality, fg ? "on" : "off",
-            engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier, gd.vfgQuality,
+            engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier == graphMultiplier ? std::format("{}X", multiplier) : std::format("{}X (graph {}X for held-frame spans)", multiplier, graphMultiplier), gd.vfgQuality,
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
@@ -976,7 +1027,7 @@ struct PushCore {
             veyra::log::info("pushcore", std::format("egress direct: {} graph output textures opened in D3D11", opened.size()));
             return PUSHCORE_OK;
         }
-        const uint32_t count = 2 * multiplier + 2;
+        const uint32_t count = 2 * graphMultiplier + 2;
         outSlots.resize(count);
         for (auto& slot : outSlots) {
             D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1017,7 +1068,19 @@ struct PushCore {
     }
 
     // ------------------------------------------------------------------------------------------
-    bool canSubmit() const { return graph && graph->nextFrameSlotAvailable(); }
+    // Re-timing: a source frame is taken while pushcore's own queue (frames waiting for their test result, for the next
+    // distinct frame, or for the graph) has room and the ingress slot is not one of them; the graph is fed from the
+    // queue (pumpHeld). Without it: the graph's own slot rule, as before.
+    bool canSubmit() {
+        if (!graph) return false;
+        if (pumpError != PUSHCORE_OK) return true;   // submit reports it
+        if (!retimingOn()) {
+            if (queuedFrames() && (pumpError = pumpHeld(true)) != PUSHCORE_OK) return true;   // re-timing switched off: the queue first
+            return queuedFrames() == 0 && graph->nextFrameSlotAvailable();
+        }
+        if ((pumpError = pumpHeld(false)) != PUSHCORE_OK) return true;
+        return queuedFrames() < kMaxQueued && !slotQueued(uint32_t(inIndex % kIngressSlots));
+    }
 
     bool ensureIngress(ID3D11Texture2D* src) {
         D3D11_TEXTURE2D_DESC sd{};
@@ -1099,11 +1162,15 @@ struct PushCore {
                 // the cost under load by ~15 ms, which pushed 1.0x playback into reduced groups needlessly.
                 const double span = (p.colorMs > 0 ? p.colorMs : 0) + (p.srMs > 0 ? p.srMs : 0) + (p.fgBatchMs > 0 ? p.fgBatchMs : 0)
                                   + (p.nrMs > 0 ? p.nrMs : 0) + (p.videoHdrMs > 0 ? p.videoHdrMs : 0);
-                if (it->second == 0 && p.fgBatchMs > 0) { costFull.push(span); costFirst.push(p.fg1Ms); costFirstBatch.push(p.fgBatchMs); }
-                else if (it->second == 1 && p.fgBatchMs > 0) costReduced.push(span);
+                // a re-timed pair spans `gap` source frames: its cost per source frame is what admission compares
+                double g = 1;
+                if (auto gi = gapOf.find(p.sourceFrameId); gi != gapOf.end()) { g = double(gi->second); gapOf.erase(gi); }
+                if (it->second == 0 && p.fgBatchMs > 0) { costFull.push(span / g); costFirst.push(p.fg1Ms); costFirstBatch.push(p.fgBatchMs / g); }
+                else if (it->second == 1 && p.fgBatchMs > 0) costReduced.push(span / g);
                 decisionOf.erase(it);
             }
             while (decisionOf.size() > 256) decisionOf.erase(decisionOf.begin());
+            while (gapOf.size() > 256) gapOf.erase(gapOf.begin());
             if (timings.size() >= 16384) timings.pop_front();
             timings.push_back(p);
         }
@@ -1115,12 +1182,14 @@ struct PushCore {
         if (!src) return fail("no texture");
         const auto t0 = Clock::now();
         if (!canSubmit()) { ++st.busy; return PUSHCORE_BUSY; }
+        if (pumpError != PUSHCORE_OK) { const int e = pumpError; pumpError = PUSHCORE_OK; return e; }
         if (!ensureIngress(src)) return PUSHCORE_ERROR;
         D3D11_TEXTURE2D_DESC sd{};
         src->GetDesc(&sd);
         if (slice >= sd.ArraySize) return fail("array slice out of range");
 
-        auto& slot = inSlots[inIndex % kIngressSlots];
+        const uint32_t slotIndex = uint32_t(inIndex % kIngressSlots);
+        auto& slot = inSlots[slotIndex];
         ++inIndex;
         // Deband (PushMPC): the source slice goes through the pass into a scratch texture, which then takes the place
         // of the source in the ingress copy. Same immediate context, so the order is kept with no wait.
@@ -1141,16 +1210,48 @@ struct PushCore {
         if (slot.freeValue) imm4->Wait(fence12in11.Get(), slot.freeValue);   // GPU-side: graph consumed it
         imm->CopySubresourceRegion(slot.tex.Get(), 0, 0, 0, 0, copySrc, copySub, nullptr);
         if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(ingress)")) return PUSHCORE_ERROR;
+        const uint64_t copyValue = value11;
+        const uint64_t seq = ingestSeq++;
+        lastIngest = Clock::now();
+        if (retimingOn()) {
+            // the held-frame test against the source frame before (same size, no discontinuity); the frame waits in
+            // the queue until its result is read
+            Pending p;
+            p.slot = slotIndex; p.seq = seq; p.pts = pts; p.flags = submitFlags; p.copyValue = copyValue;
+            if (timing) { p.haveTiming = true; std::memcpy(&p.timing, timing, std::min<size_t>(sizeof(p.timing), timing->structSize)); }
+            if (prevIngestSlot >= 0 && !(submitFlags & PUSHCORE_SUBMIT_DISCONTINUITY))
+                p.compared = held.run(imm.Get(), slot.tex.Get(), inSlots[prevIngestSlot].tex.Get(), stream.width, stream.height, seq);
+            imm4->Flush();
+            prevIngestSlot = int(slotIndex);
+            if (!heldLogged) {
+                heldLogged = true;
+                veyra::log::info("pushcore", std::format("held-frame re-timing on: {}x per source frame, graph {}x, lookahead {}, queue {}", multiplier, graphMultiplier, pushmpc::held::kLookahead, kMaxQueued));
+            }
+            pendingIn.push_back(p);
+            ++st.submitted;
+            st.submitCpuMs += msSince(t0);
+            return pumpHeld(false);
+        }
         imm4->Flush();
+        prevIngestSlot = int(slotIndex);
+        ++st.submitted;
+        return processFrame(slotIndex, copyValue, pts, submitFlags, timing, multiplier, 1, seq, t0);
+    }
 
+    // One source frame from its ingress slot into the graph. perCall: the graph's multiplier for the pair that ends at
+    // this frame (the plain multiplier, or a re-timed span's); gap: source frames the pair spans.
+    int processFrame(uint32_t slotIndex, uint64_t copyValue, int64_t pts, uint32_t submitFlags, const PushCoreSubmitTiming* timing,
+                     uint32_t perCall, uint32_t gap, uint64_t sourceIndex, Clock::time_point t0) {
+        using namespace veyra;
+        auto& slot = inSlots[slotIndex];
         pipeline::HardwareSurfaceInput hw;
         hw.texture = slot.res.Get(); hw.subresourceIndex = 0;
-        hw.waitFence = fence11in12.Get(); hw.waitValue = value11;
+        hw.waitFence = fence11in12.Get(); hw.waitValue = copyValue;
         hw.textureWidth = inW; hw.textureHeight = inH;
 
         const bool reset = needReset || (submitFlags & PUSHCORE_SUBMIT_DISCONTINUITY) || !haveReal;
         Batch b;
-        b.sourceIndex = submittedCount;
+        b.sourceIndex = sourceIndex;
         b.realPts = pts;
         // admission context: the GPU work still queued ahead of this frame (predicted finish of earlier frames)
         const double nowMs = std::chrono::duration<double, std::milli>(t0.time_since_epoch()).count();
@@ -1193,7 +1294,7 @@ struct PushCore {
         if (!graph->process(frame, double(pts) / 10000.0, reset, b.out, frameId, &color, &hw,
                             /*retainReferences*/ false,
                             useAdmission ? veyra::pipeline::EnhanceGraph::FgAdmission(admitFn) : veyra::pipeline::EnhanceGraph::FgAdmission{},
-                            /*previewMultiplier*/ multiplier))
+                            /*previewMultiplier*/ perCall))
             return fail(std::format("graph process failed (failed backend {})", int(graph->failedBackend())));
         if (!useAdmission) decision = fg ? 0 : 2;
         if (fg && !reset) {
@@ -1201,6 +1302,7 @@ struct PushCore {
             if (decision == 0) ++st.fgFull; else if (decision == 1) ++st.fgReduced; else ++st.fgSkipped;
         }
         decisionOf[frameId] = reset ? 3 : decision;
+        if (gap > 1) gapOf[frameId] = gap;
         {
             // predicted GPU finish of this frame: after the queued work, at its decision's measured cost
             double cost = decision == 0 ? costFull.p50() : decision == 1 ? costReduced.p50() : -1;
@@ -1216,7 +1318,7 @@ struct PushCore {
         b.readyValue = value12;
         batches.push_back(std::move(b));
         needReset = false; haveReal = true;
-        ++submittedCount; ++st.submitted;
+        ++submittedCount;
         st.submitCpuMs += msSince(t0);
         collectTimings();
         // PushFPS Subtitle Hold: its state and the pixels it held, about twice a second at 24 fps (the pixel count reads
@@ -1236,6 +1338,54 @@ struct PushCore {
             }
             subtitleState.store(state == 1 && haveSettings && settings.subtitleHold == 2 && !subCompose ? 4u : state, std::memory_order_relaxed);
             subtitlePixels.store(px, std::memory_order_relaxed);
+        }
+        return PUSHCORE_OK;
+    }
+
+    // Held-frame re-timing: reads the test results of the queued frames in order (waiting only when a second frame is
+    // queued behind the first, or at the end), hands each to the Retimer, and gives the graph what it decided while the
+    // graph has a slot. final: the stream paused or ended (no frame for 250 ms) or re-timing went off: frames waiting for
+    // the next distinct one go as they are.
+    int pumpHeld(bool final) {
+        using namespace pushmpc::held;
+        std::vector<Action> acts;
+        while (!pendingIn.empty()) {
+            Pending& p = pendingIn.front();
+            DiffStats d;
+            bool isHeld = false;
+            if (p.compared) {
+                const bool wait = final || pendingIn.size() >= 2;
+                if (!held.read(imm.Get(), p.seq, d, wait)) { if (!wait) break; d = {}; }
+                isHeld = IsHeld(d);
+                heldRatio.Push(isHeld);
+                if (isHeld) ++st.heldFrames;
+            }
+            const uint64_t seq = p.seq;
+            const bool disc = (p.flags & PUSHCORE_SUBMIT_DISCONTINUITY) != 0 || !p.compared;
+            waiting.emplace(seq, p);
+            pendingIn.pop_front();
+            acts.clear();
+            retimer.Push(seq, isHeld, disc, acts);
+            for (const auto& a : acts) {
+                if (a.kind == Action::Drop) { waiting.erase(a.frame); ++st.heldDropped; }
+                else readyGraph.push_back({a.frame, a.multiplier, a.gap});
+            }
+        }
+        if (final && retimer.Waiting()) {
+            acts.clear();
+            retimer.Flush(acts);
+            for (const auto& a : acts) readyGraph.push_back({a.frame, a.multiplier, a.gap});
+        }
+        st.heldSpans = retimer.Spans();
+        while (!readyGraph.empty() && graph && graph->nextFrameSlotAvailable()) {
+            const ReadyGraph r = readyGraph.front();
+            readyGraph.pop_front();
+            auto it = waiting.find(r.seq);
+            if (it == waiting.end()) continue;
+            const Pending p = it->second;
+            waiting.erase(it);
+            const int rc = processFrame(p.slot, p.copyValue, p.pts, p.flags, p.haveTiming ? &p.timing : nullptr, r.multiplier, r.gap, p.seq, Clock::now());
+            if (rc != PUSHCORE_OK) return rc;
         }
         return PUSHCORE_OK;
     }
@@ -1345,6 +1495,8 @@ struct PushCore {
     int poll(PushCoreFrame* frames, uint32_t capacity, uint32_t* countOut, uint32_t timeoutMs) {
         if (!graph) return fail("not open");
         uint32_t count = 0;
+        // re-timing: no source frame for 250 ms (end of stream, pause): what waits for a next distinct frame goes on
+        if (queuedFrames() && (!retimingOn() || msSince(lastIngest) > 250.0) && pumpHeld(true) != PUSHCORE_OK) return PUSHCORE_ERROR;
         const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
         for (;;) {
             if (pollOnce(frames, capacity, count) != PUSHCORE_OK) return PUSHCORE_ERROR;
@@ -1393,10 +1545,12 @@ struct PushCore {
     void dropQueued() {
         batches.clear();
         pendingCopyLeases.clear();
+        clearHeldQueues();
         needReset = true;
     }
 
     int flush() {
+        clearHeldQueues();   // source frames from before the seek
         if (!leases.empty()) return PUSHCORE_BUSY;
         dropQueued();
         return PUSHCORE_OK;
@@ -1417,8 +1571,8 @@ struct PushCore {
         using namespace veyra;
         if (!graph) return fail("not open");
         const auto t = Clock::now();
-        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles)) {
-            veyra::log::info("pushcore", "frame generation method, upscaler, cut guard or Subtitle Hold changed: graph rebuild");
+        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld)) {
+            veyra::log::info("pushcore", "frame generation method, upscaler, cut guard, Subtitle Hold or held-frame re-timing changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
         engine::EnhancementSettings s;
@@ -1469,6 +1623,7 @@ struct PushCore {
     // ~65 ms, and VFG's first pair) happen here, on the opening thread, and not on the first real frames.
     void warmUp() {
         const auto t = Clock::now();
+        warming = true;   // the synthetic frames are all the same picture: straight to the graph
         ComPtr<ID3D11Texture2D> tex;
         D3D11_TEXTURE2D_DESC d{};
         d.Width = (stream.width + 1) & ~1u; d.Height = (stream.height + 1) & ~1u; d.MipLevels = 1; d.ArraySize = 1;
@@ -1488,7 +1643,7 @@ struct PushCore {
             std::memset(init.data() + ySize, 128, init.size() - ySize);
         }
         D3D11_SUBRESOURCE_DATA sd{init.data(), UINT(d.Width * bpp), 0};
-        if (FAILED(d11->CreateTexture2D(&d, &sd, &tex))) { veyra::log::info("pushcore", "warm-up skipped: no texture"); return; }
+        if (FAILED(d11->CreateTexture2D(&d, &sd, &tex))) { warming = false; veyra::log::info("pushcore", "warm-up skipped: no texture"); return; }
         const int64_t step = stream.fpsNum > 0 && stream.fpsDen > 0 ? int64_t(10000000.0 * stream.fpsDen / stream.fpsNum) : 417083;
         uint32_t frames = 0, outputs = 0;
         bool ok = true;
@@ -1515,7 +1670,7 @@ struct PushCore {
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
         haveReal = false; needReset = true;
-        st = {}; timings.clear(); submittedCount = 0;
+        st = {}; timings.clear(); submittedCount = 0; ingestSeq = 0; warming = false; clearHeldQueues(); heldRatio.Reset(); heldLogged = false;
         costFull.clear(); costReduced.clear(); costFirst.clear(); costFirstBatch.clear(); decisionOf.clear(); inflight.clear();
         initCostWindows();
         if (graph) (void)graph->takeGpuTimings();
@@ -1541,6 +1696,7 @@ struct PushCore {
         }
         for (auto& s : inSlots) s = {};
         deband = pushmpc::Deband{}; debandEligible = false;
+        clearHeldQueues(); held = pushmpc::HeldDetector{}; heldEligible = false;
         copyList.Reset();
         for (auto& a : copyAlloc) a.Reset();
         if (ring.initialized()) ring.shutdown();
@@ -1561,7 +1717,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_HELD_FRAMES; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -1681,7 +1837,12 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.leasesOut = core->leases.size();
     uint64_t pending = 0;
     for (const auto& b : core->batches) pending += b.out.batch.count - b.next;
+    pending += core->queuedFrames();   // source frames pushcore still holds for re-timing
     core->st.pendingFrames = pending;
+    core->st.heldActive = core->retimingOn() ? 1u : 0u;
+    core->st.heldTested = uint32_t(core->heldRatio.Size());
+    core->st.heldRatioPermille = uint32_t(core->heldRatio.Ratio() * 1000.0 + 0.5);
+    core->st.heldGraphMultiplier = core->graphMultiplier;
     {
         const auto f = core->costFull.recentP50(std::chrono::milliseconds(3000));
         const auto r = core->costReduced.recentP50(std::chrono::milliseconds(3000));

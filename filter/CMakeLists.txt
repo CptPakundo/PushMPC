@@ -36,3 +36,12 @@ set_target_properties(auto_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BIN
 target_compile_definitions(auto_test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(auto_test PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(auto_test PRIVATE user32 advapi32 shell32)
+
+# Held-frame re-timing on the pushcore route (pushmpc/src/HeldFrames.h, PushCoreHeld.h): the rules, the GPU test pass on
+# WARP with a synthetic animation clip on twos and threes, and the output spacing (no GPU needed)
+add_executable(held_test tools/held_test.cpp)
+set_target_properties(held_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(held_test PRIVATE "${CMAKE_SOURCE_DIR}/../pushmpc/src")
+target_compile_definitions(held_test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(held_test PRIVATE /W3 /EHsc /O2 /utf-8)
+target_link_libraries(held_test PRIVATE d3d11 dxgi d3dcompiler)
