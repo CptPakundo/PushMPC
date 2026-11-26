@@ -595,7 +595,7 @@ jobs:
           - { arch: aarch64, runner: ubuntu-24.04-arm, image: 'quay.io/pypa/manylinux_2_28_aarch64', wheel: linuxArm64 }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
-    timeout-minutes: 25
+    timeout-minutes: 75   # ncnn from source takes about 30 min on a cold cache
     steps:
       - uses: actions/checkout@v4
         with:

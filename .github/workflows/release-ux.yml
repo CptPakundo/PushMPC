@@ -279,7 +279,7 @@ jobs:
     if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     container: archlinux:latest
-    timeout-minutes: 35
+    timeout-minutes: 80   # ncnn from source on a cold machine
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -306,6 +306,10 @@ jobs:
           pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils unzip vulkan-icd-loader vulkan-swrast vulkan-tools >/dev/null
           pacman -Q mpv vapoursynth vlc kodi celluloid smplayer | tee /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/ncnn
+          key: ncnn-static-arch-${{ hashFiles('scripts/ml-runtime-pin.json', 'scripts/build-ncnn-static.sh') }}
       - name: The plugin from this commit and the release tarball
         run: |
           set -eu
@@ -317,7 +321,7 @@ jobs:
           python -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx numpy
           /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs >/dev/null
           # ncnn (Vulkan) from its pinned full source, static and PIC, as release.yml builds it: the ml backend's ncnn path
-          sh scripts/build-ncnn-static.sh /tmp/ncnn /tmp/ncnn-dl
+          [ -d /tmp/ncnn/lib/cmake/ncnn ] || sh scripts/build-ncnn-static.sh /tmp/ncnn /tmp/ncnn-dl
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn >/dev/null
           cmake --build build --target pushmpc_vs --parallel >/dev/null
           git config --global --add safe.directory "$PWD"
