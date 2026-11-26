@@ -2527,7 +2527,7 @@ function Install-PmmlRuntime($state) {
     # G11: catalog EPs (amdgpu) come from Windows ML's catalog, not from pmml-fetch; they need the pinned Windows ML DLL
     $catalog = @($eps | Where-Object { Test-CatalogEp $pins $_ })
     $pinned = @($eps | Where-Object { -not (Test-CatalogEp $pins $_) })
-    $winml = $catalog.Count -and $pins.winmlCatalog -and "$($pins.winmlCatalog.sha256)" -match '^[0-9a-fA-F]{64}$' -and (Get-CatalogEpTool)
+    $winml = $catalog.Count -and $pins.winmlCatalog -and ("$($pins.winmlCatalog.sha256)" -match '^[0-9a-fA-F]{64}$' -or "$($pins.winmlCatalog.sha512)" -match '^[0-9a-fA-F]{128}$') -and (Get-CatalogEpTool)
     if ($catalog.Count -and -not $winml) { Info "PushFlow runtime: $($catalog -join ', ') needs Windows ML's EP catalog, which this build does not carry yet: DirectML stays" }
     $want = (@("ort/core $($pins.onnxruntime.core.version)") + @($eps | Where-Object { $winml -or $_ -notin $catalog } | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
     $have = ''

@@ -29,18 +29,19 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
+def sha256(path: Path, alg: str = "sha256") -> str:
+    h = hashlib.new(alg)
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
-def download(url: str, want: str | None, cache: Path, allow_unpinned: bool) -> tuple[Path, str]:
+def download(url: str, want: str | None, cache: Path, allow_unpinned: bool, alg: str = "sha256") -> tuple[Path, str]:
+    # alg: sha256 (the pins' default) or sha512 (what nuget.org publishes for a package: the winmlCatalog pin)
     name = PurePosixPath(url.split("?")[0]).name
     target = cache / name
-    if target.exists() and want and want != "TODO" and sha256(target).lower() == want.lower():
+    if target.exists() and want and want != "TODO" and sha256(target, alg).lower() == want.lower():
         print(f"cached  {name}")
         return target, want.lower()
     if (not want or want == "TODO") and not allow_unpinned:
@@ -50,12 +51,12 @@ def download(url: str, want: str | None, cache: Path, allow_unpinned: bool) -> t
     req = urllib.request.Request(url, headers={"User-Agent": "pmml-fetch/1"})
     with urllib.request.urlopen(req, timeout=300) as r, tmp.open("wb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
-    digest = sha256(tmp)
+    digest = sha256(tmp, alg)
     if want and want != "TODO" and digest.lower() != want.lower():
         tmp.unlink(missing_ok=True)
-        raise SystemExit(f"::error::{name}: SHA-256 {digest} does not match the pinned {want}")
+        raise SystemExit(f"::error::{name}: {alg} {digest} does not match the pinned {want}")
     tmp.replace(target)
-    print(f"sha256  {digest}  {name}" + ("   (UNPINNED)" if not want or want == "TODO" else ""))
+    print(f"{alg}  {digest}  {name}" + ("   (UNPINNED)" if not want or want == "TODO" else ""))
     return target, digest
 
 
@@ -246,7 +247,7 @@ def main() -> int:
         if not spec:
             print(f"skip    winml: no {plat} package")
         else:
-            arc, digest = download(wm["url"], wm["sha256"], cache, a.allow_unpinned)
+            arc, digest = download(wm["url"], wm.get("sha512") or wm.get("sha256"), cache, a.allow_unpinned, "sha512" if wm.get("sha512") else "sha256")
             if a.list:
                 list_archive(arc)
             files = extract(arc, [spec], out / "winml")

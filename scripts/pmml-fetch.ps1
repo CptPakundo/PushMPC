@@ -46,17 +46,18 @@ function Test-Glob([string]$name, [string[]]$patterns) {
     }
     return $false
 }
-function Get-Pinned([string]$url, [string]$sha) {
-    if (-not $sha -or $sha -eq 'TODO') { Fail "$url has no pinned SHA-256 (TODO): refused" }
+# $alg: SHA256 (the pins' default) or SHA512 (what nuget.org publishes for a package: the winmlCatalog pin)
+function Get-Pinned([string]$url, [string]$sha, [string]$alg = 'SHA256') {
+    if (-not $sha -or $sha -eq 'TODO') { Fail "$url has no pinned $alg (TODO): refused" }
     $file = Join-Path $Cache ([IO.Path]::GetFileName(($url -split '\?')[0]))
-    if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ieq $sha) { Write-Host "cached  $(Split-Path $file -Leaf)"; return $file }
-    if ($DryRun) { Write-Host "would fetch $url (SHA-256 $sha)"; return '' }
+    if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm $alg).Hash -ieq $sha) { Write-Host "cached  $(Split-Path $file -Leaf)"; return $file }
+    if ($DryRun) { Write-Host "would fetch $url ($alg $sha)"; return '' }
     Write-Host "fetch   $url"
     & (Join-Path $env:SystemRoot 'System32\curl.exe') -L --fail --retry 3 -C - -s -S -A 'pmml-fetch/1' -o $file $url
     if ($LASTEXITCODE -ne 0) { Fail "download failed (curl exit $LASTEXITCODE): $url" }
-    $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-    if ($got -ine $sha) { Remove-Item -LiteralPath $file -Force; Fail "$(Split-Path $file -Leaf): SHA-256 $got does not match the pinned $sha" }
-    Write-Host "sha256  $($got.ToLowerInvariant())  $(Split-Path $file -Leaf)"
+    $got = (Get-FileHash -LiteralPath $file -Algorithm $alg).Hash
+    if ($got -ine $sha) { Remove-Item -LiteralPath $file -Force; Fail "$(Split-Path $file -Leaf): $alg $got does not match the pinned $sha" }
+    Write-Host "$($alg.ToLowerInvariant())  $($got.ToLowerInvariant())  $(Split-Path $file -Leaf)"
     return $file
 }
 # the members matching the patterns, flattened into $dest (unsafe names refused); licence files into $licDir
@@ -129,7 +130,7 @@ if ($WinMl) {
     $spec = if ($wm) { $wm.platforms.$Platform } else { $null }
     if (-not $spec) { Write-Host "skip    winml: no $Platform package" }
     else {
-        $arc = Get-Pinned $wm.url $wm.sha256
+        $arc = if ($wm.sha512) { Get-Pinned $wm.url $wm.sha512 SHA512 } else { Get-Pinned $wm.url $wm.sha256 }
         if (-not $DryRun) {
             $files = @(Expand-Pinned $arc @($spec) (Join-Path $part 'winml') (Join-Path $part 'licenses'))
             if (-not $files.Count) { Fail "winml: nothing matched $spec" }
