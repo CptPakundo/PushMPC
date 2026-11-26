@@ -1,0 +1,42 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: the cell grid of a source picture for the held-drawing repair (pushmpc/src/HeldFrames.h,
+// the GLSL twin of PushCoreHeld.h's CS_Held). One invocation per cell of f x f luma pixels: its mean in 8-bit codes,
+// and one packed uint: bits 0-9 the largest change of its four 2 x 2 sub-cell means against the previous picture x 4
+// (codes), 10-20 its Cb mean x 8, 21-31 its Cr mean x 8.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D curY;    // R8 / R16 UNORM, nearest
+layout(binding = 1) uniform sampler2D prevY;
+layout(binding = 2) uniform sampler2D curU;
+layout(binding = 3) uniform sampler2D curV;
+layout(binding = 4, std430) writeonly buffer Out { float grid[]; };   // cells floats, then cells uints (aux)
+layout(push_constant) uniform PC { int cx, cy, cell, hasPrev; float kRaw, maxV; } pc;
+void main()
+{
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (c.x >= pc.cx || c.y >= pc.cy) return;
+    const float k = pc.kRaw * 255.0 / pc.maxV;   // a sample -> 8-bit codes
+    ivec2 o = c * pc.cell;
+    float a = 0.0;
+    vec4 sa = vec4(0.0), sb = vec4(0.0), sn = vec4(0.0);
+    for (int y = 0; y < pc.cell; ++y)
+        for (int x = 0; x < pc.cell; ++x) {
+            float ca = texelFetch(curY, o + ivec2(x, y), 0).r * k;
+            float cb = pc.hasPrev != 0 ? texelFetch(prevY, o + ivec2(x, y), 0).r * k : ca;
+            a += ca;
+            bool rt = x * 2 >= pc.cell, bt = y * 2 >= pc.cell;
+            vec4 sel = vec4(!rt && !bt ? 1.0 : 0.0, rt && !bt ? 1.0 : 0.0, !rt && bt ? 1.0 : 0.0, rt && bt ? 1.0 : 0.0);
+            sa += sel * ca; sb += sel * cb; sn += sel;
+        }
+    int i = c.y * pc.cx + c.x;
+    grid[i] = a / float(pc.cell * pc.cell);
+    vec4 d = abs(sa - sb) / max(sn, vec4(1.0));
+    float subMax = max(max(d.x, d.y), max(d.z, d.w));
+    int cs = max(1, pc.cell / 2);
+    ivec2 oc = o / 2;
+    vec2 uv = vec2(0.0);
+    for (int y = 0; y < cs; ++y) for (int x = 0; x < cs; ++x) uv += vec2(texelFetch(curU, oc + ivec2(x, y), 0).r, texelFetch(curV, oc + ivec2(x, y), 0).r);
+    uv *= k / float(cs * cs);
+    uint aux = min(uint(subMax * 4.0 + 0.5), 1023u) | (min(uint(uv.x * 8.0 + 0.5), 2047u) << 10) | (min(uint(uv.y * 8.0 + 0.5), 2047u) << 21);
+    grid[pc.cx * pc.cy + i] = uintBitsToFloat(aux);
+}

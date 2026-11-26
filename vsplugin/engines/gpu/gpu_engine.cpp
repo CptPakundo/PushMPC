@@ -18,7 +18,7 @@ namespace {
 double NowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 VkDeviceSize Align(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1) / a * a; }
 
-enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PBlur, PCount };
+enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PBlur, PCells, PRepair8, PRepair16, PCount };
 constexpr VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SI = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SB = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                            SBD = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, SMP = VK_DESCRIPTOR_TYPE_SAMPLER,
                            SIM = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -40,6 +40,14 @@ std::vector<PipeDesc> Descs()
         { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 64 },
         { kSpv_ofconv, sizeof(kSpv_ofconv), { SB, SB, SI, SI, SB, SB, SBD }, 52 },
         { kSpv_blur, sizeof(kSpv_blur), { SI, SI }, 8 },
+        // the held-drawing repair (cells.comp, repair8/16.comp): absent from a build whose SPIR-V predates them (no repair)
+#ifdef PMVS_HAVE_REPAIR_SPV
+        { kSpv_cells, sizeof(kSpv_cells), { CIS, CIS, CIS, CIS, SB }, 24 },
+        { kSpv_repair8, sizeof(kSpv_repair8), { SI, SI, SI, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS }, 80 },
+        { kSpv_repair16, sizeof(kSpv_repair16), { SI, SI, SI, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS }, 80 },
+#else
+        { nullptr, 0, {}, 0 }, { nullptr, 0, {}, 0 }, { nullptr, 0, {}, 0 },
+#endif
     };
 }
 
@@ -141,6 +149,12 @@ struct Engine::Impl {
     Buffer dummy;
     Image midY, midU, midV, upTmp, upY, coefScale, coefUsm;
     Buffer nisUbo;
+    // the held-drawing repair (Config::regionRepair): each part's generated picture at the source size, the parts' mask
+    // (RGBA8 on the cell grid), the cell grid's readback
+    Image rep[3][3], repMask; Buffer repMaskStage, cellsBuf;
+    int cellPx = 0, cellsX = 0, cellsY = 0;
+    bool repairOk = false;
+    bool Pyramid(Job& j, Slot& s, std::string& err);
     // optical flow
     struct OfSet {
         VkOpticalFlowSessionNV session = VK_NULL_HANDLE;
@@ -220,7 +234,7 @@ struct Engine::Impl {
             return true;
         }
     };
-    bool Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err);
+    bool Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err, const Image* mids = nullptr);
     bool UpscaleAndPack(Job& j, int out, std::string& err);
     int OutFlags() const { return (cfg.semiPlanarOut ? 1 : 0) | ((cfg.msbOut && bps == 2 ? 16 - cfg.bits : 0) << 8); }
     bool MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forward, Pair& pr, std::string& err);
@@ -267,6 +281,8 @@ void Engine::Impl::Free()
     ctx->Destroy(gpuPlanar);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
     for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
+    for (auto& part : rep) for (Image& i : part) ctx->Destroy(i);
+    ctx->Destroy(repMask); ctx->Destroy(repMaskStage); ctx->Destroy(cellsBuf); repairOk = false;
     FreeOf();
     for (auto& j : jobs) if (j.dp) vkDestroyDescriptorPool(d, j.dp, nullptr);
     jobs.clear();
@@ -294,6 +310,7 @@ bool Engine::Impl::MakePipes(std::string& err)
     for (int i = 0; i < PCount; ++i) {
         const PipeDesc& pd = descs[size_t(i)];
         Pipe& p = pipes[i];
+        if (!pd.code) continue;   // a shader this build does not have (the repair's): its pipeline stays empty
         p.types = pd.types; p.push = pd.push;
         std::vector<VkDescriptorSetLayoutBinding> b(pd.types.size());
         for (size_t k = 0; k < b.size(); ++k) { b[k].binding = uint32_t(k); b[k].descriptorType = pd.types[k]; b[k].descriptorCount = 1; b[k].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; }
@@ -475,7 +492,8 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     I.nextJob = 0;
 
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : c.importable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
+    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : c.importable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u)
+                                       | (c.regionRepair ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);   // the repair composites into the slot
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
@@ -516,6 +534,19 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     I.outUsed.assign(size_t(std::max(2, c.outSlots)), false);
     if (c.deviceReadback ? !dev(I.outStride * I.outUsed.size(), I.readback) : !host(I.outStride * I.outUsed.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.readback)) return false;
     if (!host(256 * 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.dedupStats)) return false;
+    // the held-drawing repair: cells of f x f luma pixels (f = width / 480, at least 2, as PushCoreHeld.h), up to 3 parts
+    if (c.regionRepair && I.pipes[PCells].p && I.pipes[PRepair8].p && I.pipes[PRepair16].p) {
+        I.cellPx = std::max(2, c.width / 480); I.cellsX = c.width / I.cellPx; I.cellsY = c.height / I.cellPx;
+        const VkImageUsageFlags repUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        bool ok = host(VkDeviceSize(I.cellsX) * VkDeviceSize(I.cellsY) * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.cellsBuf)
+               && host(VkDeviceSize(I.cellsX) * VkDeviceSize(I.cellsY) * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, I.repMaskStage)
+               && I.ctx->CreateImage(I.cellsX, I.cellsY, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false, I.repMask, err);
+        for (auto& part : I.rep)
+            ok = ok && I.ctx->CreateImage(c.width, c.height, VK_FORMAT_R16_UNORM, repUse, false, part[0], err)
+                    && I.ctx->CreateImage(I.cw, I.ch, VK_FORMAT_R16_UNORM, repUse, false, part[1], err) && I.ctx->CreateImage(I.cw, I.ch, VK_FORMAT_R16_UNORM, repUse, false, part[2], err);
+        if (!ok) return false;
+        I.repairOk = true;
+    }
     if (!dev(256, I.dummy)) return false;
     // intermediates for the upscaler (1x1 placeholders without one: interp.comp binds them either way)
     const VkImageUsageFlags midUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -595,6 +626,8 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     auto gen = [&](const Image& i) { if (i.img) I.ToGeneral(j.cb, i.img); };
     for (auto& s : I.slots) { gen(s.y); gen(s.u); gen(s.v); for (auto& p : s.pyr) gen(p); gen(s.pyrF); }
     for (const Image* i : { &I.midY, &I.midU, &I.midV, &I.upTmp, &I.upY, &I.coefScale, &I.coefUsm }) gen(*i);
+    for (auto& part : I.rep) for (const Image& i : part) gen(i);
+    gen(I.repMask);
     for (auto& s : I.ofSets) for (const Image* i : { &s.a, &s.b, &s.flowF, &s.flowB, &s.costF, &s.costB }) gen(*i);
     Buffer coefStage;
     if (I.coefScale.img) {
@@ -993,7 +1026,7 @@ bool Engine::SetHold(int pair, const HoldPairYuv* hold, std::string& err)
     return true;
 }
 
-bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err)
+bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err, const Image* mids)
 {
     const Slot& A = slots[size_t(sa)];
     const Slot& B = slots[size_t(sb)];
@@ -1012,7 +1045,8 @@ bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int m
         const int w = plane ? cw : cfg.width, h = plane ? ch : cfg.height;
         Bind b(*this, j, PInterp);
         b.Img(0, A.y.view).Img(1, A.u.view).Img(2, A.v.view).Img(3, B.y.view).Img(4, B.u.view).Img(5, B.v.view)
-         .Buf(6, pr ? pr->fieldF : dummy).Buf(7, pr ? pr->fieldK : dummy).Buf(8, outB, outOff, outStride).Img(9, midY.view).Img(10, midU.view).Img(11, midV.view)
+         .Buf(6, pr ? pr->fieldF : dummy).Buf(7, pr ? pr->fieldK : dummy).Buf(8, outB, outOff, outStride)
+         .Img(9, mids ? mids[0].view : midY.view).Img(10, mids ? mids[1].view : midU.view).Img(11, mids ? mids[2].view : midV.view)
          .Buf(12, pc.hold ? pr->hold : dummy).Buf(13, pr ? pr->consF : dummy).Buf(14, pr ? pr->consK : dummy);
         if (!b.Run(&pc, uint32_t(((w + per - 1) / per + 15) / 16), uint32_t((h + 7) / 8), err)) return false;
     }
@@ -1083,6 +1117,111 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     if (!I.extOut) I.outUsed[size_t(out)] = true;
     I.times.outputs++;
     return true;
+}
+
+// ---- the held-drawing repair (pushmpc/src/HeldFrames.h on the portable routes) ----
+bool Engine::Impl::Pyramid(Job& j, Slot& s, std::string& err)
+{
+    struct { int w, h, shift; float kRaw; } p0{ cfg.width, cfg.height, std::max(0, cfg.bits - 8), kRaw };
+    if (!Bind(*this, j, PPyr0).Img(0, s.y.view).Img(1, s.pyr[0].view).Run(&p0, uint32_t((cfg.width + 15) / 16), uint32_t((cfg.height + 7) / 8), err)) return false;
+    for (int l = 1; l < levels; ++l) {
+        Barrier(j.cb);
+        struct { int sw, sh, dw, dh; } pd{ lw[size_t(l - 1)], lh[size_t(l - 1)], lw[size_t(l)], lh[size_t(l)] };
+        if (!Bind(*this, j, PPyrDown).Img(0, s.pyr[size_t(l - 1)].view).Img(1, s.pyr[size_t(l)].view).Run(&pd, uint32_t((pd.dw + 15) / 16), uint32_t((pd.dh + 7) / 8), err)) return false;
+    }
+    if (s.pyrF.img) {
+        Barrier(j.cb);
+        struct { int w, h; } pb{ cfg.width, cfg.height };
+        if (!Bind(*this, j, PBlur).Img(0, s.pyr[0].view).Img(1, s.pyrF.view).Run(&pb, uint32_t((pb.w + 15) / 16), uint32_t((pb.h + 7) / 8), err)) return false;
+    }
+    return true;
+}
+bool Engine::RepairAvailable() const { return m->repairOk; }
+bool Engine::Cells(int slot, int prevSlot, CellGridOut& out, std::string& err)
+{
+    Impl& I = *m;
+    if (!I.repairOk || slot < 0 || slot >= int(I.slots.size())) { err = "GPU engine: no cell grid (repair off)"; return false; }
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return false;
+    I.Barrier(j.cb);
+    const Impl::Slot& s = I.slots[size_t(slot)];
+    const bool hasPrev = prevSlot >= 0 && prevSlot < int(I.slots.size());
+    const Impl::Slot& p = hasPrev ? I.slots[size_t(prevSlot)] : s;
+    struct { int cx, cy, cell, hasPrev; float kRaw, maxV; } pc{ I.cellsX, I.cellsY, I.cellPx, hasPrev ? 1 : 0, I.kRaw, I.maxV };
+    if (!Impl::Bind(I, j, PCells).Img(0, s.y.view).Img(1, p.y.view).Img(2, s.u.view).Img(3, s.v.view).Buf(4, I.cellsBuf)
+             .Run(&pc, uint32_t((I.cellsX + 7) / 8), uint32_t((I.cellsY + 7) / 8), err)) return false;
+    const uint64_t v = I.Submit(j, err);
+    if (!v || !I.WaitValue(v, err)) return false;
+    const size_t n = size_t(I.cellsX) * size_t(I.cellsY);
+    out.w = I.cellsX; out.h = I.cellsY; out.cell = I.cellPx;
+    const float* f = static_cast<const float*>(I.cellsBuf.map);
+    out.v.assign(f, f + n);
+    out.aux.resize(n);
+    std::memcpy(out.aux.data(), f + n, n * 4);
+    return true;
+}
+bool Engine::RepairSlot(int slot, const RepairPart* parts, int n, float featherCells, bool detail, std::string& err)
+{
+    Impl& I = *m;
+    if (!I.repairOk || n < 1 || n > 3 || slot < 0 || slot >= int(I.slots.size())) { err = "GPU engine: repair not available"; return false; }
+    const size_t cells = size_t(I.cellsX) * size_t(I.cellsY);
+    // 1. each part's pair (its motion, both directions) and its picture at the part's phase, at the source size
+    std::vector<int> made;
+    auto releaseAll = [&] { for (int p : made) ReleasePair(p); };
+    bool ok = true;
+    for (int i = 0; i < n; ++i) {
+        const RepairPart& rp = parts[i];
+        if (!rp.mask || rp.mask->size() != cells) { releaseAll(); err = "GPU engine: a repair mask does not match the cell grid"; return false; }
+        PairStats st;
+        const int pr = Estimate(rp.slotA, rp.slotB, -1, st, err);
+        if (pr < 0) { releaseAll(); return false; }
+        made.push_back(pr);
+        Impl::Job& j = I.Begin(err, ok);
+        if (!ok) { releaseAll(); return false; }
+        I.Barrier(j.cb);
+        if (!I.Interp(j, rp.slotA, rp.slotB, &I.pairs[size_t(pr)], rp.t, 0, 1, 0, err, I.rep[i])) { I.Submit(j, err); releaseAll(); return false; }
+        if (!I.Submit(j, err)) { releaseAll(); return false; }
+    }
+    // 2. the masks into the RGBA8 cell texture
+    uint8_t* mk = static_cast<uint8_t*>(I.repMaskStage.map);
+    std::memset(mk, 0, cells * 4);
+    for (int i = 0; i < n; ++i) { const auto& m8 = *parts[i].mask; for (size_t c = 0; c < cells; ++c) mk[c * 4 + size_t(i)] = m8[c]; }
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) { releaseAll(); return false; }
+    I.Barrier(j.cb);
+    VkBufferImageCopy r{};
+    r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    r.imageExtent = { uint32_t(I.cellsX), uint32_t(I.cellsY), 1 };
+    vkCmdCopyBufferToImage(j.cb, I.repMaskStage.buf, I.repMask.img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    I.Barrier(j.cb);
+    // 3. one composite pass for all parts (luma, then chroma), in place
+    Impl::Slot& s = I.slots[size_t(slot)];
+    const float fe = std::clamp(featherCells, 0.25f, 2.0f);
+    struct {
+        int W, H, CW, CH, parts, plane, detail, pad;
+        float msx, msy, lo, hi, kRaw, maxV;
+        float sh[6];
+    } pc{ I.cfg.width, I.cfg.height, I.cw, I.ch, n, 0, detail ? 1 : 0, 0, fe / float(I.cellsX), fe / float(I.cellsY), 0.15f, 0.85f, I.kRaw, I.maxV, {} };
+    for (int i = 0; i < n; ++i) { pc.sh[2 * i] = parts[i].shiftX; pc.sh[2 * i + 1] = parts[i].shiftY; }
+    const P comp = I.cfg.bits > 8 ? PRepair16 : PRepair8;
+    for (int plane = 0; plane < 2; ++plane) {
+        pc.plane = plane;
+        Impl::Bind b(I, j, comp);
+        b.Img(0, s.y.view).Img(1, s.u.view).Img(2, s.v.view);
+        for (int i = 0; i < 3; ++i) { const int k = i < n ? i : 0; for (int q = 0; q < 3; ++q) b.Img(uint32_t(3 + i * 3 + q), I.rep[k][q].view, I.linear); }
+        b.Img(12, I.repMask.view, I.linear);
+        const int w = plane ? I.cw : I.cfg.width, h = plane ? I.ch : I.cfg.height;
+        if (!b.Run(&pc, uint32_t((w + 15) / 16), uint32_t((h + 7) / 8), err)) { I.Submit(j, err); releaseAll(); return false; }
+        I.Barrier(j.cb);
+    }
+    // 4. the slot's pyramid again (the motion of its next pairs sees the repaired picture)
+    if (!I.Pyramid(j, s, err)) { I.Submit(j, err); releaseAll(); return false; }
+    const uint64_t v = I.Submit(j, err);
+    const bool done = v && I.WaitValue(v, err);
+    releaseAll();
+    if (done) s.lastUse = v;
+    return done;
 }
 
 bool Engine::Real(int slot, int& out, uint64_t& ticket, std::string& err)

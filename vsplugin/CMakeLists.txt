@@ -91,7 +91,7 @@ if(PMVS_GPU)
   endif()
 endif()
 if(PMVS_GPU_ON)
-  set(_shaders pyr0 pyrdown dedup me mefinal mad fbcheck interp nis easu rcas pack ofconv blur)
+  set(_shaders pyr0 pyrdown dedup me mefinal mad fbcheck interp nis easu rcas pack ofconv blur cells repair8 repair16)
   set(_spv_dir "${CMAKE_SOURCE_DIR}/engines/gpu/spv")
   if(PMVS_GLSLANG)
     set(_spv_dir "${CMAKE_BINARY_DIR}/spv")
@@ -103,7 +103,7 @@ if(PMVS_GPU_ON)
         COMMAND "${PMVS_GLSLANG}" -V --target-env vulkan1.2 -I${CMAKE_SOURCE_DIR}/third_party/nis -I${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr1
                 --vn kSpv_${s} -o "${_spv_dir}/${s}.h" "${s}.comp"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/engines/gpu/shaders"
-        DEPENDS "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/${s}.comp" "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/common.glsl"
+        DEPENDS "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/${s}.comp" "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/common.glsl" "${CMAKE_SOURCE_DIR}/engines/gpu/shaders/repair.glsl"
         COMMENT "glslang: ${s}.comp" VERBATIM)
       list(APPEND _spv_out "${_spv_dir}/${s}.h")
     endforeach()

@@ -260,9 +260,10 @@ const VSFrame* VS_CC GGetFrame(int n, int reason, void* inst, void** frameData, 
         const auto& c = d->pipe.Count();
         const auto& st = d->be.stats;
         Log(std::format("portable (GPU): {} frames out: {} submitted ({} duplicates), {} generated, {} repeated, {} resets; {} pairs, {} cuts ({} by the guard), "
-                        "{} pairs with subtitles held; motion {:.1f} ms a pair",
+                        "{} pairs with subtitles held; motion {:.1f} ms a pair; held-drawing repair: {} frames, {} parts, {:.1f} ms a frame, spans gated {}, over budget {}",
             d->produced, c.submitted, st.duplicates, st.generated, c.repeats, c.discontinuities, st.pairs, st.cuts, st.guardCuts, st.heldPairs,
-            st.pairs ? st.meMs / double(st.pairs) : 0.0));
+            st.pairs ? st.meMs / double(st.pairs) : 0.0, st.repairedFrames, st.repairedParts, st.repairedFrames ? st.repairMs / double(st.repairedFrames) : 0.0,
+            st.repairGated, st.repairBudget));
     }
     return out;
 }
@@ -311,6 +312,10 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     const bool hybrid = s.motion == "hybrid" || s.motion == "auto" || s.motion.empty();
     c.blockMatcherOnly = s.motion != "nvof" && !hybrid;
     c.nvofHybrid = hybrid;
+    // the held-drawing repair (HeldFrames.h, with Dedup; PUSHMPC_REGION_REPAIR=0 turns it off): the slots also hold the
+    // frames a part's pair can start at (kLookahead + 1 behind) and end at (kLookahead ahead)
+    { const char* e = std::getenv("PUSHMPC_REGION_REPAIR"); c.regionRepair = s.dedup != 0 && !(e && std::atoi(e) == 0); }
+    if (c.regionRepair) c.sourceSlots = 14;
     if (!d->be.engine.Configure(c, req, why)) { delete d; return false; }
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);
@@ -355,6 +360,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     d->vi.numFrames = int(OutputFrames(vi->numFrames, d->k));
     d->be.dedup = s.dedup != 0;
     d->be.subtitleHold = s.subtitleHold != 0;
+    d->be.regionRepair = d->be.dedup && d->be.engine.RepairAvailable();
     d->be.cadence.Configure(d->k, d->be.dedup ? 3 : 0, vi->numFrames);   // lookahead 3: twos, threes and fours (TV anime holds slow motion for four)
     d->pipe.Init(d->k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
     d->pipe.SetLookahead(d->be.Lookahead());
@@ -362,8 +368,9 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     d->be.grid = d->pipe.GridOf();
     d->api = a;
     BindGpu(d);
-    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); Dedup {} (lookahead {}), Subtitle Hold {}, cut guard on",
-        bits, d->vi.width, d->vi.height, outFps.num, outFps.den, d->k, d->be.dedup ? "on" : "off", d->be.Lookahead(), d->be.subtitleHold ? "on" : "off"));
+    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); Dedup {} (lookahead {}), held-drawing repair {}, Subtitle Hold {}, cut guard on",
+        bits, d->vi.width, d->vi.height, outFps.num, outFps.den, d->k, d->be.dedup ? "on" : "off", d->be.Lookahead(),
+        d->be.regionRepair ? "on" : c.regionRepair ? "off (this build has no repair shaders)" : "off", d->be.subtitleHold ? "on" : "off"));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, GGetFrame, GFree, fmUnordered, deps, 1, d, core);
     return true;

@@ -1,0 +1,6 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC portable GPU engine: the held-drawing repair composite on 16-bit planes (10-16 bit sources; repair.glsl).
+#define PLANE_FMT r16
+#extension GL_GOOGLE_include_directive : require
+#include "repair.glsl"
