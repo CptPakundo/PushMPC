@@ -35,6 +35,7 @@
 #ifdef _WIN32
 #include "autopick.h"
 #include "corehost.h"
+static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable ceiling follows PUSHCORE_MAX_MULTIPLIER (backend.h)");
 #endif
 #include "schedule.h"
 #include "vslog.h"

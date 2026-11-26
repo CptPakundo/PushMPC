@@ -28,6 +28,12 @@
 
 namespace pmvs {
 
+// The largest multiplier of the portable engines (CPU, Vulkan; mpv, VapourSynth, Kodi, VLC, the hook) and of pmml:
+// PushMPC's ceiling PUSHCORE_MAX_MULTIPLIER (pushmpc/include/pushmpc/pushcore_abi.h, VFG16's), which this pure header
+// cannot include on every platform; pushmpc_vs.cpp and the mpv engine static_assert that the two agree. The engines
+// place generated frames at t = j / k for any k.
+inline constexpr int kPortableMaxK = 16;
+
 enum class BackendKind { Nvidia, Portable, Rife, Apple, Ml };
 inline const char* BackendName(BackendKind k) { return k == BackendKind::Nvidia ? "nvidia" : k == BackendKind::Rife ? "rife" : k == BackendKind::Apple ? "apple" : k == BackendKind::Ml ? "ml" : "portable"; }
 
@@ -147,7 +153,7 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
 inline constexpr double kCpuShare = 0.6;
 inline constexpr int kAutoMaxHeightFull = 1080;
 struct PortableK { int k = 1; double costMs = 0, budgetMs = 0; std::string why; };
-// smoother: 0 Auto, 1 off, 2..8 fixed (the same words as the registry's Smoother); displayHz <= 0: unknown (Auto then
+// smoother: 0 Auto, 1 off, 2..kPortableMaxK fixed (the same words as the registry's Smoother); displayHz <= 0: unknown (Auto then
 // aims at x2)
 // gpu: the GPU engine (no cap at 2 above 1080p: its costs are measured the same way, the cap was the CPU's)
 inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, int height, double meMs, double genMs, bool gpu = false)
@@ -159,14 +165,14 @@ inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, 
     char b[256];
     if (smoother == 1) { r.k = 1; r.why = "Smoother off: no frame generation"; return r; }
     if (smoother >= 2) {
-        r.k = std::min(smoother, 8); r.costMs = cost(r.k);
+        r.k = std::min(smoother, kPortableMaxK); r.costMs = cost(r.k);
         snprintf(b, sizeof(b), "x%d (your setting); measured %.1f ms per source frame of %.1f ms%s", r.k, r.costMs, r.budgetMs,
                  r.costMs > r.budgetMs ? (gpu ? ": over the budget, expect dropped frames" : ": over the CPU budget, expect dropped frames") : "");
         r.why = b;
         return r;
     }
-    const int displayK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8) : 2;
-    const int cap = !gpu && height > kAutoMaxHeightFull ? 2 : 8;
+    const int displayK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2;
+    const int cap = !gpu && height > kAutoMaxHeightFull ? 2 : kPortableMaxK;
     const int want = std::min(displayK, cap);
     int k = 1;
     for (int c = want; c >= 2; --c) if (cost(c) <= r.budgetMs) { k = c; break; }

@@ -192,7 +192,7 @@ static void TestSelect()
 
 static void TestBudget()
 {
-    // 1080p23.976 on 240 Hz: display x10 -> capped at 8; cost 8 + 7 x 3 = 29 <= 25? no -> x6 (8 + 15 = 23 <= 25.0)
+    // 1080p23.976 on 240 Hz: display x10; cost 8 + 9 x 3 = 35 <= 25? no -> x6 (8 + 15 = 23 <= 25.0)
     auto r = DecidePortableK(0, 23.976, 240, 1080, 8, 3);
     CHECK(r.k == 6, "k %d: %s", r.k, r.why.c_str());
     r = DecidePortableK(0, 23.976, 60, 1080, 8, 3); CHECK(r.k == 2, "60 Hz -> x2: %d", r.k);
@@ -203,6 +203,13 @@ static void TestBudget()
     r = DecidePortableK(4, 23.976, 60, 2160, 40, 10); CHECK(r.k == 4 && r.why.find("over the CPU budget") != std::string::npos, "fixed x4 kept: %s", r.why.c_str());
     r = DecidePortableK(1, 23.976, 240, 1080, 1, 1); CHECK(r.k == 1, "off");
     r = DecidePortableK(0, 29.97, 120, 720, 2, 1); CHECK(r.k == 4, "720p30 on 120 Hz -> x4: %d", r.k);
+    // up to kPortableMaxK (16, PUSHCORE_MAX_MULTIPLIER): the display's multiple when it fits the budget
+    r = DecidePortableK(0, 23.976, 240, 1080, 1, 1, true); CHECK(r.k == 10, "GPU 24p on 240 Hz -> x10: %d %s", r.k, r.why.c_str());
+    r = DecidePortableK(0, 23.976, 360, 1080, 1, 1, true); CHECK(r.k == 15, "GPU 24p on 360 Hz -> x15: %d", r.k);
+    r = DecidePortableK(0, 23.976, 480, 1080, 1, 1, true); CHECK(r.k == kPortableMaxK, "GPU 24p on 480 Hz -> x16: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 2160, 1, 1); CHECK(r.k == 2, "CPU 4K still x2: %d", r.k);
+    r = DecidePortableK(12, 23.976, 240, 1080, 1, 1); CHECK(r.k == 12, "fixed x12: %d", r.k);
+    r = DecidePortableK(20, 23.976, 240, 1080, 1, 1); CHECK(r.k == kPortableMaxK, "fixed above the ceiling -> x16: %d", r.k);
 }
 
 static void TestPlatform()
@@ -212,7 +219,7 @@ static void TestPlatform()
     auto get = [&](const char* n) { auto it = m.find(LowerAscii(n)); return it == m.end() ? std::string() : it->second; };
     PortableSettings s = LoadPortableSettings(get);
     CHECK(!s.enable && s.smoother == 3 && s.quality == 0 && s.threads == 0, "settings");
-    CHECK(ParseSmoother("Auto", 5) == 0 && ParseSmoother("Off", 0) == 1 && ParseSmoother("x4", 0) == 4 && ParseSmoother("9", 0) == 0 && ParseSmoother("", 7) == 7, "smoother words");
+    CHECK(ParseSmoother("Auto", 5) == 0 && ParseSmoother("Off", 0) == 1 && ParseSmoother("x4", 0) == 4 && ParseSmoother("9", 0) == 9 && ParseSmoother("x16", 0) == 16 && ParseSmoother("17", 0) == 0 && ParseSmoother("", 7) == 7, "smoother words");
     CHECK(ResolveSettingsIni("", "/home/u") == "/home/u/.config/pushmpc/settings.ini", "ini home");
     CHECK(ResolveSettingsIni("/x/cfg", "/home/u") == "/x/cfg/pushmpc/settings.ini", "ini xdg");
     CHECK(ResolveSettingsIni("relative", "/home/u") == "/home/u/.config/pushmpc/settings.ini", "relative XDG ignored (spec)");

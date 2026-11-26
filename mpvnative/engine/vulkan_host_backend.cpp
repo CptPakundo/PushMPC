@@ -56,7 +56,7 @@ public:
         const GpuCalibration cal = s.enable && s.smoother == 0 ? CalibrateGpu(m_eng) : GpuCalibration{};
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true)
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
-        m_k = std::clamp(pk.k, 1, 8);
+        m_k = std::clamp(pk.k, 1, kPortableMaxK);
         const size_t bps = m_bits > 8 ? 2 : 1;
         m_sy = size_t(m_w) * bps; m_sc = size_t((m_w + 1) / 2) * bps;
         const size_t ch = size_t((m_h + 1) / 2);

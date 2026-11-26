@@ -17,7 +17,7 @@ local function multiple(src, disp)
     if not src or src <= 0 or not disp or disp <= 0 then return 2 end
     local k = math.floor(disp / src + 0.02)
     if k < 1 then k = 1 end
-    if k > 8 then k = 8 end
+    if k > 16 then k = 16 end   -- PushMPC's ceiling (PUSHCORE_MAX_MULTIPLIER)
     return k
 end
 

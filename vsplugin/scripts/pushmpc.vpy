@@ -94,10 +94,10 @@ def _rife(c, args):
     if _sm in ("off", "0", "1"):
         return c
     if _sm.isdigit():
-        k = min(int(_sm), 8)
+        k = min(int(_sm), 16)   # PushMPC's ceiling (PUSHCORE_MAX_MULTIPLIER)
     else:
         _src = c.fps_num / c.fps_den if c.fps_den else 23.976
-        k = max(1, min(8, int(args.get("display_fps", 0) / _src + 0.02))) if args.get("display_fps", 0) > 1 else 2
+        k = max(1, min(16, int(args.get("display_fps", 0) / _src + 0.02))) if args.get("display_fps", 0) > 1 else 2
     if k <= 1:
         return c
     bits = c.format.bits_per_sample

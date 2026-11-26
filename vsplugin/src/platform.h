@@ -122,7 +122,7 @@ inline int ParseSmoother(const std::string& v, int def)
     if (s == "off" || s == "0" || s == "1" || s == "false") return 1;
     const std::string n = s[0] == 'x' ? s.substr(1) : s;
     const int k = std::atoi(n.c_str());
-    return k >= 2 && k <= 8 ? k : def;
+    return k >= 2 && k <= 16 ? k : def;   // 16: kPortableMaxK (backend.h) = PUSHCORE_MAX_MULTIPLIER
 }
 inline bool ParseBool(const std::string& v, bool def)
 {

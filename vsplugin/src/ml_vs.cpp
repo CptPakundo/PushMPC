@@ -174,7 +174,7 @@ int MlMeasuredMultiplier(const std::string& runtimeDir, int width, int height, d
     const auto results = CachedResults(runtimeDir + "/pmml-autobench.json", width, height);
     if (results.empty()) return -1;
     if (fps <= 1) fps = 23.976;
-    const int wantK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, 8) : 2;
+    const int wantK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, kPortableMaxK) : 2;
     const auto c = pmml::choose(results, fps, wantK);
     return c.ok ? c.multiplier : 0;
 }
@@ -221,7 +221,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const double displayHz = a->mapGetFloat(in, "display_fps", 0, &err);
     const std::string smoother = MArg(in, a, "smoother");
     const int fixedK = smoother.empty() ? 0 : std::atoi(smoother.c_str());
-    const int wantK = fixedK >= 2 ? std::min(fixedK, 8) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8) : 2);
+    const int wantK = fixedK >= 2 ? std::min(fixedK, kPortableMaxK) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2);
     if (wantK <= 1) { Log("ml: x1: the clip passes through"); a->mapConsumeNode(out, "clip", node, maReplace); return; }
 
     pmml::Options o;
