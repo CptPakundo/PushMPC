@@ -127,7 +127,7 @@ index 2d178daa..4c5fb510 100644
          [unroll] for (int kind = 0; kind < 4; ++kind) {
              const float2 j = judge(p, kind);
              accepted = accepted || j.x > 0.5;
-+            if (j.x > 0.5) kinds += float(1 << kind);
++            if (j.x > 0.5) kinds += float(1u << uint(kind));
              const float m = j.y > 0.5 ? float(memory) : max(pick(before, kind) - 1.0, 0.0);
              if (kind == 0) after.x = m; else if (kind == 1) after.y = m; else if (kind == 2) after.z = m; else after.w = m;
          }
