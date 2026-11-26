@@ -25,7 +25,7 @@ About in the player).
 
 ## Inside
 
-- Filter **0.6.0**, core **0.6.0+pushfps4.5.3** (PushFPS v4.5.3 with the patches in `patches/`), runtime from Veyra
+- Filter **0.6.0**, core **0.6.0+pushfps4.5.4** (PushFPS v4.5.4 with the patches in `patches/`), runtime from Veyra
   v2.2.1 (never shipped here: Setup fetches it from Veyra's release or reuses an installed copy).
 - The optional mpv component (vsplugin 0.6.0) fetches the official VapourSynth R82 portable and Python 3.12 embeddable
   packages, each checked against a pinned SHA-256.

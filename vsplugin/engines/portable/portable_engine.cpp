@@ -117,7 +117,7 @@ void FillPicture(const YuvView& v, Picture& pic)
 } // namespace
 
 void InterpolatePlanes(const Picture& a, const Picture& b, const MotionField& fwd, const MotionField& bwd, float t, int maxValue, Picture& out, int threads,
-                       veyra::portable::InterpolateSettings s)
+                       veyra::portable::InterpolateSettings s, bool boundaryVectors)
 {
     for (int i = 0; i < 3; ++i) { out.p[i].w = a.p[i].w; out.p[i].h = a.p[i].h; out.p[i].px.resize(a.p[i].px.size()); }
     if (!std::isfinite(t)) t = 0;
@@ -134,11 +134,60 @@ void InterpolatePlanes(const Picture& a, const Picture& b, const MotionField& fw
     // the two candidates at luma position (px, py): their luma samples, errors and weights. When the forward and the
     // reversed backward vector agree (most of a picture), the two candidates are the same: computed once, same result.
     struct Cand { float fx, fy, kx, ky, e1, e2, w1, w2, occlusion; bool firstBetter, single; float ya1, yb1, ya2, yb2; };
+    // Motion boundaries: the field is one vector per block and bilinear between block centres, so a pixel next to an
+    // object's edge gets a mix of the object's and the background's vector that fits neither. The edge then
+    // cross-fades instead of moving, and the half-way switch to the nearer frame (occlusion) makes it jump: uneven
+    // spacing (a moving box at x4: steps of 0.5 to 2.2 px instead of 1; x8: frames that repeat a position). Where
+    // the four block vectors around a pixel disagree by more than a pixel, the one that matches best (its error at
+    // the pixel) replaces the mix when it matches better. Smooth fields (most of a picture) are unchanged.
+    auto patch = [&](float px, float py, float vx, float vy) {
+        static const float off[1][2] = { { 0, 0 } };   // the pixel itself: a cross of five cost 35 % more for the same spacing
+        float e = 0;
+        for (const auto& o : off)
+            e += std::abs(Sample(a.p[0], px + o[0] - t * vx, py + o[1] - t * vy) - Sample(b.p[0], px + o[0] + (1.f - t) * vx, py + o[1] + (1.f - t) * vy));
+        return e;
+    };
+    // per 2x2 block cell (top-left block index): do its four vectors disagree by more than a pixel
+    auto edgesOf = [&](const MotionField& f) {
+        std::vector<uint8_t> e;
+        if (!boundaryVectors || f.empty()) return e;
+        e.assign(size_t(f.blocksX) * size_t(f.blocksY), 0);
+        for (int j = 0; j < f.blocksY; ++j)
+            for (int i = 0; i < f.blocksX; ++i) {
+                const int i1 = std::min(i + 1, f.blocksX - 1), j1 = std::min(j + 1, f.blocksY - 1);
+                const size_t idx[4] = { size_t(j) * f.blocksX + i, size_t(j) * f.blocksX + i1, size_t(j1) * f.blocksX + i, size_t(j1) * f.blocksX + i1 };
+                float lo = 1e30f, hi = -1e30f, loy = 1e30f, hiy = -1e30f;
+                for (size_t k : idx) { lo = std::min(lo, f.vx[k]); hi = std::max(hi, f.vx[k]); loy = std::min(loy, f.vy[k]); hiy = std::max(hiy, f.vy[k]); }
+                e[size_t(j) * f.blocksX + i] = hi - lo > 1.f || hiy - loy > 1.f;
+            }
+        return e;
+    };
+    const std::vector<uint8_t> edgesF = edgesOf(fwd), edgesB = edgesOf(bwd);
+    auto boundary = [&](const MotionField& f, const std::vector<uint8_t>& edges, const FieldCols& cols, const FieldRow& r, int x, float py, float sign,
+                        float& vx, float& vy) {
+        const size_t i0 = size_t(cols.i0[size_t(x)]), i1 = size_t(cols.i1[size_t(x)]);
+        const size_t r0 = size_t(r.j0) * size_t(f.blocksX), r1 = size_t(r.j1) * size_t(f.blocksX);
+        if (!edges[r0 + i0]) return;
+        const size_t idx[4] = { r0 + i0, r0 + i1, r1 + i0, r1 + i1 };
+        const float px = float(x) + 0.5f;
+        float best = patch(px, py, vx, vy), bx = vx, by = vy;
+        for (size_t k : idx) {
+            const float cx = sign * f.vx[k], cy = sign * f.vy[k];   // sign -1: a backward vector, reversed
+            if (cx == bx && cy == by) continue;
+            const float e = patch(px, py, cx, cy);
+            if (e < best - 1e-3f) { best = e; bx = cx; by = cy; }
+        }
+        vx = bx; vy = by;
+    };
     auto cand = [&](int x, float py, const FieldRow& rf, const FieldRow& rb, Cand& c) {
         const float px = float(x) + 0.5f;
         SampleAt(fwd, colsF, rf, x, c.fx, c.fy);
         SampleAt(bwd, colsB, rb, x, c.kx, c.ky);
         c.kx = -c.kx; c.ky = -c.ky;
+        if (boundaryVectors) {
+            boundary(fwd, edgesF, colsF, rf, x, py, 1.f, c.fx, c.fy);
+            boundary(bwd, edgesB, colsB, rb, x, py, -1.f, c.kx, c.ky);
+        }
         c.single = std::abs(c.fx - c.kx) + std::abs(c.fy - c.ky) < 1e-4f;
         c.ya1 = Sample(a.p[0], px - t * c.fx, py - t * c.fy);
         c.yb1 = Sample(b.p[0], px + (1.f - t) * c.fx, py + (1.f - t) * c.fy);
@@ -394,7 +443,7 @@ void Engine::Generate(float t, const YuvOut& out)
     if (!m_havePair) { Current(out); return; }
     const double t0 = NowMs();
     Picture tmp;
-    InterpolatePlanes(m_prev, m_cur, m_fwd, m_bwd, t, (1 << m_cfg.bits) - 1, tmp, m_threads);
+    InterpolatePlanes(m_prev, m_cur, m_fwd, m_bwd, t, (1 << m_cfg.bits) - 1, tmp, m_threads, {}, true);
     Write(tmp, out);
     m_stats.generated++;
     const double ms = NowMs() - t0;
@@ -445,7 +494,7 @@ Calibration Calibrate(int width, int height, int bits, int threads, int quality)
     MotionField k = back.get();
     const double t1 = NowMs();
     f.sceneCut = k.sceneCut = false;
-    InterpolatePlanes(pa, pb, f, k, 0.5f, (1 << bits) - 1, out, e.Threads());
+    InterpolatePlanes(pa, pb, f, k, 0.5f, (1 << bits) - 1, out, e.Threads(), {}, true);
     std::vector<uint8_t> sink(size_t(width) * size_t(height) * size_t(bps));
     for (size_t i = 0; i < out.p[0].px.size(); ++i) sink[i * size_t(bps)] = uint8_t(out.p[0].px[i]);
     cal.meMs = t1 - t0; cal.genMs = NowMs() - t1;

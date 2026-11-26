@@ -98,6 +98,11 @@ public:
         if (c.upscaler != Upscaler::None) { c.outWidth = uc.w; c.outHeight = uc.h; }
         const std::string q = Opt(o, "portable_quality", ReadSetting("PortableQuality"));
         c.quality = q == "fast" || q == "0" ? 1 : 2;
+        // motion: Auto = hybrid (NVIDIA optical flow as one more block-matcher candidate) where the device has the flow
+        // hardware, as the VapourSynth route; blocks / nvof / hybrid by hand (PortableMotion)
+        const std::string mo = Opt(o, "motion", ReadSetting("PortableMotion"));
+        c.nvofHybrid = mo.empty() || mo == "auto" || mo == "hybrid";
+        c.blockMatcherOnly = mo != "nvof" && !c.nvofHybrid;
         if (!m_eng.Configure(c, m_ctx, why)) return false;
         if (!MakePipesOnce(why)) return false;
 

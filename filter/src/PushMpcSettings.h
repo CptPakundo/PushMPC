@@ -24,7 +24,7 @@
 //   Deband           Auto | Off | On                 default Auto   (PushMPC's own deband pass, 8-bit SDR sources)
 //   DebandStrength   Low | Medium | High             default Medium
 //   SubtitleHold     Auto | Off | On                 default Auto   (PushFPS's Subtitle Hold: burned-in subtitles kept out of frame generation; Auto = kSubtitleHoldAuto)
-//   FrameLog         DWORD 1/0                       default 1
+//   FrameLog         DWORD 1/0                       default 0 (troubleshooting only; the filter log is always written)
 // Debug and test values stay in HKCU\Software\PushMPC\Filter (see ReadConfig in PushMpcFilter.cpp).
 #pragma once
 #include <windows.h>
@@ -78,7 +78,7 @@ struct Settings {
     int deband = kAuto;     // kAuto, kOff, 1 = on
     DebandStrength debandStrength = DebandStrength::Medium;
     int subtitleHold = kAuto;  // kAuto, kOff, 1 = on (PushFPS 4.5's Subtitle Hold, only while frame generation runs)
-    bool frameLog = true;
+    bool frameLog = false;   // the per-frame CSVs (about 150 kB a minute): for troubleshooting, off unless asked for
     bool operator==(const Settings&) const = default;
 };
 
@@ -217,7 +217,7 @@ inline Settings LoadSettings()
     { const int p = _wtoi(RegReadStr(k, L"DisplayPeak").c_str()); s.displayPeak = p >= 100 && p <= 10000 ? p : 0; }
     { const std::wstring o = RegReadStr(k, L"Osd"); s.osd = _wcsicmp(o.c_str(), L"Off") == 0 ? OsdMode::Off : _wcsicmp(o.c_str(), L"Always") == 0 ? OsdMode::Always : OsdMode::Brief; }
     s.onBattery = _wcsicmp(RegReadStr(k, L"OnBattery").c_str(), L"Same") == 0 ? BatteryMode::Same : BatteryMode::Light;
-    s.frameLog = RegReadBool(k, L"FrameLog", true);
+    s.frameLog = RegReadBool(k, L"FrameLog", false);
     RegCloseKey(k);
     return s;
 }

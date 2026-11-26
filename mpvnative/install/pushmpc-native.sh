@@ -92,9 +92,12 @@ strip_block() {
     tail -n +$((e + 1)) "$1"
 }
 
-# a one-frame probe: does the hook activate in this mpv? prints the hook's log line
+# a one-frame probe: does the hook activate in this mpv? prints the hook's log line. The clip goes where that mpv can
+# read it: $probe_base when set (a Flatpak mpv has its own /tmp, but sees its ~/.var/app/<id> at the same path),
+# else a temporary folder
 probe() {   # probe <mpv command...>
-    t=$(mktemp -d 2>/dev/null || echo "/tmp/pushmpc-probe.$$"); mkdir -p "$t"
+    if [ -n "$probe_base" ]; then t=$probe_base/pushmpc-probe.$$; else t=$(mktemp -d 2>/dev/null || echo "/tmp/pushmpc-probe.$$"); fi
+    mkdir -p "$t" || return 0
     { printf 'YUV4MPEG2 W16 H16 F24:1 Ip A1:1 C420jpeg\nFRAME\n'; head -c 384 /dev/zero; } > "$t/p.y4m"
     "$@" --no-config --script="$hook_path" --script-opts=pushmpc-append=no --vo=null --ao=null --frames=1 "$t/p.y4m" 2>&1 \
         | grep -m1 "pushmpc_hook" | sed 's/^\[pushmpc_hook\] //'
@@ -160,11 +163,12 @@ cfg=${XDG_CONFIG_HOME:-}; case $cfg in /*) ;; *) cfg=$HOME/.config ;; esac
 data=${XDG_DATA_HOME:-}; case $data in /*) ;; *) data=$HOME/.local/share ;; esac
 rc=0; found=0
 if [ "$target" != flatpak ] && command -v mpv >/dev/null 2>&1; then
-    found=1; do_target native "$cfg/mpv/mpv.conf" "$data/pushmpc/mpvnative" mpv || rc=$?
+    found=1; probe_base=; do_target native "$cfg/mpv/mpv.conf" "$data/pushmpc/mpvnative" mpv || rc=$?
 fi
 if [ "$target" != native ] && command -v flatpak >/dev/null 2>&1 && flatpak info io.mpv.Mpv >/dev/null 2>&1; then
     found=1
     fdata=$HOME/.var/app/io.mpv.Mpv
+    probe_base=$fdata/cache   # the sandbox cannot see the host's /tmp
     do_target flatpak "$fdata/config/mpv/mpv.conf" "$fdata/data/pushmpc/mpvnative" flatpak run --command=mpv io.mpv.Mpv || rc=$?
 fi
 if [ "$found" = 0 ]; then emit "$target" unsupported "no mpv found (native or Flatpak io.mpv.Mpv)"; exit 3; fi

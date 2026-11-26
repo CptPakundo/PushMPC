@@ -52,6 +52,7 @@ public:
         PortableSettings s = LoadPortableSettings([](const char* n) { return ReadSetting(n); });
         if (!Opt(o, "smoother").empty()) s.smoother = ParseSmoother(Opt(o, "smoother"), s.smoother);
         if (!Opt(o, "portable_quality").empty()) s.quality = Opt(o, "portable_quality") == "fast" ? 0 : 1;
+        s.quality = s.quality < 0 ? 1 : std::min(s.quality, 1);   // Auto: balanced (16 px vectors), as the VapourSynth route; the CPU engine has no high
         if (!Opt(o, "portable_threads").empty()) { const int t = std::atoi(Opt(o, "portable_threads").c_str()); s.threads = t > 0 && t <= 64 ? t : 0; }
         if (!Opt(o, "enable").empty()) s.enable = ParseBool(Opt(o, "enable"), s.enable);
         const double srcFps = st.fps_num > 0 && st.fps_den > 0 ? double(st.fps_num) / st.fps_den : 0;

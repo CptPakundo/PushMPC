@@ -78,11 +78,11 @@ jobs:
           echo "SLANG_DIR=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/slang/bin/slangc" -v || true
           grep -nE "struct (RW)?ByteAddressBuffer" -A4 "$RUNNER_TEMP/slang/include/slang-cuda-prelude.h" | head -20
-          # one source for both platforms: the vendored HLSL must be PushFPS v4.5.3 + patches/pushfps-4.5.3-pushmpc.patch
+          # one source for both platforms: the vendored HLSL must be the pinned PushFPS tag + its patch (scripts/pushfps-pin.json)
           tag=$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['tag'])")
           up="$RUNNER_TEMP/upstream"; mkdir -p "$up/shaders"
           for f in VfgShotChange.hlsl; do curl -fsSL --retry 3 -o "$up/shaders/$f" "https://raw.githubusercontent.com/DosukaSOL/PushFPS/$tag/shaders/$f"; done
-          (cd "$up" && git init -q && git apply --include='shaders/VfgShotChange.hlsl' --include='shaders/VfgFourierMellin.hlsl' "$GITHUB_WORKSPACE/patches/pushfps-4.5.3-pushmpc.patch")
+          (cd "$up" && git init -q && git apply --include='shaders/VfgShotChange.hlsl' --include='shaders/VfgFourierMellin.hlsl' "$GITHUB_WORKSPACE/$(python -c "import json; print(json.load(open('scripts/pushfps-pin.json'))['pushfps']['patch'])")")
           for f in VfgShotChange.hlsl VfgFourierMellin.hlsl; do cmp "$up/shaders/$f" "vsplugin/engines/nvidia-linux/shaders/$f"; done
           echo "vendored HLSL = PushFPS $tag + PushMPC's patch"
 

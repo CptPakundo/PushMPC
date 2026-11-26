@@ -70,7 +70,9 @@ private:
 // the planar interpolation on its own (portable_test compares it with veyra::portable::interpolate)
 // maxValue: (1 << bits) - 1; errors are scaled to 0..255 so PushFPS's thresholds apply at every bit depth
 void InterpolatePlanes(const Picture& a, const Picture& b, const veyra::portable::MotionField& fwd, const veyra::portable::MotionField& bwd,
-                       float t, int maxValue, Picture& out, int threads, veyra::portable::InterpolateSettings s = {});
+                       float t, int maxValue, Picture& out, int threads, veyra::portable::InterpolateSettings s = {}, bool boundaryVectors = false);
+// boundaryVectors (the engine's own frames; off for the comparisons with PushFPS and the GPU engine): at a motion boundary
+// the best-matching block vector replaces the bilinear mix of the block vectors (even spacing of moving edges)
 
 // The refined rule (the GPU engine's default; this is its CPU reference, gpu_test compares the two):
 //  - occlusion is decided geometrically: the fallback to the nearer frame's sample is weighted by how much the

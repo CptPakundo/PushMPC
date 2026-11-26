@@ -122,6 +122,7 @@ PUSHCORE_API uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_FG_METHO
 PUSHCORE_API int pushcore_capabilities(uint64_t, const wchar_t*, PushCoreCaps* out)
 {
     if (!out || out->structSize < sizeof(PushCoreCaps)) return PUSHCORE_ERROR;
+    if (EnvInt("PUSHCORE_STUB_CAPS_FAIL", 0)) return PUSHCORE_ERROR;   // tests: a core that cannot answer
     const uint32_t size = out->structSize;
     memset(out, 0, sizeof(*out)); out->structSize = size;
     out->family = PUSHCORE_FAMILY_RTX50; out->vendorId = 0x10DE;

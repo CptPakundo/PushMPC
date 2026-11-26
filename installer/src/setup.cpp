@@ -224,7 +224,16 @@ std::vector<OtherPlayer> DetectOtherPlayers(bool vlcModule) {
     if (vlc.empty()) vlc = first({ JoinPath(pf, L"VideoLAN\\VLC\\vlc.exe"), JoinPath(pf86, L"VideoLAN\\VLC\\vlc.exe") });
     if (!vlc.empty()) out.push_back({ L"VLC", vlc, !vlcModule, vlcModule ? L"the PushMPC add-on for VLC" : cap });
     std::wstring st = first({ JoinPath(la, L"Programs\\Stremio\\stremio-shell-ng.exe"), JoinPath(pf, L"Stremio\\stremio-shell-ng.exe"), JoinPath(la, L"Programs\\Stremio\\stremio.exe"), JoinPath(pf, L"Stremio\\stremio.exe") });
-    if (!st.empty()) out.push_back({ L"Stremio", st, false, L"set up automatically (Stremio 5.0.28 and newer; older versions: capture mode)" });
+    if (!st.empty()) {
+        // the built-in route needs Stremio's mpv config file setting: stremio-shell-ng 5.0.28 and newer (the install
+        // script's rule, mpv-integration.ps1); older versions go through capture mode
+        unsigned a = 0, b = 0, c = 0;
+        const std::wstring v = FileVersionOf(st);
+        const bool shellNg = st.size() >= 20 && _wcsicmp(st.c_str() + st.size() - 20, L"stremio-shell-ng.exe") == 0;
+        const bool native = shellNg && swscanf_s(v.c_str(), L"%u.%u.%u", &a, &b, &c) == 3 && (a > 5 || (a == 5 && (b > 0 || c >= 28)));
+        if (native) out.push_back({ L"Stremio", st, false, L"set up automatically" });
+        else out.push_back({ L"Stremio", st, true, std::wstring(cap) + L"; Stremio 5.0.28 or newer gets the built-in route" + (v.empty() ? L"" : L" (this is " + v + L")") });
+    }
     for (auto& d : { JoinPath(pf, L"Plex\\Plex"), JoinPath(pf, L"Plex\\Plex HTPC") })
         if (FileExists(JoinPath(d, L"libmpv-2.dll")) || FileExists(JoinPath(d, L"mpv-2.dll")))
             out.push_back({ d.find(L"HTPC") != std::wstring::npos ? L"Plex HTPC" : L"Plex", d, false,

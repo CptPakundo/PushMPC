@@ -211,9 +211,10 @@ loaded in VapourSynth; otherwise `portable`. To choose yourself, add `backend=po
 - **Engine.** On the best Vulkan GPU it finds (a discrete card first), the GPU engine runs; without one (or with
   `PortableDevice = cpu`) the CPU engine. The log says which, and why; every frame carries `PushMPCEngine` = `gpu` or `cpu`.
 - Motion both ways between two real frames, computed once per pair and used for every generated frame of it: PushFPS's
-  block matcher on the GPU (16 px vectors by default; `portable_quality=high` uses 8 px ones, a little better on fast pans), or, if you ask for it, NVIDIA's
-  optical-flow hardware (`VK_NV_optical_flow`): `motion=nvof` uses its field, `motion=hybrid` offers its vectors to the
-  block matcher. The generated frames sit at 1/k, 2/k, ... between the real ones.
+  block matcher on the GPU (16 px vectors by default; `portable_quality=high` uses 8 px ones, a little better on fast pans).
+  On a card with NVIDIA's optical-flow hardware (`VK_NV_optical_flow`, RTX) the flow's vectors are offered to the block
+  matcher as well, which picks the better match (a little better and faster than the block matcher alone);
+  `motion=blocks` turns that off, `motion=nvof` uses the flow's field alone. The generated frames sit at 1/k, 2/k, ... between the real ones.
 - **Occlusions and texture:** where the forward and backward motion disagree (something appears or disappears), a
   generated pixel falls back to the nearer real frame; where they agree but the picture cannot be predicted (water,
   fire, grain), the two motion-compensated frames are averaged, which is the closer guess. At motion boundaries the
