@@ -105,8 +105,10 @@ public:
         if (!s.enable) { why = "PushMPC is off (Enable = 0)"; return false; }
 
         // colour: FFmpeg's enums are H.273's codes (range: 1 limited, 2 full)
-        // source_bits=8: an 8-bit source the player converted to 10 bits for this engine (the mpv hook's out_depth=10
-        // route): the colour guess of an untagged stream is the 8-bit one (no PQ from the 10-bit UHD rule)
+        // source_bits=8: an 8-bit source the player converted to 10 bits for this engine (the mpv hook's route): the
+        // colour guess of an untagged stream is the 8-bit one (no PQ from the 10-bit UHD rule). source_bits=-1: the
+        // player converts every stream to 10 bits (Plex's static line where it has no hook): SDR or HDR is decided at
+        // the first frame (its transfer), below
         const int srcBits = std::atoi(Opt(o, "source_bits", "0").c_str());
         const Colour guess = GuessColour(st.width, st.height, srcBits == 8 ? 8 : m_bits);
         m_in.bits = m_bits;
@@ -133,12 +135,70 @@ public:
             caps.hdr = false;
             if (wantDeep) notes = "; RTX Video HDR waits for a 10-bit stream (asked for: want_out_depth=10)";
         }
+        m_gpu = &g; m_hdrPeak = float(s.hdrPeak);
+        if (srcBits == -1 && m_bits > 8 && !m_cuda && !(st.transfer > 0 && st.transfer != 2)) {
+            // the stream may be an 8-bit SDR one the player converted: when RTX Video HDR would run on it as SDR and
+            // both readings give the same picture size, the output is HDR10 either way; the engine opens at the first
+            // frame with the reading its transfer gives (an untagged frame keeps the resolution guess)
+            Source sdr = src, hdrSrc = src;
+            sdr.hdr = false; hdrSrc.hdr = true;
+            const nvl::Plan pS = Decide(s, sdr, disp, caps, costs), pH = Decide(s, hdrSrc, disp, caps, costs);
+            if (pS.hdr && pS.vsr == pH.vsr && (!pS.vsr || (pS.outW == pH.outW && pS.outH == pH.outH)) && (pS.k > 1 || pS.vsr || pS.hdr)) {
+                m_defer = true; m_planSdr = pS; m_planHdr = pH; m_guessHdr = src.hdr;
+                m_k = std::max(1, std::min(pS.k, pH.k));
+                m_outW = pS.vsr ? pS.outW : m_w; m_outH = pS.vsr ? pS.outH : m_h;
+                Log("nvidia: Auto (decided at the first frame): SDR " + pS.why + " | HDR " + pH.why + "; x" + std::to_string(m_k) + notes);
+                out.mem = PMENG_MEM_CPU; out.fmt = m_outFmt;
+                out.width = uint32_t(m_outW); out.height = uint32_t(m_outH);
+                out.multiplier = uint32_t(m_k);
+                out.range = 1; out.matrix = 9; out.primaries = 9; out.transfer = 16; out.hdr_output = 1;
+                out.keep_dynamic_hdr = pS.vsr ? 0u : 1u;   // an SDR source has none; an HDR one keeps its own unless upscaled
+                out.mastering_peak_nits = m_hdrPeak; out.mastering_min_nits = 0.0001f; out.max_cll_nits = m_hdrPeak;   // used only when a frame has none
+                std::snprintf(out.engine, sizeof(out.engine), "nvidia");
+                std::snprintf(out.description, sizeof(out.description), "NVIDIA (Linux, CUDA + Video Effects): HDR10 out, SDR (RTX Video HDR) or HDR decided at the first frame; %dx%d -> %dx%d x%d",
+                              m_w, m_h, m_outW, m_outH, m_k);
+                return true;
+            }
+        }
         nvl::Plan plan = Decide(s, src, disp, caps, costs);
         Log("nvidia: Auto: " + plan.why + notes + (overrides.empty() ? std::string() : "; overridden:" + overrides));
         if (plan.k <= 1 && !plan.vsr && !plan.hdr) { why = "nothing to do here (" + plan.why + ")"; return false; }
+        if (!OpenEngine(plan, src.hdr, why)) return false;
+        if (m_cuda && (!m_eng->CanTakeDevice() || !m_eng->CanWriteDevice() || !m_eng->HasGpuGuard())) {
+            why = std::string("CUDA frames: ") + (!m_eng->HasGpuGuard() ? "this build has no GPU cut guard" : "this build's kernels or the driver lack the device copies") + " (the copy route)";
+            return false;
+        }
+        const nvl::Plan& ep = m_eng->Config().plan;
 
+        out.mem = m_cuda ? PMENG_MEM_CUDA : PMENG_MEM_CPU;
+        out.fmt = m_cuda ? (m_eng->OutTenBit() ? PMENG_FMT_P010 : PMENG_FMT_NV12) : m_outFmt;
+        out.want_out_depth = wantDeep ? 10u : 0u;
+        out.width = uint32_t(m_outW); out.height = uint32_t(m_outH);
+        out.multiplier = uint32_t(m_k);
+        // the engine's output colour (nvl_colour.h): limited range, the BT.709 matrix for SDR, BT.2020 for HDR; primaries
+        // and transfer are converted only by RTX Video HDR (0 = the frame keeps its own; vf_pushmpc applies the rest)
+        const bool hdr = m_eng->OutHdr();
+        const bool madeHdr = hdr && !src.hdr;
+        out.range = 1;
+        out.matrix = hdr ? 9 : 1;
+        out.primaries = madeHdr ? 9 : 0;
+        out.transfer = madeHdr ? 16 : 0;
+        out.hdr_output = hdr ? 1u : 0u;
+        out.keep_dynamic_hdr = src.hdr && !ep.vsr ? 1u : 0u;   // per-frame HDR metadata no longer matches an upscaled / converted picture
+        if (hdr && !src.hdr) { out.mastering_peak_nits = float(s.hdrPeak); out.mastering_min_nits = 0.0001f; out.max_cll_nits = float(s.hdrPeak); }
+        std::snprintf(out.engine, sizeof(out.engine), "nvidia");
+        std::snprintf(out.description, sizeof(out.description), "NVIDIA (Linux, CUDA + Video Effects): %s; %dx%d -> %dx%d x%d%s%s",
+                      m_eng->Describe().c_str(), m_w, m_h, m_outW, m_outH, m_k, m_eng->HasGpuGuard() ? "" : "; CPU cut guard",
+                      m_cuda ? "; the decoder's CUDA frames, device to device" : "");
+        return true;
+    }
+
+    // the engine for a plan (warm when the same one is open), its multiplier and output size
+    bool OpenEngine(nvl::Plan plan, bool srcHdr, std::string& why)
+    {
+        const GpuInfo& g = *m_gpu;
         EngineConfig cfg;
-        cfg.srcW = m_w; cfg.srcH = m_h; cfg.bits = m_bits; cfg.srcHdr = src.hdr; cfg.plan = plan; cfg.hdrPeak = float(s.hdrPeak);
+        cfg.srcW = m_w; cfg.srcH = m_h; cfg.bits = m_bits; cfg.srcHdr = srcHdr; cfg.plan = plan; cfg.hdrPeak = m_hdrPeak;
         cfg.ampere = plan.k >= 2 && !plan.nvof && VfgAmpere(g.major, g.minor);
         cfg.guardFlow = plan.guardFlow;
         cfg.deviceOut = m_cuda;
@@ -166,41 +226,27 @@ public:
         m_eng = w.engine;
         m_token = ++w.next;
         w.owner = m_token;
-        m_k = std::max(1, m_eng->Config().plan.k);
         const nvl::Plan& ep = m_eng->Config().plan;
+        if (m_defer && std::max(1, ep.k) != m_k) { why = "nvidia: frame generation could not start at x" + std::to_string(m_k); return false; }
+        m_k = std::max(1, ep.k);
         m_outW = ep.vsr ? ep.outW : m_w; m_outH = ep.vsr ? ep.outH : m_h;
-        if (m_cuda && (!m_eng->CanTakeDevice() || !m_eng->CanWriteDevice() || !m_eng->HasGpuGuard())) {
-            why = std::string("CUDA frames: ") + (!m_eng->HasGpuGuard() ? "this build has no GPU cut guard" : "this build's kernels or the driver lack the device copies") + " (the copy route)";
-            return false;
-        }
         m_guard.Configure(m_w, m_h);
         if (yuv::Semi(m_fmt)) m_src.Resize(m_w, m_h, m_bits);
-
-        out.mem = m_cuda ? PMENG_MEM_CUDA : PMENG_MEM_CPU;
-        out.fmt = m_cuda ? (m_eng->OutTenBit() ? PMENG_FMT_P010 : PMENG_FMT_NV12) : m_outFmt;
-        out.want_out_depth = wantDeep ? 10u : 0u;
-        out.width = uint32_t(m_outW); out.height = uint32_t(m_outH);
-        out.multiplier = uint32_t(m_k);
-        // the engine's output colour (nvl_colour.h): limited range, the BT.709 matrix for SDR, BT.2020 for HDR; primaries
-        // and transfer are converted only by RTX Video HDR (0 = the frame keeps its own; vf_pushmpc applies the rest)
-        const bool hdr = m_eng->OutHdr();
-        const bool madeHdr = hdr && !src.hdr;
-        out.range = 1;
-        out.matrix = hdr ? 9 : 1;
-        out.primaries = madeHdr ? 9 : 0;
-        out.transfer = madeHdr ? 16 : 0;
-        out.hdr_output = hdr ? 1u : 0u;
-        out.keep_dynamic_hdr = src.hdr && !ep.vsr ? 1u : 0u;   // per-frame HDR metadata no longer matches an upscaled / converted picture
-        if (hdr && !src.hdr) { out.mastering_peak_nits = float(s.hdrPeak); out.mastering_min_nits = 0.0001f; out.max_cll_nits = float(s.hdrPeak); }
-        std::snprintf(out.engine, sizeof(out.engine), "nvidia");
-        std::snprintf(out.description, sizeof(out.description), "NVIDIA (Linux, CUDA + Video Effects): %s; %dx%d -> %dx%d x%d%s%s",
-                      m_eng->Describe().c_str(), m_w, m_h, m_outW, m_outH, m_k, m_eng->HasGpuGuard() ? "" : "; CPU cut guard",
-                      m_cuda ? "; the decoder's CUDA frames, device to device" : "");
         return true;
     }
 
     int Submit(const pmeng_image& src, int64_t, uint32_t flags) override
     {
+        if (m_defer && !m_eng) {   // source_bits=-1: SDR or HDR from the first frame's transfer
+            const bool tagged = src.transfer > 0 && src.transfer != 2;
+            const bool hdr = tagged ? IsHdrTransfer(src.transfer) : m_guessHdr;
+            if (src.matrix > 0 && src.matrix != 2) m_in.matrix = src.matrix;
+            nvl::Plan plan = hdr ? m_planHdr : m_planSdr;
+            plan.k = m_k;
+            std::string why;
+            if (!OpenEngine(plan, hdr, why)) { err = why; return PMENG_ERROR; }
+            Log(std::string("nvidia: first frame ") + (tagged ? "tagged " : "untagged, guessed ") + (hdr ? "HDR" : "SDR") + ": " + plan.why);
+        }
         if (!m_q.empty() && m_eng->FreeSlots() < m_k) return PMENG_BUSY;
         if (m_eng->FreeSlots() < m_k) { err = "nvidia: no free readback slot"; return PMENG_ERROR; }
         if (src.mem != (m_cuda ? PMENG_MEM_CUDA : PMENG_MEM_CPU) || src.fmt != m_fmt) { err = "nvidia: unexpected input memory / format"; return PMENG_ERROR; }
@@ -295,6 +341,7 @@ public:
     {
         m_q.clear();
         m_guard.Reset();
+        if (!m_eng) return PMENG_OK;
         std::string e;
         if (!m_eng->Drain(e)) { err = e; return PMENG_ERROR; }
         return PMENG_OK;
@@ -315,6 +362,10 @@ private:
     InFormat m_in;
     yuv::Planes m_src;
     uint32_t m_fmt = 0, m_outFmt = 0;
+    const GpuInfo* m_gpu = nullptr;
+    float m_hdrPeak = 1000;
+    bool m_defer = false, m_guessHdr = false;   // source_bits=-1: the engine opens at the first frame
+    nvl::Plan m_planSdr, m_planHdr;
     bool m_cuda = false;
     CUcontext m_devCtx = nullptr;
     CUstream m_devStream = nullptr;

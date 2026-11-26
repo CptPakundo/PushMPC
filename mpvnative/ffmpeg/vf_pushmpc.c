@@ -564,7 +564,7 @@ static int config_output(AVFilterLink *outlink)
         snprintf(num, sizeof(num), "%d", s->display_hdr);
         add_opt(opts, sizeof(opts), "display_hdr", num);
     }
-    if (s->source_depth > 0) {
+    if (s->source_depth != 0) {
         snprintf(num, sizeof(num), "%d", s->source_depth);
         add_opt(opts, sizeof(opts), "source_bits", num);
     }
@@ -1077,7 +1077,7 @@ static const AVOption pushmpc_options[] = {
     { "display_hdr", "the player presents HDR10 (-1: the engine finds out)", OFFSET(display_hdr), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, FLAGS },
     { "passthrough", "pass the video through when the engine is missing or fails to open", OFFSET(passthrough_on_error), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
     { "wait_ms", "longest wait for the engine", OFFSET(wait_ms), AV_OPT_TYPE_INT, { .i64 = 10000 }, 100, 120000, FLAGS },
-    { "source_depth", "bits of the source before the player converted it (0: as it arrives)", OFFSET(source_depth), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 16, FLAGS },
+    { "source_depth", "bits of the source before the player converted it (0: as it arrives; -1: every stream converted, unknown)", OFFSET(source_depth), AV_OPT_TYPE_INT, { .i64 = 0 }, -1, 16, FLAGS },
     { NULL }
 };
 

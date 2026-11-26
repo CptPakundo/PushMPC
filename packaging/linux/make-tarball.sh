@@ -52,7 +52,7 @@ if [ -n "${PUSHMPC_PLEX_DIR:-}" ] && [ -f "$PUSHMPC_PLEX_DIR/pushmpc_preload.so"
     mkdir -p "$d/plex"; install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc_preload.so" "$d/plex/pushmpc_preload.so"
     if [ -f "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" ]; then install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" "$d/plex/pushmpc-plex-selftest"; fi
     install -m 755 mpvnative/install/pushmpc-plex-linux.sh "$d/plex/pushmpc-plex-linux.sh"
-    for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d"/mpvnative/libpushmpc_engine*.so "$d/mpvnative/SOURCES.txt" "$d/mpvnative/pushmpc-nvvfx-selftest" "$d/mpvnative/pmml_cli"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
+    for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d"/mpvnative/libpushmpc_engine*.so "$d/mpvnative/SOURCES.txt" "$d/mpvnative/pushmpc-nvvfx-selftest" "$d/mpvnative/pmml_cli" "$d/mpvnative/pushmpc_hook.so"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
 fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"

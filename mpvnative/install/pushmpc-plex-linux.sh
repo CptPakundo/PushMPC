@@ -20,6 +20,15 @@
 #   ~/.var/app/<id>/data/plex/mpv.conf. Uninstall: our LD_PRELOAD key out of the override keyfile (restored exactly), the files, the block (exact restore).
 # Tarball: files in <dir>/pushmpc and a launcher ~/.local/bin/plex-pushmpc (LD_PRELOAD + Plex.sh); mpv.conf in
 #   ~/.local/share/plex/mpv.conf.
+# mpv.conf, the route per Plex (decided at install, reported as "route: ..."):
+#   hook   Plex's libmpv runs C plugins (its binary has mpv_open_cplugin, and the self-test loads the plugin):
+#          scripts-append=<dest>/pushmpc_hook.so (+ script-opts pushmpc-vf=<opts>); the hook appends the filter (the
+#          preload provides it) and adds what it learns at play time (the display's rate; for RTX Video HDR on 8-bit
+#          video it converts that stream to 10 bits ahead of the filter)
+#   hdr10  no C plugins, PushMPC's settings ask for RTX Video HDR (SdrToHdr on) and NVIDIA's engine is installed:
+#          every stream converted to 10 bits ahead of the filter (vf-append=@pushmpcdepth:lavfi=[format=yuv420p10le]),
+#          the filter with source_depth=-1 (the engine reads SDR or HDR from the first frame)
+#   vf     otherwise: vf-append=@pushmpc:pushmpc[=<opts>]
 # Snap Plex is not supported: snap-confine is setuid, and glibc drops LD_PRELOAD for it.
 # Exit: 0 done, 1 error, 2 usage, 3 not supported here (no Plex found).
 set -u
@@ -49,14 +58,38 @@ log() { printf '%s\n' "$*" >&2; }
 jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 emit() { if [ "$json" = 1 ]; then printf '{"target":"%s","action":"%s","state":"%s","detail":"%s"}\n' "$1" "$action" "$2" "$(jesc "$3")"; else log "$1: $2${3:+ ($3)}"; fi; }
 
-conf_add() {   # conf_add <mpv.conf>
+conf_add() {   # conf_add <mpv.conf> <route: hook | hdr10 | vf> <the hook's path>
     c=$1; mkdir -p "$(dirname "$c")"
     if [ ! -f "$c.pushmpc-native-backup" ] && [ ! -f "$c.pushmpc-native-absent" ]; then
         if [ -f "$c" ]; then cp "$c" "$c.pushmpc-native-backup"; else : > "$c.pushmpc-native-absent"; fi
     fi
-    vf='vf-append=@pushmpc:pushmpc'; [ -n "$opts" ] && vf="$vf=$opts"
-    { printf '%s\n%s\ninterpolation=no\n%s\n' "$BEGIN_MARK" "$vf" "$END_MARK"; [ ! -f "$c" ] || conf_strip "$c"; } > "$c.tmp" && mv "$c.tmp" "$c"
+    case $2 in
+        hook) lines="scripts-append=$3"; [ -n "$opts" ] && lines="$lines
+script-opts-append=pushmpc-vf=$opts" ;;
+        hdr10) lines="vf-append=@pushmpcdepth:lavfi=[format=yuv420p10le]
+vf-append=@pushmpc:pushmpc=source_depth=-1${opts:+:$opts}" ;;
+        *) lines='vf-append=@pushmpc:pushmpc'; [ -n "$opts" ] && lines="$lines=$opts" ;;
+    esac
+    { printf '%s\n%s\ninterpolation=no\n%s\n' "$BEGIN_MARK" "$lines" "$END_MARK"; [ ! -f "$c" ] || conf_strip "$c"; } > "$c.tmp" && mv "$c.tmp" "$c"
 }
+# does Plex's libmpv run C plugins? mpv's cplugins feature looks up mpv_open_cplugin in each plugin, so the name is in
+# the libmpv binary only when the feature is built in. cplugins <libmpv> <runner...>
+cplugins() {
+    l=$1; shift
+    [ -n "$l" ] || return 1
+    "$@" grep -q -a mpv_open_cplugin "$l" 2>/dev/null
+}
+# PushMPC's settings ask for RTX Video HDR (SdrToHdr on) and NVIDIA's engine is here (the sidecar in this download, its
+# runtime installed, the NVIDIA driver loaded); PUSHMPC_TEST_HDR10=1 (tests) stands for all of it
+hdr10_wanted() {
+    [ "${PUSHMPC_TEST_HDR10:-0}" = 1 ] && return 0
+    ini=${XDG_CONFIG_HOME:-$HOME/.config}/pushmpc/settings.ini
+    v=$(sed -n 's/^[[:space:]]*[Ss][Dd][Rr][Tt][Oo][Hh][Dd][Rr][[:space:]]*=[[:space:]]*//p' "$ini" 2>/dev/null | tail -n 1 | tr -d '"\r ' | tr 'A-Z' 'a-z')
+    case $v in on|1) ;; *) return 1 ;; esac
+    [ -f "$from/libpushmpc_engine_nvl.so" ] && [ -e /proc/driver/nvidia/version ] && [ -d "${XDG_DATA_HOME:-$HOME/.local/share}/pushmpc/nvidia-vfx" ]
+}
+# the route for one Plex, after the hook was tried: hdr10 or vf
+fallback_route() { if hdr10_wanted; then echo hdr10; else echo vf; fi; }
 conf_strip() {   # the file without the block
     awk -v b="$BEGIN_MARK" -v e="$END_MARK" '$0 == b { s = 1; next } s && $0 == e { s = 0; next } !s' "$1"
 }
@@ -68,7 +101,7 @@ conf_remove() {
     else rm -f "$c.pushmpc-native-backup" "$c.pushmpc-native-absent"; fi
 }
 # the sidecar engines (NVIDIA's Video Effects, PushFlow) and their helpers, copied when the download has them
-EXTRAS='libpushmpc_engine_nvl.so libpushmpc_engine_ml.so pushmpc-nvvfx-selftest pmml_cli'
+EXTRAS='libpushmpc_engine_nvl.so libpushmpc_engine_ml.so pushmpc-nvvfx-selftest pmml_cli pushmpc_hook.so'
 # Flatpak: the sandbox sees PushMPC's runtimes (NVIDIA's Video Effects, PushFlow's pmml) read-only, so the engines in
 # it find them; added only when the app has no filesystem override of the user's own (exact undo)
 FS_RO=xdg-data/pushmpc:ro
@@ -88,7 +121,7 @@ selftest() {
     d=$1; lib=$2; shift 2
     [ -x "$d/pushmpc-plex-selftest" ] || { st_detail="no self-test (pushmpc-plex-selftest not shipped)"; return 2; }
     [ -n "$lib" ] || { st_detail="no libmpv.so found in Plex"; return 2; }
-    out=$("$@" "$d/pushmpc-plex-selftest" "$lib" 2>&1); r=$?
+    out=$("$@" env PUSHMPC_HOST_SCRIPT="${st_script:-}" "$d/pushmpc-plex-selftest" "$lib" 2>&1); r=$?
     st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
     case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
 }
@@ -98,6 +131,24 @@ report_install() {   # report_install <name> <rc of selftest> <where>
         3) emit "$1" installed-inactive "$3; selftest: $st_detail"; return 3 ;;
         *) emit "$1" installed "$3; $st_detail" ;;
     esac
+}
+
+# the mpv.conf block for this Plex ($conf), then the self-test: the hook when Plex's libmpv has C plugins and the self-test
+# loads it (else the fallback route is written instead). Sets route; returns the self-test's code.
+plex_route() {   # plex_route <dest> <libmpv> <runner...>
+    pd=$1; pl=$2; shift 2
+    route=vf; st_script=''
+    if [ "${PUSHMPC_TEST_NO_HOOK:-0}" != 1 ] && [ -f "$pd/pushmpc_hook.so" ] && cplugins "$pl" "$@"; then route=hook; st_script=$pd/pushmpc_hook.so; fi
+    [ "$route" = hook ] || route=$(fallback_route)
+    conf_add "$conf" "$route" "$pd/pushmpc_hook.so"
+    selftest "$pd" "$pl" "$@"; rs=$?
+    if [ "$route" = hook ] && ! printf '%s' "$st_detail" | grep -q 'C plugin: loaded'; then
+        log "Plex's libmpv names C plugins but did not run pushmpc_hook.so: the static line instead"
+        route=$(fallback_route); st_script=''
+        conf_add "$conf" "$route" "$pd/pushmpc_hook.so"
+    fi
+    st_script=''
+    return $rs
 }
 
 do_flatpak() {   # do_flatpak <target name> <app id>
@@ -118,10 +169,9 @@ do_flatpak() {   # do_flatpak <target name> <app id>
         fi
         flatpak override --user --env=LD_PRELOAD="$dest/pushmpc_preload.so" "$id" || { emit "$name" error "flatpak override failed"; return 1; }
         if ! grep -q '^filesystems=' "$ovf" 2>/dev/null; then flatpak override --user --filesystem="$FS_RO" "$id" 2>/dev/null || log "$name: no read-only access to PushMPC's runtimes (flatpak override failed)"; fi
-        conf_add "$conf"
         lib=$(flatpak run --command=sh "$id" -c 'find /app -name "libmpv.so*" 2>/dev/null | sort | head -1' 2>/dev/null)
-        selftest "$dest" "$lib" flatpak run --command=sh "$id" -c 'exec "$@"' sh; s=$?
-        report_install "$name" $s "$id: LD_PRELOAD=$dest/pushmpc_preload.so; $conf" ;;
+        plex_route "$dest" "$lib" flatpak run --command=sh "$id" -c 'exec "$@"' sh; s=$?
+        report_install "$name" $s "$id: LD_PRELOAD=$dest/pushmpc_preload.so; $conf; route: $route" ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$dest"; return 0; }
         ovf=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/overrides/$id
@@ -154,10 +204,10 @@ do_tarball() {
         copy_files "$dest" || { emit tarball error "cannot write $dest"; return 1; }
         mkdir -p "$(dirname "$launcher")"
         printf '#!/bin/sh\n# PushMPC: Plex with vf_pushmpc (pushmpc-plex-linux.sh uninstall removes this)\nLD_PRELOAD="%s${LD_PRELOAD:+:$LD_PRELOAD}" exec "%s" "$@"\n' "$dest/pushmpc_preload.so" "$tdir/Plex.sh" > "$launcher"
-        chmod +x "$launcher"; conf_add "$conf"
+        chmod +x "$launcher"
         lib=$(find "$tdir" -name "libmpv.so*" 2>/dev/null | sort | head -1)
-        selftest "$dest" "$lib" env LD_PRELOAD="$dest/pushmpc_preload.so"; s=$?
-        report_install tarball $s "launcher $launcher; $conf" ;;
+        plex_route "$dest" "$lib" env LD_PRELOAD="$dest/pushmpc_preload.so"; s=$?
+        report_install tarball $s "launcher $launcher; $conf; route: $route" ;;
     uninstall)
         [ "$dry" = 1 ] && { emit tarball would-uninstall "$dest"; return 0; }
         remove_files "$dest"; rm -f "$launcher"; conf_remove "$conf"

@@ -183,6 +183,15 @@ static int install(void)
     const char *env = getenv("PUSHMPC_AVFILTER");
     unsigned v;
 
+#ifndef PUSHMPC_PRELOAD
+    {   /* Plex: pushmpc_preload.so (LD_PRELOAD) already put the filter in; the hook only adds what it learns at play time */
+        const char *pre = getenv("LD_PRELOAD");
+        if (pre && strstr(pre, "pushmpc_preload.so")) {
+            logf_("the filter comes from pushmpc_preload.so (LD_PRELOAD); ");
+            return 0;
+        }
+    }
+#endif
     g_sys_handle = dlopen("libavfilter.so", RTLD_NOW | RTLD_NOLOAD);
     if (!g_sys_handle) {
         /* the soname carries the major version: find the loaded one through the symbol */

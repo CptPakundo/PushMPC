@@ -157,7 +157,8 @@ typedef struct pmeng_api {
     uint32_t struct_size, abi_version;
     const char* (*version)(void);
     /* options: "key=value" lines separated by newlines (smoother, sharper, backend, display_fps, display_hdr, core_dir, adapter ...;
-       minor 1: source_bits=8 when the player converted an 8-bit source to the 10 bits the engine asked for).
+       minor 1: source_bits=8 when the player converted an 8-bit source to the 10 bits the engine asked for; -1 when the
+       player converts every stream to 10 bits and the source depth is unknown: the engine decides at the first frame).
        Returns NULL on failure (err holds the reason). */
     void* (*open)(const pmeng_device* dev, const pmeng_stream* stream, const char* options, pmeng_output* out,
                   char* err, uint32_t err_size);

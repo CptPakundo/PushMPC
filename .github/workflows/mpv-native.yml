@@ -668,6 +668,9 @@ jobs:
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
           cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
+          # the hook as Plex's C plugin (where its libmpv runs them): mpv's client header only
+          sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '
@@ -730,6 +733,9 @@ jobs:
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
           cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
+          # the hook as Plex's C plugin (where its libmpv runs them): mpv's client header only
+          sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '
@@ -768,10 +774,23 @@ jobs:
             out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target tarball --tarball-dir "$t" --json); rc=$?; echo "install: $out"
             echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \
               && echo "$t: vf_pushmpc active through Plex's libmpv" || { echo "::error::$(basename "$t"): install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
+            # which route this Plex got: hook (its libmpv runs C plugins) or the static line
+            echo "$(basename "$t"): libmpv C plugins: $(grep -q -a mpv_open_cplugin "$(find "$t" -name 'libmpv.so*' | sort | head -1)" && echo yes || echo no); $(echo "$out" | grep -o 'route: [a-z0-9]*' | head -1); $(echo "$out" | grep -o 'C plugin: [a-z ]*' | head -1)"
+            cat "$HOME/.local/share/plex/mpv.conf"
             [ -x "$HOME/.local/bin/plex-pushmpc" ] && cat "$HOME/.local/bin/plex-pushmpc" || { echo "::error::no launcher"; fails=$((fails + 1)); }
             echo "status: $(sh mpvnative/install/pushmpc-plex-linux.sh status --target tarball --tarball-dir "$t" --json)"
             echo "uninstall: $(sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target tarball --tarball-dir "$t" --json)"
             after=$(snap); [ "$after" = "$before" ] && echo "$t: uninstall restored the folder and HOME exactly" || { diff <(echo "$before") <(echo "$after") | head -20; echo "::error::$(basename "$t"): files differ after uninstall"; fails=$((fails + 1)); }
+            # the fallback where a libmpv runs no C plugins: the static 10-bit line (as with RTX Video HDR asked for and
+            # NVIDIA's engine installed), self-test, uninstall bit-exact
+            out=$(PUSHMPC_TEST_NO_HOOK=1 PUSHMPC_TEST_HDR10=1 sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target tarball --tarball-dir "$t" --json); rc=$?; echo "install (hdr10): $out"
+            if echo "$out" | grep -q 'route: hdr10' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] && grep -qF 'vf-append=@pushmpcdepth:lavfi=[format=yuv420p10le]' "$HOME/.local/share/plex/mpv.conf" && grep -q 'source_depth=-1' "$HOME/.local/share/plex/mpv.conf"; then
+              echo "$(basename "$t"): the hdr10 fallback line is written and the filter runs"
+            else
+              echo "::error::$(basename "$t"): the hdr10 fallback route failed (exit $rc)"; fails=$((fails + 1))
+            fi
+            sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target tarball --tarball-dir "$t" --json >/dev/null
+            after=$(snap); [ "$after" = "$before" ] || { echo "::error::$(basename "$t"): files differ after the hdr10 uninstall"; fails=$((fails + 1)); }
           done
           [ "$fails" = 0 ] && echo "plex-linux-tarball: all checks passed" || exit 1
 
