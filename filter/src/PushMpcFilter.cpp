@@ -2599,6 +2599,7 @@ private:
     int64_t m_openQpc = 0, m_activeQpc = 0, m_flushStartQpc = 0, m_lastSubmitQpc = 0;
     std::atomic<int64_t> m_lastCoreOutQpc = 0;   // the last pushcore frame copied for delivery (the no-output guard)
     int m_submitsSinceOut = 0; int64_t m_seenOutQpc = 0;
+    int m_autoCap = 0; int64_t m_capWinQpc = 0; uint64_t m_capLate = 0, m_capGen = 0;   // the delivery check (Auto loop)
     REFERENCE_TIME m_lastSubmitPts = INT64_MIN;
     std::atomic<double> m_ptsStepMs = 0;
     double m_uploadMs = 0, m_submitMs = 0;
@@ -4454,6 +4455,7 @@ void CPushMpcFilter::LoadLearned()
         num(L"NrMs", m_costs.nrMs, &m_costs.learnedNr, 0.05, 200);
         num(L"Hdr4kMs", m_costs.hdr4k, &m_costs.learnedHdr, 0.05, 30);
         num(L"Deband1080Ms", m_costs.deband1080, &m_costs.learnedDeband, 0.001, 20);
+        num(L"Base4kMs", m_costs.base4k, &m_costs.learnedBase, 0.05, 20);
         bool bench = true;
         for (int t = 0; t < 3; ++t) {
             bench = num(std::format(L"PfFirst{}", t), m_costs.pfFirst[t], nullptr, 0.1, 500) && bench;
@@ -4461,9 +4463,9 @@ void CPushMpcFilter::LoadLearned()
         }
         m_costs.pfBenched = bench;
         if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
-        Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p",
+        Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
             Narrow(m_gpuName), m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
-            m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080));
+            m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080, m_costs.base4k, m_costs.learnedBase ? "" : " (prior)"));
     }
     RegCloseKey(k);
 }
@@ -4471,7 +4473,7 @@ void CPushMpcFilter::SaveLearned()
 {
     pm::Costs c;
     { std::lock_guard<std::mutex> lk(m_autoLock); c = m_costs; }
-    bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband;
+    bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband || c.learnedBase;
     for (bool b : c.fgLearned) any = any || b;
     if (m_gpuName.empty() || !any) return;
     HKEY k = nullptr;
@@ -4488,6 +4490,7 @@ void CPushMpcFilter::SaveLearned()
     if (c.learnedNr) str(L"NrMs", std::format(L"{:.3f}", c.nrMs));
     if (c.learnedHdr) str(L"Hdr4kMs", std::format(L"{:.3f}", c.hdr4k));
     if (c.learnedDeband) str(L"Deband1080Ms", std::format(L"{:.4f}", c.deband1080));
+    if (c.learnedBase) str(L"Base4kMs", std::format(L"{:.3f}", c.base4k));
     RegCloseKey(k);
 }
 // PushFlow's once-per-card speed test (pushcore_pushFlowBench, a port of PushFPS's PushFlowBench): run lazily, the first
@@ -4555,13 +4558,18 @@ void CPushMpcFilter::LearnCosts()
     // 3 s after the graph started, and 3 s after a playback-rate change (R-RATE1: the admission's reduced groups and the
     // old rate's frames are still in the timings then and taught Auto that High at 5x costs 8 ms)
     const int64_t from = std::max<int64_t>(m_graphQpc, m_rateQpc.load()) + int64_t(3.0 * QpcFreq());
-    std::vector<double> fg, sr, nr, hdr;
+    std::vector<double> fg, sr, nr, hdr, rest;
     for (const auto& s : m_autoTimings) {
         if (s.qpc < from) continue;
         if (a.multiplier >= 2 && s.fgLevel == 0 && s.t.fgBatchMs > 0) fg.push_back(s.t.fgBatchMs);
         if (a.sr && s.t.srMs > 0) sr.push_back(s.t.srMs);
         if (a.nr && s.t.nrMs > 0) nr.push_back(s.t.nrMs);
         if (a.videoHdr && s.t.videoHdrMs > 0) hdr.push_back(s.t.videoHdrMs);
+        // the rest of the graph (colour, conversions, the cut guard, deband): the graph span minus the timed stages, full groups only
+        if (s.t.graphMs > 0 && (a.multiplier < 2 || (s.fgLevel == 0 && s.t.fgBatchMs > 0))) {
+            double st = 0; for (double x : { s.t.fgBatchMs, s.t.srMs, s.t.nrMs, s.t.videoHdrMs }) if (x > 0) st += x;
+            rest.push_back(std::max(0.0, s.t.graphMs - st));
+        }
     }
     auto p95 = [](std::vector<double>& v) { std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, size_t(v.size() * 0.95))]; };
     auto ema = [](double& v, double x) { v = v * 0.5 + x * 0.5; };
@@ -4585,6 +4593,13 @@ void CPushMpcFilter::LearnCosts()
     }
     if (nr.size() >= 48) { const double x = p95(nr); if (!c.learnedNr) c.nrMs = x; else ema(c.nrMs, x); c.learnedNr = true; }
     if (hdr.size() >= 48) { const double x = p95(hdr) / pix; if (!c.learnedHdr) c.hdr4k = x; else ema(c.hdr4k, x); c.learnedHdr = true; }
+    if (rest.size() >= 48) {
+        // base4k: what the model adds besides the stages it times (Decide: base4k x size x card, the guard's test and flow, deband)
+        const double guard = a.multiplier >= 2 ? c.guardScore * c.card + (m_choice.guardFlow ? c.guardFlow * c.card : 0.0) : 0.0;
+        const double deb = a.deband && m_visW && m_visH ? pm::DebandCost(c, int(a.debandStrength), m_visW, m_visH) : 0.0;
+        const double x = (p95(rest) - guard - deb) / std::max(1e-3, pix * c.card);
+        if (std::isfinite(x)) { const double v = std::clamp(x, 0.2, 20.0); if (!c.learnedBase) c.base4k = v; else ema(c.base4k, v); c.learnedBase = true; }
+    }
     // deband: pushcore's median of the last 64 passes, back to the medium-strength 1080p equivalent (x1.3 for the p95)
     if (a.deband && m_debandMsNow.load() > 0 && m_visW && m_visH) {
         const double unit = pm::DebandCost(pm::Costs{}, int(a.debandStrength), m_visW, m_visH) / pm::Costs{}.deband1080;
@@ -4781,6 +4796,25 @@ void CPushMpcFilter::AutoLoop()
         }
         LearnCosts();
         if (tick % 30 == 0) SaveLearned();
+        if (m_mode == Mode::Active && s.smoother == pm::kAuto) {
+            // the delivery check: generated frames late or dropped at this multiplier although the GPU timings fit -> one
+            // step lower for the rest of this file (DeliveryOverloaded); windows within 5 s of a start, rebuild or seek do not count
+            const int64_t nq = Qpc();
+            const uint64_t late = m_dropGen + m_lateDelivered, gen = m_delGen;
+            int64_t gq; PushCoreSettings ap; { std::lock_guard<std::mutex> lk(m_autoLock); gq = m_graphQpc; ap = m_applied; }
+            const bool settle = QpcMs(nq - std::max({ gq, m_flushStartQpc, m_activeQpc })) < 5000.0 || m_fgRun > PUSHCORE_FG_NVOF;
+            if (!m_capWinQpc || settle) { m_capWinQpc = nq; m_capLate = late; m_capGen = gen; }
+            else if (QpcMs(nq - m_capWinQpc) >= 10000.0) {
+                const uint64_t dl = late - m_capLate, dg = gen - m_capGen;
+                if (pm::DeliveryOverloaded(dl, dg) && ap.multiplier > 2 && (!m_autoCap || int(ap.multiplier) <= m_autoCap)) {
+                    m_autoCap = int(ap.multiplier) - 1;
+                    Log(std::format("Auto: {} of {} generated frames came late or were dropped in 10 s at {}x although the GPU timings fit: at most {}x for this file",
+                        dl, dg, ap.multiplier, m_autoCap));
+                }
+                m_capWinQpc = nq; m_capLate = late; m_capGen = gen;
+            }
+        }
+        s.autoCap = m_autoCap;
         const pm::Source src = SourceInfo();
         pm::Choice c;
         bool weakPf = false;   // a weak GPU with PushFlow installed (its speed test decides PushFlow vs FSR FG)
@@ -4867,7 +4901,7 @@ void CPushMpcFilter::AutoLoop()
         }
         const bool inputs = !(s == appliedS) || !(d == appliedD) || (appliedFps > 0 && std::fabs(src.fps - appliedFps) / appliedFps > 0.03);
         const uint32_t rateSerial = m_rateSerial.load();
-        const char* why = !(s == appliedS) ? "settings" : !(d == appliedD) ? "display" : rateSerial != rateSeen ? "playback rate" : "measured frame rate";
+        const char* why = !(s == appliedS) ? (s.autoCap != appliedS.autoCap ? "delivery check" : "settings") : !(d == appliedD) ? "display" : rateSerial != rateSeen ? "playback rate" : "measured frame rate";
         const int rateKey = int(std::lround(m_rate.load() * 100.0));
         if (inputs && rateSerial != rateSeen && s == appliedS && d == appliedD) {
             // R-RATE1: back at a rate this playback ran before, with the same settings and display: its graph again (it

@@ -281,6 +281,14 @@ int main()
         }
         check(!CoreOutputStalled(800, 40, true) && !CoreOutputStalled(5000, 10, true) && !CoreOutputStalled(5000, 40, false) && CoreOutputStalled(1600, 24, true),
               L"no-output guard: source frames shown after 1.5 s and 24 frames in, nothing out (playing)");
+        {   // the delivery check: late frames at 10x cap Auto one step lower; at 240 Hz fixed that is 5x (the even cadence), VRR 9x
+            check(!DeliveryOverloaded(9, 100) && !DeliveryOverloaded(20, 4000) && DeliveryOverloaded(30, 2400), L"delivery check: 1 % late (and at least 10 frames) in 10 s");
+            Settings capped; capped.autoCap = 9;
+            const Source clipA{ 1920, 1040, 23.976, false, 0.5 };
+            const Choice w = Decide(capped, clipA, d4k, {}, {}), v = Decide(capped, clipA, d4kVrr, {}, {});
+            check(w.multiplier == 5 && v.multiplier == 9 && v.stoppedAt.find(L"delivery measured") != std::wstring::npos,
+                  L"delivery check: capped at 9x -> 5x windowed (even), 9x VRR (said so)", std::format(L"{}x / {}x: {}", w.multiplier, v.multiplier, v.stoppedAt));
+        }
         wprintf(L"  vendor paths: %d failed\n", fails);
     }
     Display real = QueryDisplay(PlayerWindow());

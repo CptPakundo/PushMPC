@@ -58,6 +58,7 @@ enum class BatteryMode { Light = 0, Same = 1 };
 struct Settings {
     bool enable = true;
     int smoother = kAuto;   // kAuto, kOff, 2..16
+    int autoCap = 0;        // runtime only (never stored): Auto's multiplier cap after frames came late at the higher one
     int sharper = kAuto;    // kAuto, kOff, 1..4
     int cleanUp = kAuto;    // kAuto, kOff, 1 = on
     int sdrToHdr = kAuto;   // kAuto, kOff, 1 = on

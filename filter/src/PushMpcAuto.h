@@ -149,6 +149,7 @@ struct Costs {
     double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
+    bool learnedBase = false;                       // base4k from the measured graph minus its stages (LearnCosts)
 };
 
 struct Choice {               // resolved values for pushcore and the filter
@@ -248,6 +249,13 @@ inline constexpr int kNoOutputSubmits = 24;
 inline bool CoreOutputStalled(double msSinceOutput, int submitsSinceOutput, bool running)
 {
     return running && submitsSinceOutput >= kNoOutputSubmits && msSinceOutput >= kNoOutputMs;
+}
+// The delivery check (the filter, every 10 s of playback): this many generated frames dropped or shown late in the window
+// means the multiplier does not hold here even when the GPU timings fit (the renderer's own per-frame work, for one, is
+// not in them): Auto caps the multiplier one step lower for the rest of the file
+inline bool DeliveryOverloaded(uint64_t lateFrames, uint64_t generatedFrames)
+{
+    return lateFrames >= 10 && lateFrames * 100 >= generatedFrames;
 }
 inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
@@ -451,7 +459,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         double bestHold = HoldMs(d, fps);
         bool bestEven = true;
         std::wstring brk;
-        const int maxM = MaxMultiplier(m);
+        const int maxM = s.autoCap >= 2 ? std::min(MaxMultiplier(m), s.autoCap) : MaxMultiplier(m);
         for (int mm = 2; mm <= maxM; ++mm) {
             const double out = fps * mm;
             if (out > d.refreshHz * kRefreshSlack) { brk = std::format(L"refresh {:.2f} Hz ({}x would be {:.1f} fps)", d.refreshHz, mm, out); break; }
@@ -463,7 +471,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
             const bool better = h < bestHold - 0.05 || (std::fabs(h - bestHold) <= 0.05 && (even && !bestEven || even == bestEven));
             if (best == 1 || better) { best = mm; bestHold = h; bestEven = even; }
         }
-        if (brk.empty()) brk = std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
+        if (brk.empty()) brk = maxM < MaxMultiplier(m) ? std::format(L"{}x: frames came late at {}x during this file (delivery measured)", maxM, maxM + 1)
+                                                        : std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
         if (best >= 2 && !bestEven) brk = std::format(L"{}x is uneven at {:.2f} Hz but holds shortest ({:.1f} ms); next: {}", best, d.refreshHz, bestHold, brk);
         else if (lastFit > best) brk = std::format(L"cadence at {:.2f} Hz ({}x would not show frames shorter); next: {}", d.refreshHz, lastFit, brk);
         stop = brk;

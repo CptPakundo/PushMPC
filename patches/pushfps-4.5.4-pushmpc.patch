@@ -342,7 +342,7 @@ index 00000000..19ea835a
 +};
 +}
 diff --git a/include/veyra/pipeline/VfgBackend.h b/include/veyra/pipeline/VfgBackend.h
-index f8c2bb50..9abd42ab 100644
+index f8c2bb50..670a01a3 100644
 --- a/include/veyra/pipeline/VfgBackend.h
 +++ b/include/veyra/pipeline/VfgBackend.h
 @@ -5,6 +5,7 @@
@@ -353,7 +353,7 @@ index f8c2bb50..9abd42ab 100644
  // Public NvVFX 1.3 API. SDK metadata is allocated by NVCVImage.dll; no SDK
  // headers, models or implementation are vendored into the source repository.
  // Borrowed encoded textures stay in the graph's normal FrameLease pool.
-@@ -29,8 +30,12 @@ public:
+@@ -29,25 +30,34 @@ public:
      // The same list also runs the GPU shot-change test of this pair against
      // the other parity's input (comparePrevious=false when the pair has no
      // valid A, e.g. after a reset); copyOutput() of the pair's subframes is
@@ -368,7 +368,14 @@ index f8c2bb50..9abd42ab 100644
      // Signals an OWNED producer fence and queues a GPU wait before copyOutput.
      // Preview offloads the serial CUDA wait/run/signal to a bounded worker;
      // synchronous/export callers retain the immediate SDK rejection verdict.
-@@ -42,12 +47,15 @@ public:
+     // fast: this pair uses the second effect, see fastReady().
+-    bool generate(unsigned parity,unsigned subframe,unsigned multiplier,bool reset,bool fast=false);
++    // PushMPC (local addition): timestep in (0,1) generates at that position instead of subframe/multiplier (the SDK's
++    // timestep mode; the output still goes to the subframe's slot), so a caller can ask for any t of a pair.
++    bool generate(unsigned parity,unsigned subframe,unsigned multiplier,bool reset,bool fast=false,float timestep=0.f);
+     // A second effect is loaded: a mixed tier's second model, or with fastFallback
+     // the next faster model, for pairs the chosen one would finish too late for.
+     bool fastReady() const;
      // Poll after the corresponding consumer fence. A submitted copy is not
      // proof that the SDK accepted the generated frame.
      SubmissionState submissionState(unsigned slot) const;
@@ -2416,7 +2423,7 @@ index 00000000..d52c6834
 +}
 +}  // namespace veyra::pipeline
 diff --git a/src/pipeline/VfgBackend.cpp b/src/pipeline/VfgBackend.cpp
-index 94591579..3a363f0f 100644
+index 94591579..26925e93 100644
 --- a/src/pipeline/VfgBackend.cpp
 +++ b/src/pipeline/VfgBackend.cpp
 @@ -1,5 +1,6 @@
@@ -2456,7 +2463,7 @@ index 94591579..3a363f0f 100644
      std::array<Buffer,kOutputs> outputs;
      gfx::D3D12DeviceContext* context=nullptr;
      Microsoft::WRL::ComPtr<ID3D12Fence> producer,completion;
-@@ -139,10 +145,14 @@ struct VfgBackend::Impl {
+@@ -139,11 +145,15 @@ struct VfgBackend::Impl {
      // AutomaticShotChangeDetection; VEYRA_TEST_VFG_AUTO_SHOT_CHANGE=1 restores
      // the SDK detection (and skips this test) for same-EXE A/B runs.
      bool gpuShotChange=false;
@@ -2464,6 +2471,7 @@ index 94591579..3a363f0f 100644
 -    Microsoft::WRL::ComPtr<ID3D12PipelineState> cutPso;
 -    Microsoft::WRL::ComPtr<ID3D12Resource> cutResults;
 -    D3D12_RESOURCE_STATES cutState=D3D12_RESOURCE_STATE_COMMON;
+-    struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;};
 +    // PushMPC (local addition): the pair test is PushMpcCutGuard's (adaptive, dark, warp and active-area rules in
 +    // VfgShotChange.hlsl; VEYRA_TEST_VFG_FIXED_SHOT_CHANGE=1 keeps PushFPS's fixed thresholds only) and, on a cut,
 +    // the pair's first real frame A is held through the generated slots instead of B shown early
@@ -2472,9 +2480,10 @@ index 94591579..3a363f0f 100644
 +    bool forceTimestep=false;   // PushMPC (local addition): VEYRA_TEST_VFG_TIMESTEP=1
 +    bool timestepMode(unsigned multiplier)const{return forceTimestep||multiplier>kSdkIndexedMultiplierMax;}
 +    CutGuard guard;
-     struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;};
++    struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;float t=0.f;};
      std::array<std::atomic<SubmissionState>,kOutputs> states{};
      std::atomic<bool> failed=false;
+     uint64_t queuedFence=0; // jobsMutex: greatest completion dependency queued for D3D12
 @@ -264,54 +274,32 @@ struct VfgBackend::Impl {
      // Root signature: 12 constants (b0), the previous/current input buffers as
      // raw root SRVs (t0/t1) and the result buffer as a raw root UAV (u0). The
@@ -2549,23 +2558,59 @@ index 94591579..3a363f0f 100644
      }
      void releaseBuffer(Buffer& buffer){
          if(buffer.image){imageDestroy(buffer.image);buffer.image=nullptr;}
+@@ -320,7 +308,7 @@ struct VfgBackend::Impl {
+         buffer.resource.Reset();
+     }
+     bool cudaJob(const Job& job){
+-        const auto [parity,sub,multiplier,reset,revision,value,fast]=job;
++        const auto [parity,sub,multiplier,reset,revision,value,fast,t]=job;
+         Current current(*this);if(!current.active)return false;
+         CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS wait{};wait.params.fence.value=value;
+         bool ok=!failed.load()&&cu(cpuCall(2,[&]{return cuWaitExternalSemaphoresAsyncFn(&inputSemaphore,&wait,1,stream);}),"cuWaitExternalSemaphoresAsync");
 @@ -347,12 +335,14 @@ struct VfgBackend::Impl {
                  cv(cpuCall(6,[&]{return setU32(e.handle,"ShotChange",reset?1u:0u);}),"SetU32 ShotChange");
              if(ok)e.boundPair=pairSerial;
          }
-+        const bool timestep=timestepMode(multiplier);
-         if(ok&&e.boundMultiplier!=multiplier){
+-        if(ok&&e.boundMultiplier!=multiplier){
 -            ok=cv(cpuCall(7,[&]{return setU32(e.handle,"FrameMultiplier",multiplier);}),"SetU32 FrameMultiplier");
-+            ok=cv(cpuCall(7,[&]{return setU32(e.handle,"FrameMultiplier",timestep?0u:multiplier);}),"SetU32 FrameMultiplier");
-             if(ok)e.boundMultiplier=multiplier;
+-            if(ok)e.boundMultiplier=multiplier;
++        const bool timestep=t>0.f||timestepMode(multiplier);const unsigned sdkMultiplier=timestep?0u:multiplier;
++        if(ok&&e.boundMultiplier!=sdkMultiplier){   // boundMultiplier: the value the SDK holds (0 = timestep mode)
++            ok=cv(cpuCall(7,[&]{return setU32(e.handle,"FrameMultiplier",sdkMultiplier);}),"SetU32 FrameMultiplier");
++            if(ok)e.boundMultiplier=sdkMultiplier;
          }
          ok=ok&&cv(cpuCall(5,[&]{return setImage(e.handle,"DstImage0",outputs[parity+2*(sub-1)].image);}),"SetImage output")&&
 -            cv(cpuCall(8,[&]{return setU32(e.handle,"FrameIndex",sub);}),"SetU32 FrameIndex");
-+            (timestep?cv(cpuCall(8,[&]{return setF32(e.handle,"Timestep",float(sub)/float(multiplier));}),"SetF32 Timestep")
++            (timestep?cv(cpuCall(8,[&]{return setF32(e.handle,"Timestep",t>0.f?t:float(sub)/float(multiplier));}),"SetF32 Timestep")
 +                     :cv(cpuCall(8,[&]{return setU32(e.handle,"FrameIndex",sub);}),"SetU32 FrameIndex"));
          if(ok&&testRunDelayMs>0){
              const auto until=std::chrono::steady_clock::now()+std::chrono::duration<double,std::milli>(testRunDelayMs*(second?.3:1));
              while(std::chrono::steady_clock::now()<until)std::this_thread::yield();
+@@ -433,13 +423,13 @@ struct VfgBackend::Impl {
+             {std::lock_guard lock(jobsMutex);--outstanding;}
+         }
+     }
+-    bool handoff(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast){
++    bool handoff(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast,float t=0.f){
+         const unsigned slot=parity+2*(sub-1);
+         if(!asynchronous){
+             std::lock_guard submit(cudaSubmissionMutex);
+             const uint64_t value=++signalValue;
+             if(!hr(cpuCall(1,[&]{return context->directQueue()->Signal(producer.Get(),value);}),"signal VFG producer"))return false;
+-            const bool ok=cudaJob({parity,sub,multiplier,reset,inputRevision,value,fast});
++            const bool ok=cudaJob({parity,sub,multiplier,reset,inputRevision,value,fast,t});
+             if(!ok){
+                 failed.store(true);Current current(*this);
+                 if(current.active&&stream)cu(cuStreamSynchronizeFn(stream),"rejected synchronous job drain");
+@@ -466,7 +456,7 @@ struct VfgBackend::Impl {
+         if(!hr(cpuCall(1,[&]{return context->directQueue()->Signal(producer.Get(),value);}),"signal VFG producer"))return false;
+         // Allocate the queue entry before adding a GPU dependency. Even a host
+         // allocation exception cannot leave a wait with no job to signal it.
+-        jobs.push_back({parity,sub,multiplier,reset,inputRevision,value,fast});
++        jobs.push_back({parity,sub,multiplier,reset,inputRevision,value,fast,t});
+         if(!hr(cpuCall(11,[&]{return context->directQueue()->Wait(completion.Get(),value);}),"queue wait VFG completion")){
+             jobs.pop_back();return false;
+         }
 @@ -494,6 +484,8 @@ bool VfgBackend::initialize(gfx::D3D12DeviceContext& context,const std::wstring&
      p.mixed=engine::vfgMixedQuality(quality);
      p.effects[0].mode=engine::vfgPrimaryMode(quality);p.effects[1].mode=engine::vfgSecondaryMode(quality);
@@ -2589,8 +2634,9 @@ index 94591579..3a363f0f 100644
             !p.cv(p.setImage(e.handle,"SrcImage0",p.inputs[0].image),"initial previous")||!p.cv(p.setImage(e.handle,"SrcImage1",p.inputs[1].image),"initial current")||
             !p.cv(p.loadEffect(e.handle),loadName)||!p.cv(p.setImage(e.handle,"DstImage0",p.outputs[0].image),"initial output")||
 -           !p.cv(p.setU32(e.handle,"FrameMultiplier",multiplier),"initial multiplier"))return false;
+-        e.boundMultiplier=multiplier;return true;
 +           !p.cv(p.setU32(e.handle,"FrameMultiplier",p.timestepMode(multiplier)?0u:multiplier),"initial multiplier"))return false;
-         e.boundMultiplier=multiplier;return true;
++        e.boundMultiplier=p.timestepMode(multiplier)?0u:multiplier;return true;
      };
      for(unsigned i=0;i<(p.mixed?2u:1u);++i)if(!createEffect(p.effects[i],i?"NvVFX_Load second model":"NvVFX_Load"))return false;
 +    if(p.timestepMode(multiplier))log::info("vfg",std::format("multiplier={} runs in the SDK timestep mode (FrameMultiplier 0, Timestep sub/{})",multiplier,multiplier));   // PushMPC (local addition)
@@ -2644,6 +2690,23 @@ index 94591579..3a363f0f 100644
  #endif
  }
  bool VfgBackend::fastReady()const{
+@@ -671,12 +688,12 @@ bool VfgBackend::fastReady()const{
+     return false;
+ #endif
+ }
+-bool VfgBackend::generate(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast){
++bool VfgBackend::generate(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast,float timestep){
+ #ifdef VEYRA_HAVE_CUDA_DRIVER_HEADERS
+-    auto& p=*impl_;if(!p.ready||p.failed.load()||parity>1||multiplier<2||multiplier>p.maxMultiplier||sub<1||sub>=multiplier)return false;
+-    return p.handoff(parity,sub,multiplier,reset,fast);
++    auto& p=*impl_;if(!p.ready||p.failed.load()||parity>1||multiplier<2||multiplier>p.maxMultiplier||sub<1||sub>=multiplier||!(timestep>=0.f&&timestep<1.f))return false;
++    return p.handoff(parity,sub,multiplier,reset,fast,timestep);
+ #else
+-    (void)parity;(void)sub;(void)multiplier;(void)reset;(void)fast;return false;
++    (void)parity;(void)sub;(void)multiplier;(void)reset;(void)fast;(void)timestep;return false;
+ #endif
+ }
+ VfgBackend::SubmissionState VfgBackend::submissionState(unsigned slot)const{
 @@ -686,7 +703,7 @@ VfgBackend::SubmissionState VfgBackend::submissionState(unsigned slot)const{
      (void)slot;return SubmissionState::Failed;
  #endif
