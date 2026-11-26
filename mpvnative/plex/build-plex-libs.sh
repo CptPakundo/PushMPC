@@ -10,6 +10,7 @@ src=$1; out=$2
 mkdir -p "$out"
 cc=gcc; command -v ccache >/dev/null && cc="ccache gcc"
 pins="$here/../pins.json"
+. "$here/../ci/fetch-commit.sh"
 ref=''
 
 build_tree() {   # build_tree <label>: the tree in $src is checked out
@@ -36,19 +37,16 @@ build_tree() {   # build_tree <label>: the tree in $src is checked out
     ref="$out/$name"
 }
 
-# release tags (git.ffmpeg.org)
+# release tags (fetched by their pinned commit)
 tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.load(open(sys.argv[1]))['hookTags'] if re.fullmatch(r'n5\.[01](\.\d+)?', t['tag'])))" "$pins")
 for tag in $tags; do
     commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$pins" "$tag")
-    if [ ! -d "$src/.git" ]; then git clone -q --depth 1 -b "$tag" https://git.ffmpeg.org/ffmpeg.git "$src"
-    else git -C "$src" fetch -q --depth 1 origin tag "$tag" && git -C "$src" checkout -q -f "$tag"; fi
-    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
+    fetch_commit "$src" "$commit" https://git.ffmpeg.org/ffmpeg.git "$tag" || exit 1   # by commit (the pin), never by tag name alone
     build_tree "$tag"
 done
 # master snapshots (by commit, from the GitHub mirror, which serves single commits)
 for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in json.load(open(sys.argv[1])).get('snapshotCommits', [])))" "$pins"); do
-    git -C "$src" fetch -q --depth 1 https://github.com/FFmpeg/FFmpeg.git "$commit" && git -C "$src" checkout -q -f "$commit"
-    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::snapshot $commit: checkout failed"; exit 1; }
+    fetch_commit "$src" "$commit" https://github.com/FFmpeg/FFmpeg.git || exit 1
     build_tree "master@${commit:0:12}"
 done
 # the proxy: libavfilter 8's exports, forwarded
