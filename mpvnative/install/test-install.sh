@@ -1,6 +1,6 @@
 #!/bin/sh
 # test-install.sh <folder with the hook files> <work dir>: pushmpc-native.sh in a fake HOME against the system's mpv:
-# install (with an existing mpv.conf), play through the installed config (x4), status, uninstall (byte-exact restore,
+# install (with an existing mpv.conf, then with none), play through the installed config (x4), status, uninstall (byte-exact restore,
 # folder gone). Needs mpv, ffmpeg (ffprobe) and python3.
 set -u
 H=$1; T=$2; HERE=$(cd "$(dirname "$0")" && pwd)
@@ -27,4 +27,11 @@ un=$(sh "$HERE/pushmpc-native.sh" uninstall --target native --json); echo "unins
 cmp -s "$T/orig.conf" "$XDG_CONFIG_HOME/mpv/mpv.conf" || { echo "mpv.conf not restored byte for byte"; fails=$((fails + 1)); }
 [ ! -e "$XDG_DATA_HOME/pushmpc/mpvnative" ] || { echo "install folder left behind"; fails=$((fails + 1)); }
 ls "$XDG_CONFIG_HOME/mpv/" | grep -q pushmpc-native && { echo "backup files left behind"; fails=$((fails + 1)); }
+# a fresh system: no mpv.conf before install, none after uninstall
+rm -f "$XDG_CONFIG_HOME/mpv/mpv.conf"
+out=$(sh "$HERE/pushmpc-native.sh" install --from "$H" --target native --json); echo "install (no mpv.conf): $out"
+echo "$out" | grep -q '"state":"installed"' || fails=$((fails + 1))
+grep -q pushmpc "$XDG_CONFIG_HOME/mpv/mpv.conf" 2>/dev/null || { echo "no mpv.conf block written on a fresh system"; fails=$((fails + 1)); }
+sh "$HERE/pushmpc-native.sh" uninstall --target native --json > /dev/null
+[ ! -e "$XDG_CONFIG_HOME/mpv/mpv.conf" ] || { echo "mpv.conf left behind on a fresh system"; fails=$((fails + 1)); }
 [ "$fails" = 0 ] && echo "install: all checks passed" || { echo "install: $fails check(s) failed"; exit 1; }

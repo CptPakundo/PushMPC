@@ -29,7 +29,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifndef PUSHMPC_PRELOAD
 #include <mpv/client.h>
+#endif
 
 typedef const void *(*get_by_name_fn)(const char *);
 typedef unsigned (*version_fn)(void);
@@ -241,13 +243,36 @@ static int install(void)
     if (!g_real_parse2 || !g_api.segment_parse || !g_api.segment_apply || !g_api.segment_free || !g_api.alloc_filter ||
         !g_api.filter_free)
         g_glue_parse2 = NULL;
+#ifdef PUSHMPC_PRELOAD
+    g_glue_parse2 = NULL;   /* the preload interposes avfilter_get_by_name only */
+    logf_("libavfilter %u.%u.%u, %s; avfilter_get_by_name interposed (LD_PRELOAD); ", v >> 16, (v >> 8) & 255, v & 255,
+          strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+    return 0;
+#else
     dl_iterate_phdr(each_object, NULL);
     logf_("libavfilter %u.%u.%u, %s; rebound avfilter_get_by_name x%d, avfilter_graph_parse2 x%d%s; ", v >> 16,
           (v >> 8) & 255, v & 255, strrchr(path, '/') ? strrchr(path, '/') + 1 : path, g_patched_name, g_patched_parse,
           g_glue_parse2 ? "" : " (graph strings: unavailable)");
     return g_patched_name > 0 ? 0 : -1;
+#endif
 }
 
+#ifdef PUSHMPC_PRELOAD
+#include <pthread.h>
+static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+static void preload_init(void)
+{
+    if (install() == 0) fprintf(stderr, "[pushmpc_preload] %s\n", g_log);
+    else fprintf(stderr, "[pushmpc_preload] not active: %s\n", g_log);
+    if (!g_real) g_real = (get_by_name_fn)dlsym(RTLD_NEXT, "avfilter_get_by_name");   /* never break the program */
+}
+/* LD_PRELOAD: this definition comes before libavfilter's in the global scope, so libmpv's calls land here */
+__attribute__((visibility("default"))) const void *avfilter_get_by_name(const char *name)
+{
+    pthread_once(&g_once, preload_init);
+    return hook_get_by_name(name);
+}
+#else
 int mpv_open_cplugin(mpv_handle *h)
 {
     char *opts = mpv_get_property_string(h, "script-opts");
@@ -281,3 +306,4 @@ int mpv_open_cplugin(mpv_handle *h)
     }
     return 0;
 }
+#endif
