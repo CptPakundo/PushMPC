@@ -15,14 +15,15 @@ grep -q 'pushmpc_hook_glue.o' "$tree/libavfilter/Makefile" || \
 grep -q 'pushmpc_hook_glue.o' "$tree/libavfilter/Makefile"
 cd "$tree"
 cc=cc; command -v ccache >/dev/null && cc="ccache cc"
-if [ ! -f config_components.h ] || ! grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h; then
+if ! grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h; then
     ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
         --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
         $(./configure --help | grep -q disable-postproc && echo --disable-postproc) --disable-asm > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
 fi
-grep -q 'CONFIG_PUSHMPC_FILTER 1' config_components.h
+grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h   # 5.0 has no config_components.h
 make -j"$(nproc)" >/dev/null
-maj=$(sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' libavfilter/version_major.h libavfilter/version.h | head -1)
+vdir=libavfilter/
+maj=$( (cat "${vdir}version_major.h" "${vdir}version.h" 2>/dev/null || true) | sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
 min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' libavfilter/version.h | head -1)
 mic=$(sed -n 's/^#define LIBAVFILTER_VERSION_MICRO *\([0-9]*\).*/\1/p' libavfilter/version.h | head -1)
 so=$(ls libavfilter/libavfilter.so.* | grep -E '\.so\.[0-9]+$' | head -1)

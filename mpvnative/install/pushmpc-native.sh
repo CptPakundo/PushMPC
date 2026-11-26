@@ -134,7 +134,7 @@ do_target() {   # do_target <name> <conf> <dest> <mpv command...>
         fi
         le=$(line_ending "$conf")
         tmp=$conf.pushmpc-native-tmp
-        { block "$dest" "$le"; [ -f "$conf" ] && strip_block "$conf"; } > "$tmp" && mv "$tmp" "$conf" || return 1
+        { block "$dest" "$le"; [ ! -f "$conf" ] || strip_block "$conf"; } > "$tmp" && mv "$tmp" "$conf" || return 1
         detail=$(probe "$@")
         case $detail in
             *"not active"*) emit "$name" installed-inactive "$detail"; return 3 ;;

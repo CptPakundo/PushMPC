@@ -52,7 +52,11 @@ struct Config {
                                         // default: on an RTX 5090 it was slower (4K: 17.0 vs 6.8 ms a pair) and not better
                                         // (synthetic zoom: 37.85 vs 38.06 dB) than the block matcher at quality 2
     float errorLow = 24.f, errorHigh = 48.f;
+    bool importable = false;            // source slots writable by Import (a decoder's GPU frames: Android hardware buffers)
     bool deviceReadback = false;        // outputs stay in device memory for Export (frames of an external device: no Read)
+    // the packed output's layout: semiPlanarOut puts U and V interleaved (NV12 / P010); msbOut stores samples in the high
+    // bits of 16 (P010). Both default off: planar, low bits (the VapourSynth and Kodi planar formats)
+    bool semiPlanarOut = false, msbOut = false;
     bool refined = true;                // InterpolatePlanesRefined's rule (portable_engine.h); false: PushFPS's own
     float boundaryPx = 1.0f;
     // the block matcher at quality 2 (8 px blocks on the full-size picture): search on a 3x3 binomial-filtered copy; double
@@ -115,6 +119,8 @@ public:
     virtual bool Record(VkCommandBuffer cb, const PairGpu& pair, float t, const SynthTarget& target, std::string& err) = 0;
 };
 
+// where an output frame lies in its buffer (packed rows): Y at 0, U at offU, V at offV; one output = stride bytes
+struct OutputLayout { int pitchY = 0, pitchC = 0; uint64_t offU = 0, offV = 0, stride = 0; };
 // ---- frames of an external device (FFmpeg's Vulkan frames in mpv): the caller records the copy in (Import) or out
 // (Export) into the engine's command buffer, with the owner's timeline semaphores to wait for and to signal.
 struct ExternalSync { std::vector<VkSemaphore> wait, signal; std::vector<uint64_t> waitValue, signalValue; };
@@ -180,6 +186,17 @@ public:
     void Read(int out, const YuvOut& o);
     void ReleaseOut(int out);
 
+    // zero copy (Linux): a player's dma-buf frame buffer imported as an output target laid out as Layout() says; the
+    // frame is written straight into it (no readback, no copy). ImportOutput returns an id, or -1 with the reason.
+    bool DmaBufImport() const;
+    OutputLayout Layout() const;
+    int ImportOutput(int fd, uint64_t size, std::string& err);
+    // the same for a host memory range (VK_EXT_external_memory_host): ptr and size aligned to HostImportAlignment()
+    uint64_t HostImportAlignment() const;   // 0: not supported
+    int ImportHostOutput(void* ptr, uint64_t size, std::string& err);
+    void ReleaseOutput(int id);
+    bool GenerateInto(int pair, float t, int mode, int output, uint64_t& ticket, std::string& err);
+    bool RealInto(int slot, int output, uint64_t& ticket, std::string& err);
     // ---- zero-copy hosts (VA-API dmabufs imported in VLC): the host records its own commands into the engine's command
     // buffer, ordered on the engine's timeline. UploadWith: rec writes the source into `planar` (device memory, Upload's
     // staging layout: rows of width x bytes per sample, packed; U at offU, V at offV, all 4-byte aligned), then the

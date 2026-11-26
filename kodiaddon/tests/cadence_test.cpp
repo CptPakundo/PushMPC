@@ -142,12 +142,21 @@ static void KodiEngine(int upscale)
     CHECK(k >= 1 && k <= 5);
 }
 
+#include "zero_copy_test.inc"
+
 int main()
 {
     Schedule();
     Engine();
     KodiEngine(0);
     KodiEngine(1);
+    ZeroCopy();
+    ZeroCopyP010();
+    HostImport();
+    SemiPlanar(8);
+    SemiPlanar(10);
+    ToneMap();
+    PlatformChecks();
     std::printf(g_fail ? "cadence_test: %d failure(s)\n" : "cadence_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
