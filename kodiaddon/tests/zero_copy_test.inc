@@ -177,6 +177,11 @@ static void SemiPlanar(int bits)
     for (size_t i = 0; i < size_t(W / 2) * (H / 2); ++i) bad += at(uv2, 2 * i) != (at(u1, i) << sh) || at(uv2, 2 * i + 1) != (at(v1, i) << sh);
     std::printf("semi-planar %d-bit: %ld samples differ from the planar output\n", bits, bad);
     CHECK(bad == 0);
+    // the multiplier calibration reads the engine's NV12 / P010 output back (it once overran a planar-sized buffer)
+    std::string kwhy;
+    const int k = semi->DecideK(0, 23.976, 120.0, kwhy);
+    std::printf("semi-planar %d-bit: calibration gives x%d (%s)\n", bits, k, kwhy.c_str());
+    CHECK(k >= 1);
 }
 
 // Kodi 21 HDR to SDR: neutral greys stay neutral, black stays black, brighter PQ codes give brighter SDR codes, and the
