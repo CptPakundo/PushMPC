@@ -79,6 +79,14 @@ msgctxt "#30018"
 msgid "x10"
 msgstr ""
 
+msgctxt "#30019"
+msgid "x12"
+msgstr ""
+
+msgctxt "#30029"
+msgid "x16"
+msgstr ""
+
 msgctxt "#30020"
 msgid "Fast"
 msgstr ""

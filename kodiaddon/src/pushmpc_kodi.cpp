@@ -90,7 +90,7 @@ std::string FfErr(int e)
 // ------------------------------------------------------------------------------------------- settings (add-on UI)
 struct Settings {
     bool enabled = true;
-    int smoother = 0;   // 0 Auto, 1 off, 2..10 fixed
+    int smoother = 0;   // 0 Auto, 1 off, 2..16 fixed (clamped to what the engine reports: IEngine::MaxK, pushcore's own k)
     int quality = 1;
     bool hdr = true;
     int upscale = 0;    // 0 Kodi's scaler, 2 = x2 in the add-on (test)
@@ -784,8 +784,9 @@ private:
         } else if (m_engine->FixedK() > 0) {   // the NVIDIA engine: its own Auto plan, fixed for the stream
             m_k = std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why));
         } else if (m_settings.smoother >= 9) {
-            m_k = std::min(m_settings.smoother, 16);
-            why = "x" + std::to_string(m_k) + " (your setting)";
+            m_k = std::min(m_settings.smoother, m_engine->MaxK());
+            why = "x" + std::to_string(m_k) + (m_k < m_settings.smoother ? " (your setting x" + std::to_string(m_settings.smoother) +
+                  ", this engine's highest)" : " (your setting)");
         } else {
             m_k = std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why));
             // Auto upscaling only where the GPU keeps up: one upscaled frame must fit the same budget as Auto's
@@ -803,6 +804,7 @@ private:
                 m_k = m_engine ? std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why)) : 1;
             }
         }
+        if (m_engine) m_k = std::clamp(m_k, 1, std::max(1, m_engine->MaxK()));
         const int up = m_settings.upscale == 2 ? 2 : 1;
         m_outW = m_engine ? m_engine->OutWidth() * up : p->width * up;
         m_outH = m_engine ? m_engine->OutHeight() * up : p->height * up;
@@ -836,7 +838,7 @@ private:
         c.transfer = m_trc == AVCOL_TRC_SMPTE2084 ? 16 : m_trc == AVCOL_TRC_ARIB_STD_B67 ? 18 : 1;
         c.primaries = m_prim == AVCOL_PRI_BT2020 || (m_prim == AVCOL_PRI_UNSPECIFIED && c.matrix == 9) ? 9 : 1;
         c.range = p->color_range == AVCOL_RANGE_JPEG ? 2 : 1;
-        c.smoother = m_settings.smoother;   // 0 Auto (PushMPC's Smoother setting), 2..10
+        c.smoother = m_settings.smoother;   // 0 Auto (PushMPC's Smoother setting), 2..16: pushcore clamps it and reports its k
         c.displayHz = hz;
         c.warp = std::getenv("PUSHMPC_KODI_WARP") != nullptr;
         auto pc = std::make_unique<pmk::PushcoreRoute>();

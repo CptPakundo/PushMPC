@@ -22,6 +22,8 @@
               <option label="30016">6</option>
               <option label="30017">8</option>
               <option label="30018">10</option>
+              <option label="30019">12</option>
+              <option label="30029">16</option>
             </options>
           </constraints>
           <control type="list" format="string"/>

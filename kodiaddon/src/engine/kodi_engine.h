@@ -69,9 +69,16 @@ public:
     virtual EngineStats Stats() const = 0;
     // > 0: the multiplier this engine was opened for (it cannot change per stream)
     virtual int FixedK() const { return 0; }
+    // the highest multiplier this engine produces; a fixed setting above it is clamped to it
+    virtual int MaxK() const { return FixedK() > 0 ? FixedK() : 8; }
     // Auto's multiplier for this engine (display refresh / source fps within the measured budget)
     virtual int DecideK(int smoother, double srcFps, double displayHz, std::string& why) = 0;
 };
+
+// the portable engines' (CPU and GPU) highest multiplier: vsplugin/src/backend.h kPortableMaxK, which equals PushMPC's
+// ceiling PUSHCORE_MAX_MULTIPLIER (16). Kept here as a number because this branch's backend.h predates kPortableMaxK;
+// at the merge it can become pmvs::kPortableMaxK.
+inline constexpr int kPortableEngineMaxK = 16;
 
 // Linux with NVIDIA: the nvl engine (kodi_nvl.cpp), or null with the reason
 std::unique_ptr<IEngine> OpenNvl(const EngineCfg& cfg, std::string& why);

@@ -49,6 +49,7 @@ public:
         pm_engine_stats_get(m_e, &s);
         return EngineStats{s.pushed, s.pairs, s.cuts, s.generated, s.me_ms, s.gen_ms};
     }
+    int MaxK() const override { return kPortableEngineMaxK; }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         char b[512] = {};
@@ -186,6 +187,7 @@ public:
         uint64_t ticket = 0;
         return m_e.RealInto(slot, id, ticket, err) && m_e.Wait(ticket, err);
     }
+    int MaxK() const override { return kPortableEngineMaxK; }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         static std::mutex mu;
