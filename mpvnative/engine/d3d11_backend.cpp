@@ -468,11 +468,14 @@ private:
             w.api->close(w.core); w.core = nullptr; how = "reopen (stream or device changed)";
         }
         if (!w.core) {
-            const std::wstring runtime = m_runtimeRoot.empty() ? coreDir : m_runtimeRoot;
+            // as the filter and the VapourSynth route open it: the runtime root is PushFPS's folder for pushcore (its
+            // runtime\ and runtime_local\ hold the VFG, VSR and FidelityFX files); the core folder only gives the shaders.
+            // (R-MN1: with the core folder as that root, every frame generation backend failed to start.)
+            const std::wstring root = m_runtimeRoot.empty() ? coreDir : m_runtimeRoot;
             const std::wstring shaders = coreDir + L"\\shaders";
             PushCoreConfig cfg = {};
             cfg.structSize = sizeof(cfg); cfg.abiVersion = PUSHCORE_ABI_VERSION;
-            cfg.pushfpsDir = coreDir.c_str(); cfg.dataDir = L""; cfg.runtimeDir = runtime.c_str();
+            cfg.pushfpsDir = root.c_str(); cfg.dataDir = L""; cfg.runtimeDir = nullptr;
             cfg.sr = -1; cfg.fg = -1; cfg.multiplier = -1; cfg.vfgQuality = -1;
             cfg.shaderDir = DirExists(shaders) ? shaders.c_str() : nullptr;
             cfg.settings = &m_ps;
