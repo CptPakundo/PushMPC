@@ -404,6 +404,16 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     const HWND wnd = MpvWindow();
     d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg);
     d->choice = pm::Decide(s, d->src, d->disp, costs, g);
+    // this route reads every output frame back to the CPU: Auto stops at the readback the route sustains (schedule.h)
+    if (s.smoother == pm::kAuto && d->choice.multiplier > 1) {
+        const bool ten = f.bitsPerSample > 8 || d->src.hdr;
+        const int maxK = ReadbackMaxK(uint32_t(d->choice.outW ? d->choice.outW : w), uint32_t(d->choice.outH ? d->choice.outH : hh), ten, d->src.fps);
+        if (d->choice.multiplier > maxK) {
+            Log(std::format("Auto: x{} lowered to x{}: the CPU readback of this route sustains {:.1f} GB/s ({}x{} {}-bit 4:2:0; PushMPC's own mpv and players with PushMPC's libmpv keep the picture on the GPU)",
+                d->choice.multiplier, maxK, kReadbackLimitGBs, d->choice.outW, d->choice.outH, ten ? 10 : 8));
+            d->choice.multiplier = maxK;
+        }
+    }
     const pm::Choice& c = d->choice;
 
     Log(std::format("script instance: {}x{} {}-bit, {}/{} fps, {} frames; colour {} (matrix {} transfer {} primaries {} range {}); settings from the registry{}",

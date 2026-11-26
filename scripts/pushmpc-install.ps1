@@ -123,12 +123,15 @@ param(
     # pushmpc_engine.dll), staged as plexnative\ with mpvnative\install\pushmpc-plex-native.ps1
     [string]$PlexNative = '',
     # PushMPC's own mpv build for Windows (mpv-native.yml): stage: the release asset's zip and its download URL (the
-    # filter component gets mpvbuild.json with both and the SHA-256); install: -MpvBuild Yes installs it (Setup's
-    # checkbox, off by default)
+    # filter component gets mpvbuild.json with both and the SHA-256); install: -MpvBuild Auto (default) installs it when
+    # an mpv-family player is found (mpv, mpv.net, MPC-QT, Jellyfin Desktop, Stremio), Yes always, No never (Setup's
+    # checkbox). Players with their own libmpv then get PushMPC's (-LibmpvSwap Auto | No; pushmpc-libmpv.ps1).
     [string]$MpvBuildZip = '',
     [string]$MpvBuildUrl = '',
-    [ValidateSet('No', 'Yes')]
-    [string]$MpvBuild = 'No',
+    [ValidateSet('Auto', 'No', 'Yes')]
+    [string]$MpvBuild = 'Auto',
+    [ValidateSet('Auto', 'No')]
+    [string]$LibmpvSwap = 'Auto',
     # capture mode, the fallback for players without a native route: Auto = on only when such a player is found
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$Capture = 'Auto',
@@ -1436,12 +1439,15 @@ function Use-EarlierChoices($state) {
     if ($Pmml -eq 'Auto' -and $c.pmml -ne 'Yes' -and -not (Get-StateValue $state 'pmmlInstalled')) { $script:Pmml = 'No'; Info 'PushFlow runtime: this install did not have it, so a repair or update does not download it (-Pmml Yes adds it)' }
     if ($FidelityFx -eq 'Auto' -and $c.fsr -eq 'Package') { $script:FidelityFx = 'Package' }
     if ($PlexSwap -eq 'Auto' -and $c.plex -eq 'No') { $script:PlexSwap = 'No' }
+    if ($MpvBuild -eq 'Auto' -and $c.PSObject.Properties['mpvbuild'] -and $c.mpvbuild -eq 'No') { $script:MpvBuild = 'No' }
+    if ($LibmpvSwap -eq 'Auto' -and $c.PSObject.Properties['libmpv'] -and $c.libmpv -eq 'No') { $script:LibmpvSwap = 'No' }
 }
 function Save-Choices($state) {
     $fsr = if ($FidelityFx -eq 'Package' -or $GpuVendor -ne 'AMD') { 'Package' } else { 'Auto' }
     $gi = Get-GpuInfo
     $pm = if ($Pmml -ne 'No' -and @(Get-PmmlEps (Get-GpuFamily $gi) $gi).Count) { 'Yes' } else { 'No' }
-    Set-StateValue $state 'choices' ([pscustomobject][ordered]@{ pmml = $pm; fsr = $fsr; plex = $(if ($PlexSwap -eq 'No') { 'No' } else { 'Yes' }) })
+    Set-StateValue $state 'choices' ([pscustomobject][ordered]@{ pmml = $pm; fsr = $fsr; plex = $(if ($PlexSwap -eq 'No') { 'No' } else { 'Yes' })
+        mpvbuild = $(if ($MpvBuild -eq 'No') { 'No' } else { 'Yes' }); libmpv = $(if ($LibmpvSwap -eq 'No') { 'No' } else { 'Yes' }) })
 }
 # Builds the runtime component for install/update into staging\runtime-<version>: from a staged runtime of the same
 # package and subset (developer builds), else from the package (cache, own download folder, or Veyra's release).
@@ -1560,7 +1566,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1', 'pushmpc-libmpv.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -2884,11 +2890,23 @@ function Uninstall-KodiRoute($state) {
 # mpvnative\install\pushmpc-native.ps1 into <InstallDir>\mpv-native, with a Start menu entry "PushMPC mpv". The user's own
 # mpv keeps the VapourSynth route.
 $MpvLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'PushMPC\PushMPC mpv.lnk'
+# an mpv-family player on this PC (MpvBuild Auto): mpv, or a player with its own libmpv
+function Test-MpvFamily {
+    if (@(Get-Command mpv.exe, mpvnet.exe -ErrorAction SilentlyContinue).Count) { return $true }
+    $roots = @("$env:ProgramFiles", ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'), (Join-Path $env:USERPROFILE 'scoop\apps')) | Where-Object { $_ }
+    $rel = @('mpv\mpv.exe', 'mpv\current\mpv.exe', 'mpv.net\mpvnet.exe', 'mpv.net\current\mpvnet.exe', 'mpc-qt\mpc-qt.exe', 'mpc-qt\current\mpc-qt.exe',
+             'Jellyfin Desktop\Jellyfin Desktop.exe', 'Jellyfin Media Player\JellyfinMediaPlayer.exe', 'Stremio\stremio-shell-ng.exe', 'LNV\Stremio-5\stremio-shell-ng.exe')
+    foreach ($r in $roots) { foreach ($x in $rel) { if (Test-Path -LiteralPath (Join-Path $r $x)) { return $true } } }
+    return $false
+}
 function Install-MpvBuild($state) {
-    if ($MpvBuild -ne 'Yes') { return }
+    if ($MpvBuild -eq 'No') { return }
+    if ($MpvBuild -eq 'Auto' -and -not (Get-StateValue $state 'mpvBuild') -and -not (Test-MpvFamily)) { Info "PushMPC's mpv: not needed (no mpv-family player found; -MpvBuild Yes installs it anyway)"; return }
     $fd = @((Join-Path $StageDir 'filter'), (Join-Path $InstallDir 'filter')) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'mpvbuild.json') } | Select-Object -First 1
     if (-not $fd -or -not (Test-Path -LiteralPath (Join-Path $fd 'pushmpc-native.ps1'))) { Warn "PushMPC's mpv: this build has none"; return }
     $mb = Get-Content -LiteralPath (Join-Path $fd 'mpvbuild.json') -Raw | ConvertFrom-Json
+    # already installed from this very build (a repair, or an update without a new mpv): nothing to download
+    if ((Get-StateValue $state 'mpvBuildSha') -ieq $mb.sha256 -and (Test-Path -LiteralPath (Join-Path $InstallDir 'mpv-native\mpv.exe'))) { Info "PushMPC's mpv is installed (this build)"; return }
     $zip = Join-Path $InstallDir "download\$($mb.asset)"
     if ($DryRun) { Dry "would download $($mb.url) (SHA-256 $($mb.sha256)) and install it into $InstallDir\mpv-native"; return }
     New-Item -ItemType Directory -Force (Split-Path $zip) | Out-Null
@@ -2923,7 +2941,25 @@ function Install-MpvBuild($state) {
         $sh.Description = "PushMPC's own mpv player"; $sh.Save()
     }
     Set-StateValue $state 'mpvBuild' (Get-Date).ToString('s')
+    Set-StateValue $state 'mpvBuildSha' "$($mb.sha256)"
     Info "PushMPC's mpv is installed (Start menu: PushMPC mpv)"
+}
+# Players with their own libmpv (mpv.net, MPC-QT, Jellyfin Desktop, Stremio): PushMPC's libmpv in their folder after a
+# self-test there (pushmpc-libmpv.ps1; it keeps its own state and logon check)
+function Get-LibmpvScript { foreach ($p in @((Join-Path $InstallDir 'filter\pushmpc-libmpv.ps1'), (Join-Path $StageDir 'filter\pushmpc-libmpv.ps1'), (Join-Path $here 'pushmpc-libmpv.ps1'))) { if ($p -and (Test-Path -LiteralPath $p)) { return $p } }; return '' }
+function Invoke-LibmpvSwap([string]$verb) {
+    $s = Get-LibmpvScript
+    if (-not $s) { if ($verb -eq 'restore' -and (Test-Path -LiteralPath (Join-Path $InstallDir 'libmpv-swap'))) { Warn "pushmpc-libmpv.ps1 not found: the players' own libmpv is not put back (backups in $InstallDir\libmpv-swap\backup)" }; return }
+    $a = @{ InstallDir = $InstallDir; Machine = $Machine; DryRun = $DryRun }
+    if ($NoTask) { $a.NoTask = $true }
+    $out = & $s $verb @a
+    foreach ($l in @($out)) { if ($l) { [Console]::Out.WriteLine($l) } }
+}
+function Install-LibmpvSwap($state) {
+    if ($LibmpvSwap -eq 'No') { if (Test-Path -LiteralPath (Join-Path $InstallDir 'libmpv-swap')) { Invoke-LibmpvSwap 'restore' }; Info 'Players with their own libmpv: left as they are (-LibmpvSwap No)'; return }
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'mpv-native\libmpv-2.dll'))) { return }
+    Step "Players with their own libmpv (mpv.net, MPC-QT, Jellyfin Desktop, Stremio)"
+    Invoke-LibmpvSwap 'apply'
 }
 function Uninstall-MpvBuild($state) {
     if (-not (Get-StateValue $state 'mpvBuild') -and -not (Test-Path -LiteralPath (Join-Path $InstallDir 'mpv-native'))) { return }
@@ -2959,6 +2995,7 @@ function Find-CaptureOnlyPlayers([object[]]$mpvRows) {
     # mpv-integration's rows: a player it found but cannot give frame generation (Plex: upscaling only; Stremio before
     # 5.0.28: no config setting)
     foreach ($r in @($mpvRows)) {
+        if ($r.Player -eq 'Stremio' -and $r.Exe -and (Test-Path -LiteralPath (Join-Path (Split-Path $r.Exe) 'pushmpc-libmpv.txt'))) { continue }   # PushMPC's libmpv (pushmpc-libmpv.ps1)
         if ($r.Player -match '^(Plex|Stremio)' -and ($r.Kind -in 'plex', 'none')) { $out += "$($r.Player) ($(if ($r.Kind -eq 'plex') { 'native upscaling only' } else { 'no native route' }))" }
         elseif ($r.Kind -in 'kodi', 'shim' -and -not $r.Managed) { $out += "$($r.Player) (needs mpv for the native route)" }
     }
@@ -3092,7 +3129,8 @@ switch ($Action) {
         Install-MpvRoute $state
         Step 'VLC'
         $vlcOk = $false; try { $vlcOk = Install-VlcRoute $state } catch { Warn "VLC: not set up ($($_.Exception.Message)); capture mode covers VLC" }
-        if ($MpvBuild -eq 'Yes') { Step "PushMPC's own mpv"; try { Install-MpvBuild $state } catch { Warn "PushMPC's mpv: not installed ($($_.Exception.Message))" } }
+        if ($MpvBuild -ne 'No') { Step "PushMPC's own mpv"; try { Install-MpvBuild $state } catch { Warn "PushMPC's mpv: not installed ($($_.Exception.Message))" } }
+        try { Install-LibmpvSwap $state } catch { Warn "Players with their own libmpv: not changed ($($_.Exception.Message))" }
         Step 'PushFlow runtime for this GPU (pmml)'
         try { Install-PmmlRuntime $state } catch { Warn "PushFlow runtime: not installed ($($_.Exception.Message)); PushFlow runs on DirectML" }
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
@@ -3252,6 +3290,7 @@ switch ($Action) {
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
+        try { Invoke-LibmpvSwap 'restore' } catch { Warn "Players with their own libmpv: not put back ($($_.Exception.Message)); the backups are in $InstallDir\libmpv-swap\backup" }
         try { Uninstall-MpvBuild $state } catch { Warn "PushMPC's mpv: not removed ($($_.Exception.Message))" }
         try { Uninstall-KodiRoute $state } catch { Warn "Kodi add-on: not removed ($($_.Exception.Message))" }
         try { Uninstall-PlexRoute $state } catch { Warn "Plex: its own libmpv was not put back ($($_.Exception.Message)); the backup is in $InstallDir\plex\backup" }

@@ -250,15 +250,23 @@ inline Reuse DecideReuse(bool haveCore, const CoreKey& cur, const CoreKey& next)
 }
 
 // ------------------------------------------------------------------------------------------------ readback bandwidth
-// 4:4:4 readback above this (GB/s, one direction; mpv's re-upload costs the same again) goes 4:2:0 on the GPU first
-// (4K at <= 120 fps is fine in 4:4:4, 4K HDR at 240 is not).
-inline constexpr double kReadbackLimitGBs = 6.0;
+// What the route sustains (GB/s read back, one direction; mpv's re-upload costs the same again), measured on an RTX 5090
+// in mpv (test pass 2026-11-26): 4K RGB24 x2 = 1.15 GB/s played clean, x4 = 2.30 GB/s dropped 2328 of 4000 frames.
+// Above it Auto converts to 4:2:0 on the GPU first, and Auto's multiplier stops where even 4:2:0 would exceed it
+// (ReadbackMaxK). Faster routes (vf_pushmpc, zero copy) have no such limit.
+inline constexpr double kReadbackLimitGBs = 1.6;
 enum class Chroma { Auto = 0, C444 = 1, C420 = 2 };
 inline double ReadbackGBs(uint32_t w, uint32_t h, bool tenBit, bool c444, double outFps)
 {
     const double bytesPerSample = tenBit ? 2.0 : 1.0;
     const double samples = double(w) * h * (c444 ? 3.0 : 1.5);
     return samples * bytesPerSample * outFps / 1e9;
+}
+// the largest multiplier whose 4:2:0 readback fits kReadbackLimitGBs (at least 1)
+inline int ReadbackMaxK(uint32_t w, uint32_t h, bool tenBit, double srcFps)
+{
+    const double one = ReadbackGBs(w, h, tenBit, false, srcFps > 0 ? srcFps : 23.976);
+    return one <= 0 ? 16 : std::max(1, int(kReadbackLimitGBs / one + 1e-9));
 }
 struct ChromaDecision { bool use420 = false; double gbs444 = 0, gbs420 = 0; std::string why; };
 inline ChromaDecision DecideChroma(Chroma mode, uint32_t w, uint32_t h, bool tenBit, double outFps)

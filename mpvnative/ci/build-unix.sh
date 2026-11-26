@@ -68,8 +68,12 @@ make install >/dev/null
 cd "$ROOT"
 
 # mpv 0.42.0 against it
-if ! done_ mpv mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ]; }; then
+# (stamp mpvpm-<hash of mpvnative/mpv>: mpv with PushMPC's additions; Windows: D3D11 frames into OpenGL players,
+# mpvnative/mpv/hwdec_d3d11gldx.c; a change there rebuilds mpv from a cached prefix)
+MPVPM="mpvpm-$(cat "$ROOT"/mpvnative/mpv/hwdec_d3d11gldx.c "$ROOT"/mpvnative/mpv/add-to-mpv.py | sha1sum | cut -c1-10)"
+if ! done_ "$MPVPM" mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ]; }; then
     fetch mpv "$S/mpv"
+    [ "$OS" = msys2 ] && { python3 "$ROOT/mpvnative/mpv/add-to-mpv.py" "$S/mpv" || exit 1; }
     rm -rf "$S/mpv/b"
     extra=()
     case $OS in
@@ -77,10 +81,10 @@ if ! done_ mpv mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ]; }; t
         macos) ;;   # mpv 0.42 builds its macOS player with Swift (Xcode's): cplayer needs it
     esac
     CC="$CC" meson setup "$S/mpv/b" "$S/mpv" --prefix="$P" --libdir=lib --buildtype=release -Dlibmpv=true -Dcplayer=true \
-        -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled ${extra[@]+"${extra[@]}"} > "$S/mpv-setup.log" 2>&1 \
+        -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled -Dc_args=-DPUSHMPC_BUILD=1 ${extra[@]+"${extra[@]}"} > "$S/mpv-setup.log" 2>&1 \
         || { tail -60 "$S/mpv-setup.log"; exit 1; }
     grep -iE "ffmpeg|libplacebo|vulkan|d3d11|lua|enabled features" "$S/mpv-setup.log" | head -20 || true
     ninja -C "$S/mpv/b" install >/dev/null
-    mark mpv mpv
+    mark "$MPVPM" mpv
 fi
 "$P/bin/mpv" --version | head -3 || true

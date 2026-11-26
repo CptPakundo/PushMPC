@@ -9,7 +9,7 @@
 // which runs again as Repair / Update / Uninstall.
 //
 // Command line: [--uninstall | --repair | --update] [--quiet] [--install-dir <dir>] [--dry-run] [--package-cache <dir>]
-//               [--no-existing] [--sandbox] [--mirror <base url>] [--mpv-build]
+//               [--no-existing] [--sandbox] [--mirror <base url>] [--mpv-build] [--no-mpv-build]
 //   --sandbox: a test install that touches nothing outside the install folder (no regsvr32, no MPC-HC or MPC-VR or
 //              NVIDIA settings, no logon task; Apps entry "PushMPC-Sandbox"; settings key Software\PushMPC-Sandbox).
 //   --mirror:  developer tests: fetch the runtime and PushFlow packages from <base url>/<asset> (same SHA-256 checks).
@@ -398,8 +398,9 @@ std::atomic<bool> g_pmml{ true };
 // Plex: frame generation inside Plex (the proxy avfilter-8.dll, or the VapourSynth-enabled libmpv when the proxy fails its
 // self-test), on by default (-PlexSwap No when unchecked)
 std::atomic<bool> g_plexSwap{ true };
-// PushMPC's own mpv player (a separate download), off by default (-MpvBuild Yes when checked)
-std::atomic<bool> g_mpvBuild{ false };
+// PushMPC's own mpv (a separate download): on by default, installed when an mpv-family player is here (-MpvBuild Auto),
+// and then the libmpv of mpv.net, MPC-QT, Jellyfin Desktop, Stremio; unchecked: -MpvBuild No
+std::atomic<bool> g_mpvBuild{ true };
 
 Result DoInstall(Op op, bool autoUpdates) {
     Result res;
@@ -451,7 +452,7 @@ Result DoInstall(Op op, bool autoUpdates) {
     fail.clear();
     if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
     rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package") + (g_pmml ? L"" : L" -Pmml No") +
-                   (g_plexSwap ? L"" : L" -PlexSwap No") + (g_mpvBuild && !opt.sandbox ? L" -MpvBuild Yes" : L""), scriptLo, 98, nullptr, fail);
+                   (g_plexSwap ? L"" : L" -PlexSwap No") + (opt.sandbox || !g_mpvBuild ? L" -MpvBuild No" : L""), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -868,7 +869,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         Button_SetCheck(mk(L"BUTTON", L"Download AMD's newest FSR upscaling (FSR 4.1) for this Radeon", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"Download faster AI frame generation for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"Give Plex smoother motion (changes Plex's folder, undone on uninstall; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
-        mk(L"BUTTON", L"Also install PushMPC's own mpv player (a separate download; Start menu: PushMPC mpv)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_MPVBUILD);
+        Button_SetCheck(mk(L"BUTTON", L"PushMPC's own mpv, also for mpv.net, MPC-QT, Jellyfin Desktop and Stremio (a separate download when one of them is here)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_MPVBUILD), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UNINSTALL);
@@ -982,6 +983,7 @@ bool ParseArgs() {
         else if (a == L"--sandbox") opt.sandbox = true;
         else if (a == L"--no-existing") opt.noExisting = true;
         else if (a == L"--mpv-build") g_mpvBuild = true;   // scripted installs: PushMPC's own mpv too
+        else if (a == L"--no-mpv-build") g_mpvBuild = false;
         else if (a == L"--install-dir") next(opt.installDir);
         else if (a == L"--package-cache") next(opt.packageCache);
         else if (a == L"--mirror") next(opt.mirror);
