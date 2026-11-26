@@ -328,6 +328,7 @@ uninstall_one() {
       if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi
     fi
   fi
+  rm -f "$RC.pushmpc-backup"
   say "PushMPC for VLC removed ($tgt)"
 }
 
