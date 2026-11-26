@@ -235,11 +235,19 @@ bool NonNull(const void* p) { return p != nullptr; }
 
 std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
 {
-    std::string gpuWhy;
+    std::string gpuWhy, nvlWhy;
+#if defined(PM_NVL)
+    // Linux with an NVIDIA GPU: NVIDIA VFG / optical flow and RTX VSR first (Auto, or the GPU choice); the portable
+    // GPU engine wherever it does not run (no driver, no runtime installed, nothing to do). Off for the dma-buf
+    // in-place path's P010 and for GPU frames (those need the portable GPU engine).
+    if (cfg.backend != 1 && !cfg.semiPlanar && !cfg.external) {
+        if (auto n = OpenNvl(cfg, nvlWhy)) { why = "NVIDIA engine"; return n; }
+    }
+#endif
 #ifdef PMVS_GPU
     if (cfg.backend != 1) {
         auto g = std::make_unique<GpuEngine>(cfg);
-        if (g->Open(gpuWhy)) return g;
+        if (g->Open(gpuWhy)) { if (!nvlWhy.empty()) why = "NVIDIA engine not used: " + nvlWhy; return g; }
         if (cfg.backend == 2) { why = "GPU engine: " + gpuWhy; return nullptr; }
     }
 #else
@@ -248,7 +256,7 @@ std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
     auto c = std::make_unique<CpuEngine>(cfg);
     std::string cpuWhy;
     if (!c->Open(cpuWhy)) { why = "CPU engine: " + cpuWhy; return nullptr; }
-    why = cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + "): CPU engine";
+    why = cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + (nvlWhy.empty() ? "" : "; NVIDIA: " + nvlWhy) + "): CPU engine";
     return c;
 }
 

@@ -71,6 +71,7 @@
               <option label="30040">0</option>
               <option label="30041">1</option>
               <option label="30042">2</option>
+              <option label="30044">3</option>
             </options>
           </constraints>
           <control type="list" format="string"/>

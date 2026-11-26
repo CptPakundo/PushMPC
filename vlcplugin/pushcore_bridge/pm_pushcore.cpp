@@ -290,7 +290,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     }
     pc->k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : ps.multiplier, 1, 8));
     pc->describe = std::format("{} ({} in {:.0f} ms on {}; Auto: x{} {}){}", oi.description, ReuseName(how), ms, host.DeviceName(),
-                               c.multiplier, Narrow(pm::FgMethodLabel(c.fgMethod)), device ? "; zero copy on VLC's D3D11 device" : "");
+                               c.multiplier, Narrow(pm::FgMethodLabel(c.fgMethod)), device ? "; zero copy on the player's D3D11 device" : "");
     Log("VLC: " + pc->describe);
 
     // the callbacks stay set for this owner

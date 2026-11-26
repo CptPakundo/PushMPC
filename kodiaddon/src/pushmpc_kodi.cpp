@@ -33,6 +33,10 @@ extern "C" {
 #include "tonemap.h"
 #include "kodi_engine.h"
 #include "kodi_platform.h"
+#if defined(_WIN32)
+#include <kodi/gui/General.h>   // GetHWContext: Kodi's own D3D11 device (logged next to pushcore's)
+#include "pushcore_route.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -530,6 +534,10 @@ public:
     int OutHeight() const { return m_outH; }
     bool DmaBufs() const { return m_dma; }
     bool Force8Bit() const { return m_force8; }
+#if defined(_WIN32)
+    // pushcore (Windows), opened for this stream, handed over to the decoder once
+    std::unique_ptr<pmk::PushcoreRoute> TakePushcore() { return std::move(m_pc); }
+#endif
 
     // Kodi tells the add-on the screen size before Open (CInputStreamAddon::DetectScreenResolution)
     void SetVideoResolution(unsigned int width, unsigned int height) override { m_screenW = int(width); m_screenH = int(height); }
@@ -752,7 +760,7 @@ private:
         m_engineCfg = pmk::EngineCfg{};
         m_engineCfg.width = p->width; m_engineCfg.height = p->height; m_engineCfg.bits = bits > 8 && !m_toneMap && !m_force8 ? 10 : 8;
         m_engineCfg.threads = m_settings.threads; m_engineCfg.quality = m_settings.quality;
-        m_engineCfg.backend = m_settings.engine;
+        m_engineCfg.backend = m_settings.engine == 3 ? 0 : m_settings.engine;   // 3: pushcore (Windows), then Auto
 #if defined(__ANDROID__) && defined(PM_AHB)
         m_engineCfg.external = true;   // decoder frames straight into the engine (AImageReader hardware buffers)
 #endif
@@ -761,11 +769,20 @@ private:
 #endif
         if (m_dma && m_engineCfg.bits > 8) m_engineCfg.semiPlanar = true;   // 10-bit dma-bufs as P010 (DRM_FORMAT_P010)
         std::string upWhy, engWhy;
+        const double hz = m_settings.displayHz > 0 ? double(m_settings.displayHz) : pm_display_hz();
+#if defined(_WIN32)
+        if (TryPushcore(st, bits, hz, engWhy)) return;
+#endif
+        m_engineCfg.srcFps = m_fps; m_engineCfg.displayHz = hz; m_engineCfg.smoother = m_settings.smoother;
+        m_engineCfg.matrix = m_space != AVCOL_SPC_UNSPECIFIED ? int(m_space) : (p->height >= 600 ? 1 : 6);
+        m_engineCfg.fullRange = p->color_range == AVCOL_RANGE_JPEG;
+        m_engineCfg.hdr = IsHdrTransfer(m_trc) && !m_toneMap;
         DecideUpscale(st, m_engineCfg, upWhy);
         m_engine = pmk::OpenEngine(m_engineCfg, engWhy);
-        const double hz = m_settings.displayHz > 0 ? double(m_settings.displayHz) : pm_display_hz();
         if (!m_engine) {
             why = "no engine (" + engWhy + "): x1";
+        } else if (m_engine->FixedK() > 0) {   // the NVIDIA engine: its own Auto plan, fixed for the stream
+            m_k = std::max(1, m_engine->DecideK(m_settings.smoother, m_fps, hz, why));
         } else if (m_settings.smoother >= 9) {
             m_k = std::min(m_settings.smoother, 16);
             why = "x" + std::to_string(m_k) + " (your setting)";
@@ -796,6 +813,51 @@ private:
         Log(ADDON_LOG_INFO, "%s; output %dx%d", upWhy.c_str(), m_outW, m_outH);
         Log(ADDON_LOG_INFO, "multiplier: %s", why.c_str());
     }
+
+#if defined(_WIN32)
+    // Windows: pushcore (VFG / DLSS-G on RTX, PushFlow, FSR FG, AMD FRC) through pm_pushcore.dll, first in Auto; it
+    // decides the multiplier with PushMPC's own Auto rules and settings. Kept at the source size: Kodi's DXVA renderer
+    // upscales (with RTX / Intel Video Super Resolution when switched on in Kodi). What it cannot take (SD / BT.601,
+    // Kodi 21 HDR tone-mapped to SDR, a shader upscaler chosen, the CPU / GPU engine chosen) goes to the engines below.
+    bool TryPushcore(const AVStream* st, int bits, double hz, std::string& engWhy)
+    {
+        const AVCodecParameters* p = st->codecpar;
+        const int e = m_settings.engine, up = m_settings.upscale;
+        if (e == 3) m_engineCfg.backend = 0;   // pushcore only, else Auto's engines
+        if (!(e == 0 || e == 3) || m_settings.smoother == 1 || m_toneMap || up >= 2) return false;
+        if (void* hc = kodi::gui::GetHWContext()) Log(ADDON_LOG_INFO, "Kodi renders on: %s", pmk::AdapterOfContext(hc).c_str());
+        pmk::PcConfig c;
+        c.width = p->width; c.height = p->height; c.bits = bits > 8 ? 10 : 8;
+        int rate = 0, scale = 0;
+        StreamFps(st, rate, scale);
+        if (rate > 0 && scale > 0) { c.fpsNum = rate; c.fpsDen = scale; }
+        const bool uhd = p->width >= 3200 || p->height >= 1800;
+        c.matrix = m_space != AVCOL_SPC_UNSPECIFIED ? int(m_space) : (p->width >= 1024 || p->height >= 600 ? (uhd && bits > 8 ? 9 : 1) : 6);
+        c.transfer = m_trc == AVCOL_TRC_SMPTE2084 ? 16 : m_trc == AVCOL_TRC_ARIB_STD_B67 ? 18 : 1;
+        c.primaries = m_prim == AVCOL_PRI_BT2020 || (m_prim == AVCOL_PRI_UNSPECIFIED && c.matrix == 9) ? 9 : 1;
+        c.range = p->color_range == AVCOL_RANGE_JPEG ? 2 : 1;
+        c.smoother = m_settings.smoother;   // 0 Auto (PushMPC's Smoother setting), 2..10
+        c.displayHz = hz;
+        c.warp = std::getenv("PUSHMPC_KODI_WARP") != nullptr;
+        auto pc = std::make_unique<pmk::PushcoreRoute>();
+        std::string why;
+        if (!pc->Open(c, why)) {
+            engWhy = "pushcore: " + why;
+            Log(ADDON_LOG_INFO, "pushcore not used: %s", why.c_str());
+            return false;
+        }
+        m_pc = std::move(pc);
+        m_k = m_pc->K();
+        m_outW = p->width; m_outH = p->height;
+        Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz, screen %dx%d", avcodec_get_name(p->codec_id), p->width,
+            p->height, bits, m_fps, hz, m_screenW, m_screenH);
+        Log(ADDON_LOG_INFO, "engine: pushcore: %s", m_pc->Describe().c_str());
+        Log(ADDON_LOG_INFO, "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi); output %dx%d", m_outW, m_outH);
+        Log(ADDON_LOG_INFO, "multiplier: x%d (pushcore, PushMPC's Auto and settings)", m_k);
+        return true;
+    }
+    std::unique_ptr<pmk::PushcoreRoute> m_pc;
+#endif
 
     Settings m_settings;
     KodiIo m_io;
@@ -841,6 +903,9 @@ public:
         m_force8 = m_in->Force8Bit();
         m_cfg = m_in->EngineConfig();
         m_engine = m_in->TakeEngine();
+#if defined(_WIN32)
+        m_pc = m_in->TakePushcore();
+#endif
         const bool playback = m_in->Playback();
         const AVCodec* dec = nullptr;
 #if defined(__ANDROID__)
@@ -897,6 +962,7 @@ public:
         if (m_toneMap) m_tm.Configure(m_in->ToneMapPq(), m_in->PeakNits());
         Log(ADDON_LOG_INFO, "decoder %s%s, x%d, output %dx%d", HaveAhb() ? "MediaCodec (hardware buffers)" : dec->name, m_hw ? " (hardware)" : "",
             m_k, m_in->OutWidth(), m_in->OutHeight());
+        if (Pc()) Log(ADDON_LOG_INFO, "pushcore route: %s", m_hw ? "decoder frames straight into pushcore (D3D11, no copy)" : "software decoding, frames uploaded to pushcore");
         return true;
     }
 
@@ -943,7 +1009,7 @@ public:
             }
             // end of the drained stream (or an error): the last held frame goes out alone, then the end
             if (m_havePrev) {
-                m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true});
+                m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true, m_prevPc});
                 m_havePrev = false;
                 continue;
             }
@@ -1004,6 +1070,9 @@ public:
         m_queue.clear();
         m_havePrev = false;
         if (m_engine) m_engine->Forget();
+#if defined(_WIN32)
+        if (m_pc) m_pc->Flush();
+#endif
     }
 
 private:
@@ -1019,7 +1088,8 @@ private:
             data[0] = buf.data(); data[1] = data[0] + stride[0] * h; data[2] = data[1] + stride[1] * ch;
         }
     };
-    struct Out { pmk::Slot slot; int pic = 0; bool current = false; };   // current: the newest frame (end of the clip)
+    // current: the newest frame (end of the clip); pc: the pushcore ring slice holding the picture (-1: m_pic / engine)
+    struct Out { pmk::Slot slot; int pic = 0; bool current = false; int pc = -1; };
 
     void TryHardware()
     {
@@ -1032,6 +1102,12 @@ private:
 #endif
         if (std::getenv("PUSHMPC_NO_HWDEC")) return;
         AVBufferRef* dev = nullptr;
+#if defined(_WIN32)
+        if (m_pc) {   // decode onto pushcore's own device; none there (WARP): software frames, uploaded
+            dev = m_pc->HwDevice();
+            if (!dev) return;
+        } else
+#endif
         if (!CreateHwDevice(type, dev)) return;
         for (int i = 0;; ++i) {
             const AVCodecHWConfig* c = avcodec_get_hw_config(m_ctx->codec, i);
@@ -1054,8 +1130,69 @@ private:
     }
 
     // a decoded frame: convert it to the engine's layout, push it, and queue the pictures of the previous frame
+#if defined(_WIN32)
+    // pushcore: the decoded frame (its D3D11 texture, or planes uploaded) into pushcore and the ring; then the pictures
+    // of the previous frame: itself, and the generated frames pushcore delivered for the pair (the real frame where one
+    // is missing, never a stale picture). A frame pushcore could not take stays in m_pic (the CPU copy path).
+    void OnFramePc()
+    {
+        AVFrame* f = m_frame;
+        int64_t pts = f->best_effort_timestamp;
+        if (pts == AV_NOPTS_VALUE) pts = m_havePrev ? m_prevPts + int64_t(m_frameUs > 0 ? m_frameUs : 41708) : 0;
+        const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
+        const int cur = m_havePrev ? 1 - m_prevSlot : 0;
+        std::string err;
+        int slot = -1;
+        if (f->format == AV_PIX_FMT_D3D11 && f->hw_frames_ctx) {
+            if (m_w != f->width || m_h != f->height) { m_w = m_outW = f->width; m_h = m_outH = f->height; m_bits = m_pc->TenBit() ? 10 : 8; }
+            slot = m_pc->PushTexture(f->data[0], unsigned(reinterpret_cast<intptr_t>(f->data[1])), pts, contiguous, err);
+            if (slot < 0) {   // keep it on the CPU
+                av_frame_unref(m_sw);
+                if (av_hwframe_transfer_data(m_sw, f, 0) >= 0) { av_frame_copy_props(m_sw, f); f = m_sw; }
+            }
+        }
+        if (slot < 0 && !f->hw_frames_ctx) {
+            const int bits = m_pc->TenBit() ? 10 : 8;
+            if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
+            ToPlanes(f, m_pic[cur]);
+            if (err.empty()) {
+                pm_yuv src{};
+                for (int i = 0; i < 3; ++i) { src.data[i] = m_pic[cur].data[i]; src.stride[i] = m_pic[cur].stride[i]; }
+                slot = m_pc->PushPlanes(src, pts, contiguous, err);
+            }
+        }
+        av_frame_unref(m_frame);
+        av_frame_unref(m_sw);
+        if (!err.empty() && !m_warned) { Log(ADDON_LOG_WARNING, "pushcore: %s", err.c_str()); m_warned = true; }
+        if (m_havePrev) {
+            const bool pair = slot >= 0 && m_prevPc >= 0;
+            const std::vector<pmk::Slot> slots = pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair);
+            std::vector<int64_t> want;
+            for (const pmk::Slot& s : slots) if (!s.real) want.push_back(s.pts);
+            std::vector<int> got;
+            if (!want.empty()) m_pc->Collect(want, double(pts - m_prevPts), got);
+            size_t j = 0;
+            for (const pmk::Slot& s : slots) {
+                int pc = m_prevPc;
+                if (!s.real) { const int g = got[j++]; if (g >= 0) { pc = g; ++m_generated; } }
+                m_queue.push_back(Out{s, m_prevSlot, false, pc});
+            }
+        }
+        m_prevSlot = cur;
+        m_prevPc = slot;
+        m_prevPts = pts;
+        m_havePrev = true;
+    }
+    bool Pc() const { return m_pc != nullptr; }
+#else
+    bool Pc() const { return false; }
+#endif
+
     void OnFrame()
     {
+#if defined(_WIN32)
+        if (m_pc) { OnFramePc(); return; }
+#endif
         AVFrame* f = m_frame;
         if (f->hw_frames_ctx) {
             av_frame_unref(m_sw);
@@ -1102,6 +1239,7 @@ private:
         for (auto& p : m_pic) p.Alloc(w, h, bytes);
         m_gen.Alloc(w, h, bytes);
         ReleaseImports();
+        if (Pc()) { m_upscaled = false; m_outW = w; m_outH = h; m_havePrev = false; return; }   // pushcore keeps the source size
         if (!m_engine || w != m_cfg.width || h != m_cfg.height || bits != m_cfg.bits) {
             // the stream changed size or depth mid-way (rare): a new engine for the new pictures
             m_cfg.width = w; m_cfg.height = h; m_cfg.bits = bits;
@@ -1163,6 +1301,9 @@ private:
     {
         const Out q = m_queue.front();
         m_queue.pop_front();
+#if defined(_WIN32)
+        if (q.pc >= 0 && m_pc) return EmitPc(picture, q);
+#endif
         const pmk::Slot& s = q.slot;
         const int bytes = m_bits > 8 ? 2 : 1;
         const int ow = m_outW, oh = m_outH, ocw = (ow + 1) / 2, och = (oh + 1) / 2;
@@ -1279,6 +1420,53 @@ private:
         }
         return VC_PICTURE;
     }
+
+#if defined(_WIN32)
+    // a pushcore ring picture read back into Kodi's buffer: NV12 / P010 on Kodi 22 (the DXVA renderer's single-copy
+    // formats), planar on Kodi 21
+    VIDEOCODEC_RETVAL EmitPc(VIDEOCODEC_PICTURE& picture, const Out& q)
+    {
+        const pmk::Slot& s = q.slot;
+        const int bytes = m_bits > 8 ? 2 : 1;
+        const int w = m_outW, h = m_outH, cw = w / 2, ch = h / 2;
+#if PM_KODI22
+        const bool semi = true;
+        picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_P010 : VIDEOCODEC_FORMAT_NV12;
+#else
+        const bool semi = false;
+        picture.videoFormat = m_bits > 8 ? VIDEOCODEC_FORMAT_YUV420P10 : VIDEOCODEC_FORMAT_I420;
+#endif
+        picture.width = uint32_t(w);
+        picture.height = uint32_t(h);
+        picture.planeOffsets[0] = 0;
+        picture.stride[0] = uint32_t(w * bytes);
+        picture.planeOffsets[1] = picture.stride[0] * uint32_t(h);
+        if (semi) {
+            picture.stride[1] = uint32_t(cw * 2 * bytes);
+            picture.stride[2] = 0;
+            picture.planeOffsets[2] = 0;
+            picture.decodedDataSize = size_t(picture.planeOffsets[1]) + size_t(picture.stride[1]) * size_t(ch);
+        } else {
+            picture.stride[1] = picture.stride[2] = uint32_t(cw * bytes);
+            picture.planeOffsets[2] = picture.planeOffsets[1] + picture.stride[1] * uint32_t(ch);
+            picture.decodedDataSize = size_t(picture.planeOffsets[2]) + size_t(picture.stride[2]) * size_t(ch);
+        }
+        picture.pts = s.pts;
+        if (!GetFrameBuffer(picture)) { Log(ADDON_LOG_WARNING, "Kodi gave no frame buffer"); return VC_ERROR; }
+        uint8_t* const dst[3] = {picture.decodedData + picture.planeOffsets[0], picture.decodedData + picture.planeOffsets[1],
+                                 semi ? nullptr : picture.decodedData + picture.planeOffsets[2]};
+        const int ds[3] = {int(picture.stride[0]), int(picture.stride[1]), int(picture.stride[2])};
+        std::string err;
+        if (!m_pc->Read(q.pc, dst, ds, semi, err) && !m_warned) { Log(ADDON_LOG_WARNING, "pushcore readback: %s", err.c_str()); m_warned = true; }
+        ++m_emitted;
+        Log(ADDON_LOG_DEBUG, "out pts=%lld real=%d t=%.3f", static_cast<long long>(s.pts), s.real ? 1 : 0, double(s.t));
+        if ((m_emitted % 600) == 0)
+            Log(ADDON_LOG_INFO, "%llu pictures out, pushcore delivered %llu generated frames (%llu missing: the real frame shown)",
+                static_cast<unsigned long long>(m_emitted), static_cast<unsigned long long>(m_pc->Delivered()),
+                static_cast<unsigned long long>(m_pc->Missed()));
+        return VC_PICTURE;
+    }
+#endif
 
     static bool Windows()
     {
@@ -1511,6 +1699,10 @@ private:
 #if defined(__ANDROID__) && defined(PM_AHB)
         m_ahb.reset();
 #endif
+#if defined(_WIN32)
+        if (m_pc) Log(ADDON_LOG_INFO, "pushcore: %llu generated frames delivered, %llu missing (the real frame shown)",
+                      static_cast<unsigned long long>(m_pc->Delivered()), static_cast<unsigned long long>(m_pc->Missed()));
+#endif
         m_engine.reset();
         if (m_sws) sws_freeContext(m_sws);
         if (m_swsOut) sws_freeContext(m_swsOut);
@@ -1567,6 +1759,10 @@ private:
     int m_prevSlot = 0;
     int64_t m_prevPts = 0;
     bool m_havePrev = false;
+    int m_prevPc = -1;   // the pushcore ring slice of the previous frame (-1: none)
+#if defined(_WIN32)
+    std::unique_ptr<pmk::PushcoreRoute> m_pc;
+#endif
     std::deque<Out> m_queue;
     unsigned long long m_emitted = 0, m_generated = 0;
     int m_packets = 0;

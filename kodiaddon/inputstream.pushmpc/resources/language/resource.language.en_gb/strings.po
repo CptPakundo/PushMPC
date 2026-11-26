@@ -140,7 +140,7 @@ msgid "FSR1 to the screen size (GPU engine)"
 msgstr ""
 
 msgctxt "#30040"
-msgid "Auto (GPU, else CPU)"
+msgid "Auto (the best one this PC has)"
 msgstr ""
 
 msgctxt "#30041"
@@ -152,7 +152,7 @@ msgid "GPU (Vulkan) only"
 msgstr ""
 
 msgctxt "#30109"
-msgid "The GPU engine runs on any Vulkan 1.2 GPU and is much faster; the CPU engine is the fallback."
+msgid "Auto picks the best engine: on Windows PushMPC's own core (NVIDIA frame generation on RTX cards, PushFlow and the AMD and Intel engines; needs PushMPC Setup), then the GPU engine (any Vulkan 1.2 GPU), then the CPU."
 msgstr ""
 
 msgctxt "#30043"
@@ -161,4 +161,8 @@ msgstr ""
 
 msgctxt "#30110"
 msgid "Off: Kodi plays HDR files as real HDR without frame generation (best on an HDR display). On: they get frame generation, converted to SDR."
+msgstr ""
+
+msgctxt "#30044"
+msgid "PushMPC core (Windows)"
 msgstr ""
