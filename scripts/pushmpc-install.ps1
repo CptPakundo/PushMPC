@@ -985,11 +985,12 @@ $RuntimeFileHashesNvidia = @{
 $RuntimeFileHashes = if ($GpuVendor -eq 'AMD') { $RuntimeFileHashesAmd } else { $RuntimeFileHashesNvidia }
 # PushFlow (PushFPS's own frame generation: ONNX Runtime + DirectML and the RIFE models). Not in Veyra's packages:
 # PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0, 4.3.1,
-# 4.4.0 and 4.5.3 (per-file SHA-256 below; 4.5.3 checked on an official 4.5.3 install and in its release zip, all 20 files). Sources, in order: an
+# 4.4.0, 4.5.3 and 4.5.4 (per-file SHA-256 below; 4.5.3 checked on an official 4.5.3 install and in its release zip, all 20 files;
+# 4.5.4 checked in its release zip by runtime-pins.yml, job pushflow). Sources, in order: an
 # installed PushFPS, a PushFPS-<v>-win64.zip in -PackageCache or the own download folder, else PushFPS's GitHub release.
 $PushFlow = @{
-    Asset = 'PushFPS-4.5.3-win64.zip'
-    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip'
+    Asset = 'PushFPS-4.5.4-win64.zip'
+    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip'
     Rel   = 'runtime\experimental\pushflow'
     Files = @{
         'DirectML.dll' = '9C9E6D822561C6C41B90E6994B3E8857CF1D66DBFB1E0C4C799C7C89B4E92DA1 18527776'
@@ -2508,7 +2509,9 @@ function Get-AutoPlan {
         gpu = $(if ($g.Name) { $g.Name } else { 'none' }); gpuVendor = ('{0:X4}' -f [int]$g.Vendor); gpuDevice = ('{0:X4}' -f [int]$g.Device); gpuDriver = $g.Driver; gpuSource = $g.Source
         family = $fam; runtimePackage = $GpuVendor
         directshow = $dshow; mpv = $mpv
-        vlc = $(if ($hwGpu) { 'the VLC module on pushcore (frame generation; VLC''s own RTX / Intel super resolution)' } else { 'the VLC module on the portable engine' })
+        vlc = $(if (-not (Find-VlcExe)) { 'VLC not found (Setup adds the VLC module when VLC is installed)' }
+                elseif ($hwGpu) { "the VLC module on pushcore: $fg; upscaling: VLC's own (RTX Video Super Resolution, Intel VPL or NIS)" }
+                else { 'the VLC module on the portable engine (a Vulkan GPU, else the CPU)' })
         pushflow = $(if ($pushflow) { 'installed' } else { 'not installed' })
         pmmlRuntime = $rt; pmmlBackend = $pm.backend; pmmlWhy = $pm.why
         fsrSdk240 = $(if ($fsrOffer) { if ($FidelityFx -eq 'Package') { 'offered, declined (the package''s FSR SDK 2.3 set)' } else { 'on: AMD FSR SDK 2.4.0 (FSR 4.1 INT8 upscaling)' } } else { 'not for this GPU' })
@@ -2522,7 +2525,7 @@ function Show-AutoPlan($p) {
     Info "AMD FSR SDK 2.4: $($p.fsrSdk240)"
 }
 # pmml.txt beside PushFlow's models (<InstallDir>\runtime\runtime\experimental\pushflow: the runtime component keeps the
-# package's runtime\ folder): pushcore reads runtime= and backend= from it (patches/pushfps-4.5.3-pushmpc.patch,
+# package's runtime\ folder): pushcore reads runtime= and backend= from it (patches/pushfps-4.5.4-pushmpc.patch,
 # pmmlChoice); without it, or with dml, PushFlow runs on its own DirectML session.
 function Write-PmmlChoice($p, $state) {
     $dir = Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel

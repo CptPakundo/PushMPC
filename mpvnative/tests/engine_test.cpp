@@ -3,6 +3,7 @@
 //   the real frame); real frames byte-identical; the box of a generated frame sits between its neighbours; a hard cut
 //   makes no blend (every generated frame equals a real one); a discontinuity makes no pair; NV12 / P010 / 10-bit
 //   planar round trips.
+//   Spacing, every OS: a 32 px box moving 4 px a frame at x4 and x8: even steps, no repeated positions.
 //   D3D11, Windows: WARP device, NV12 textures, the stub pushcore (CPU blend) -> BGRA textures with the right pixels,
 //   x2 order, pending() drains to 0.
 #include <cmath>
@@ -139,6 +140,65 @@ static void TestCpu(const pmeng_api* api, uint32_t fmt, const char* name)
     api->close(h);
 }
 
+// Even spacing of generated frames (the VLC null decoder's picture: a 32 px box of 235 on 16 moving 4 px a frame).
+// The box's x centroid two ways: intensity-weighted (sub-pixel) and over pixels above 128 (as the VLC CI's hwcheck
+// measures it; a cross-faded edge instead of a moved one makes it jump). Every step between consecutive outputs must
+// be within 0.5x..1.6x of the ideal 4/k px, and no output may repeat the previous position. Before the boundary-vector
+// fix the CPU engine measured x4 steps of 0.50..2.16 px and 34 of 311 repeats at x8.
+static void TestSpacing(const pmeng_api* api, int k)
+{
+    const int W = 640, H = 360, y0 = H / 2 - 16;   // the null decoder's geometry (box centred vertically)
+    pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = PMENG_FMT_YUV420P; st.fps_num = 24; st.fps_den = 1;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = "smoother=" + std::to_string(k) + "\nportable_threads=2\n";
+    void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
+    CHECK(h, "spacing x%d: open: %s", k, err);
+    if (!h) return;
+    CHECK(int(out.multiplier) == k, "spacing x%d: the engine runs x%u", k, out.multiplier);
+    std::vector<double> wc, tc;
+    for (int s = 0; s < 40; ++s) {
+        Pic src(W, H, PMENG_FMT_YUV420P);
+        const int bx = 16 + 4 * s;
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) src.SetY(x, y, (x >= bx && x < bx + 32 && y >= y0 && y < y0 + 32) ? 235 : 16);
+        src.FillChroma(128);
+        pmeng_image im = src.Img();
+        CHECK(api->submit(h, &im, int64_t(s) * 41667, 0) == PMENG_OK, "spacing x%d: submit %d", k, s);
+        pmeng_out_info oi{};
+        while (api->peek(h, &oi, 0) == 1) {
+            Pic dst(W, H, PMENG_FMT_YUV420P);
+            pmeng_image di = dst.Img();
+            api->write(h, &di);
+            double sw = 0, sx = 0, ts = 0, tn = 0;
+            for (int y = y0 - 8; y < y0 + 40; ++y) for (int x = 0; x < W; ++x) {
+                const int v = dst.Y(x, y);
+                sw += v - 16; sx += double(v - 16) * x;
+                if (v > 128) { ts += x; tn += 1; }
+            }
+            if (sw > 0 && tn > 0) { wc.push_back(sx / sw); tc.push_back(ts / tn); }
+        }
+    }
+    const double ideal = 4.0 / k;
+    for (int m = 0; m < 2; ++m) {
+        const std::vector<double>& p = m ? tc : wc;
+        double lo = 1e9, hi = -1e9; int repeats = 0, bad = 0;
+        for (size_t i = 1; i < p.size(); ++i) {
+            const double d = p[i] - p[i - 1];
+            lo = std::min(lo, d); hi = std::max(hi, d);
+            if (std::fabs(d) < 0.05) ++repeats;
+            if (d < 0.5 * ideal || d > 1.6 * ideal) ++bad;
+        }
+        std::printf("spacing x%d %s: %zu outputs, steps %.3f..%.3f px (ideal %.3f), %d repeats, %d steps out of range\n", k,
+                    m ? "threshold" : "weighted", p.size(), lo, hi, ideal, repeats, bad);
+        CHECK(p.size() >= size_t(30 * k), "spacing x%d: only %zu outputs", k, p.size());
+        if (m == 0) { char sb[512]; api->stats(h, sb, sizeof(sb)); std::printf("spacing x%d: %s\n", k, sb); }
+        CHECK(repeats == 0 && bad == 0, "spacing x%d (%s): %d repeats, %d steps outside %.2f..%.2f px", k, m ? "threshold" : "weighted",
+              repeats, bad, 0.5 * ideal, 1.6 * ideal);
+    }
+    api->close(h);
+}
+
 #ifdef _WIN32
 static void TestD3D11(const pmeng_api* api)
 {
@@ -225,6 +285,36 @@ static void TestD3D11(const pmeng_api* api)
     std::printf("d3d11: %d outputs (%d real); %s\n", outputs, reals, sbuf);
     api->close(h);
 }
+
+// R-MN1: Auto alone (no force_multiplier) must turn frame generation on. The stub pushcore answers
+// pushcore_capabilities like the real one (an RTX 50 class GPU with every capability) only when the caller fills in
+// structSize; a failed query must still leave frame generation on (judged by the adapter). 24 fps on a 48 Hz display:
+// Auto's only fitting multiplier is x2.
+static void TestD3D11Auto(const pmeng_api* api, bool capsFail)
+{
+    const char* name = capsFail ? "d3d11 auto (capabilities fail)" : "d3d11 auto";
+    _putenv_s("PUSHCORE_STUB_CAPS_FAIL", capsFail ? "1" : "0");
+    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+    D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1 };
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+    CHECK(SUCCEEDED(hr), "%s: WARP device: 0x%08lx", name, hr);
+    if (FAILED(hr)) return;
+    ComPtr<ID3D10Multithread> mt; if (SUCCEEDED(ctx.As(&mt))) mt->SetMultithreadProtected(TRUE);
+    pmeng_device pd{}; pd.struct_size = sizeof(pd); pd.mem = PMENG_MEM_D3D11; pd.d3d11_device = dev.Get();
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 320; st.height = 180; st.fmt = PMENG_FMT_NV12; st.fps_num = 24; st.fps_den = 1;
+    st.range = 1; st.matrix = 1; st.primaries = 1; st.transfer = 1;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = std::string("core_dir=") + PME_STUB_DIR + "\nsharper=off\ndisplay_fps=48\n";
+    void* h = api->open(&pd, &st, opts.c_str(), &out, err, sizeof(err));
+    CHECK(h, "%s: open: %s", name, err);
+    if (h) {
+        std::printf("%s: %s | x%u\n", name, out.description, out.multiplier);
+        CHECK(out.multiplier == 2, "%s: multiplier %u, expected 2 (Auto must generate frames)", name, out.multiplier);
+        api->close(h);
+    }
+    _putenv_s("PUSHCORE_STUB_CAPS_FAIL", "0");
+}
 #endif
 
 int main()
@@ -238,6 +328,8 @@ int main()
     TestCpu(api, PMENG_FMT_YUV420P10, "yuv420p10");
     TestCpu(api, PMENG_FMT_NV12, "nv12");
     TestCpu(api, PMENG_FMT_P010, "p010");
+    TestSpacing(api, 4);
+    TestSpacing(api, 8);
     {   // a Vulkan open without a device must fail with a reason (the filter then takes the copy fallback)
         pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_VULKAN;
         pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 64; st.height = 64; st.fmt = PMENG_FMT_NV12;
@@ -247,6 +339,8 @@ int main()
     }
 #ifdef _WIN32
     TestD3D11(api);
+    TestD3D11Auto(api, false);
+    TestD3D11Auto(api, true);
 #endif
     std::printf(g_fail ? "engine_test: %d FAILED\n" : "engine_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;

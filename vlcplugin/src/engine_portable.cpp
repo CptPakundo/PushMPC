@@ -55,6 +55,8 @@ static bool OpenGpu(pm_engine *e, const pm_engine_cfg *cfg, std::string &why)
     c.outWidth = 0; c.outHeight = 0;       // VLC keeps the source size
     c.upscaler = pmvs::gpu::Upscaler::None;
     c.sourceSlots = 6; c.outSlots = 4;
+    c.blockMatcherOnly = false; c.nvofHybrid = true;   // Auto: NVIDIA optical flow as one more block-matcher candidate where
+                                                     // the device has it (the release test matrix's best), else the block matcher
     pmvs::gpu::DeviceRequest req;
     if (const char *d = std::getenv("PUSHMPC_VK_DEVICE")) req.device = d;
     if (const char *a = std::getenv("PUSHMPC_VK_ALLOW_CPU")) req.allowCpu = a[0] == '1';

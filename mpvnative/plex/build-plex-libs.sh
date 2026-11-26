@@ -10,6 +10,7 @@ src=$1; out=$2
 mkdir -p "$out"
 cc=gcc; command -v ccache >/dev/null && cc="ccache gcc"
 pins="$here/../pins.json"
+. "$here/../ci/fetch-commit.sh"
 ref=''
 
 build_tree() {   # build_tree <label>: the tree in $src is checked out
@@ -36,24 +37,16 @@ build_tree() {   # build_tree <label>: the tree in $src is checked out
     ref="$out/$name"
 }
 
-# release tags
+# release tags (fetched by their pinned commit)
 tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.load(open(sys.argv[1]))['hookTags'] if re.fullmatch(r'n5\.[01](\.\d+)?', t['tag'])))" "$pins")
 for tag in $tags; do
     commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$pins" "$tag")
-    # git.ffmpeg.org, else the GitHub mirror (same tags; the commit check below holds either way)
-    [ -d "$src/.git" ] || git init -q "$src"
-    for url in https://git.ffmpeg.org/ffmpeg.git https://github.com/FFmpeg/FFmpeg.git; do
-        git -C "$src" fetch -q --depth 1 "$url" tag "$tag" 2>/dev/null && break
-        echo "$tag: $url unreachable, trying the next source"
-    done
-    git -C "$src" checkout -q -f "$tag"
-    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
+    fetch_commit "$src" "$commit" https://git.ffmpeg.org/ffmpeg.git "$tag" || exit 1   # by commit (the pin), never by tag name alone
     build_tree "$tag"
 done
 # master snapshots (by commit, from the GitHub mirror, which serves single commits)
 for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in json.load(open(sys.argv[1])).get('snapshotCommits', [])))" "$pins"); do
-    git -C "$src" fetch -q --depth 1 https://github.com/FFmpeg/FFmpeg.git "$commit" && git -C "$src" checkout -q -f "$commit"
-    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::snapshot $commit: checkout failed"; exit 1; }
+    fetch_commit "$src" "$commit" https://github.com/FFmpeg/FFmpeg.git || exit 1
     build_tree "master@${commit:0:12}"
 done
 # the proxy: libavfilter 8's exports, forwarded

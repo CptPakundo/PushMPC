@@ -12,13 +12,13 @@ export CFLAGS="-I$P/include ${CFLAGS:-}" CPPFLAGS="-I$P/include ${CPPFLAGS:-}" L
 BASECC=cc; [ "$OS" = msys2 ] && BASECC=gcc
 CC="$BASECC"; command -v ccache >/dev/null && CC="ccache $BASECC"
 pin() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])" "$ROOT/mpvnative/pins.json" "$1" "$2"; }
-fetch() {   # fetch <pin> <dir> [--recurse]
+. "$ROOT/mpvnative/ci/fetch-commit.sh"
+fetch() {   # fetch <pin> <dir> [--recurse]: the pinned commit itself (fetch-commit.sh: by SHA, mirrors, retries)
     local d=$2
-    if [ ! -d "$d/.git" ]; then
-        git clone -q --depth 1 ${3:+--recurse-submodules --shallow-submodules} -b "$(pin "$1" tag)" "$(pin "$1" repo)" "$d"
-    fi
-    local c; c=$(git -C "$d" rev-parse HEAD)
-    [ "$c" = "$(pin "$1" commit)" ] || { echo "::error::$1: $c is not the pinned commit $(pin "$1" commit)"; exit 1; }
+    # a cached tree already at the pin stays as it is (it may carry our patches)
+    if [ -d "$d/.git" ] && [ "$(git -C "$d" rev-parse HEAD 2>/dev/null)" = "$(pin "$1" commit)" ]; then return 0; fi
+    fetch_commit "$d" "$(pin "$1" commit)" "$(pin "$1" repo)" "$(pin "$1" tag)" || exit 1
+    [ -z "${3:-}" ] || git -C "$d" submodule update -q --init --recursive --depth 1 || exit 1
 }
 stamp() { echo "$1:$(pin "$2" commit)"; }
 done_() { [ -f "$P/stamps/$1" ] && [ "$(cat "$P/stamps/$1")" = "$(stamp "$1" "$2")" ]; }
