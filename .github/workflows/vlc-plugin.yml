@@ -10,6 +10,11 @@ on:
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
   workflow_call:
+    inputs:
+      tests:
+        description: 'run the test jobs (release.yml: false, build jobs only; push and dispatch always test)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -22,8 +27,9 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  # called from release.yml, github.workflow is the caller's name: its own group there, never cancelled midway
+  group: vlc-plugin-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.workflow == 'vlc-plugin' }}
 
 env:
   VLC_WIN_VERSION: '3.0.24'
@@ -151,6 +157,7 @@ jobs:
 
   test-linux:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -224,6 +231,7 @@ jobs:
   # Ubuntu 22.04: 3.0.16): it must load (entry name, glibc) and multiply frames
   test-distros:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     strategy:
       fail-fast: false
       matrix:
@@ -253,6 +261,7 @@ jobs:
   # drivers that lose uploads must make PushMPC fall back to pass-through. Then the installer's self-test, both ways.
   test-hw:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -350,6 +359,7 @@ jobs:
   # exported getters and hands the postproc slot (and one rarely used filter, for pushmpc_out) to PushMPC, or does nothing.
   snap-spike:
     needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -450,6 +460,7 @@ jobs:
 
   # pm_pushcore.dll (MSVC: vsplugin's pushcore host + the filter's Auto) and the stub pushcore.dll for the tests
   build-bridge:
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only (test-windows uses it)
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -477,6 +488,7 @@ jobs:
 
   test-windows:
     needs: [clips, build-windows, build-bridge]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: windows-latest
     timeout-minutes: 30
     defaults: { run: { shell: bash } }
@@ -585,6 +597,7 @@ jobs:
   macos:
     # public repository: standard macOS runners are free, so macOS runs on every push
     needs: [clips]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: macos-15
     timeout-minutes: 30
     steps:

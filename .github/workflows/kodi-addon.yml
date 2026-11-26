@@ -17,6 +17,10 @@ on:
         description: 'also run the Kodi-on-Wayland test job (it builds no artifact)'
         type: boolean
         default: true
+      tests:
+        description: 'run the unit tests and the playback test jobs (release.yml: false, build + package + installer round trip only)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -30,7 +34,7 @@ on:
 
 concurrency:
   group: kodi-addon-${{ github.workflow }}-${{ github.ref }}   # called from release.yml: its own group (github.workflow is the caller's)
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.workflow == 'kodi-addon' }}   # a release run's builds are never cancelled midway
 
 env:
   FFMPEG_VERSION: '8.1'
@@ -106,6 +110,7 @@ jobs:
           fi
 
       - name: Unit tests (on Linux the GPU engine runs on lavapipe and is required)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
@@ -233,7 +238,7 @@ jobs:
 
   kodi-linux:
     needs: build
-    if: ${{ !cancelled() }}   # each OS runs with its own build even if the other OS's build failed
+    if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # each OS runs with its own build even if the other OS's build failed; release.yml: off
     strategy:
       fail-fast: false
       matrix:
@@ -281,7 +286,7 @@ jobs:
 
   kodi-windows:
     needs: build
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # release.yml: off
     strategy:
       fail-fast: false
       matrix:
@@ -332,6 +337,7 @@ jobs:
   build-android:
     # Android TV / Fire TV / Shield (arm64-v8a): build and package only. Kodi has no headless Android test path on a
     # hosted runner yet; the engine is the GPU one (Vulkan, loaded at run time) with the CPU fallback.
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: off (the release ships no Android build)
     strategy:
       fail-fast: false
       matrix:

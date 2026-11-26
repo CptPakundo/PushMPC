@@ -98,7 +98,8 @@ and approve pull requests", for the watch's branch and pull request.
 
 | Workflow | What it checks or builds |
 |---|---|
-| `release.yml` | the release: Windows build, Setup, component zips, signed manifest, Linux tarballs; calls the VLC, mpv-native and Kodi workflows |
+| `release.yml` | the release: Windows build, Setup, component zips, signed manifest, Linux tarballs; builds the VLC, mpv-native and Kodi pieces through their workflows (build jobs and one smoke test each; their full test suites run on their own pushes) |
+| `dev-build.yml` | a quick Windows test build (below) |
 | `release-ux.yml` | Setup on Windows and `setup.sh` on Linux with real players, including a clean uninstall |
 | `integrations.yml`, `players-layout.yml` | the player configuration writers, MPC-BE and PotPlayer settings layouts |
 | `vsplugin*.yml` | the VapourSynth route: the pushcore, portable CPU, Vulkan and Linux NVIDIA backends |
@@ -111,6 +112,17 @@ and approve pull requests", for the watch's branch and pull request.
 
 Hosted runners have no GPU, so these run on synthetic clips, stand-in GPUs or software Vulkan (lavapipe); the real-GPU
 checks run on a self-hosted runner (below) or by hand.
+
+### Test builds
+
+For a Windows build to try out, use `dev-build.yml`, not a release dry run. It builds pushcore, the filter, the
+updater, the VapourSynth plugin and `PushMPC-Setup.exe` with release.yml's own jobs, without the VLC, mpv, Plex, Kodi
+and Linux pieces, in about 10 minutes on a warm cache. It runs on every push to a `track/**` branch that touches the
+Windows build, or by hand: `gh workflow run dev-build.yml --ref <branch>`. The result is the `pushmpc-release` artifact
+(Setup, the component zips, `release.json`), the same as a dry run's: `gh run download <run id> -n pushmpc-release`.
+
+The caches are keyed by what goes into them (pins, build scripts, sources) and saved right after each build step.
+Caches made on `main` are the ones every branch can restore; `dev-build.yml` runs weekly on `main` to keep them.
 
 ### GPU runner
 

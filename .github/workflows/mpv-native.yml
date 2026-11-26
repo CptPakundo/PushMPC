@@ -21,6 +21,10 @@ on:
         description: 'a release build (release.yml): also the Plex for Mac bundle (artifact plexmac)'
         type: boolean
         default: true
+      tests:
+        description: 'run the test suites (release.yml: false, builds + one smoke test per artifact; push and dispatch always test)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -37,11 +41,15 @@ on:
         default: false
 
 concurrency:
+  # never cancelled midway: its jobs fill the FFmpeg / mpv caches (a newer run waits, an older waiting one is dropped)
   group: mpv-native-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
+# Caches are keyed by what goes into them (pins, build scripts, our FFmpeg filter sources), not by run: a build with
+# the same inputs restores the previous output and skips the build; each cache is saved right after its build.
 jobs:
   linux:
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml takes nothing from it
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -58,13 +66,14 @@ jobs:
             glslang-tools spirv-headers libvulkan-dev mesa-vulkan-drivers vulkan-tools libshaderc-dev glslang-dev \
             libass-dev liblua5.2-dev libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev libxkbcommon-dev \
             libwayland-dev wayland-protocols libegl-dev libgl-dev libdrm-dev zlib1g-dev python3-jinja2 bc squashfs-tools patchelf
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: |
             /home/runner/pm-ccache
             /home/runner/pm-src
             /home/runner/pm-prefix
-          key: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          key: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-built
           restore-keys: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
       - name: Build Vulkan-Headers, libplacebo, FFmpeg + vf_pushmpc, mpv
         timeout-minutes: 60
@@ -72,6 +81,14 @@ jobs:
           ccache -z || true
           bash mpvnative/ci/build-unix.sh "$PREFIX" "$SRC" linux
           ccache -s | head -12 || true
+      - uses: actions/cache/save@v4
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            /home/runner/pm-ccache
+            /home/runner/pm-src
+            /home/runner/pm-prefix
+          key: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-built
       - name: Engine module and engine_test
         run: |
           cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
@@ -164,13 +181,14 @@ jobs:
             mingw-w64-ucrt-x86_64-spirv-cross mingw-w64-ucrt-x86_64-spirv-headers mingw-w64-ucrt-x86_64-glslang
             mingw-w64-ucrt-x86_64-libplacebo mingw-w64-ucrt-x86_64-libass mingw-w64-ucrt-x86_64-luajit
             mingw-w64-ucrt-x86_64-lcms2 mingw-w64-ucrt-x86_64-libjpeg-turbo mingw-w64-ucrt-x86_64-uchardet mingw-w64-ucrt-x86_64-zlib
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: |
             ${{ runner.temp }}/pm-ccache
             ${{ runner.temp }}/pm-src
             ${{ runner.temp }}/pm-prefix
-          key: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          key: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-built
           restore-keys: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
       - name: Build FFmpeg + vf_pushmpc and mpv (MSYS2 UCRT64)
         shell: msys2 {0}
@@ -183,6 +201,15 @@ jobs:
           ccache -z || true
           bash mpvnative/ci/build-unix.sh $R/pm-prefix $R/pm-src msys2
           ccache -s | head -12 || true
+      # right after the build, so a later failure or a cancel does not lose it
+      - uses: actions/cache/save@v4
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ runner.temp }}/pm-ccache
+            ${{ runner.temp }}/pm-src
+            ${{ runner.temp }}/pm-prefix
+          key: mpvnative-win-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-built
       - name: Portable mpv folder (mpv + our FFmpeg + engine + MinGW runtime DLLs)
         shell: msys2 {0}
         run: |
@@ -194,6 +221,7 @@ jobs:
           cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
           ls "$d" | head -100; du -sh "$d"
       - name: Headless checks
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         shell: msys2 {0}
         timeout-minutes: 20
         run: |
@@ -205,6 +233,7 @@ jobs:
           rm -rf $R/pm-portable-prefix; mkdir -p $R/pm-portable-prefix; cp -r $R/PushMPC-mpv-windows $R/pm-portable-prefix/bin
           bash mpvnative/tests/run-tests.sh $R/pm-portable-prefix "$t" msys2
       - name: D3D11 zero-copy filter path on WARP (harness, stub pushcore)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         shell: msys2 {0}
         timeout-minutes: 5
         run: |
@@ -224,6 +253,7 @@ jobs:
           Write-Host "install: $($r | ConvertTo-Json -Compress)"
           if ($r.state -ne 'installed') { throw 'install failed' }
           # playback through the installed config (encode mode ignores it): mpv must see the x2 rate
+          New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 't') | Out-Null
           $clip = Join-Path $env:RUNNER_TEMP 't\clip12.mkv'
           & (Join-Path $from 'ffmpeg.exe') -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 $clip
           Get-Content (Join-Path $dest 'portable_config/mpv.conf') | Write-Host
@@ -235,6 +265,7 @@ jobs:
           & pwsh -File (Join-Path $from 'pushmpc-native.ps1') uninstall -Dest $dest -Json
           if (Test-Path $dest) { Get-ChildItem $dest -Recurse | Select-Object -First 10 | Out-String | Write-Host; throw 'uninstall left files behind' }
       - name: mpv on a window (d3d11 on WARP, hwupload -> pushmpc -> d3d11 interop), best effort
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         shell: msys2 {0}
         continue-on-error: true
         timeout-minutes: 5
@@ -291,12 +322,38 @@ jobs:
   # (b) the runtime hook into an EXISTING mpv: one private libavfilter per FFmpeg branch (6.0 .. 9.1) and architecture,
   # picked at run time by the system's avfilter_version(); then the distros' own mpv: Ubuntu 24.04 (FFmpeg 6.1),
   # Debian 13 (7.1), Arch (current).
+  #
+  # The 22 builds below depend only on the pins and the filter sources: hook-cache looks their output up first (one
+  # entry per architecture) and when both are there the builds are skipped and the hook job restores them instead.
+  hook-cache:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      # plex-linux (dispatch only) takes the build artifacts themselves
+      hit: ${{ steps.x64.outputs.cache-hit == 'true' && steps.arm64.outputs.cache-hit == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.plex_linux) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: mpvnative, persist-credentials: false }
+      - name: Key (the pins, the build scripts, the filter sources, the branch list)
+        id: key
+        run: echo "key=mpvnative-hooklibs-out-v1-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/fetch-commit.sh', 'mpvnative/hook/build-hook-branch.sh', 'mpvnative/hook/build-hook.sh', 'mpvnative/hook/pushmpc_hook_glue.c', 'mpvnative/ffmpeg/**', 'mpvnative/include/**') }}-n50-n51-snap-n60-n61-n70-n71-n80-n81-n90-n91" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: x64
+        with: { path: '${{ runner.temp }}/hooklibs', key: '${{ steps.key.outputs.key }}-x64', lookup-only: true }
+      - uses: actions/cache/restore@v4
+        id: arm64
+        with: { path: '${{ runner.temp }}/hooklibs', key: '${{ steps.key.outputs.key }}-arm64', lookup-only: true }
+
   hook-libs:
+    needs: hook-cache
+    if: ${{ needs.hook-cache.outputs.hit != 'true' }}
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         # every pinned tag of the branch (point releases can bump the micro version: 7.1 is 10.4.100, 7.1.5 is 10.5.100)
+        # (a change here goes into the hook-cache key's branch list too)
         branch: [n5.0, n5.1, snapshots, n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -321,7 +378,8 @@ jobs:
           retention-days: 7
 
   hook:
-    needs: hook-libs
+    needs: [hook-cache, hook-libs]
+    if: ${{ !cancelled() && needs.hook-cache.result == 'success' && (needs.hook-libs.result == 'success' || (needs.hook-libs.result == 'skipped' && needs.hook-cache.outputs.hit == 'true')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -329,23 +387,25 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
-      CCACHE_DIR: /home/runner/pm-ccache-hook-test
+      HOOKLIBS_KEY: ${{ needs.hook-cache.outputs.key }}-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
     steps:
       - uses: actions/checkout@v4
       - name: Packages (the distro mpv and FFmpeg)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config gdb
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake patchelf glslang-tools pkg-config gdb
           mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
       - uses: actions/download-artifact@v4
+        if: needs.hook-libs.result == 'success'
         with:
           pattern: hooklib-${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}-*
           path: ${{ runner.temp }}/hooklibs
-      - uses: actions/cache@v4
-        with:
-          path: /home/runner/pm-ccache-hook-test
-          key: mpvnative-hooktest-${{ matrix.runner }}-${{ github.run_id }}
-          restore-keys: mpvnative-hooktest-${{ matrix.runner }}-
+      - uses: actions/cache/save@v4
+        if: needs.hook-libs.result == 'success'
+        with: { path: '${{ runner.temp }}/hooklibs', key: '${{ env.HOOKLIBS_KEY }}' }
+      - uses: actions/cache/restore@v4
+        if: needs.hook-libs.result != 'success'
+        with: { path: '${{ runner.temp }}/hooklibs', key: '${{ env.HOOKLIBS_KEY }}', fail-on-cache-miss: true }
       - name: The hook and the engine module
         run: |
           # one file per libavfilter version (two tags of one version give the same build; copied one after another)
@@ -364,17 +424,19 @@ jobs:
       - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
         run: sh mpvnative/install/test-install.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-install"
       - name: Debian 13's mpv (FFmpeg 7.1)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         timeout-minutes: 15
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:trixie sh -c \
             'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
       - name: Debian 12's mpv (FFmpeg 5.1, libavfilter 8)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         timeout-minutes: 15
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:bookworm sh -c \
             'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
       - name: Arch's mpv (current FFmpeg)
-        if: matrix.runner == 'ubuntu-24.04'
+        if: ${{ matrix.runner == 'ubuntu-24.04' && format('{0}', inputs.tests) != 'false' }}
         timeout-minutes: 15
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" archlinux:latest sh -c \
@@ -395,7 +457,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # the builds' output depends only on these (every FFmpeg tree is pinned by commit)
+      - name: Output key
+        shell: bash
+        run: echo "PLEXLIBS_KEY=mpvnative-plexlibs-out-v1-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/fetch-commit.sh', 'mpvnative/plex/**', 'mpvnative/ffmpeg/**', 'mpvnative/include/**') }}" >> "$GITHUB_ENV"
+      - uses: actions/cache/restore@v4
+        id: out-cache
+        with: { path: '${{ runner.temp }}/plexlibs', key: '${{ env.PLEXLIBS_KEY }}' }
       - uses: msys2/setup-msys2@v2
+        if: steps.out-cache.outputs.cache-hit != 'true'
         with:
           msystem: UCRT64
           update: false
@@ -403,12 +473,15 @@ jobs:
           install: >-
             make git diffutils mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-ccache
             mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-tools-git
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        if: steps.out-cache.outputs.cache-hit != 'true'
+        id: ccache
         with:
           path: ${{ runner.temp }}/pm-ccache-plex
           key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
           restore-keys: mpvnative-plexlibs-
       - name: FFmpeg 5.0 / 5.1 builds (every pinned tag) and the proxy avfilter-8.dll
+        if: steps.out-cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
         timeout-minutes: 50
         env:
@@ -416,6 +489,15 @@ jobs:
         run: |
           R=$(cygpath -u "$RUNNER_TEMP")
           bash mpvnative/plex/build-plex-libs.sh "$R/ffmpeg5" "$R/plexlibs"
+      # right after the build: a later cancel keeps them
+      - uses: actions/cache/save@v4
+        if: steps.out-cache.outputs.cache-hit != 'true'
+        with: { path: '${{ runner.temp }}/plexlibs', key: '${{ env.PLEXLIBS_KEY }}' }
+      - uses: actions/cache/save@v4
+        if: steps.out-cache.outputs.cache-hit != 'true' && steps.ccache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pm-ccache-plex
+          key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
       - uses: actions/upload-artifact@v4
         with:
           name: plexlibs
@@ -447,6 +529,7 @@ jobs:
           path: ${{ runner.temp }}/plexlibs/
           retention-days: 7
       - name: Plex HTPC and Plex for Windows (winget)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         timeout-minutes: 20
         run: |
           if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -481,6 +564,7 @@ jobs:
           }
           exit 0
       - name: Proxy install, self-test through Plex's own libmpv, uninstall bit-exact (Windows PowerShell 5.1 and PowerShell 7)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
         timeout-minutes: 20
         run: |
           $p = "$env:RUNNER_TEMP\plexlibs"
@@ -614,7 +698,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-26]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
+        # release.yml: macOS 15 only (its bundle is the release's; built, installed and self-tested there)
+        runner: ${{ fromJSON(format('{0}', inputs.tests) != 'false' && '["macos-15", "macos-26"]' || '["macos-15"]') }}   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     steps:

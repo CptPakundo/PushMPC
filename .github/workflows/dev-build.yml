@@ -1,0 +1,45 @@
+# A quick Windows test build: PushFPS's pushcore, the filter, the updater, the VapourSynth plugin and
+# PushMPC-Setup.exe, exactly as release.yml builds them (it runs release.yml's core and build jobs), without the VLC,
+# mpv, Plex, Kodi and Linux pieces. Artifact pushmpc-release (Setup, component zips, release.json) as in a release dry
+# run. Never publishes. About 10 minutes on a warm cache.
+#
+# Runs on a push to a track/** branch that touches the Windows build, by hand ("Run workflow"), and weekly on main
+# (caches unused for 7 days are dropped; main's caches are the ones every branch can restore).
+name: dev-build
+
+on:
+  push:
+    branches: ['track/**']
+    paths:
+      - 'filter/**'
+      - 'pushmpc/**'
+      - 'updater/**'
+      - 'installer/**'
+      - 'patches/**'
+      - 'pmml/scripts/**'
+      - 'scripts/pushmpc-install.ps1'
+      - 'scripts/pushfps-pin.json'
+      - 'scripts/ml-runtime-pin.json'
+      - 'vsplugin/src/**'
+      - 'vsplugin/CMakeLists.txt'
+      - '.github/workflows/dev-build.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: dev-build-${{ github.ref }}
+  cancel-in-progress: true   # the caches are saved right after each build step, so a cancel keeps them
+
+permissions:
+  contents: write   # what release.yml declares (a dev build never publishes)
+
+jobs:
+  windows:
+    uses: ./.github/workflows/release.yml
+    with:
+      source_ref: ${{ github.sha }}
+      dry_run: true
+      components: false
+    secrets: inherit
