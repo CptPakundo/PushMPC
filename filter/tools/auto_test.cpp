@@ -91,7 +91,7 @@ int main()
         VrrProbe f = w; VrrDecide(f, true, true, true);
         Display dw = d4k; dw.vrr = w.active; Display df = d4k; df.vrr = f.active;
         const Choice cw = Decide({}, { 1920, 1040, 23.976, false, 0.5 }, dw, {}, {}), cf = Decide({}, { 1920, 1040, 23.976, false, 0.5 }, df, {}, {});
-        wprintf(L"  user's profile 1/1, clip A: windowed %dx %.1f fps (VRR %d), fullscreen %dx %.1f fps (VRR %d)  [expected 5x / 8x]\n",
+        wprintf(L"  user's profile 1/1, clip A: windowed %dx %.1f fps (VRR %d), fullscreen %dx %.1f fps (VRR %d)  [expected 10x / 10x]\n",
                 cw.multiplier, 23.976 * cw.multiplier, int(dw.vrr), cf.multiplier, 23.976 * cf.multiplier, int(df.vrr));
     }
 
@@ -266,6 +266,33 @@ int main()
             check(SubtitleHoldValue(a, true, true) == 2 && SubtitleHoldValue(a, false, true) == 0 && SubtitleHoldValue(a, true, false) == 0
                   && SubtitleHoldValue(off, true, true) == 0 && SubtitleHoldValue(on, false, false) == 1, L"Subtitle Hold: Auto gated (2) only with the core's gate and the unlock on; Off/On manual");
         }
+        {   // NVIDIA VFG up to 16x (8x in the SDK multiplier mode, above in its timestep mode), the usual rules
+            const Source clipA{ 1920, 1040, 23.976, false, 0.5 }, low15{ 1920, 1040, 15.0, false, 0.5 };
+            const Display w240 = d4k, vrr240 = d4kVrr;
+            const Display w480{ L"4K 480", 480.0, 3840, 2160, false };
+            const Choice a = Decide({}, clipA, w240, {}, {}), b = Decide({}, clipA, vrr240, {}, {});
+            check(a.multiplier == 10 && CadenceEven(w240.refreshHz, 23.976 * a.multiplier), L"VFG16: clip A, 240 Hz fixed (windowed): 10x, one new frame per refresh", a.smootherNote + L" | " + a.stoppedAt);
+            check(b.multiplier == 10, L"VFG16: clip A, 240 Hz VRR (fullscreen): 10x (11x would pass the refresh)", b.smootherNote + L" | " + b.stoppedAt);
+            const Choice c15 = Decide({}, low15, w240, {}, {});
+            check(c15.multiplier == 16, L"VFG16: a 15 fps source on 240 Hz: 16x (240 fps)", c15.smootherNote + L" | " + c15.stoppedAt);
+            const Choice c480 = Decide({}, clipA, w480, {}, {});
+            check(c480.multiplier >= 10 && c480.multiplier <= 16 && c480.predictedMs <= c480.budgetMs, L"VFG16: 480 Hz: above 8x within the GPU budget", c480.smootherNote + L" | " + c480.stoppedAt);
+            Settings f16; f16.smoother = 16; Settings f12; f12.smoother = 12;
+            check(Decide(f16, clipA, w240, {}, {}).multiplier == 16, L"VFG16: Smoother 16x is honoured with VFG");
+            Settings pf16 = f16; pf16.fgMethod = FgMethod::PushFlow;
+            check(Decide(pf16, clipA, w240, {}, {}).multiplier == 4, L"VFG16: Smoother 16x with PushFlow stops at its 4x");
+            check(ParseChoice(L"16", 2, kMaxSmoother, kAuto) == 16 && ParseChoice(L"17", 2, kMaxSmoother, kAuto) == kAuto, L"VFG16: the Smoother setting reads 2..16");
+            const Costs c0{};
+            check(FgPrior(c0, FgMethod::Vfg, 1, 16, 1.0) > FgPrior(c0, FgMethod::Vfg, 1, 10, 1.0) && FgPrior(c0, FgMethod::Vfg, 1, 10, 1.0) > FgPrior(c0, FgMethod::Vfg, 1, 8, 1.0),
+                  L"VFG16: the cost grows with the multiplier above 8x");
+            VfgCeiling() = 8;   // an older core (no PUSHCORE_FEATURE_VFG16)
+            const Choice o1 = Decide({}, clipA, w240, {}, {}), o2 = Decide({}, clipA, vrr240, {}, {}), o3 = Decide(f12, clipA, w240, {}, {});
+            VfgCeiling() = 16;
+            check(o1.multiplier == 5 && o2.multiplier == 8 && o3.multiplier == 8, L"VFG16: a core without 16x: 5x windowed, 8x VRR, Smoother 12x stops at 8x",
+                  std::format(L"{}x / {}x / {}x", o1.multiplier, o2.multiplier, o3.multiplier));
+        }
+        check(!CoreOutputStalled(800, 40, true) && !CoreOutputStalled(5000, 10, true) && !CoreOutputStalled(5000, 40, false) && CoreOutputStalled(1600, 24, true),
+              L"no-output guard: source frames shown after 1.5 s and 24 frames in, nothing out (playing)");
         wprintf(L"  vendor paths: %d failed\n", fails);
     }
     Display real = QueryDisplay(PlayerWindow());

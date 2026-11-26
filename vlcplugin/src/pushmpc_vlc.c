@@ -55,7 +55,7 @@
  * VLC's device, made like the pictures of VLC's Direct3D 11 pool (same size, format, bind flags; one texture each, with
  * the luma and chroma shader views VLC's outputs draw from). A picture holds its slot and the ring until VLC releases
  * it, so pictures may outlive the filter. */
-#define PM_RING_MAX 32
+#define PM_RING_MAX 52   /* 3 x 16 + 4: VFG 16x */
 typedef struct pm_ring {
     atomic_int refs;
     ID3D11Device *dev;
@@ -273,8 +273,8 @@ static bool RegTake(picture_t *p, pm_job **job, int *idx)
 }
 static int OutStages(void) { vlc_mutex_lock(&reg_lock); int n = out_stages; vlc_mutex_unlock(&reg_lock); return n; }
 
-static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
-static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8" };
+static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 };
+static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8", "x10", "x12", "x16" };
 static const int quality_values[] = { 0, 1 };
 static const char *const quality_texts[] = { "Fast", "Balanced" };
 static const int engine_values[] = { 0, 1, 2, 3 };
@@ -291,7 +291,7 @@ vlc_module_begin()
     set_subcategory(SUBCAT_VIDEO_VFILTER)
     add_integer(CFG "smoother", 0, "Smoother (frame generation)",
                 "Auto picks the multiplier from the display refresh rate and what this computer can generate in time; "
-                "Off passes frames through; x2..x8 force a multiplier.", false)
+                "Off passes frames through; x2..x16 force a multiplier (above x8 with NVIDIA VFG only).", false)
         change_integer_list(smoother_values, smoother_texts)
         change_safe()
     add_integer(CFG "quality", 1, "Motion search quality", "Fast searches on a quarter-size picture, Balanced on a "
@@ -315,7 +315,7 @@ vlc_module_begin()
              "pictures stay on the GPU (pushcore works on VLC's own D3D11 device); off = they are copied to the CPU "
              "and back, as before.", true)
     add_bool(CFG "zerocopy-ring", true, "Own output pictures with zero copy", "Generated pictures come from textures "
-             "of the module's own (up to x8); off = VLC's 4-picture pool (at most x4).", true)
+             "of the module's own (up to x16); off = VLC's 4-picture pool (at most x4).", true)
     add_integer(CFG "hw", 0, "Hardware-decoded video (Linux)", "Auto keeps VA-API / VDPAU pictures on the GPU: real frames "
                 "pass untouched, generated frames go into PushMPC's own surfaces on the decoder's device, after a "
                 "round-trip check of the driver (pass-through if it fails). Convert hands them to VLC's converter "
@@ -1076,7 +1076,7 @@ static int Open(vlc_object_t *obj)
             if (sys->pc && pk > 1) {
                 sys->zc = true;
                 bits = pcc.bits;
-                sys->k = pk > 8 ? 8 : pk;
+                sys->k = pk > 16 ? 16 : pk;
                 snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             } else {
                 if (sys->pc) { pmx_close(sys->pc); sys->pc = NULL; snprintf(err, sizeof(err), "pushcore runs x1 here"); }
@@ -1124,7 +1124,7 @@ static int Open(vlc_object_t *obj)
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
         if (sys->pc) {
-            sys->k = pk < 1 ? 1 : pk > 8 ? 8 : pk;
+            sys->k = pk < 1 ? 1 : pk > 16 ? 16 : pk;
             snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             if (sys->k <= 1) { pmx_close(sys->pc); sys->pc = NULL; sys->k = 1; }
         } else if (engine == 2) {

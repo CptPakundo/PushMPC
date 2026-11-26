@@ -27,7 +27,7 @@ typedef struct pm_pc_cfg {
     int bits;                     /* 8, or 10..16 (2 bytes per sample, little endian) */
     int fps_num, fps_den;         /* nominal source rate */
     int matrix, transfer, primaries, range;  /* H.273 codes; range 1 limited, 2 full */
-    int smoother;                 /* VLC's setting: 0 Auto (PushMPC's own Smoother setting), 1 off, 2..8 */
+    int smoother;                 /* VLC's setting: 0 Auto (PushMPC's own Smoother setting), 1 off, 2..16 */
     double display_hz;            /* 0 = the primary display */
     int warp;                     /* 1 = WARP adapter (CI with the stub core) */
     const wchar_t *core_dir;      /* folder with pushcore.dll; NULL = the PushMPC install (%LOCALAPPDATA%\PushMPC\core) */

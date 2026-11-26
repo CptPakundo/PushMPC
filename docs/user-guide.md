@@ -251,7 +251,7 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 | Setting | Choices | What Auto does |
 |---|---|---|
 | Enable PushMPC | on / off | |
-| Smoother | Auto, Off, 2x-8x | the highest multiplier your card keeps up with and your display can show. On a fixed-refresh display, an even rhythm wins a tie |
+| Smoother | Auto, Off, 2x-16x | the highest multiplier your card keeps up with and your display can show. On a fixed-refresh display, an even rhythm wins a tie |
 | Sharper | Auto, Off, level 1-4 | upscales to your screen size with the time left over |
 | Clean up | Auto, Off, On | AI clean-up for low-quality video, when your card has time for it |
 | SDR to HDR | Auto, Off, On | when Windows HDR is on and the video is SDR, shows it as HDR |

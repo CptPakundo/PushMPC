@@ -27,7 +27,7 @@ struct CoreConfig {
     std::wstring dataDir;      // PushFPS user data holding chain-session.v1; empty = built-in defaults
     // Overrides on top of the saved chain (negative / empty = keep what is saved).
     int sr = -1, fg = -1;      // 0 off, 1 on
-    int multiplier = -1;       // 2..8
+    int multiplier = -1;       // 2..16 (NVIDIA VFG)
     int vfgQuality = -1;
 };
 
