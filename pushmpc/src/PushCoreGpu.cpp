@@ -546,12 +546,13 @@ struct PushCore {
     ComPtr<ID3D12GraphicsCommandList> regionList;
     uint32_t regionListNext = 0, regionCurAlloc = 0;
     uint64_t repairedFrames = 0, repairedParts = 0, repairedWholly = 0, repairSubstitutions = 0, repairShifted = 0, repairCarved = 0;
-    uint64_t repairWhy[9]{};   // not repaired: gate (no animation evidence), budget, no part, no RGB copy, capture, generate, copy, composite; 8: budget, largest part only
+    uint64_t repairWhy[9]{};   // spans / frames not repaired: gate (no animation evidence), budget (graph over it), no part, no RGB copy, capture, generate, copy, composite; 8: budget (one new span per frame)
     // the repair's GPU time: D3D12 timestamps around its span-stream work, per repaired frame (16 in flight)
     ComPtr<ID3D12QueryHeap> repairQueries; ComPtr<ID3D12Resource> repairQueryBuf; const uint64_t* repairQueryMap = nullptr;
     uint64_t repairQueryValue[16]{}; uint32_t repairQueryNext = 0; int repairQueryCur = -1; double tsPerMs = 0;
     CostWindow costRepair;
     double pendingRepairMs = 0;   // the repair queued for the frame that goes to the graph next (admission's queue prediction)
+    std::map<std::tuple<uint64_t, uint64_t, uint64_t>, bool> spanDecision;   // (d0, d1, pair start) -> repaired for the whole span
     // Repair mode (VFG, the span stream running): held frames are repaired in place and every source frame goes to the
     // graph with k outputs; nothing is dropped and no pair spans more than one source frame.
     bool repairMode() const { return retimingOn() && spanVfgOk && repairPass.ready(); }
@@ -566,7 +567,7 @@ struct PushCore {
         return (tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE) || veyra::pushflow::runtimeInstalled(runtimeDir);
     }
     double sourceIntervalMs() const { return stream.fpsNum > 0 && stream.fpsDen > 0 ? 1000.0 * double(stream.fpsDen) / double(stream.fpsNum) : 1000.0 / 23.976; }
-    void clearRegions() { gridOf.clear(); regionOf.clear(); slotOf.clear(); whollyHeld.clear(); anyClassified = false; lastClassified = 0; pairA = pairB = UINT64_MAX; for (auto& r : rgbSlots) r.seq = UINT64_MAX; }
+    void clearRegions() { gridOf.clear(); regionOf.clear(); slotOf.clear(); whollyHeld.clear(); spanDecision.clear(); anyClassified = false; lastClassified = 0; pairA = pairB = UINT64_MAX; for (auto& r : rgbSlots) r.seq = UINT64_MAX; }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
     bool dvP5Logged = false;
@@ -1620,19 +1621,34 @@ struct PushCore {
         for (const auto& g : groups) exact |= IsExactRepeat(g);
         evidence.Push(wholly || exact);
         if (groups.empty()) { ++repairWhy[2]; return PUSHCORE_OK; }
-        // the live-action gate: a wholly held frame is always repaired, a partly held one only in animation
-        if (!wholly && !animationGate()) { ++repairWhy[0]; return PUSHCORE_OK; }
-        // the budget: 85 % of a source frame at p95, the graph and the repair together. Over it: the largest part only; the
-        // graph alone over it: no partial repair (a wholly held frame still is: the graph would otherwise show it as a still)
+        // Decisions per (part, span), made at the span's first frame and kept for the whole span (a part repaired at s and
+        // not at s + 1 would step forward and back): the live-action gate (a wholly held frame always passes) and the
+        // budget, 85 % of a source frame at p95 for the graph and the repair together. Over it, at most one new span per
+        // frame, the largest part first; when the graph alone is over it, no new partial span.
         {
+            for (auto it = spanDecision.begin(); it != spanDecision.end();) { if (std::get<1>(it->first) <= p.seq) it = spanDecision.erase(it); else ++it; }
             const double budget = 0.85 * sourceIntervalMs(), graphP95 = costFull.pct(0.95), repP95 = costRepair.pct(0.95);
-            if (graphP95 > 0) {
-                if (!wholly && graphP95 >= budget) { ++repairWhy[1]; return PUSHCORE_OK; }
-                if (repP95 > 0 && graphP95 + repP95 > budget && groups.size() > 1) {
-                    std::partial_sort(groups.begin(), groups.begin() + 1, groups.end(), [](const RepairGroup& x, const RepairGroup& y) { return x.cells > y.cells; });
-                    groups.resize(1); ++repairWhy[8];
+            const bool graphOver = graphP95 > 0 && graphP95 >= budget;
+            const bool over = graphOver || (graphP95 > 0 && repP95 > 0 && graphP95 + repP95 > budget);
+            std::sort(groups.begin(), groups.end(), [](const RepairGroup& x, const RepairGroup& y) { return x.cells > y.cells; });
+            const bool gate = wholly || animationGate();
+            bool admittedNew = false;
+            std::vector<RepairGroup> keep;
+            for (auto& g : groups) {
+                const auto key = std::make_tuple(g.d0, g.d1, g.pairFrom);
+                auto it = spanDecision.find(key);
+                if (it == spanDecision.end()) {
+                    int why = -1;
+                    if (!gate) why = 0;
+                    else if (!wholly && graphOver) why = 1;
+                    else if (over && admittedNew) why = 8;
+                    it = spanDecision.emplace(key, why < 0).first;
+                    if (why >= 0) ++repairWhy[why]; else admittedNew = true;
                 }
+                if (it->second) keep.push_back(std::move(g));
             }
+            groups.swap(keep);
+            if (groups.empty()) return PUSHCORE_OK;
         }
         const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
         const CellGrid* gs = gridAt(p.seq);
@@ -1883,7 +1899,7 @@ struct PushCore {
         if (spanVfgOk) {
             collectRepairTimes();
             veyra::log::info("pushcore", std::format("source repair: {} frames ({} wholly held), {} parts ({} substitution pairs, {} camera-residual shifts, {} cells carved); "
-                "not repaired: gate {}, budget {}, no part {}, no RGB copy {}, capture {}, generate {}, copy {}, composite {}; largest part only (budget) {}; "
+                "not repaired: spans gated {}, spans over budget {}, frames with no part {}, no RGB copy {}, capture {}, generate {}, copy {}, composite {}; spans held back (one new span per frame over budget) {}; "
                 "GPU per repaired frame p50 {:.2f} p95 {:.2f} ms; cell threshold {:.1f} codes (noise p99 {:.2f}); animation evidence {:.1f} %",
                 repairedFrames, repairedWholly, repairedParts, repairSubstitutions, repairShifted, repairCarved,
                 repairWhy[0], repairWhy[1], repairWhy[2], repairWhy[3], repairWhy[4], repairWhy[5], repairWhy[6], repairWhy[7], repairWhy[8],

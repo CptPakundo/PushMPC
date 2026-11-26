@@ -322,19 +322,22 @@ struct RepairGroup {
     float vx = 0, vy = 0;                 // the group's motion d0 -> d1 in cells (block match on the cell grids)
     float shiftX = 0, shiftY = 0;         // camera residual in cells (a part that moves with the camera), else 0
     float residual = 0;                   // mean |s - d0| of the group's cells (codes): near 0 for a drawing held exactly
+    float stepD0 = 0, stepD1 = 0;         // median change of the group's cells at d0 and at d1 (codes): the drawing steps
+    float thr = kCellChangeCodes;         // the change threshold the plan used
     uint32_t carved = 0, substituted = 0; // mask cells given back to the frame / carried from pairFrom
     std::vector<uint8_t> mask;            // per cell 0 / 255
 };
 inline constexpr double kMinGroupShare = 0.0008;   // about 100 cells: a small part (a hand) is still a part
 inline constexpr double kFadeShare = 0.6;
 inline constexpr uint32_t kCadenceCap = 4;   // the longest drawing span that still moves over its whole length
-inline constexpr uint32_t kMinSubstitution = 4;   // cells: fewer redrawn cells are carved, not swapped
+inline constexpr uint32_t kMinSubstitution = 12;  // cells: a redrawn blob (a mouth, an eye) smaller than this stays in the body's span
+inline constexpr uint32_t kLayerCells = 300;      // cells: a key this large inside an object is a second layer in contact
 // per source frame at most kMaxGroups parts on at most kMaxPairs span-stream pairs, the largest first: each part costs
 // one generated frame of the span stream and each pair one pair analysis (the budget; the largest parts carry the motion)
 #ifndef PUSHMPC_HELD_MAX_GROUPS
-#define PUSHMPC_HELD_MAX_GROUPS 4
+#define PUSHMPC_HELD_MAX_GROUPS 3
 #endif
-inline constexpr size_t kMaxGroups = PUSHMPC_HELD_MAX_GROUPS, kMaxPairs = 3;
+inline constexpr size_t kMaxGroups = PUSHMPC_HELD_MAX_GROUPS, kMaxPairs = 2;
 template <class FrameAt, class GridAt>
 inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt gridAt, int lookahead, PhaseShape shape = PhaseShape::Linear,
                                             float thr = kCellChangeCodes)
@@ -369,6 +372,55 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
         for (size_t k = 0; k < ahead.size(); ++k) if (ahead[k]->changed[i]) { k1 = int(k) + 1; break; }
         if (!k1) continue;
         key[i] = {k0, k1};
+    }
+    // Objects, not cells (the research critique C1: per-cell keys split one drawing into several spans at different
+    // phases, because edge and shading cells cross the threshold at different frames). 1. a 3x3 majority filter on the
+    // key map; 2. 8-connected objects of keyed cells, each taking its cells' majority key, unless another key holds
+    // kLayerCells cells and a quarter of the object (a second layer in contact, kept apart). Objects with the same key
+    // share one span-stream frame.
+    {
+        std::vector<std::pair<int, int>> k2 = key;
+        for (int y = 0; y < int(H); ++y)
+            for (int x = 0; x < int(W); ++x) {
+                const size_t i = size_t(y) * W + x;
+                if (!key[i].first) continue;
+                std::pair<int, int> cand[9]; int cnt[9] = {}, nk = 0;
+                for (int j = -1; j <= 1; ++j) for (int q = -1; q <= 1; ++q) {
+                    const int xx = x + q, yy = y + j;
+                    if (xx < 0 || yy < 0 || xx >= int(W) || yy >= int(H)) continue;
+                    const auto& kk = key[size_t(yy) * W + xx];
+                    if (!kk.first) continue;
+                    int f = 0; while (f < nk && cand[f] != kk) ++f;
+                    if (f == nk) cand[nk++] = kk;
+                    ++cnt[f];
+                }
+                int best = 0; for (int f = 1; f < nk; ++f) if (cnt[f] > cnt[best]) best = f;
+                if (cnt[best] > 4) k2[i] = cand[best];
+            }
+        std::vector<int> label(n, -1);
+        std::vector<uint32_t> stack, members;
+        for (size_t i0 = 0; i0 < n; ++i0) {
+            if (!k2[i0].first || label[i0] >= 0) continue;
+            members.clear(); stack.assign(1, uint32_t(i0)); label[i0] = 1;
+            while (!stack.empty()) {
+                const uint32_t c = stack.back(); stack.pop_back(); members.push_back(c);
+                const int x = int(c % W), y = int(c / W);
+                for (int j = -1; j <= 1; ++j) for (int q = -1; q <= 1; ++q) {
+                    const int xx = x + q, yy = y + j;
+                    if (xx < 0 || yy < 0 || xx >= int(W) || yy >= int(H)) continue;
+                    const size_t d = size_t(yy) * W + xx;
+                    if (k2[d].first && label[d] < 0) { label[d] = 1; stack.push_back(uint32_t(d)); }
+                }
+            }
+            std::vector<std::pair<std::pair<int, int>, uint32_t>> votes;
+            for (uint32_t c : members) { bool f = false; for (auto& v : votes) if (v.first == k2[c]) { ++v.second; f = true; break; } if (!f) votes.push_back({k2[c], 1u}); }
+            auto major = std::max_element(votes.begin(), votes.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first;
+            const uint32_t keepApart = std::max<uint32_t>(kLayerCells, uint32_t(members.size() / 4));
+            for (uint32_t c : members) {
+                uint32_t mine = 0; for (auto& v : votes) if (v.first == k2[c]) mine = v.second;
+                key[c] = mine >= keepApart ? k2[c] : major;
+            }
+        }
     }
     std::vector<std::pair<std::pair<int, int>, uint32_t>> groups;
     for (size_t i = 0; i < n; ++i) {
@@ -462,8 +514,11 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
             }
         r.mask.assign(n, 0);
         const int dil = 2;
-        std::vector<uint64_t> subAt;   // per substitution cell: its index (the frame m is in subFrame)
-        std::vector<uint64_t> subFrame;
+        // Ownership-aware carving (critique C5): inside the sweep (the part's old and new footprints and the way between)
+        // nothing is carved; in the dilation band only changes that motion does not explain are (sparkles, flashes, a
+        // light pulse): a cell that matches d0 moved by the camera is a background scrolling on ones, which the span
+        // stream interpolates correctly (carving it would leave the part's d0 outline behind: a ghost edge).
+        std::vector<uint32_t> subCand; std::vector<uint64_t> subM;
         for (int y = by0; y <= by1; ++y)
             for (int x = bx0; x <= bx1; ++x) {
                 bool on = false;
@@ -474,25 +529,81 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
                 if (!on) continue;
                 const size_t c = size_t(y) * W + x;
                 if (cells[c]) { r.mask[c] = 255; continue; }
-                // another layer inside the mask: its changes in (d0, d1)
                 uint32_t nc = 0; uint64_t m = 0;
                 for (uint64_t j = r.d0 + 1; j < r.d1; ++j) if (rfAt(j)->changed[c]) { ++nc; m = j; }
                 if (nc == 0) { r.mask[c] = 255; continue; }
-                if (nc == 1 && m <= s) { subAt.push_back(c); subFrame.push_back(m); continue; }   // a substitution (decided below)
-                ++r.carved;   // a layer on another cadence: the frame's own picture
+                if (sweep[c]) {
+                    r.mask[c] = 255;
+                    if (nc == 1 && m <= s) { subCand.push_back(uint32_t(c)); subM.push_back(m); }   // a redraw inside the part (decided below)
+                    continue;
+                }
+                const float moved = std::fabs(gs->v[c] - g0->sample(x - csx, y - csy));
+                if (moved <= thr) { r.mask[c] = 255; continue; }
+                ++r.carved;
             }
         r.pairFrom = r.d0;
-        if (subAt.size() >= kMinSubstitution) {
-            r.pairFrom = *std::max_element(subFrame.begin(), subFrame.end());
-            for (size_t c : subAt) r.mask[c] = 255;
-            r.substituted = uint32_t(subAt.size());
-        } else r.carved += uint32_t(subAt.size());
-        const std::pair<uint64_t, uint64_t> pr{r.pairFrom, r.d1};
+        // Substitution (critique C6): only a compact blob inside the part that was redrawn once at m and then held (a
+        // mouth, an eye, a hand pose) takes the pair (m, d1), as its own sub-part at the same phase; the body keeps (d0, d1)
+        RepairGroup sub;
+        if (subCand.size() >= kMinSubstitution) {
+            std::vector<uint8_t> isCand(n, 0);
+            for (uint32_t c : subCand) isCand[c] = 1;
+            std::vector<uint32_t> best, cur, st;
+            for (uint32_t c0 : subCand) {
+                if (isCand[c0] != 1) continue;
+                cur.clear(); st.assign(1, c0); isCand[c0] = 2;
+                while (!st.empty()) {
+                    const uint32_t c = st.back(); st.pop_back(); cur.push_back(c);
+                    const int x = int(c % W), y = int(c / W);
+                    for (int j = -1; j <= 1; ++j) for (int q = -1; q <= 1; ++q) {
+                        const int xx = x + q, yy = y + j;
+                        if (xx < 0 || yy < 0 || xx >= int(W) || yy >= int(H)) continue;
+                        const size_t d = size_t(yy) * W + xx;
+                        if (isCand[d] == 1) { isCand[d] = 2; st.push_back(uint32_t(d)); }
+                    }
+                }
+                if (cur.size() > best.size()) best = cur;
+            }
+            if (best.size() >= kMinSubstitution && best.size() * 2 <= r.cells) {
+                uint64_t m = 0;
+                for (size_t q = 0; q < subCand.size(); ++q) for (uint32_t c : best) if (subCand[q] == c) m = std::max(m, subM[q]);
+                sub = r; sub.pairFrom = m; sub.mask.assign(n, 0); sub.cells = uint32_t(best.size()); sub.carved = 0;
+                for (uint32_t c : best) {
+                    const int x = int(c % W), y = int(c / W);
+                    for (int j = -1; j <= 1; ++j) for (int q = -1; q <= 1; ++q) {
+                        const int xx = x + q, yy = y + j;
+                        if (xx >= 0 && yy >= 0 && xx < int(W) && yy < int(H)) { sub.mask[size_t(yy) * W + xx] = 255; r.mask[size_t(yy) * W + xx] = 0; }
+                    }
+                }
+                r.substituted = sub.substituted = uint32_t(best.size());
+            }
+        }
+        // the step signature (critique C4): the part's cells change by a drawing step at d0 and at d1
+        {
+            const CellGrid* gp0 = r.d0 > 0 ? gridAt(r.d0 - 1) : nullptr; const CellGrid* gp1 = gridAt(r.d1 - 1);
+            std::vector<float> a0, a1;
+            const size_t stride = std::max<size_t>(1, r.cells / 2000);
+            size_t q = 0;
+            for (size_t i = 0; i < n; ++i) if (cells[i] && (q++ % stride) == 0) {
+                if (gp0 && gp0->ok() && gp0->v.size() == n) a0.push_back(std::fabs(g0->v[i] - gp0->v[i]));
+                if (gp1 && gp1->ok() && gp1->v.size() == n) a1.push_back(std::fabs(g1->v[i] - gp1->v[i]));
+            }
+            auto med = [](std::vector<float>& v) { if (v.empty()) return 0.f; std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+            r.stepD0 = med(a0); r.stepD1 = med(a1); r.thr = thr;
+            if (sub.cells) { sub.stepD0 = r.stepD0; sub.stepD1 = r.stepD1; sub.thr = thr; sub.residual = r.residual; }
+        }        const std::pair<uint64_t, uint64_t> pr{r.pairFrom, r.d1};
         if (std::find(pairList.begin(), pairList.end(), pr) == pairList.end()) {
             if (pairsUsed >= kMaxPairs) continue;
             pairList.push_back(pr); ++pairsUsed;
         }
         out.push_back(std::move(r));
+        if (sub.cells && out.size() < kMaxGroups) {
+            const std::pair<uint64_t, uint64_t> ps{sub.pairFrom, sub.d1};
+            if (std::find(pairList.begin(), pairList.end(), ps) != pairList.end() || pairsUsed < kMaxPairs) {
+                if (std::find(pairList.begin(), pairList.end(), ps) == pairList.end()) { pairList.push_back(ps); ++pairsUsed; }
+                out.push_back(std::move(sub));
+            }
+        }
     }
     return out;
 }
@@ -505,7 +616,12 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
 // opens partial repairs (a wholly held frame is always repaired, as the whole-frame re-timer always re-times it).
 inline constexpr float kExactResidual = 1.0f;
 inline constexpr double kExactShare = 0.005;   // of the cells (650 at 1080p): a part, not a few quiet cells
-inline bool IsExactRepeat(const RepairGroup& g) { return g.residual < kExactResidual && double(g.cells) >= kExactShare * double(g.w) * double(g.h); }
+// a drawing held exactly between two drawing steps (the step signature): live action moves continuously, with no
+// exact hold between two large steps; near-still live-action regions are exact but have no steps
+inline bool IsExactRepeat(const RepairGroup& g)
+{
+    return g.residual < kExactResidual && double(g.cells) >= kExactShare * double(g.w) * double(g.h) && std::min(g.stepD0, g.stepD1) >= 3.f * g.thr;
+}
 class CadenceEvidence {
 public:
     explicit CadenceEvidence(size_t window = 240) : m_window(window) {}
