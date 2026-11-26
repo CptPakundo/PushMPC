@@ -20,16 +20,26 @@
 # Targets:
 #   stremio            /Applications/Stremio.app (Stremio 5)
 #   jellyfin-desktop   /Applications/Jellyfin Desktop.app, or Jellyfin Media Player.app
-#        The app's own libmpv (found in the bundle by name) is renamed pushmpc-orig-libmpv.dylib and a small stand-in
+#        The app's own libmpv is found in Contents/Frameworks: a libmpv*.dylib, else any library or framework binary
+#        (Mpv.framework/Versions/A/Mpv, ...) that carries libmpv's code (exports mpv_create: nm when the Command Line
+#        Tools are there, else libmpv's own copyright line). It is renamed pushmpc-orig-libmpv.dylib and a small stand-in
 #        takes its name (apps/libmpv-proxy.dylib: every libmpv function goes to the original; after the app starts its
 #        player, the stand-in loads the bridge and adds the filter, and puts it back if the app replaces the filter
 #        list). Its settings are pushmpc-autoload.conf beside it. The original is backed up with its SHA-256 in
 #        ~/Library/Application Support/PushMPC/apps-mac/<target>. A self-test plays a generated clip through the app's
 #        own libmpv and the bridge; a target that does not pass is put back as it was, with the reason.
+#        An app whose player is built into the app itself (libmpv inside its main program, no separate library) cannot
+#        take the stand-in: install says so and names capture mode instead (pushmpc-capture --player "<app>", the
+#        Homebrew formula's capture host: smoother motion over the app's window, nothing in the app changes).
 #        Signature: an app that loads ad-hoc signed libraries (no hardened runtime, or library validation off) is
 #        changed in place. An app with the hardened runtime and library validation on is backed up whole and signed
 #        again ad hoc with its own entitlements (without the hardened runtime); uninstall puts the backup back. An app
 #        whose entitlements an ad-hoc signature cannot carry (team-bound ones) is refused, with the reason.
+#        What signing again means for you: macOS then sees the app as a different app from the same name. It may ask
+#        once more for permissions you gave it before (network, folders, notifications), saved passwords or logins the
+#        app kept in your Keychain may ask to be allowed again or need a new sign-in, and macOS no longer checks that
+#        the app comes unchanged from its maker. The app's next update replaces it with the maker's signed version
+#        again (the agent then puts PushMPC back). Uninstall puts the original, maker-signed app back.
 #   jellyfin-mpv-shim, plex-mpv-shim
 #        their conf.json (~/Library/Application Support/<shim>/conf.json): mpv_ext=true, mpv_ext_path=Homebrew's mpv,
 #        mpv_ext_no_ovr=false (the shim starts that mpv with its own folder as the config folder), and the PushMPC block
@@ -41,6 +51,7 @@
 # If macOS refuses writing into an app (App Management), allow the terminal in System Settings > Privacy & Security >
 # App Management. Tests: PUSHMPC_APPS_MAC_ROOT replaces / for the app folders.
 # Exit: 0 done, 1 error, 2 usage, 3 none of these players found, or a target not supported / not passing its self-test.
+# shellcheck disable=SC2329  # the do_* functions run through run_t
 set -u
 
 action=${1:-}; [ $# -gt 0 ] && shift
@@ -85,9 +96,30 @@ sha() { [ -f "$1" ] && shasum -a 256 "$1" | awk '{print $1}'; }
 is_proxy() { [ -f "$1" ] && grep -aq pushmpc_mpv_proxy_status "$1"; }
 
 # ---------------------------------------------------------------------------------------------- apps: the libmpv stand-in
-app_lib() {   # the app's libmpv file (the real file, not a symlink); a stand-in of ours counts too
-    find "$1/Contents" -type f -name 'libmpv*.dylib' ! -name 'pushmpc-*' 2>/dev/null | sort | head -n 1
+have_nm=0; [ "$(uname -s)" = Darwin ] && xcode-select -p >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 && have_nm=1
+is_libmpv() {   # is_libmpv <file>: libmpv's code is in it (it exports mpv_create; a program that only calls libmpv does not)
+    if [ "$have_nm" = 1 ]; then nm -gU "$1" 2>/dev/null | grep -q ' _mpv_create$'; return; fi
+    # without the Command Line Tools (nm would ask to install them): libmpv's own version banner, in no other file
+    grep -a -q -F 'mpv/MPlayer/mplayer2 projects' "$1" 2>/dev/null && grep -a -q -F 'mpv_create' "$1" 2>/dev/null
 }
+app_lib() {   # the app's libmpv file (the real file, not a symlink): our stand-in, a libmpv*.dylib, or a framework binary
+    fl=$(find "$1/Contents/Frameworks" -type f ! -name 'pushmpc-*' ! -name '*.plist' ! -name '*.conf' ! -name '*.png' \
+        ! -name '*.icns' ! -name '*.nib' ! -name '*.strings' ! -path '*/_CodeSignature/*' 2>/dev/null | LC_ALL=C sort)
+    while IFS= read -r f; do [ -n "$f" ] && is_proxy "$f" && { printf '%s\n' "$f"; return 0; }; done <<EOF
+$fl
+EOF
+    while IFS= read -r f; do case $f in */libmpv*.dylib) printf '%s\n' "$f"; return 0 ;; esac; done <<EOF
+$fl
+EOF
+    while IFS= read -r f; do [ -n "$f" ] && is_libmpv "$f" && { printf '%s\n' "$f"; return 0; }; done <<EOF
+$fl
+EOF
+    return 1
+}
+app_static() {   # app_static <bundle>: the main program carries libmpv itself (nothing to stand in for)
+    for f in "$1"/Contents/MacOS/*; do [ -f "$f" ] && is_libmpv "$f" && return 0; done; return 1
+}
+capture_bin() { for c in "$(command -v pushmpc-capture 2>/dev/null)" /opt/homebrew/bin/pushmpc-capture /usr/local/bin/pushmpc-capture; do [ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }; done; return 1; }
 sig_kind() {   # sig_kind <bundle>: plain (loads ad-hoc libraries) | resign (hardened, library validation on) | team:<entitlement>
     fl=$(codesign -dv "$1" 2>&1 | sed -n 's/.*flags=0x[0-9a-f]*(\([^)]*\)).*/\1/p' | head -n 1)
     case $fl in *runtime*) ;; *) echo plain; return ;; esac
@@ -145,7 +177,13 @@ do_app() {   # do_app <target> <bundle>
         elif [ -d "$bk" ]; then emit "$name" needs-reapply "$bundle: the app was replaced (an update); install again"
         else emit "$name" not-installed "$bundle"; fi ;;
     install)
-        [ -n "$lib" ] || { emit "$name" unsupported "$bundle has no libmpv dylib (its player is built into the app)"; return 3; }
+        if [ -z "$lib" ]; then
+            an=$(defaults read "$bundle/Contents/Info" CFBundleName 2>/dev/null || basename "$bundle" .app)
+            if app_static "$bundle"; then why="its player is built into the app itself, so PushMPC cannot sit inside it"
+            else why="no mpv player found in the app"; fi
+            if cb=$(capture_bin); then emit "$name" capture-mode "$why: use capture mode instead: $cb --player \"$an\" (smoother motion over the app's window; the app is not changed)"; return 0; fi
+            emit "$name" capture-mode "$why: capture mode works instead (brew install CptPakundo/pushmpc/pushmpc, then pushmpc-capture --player \"$an\")"; return 3
+        fi
         [ -f "$from/apps/libmpv-proxy.dylib" ] || { emit "$name" error "the files are not in $from"; return 1; }
         [ -n "$bridge" ] && [ -f "$bridge" ] || { emit "$name" unsupported "PushMPC's mpv bridge (pushmpc-iina.so) is not installed: brew install CptPakundo/pushmpc/pushmpc"; return 3; }
         if [ "$ifneeded" = 1 ]; then
@@ -171,7 +209,7 @@ do_app() {   # do_app <target> <bundle>
                 defaults read "$bundle/Contents/Info" CFBundleVersion > "$bk/app-version" 2>/dev/null
             fi
             rm -f "$d/pushmpc-orig-libmpv.dylib"   # an original from before an app update
-            sha "$lib" > "$bk/libmpv.sha256"; basename "$lib" > "$bk/libmpv.name"
+            sha "$lib" > "$bk/libmpv.sha256"; printf '%s\n' "${lib#"$bundle"/}" > "$bk/libmpv.rel"
             mv "$lib" "$d/pushmpc-orig-libmpv.dylib" && cp "$from/apps/libmpv-proxy.dylib" "$lib" \
                 || { [ -f "$lib" ] || mv "$d/pushmpc-orig-libmpv.dylib" "$lib"; emit "$name" error "cannot replace $lib"; return 1; }
         fi
@@ -188,8 +226,8 @@ do_app() {   # do_app <target> <bundle>
         emit "$name" not-active "$bundle: put back as it was; ${st_detail:-the self-test could not run}"; return 3 ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$bundle"; return 0; }
-        [ -n "$lib" ] || { [ ! -f "$bk/libmpv.name" ] || lib=$(find "$bundle/Contents" -type f -name "$(cat "$bk/libmpv.name")" | head -n 1); }
-        [ -n "$lib" ] || lib=$(find "$bundle/Contents" -type f -name 'pushmpc-orig-libmpv.dylib' | head -n 1 | sed "s|pushmpc-orig-libmpv.dylib\$|$(cat "$bk/libmpv.name" 2>/dev/null || echo libmpv.2.dylib)|")
+        # the stand-in gone (the app was updated or the file removed): the path the original had
+        [ -n "$lib" ] || { [ ! -f "$bk/libmpv.rel" ] || lib=$bundle/$(cat "$bk/libmpv.rel"); }
         pb_detail='nothing of PushMPC in the app'
         if [ -n "$lib" ]; then app_put_back "$bundle" "$lib" "$bk" || { emit "$name" error "cannot write $bundle"; return 1; }; fi
         rm -rf "$bk"; emit "$name" uninstalled "$pb_detail" ;;

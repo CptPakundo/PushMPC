@@ -4,7 +4,7 @@
 #         linux = apps-linux: the stub test, then pushmpc-apps-linux.sh install / status / uninstall with the real Snap
 #                 Plex, Flathub Stremio and Jellyfin Desktop (self-test x2 through each one's libmpv; exact undo)
 #         macos = apps-macos: the libmpv stand-in and the bridge built here, pushmpc-apps-mac.sh against Stremio 5 and
-#                 Jellyfin Desktop (self-test frames out > in; exact undo) and the shims' conf.json round trip
+#                 Jellyfin Desktop (self-test frames out > in; exact undo) and the shims' conf.json round trip; test-apps-mac.sh first
 name: players
 on:
   push:
@@ -186,6 +186,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      - name: Stub test of the app route (libmpv dylib, framework, built-in player, team-bound entitlements)
+        run: sh mpvnative/install/test-apps-mac.sh
       - name: Build the libmpv stand-in, the self-test host and the bridge
         run: |
           O="$RUNNER_TEMP/bundle"; W="$RUNNER_TEMP/w"; mkdir -p "$O/apps" "$W"
