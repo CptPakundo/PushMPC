@@ -389,19 +389,28 @@ jobs:
           $tool = "$env:BUILD\pushmpc\pushflow_pmml_check.exe"; $rt = "$env:DEPS\pushflow\runtime"; $sh = "$env:BUILD\shaders"
           $out = "$env:RUNNER_TEMP\pushflow-check"; New-Item -ItemType Directory -Force $out | Out-Null
           $fail = 0
-          foreach ($mode in @(@{n='directml-own'; v=''}, @{n='pmml-cpu'; v="$env:DEPS\pmml|ort:core:cpu:0"}, @{n='pmml-dml-native'; v="$env:DEPS\pmml|ort:directml:dml:0"})) {
+          # pmml-cpu-fails: pmml's run fails after 4 calls (the 2 warm-up runs at start, then frames 1-2; PMML_TEST_FAIL_RUN_AFTER):
+          # PushFlow must reopen the network on DirectML within frame 3, and all 6 frames must be made (the last one is compared below)
+          foreach ($mode in @(@{n='directml-own'; v=''}, @{n='pmml-cpu'; v="$env:DEPS\pmml|ort:core:cpu:0"}, @{n='pmml-dml-native'; v="$env:DEPS\pmml|ort:directml:dml:0"},
+                              @{n='pmml-cpu-fails'; v="$env:DEPS\pmml|ort:core:cpu:0"; failAfter='4'; frames='6'})) {
             $env:VEYRA_PUSHFLOW_PMML = $mode.v; $env:PMML_DML_WARP = '1'
-            & $tool $rt $sh "$out\$($mode.n).rgba" --warp 1 --size 512x288 --tier 0 2>&1 | Tee-Object -Variable log | Select-Object -Last 8
+            $env:PMML_TEST_FAIL_RUN_AFTER = $(if ($mode.failAfter) { $mode.failAfter } else { '' })
+            $frames = $(if ($mode.frames) { $mode.frames } else { '1' })
+            & $tool $rt $sh "$out\$($mode.n).rgba" --warp 1 --size 512x288 --tier 0 --frames $frames 2>&1 | Tee-Object -Variable log | Select-Object -Last 10
             $r = ($log | Select-String '^RESULT ' | Select-Object -Last 1).Line
             $p = ($log | Select-String '^PROVIDER ' | Select-Object -Last 1).Line
-            if ($r -notmatch '^RESULT ok') { Write-Host "::error::$($mode.n): $r"; $fail++ }
-            elseif ($mode.n -eq 'pmml-cpu' -and $p -notmatch 'pmml') { Write-Host "::error::$($mode.n) did not run on pmml: $p"; $fail++ }
+            $after = ($log | Select-String '^PROVIDER-AFTER ' | Select-Object -Last 1).Line
+            $fr = ($log | Select-String '^FRAMES ' | Select-Object -Last 1).Line
+            if ($r -notmatch '^RESULT ok') { Write-Host "::error::$($mode.n): $r ($fr)"; $fail++ }
+            elseif ($mode.n -like 'pmml-cpu*' -and $p -notmatch 'pmml') { Write-Host "::error::$($mode.n) did not run on pmml: $p"; $fail++ }
             elseif ($mode.n -eq 'pmml-dml-native' -and $p -ne 'PROVIDER DirectML') { Write-Host "::error::a DirectML choice should stay on PushFlow's own session: $p"; $fail++ }
-            "| $($mode.n) | $p | $r |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            elseif ($mode.n -eq 'pmml-cpu-fails' -and ($fr -notmatch ' failed 0$' -or $after -notmatch '^PROVIDER-AFTER DirectML' -or $after -notmatch 'pmml failed')) {
+              Write-Host "::error::pmml failing mid-stream did not hand over to DirectML without a lost frame: $fr; $after"; $fail++ }
+            "| $($mode.n) | $p | $after | $fr | $r |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           }
-          $env:VEYRA_PUSHFLOW_PMML = ''
+          $env:VEYRA_PUSHFLOW_PMML = ''; $env:PMML_TEST_FAIL_RUN_AFTER = ''
           if ($fail) { exit 1 }
-          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/compare_rgba.py $out directml-own pmml-cpu pmml-dml-native --min-db 35
+          & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/compare_rgba.py $out directml-own pmml-cpu pmml-dml-native pmml-cpu-fails --min-db 35
           if ($LASTEXITCODE -ne 0) { Write-Host '::error::the pmml path does not match PushFlow on DirectML'; exit 1 }
 
       - name: MPC Video Renderer source (DirectShow base classes for the filter)
