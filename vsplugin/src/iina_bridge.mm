@@ -187,14 +187,19 @@ std::shared_ptr<Bridge> BridgeOf(const AVFilterContext* ctx)
 std::atomic<double> g_displayFps{ 0 }, g_containerFps{ 0 };
 double MpvDouble(const char* name) { return std::string(name) == "display-fps" ? g_displayFps.load() : g_containerFps.load(); }
 
+// multiplier ceilings per engine: the bridge asks for up to the highest, then each engine takes what it can do (apple:
+// VideoToolbox, DecideAppleK's x8; the engine module reports its own; the built-in portable engine: pmvs::kPortableMaxK
+// in backend.h, 16)
+constexpr int kBridgeAppleMaxK = 8, kBridgePortableMaxK = 16, kBridgeMaxK = 16;
+
 int DecideK(double srcFps)
 {
-    if (const char* e = getenv("PUSHMPC_IINA_K"); e && *e) return std::clamp(atoi(e), 1, 8);
+    if (const char* e = getenv("PUSHMPC_IINA_K"); e && *e) return std::clamp(atoi(e), 1, kBridgeMaxK);
     const double disp = MpvDouble("display-fps");
     if (srcFps <= 0) srcFps = MpvDouble("container-fps");
     if (srcFps <= 0) srcFps = 23.976;
     if (disp <= 0) return 2;
-    return std::clamp(int(std::floor(disp / srcFps + 0.02)), 1, 8);
+    return std::clamp(int(std::floor(disp / srcFps + 0.02)), 1, kBridgeMaxK);
 }
 
 // an output AVFrame from a CVPixelBuffer (retained by the frame)
@@ -239,13 +244,14 @@ bool ConfigureApple(Bridge& b, const AVFrame* f, CVPixelBufferRef pb)
     const OSType fmt = CVPixelBufferGetPixelFormatType(pb);
     c.bits = SwFormatOf(fmt) == AV_PIX_FMT_P010 ? 10 : 8;
     c.srcFps = MpvDouble("container-fps");
-    c.k = b.k;
+    c.k = std::min(b.k, kBridgeAppleMaxK);
     c.colour = ColourOf(f);
     if (const char* sr = getenv("PUSHMPC_IINA_SR")) c.sr = sr;
     if (const char* ct = getenv("PUSHMPC_IINA_CONTENT")) c.anime = std::string(ct) == "anime";
     b.apple = std::make_unique<apple::Engine>();
     b.apple->log = [](const std::string& m) { Log("%s", m.c_str()); };
     if (!b.apple->Configure(c, err, info)) { b.why = err; b.apple.reset(); return false; }
+    b.k = std::max(1, b.apple->K());   // what VideoToolbox runs here
     Log("apple engine: %s", info.c_str());
     return true;
 }
@@ -254,6 +260,7 @@ bool ConfigureApple(Bridge& b, const AVFrame* f, CVPixelBufferRef pb)
 bool ConfigurePortable(Bridge& b, const AVFrame* f)
 {
     if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUV420P10) { b.why += "; portable: format " + std::to_string(f->format) + " not supported"; return false; }
+    b.k = std::min(b.k, kBridgePortableMaxK);
     if (b.k < 2) return false;
     portable::Config c; c.width = f->width; c.height = f->height; c.bits = f->format == AV_PIX_FMT_YUV420P10 ? 10 : 8;
     b.port = std::make_unique<portable::Engine>();
