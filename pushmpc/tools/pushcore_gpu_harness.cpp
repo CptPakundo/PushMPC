@@ -488,9 +488,9 @@ int wmain(int argc, wchar_t** argv) {
         std::string h;
         for (auto& kv : hist) h += std::format(" {}:{}", kv.first, kv.second);
         uint64_t zeroSources = 0; for (size_t i = 1; i < perSource.size(); ++i) zeroSources += perSource[i] == 0;
-        std::cout << std::format("EVENNESS grid {:.3f} ms; steps {} on grid {:.1f} %; steps in grid units (units:count){}; source frames with no output (held, re-timed) {}; held stats: found {} dropped {} spans {} ratio {:.1f} % of {} graph x{}\n",
+        std::cout << std::format("EVENNESS grid {:.3f} ms; steps {} on grid {:.1f} %; steps in grid units (units:count){}; source frames with no output (held, re-timed) {}; held stats: found {} dropped {} spans {} ratio {:.1f} % of {} graph x{}; source repair {} (frames {}, parts {})\n",
                                  grid / 1e4, steps.size(), steps.empty() ? 0.0 : 100.0 * onGrid / steps.size(), h, zeroSources,
-                                 s.heldFrames, s.heldDropped, s.heldSpans, s.heldRatioPermille / 10.0, s.heldTested, s.heldGraphMultiplier);
+                                 s.heldFrames, s.heldDropped, s.heldSpans, s.heldRatioPermille / 10.0, s.heldTested, s.heldGraphMultiplier, s.repairActive ? "on" : "off", s.repairedFrames, s.repairedParts);
     }
     std::cout << std::format(
         "RESULT source={} outputs={} real={} generated={} skippedGenerated={} expectedOutputs={} countMismatches={} orderErrors={} ptsErrors={} sizeErrors={} pngs={} pngFailures={}\n",

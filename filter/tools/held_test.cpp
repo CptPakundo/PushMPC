@@ -289,10 +289,130 @@ static void TestGpu()
     }
 }
 
+// ---- per-region (source repair): a layered clip ----
+// A textured background panning on ones (3 px per frame), sprite A on twos (12 px per drawing, even frames), sprite B on
+// twos out of phase (odd frames), and a mouth on threes inside A. The GPU pass makes each frame's cell grid (WARP), the
+// classifier and PlanRepairs decide which parts each frame repairs; a part's position at frame s is then
+// lerp(pos(d0), pos(d1), t) where repaired and its drawn position elsewhere. Checks: every sprite moves at an even rate
+// (stall ratio min/max per-frame step >= 0.8, as the critic's T1), the background is never repaired, B is caught as well
+// as A (out of phase), and no repair spans a cut.
+struct Layered {
+    uint32_t w = 960, h = 540;
+    std::mt19937 rng{ 7 };
+    std::vector<float> tex;   // background texture, 2x wide (pans)
+    Layered() {
+        tex.resize(size_t(w) * 2 * h);
+        std::uniform_real_distribution<float> u(0.f, 1.f);
+        std::vector<float> c(size_t(w / 8 * 2 + 2) * (h / 8 + 2));
+        for (auto& v : c) v = 40.f + 120.f * u(rng);
+        for (uint32_t y = 0; y < h; ++y) for (uint32_t x = 0; x < 2 * w; ++x) {   // blocky, smoothed: a painted background
+            const float fx = x / 8.f, fy = y / 8.f; const int ix = int(fx), iy = int(fy); const float ax = fx - ix, ay = fy - iy;
+            const size_t cw = w / 8 * 2 + 2;
+            auto C = [&](int i, int j) { return c[size_t(j) * cw + i]; };
+            tex[size_t(y) * 2 * w + x] = C(ix, iy) * (1 - ax) * (1 - ay) + C(ix + 1, iy) * ax * (1 - ay) + C(ix, iy + 1) * (1 - ax) * ay + C(ix + 1, iy + 1) * ax * ay;
+        }
+    }
+    // drawn positions: A (even frames), B (odd frames), mouth state (threes)
+    static double posA(int f) { return 150 + 12.0 * (f / 2); }
+    static double posB(int f) { return 600 - 12.0 * ((f + 1) / 2); }
+    static int mouth(int f) { return (f / 3) % 2; }
+    std::vector<uint8_t> Frame(int f, bool cut = false)
+    {
+        std::vector<uint8_t> o(size_t(w) * h * 3 / 2, 128);
+        std::normal_distribution<double> grain(0.0, 1.5);
+        const double pan = 3.0 * f;
+        const double ax = posA(f), bx = posB(f);
+        for (uint32_t y = 0; y < h; ++y) for (uint32_t x = 0; x < w; ++x) {
+            double v = cut ? 230.0 - tex[size_t(y) * 2 * w + x] * 0.5 : [&] { const double sx = x + pan; const int i = int(sx); const double a = sx - i;
+                return tex[size_t(y) * 2 * w + i] * (1 - a) + tex[size_t(y) * 2 * w + i + 1] * a; }();
+            auto disc = [&](double cx, double cy, double r, double fill) {
+                const double d = std::hypot(x - cx, y - cy);
+                if (d < r - 2) v = fill; else if (d < r) v = 15;   // outline
+            };
+            if (!cut) {
+                disc(ax, 270, 60, 200);
+                if (std::fabs(x - ax) < 14 && std::fabs(y - 290.0) < (mouth(f) ? 10 : 3)) v = 30;   // the mouth
+                disc(bx, 300, 50, 170);
+            }
+            o[size_t(y) * w + x] = uint8_t(std::clamp(v + grain(rng), 0.0, 255.0));
+        }
+        return o;
+    }
+};
+
+static void TestLayered()
+{
+    using namespace pushmpc::held;
+    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+    const D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1 };
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx))) { Check(false, "WARP device (layered)"); return; }
+    pushmpc::HeldDetector det;
+    if (!det.init(dev.Get())) { Check(false, "held pass (layered): " + det.why()); return; }
+    Layered clip;
+    const int N = 30, cutAt = 24;
+    std::map<uint64_t, CellGrid> grids; std::map<uint64_t, RegionFrame> frames;
+    ComPtr<ID3D11Texture2D> ring[2];
+    for (int f = 0; f < N; ++f) {
+        auto src = Upload(dev.Get(), clip.Frame(f, f == cutAt), clip.w, clip.h);
+        auto& t = ring[f % 2];
+        if (!t) { D3D11_TEXTURE2D_DESC d{}; src->GetDesc(&d); dev->CreateTexture2D(&d, nullptr, &t); }
+        ctx->CopySubresourceRegion(t.Get(), 0, 0, 0, 0, src.Get(), 0, nullptr);
+        if (f == 0) { det.run(ctx.Get(), t.Get(), t.Get(), clip.w, clip.h, uint64_t(f)); }
+        else det.run(ctx.Get(), t.Get(), ring[(f + 1) % 2].Get(), clip.w, clip.h, uint64_t(f));
+        ctx->Flush();
+        DiffStats d; CellGrid g;
+        if (!det.read(ctx.Get(), uint64_t(f), d, true, &g) || !g.ok()) { Check(false, "cell grid read back"); return; }
+        if (f > 0) frames[uint64_t(f)] = CompareRegions(grids[uint64_t(f - 1)], g);
+        grids[uint64_t(f)] = std::move(g);
+    }
+    const auto& g0 = grids[0];
+    const RegionFrame& f3 = frames[3];
+    char b0[200]; std::snprintf(b0, sizeof(b0), "camera shift found on the panning background: %.2f, %.2f cells (truth %.2f, 0)", f3.dx, f3.dy, -3.0 / g0.cell);
+    Check(std::fabs(f3.dx + 3.0 / g0.cell) < 0.25 && std::fabs(f3.dy) < 0.25, b0);
+    Check(frames[uint64_t(cutAt)].cut && !frames[3].cut, "the cut frame is a cut, a pan frame is not");
+    // repairs per frame, and the positions they give
+    auto frameAt = [&](uint64_t q) -> const RegionFrame* { auto it = frames.find(q); return it == frames.end() ? nullptr : &it->second; };
+    auto gridAt = [&](uint64_t q) -> const CellGrid* { auto it = grids.find(q); return it == grids.end() ? nullptr : &it->second; };
+    std::vector<double> shownA(N), shownB(N);
+    int repA = 0, repB = 0, bgRepaired = 0, acrossCut = 0;
+    const uint32_t W = g0.w, cell = g0.cell;
+    for (int f = 0; f < N; ++f) {
+        shownA[f] = Layered::posA(f); shownB[f] = Layered::posB(f);
+        if (f < 3 || f + 3 >= N) continue;
+        const auto groups = PlanRepairs(uint64_t(f), frameAt, gridAt, kLookahead);
+        if (getenv("HELD_DEBUG")) for (const auto& g : groups) std::printf("     frame %d: group %llu..%llu t %.2f cells %u v %.1f,%.1f\n", f, (unsigned long long)g.d0, (unsigned long long)g.d1, g.t, g.cells, g.vx, g.vy);
+        for (const auto& g : groups) {
+            auto covers = [&](double x, double y) { const uint32_t cx = uint32_t(x / cell), cy = uint32_t(y / cell); return cx < W && g.mask[size_t(cy) * W + cx] != 0; };
+            if (g.d0 < uint64_t(cutAt) && g.d1 >= uint64_t(cutAt)) ++acrossCut;
+            if (covers(Layered::posA(f) + 60, 270) || covers(Layered::posA(f), 211) || covers(Layered::posA(f), 329)) {   // the outline (flat insides never change)
+                shownA[f] = Layered::posA(int(g.d0)) + g.t * (Layered::posA(int(g.d1)) - Layered::posA(int(g.d0))); ++repA; }
+            if (covers(Layered::posB(f) - 50, 300) || covers(Layered::posB(f), 251) || covers(Layered::posB(f), 349)) {
+                shownB[f] = Layered::posB(int(g.d0)) + g.t * (Layered::posB(int(g.d1)) - Layered::posB(int(g.d0))); ++repB; }
+            if (covers(900, 60) || covers(40, 500)) ++bgRepaired;
+        }
+    }
+    if (getenv("HELD_DEBUG")) for (int f = 0; f < N; ++f) std::printf("     f %d: A %.1f B %.1f\n", f, shownA[f], shownB[f]);
+    auto stall = [&](const std::vector<double>& p, int from, int to) {
+        double mn = 1e9, mx = 0;
+        for (int f = from + 1; f <= to; ++f) { const double s = std::fabs(p[f] - p[f - 1]); mn = std::min(mn, s); mx = std::max(mx, s); }
+        return mx > 0 ? mn / mx : 0.0;
+    };
+    std::vector<double> rawA(N), rawB(N);
+    for (int f = 0; f < N; ++f) { rawA[f] = Layered::posA(f); rawB[f] = Layered::posB(f); }
+    char b[300];
+    std::snprintf(b, sizeof(b), "sprite on twos (even): stall ratio %.2f (without repair %.2f), repaired on %d frames", stall(shownA, 4, 20), stall(rawA, 4, 20), repA);
+    Check(stall(shownA, 4, 20) >= 0.8, b);
+    std::snprintf(b, sizeof(b), "sprite on twos out of phase (odd): stall ratio %.2f (without %.2f), repaired on %d frames", stall(shownB, 4, 20), stall(rawB, 4, 20), repB);
+    Check(stall(shownB, 4, 20) >= 0.8, b);
+    Check(bgRepaired == 0, "the panning background is never repaired (" + std::to_string(bgRepaired) + ")");
+    Check(acrossCut == 0, "no repair spans the cut (" + std::to_string(acrossCut) + ")");
+}
+
 int main()
 {
     TestRules();
     TestGpu();
+    TestLayered();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }

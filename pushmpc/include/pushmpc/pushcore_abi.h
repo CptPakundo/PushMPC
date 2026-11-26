@@ -148,7 +148,8 @@ typedef struct PushCoreSettings {
        (animation drawn on twos or threes) is not given to frame generation; the frames generated between the two
        distinct frames around it are spread over the whole held span, so the motion no longer moves in one step and
        holds in the next. Runs of more than three held frames (a still) are shown as they are. The outputs keep the
-       source timestamps; pushcore takes up to 6 source frames ahead to wait for the next distinct one. Default 0. */
+       source timestamps; pushcore takes up to 9 source frames ahead to wait for the next distinct one. 2 = the same, and
+       the per-region source repair runs without waiting for held drawings to be found (Animation On). Default 0. */
     int32_t heldFrames;
 } PushCoreSettings;
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
@@ -265,6 +266,12 @@ typedef struct PushCoreStats {
     uint64_t heldFrames;          /* source frames found held since open */
     uint64_t heldDropped;         /* held frames covered by a re-timed span (not given to the graph) */
     uint64_t heldSpans;           /* re-timed spans */
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): per-region re-timing by source repair: held parts of a frame between two of
+       their drawings get the span stream's in-between (a second VFG effect at the source size) before the graph */
+    uint32_t repairActive;        /* 1 = the source repair runs (VFG, animation found or heldFrames 2) */
+    uint32_t repairReserved;
+    uint64_t repairedFrames;      /* source frames repaired */
+    uint64_t repairedParts;       /* parts laid in (one span-stream frame each) */
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 

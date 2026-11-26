@@ -4407,7 +4407,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
         ? pm::SubtitleHoldValue(s, (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) != 0, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
     // held-frame re-timing (animation drawn on twos / threes): with frame generation, unless Animation is Off. pushcore
     // re-times only where it finds held frames, so it is on for every video (live action has none and is unchanged).
-    p.heldFrames = (g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && p.multiplier > 1 && s.enable && s.animation != pm::kOff ? 1 : 0;
+    p.heldFrames = (g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && p.multiplier > 1 && s.enable && s.animation != pm::kOff ? (s.animation == pm::kAuto ? 1 : 2) : 0;
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)

@@ -27,6 +27,7 @@
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
 #include "PushCoreHeld.h"          // held-frame re-timing (HeldFrames.h): animation on twos / threes
+#include "PushCoreRegion.h"        // per-region re-timing: source repair (held parts between their drawings)
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
@@ -476,7 +477,7 @@ struct PushCore {
     std::map<uint64_t, uint32_t> gapOf;     // graph source frame id -> source frames its pair spans (re-timed > 1)
 
     // ---- ingress ring ----
-    static constexpr uint32_t kIngressSlots = 8;
+    static constexpr uint32_t kIngressSlots = 14;   // held-frame re-timing keeps up to kMaxQueued frames ahead of the graph and d0 behind it
     struct InSlot { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D12Resource> res; uint64_t freeValue = 0; };
     InSlot inSlots[kIngressSlots];
     uint32_t inW = 0, inH = 0; DXGI_FORMAT inFormat = DXGI_FORMAT_UNKNOWN;
@@ -501,7 +502,7 @@ struct PushCore {
     std::map<uint64_t, Pending> waiting;   // tested: waiting for the next distinct frame, or for the graph
     struct ReadyGraph { uint64_t seq; uint32_t multiplier, gap; };
     std::deque<ReadyGraph> readyGraph;     // to the graph, in order, when it has a slot
-    static constexpr size_t kMaxQueued = pushmpc::held::kLookahead + 3;   // waiting held frames + tested + new
+    static constexpr size_t kMaxQueued = 2 * pushmpc::held::kLookahead + 3;   // waiting held frames + the repair's lookahead + tested + new
     int prevIngestSlot = -1;              // the ingress slot of the source frame before (the test's reference)
     int pumpError = PUSHCORE_OK;           // a graph failure while canSubmit fed the graph: the next submit returns it
     uint64_t ingestSeq = 0;
@@ -514,7 +515,34 @@ struct PushCore {
         for (const auto& kv : waiting) if (kv.second.slot == slot) return true;
         return false;
     }
-    void clearHeldQueues() { pendingIn.clear(); waiting.clear(); readyGraph.clear(); retimer.Reset(); prevIngestSlot = -1; }
+    void clearHeldQueues() { pendingIn.clear(); waiting.clear(); readyGraph.clear(); retimer.Reset(); prevIngestSlot = -1; clearRegions(); }
+
+    // ---- per-region re-timing: source repair (HeldFrames.h PlanRepairs, PushCoreRegion.h) ----
+    // Before a source frame goes to the graph, each part of it that is held between two of its drawings (d0 < s < d1, both
+    // in the queue: the lookahead) is replaced by the span stream's frame of the pair d0 -> d1 at the part's phase, inside
+    // the part's mask. The span stream is a second VFG effect at the source size (SDK timestep mode), fed with RGBA copies
+    // of the ingress slots. The graph then runs on the repaired source as usual, at any multiplier.
+    veyra::pipeline::VfgBackend spanVfg;
+    bool spanVfgOk = false, repairLogged = false;
+    pushmpc::RegionRepair repairPass;
+    std::map<uint64_t, pushmpc::held::CellGrid> gridOf;
+    std::map<uint64_t, pushmpc::held::RegionFrame> regionOf;   // seq -> its change against seq - 1
+    std::map<uint64_t, uint32_t> slotOf;                       // seq -> ingress slot (while it is alive)
+    uint64_t lastClassified = 0; bool anyClassified = false;
+    struct RgbSlot { ComPtr<ID3D12Resource> res; ComPtr<ID3D11Texture2D> tex; uint64_t seq = UINT64_MAX; uint64_t readyValue11 = 0; };
+    std::vector<RgbSlot> rgbSlots; uint32_t rgbNext = 0;
+    RgbSlot repSlot;                                           // the span stream's frame
+    ComPtr<ID3D11Texture2D> repairOut;                         // NV12 / P010 with plane UAVs
+    uint64_t pairA = UINT64_MAX, pairB = UINT64_MAX; int pairParity = 0;   // what the span stream holds now
+    ComPtr<ID3D12CommandAllocator> regionAlloc[8];
+    uint64_t regionAllocValue[8]{};
+    ComPtr<ID3D12GraphicsCommandList> regionList;
+    uint32_t regionListNext = 0, regionCurAlloc = 0;
+    uint64_t repairedFrames = 0, repairedParts = 0;
+    bool repairOn() const { return retimingOn() && spanVfgOk && repairPass.ready() && animationLikely(); }
+    // the live-action gate: only where held drawings are common (anime repeats drawings exactly; live action does not)
+    bool animationLikely() const { return settings.heldFrames >= 2 || (heldRatio.Size() >= 96 && heldRatio.Ratio() >= 0.15); }
+    void clearRegions() { gridOf.clear(); regionOf.clear(); slotOf.clear(); anyClassified = false; lastClassified = 0; pairA = pairB = UINT64_MAX; for (auto& r : rgbSlots) r.seq = UINT64_MAX; }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
     bool dvP5Logged = false;
@@ -975,7 +1003,9 @@ struct PushCore {
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
-        return buildEgress();
+        const int er = buildEgress();
+        if (er == PUSHCORE_OK) initRepair();
+        return er;
     }
 
     // AMD FRC's AMF runtime needs the system's d3dcompiler_47.dll: an old copy (Qt's in Veyra's folder; MPC-HC ships its
@@ -1081,7 +1111,7 @@ struct PushCore {
             return queuedFrames() == 0 && graph->nextFrameSlotAvailable();
         }
         if ((pumpError = pumpHeld(false)) != PUSHCORE_OK) return true;
-        return queuedFrames() < kMaxQueued && !slotQueued(uint32_t(inIndex % kIngressSlots));
+        return queuedFrames() < kMaxQueued && !slotQueued(uint32_t(inIndex % kIngressSlots));   // the ring (14) keeps d0 alive behind the queue
     }
 
     bool ensureIngress(ID3D11Texture2D* src) {
@@ -1357,13 +1387,20 @@ struct PushCore {
             bool isHeld = false;
             if (p.compared) {
                 const bool wait = final || pendingIn.size() >= 2;
-                if (!held.read(imm.Get(), p.seq, d, wait)) { if (!wait) break; d = {}; }
-                isHeld = IsHeld(d);
+                CellGrid grid;
+                const bool wantGrid = spanVfgOk && retimingOn();
+                if (!held.read(imm.Get(), p.seq, d, wait, wantGrid ? &grid : nullptr)) { if (!wait) break; d = {}; }
+                // where the source repair runs, a partly changed frame stays with the graph (its held parts are repaired);
+                // where it does not, small changes (a mouth, a blink) count as held, so the body's drawing waits as a whole
+                isHeld = IsHeld(d, !repairOn());
+                if (wantGrid) classifyRegion(p.seq, std::move(grid));
                 heldRatio.Push(isHeld);
                 if (isHeld) ++st.heldFrames;
             }
             const uint64_t seq = p.seq;
             const bool disc = (p.flags & PUSHCORE_SUBMIT_DISCONTINUITY) != 0 || !p.compared;
+            slotOf[seq] = p.slot;
+            if (disc) { regionOf.erase(seq); }
             waiting.emplace(seq, p);
             pendingIn.pop_front();
             acts.clear();
@@ -1381,13 +1418,157 @@ struct PushCore {
         st.heldSpans = retimer.Spans();
         while (!readyGraph.empty() && graph && graph->nextFrameSlotAvailable()) {
             const ReadyGraph r = readyGraph.front();
+            // source repair: a frame goes to the graph once the frames its parts' next drawings could be in are classified
+            if (repairOn() && !final && r.seq + pushmpc::held::kLookahead > lastClassified) break;
             readyGraph.pop_front();
             auto it = waiting.find(r.seq);
             if (it == waiting.end()) continue;
-            const Pending p = it->second;
+            Pending p = it->second;
             waiting.erase(it);
+            if (repairOn() && r.gap == 1) { const int rr = repairFrame(p); if (rr != PUSHCORE_OK) return rr; }
             const int rc = processFrame(p.slot, p.copyValue, p.pts, p.flags, p.haveTiming ? &p.timing : nullptr, r.multiplier, r.gap, p.seq, Clock::now());
             if (rc != PUSHCORE_OK) return rc;
+        }
+        return PUSHCORE_OK;
+    }
+
+    // ---- source repair: setup ----
+    void initRepair() {
+        spanVfgOk = false;
+        if (!haveSettings || settings.heldFrames == 0 || !fg || tryFg != PUSHCORE_FG_VFG || multiplier < 2 || !heldEligible) return;   // tryFg: what this graph runs (runFg is set after the build)
+        if (const char* e = std::getenv("PUSHMPC_REGION_REPAIR"); e && std::atoi(e) == 0) { veyra::log::info("pushcore", "source repair off (PUSHMPC_REGION_REPAIR=0)"); return; }
+        if (!repairPass.ready() && !repairPass.init(d11.Get())) { veyra::log::warn("pushcore", "source repair unavailable: " + repairPass.why()); return; }
+        const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
+        const bool p010 = stream.format == PUSHCORE_INPUT_P010;
+        const DXGI_FORMAT rgbFmt = p010 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+        const auto t = Clock::now();
+        if (!spanVfg.initialize(ctx, runtimeDir, w, h, rgbFmt, veyra::pipeline::FrameBatch::Capacity, std::min<uint32_t>(gd.vfgQuality, 2u), false, false)) {
+            veyra::log::warn("pushcore", "source repair off: the span stream (a second VFG effect) did not start");
+            return;
+        }
+        // made in D3D11 (UAV for the conversion, shared NT handle) and opened in D3D12, as the ingress ring is
+        auto makeShared = [&](RgbSlot& slot) {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = rgbFmt; d.SampleDesc = {1, 0};
+            d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET;
+            d.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+            if (FAILED(d11->CreateTexture2D(&d, nullptr, &slot.tex))) return false;
+            ComPtr<IDXGIResource1> dr; HANDLE hd = nullptr;
+            if (FAILED(slot.tex.As(&dr)) || FAILED(dr->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hd))) return false;
+            const HRESULT hr = ctx.device()->OpenSharedHandle(hd, IID_PPV_ARGS(&slot.res));
+            CloseHandle(hd);
+            return SUCCEEDED(hr);
+        };
+        rgbSlots.assign(6, {});
+        for (auto& sl : rgbSlots) if (!makeShared(sl)) { veyra::log::warn("pushcore", "source repair off: RGB textures"); spanVfg.shutdown(); return; }
+        if (!makeShared(repSlot)) { veyra::log::warn("pushcore", "source repair off: span texture"); spanVfg.shutdown(); return; }
+        {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = p010 ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12; d.SampleDesc = {1, 0};
+            d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            if (FAILED(d11->CreateTexture2D(&d, nullptr, &repairOut))) { veyra::log::warn("pushcore", "source repair off: no NV12 / P010 UAV texture on this device"); spanVfg.shutdown(); return; }
+        }
+        if (!regionList) {
+            for (auto& a : regionAlloc) if (FAILED(ctx.device()->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a)))) { spanVfg.shutdown(); return; }
+            if (FAILED(ctx.device()->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, regionAlloc[0].Get(), nullptr, IID_PPV_ARGS(&regionList)))) { spanVfg.shutdown(); return; }
+            regionList->Close();
+        }
+        spanVfgOk = true;
+        pairA = pairB = UINT64_MAX;
+        veyra::log::info("pushcore", std::format("source repair ready in {:.0f} ms: span stream VFG at {}x{} (timestep mode), lookahead {}", msSince(t), w, h, pushmpc::held::kLookahead));
+    }
+    ID3D12GraphicsCommandList* regionBegin() {
+        const uint32_t a = regionListNext++ % 8;
+        if (regionAllocValue[a] && fence12->GetCompletedValue() < regionAllocValue[a]) { fence12->SetEventOnCompletion(regionAllocValue[a], waitEvent); WaitForSingleObject(waitEvent, 10000); }
+        if (FAILED(regionAlloc[a]->Reset()) || FAILED(regionList->Reset(regionAlloc[a].Get(), nullptr))) return nullptr;
+        regionCurAlloc = a;
+        return regionList.Get();
+    }
+    bool regionSubmit() {
+        if (FAILED(regionList->Close())) return false;
+        ID3D12CommandList* lists[] = {regionList.Get()};
+        ring.queue()->ExecuteCommandLists(1, lists);
+        if (hrFail(ring.queue()->Signal(fence12.Get(), ++value12), "D3D12 Signal(repair)")) return false;
+        regionAllocValue[regionCurAlloc] = value12;
+        return true;
+    }
+    static void barrier(ID3D12GraphicsCommandList* l, ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+        D3D12_RESOURCE_BARRIER x{}; x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; x.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+        l->ResourceBarrier(1, &x);
+    }
+
+    // ---- source repair: classification (submit thread, as each frame's test result is read) ----
+    void classifyRegion(uint64_t seq, pushmpc::held::CellGrid grid) {
+        if (!grid.ok()) return;
+        auto prev = gridOf.find(seq - 1);
+        if (prev != gridOf.end() && seq > 0) regionOf[seq] = pushmpc::held::CompareRegions(prev->second, grid);
+        gridOf[seq] = std::move(grid);
+        lastClassified = seq; anyClassified = true;
+        while (gridOf.size() > 12) gridOf.erase(gridOf.begin());
+        while (regionOf.size() > 12) regionOf.erase(regionOf.begin());
+        while (slotOf.size() > 16) slotOf.erase(slotOf.begin());
+    }
+    // the RGB copy of a source frame (converted once, cached in a small ring)
+    RgbSlot* rgbOf(uint64_t seq) {
+        for (auto& r : rgbSlots) if (r.seq == seq) return &r;
+        auto it = slotOf.find(seq);
+        if (it == slotOf.end()) return nullptr;
+        auto& r = rgbSlots[rgbNext++ % rgbSlots.size()];
+        if (!repairPass.toRgb(imm.Get(), inSlots[it->second].tex.Get(), r.tex.Get(), (stream.width + 1) & ~1u, (stream.height + 1) & ~1u)) return nullptr;
+        if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(rgb)")) return nullptr;
+        r.seq = seq; r.readyValue11 = value11;
+        return &r;
+    }
+    // repairs the held parts of p's frame in place (its ingress slot), before the graph takes it
+    int repairFrame(Pending& p) {
+        using namespace pushmpc::held;
+        auto frameAt = [&](uint64_t q) -> const RegionFrame* { auto it = regionOf.find(q); return it == regionOf.end() ? nullptr : &it->second; };
+        auto gridAt = [&](uint64_t q) -> const CellGrid* { auto it = gridOf.find(q); return it == gridOf.end() ? nullptr : &it->second; };
+        const auto groups = PlanRepairs(p.seq, frameAt, gridAt, kLookahead);
+        if (groups.empty()) return PUSHCORE_OK;
+        const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
+        bool any = false;
+        for (const auto& g : groups) {
+            RgbSlot* a = rgbOf(g.d0); RgbSlot* b = rgbOf(g.d1);
+            if (!a || !b || a == b) continue;
+            // the pair into the span stream (parity: A then B), unless it holds it already
+            if (pairA != g.d0 || pairB != g.d1) {
+                auto* l = regionBegin(); if (!l) return PUSHCORE_ERROR;
+                ring.queue()->Wait(fence11in12.Get(), std::max(a->readyValue11, b->readyValue11));
+                const unsigned pa = unsigned(pairParity), pb = unsigned(pairParity ^ 1);
+                barrier(l, a->res.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                barrier(l, b->res.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                const bool ok = spanVfg.capture(l, a->res.Get(), pa, false) && spanVfg.capture(l, b->res.Get(), pb, true);
+                barrier(l, a->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+                barrier(l, b->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+                if (!regionSubmit() || !ok) { pairA = pairB = UINT64_MAX; continue; }
+                pairA = g.d0; pairB = g.d1; pairParity ^= 1;   // B's parity is the generate parity
+            }
+            const unsigned gp = unsigned(pairParity);   // after the flip: the parity B went into
+            if (!spanVfg.generateAt(gp, g.t, 1)) { pairA = pairB = UINT64_MAX; continue; }
+            auto* l = regionBegin(); if (!l) return PUSHCORE_ERROR;
+            if (repSlot.readyValue11) ring.queue()->Wait(fence11in12.Get(), repSlot.readyValue11);   // the last repair read it
+            barrier(l, repSlot.res.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            const bool copied = spanVfg.copyOutput(l, repSlot.res.Get(), gp, g.t > 0.5f);
+            barrier(l, repSlot.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+            if (!regionSubmit()) return PUSHCORE_ERROR;
+            if (!copied) continue;
+            // D3D11: the part laid into the slot (via the scratch: the pass reads the slot and writes the scratch)
+            imm4->Wait(fence12in11.Get(), value12);
+            if (!repairPass.setMask(imm.Get(), g.mask, g.w, g.h, std::max(0.5f, 8.0f * float(stream.width) / 3840.0f / float(std::max(1u, gridOf.rbegin()->second.cell)))) ||
+                !repairPass.repair(imm.Get(), inSlots[p.slot].tex.Get(), repSlot.tex.Get(), repairOut.Get(), w, h)) continue;
+            imm->CopySubresourceRegion(inSlots[p.slot].tex.Get(), 0, 0, 0, 0, repairOut.Get(), 0, nullptr);
+            if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(repair)")) return PUSHCORE_ERROR;
+            repSlot.readyValue11 = value11;
+            // the RGB copy of this frame (if any) is stale now
+            for (auto& r : rgbSlots) if (r.seq == p.seq) r.seq = UINT64_MAX;
+            any = true; ++repairedParts;
+        }
+        if (any) {
+            imm4->Flush();
+            p.copyValue = value11;   // the graph waits for the repaired slot
+            ++repairedFrames;
+            if (!repairLogged) { repairLogged = true; veyra::log::info("pushcore", std::format("source repair: first repaired frame {} ({} part(s), first pair {} -> {} at t {:.2f})", p.seq, groups.size(), groups[0].d0, groups[0].d1, groups[0].t)); }
         }
         return PUSHCORE_OK;
     }
@@ -1561,6 +1742,7 @@ struct PushCore {
     void teardownGraph() {
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
+        spanVfg.shutdown(); spanVfgOk = false; rgbSlots.clear(); repSlot = {}; repairOut.Reset(); repairPass.forgetViews();
         opened.clear(); outSlots.clear();
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
     }
@@ -1845,6 +2027,9 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.heldTested = uint32_t(core->heldRatio.Size());
     core->st.heldRatioPermille = uint32_t(core->heldRatio.Ratio() * 1000.0 + 0.5);
     core->st.heldGraphMultiplier = core->graphMultiplier;
+    core->st.repairActive = core->repairOn() ? 1u : 0u;
+    core->st.repairedFrames = core->repairedFrames;
+    core->st.repairedParts = core->repairedParts;
     {
         const auto f = core->costFull.recentP50(std::chrono::milliseconds(3000));
         const auto r = core->costReduced.recentP50(std::chrono::milliseconds(3000));

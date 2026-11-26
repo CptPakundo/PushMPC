@@ -250,8 +250,8 @@ int main()
             (void)fm;
         }
         {   // Animation: the path hint, the held-frame share, Off / On, and DLSS-G behind PushFlow for animation
-            check(AnimationHint(L"d:\\videos\\anime\\show - 01.mkv") && AnimationHint(L"D:\\Cartoons\\ep1.mkv") && AnimationHint(L"x:\\animated films\\a.mkv")
-                  && !AnimationHint(L"d:\\videos\\animal planet\\a.mkv") && !AnimationHint(L"d:\\animes2\\x.mkv") && !AnimationHint(L"d:\\movies\\film.mkv"),
+            check(AnimationHint(L"videos/anime/show - 01.mkv") && AnimationHint(L"Cartoons/ep1.mkv") && AnimationHint(L"animated films/a.mkv")
+                  && !AnimationHint(L"videos/animal planet/a.mkv") && !AnimationHint(L"animes2/x.mkv") && !AnimationHint(L"movies/film.mkv"),
                   L"Animation hint: whole words anime / cartoons / animated only");
             Source s; s.fps = 23.976; Display d; d.refreshHz = 240; Gpu g = Family(kRtx40, L"NVIDIA GeForce RTX 4090"); g.available &= ~(1u << kCapVfg);
             Source held = s; held.heldShare = 0.4; Source hint = s; hint.animHint = true; Source live = s; live.heldShare = 0.01;
