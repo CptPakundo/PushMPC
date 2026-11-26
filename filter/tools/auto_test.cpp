@@ -268,9 +268,9 @@ int main()
             check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full by class until the verdict, a show's choice is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
             check((m1.holdFlags & 1) && (m1.holdFlags & 2) && (m5.holdFlags & 1) && (m5.holdFlags & 8) && !(m5.holdFlags & 2) && m4.holdFlags == 0,
                   L"holds: transients on for every video (flash / impact also on live action), line art on animation only; Off turns them off", std::to_wstring(m1.holdFlags) + L" / " + std::to_wstring(m5.holdFlags));
-            check(ShowKeyFor(L"D:\\TV\\Show\\Season 1\\e01.mkv") == ShowKeyFor(L"d:\\tv\\show\\season 2\\e05.mkv") && ShowKeyFor(L"D:\\TV\\Show\\S01\\e01.mkv") == ShowKeyFor(L"D:\\TV\\Show\\e09.mkv")
-                  && ShowKeyFor(L"D:\\TV\\Show\\e01.mkv") != ShowKeyFor(L"D:\\TV\\Other\\e01.mkv") && ShowKeyFor(L"D:\\TV\\Show\\e01.mkv").size() == 16,
-                  L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"D:\\TV\\Show\\e01.mkv"));
+            check(ShowKeyFor(L"media/Show/Season 1/e01.mkv") == ShowKeyFor(L"Media/show/season 2/e05.mkv") && ShowKeyFor(L"media/Show/S01/e01.mkv") == ShowKeyFor(L"media/Show/e09.mkv")
+                  && ShowKeyFor(L"media/Show/e01.mkv") != ShowKeyFor(L"media/Other/e01.mkv") && ShowKeyFor(L"media/Show/e01.mkv").size() == 16,
+                  L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"media/Show/e01.mkv"));
         }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;
