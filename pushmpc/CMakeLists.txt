@@ -34,7 +34,8 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc
+            src/PushCoreZludaVsr.cpp src/PushCoreZludaVsr.h src/ZludaVsrClient.h include/pushmpc/zluda_vsr.h)
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
 target_compile_options(pushcore_dll PRIVATE /utf-8)
@@ -113,7 +114,7 @@ endfunction()
 function(pushmpc_add_release_target)
   pushmpc_collect_shader_targets("${CMAKE_SOURCE_DIR}" _shaders)
   add_custom_target(pushmpc_release)
-  add_dependencies(pushmpc_release ${_shaders} pushcore_dll pushcore_hip_preflight pushcore_gpu_harness)
+  add_dependencies(pushmpc_release ${_shaders} pushcore_dll pushcore_hip_preflight pushcore_gpu_harness pushcore_zluda_vsr_worker pmml_winml_ep)
 endfunction()
 cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL pushmpc_add_release_target)
 
@@ -134,3 +135,33 @@ if(PUSHMPC_VPL_ROOT AND EXISTS "${PUSHMPC_VPL_ROOT}/include/vpl/mfx.h" AND EXIST
 else()
   message(STATUS "pushcore: no Intel VPL dispatcher (PUSHMPC_VPL_ROOT): VPL frame interpolation not built")
 endif()
+
+# G11: RTX VSR on AMD RX 7000 / 9000 through ZLUDA. pushcore starts this worker (shipped in core\ next to pushcore.dll);
+# it loads ZLUDA (runtime\amd-nr-rdna3\zluda) and nvngx_vsr.dll in its own process. Needs only the NGX SDK headers
+# (VEYRA_DLSS_SDK_ROOT/include) and NVIDIA's cuda.h (VEYRA_CUDA_DRIVER_INCLUDE_DIR); everything else is loaded at run time.
+# zluda_vsr_test (CPU + WARP, the stub worker built with PUSHMPC_ZLUDA_VSR_STUB) checks the protocol and the refusals.
+add_executable(pushcore_zluda_vsr_worker tools/zluda_vsr_worker.cpp)
+target_compile_features(pushcore_zluda_vsr_worker PRIVATE cxx_std_20)
+target_compile_options(pushcore_zluda_vsr_worker PRIVATE /utf-8)
+target_compile_definitions(pushcore_zluda_vsr_worker PRIVATE UNICODE _UNICODE)
+target_include_directories(pushcore_zluda_vsr_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${VEYRA_DLSS_SDK_ROOT}/include ${VEYRA_CUDA_DRIVER_INCLUDE_DIR})
+target_link_libraries(pushcore_zluda_vsr_worker PRIVATE d3d12 dxgi advapi32 user32)
+add_executable(zluda_vsr_stub_worker tools/zluda_vsr_worker.cpp)
+target_compile_features(zluda_vsr_stub_worker PRIVATE cxx_std_20)
+target_compile_options(zluda_vsr_stub_worker PRIVATE /utf-8)
+target_compile_definitions(zluda_vsr_stub_worker PRIVATE UNICODE _UNICODE PUSHMPC_ZLUDA_VSR_STUB=1)
+target_include_directories(zluda_vsr_stub_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(zluda_vsr_stub_worker PRIVATE d3d12 dxgi advapi32 user32)
+add_executable(zluda_vsr_test tools/zluda_vsr_test.cpp)
+target_compile_features(zluda_vsr_test PRIVATE cxx_std_20)
+target_compile_options(zluda_vsr_test PRIVATE /utf-8)
+target_compile_definitions(zluda_vsr_test PRIVATE UNICODE _UNICODE)
+target_include_directories(zluda_vsr_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(zluda_vsr_test PRIVATE d3d12 dxgi advapi32 user32)
+
+# G11: AMD's GPU EP for PushFlow (pmml): asks Windows ML's EP catalog for AMDGPUExecutionProvider and writes
+# eps\amdgpu\ep.json (Setup runs it; shipped in core\). No build dependency: the catalog's C API is loaded at run time.
+add_executable(pmml_winml_ep ${CMAKE_CURRENT_SOURCE_DIR}/../pmml/tools/pmml_winml_ep.cpp)
+target_compile_features(pmml_winml_ep PRIVATE cxx_std_17)
+target_compile_options(pmml_winml_ep PRIVATE /utf-8)
+target_compile_definitions(pmml_winml_ep PRIVATE UNICODE _UNICODE)

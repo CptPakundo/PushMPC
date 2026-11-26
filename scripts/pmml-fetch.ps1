@@ -3,7 +3,7 @@
   fetches it (same pin file, same layout, same checks), for Setup on PCs without Python.
 
     pmml-fetch.ps1 -Pin <ml-runtime-pin.json> -Out <dir> [-Platform win-x64] [-Flavors core] [-Eps trt-rtx,openvino,qnn]
-                   [-Cache <dir>] [-DryRun]
+                   [-Cache <dir>] [-WinMl] [-DryRun]
 
   Everything comes from its official source (nuget.org, pypi.org wheels used as archives) and is checked against the pinned
   SHA-256 before anything is extracted; an entry pinned as TODO is refused. Only the native libraries, the side-by-side
@@ -11,6 +11,8 @@
   Layout: <Out>\ort\<flavor>\ (onnxruntime.dll), <Out>\eps\<ep>\ (the plugin EP and ep.json {name, epName, library,
   version}), <Out>\licenses\, <Out>\fetched.json. Exit 0 = done, 1 = a download or a check failed (nothing half-written
   is left in <Out>: the result is built in <Out>.part and moved into place).
+  -WinMl: Windows ML (the winmlCatalog pin) into <Out>\winml, for pmml_winml_ep.exe, which asks Windows ML's EP catalog
+  for the EPs that exist only there (AMD's AMDGPUExecutionProvider); Setup runs that tool after this script.
   Works with Windows PowerShell 5.1 and PowerShell 7.
 #>
 [CmdletBinding()]
@@ -21,6 +23,7 @@ param(
     [string[]]$Flavors = @('core'),
     [string[]]$Eps = @(),
     [string]$Cache = '',
+    [switch]$WinMl,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -43,17 +46,18 @@ function Test-Glob([string]$name, [string[]]$patterns) {
     }
     return $false
 }
-function Get-Pinned([string]$url, [string]$sha) {
-    if (-not $sha -or $sha -eq 'TODO') { Fail "$url has no pinned SHA-256 (TODO): refused" }
+# $alg: SHA256 (the pins' default) or SHA512 (what nuget.org publishes for a package: the winmlCatalog pin)
+function Get-Pinned([string]$url, [string]$sha, [string]$alg = 'SHA256') {
+    if (-not $sha -or $sha -eq 'TODO') { Fail "$url has no pinned $alg (TODO): refused" }
     $file = Join-Path $Cache ([IO.Path]::GetFileName(($url -split '\?')[0]))
-    if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ieq $sha) { Write-Host "cached  $(Split-Path $file -Leaf)"; return $file }
-    if ($DryRun) { Write-Host "would fetch $url (SHA-256 $sha)"; return '' }
+    if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm $alg).Hash -ieq $sha) { Write-Host "cached  $(Split-Path $file -Leaf)"; return $file }
+    if ($DryRun) { Write-Host "would fetch $url ($alg $sha)"; return '' }
     Write-Host "fetch   $url"
     & (Join-Path $env:SystemRoot 'System32\curl.exe') -L --fail --retry 3 -C - -s -S -A 'pmml-fetch/1' -o $file $url
     if ($LASTEXITCODE -ne 0) { Fail "download failed (curl exit $LASTEXITCODE): $url" }
-    $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-    if ($got -ine $sha) { Remove-Item -LiteralPath $file -Force; Fail "$(Split-Path $file -Leaf): SHA-256 $got does not match the pinned $sha" }
-    Write-Host "sha256  $($got.ToLowerInvariant())  $(Split-Path $file -Leaf)"
+    $got = (Get-FileHash -LiteralPath $file -Algorithm $alg).Hash
+    if ($got -ine $sha) { Remove-Item -LiteralPath $file -Force; Fail "$(Split-Path $file -Leaf): $alg $got does not match the pinned $sha" }
+    Write-Host "$($alg.ToLowerInvariant())  $($got.ToLowerInvariant())  $(Split-Path $file -Leaf)"
     return $file
 }
 # the members matching the patterns, flattened into $dest (unsafe names refused); licence files into $licDir
@@ -119,6 +123,21 @@ foreach ($ep in $Eps) {
     [ordered]@{ name = $ep; epName = $entry.epName; library = $lib; version = $entry.version } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dest 'ep.json') -Encoding ASCII
     $record.eps[$ep] = [ordered]@{ version = $entry.version; library = $lib; files = $files.Count }
     Write-Host "ok      eps/$ep $($entry.version): library $lib; $($files.Count) files"
+}
+if ($WinMl) {
+    # Windows ML's EP catalog C API (pmml_winml_ep.exe): AMD's AMDGPUExecutionProvider exists only through it
+    $wm = $pinData.winmlCatalog
+    $spec = if ($wm) { $wm.platforms.$Platform } else { $null }
+    if (-not $spec) { Write-Host "skip    winml: no $Platform package" }
+    else {
+        $arc = if ($wm.sha512) { Get-Pinned $wm.url $wm.sha512 SHA512 } else { Get-Pinned $wm.url $wm.sha256 }
+        if (-not $DryRun) {
+            $files = @(Expand-Pinned $arc @($spec) (Join-Path $part 'winml') (Join-Path $part 'licenses'))
+            if (-not $files.Count) { Fail "winml: nothing matched $spec" }
+            $record['winml'] = [ordered]@{ version = $wm.version; files = $files }
+            Write-Host "ok      winml $($wm.version): $($files -join ', ')"
+        }
+    }
 }
 if ($DryRun) { exit 0 }
 $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $part 'fetched.json') -Encoding ASCII

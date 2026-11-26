@@ -1399,6 +1399,7 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
     Add-FidelityFxSdk $dest
     Add-XessSdk $dest
+    Add-ZludaVsrFile $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
@@ -1450,6 +1451,26 @@ function Add-XessSdk([string]$dest) {
     if ($LASTEXITCODE -ne 0) { Warn "Intel XeSS not installed (xess-fetch.ps1 exit $LASTEXITCODE): XeSS SR and XeSS frame generation stay off" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + Intel XeSS SDK 3.0.2" }
 }
+# G11: RTX Video Super Resolution on AMD RX 7000 / 9000 through ZLUDA (pushcore's unlock ZludaVsr): NVIDIA's nvngx_vsr.dll
+# from NVIDIA's own wheel (pinned, as for NVIDIA cards) into runtime\zluda-vsr; ZLUDA itself is the RX 7000 NR worker's
+# (runtime\amd-nr-rdna3\zluda). pushcore self-tests the route before it uses it (FSR until then). Off switch: Unlocks
+# ZludaVsr = 0 / PUSHMPC_DISABLE_ZLUDAVSR=1 (then nothing is fetched).
+function Add-ZludaVsrFile([string]$dest) {
+    if ($GpuVendor -ne 'AMD') { return }
+    $fam = Get-GpuFamily (Get-GpuInfo)
+    if ($fam -notin 'RX 7000', 'RX 9000') { return }
+    $off = $env:PUSHMPC_DISABLE_ZLUDAVSR -match '^(1|true|yes|on)$'
+    try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name ZludaVsr -ErrorAction Stop).ZludaVsr -eq 0) { $off = $true } } catch {}
+    if ($off) { Info 'RTX VSR on AMD (ZLUDA): switched off (unlock ZludaVsr)'; return }
+    $fetch = Join-Path $PSScriptRoot 'nvidia-vfx-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'nvidia-vfx-fetch.ps1 is not next to the installer: RTX VSR on AMD is not installed (FSR upscaling)'; return }
+    if ($DryRun) { Dry "would fetch nvngx_vsr.dll from NVIDIA's wheel into runtime\zluda-vsr (RTX VSR on $fam through ZLUDA)"; return }
+    Step "RTX Video Super Resolution on $fam (through ZLUDA): nvngx_vsr.dll from NVIDIA's PyPI wheel (pinned SHA-256)"
+    $cache = if ($PackageCache) { $PackageCache } else { Join-Path $InstallDir 'download' }
+    & $fetch -Dest (Join-Path $dest 'runtime\zluda-vsr') -Cache $cache -Only 'nvngx_vsr.dll' -AcceptNvidiaLicense
+    if ($LASTEXITCODE -ne 0) { Warn "RTX VSR on AMD not installed (nvidia-vfx-fetch.ps1 exit $LASTEXITCODE): FSR upscaling stays" }
+    else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + nvngx_vsr (ZLUDA VSR)" }
+}
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
     $pfNote = if ($pushflow) { $pushflow } else { 'not installed' }
@@ -1496,6 +1517,7 @@ function Prepare-Runtime($pkg = $Runtime) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
         Add-FidelityFxSdk $dest
         Add-XessSdk $dest
+        Add-ZludaVsrFile $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1617,6 +1639,8 @@ function Invoke-Stage {
     # licence texts of what is built into pushcore.dll (libvpl, the XeSS SDK; release.yml collects them next to the build)
     $coreLic = Join-Path (Split-Path $CoreDll) 'licenses'
     if (Test-Path $coreLic) { Copy-Item $coreLic $c -Recurse -Force }
+    # G11: the ZLUDA RTX VSR worker (RX 7000 / 9000) and the Windows ML EP catalog tool (AMD's GPU EP for PushFlow)
+    foreach ($x in 'pushcore_zluda_vsr_worker.exe', 'pmml_winml_ep.exe') { $p = Join-Path (Split-Path $CoreDll) $x; if (Test-Path $p) { Copy-Item $p $c } }
     Copy-Item (Join-Path $ShaderDir '*') (Join-Path $c 'shaders') -Recurse -Include *.dxil
     if (Test-Path (Join-Path $ShaderDir 'dis')) { Copy-Item (Join-Path $ShaderDir 'dis') (Join-Path $c 'shaders') -Recurse -Force }
     Get-ChildItem (Join-Path $c 'shaders') -Recurse -File | Where-Object { $_.Extension -ne '.dxil' } | Remove-Item -Force
@@ -2514,8 +2538,21 @@ function Find-PmmlRuntime {
 # GeForce GTX (TensorRT-RTX needs RTX), Snapdragon (QNN's NPU path for PushFlow is not built yet).
 # GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5, the oldest TensorRT-RTX supports): TensorRT-RTX as on RTX
 # (Get-PmmlChoice); pushcore keeps DirectML when the EP does not load or its session fails
+# AMD Radeon (G11): AMD's AMDGPUExecutionProvider, which exists only through Windows ML's EP catalog (Windows 11 24H2+,
+# Adrenalin 24.12.1+): Windows installs it on request and pmml_winml_ep.exe writes eps\amdgpu\ep.json with its path. The
+# catalog decides which Radeons it serves; where it serves none, nothing is written and PushFlow stays on DirectML.
 function Get-PmmlEps([string]$fam, $g = $null) {
-    switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } default { return @() } }
+    switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } 'RX *' { return @('amdgpu') } 'Radeon' { return @('amdgpu') } default { return @() } }
+}
+# EPs pinned with version "catalog" have no package: Windows ML's EP catalog provides them (pmml_winml_ep.exe, in core\)
+function Test-CatalogEp($pins, [string]$ep) { return "$($pins.eps.$ep.version)" -eq 'catalog' }
+function Get-CatalogEpTool { foreach ($d in @((Join-Path $InstallDir 'core'), (Join-Path $StageDir 'core'), $here)) { $t = Join-Path $d 'pmml_winml_ep.exe'; if (Test-Path -LiteralPath $t) { return $t } }; return '' }
+# a catalog EP counts as installed while the library its ep.json names is on disk (Windows updates catalog EPs on its
+# own; a moved library makes Repair or the next update ask the catalog again)
+function Test-CatalogEpPresent([string]$dir, [string]$ep) {
+    $j = Join-Path $dir "eps\$ep\ep.json"
+    if (-not (Test-Path -LiteralPath $j)) { return $false }
+    try { $lib = (Get-Content -LiteralPath $j -Raw | ConvertFrom-Json).library; return [bool]($lib -and (Test-Path -LiteralPath $lib)) } catch { return $false }
 }
 function Get-PmmlFetchFiles { foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) { $s = Join-Path $d 'pmml-fetch.ps1'; $p = Join-Path $d 'ml-runtime-pin.json'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath $p)) { return @($s, $p) } }; return @() }
 function Install-PmmlRuntime($state) {
@@ -2532,20 +2569,45 @@ function Install-PmmlRuntime($state) {
     $ff = @(Get-PmmlFetchFiles)
     if (-not $ff.Count) { Warn 'PushFlow runtime: pmml-fetch.ps1 / ml-runtime-pin.json not found: not installed'; return }
     $pins = Get-Content -LiteralPath $ff[1] -Raw | ConvertFrom-Json
-    $want = (@("ort/core $($pins.onnxruntime.core.version)") + @($eps | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
+    # G11: catalog EPs (amdgpu) come from Windows ML's catalog, not from pmml-fetch; they need the pinned Windows ML DLL
+    $catalog = @($eps | Where-Object { Test-CatalogEp $pins $_ })
+    $pinned = @($eps | Where-Object { -not (Test-CatalogEp $pins $_) })
+    $winml = $catalog.Count -and $pins.winmlCatalog -and ("$($pins.winmlCatalog.sha256)" -match '^[0-9a-fA-F]{64}$' -or "$($pins.winmlCatalog.sha512)" -match '^[0-9a-fA-F]{128}$') -and (Get-CatalogEpTool)
+    if ($catalog.Count -and -not $winml) { Info "PushFlow runtime: $($catalog -join ', ') needs Windows ML's EP catalog, which this build does not carry yet: DirectML stays" }
+    $want = (@("ort/core $($pins.onnxruntime.core.version)") + @($eps | Where-Object { $winml -or $_ -notin $catalog } | ForEach-Object { "eps/$_ $($pins.eps.$_.version)" })) -join ', '
     $have = ''
     if (Test-Path -LiteralPath (Join-Path $dir 'fetched.json')) {
-        try { $f = Get-Content -LiteralPath (Join-Path $dir 'fetched.json') -Raw | ConvertFrom-Json; $have = (@($f.ort.PSObject.Properties | ForEach-Object { "ort/$($_.Name) $($_.Value.version)" }) + @($f.eps.PSObject.Properties | ForEach-Object { "eps/$($_.Name) $($_.Value.version)" })) -join ', ' } catch { }
+        try { $f = Get-Content -LiteralPath (Join-Path $dir 'fetched.json') -Raw | ConvertFrom-Json; $have = (@($f.ort.PSObject.Properties | ForEach-Object { "ort/$($_.Name) $($_.Value.version)" }) + @($f.eps.PSObject.Properties | Where-Object { $_.Value.version -ne 'catalog' -or $_.Value.unavailable -or (Test-CatalogEpPresent $dir $_.Name) } | ForEach-Object { "eps/$($_.Name) $($_.Value.version)" })) -join ', ' } catch { }
     }
     if ($have -eq $want) { Info "PushFlow runtime ($want) is already installed"; if (-not $DryRun) { Set-StateValue $state 'pmmlInstalled' $want }; return }
-    Info "PushFlow runtime for $fam`: $want (ONNX Runtime and the EP from nuget.org / pypi.org, pinned by SHA-256)"
+    Info "PushFlow runtime for $fam`: $want (ONNX Runtime and the EP from nuget.org / pypi.org, pinned by SHA-256$(if ($catalog.Count) { '; AMD''s EP from Windows ML''s catalog' }))"
     Progress 93 'Installing PushFlow''s runtime for this GPU'
-    if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors core -Eps $($eps -join ',')"; return }
-    $out = & $ff[0] -Pin $ff[1] -Out $dir -Platform 'win-x64' -Flavors core -Eps $eps -Cache (Join-Path $InstallDir 'download\pmml') 2>&1
+    if ($DryRun) { Dry "would run pmml-fetch.ps1 -Out $dir -Flavors core -Eps $($pinned -join ',')$(if ($winml) { " -WinMl, then pmml_winml_ep.exe for $($catalog -join ',')" })"; return }
+    $fa = @{ Pin = $ff[1]; Out = $dir; Platform = 'win-x64'; Flavors = 'core'; Eps = $pinned; Cache = (Join-Path $InstallDir 'download\pmml') }
+    if ($winml) { $fa.WinMl = $true }
+    $out = & $ff[0] @fa 2>&1
     $rc = $LASTEXITCODE
     foreach ($l in @($out)) { if ("$l" -match '^(ok|fetch|cached|skip|pmml-fetch)') { Info "  $l" } }
     Remove-Item -LiteralPath (Join-Path $InstallDir 'download\pmml') -Recurse -Force -ErrorAction SilentlyContinue
     if ($rc -ne 0) { Warn "PushFlow runtime not installed (pmml-fetch exit $rc): PushFlow runs on DirectML; run Repair to try again"; return }
+    if ($winml) {
+        $tool = Get-CatalogEpTool
+        $fj = Join-Path $dir 'fetched.json'
+        $rec = try { Get-Content -LiteralPath $fj -Raw | ConvertFrom-Json } catch { $null }
+        foreach ($ep in $catalog) {
+            # Windows downloads and installs the EP here on its first request (Windows Update delivery; can take minutes)
+            Progress 94 'Asking Windows ML for AMD''s AI engine'
+            $o = & $tool --winml (Join-Path $dir 'winml') --out (Join-Path $dir "eps\$ep") --id $ep --ep $pins.eps.$ep.epName --fallback 'MIGraphXExecutionProvider' 2>&1
+            $trc = $LASTEXITCODE
+            foreach ($l in @($o)) { if ("$l" -match '^(RESULT|ensure)') { Info "  $l" } }
+            if ($trc -eq 0 -and $rec) { $rec.eps | Add-Member -NotePropertyName $ep -NotePropertyValue ([pscustomobject]@{ version = 'catalog'; library = 'Windows ML catalog' }) -Force }
+            elseif ($trc -ne 0) {
+                Info "  eps/$ep`: not available from Windows ML on this PC (exit $trc): PushFlow stays on DirectML"
+                if ($rec) { $rec.eps | Add-Member -NotePropertyName $ep -NotePropertyValue ([pscustomobject]@{ version = 'catalog'; unavailable = $true; exit = $trc }) -Force }
+            }
+        }
+        if ($rec) { $rec | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fj -Encoding ASCII }
+    }
     Set-StateValue $state 'pmmlInstalled' $want
     Info "PushFlow runtime installed in $dir"
 }

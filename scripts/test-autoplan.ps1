@@ -72,6 +72,8 @@ Test-That (-not $p['pmmlEps']) "GTX 1080: no runtime candidate ('$($p['pmmlEps']
 # an AMD card keeps DirectML (pmml's order without a measurement): pmml.txt goes again
 $p = Get-Plan '1002:744C:AMD Radeon RX 7900 XTX' $id @('-PmmlRuntime', $rt, '-Apply')
 Test-That (-not $p['pmmlBackend'] -and -not (Test-Path $txt)) "RX 7900 XTX without a measurement: DirectML, pmml.txt removed ($($p['pmmlWhy']))"
+# G11: a Radeon is offered AMD's GPU EP from Windows ML's catalog (Auto's measurement then picks it or DirectML)
+Test-That ($p['pmmlEps'] -eq 'amdgpu') "RX 7900 XTX: candidate '$($p['pmmlEps'])' (AMD GPU EP from Windows ML's catalog)"
 # a measurement on this card picks the fastest network that ran
 $cache = @'
 {

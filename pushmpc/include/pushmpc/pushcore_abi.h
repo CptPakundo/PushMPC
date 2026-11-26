@@ -182,6 +182,9 @@ typedef struct PushCoreSettings {
                                       Quality / Ultra Quality; not started: FSR */
 #define PUSHCORE_SR_METHOD_IVSR 4u /* PUSHCORE_FEATURE_IVSR: Intel Video Super Resolution (the driver's video processor with Intel's VPE
                                       extension) before the graph, on a D3D11 device beside it; Intel GPUs only, else FSR */
+#define PUSHCORE_SR_METHOD_ZLUDA_VSR 5u /* PUSHCORE_FEATURE_ZLUDA_VSR: RTX VSR on AMD RX 7000 / 9000 through ZLUDA (a worker process;
+                                      unlock ZludaVsr, self-tested). On those cards PUSHCORE_SR_METHOD_RTX runs it too when
+                                      PUSHCORE_CAP_ZLUDA_VSR is available; elsewhere it is FSR (AMD) or RTX VSR (NVIDIA) */
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
@@ -346,6 +349,9 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_VPL_FI (1u << 21)  /* fgBackend = PUSHCORE_FG_VPL, PUSHCORE_CAP_VPL_FI, PUSHCORE_SELFTEST_VPL_FI */
 #define PUSHCORE_FEATURE_XESS_SR (1u << 22) /* srMethod = PUSHCORE_SR_METHOD_XESS, PUSHCORE_CAP_XESS_SR, PUSHCORE_SELFTEST_XESS_SR */
 #define PUSHCORE_FEATURE_IVSR (1u << 23)    /* srMethod = PUSHCORE_SR_METHOD_IVSR, PUSHCORE_CAP_IVSR, PUSHCORE_SELFTEST_IVSR */
+#define PUSHCORE_FEATURE_ZLUDA_VSR (1u << 24) /* PUSHCORE_SR_METHOD_ZLUDA_VSR, PUSHCORE_CAP_ZLUDA_VSR, PUSHCORE_SELFTEST_ZLUDA_VSR (Vendor-AMD, G11) */
+#define PUSHCORE_FEATURE_AMDGPU_EP (1u << 25) /* PushFlow on pmml takes AMD's AMDGPUExecutionProvider from Windows ML's EP catalog
+                                                 (eps\amdgpu\ep.json written by Setup's pmml_winml_ep.exe; Vendor-AMD, G11) */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 #define PUSHCORE_FEATURE_QUICK_VSR 4096u /* PUSHCORE_FLAG_QUICK_VSR and PushCoreStats.quickVsr (fast start, Route B) */
@@ -389,7 +395,11 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
                                         build's provider slot, the self-test passed (SelfTest\XessSr); available: reason[] = "ms4k=.." */
 #define PUSHCORE_CAP_IVSR 17u        /* PUSHCORE_SR_METHOD_IVSR: Intel GPU + the self-test passed (SelfTest\IntelVsr); when available,
                                         reason[] holds the measured cost ("ms4k=..") */
-#define PUSHCORE_CAP_COUNT 18u       /* grows with the next methods (ZLUDA VSR 18, community ports 19-20) */
+#define PUSHCORE_CAP_ZLUDA_VSR 18u   /* PUSHCORE_SR_METHOD_ZLUDA_VSR: AMD RX 7000 / 9000, HIP + ZLUDA + nvngx_vsr.dll + the worker, self-test passed */
+/* Self-test id (one global bit space with the pushcore_selfTest export of PUSHCORE_FEATURE_XEFG / XESS_SR; report key
+   "zludavsr", registered in PushCoreGpu.cpp, calls pushmpc::zludaVsrSelfTestNow): the ZludaVsr self-test, synchronously */
+#define PUSHCORE_SELFTEST_ZLUDA_VSR 32u
+#define PUSHCORE_CAP_COUNT 22u       /* set at the v1 merge: 0-20 used, 21 = PUSHCORE_CAP_ANIME_SR (Anime, merged later); PushCoreCaps.reason[] has this many rows */
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;
@@ -445,7 +455,7 @@ typedef int (*PushCorePrewarmReleaseFn)(void);
    global bit space for every method that has a self-test); flags = PUSHCORE_SELFTEST_FLAG_*. adapterLuid 0 = the first hardware
    adapter (FLAG_WARP: Windows' software adapter, for CI); rootDir = the runtime root (NULL = pushcore's folder). report = one
    JSON object (UTF-8): "adapter", "driver", "features", per asked-for test "<key>": its verdict line ("pass; ..." / "fail: ..."
-   / "unavailable: ...") and "<key>.<name>" fields with its numbers. Keys: xefg, xesssr, ivsr, vplfi, bridge. PUSHCORE_OK =
+   / "unavailable: ...") and "<key>.<name>" fields with its numbers. Keys: xefg, xesssr, ivsr, vplfi, bridge, zludavsr. PUSHCORE_OK =
    every asked-for test passed. FLAG_RECORD writes each hardware result into HKCU\Software\PushMPC\SelfTest\<unlock name>
    (keyed vendor:device:driver), which pushcore_capabilities reads; capabilities also runs a missing test itself (Auto). */
 #define PUSHCORE_SELFTEST_XEFG 1u

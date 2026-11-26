@@ -51,6 +51,18 @@
       }
     }
   },
+  "winmlCatalog": {
+    "what": "Windows ML (Microsoft.Windows.AI.MachineLearning, standalone, unpackaged; reg-free WinRT, no Windows App SDK runtime) for its ExecutionProviderCatalog flat C API (WinMLEpCatalog*), which pmml_winml_ep.exe uses to get the EPs that exist only through the catalog (eps with \"version\": \"catalog\": AMD's AMDGPUExecutionProvider, min. 2.5.96). Extracted into <Out>\\winml only when such an EP is asked for; ONNX Runtime from this package is NOT used by pmml (ort/core is). MIT.",
+    "version": "2.5.96",
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.5.96/microsoft.windows.ai.machinelearning.2.5.96.nupkg",
+    "sha512": "0903efa70c5c829593d6c99251e974fe91184f9b42737d6c6731a0b3d23907e77587b7258eab1de47394484206f6e91e6fdb36e589d9bcc88726cc06c3209c99",
+    "size": 52171134,
+    "platforms": {
+      "win-x64": "runtimes/win-x64/native/*",
+      "win-arm64": "runtimes/win-arm64/native/*"
+    },
+    "note": "Pinned by SHA-512, the hash nuget.org publishes for the package (catalog entry packageHash, base64 CQPvpwxc...yCcmQ==, packageHashAlgorithm SHA512, packageSize 52171134; read from the catalog API without downloading the package). The catalog entry lists runtimes/win-x64, win-arm64 and win-arm64ec native/{Microsoft.Windows.AI.MachineLearning,onnxruntime,DirectML}.dll."
+  },
   "eps": {
     "trt-rtx": {
       "what": "NVIDIA TensorRT for RTX as an ONNX Runtime plugin EP (NVIDIA/TensorRT-RTX-EP-ABI 0.5.0; bundles the TensorRT-RTX 1.7 runtime). RTX GPUs; JIT engine build on the user's GPU, cached. Host: ort/core.",
