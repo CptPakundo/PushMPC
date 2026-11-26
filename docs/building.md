@@ -90,3 +90,34 @@ the Auto decisions for a few sources and displays (no GPU needed).
 
 Before publishing anything: `scripts\check-public.ps1` (needs a local `scripts\check-public.patterns.local`, never
 published) scans the files listed in `scripts\public-files.txt` for personal data.
+
+## How Setup works (for developers)
+
+Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its payload; on Linux `setup.sh` runs
+`install.sh` and the other installers. What they do besides the player settings:
+
+- **Auto plan:** the GPU family (pushcore's rules), the frame generation order and upscaler per route, logged and saved
+  as `auto-plan.json` (`pushmpc-install.ps1 autoplan [-Apply]`; Linux `setup.sh plan`, `auto-plan.txt`).
+  `PUSHMPC_TEST_GPU="<vendor>:<device>:<name>"` stands in for the GPU in tests.
+- **PushFlow runtime (pmml):** `scripts/pmml-fetch.ps1` (Windows) and `pmml/scripts/fetch_runtime.py` (Linux) fetch ONNX
+  Runtime and the execution provider for the GPU by the pins in `scripts/ml-runtime-pin.json` (nuget.org, pypi.org,
+  SHA-256 checked) into `%LOCALAPPDATA%\PushMPC\pmml` / `~/.local/share/pushmpc/pmml`: TensorRT-RTX on RTX, OpenVINO on
+  Intel, MIGraphX on Linux AMD with ROCm. Other GPUs keep DirectML. `pmml.txt` in the runtime's
+  `runtime\experimental\pushflow` folder tells pushcore which provider to use (a measurement in `pmml-autobench.json`
+  wins). Switches: `-Pmml No`, `--no-pmml`.
+- **AMD FSR SDK 2.4:** `scripts/fidelityfx-fetch.ps1` on Radeon RX 6000-9000 (`-FidelityFx Package` declines it).
+- **Plex:** `scripts/pushmpc-plex.ps1` replaces Plex's `libmpv-2.dll` with a VapourSynth-enabled libmpv (shinchiro's mpv
+  build, SHA-256 pinned) after a self-test, on tested Plex versions only (`$Tested`), with a backup, elevated once; a
+  logon task (`\PushMPC\Plex libmpv check`) re-applies it after Plex updates; uninstall restores the original.
+  mpv-integration then writes PushMPC's block and `tls-ca-file=<Plex>\resources\cacert.pem` into Plex's `mpv.conf`.
+  `-PlexSwap No` declines it.
+- **VLC, Kodi:** optional `vlc` and `kodi` components (`stage -VlcPlugin`, `-KodiPackage`), installed by
+  `vlcplugin/install/pushmpc-vlc.ps1` and `kodiaddon/install/install.ps1` when the player is found.
+- **Linux mpv:** `setup.sh` tries the native hook first (`mpvnative/install/pushmpc-native.sh`); when it does not activate
+  in the distro's mpv, the VapourSynth route (`install.sh`) is used instead, never both.
+- **Capture mode:** `scripts/pushmpc-capture.ps1` installs its own PushFPS into `%LOCALAPPDATA%\PushMPC\capture\PushFPS`
+  (PushFPS's installer with `-InstallDir`, `-NoShortcuts` and its own TEMP), so logs, caches and `runtime_local` stay in
+  that folder; it starts PushFPS with `--data-dir`, `--no-update-check`, `QML_DISK_CACHE_PATH` and TEMP inside it, and
+  opens the player's window directly (`screen:0:<hwnd>:0:0:2:0:0:0:0`) on tested PushFPS versions. `-Capture On|Off`.
+- **CI:** `.github/workflows/release-ux.yml` runs Setup headless on windows-2025 and `setup.sh` in Arch with players from
+  their packages, and checks that uninstall leaves nothing behind.

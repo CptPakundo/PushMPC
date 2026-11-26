@@ -261,10 +261,11 @@ sh ~/.local/share/pushmpc/setup.sh status
 sh ~/.local/share/pushmpc/setup.sh uninstall # puts every changed file back
 ```
 
-`setup.sh` finds the graphics card (and the Vulkan device), prints the engine Auto starts with, runs `install.sh` for
-the mpv family and Kodi, installs the VLC module when the download has it, and saves its choice in
-`~/.local/share/pushmpc/auto-plan.txt`. It asks only before a download that needs your yes (the Flathub mpv, NVIDIA's
-Video Effects); `--yes` accepts both, and without a terminal nothing is downloaded.
+`setup.sh` sets up every player it finds and picks the best settings for your graphics card. For your distribution's
+mpv it uses PushMPC's own connection when that works with your mpv, and the VapourSynth filter otherwise. On NVIDIA RTX,
+Intel and (with ROCm) AMD graphics cards it also downloads a faster version of PushFlow, PushMPC's AI frame generation
+(about 300 MB; `--no-pmml` skips it). It only asks before downloads that need your yes: mpv from Flathub, and
+NVIDIA's video effects (their licence). `--yes` says yes to both.
 
 mpv needs VapourSynth. Arch, Manjaro and EndeavourOS build mpv with it (Arch users can also use the AUR package
 `pushmpc` and run `pushmpc-setup`). **Ubuntu, Debian and Mint build mpv without it**: the installer then offers, once,

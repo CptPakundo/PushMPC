@@ -226,7 +226,14 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
     $kodiUser = @()
     foreach ($d in $kodiDirs) { if (Test-Path -LiteralPath "$d\portable_data" -PathType Container) { $kodiUser += "$d\portable_data\userdata" } }
     if ((Test-Path -LiteralPath "$($E.AppData)\Kodi" -PathType Container) -or $kodiDirs) { $kodiUser += "$($E.AppData)\Kodi\userdata" }
+    # the PushMPC Kodi add-on (kodiaddon/install/install.ps1) lists each Kodi it is in: that Kodi keeps its own player
+    $kodiMarker = "$($E.AppData)\PushMPC\kodi-addon.installed"
+    $kodiAddon = @(if (Test-Path -LiteralPath $kodiMarker) { Get-Content -LiteralPath $kodiMarker | ForEach-Object { ($_ -split "`t")[0].TrimEnd('\') } })
     foreach ($u in ($kodiUser | Select-Object -Unique)) {
+        if ($kodiAddon -contains (Split-Path -Parent $u).TrimEnd('\')) {
+            $found += [pscustomobject]@{ Player = 'Kodi'; Exe = ''; Kind = 'none'; Config = ''; Managed = $false; Note = 'the PushMPC add-on plays inside Kodi: mpv is not set as its external player' }
+            continue
+        }
         $found += [pscustomobject]@{ Player = 'Kodi'; Exe = $hostExe; Kind = 'kodi'; Config = "$u\playercorefactory.xml"; Managed = [bool]$hostExe
             Note = $(if ($hostExe) { "videos play in mpv ($hostExe) as Kodi's external player" } else { 'not changed: Kodi needs mpv (shinchiro build) as its external player; install mpv, then run PushMPC Setup again' }) }
     }
@@ -242,8 +249,15 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
     # video super resolution through mpv's d3d11vpp, added by pushmpc.lua (soft failure), in their own mpv.conf
     foreach ($pl in @(@{ Name = 'Plex for Windows'; Dir = "$($E.ProgramFiles)\Plex\Plex"; Conf = "$($E.LocalAppData)\Plex\mpv.conf" },
                       @{ Name = 'Plex HTPC'; Dir = "$($E.ProgramFiles)\Plex\Plex HTPC"; Conf = "$($E.LocalAppData)\Plex HTPC\mpv.conf" })) {
-        $dll = "$($pl.Dir)\libmpv-2.dll"
-        if (-not (Test-Path -LiteralPath $dll)) { continue }
+        $dll = @("$($pl.Dir)\libmpv-2.dll", "$($pl.Dir)\mpv-2.dll") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $dll) { continue }
+        # a VapourSynth-enabled libmpv in Plex's folder (pushmpc-plex.ps1 apply): the full route, frame generation included,
+        # with Plex's own CA bundle for its plex.direct HTTPS streams
+        if (Test-PmLibmpvVs $dll) {
+            $found += [pscustomobject]@{ Player = $pl.Name; Exe = $dll; Kind = 'plexvs'; Config = $pl.Conf; Managed = $true; CaFile = "$($pl.Dir)\resources\cacert.pem"
+                Note = 'frame generation through the VapourSynth-enabled libmpv PushMPC put in its folder' }
+            continue
+        }
         $g = Test-PmPlexLibmpv $dll
         $vendor = if ($g.Vsr) { Get-PmGpuScaling $E } else { '' }
         $sh = @(Get-PmShaderLines $E "$($E.LocalAppData)\PushMPC\vsplugin\pushmpc.vpy")
@@ -522,6 +536,11 @@ function Uninstall-PmMpcQt {
 # ------------------------------------------------------------------------------------------------ Plex (tier A)
 # The gate: Plex's libmpv-2.dll must know d3d11vpp's scaling-mode (mpv 0.38+) and carry Lua (pushmpc.lua adds the
 # filter softly; a vf= line that fails would stop playback). Read from the DLL's strings; nothing is loaded.
+# a libmpv built with VapourSynth (its vf list names it; shinchiro's builds and PushMPC's own)
+function Test-PmLibmpvVs([string]$Dll) {
+    try { $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Dll)) } catch { return $false }
+    return $t.Contains('vapoursynth') -and $t.Contains('VSScript')
+}
 function Test-PmPlexLibmpv([string]$Dll) {
     try { $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Dll)) } catch { return [pscustomobject]@{ Ok = $false; Why = "cannot read $Dll" } }
     if (-not $t.Contains('mp.options')) { return [pscustomobject]@{ Ok = $false; Vsr = $false; Why = 'its libmpv has no Lua scripting' } }
@@ -784,7 +803,7 @@ function Invoke-PmMpvIntegration {
         'Status' {
             foreach ($p in $players) {
                 $installed = $false; $warn = @()
-                if ($p.Kind -in 'mpvconf', 'plex' -and (Test-Path -LiteralPath $p.Config)) { $txt = (Read-PmText $p.Config).Text; $installed = [bool](Find-PmBlock $txt); $warn = Get-PmConflicts $txt }
+                if ($p.Kind -in 'mpvconf', 'plex', 'plexvs' -and (Test-Path -LiteralPath $p.Config)) { $txt = (Read-PmText $p.Config).Text; $installed = [bool](Find-PmBlock $txt); $warn = Get-PmConflicts $txt }
                 if ($p.Kind -in 'smplayer', 'mpcqt', 'shim', 'stremio') { $installed = Test-Path -LiteralPath "$($p.Config).pushmpc-backup.json" }
                 if ($p.Kind -eq 'kodi' -and (Test-Path -LiteralPath $p.Config)) { $installed = (Read-PmText $p.Config).Text.Contains($script:PmXmlBegin) }
                 $rows += [pscustomobject]@{ Player = $p.Player; Exe = $p.Exe; Config = $p.Config; Installed = $installed; Managed = $p.Managed
@@ -818,6 +837,11 @@ function Invoke-PmMpvIntegration {
                     'kodi' { $w = Install-PmKodi $p.Config $p.Exe }
                     'stremio' { $w = Install-PmStremio $E $p.Config $block }
                     'plex' { $w = Install-PmMpvConf $p.Config (Get-PmPlexBlock $ScriptPath $p.Scaling "`r`n") }
+                    'plexvs' {
+                        # the usual block plus Plex's CA bundle (plex.direct HTTPS) inside the marked part
+                        $pb = $block.Replace("$script:PmBegin`r`n", "$script:PmBegin`r`n" + $(if (Test-Path -LiteralPath $p.CaFile) { "tls-ca-file=$(Get-PmQuoted $p.CaFile)`r`n" } else { '' }))
+                        $w = Install-PmMpvConf $p.Config $pb
+                    }
                 }
                 $done += [pscustomobject]@{ Kind = $p.Kind; Config = $p.Config }
                 $rows += [pscustomobject]@{ Player = $p.Player; Config = $p.Config; Result = 'installed'; Note = (@($p.Note) + @($w)) -join '; ' }
@@ -854,6 +878,7 @@ function Invoke-PmMpvIntegration {
                     'kodi' { Uninstall-PmKodi $t.Config }
                     'stremio' { Uninstall-PmStremio $E $t.Config }
                     'plex' { Uninstall-PmMpvConf $t.Config }
+                    'plexvs' { Uninstall-PmMpvConf $t.Config }
                     default { 'unknown target kind' }
                 }
                 $rows += [pscustomobject]@{ Player = $t.Kind; Config = $t.Config; Result = $r; Note = '' }

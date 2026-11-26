@@ -191,6 +191,20 @@ std::string MlRuntimeDir(const VSMap* in, const VSAPI* a)
     std::string d = in ? MArg(in, a, "ml_runtime") : std::string();
     if (d.empty()) d = ReadSetting("MlRuntime");
     if (d.empty()) d = Env("PMML_RUNTIME");
+    // where PushMPC's Setup puts it (Windows <LOCALAPPDATA>\PushMPC\pmml; Linux / macOS setup.sh
+    // ${XDG_DATA_HOME:-~/.local/share}/pushmpc/pmml), when it is there
+    if (d.empty()) {
+#ifdef _WIN32
+        const std::string base = Env("LOCALAPPDATA");
+        const std::string def = base.empty() ? std::string() : base + "\\PushMPC\\pmml";
+        if (MlRuntimePresent(def)) d = def;
+#else
+        // inside the Flathub mpv XDG_DATA_HOME is the app's own folder; the runtime is in the user's (read-only override)
+        const std::string xdg = Env("XDG_DATA_HOME"), home = Env("HOME");
+        for (const std::string& def : { !xdg.empty() && xdg[0] == '/' ? xdg + "/pushmpc/pmml" : std::string(), home.empty() ? std::string() : home + "/.local/share/pushmpc/pmml" })
+            if (d.empty() && MlRuntimePresent(def)) d = def;
+#endif
+    }
     return d;
 }
 

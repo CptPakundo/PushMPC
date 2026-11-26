@@ -54,63 +54,62 @@ set up by itself for your GPU and display. Your player stays your player.
 
 ## 📺 Players and GPUs
 
-Setup finds your players and your graphics card, picks the engine and sets everything up, with no questions. Status:
-✅ tested with a real GPU · 🆕 automatic, checked in CI on real players (no GPU there) · 🧪 preview.
+Setup finds your players and your graphics card and sets everything up for you. You don't have to answer any
+questions.
 
-| Player | Windows | Linux | macOS | How |
-|---|---|---|---|---|
-| **MPC-HC** | ✅ | | | DirectShow filter before MPC Video Renderer |
-| **MPC-BE**, **PotPlayer** | 🆕 | | | the same filter; the decoder set to copy-back (put back on uninstall) |
-| **mpv**, **mpv.net**, **SMPlayer**, **MPC-QT** | 🆕 | 🆕 | 🧪 | VapourSynth filter in the player's mpv settings |
-| **Celluloid**, **Haruna** | | 🆕 | | the same, through the system mpv |
-| **IINA** | | | 🧪 | VideoToolbox frame interpolation and super resolution, ArtCNN upscaling |
-| **VLC 3** | 🧪 | 🧪 | 🧪 | PushMPC's VLC module (Setup installs it when the download includes it) |
-| **Kodi** | 🆕 | 🆕 | | videos play in mpv as Kodi's external player |
-| **Stremio** 5.0.28+ | 🆕 | | | through its mpv config file setting |
-| **Plex** for Windows / HTPC | 🧪 | | | frame generation through capture mode; RTX / Intel video super resolution inside Plex once its mpv supports it |
-| **Jellyfin** Desktop, Jellyfin / Plex MPV Shim | 🆕 | 🆕 | | VapourSynth filter in their mpv |
-| **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 fallback | | | capture mode: PushFPS's window capture of the player |
+✅ tested on a real PC · 🆕 sets itself up · 🧪 preview (works, still being tested)
 
-**Capture mode** is the fallback for players PushMPC cannot plug into. Setup turns it on only when it finds such a
-player (Start menu > *PushMPC Capture (fallback)*). It adds about 50-60 ms of delay, opens a second window over the
-player, and cannot show DRM-protected video. On first use it installs PushFPS, after asking. Windows only: PushFPS's
-Linux and macOS builds have no window capture.
+| Player | Windows | Linux | macOS |
+|---|---|---|---|
+| **MPC-HC** | ✅ | | |
+| **MPC-BE**, **PotPlayer** | 🆕 | | |
+| **mpv**, **mpv.net**, **SMPlayer**, **MPC-QT** | 🆕 | 🆕 | 🧪 |
+| **Celluloid**, **Haruna** | | 🆕 | |
+| **IINA** | | | 🧪 |
+| **VLC 3** | 🧪 | 🧪 | 🧪 |
+| **Kodi** | 🆕 | 🆕 | |
+| **Stremio** (5.0.28 and newer) | 🆕 | | |
+| **Plex** (Plex for Windows, Plex HTPC) | 🧪 | | |
+| **Jellyfin** (Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim) | 🆕 | 🆕 | |
+| **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 capture mode | | |
 
-| GPU | Frame generation (Auto's order) | Upscaling |
+**Capture mode** is for players PushMPC can't plug into. Setup turns it on only if you have one of those players: you
+then find **PushMPC Capture** in the Start menu. Start your player, then PushMPC Capture, and the picture shows up
+smoother in a second window on top. It reacts a little later than the player (about 1/20 of a second), so if the sound
+seems early, set your player's audio delay to about +80 ms. Copy-protected streams (like Netflix) stay black. On Linux
+and macOS there is a [workaround with OBS](docs/user-guide.md#capture-on-linux-and-macos-workaround).
+
+| Graphics card | Smoother motion | Sharper picture |
 |---|---|---|
-| **GeForce RTX 50 / 40** | NVIDIA VFG up to 8x, DLSS-G, PushFlow, NVIDIA optical flow, FSR | RTX VSR (+ RTX Video HDR) |
-| **GeForce RTX 30** | NVIDIA VFG (RTX 30 port), DLSS-G (unlocked), PushFlow, FSR | RTX VSR (+ RTX Video HDR) |
-| **GeForce RTX 20** | DLSS-G, PushFlow, NVIDIA optical flow, FSR | RTX VSR (+ RTX Video HDR) |
-| **GeForce GTX 16 / 10** | PushFlow, NVIDIA optical flow (GTX 16), FSR | RTX VSR on GTX 16 (unlock), else NIS |
-| **Radeon RX 9000** | PushFlow, FSR 4, AMD FRC | FSR 4.1 |
-| **Radeon RX 6000 / 7000** | PushFlow, FSR 3.1, AMD FRC | FSR 4.1 INT8 (RX 6000: AMD FSR SDK 2.4, offered by Setup) |
-| **Intel Arc**, **Snapdragon X** | PushFlow, FSR 3.1 | NIS |
-| **Linux**: NVIDIA RTX | NVIDIA VFG (NVIDIA's Video Effects, after you accept NVIDIA's licence; RTX 20: the GPU engine) | RTX VSR |
-| **Linux**: any Vulkan GPU | PushMPC's GPU engine (motion-compensated, scene-cut guard); PushFlow where the pmml runtime is installed | NIS, ArtCNN |
-| **macOS**: Apple silicon | VideoToolbox frame interpolation (macOS 26), else the GPU engine on Metal | VideoToolbox super resolution, ArtCNN |
+| **GeForce RTX 50 / 40** | NVIDIA frame generation, up to 8x | RTX Video Super Resolution, RTX Video HDR |
+| **GeForce RTX 30 / 20** | NVIDIA frame generation (RTX 30), DLSS-G, PushFlow | RTX Video Super Resolution, RTX Video HDR |
+| **GeForce GTX 16 / 10** | PushFlow, FSR | RTX Video Super Resolution (GTX 16) or NIS |
+| **Radeon RX 6000 / 7000 / 9000** | PushFlow, FSR, AMD Fluid Motion | FSR 4.1 |
+| **Radeon RX 5000**, **Intel Arc**, **Snapdragon X** | PushFlow, FSR | FSR or NIS |
+| **Linux** | NVIDIA frame generation on RTX cards, PushFlow, PushMPC's own engine | RTX Video Super Resolution, NIS |
+| **Mac** (Apple silicon) | Apple's frame interpolation (macOS 26) | Apple's super resolution |
 
-If your GPU can run a feature, you get it: community unlocks and ports are on by default. Auto measures your GPU while
-you watch and steps down where a method does not fit. Details: [user guide](docs/user-guide.md#gpus).
+If your graphics card can run a feature, you get it. Auto picks the best mix for your card and your screen, and adjusts
+while you watch. More in the [user guide](docs/user-guide.md#gpus).
 
 ## 🚀 Install
 
 **Windows 10/11:** download **[PushMPC-Setup.exe](https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe)**
-and run it. It installs for your account only (no administrator rights) into `%LOCALAPPDATA%\PushMPC`, sets up every
-player it finds, and fetches the runtime for your GPU (Veyra's package, about 750 MB, resumable, checked by SHA-256)
-unless PushFPS or Veyra already has the same files. Then play a video: Auto is on. Settings in MPC-HC and MPC-BE:
-**Play > Filters > PushMPC Filter**.
+and run it. It installs for your account only (no administrator rights needed), sets up every player it finds, and
+downloads what your graphics card needs (about 750 MB the first time; if PushFPS is already installed it reuses its
+files). Then just play a video. In MPC-HC and MPC-BE the settings are under **Play > Filters > PushMPC Filter**.
 
-Setup is not code-signed yet: if SmartScreen says "Windows protected your PC", choose **More info > Run anyway**. The
-release manifest the updater reads is signed. Uninstall from *Windows Settings > Apps > Installed apps > PushMPC*: every
-player setting PushMPC changed is put back. *Modify* offers Repair and Update.
+Windows may say "Windows protected your PC" because Setup isn't signed yet: choose **More info > Run anyway**. To
+remove PushMPC, go to *Windows Settings > Apps > Installed apps > PushMPC*; your players' settings go back to how they
+were.
 
-**Linux** (x86_64, aarch64): download `pushmpc-linux-<arch>-<version>.tar.gz` from the
-[releases](https://github.com/CptPakundo/PushMPC/releases/latest), unpack it and run `sh setup.sh` as your user. It sets
-up every player it finds and offers, once each, the Flathub mpv (Ubuntu and Debian build mpv without VapourSynth) and
-NVIDIA's Video Effects. Remove it with `sh ~/.local/share/pushmpc/setup.sh uninstall`.
+**Linux:** download `pushmpc-linux-x86_64-<version>.tar.gz` (or `aarch64`) from the
+[releases](https://github.com/CptPakundo/PushMPC/releases/latest), unpack it and run `sh setup.sh`. It sets up every
+player it finds. It may ask you twice: whether to install mpv from Flathub (Ubuntu and Debian need it) and, on NVIDIA
+cards, whether to accept NVIDIA's licence for their video effects. To remove it: `sh ~/.local/share/pushmpc/setup.sh
+uninstall`.
 
-**macOS** (Apple silicon): a Homebrew formula (`brew install pushmpc`, then `pushmpc-setup install`); its tap is not
-published yet. See [mpv and mpv-based players](docs/players-mpv.md#macos).
+**Mac:** a Homebrew package is on the way. Until then, see [mpv, IINA and other players](docs/players-mpv.md#macos).
 
 ## 🤖 How Auto picks
 
@@ -172,6 +171,11 @@ to it by itself if a new one fails to load. Stable and Beta channels; turn it of
 No. PushMPC brings its own copy of PushFPS's engine and Veyra's runtime. If PushFPS or Veyra is installed with the same
 files, Setup reuses them instead of downloading.
 </details>
+
+## 🗺️ Roadmap (after the first release)
+
+- Capture mode on Linux and Mac without OBS, with the best picture PushMPC can make there.
+- Plex support built by PushMPC itself, instead of the community mpv library Setup uses today.
 
 ## 📚 More
 

@@ -32,7 +32,9 @@ on:
       - '.github/workflows/release-ux.yml'
 
 concurrency:
-  group: release-ux-${{ github.ref }}
+  # not "release-ux-<ref>": the workflows this one calls (release.yml, vlc-plugin.yml) take the caller's name in their
+  # own groups
+  group: release-ux-run-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -122,6 +124,40 @@ jobs:
             Write-Host '::warning title=KMPlayer::the Chocolatey package did not install; a stand-in executable is used for the capture-mode check'
           }
           exit 0   # a failed optional package (exit code of the last choco) is handled above
+      # Plex HTPC and Plex for Windows (winget): what their folder holds and what libmpv-2.dll imports (separate FFmpeg
+      # DLLs or not), then Setup swaps in the VapourSynth-enabled libmpv where the version is tested
+      - name: Plex HTPC and Plex for Windows (winget), their libmpv imports
+        timeout-minutes: 20
+        run: |
+          $log = "$env:RUNNER_TEMP\plex.txt"
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -Force -Scope CurrentUser | Out-Null
+            Install-Module Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery
+            Repair-WinGetPackageManager -AllUsers -Latest
+          }
+          foreach ($id in 'Plex.PlexHTPC', 'Plex.Plex') {
+            winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 3
+            "winget $id`: exit $LASTEXITCODE" | Tee-Object -Append $log
+          }
+          Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
+          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") {
+            if (-not (Test-Path $d)) { "$d`: not installed" | Tee-Object -Append $log; continue }
+            $exe = Get-ChildItem $d -Filter 'Plex*.exe' | Select-Object -First 1
+            "== $d ($($exe.Name) $($exe.VersionInfo.ProductVersion))" | Tee-Object -Append $log
+            Get-ChildItem $d -File | Sort-Object Name | ForEach-Object { "  {0,12:N0}  {1}" -f $_.Length, $_.Name } | Tee-Object -Append $log
+            $dll = Get-ChildItem $d -Filter '*mpv*.dll' | Select-Object -First 1
+            if ($dll -and $dumpbin) {
+              "  -- dumpbin /imports $($dll.Name):" | Tee-Object -Append $log
+              & $dumpbin.FullName /nologo /imports $dll.FullName | Select-String -Pattern '^\s+\S+\.dll\s*$' | ForEach-Object { "    $($_.Line.Trim())" } | Tee-Object -Append $log
+            }
+            if ($dll) { "  $($dll.Name) SHA-256 $((Get-FileHash $dll.FullName).Hash)" | Tee-Object -Append $log }
+          }
+          Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { "$($_.DisplayName)" -like 'Plex*' } | ForEach-Object { "Apps entry: $($_.DisplayName) $($_.DisplayVersion) [$(([int[]][char[]]"$($_.DisplayVersion)") -join ",")] ($($_.InstallLocation)) icon $($_.DisplayIcon)" } | Tee-Object -Append $log
+          pwsh -NoProfile -File scripts/pushmpc-plex.ps1 status -InstallDir "$env:RUNNER_TEMP\plex-probe" 2>&1 | Tee-Object -Append $log
+          @('## Plex on the runner', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          exit 0
       - name: Snapshot before Setup
         run: |
           $s = "$env:RUNNER_TEMP\snap"; New-Item -ItemType Directory $s -Force | Out-Null
@@ -129,16 +165,15 @@ jobs:
           (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\before-env.txt"
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\before-vlc.txt"
           "PushMPC folder before: $(Test-Path "$env:LOCALAPPDATA\PushMPC"); Start menu PushMPC: $(Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC")" | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
+          Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\before-plex.txt"
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\before-plexconf.txt"
           exit 0   # reg export of a key the runner does not have returns 1
-      - name: PushMPC-Setup.exe /S (simulated RTX 4090; a pmml runtime with the TensorRT-RTX EP)
-        timeout-minutes: 25
+      - name: PushMPC-Setup.exe /S (simulated RTX 4090; the TensorRT-RTX pmml runtime fetched by its pins)
+        timeout-minutes: 30
         env:
           PUSHMPC_TEST_GPU: '10DE:2684:NVIDIA GeForce RTX 4090'
         run: |
           $log = "$env:RUNNER_TEMP\ux.txt"
-          $rt = "$env:RUNNER_TEMP\pmml"; New-Item -ItemType Directory "$rt\graphs", "$rt\eps\trt-rtx" -Force | Out-Null
-          Set-Content "$rt\graphs\synth-yuv.onnx" 'stub'; Set-Content "$rt\eps\trt-rtx\ep.json" '{"name": "trt-rtx"}'
-          $env:PMML_RUNTIME = $rt
           # Setup's Windows PowerShell 5.1 must not inherit pwsh's module path (as from Explorer); this step keeps its own
           $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
           $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"
@@ -147,11 +182,20 @@ jobs:
           "Setup exit $($p.ExitCode)" | Tee-Object -Append $log
           $sl = Get-ChildItem "$env:LOCALAPPDATA\PushMPC\logs" -Filter 'setup*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
           $text = Get-Content $sl.FullName -Raw
-          ($text -split "`r?`n" | Select-String -Pattern 'GPU:|Engine for|PushFlow''s ONNX|pmml.txt|AMD FSR SDK|found|Capture mode|Players without|VLC|KMPlayer|MPC-HC|Auto''s starting' | ForEach-Object Line) | Tee-Object -Append $log
+          ($text -split "`r?`n" | Select-String -Pattern 'GPU:|Engine for|PushFlow|pmml|AMD FSR SDK|found|Capture mode|Players without|VLC|KMPlayer|MPC-HC|Auto''s starting|Plex|libmpv|self-test|logon check' | ForEach-Object Line) | Tee-Object -Append $log
+          $pm = "$env:LOCALAPPDATA\PushMPC\pmml"
+          $fetched = Get-Content "$pm\fetched.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+          $epj = Get-Content "$pm\eps\trt-rtx\ep.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+          "pmml runtime: onnxruntime.dll $(Test-Path "$pm\ort\core\onnxruntime.dll"); trt-rtx library $($epj.library) (present $(if ($epj) { Test-Path (Join-Path "$pm\eps\trt-rtx" $epj.library) }))" | Tee-Object -Append $log
+          # Plex: swapped where the version is tested; mpv.conf with the CA bundle and PushMPC's block
+          $plexState = Get-Content "$env:LOCALAPPDATA\PushMPC\plex\plex.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+          foreach ($r in @($plexState)) { if ($r) { "Plex swapped: $($r.Name) $($r.Version): libmpv now $((Get-FileHash $r.Dll).Hash) (ours $($r.OursSha)); backup $(Test-Path $r.Backup)" | Tee-Object -Append $log } }
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { if (Test-Path $c) { "$c`:"; Get-Content $c | ForEach-Object { "    $_" } } }) | Tee-Object -Append $log
+          "Plex logon check task: $([bool](Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue))" | Tee-Object -Append $log
           $plan = Get-Content "$env:LOCALAPPDATA\PushMPC\auto-plan.json" -Raw | ConvertFrom-Json
           $pmml = [string](Get-Content "$env:LOCALAPPDATA\PushMPC\runtime\runtime\experimental\pushflow\pmml.txt" -Raw -ErrorAction SilentlyContinue)
           $cap = Get-Content "$env:LOCALAPPDATA\PushMPC\capture\capture.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-          $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk"
+          $lnk = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture.lnk"
           $mpc = [bool](Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\Filters\x64' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).CLSID -eq '{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}' })
           "auto-plan.json: family $($plan.family); directshow: $($plan.directshow)" | Tee-Object -Append $log
           "pmml.txt: $(($pmml -split "`r?`n" | Where-Object { $_ -match '^(runtime|backend)=' }) -join ' | ')" | Tee-Object -Append $log
@@ -161,7 +205,17 @@ jobs:
           if ($text -notmatch 'Engine for MPC-HC / MPC-BE / PotPlayer: pushcore: NVIDIA VFG') { $bad += 'no engine choice in the Setup log' }
           if ($plan.family -ne 'RTX 40') { $bad += "auto-plan.json family $($plan.family)" }
           if (-not ($pmml -match '(?m)^backend=ort:core:trt-rtx:0')) { $bad += 'pmml.txt not written with the TensorRT-RTX EP' }
-          if (-not $cap -or -not (@($cap.players) -match 'KMPlayer') -or -not (@($cap.players) -match '^VLC')) { $bad += 'capture mode not on for KMPlayer and VLC' }
+          if (-not ($pmml -match [regex]::Escape("runtime=$pm"))) { $bad += 'pmml.txt does not name the installed pmml runtime' }
+          if (-not (Test-Path "$pm\ort\core\onnxruntime.dll") -or -not $epj -or -not (Test-Path (Join-Path "$pm\eps\trt-rtx" $epj.library))) { $bad += 'the pmml runtime (ONNX Runtime + TensorRT-RTX EP) is not installed' }
+          foreach ($r in @($plexState)) { if ($r -and (Get-FileHash $r.Dll).Hash -ne $r.OursSha) { $bad += "Plex $($r.Name): the swapped libmpv is not in place" } }
+          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { if ((Test-Path "$d\libmpv-2.dll") -and -not @($plexState | Where-Object { $_ -and $_.Dir -eq $d }).Count) { $bad += "${d}: Plex was not given the VapourSynth-enabled libmpv (version not in the tested list, or the swap failed: see the log)" } }
+          foreach ($r in @($plexState)) { if ($r) { $c = if ($r.Name -eq 'Plex HTPC') { "$env:LOCALAPPDATA\Plex HTPC\mpv.conf" } else { "$env:LOCALAPPDATA\Plex\mpv.conf" }; if (-not ((Get-Content $c -Raw -ErrorAction SilentlyContinue) -match 'tls-ca-file=.*cacert\.pem')) { $bad += "Plex $($r.Name): mpv.conf has no PushMPC block with tls-ca-file" } } }
+          # VLC: PushMPC's module (the release's vlc component) through its installer, so not in capture mode
+          $vlcrc = Get-Content "$env:APPDATA\vlc\vlcrc" -Raw -ErrorAction SilentlyContinue
+          "VLC: plugin $(Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll"); vlcrc video-filter $([regex]::Match("$vlcrc", '(?m)^video-filter=.*$').Value); VLC_PLUGIN_PATH $([Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User'))" | Tee-Object -Append $log
+          if (-not $cap -or -not (@($cap.players) -match 'KMPlayer')) { $bad += 'capture mode not on for KMPlayer' }
+          if (@($cap.players) -match '^VLC') { $bad += 'VLC went to capture mode: its PushMPC module was not installed' }
+          if (-not (Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll") -or "$vlcrc" -notmatch 'pushmpc') { $bad += 'the VLC module is not set up (plugin and vlcrc)' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
@@ -188,9 +242,14 @@ jobs:
           if ((@(Get-Content "$s\before-vlc.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-vlc.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += 'VLC settings differ' }
           foreach ($k in 'HKCU:\Software\PushMPC', 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC') { if (Test-Path $k) { $bad += "left: $k" } }
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
+          Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\after-plex.txt"
+          if ((@(Get-Content "$s\before-plex.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-plex.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += "Plex's libmpv not put back" }
+          @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\after-plexconf.txt"
+          if ((@(Get-Content "$s\before-plexconf.txt") -join "`n") -ne (@(Get-Content "$s\after-plexconf.txt") -join "`n")) { $bad += "Plex's mpv.conf not as before" }
+          if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left: the Plex logon check task' }
           $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)
           if ($left) { $bad += "left in the install folder: $($left -join ', ')" }
-          "after uninstall: $(if ($bad) { $bad -join ' / ' } else { 'nothing left; MPC-HC, VLC and the environment as before' })" | Tee-Object -Append $log
+          "after uninstall: $(if ($bad) { $bad -join ' / ' } else { 'nothing left; MPC-HC, VLC, Plex and the environment as before' })" | Tee-Object -Append $log
           @('## win-setup', '', '```') + (Get-Content $log) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           Copy-Item "$env:LOCALAPPDATA\PushMPC\logs" "$env:RUNNER_TEMP\pushmpc-logs" -Recurse -ErrorAction SilentlyContinue
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
@@ -199,18 +258,30 @@ jobs:
         if: always()
         with: { name: win-setup-logs, path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs\n${{ runner.temp }}/snap" }
 
+  # with the release build (dispatch) its native hook goes into the tarball: Arch's mpv then takes the hook route; a
+  # push run tests the VapourSynth route
   linux-setup:
+    needs: [release]
+    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     container: archlinux:latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        with:
+          name: mpvnative-hook-ubuntu-24.04
+          path: /tmp/mpvnative-art
+          run-id: '${{ inputs.release_run || github.run_id }}'
+          github-token: '${{ github.token }}'
       - uses: actions/cache@v4
         with: { path: /var/cache/pacman/pkg, key: arch-pkg-ux-v1 }
       - name: Players and build tools from pacman (mpv requires vapoursynth on Arch)
         timeout-minutes: 15
         run: |
-          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python git diffutils pciutils >/dev/null
+          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils >/dev/null
           pacman -Q mpv vapoursynth vlc kodi celluloid smplayer | tee /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
       - name: The plugin from this commit and the release tarball
@@ -218,12 +289,21 @@ jobs:
           set -eu
           mkdir -p vsplugin/third_party/vapoursynth
           cp /usr/include/vapoursynth/VapourSynth4.h /usr/include/vapoursynth/VSHelper4.h vsplugin/third_party/vapoursynth/
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          # the ml backend (pmml): ONNX Runtime's headers by their pin; pmml's graphs for the tarball
+          python -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-x64 --out /tmp/pmml-rt --cache /tmp/pmml-dl --flavors core --headers >/dev/null
+          # Arch's Python is newer than the pinned onnx wheels: the current ones (the graphs are plain opset-16 ONNX)
+          python -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx numpy
+          /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs >/dev/null
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include >/dev/null
           cmake --build build --target pushmpc_vs --parallel >/dev/null
           git config --global --add safe.directory "$PWD"
-          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
-          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/setup.sh$'
-      - name: setup.sh into a fresh HOME (detection, engine choice, players), mpv through the installed block, uninstall
+          [ -f /tmp/mpvnative-art/hook/pushmpc_hook.so ] && export PUSHMPC_MPVNATIVE_DIR=/tmp/mpvnative-art/hook && echo "native hook: $(ls /tmp/mpvnative-art/hook | tr '\n' ' ')"
+          PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
+          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -E '/setup.sh$|/pmml/' | head
+          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
+      - name: setup.sh into a fresh HOME (detection, engine choice, players, the pmml runtime), mpv through the installed block, uninstall
+        env:
+          PUSHMPC_TEST_GPU: '8086:56a0:Intel(R) Arc(TM) A770 Graphics'
         run: |
           set -eu
           export HOME=/tmp/home-ux; mkdir -p $HOME/.config/mpv $HOME/.kodi/userdata; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
@@ -231,19 +311,37 @@ jobs:
           snap > /tmp/before.txt
           tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-0.6.0/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
-          for want in 'Graphics card:' 'Engine for mpv and mpv-based players: portable' 'Players found: mpv' 'vlc' 'kodi' 'Auto starts with:' 'Capture mode: not available on Linux'; do
+          for want in 'Graphics card: Intel' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: not available on Linux'; do
             grep -q "$want" /tmp/setup.txt || { echo "::error::setup.sh output lacks '$want'"; exit 1; }
           done
           cat $HOME/.local/share/pushmpc/auto-plan.txt
-          grep -q '^mpv=portable' $HOME/.local/share/pushmpc/auto-plan.txt
-          grep -q 'PushMPC managed' $HOME/.config/mpv/mpv.conf || { echo '::error::mpv.conf has no PushMPC block'; exit 1; }
+          grep -q '^mpv=ml' $HOME/.local/share/pushmpc/auto-plan.txt
+          p=$HOME/.local/share/pushmpc/pmml; ls $p $p/ort/core $p/eps/openvino | head -40; cat $p/eps/openvino/ep.json
+          for f in ort/core/libonnxruntime.so graphs/synth-yuv.onnx models/pushflow-fast.onnx models/pushflow-quality.onnx eps/openvino/ep.json; do [ -f "$p/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
+          # one route in mpv.conf, never both: the native hook's block when it activated, else the VapourSynth block
+          native=0; grep -q -x 'native' $HOME/.local/share/pushmpc/setup-state 2>/dev/null && native=1
+          vsb=0; grep -q 'PushMPC managed' $HOME/.config/mpv/mpv.conf && vsb=1
+          nb=0; grep -q 'PushMPC native' $HOME/.config/mpv/mpv.conf && nb=1
+          echo "route: native hook $native (block $nb), VapourSynth block $vsb"; echo "::notice title=Arch mpv route::native hook $native, VapourSynth block $vsb"
+          [ "$((vsb + nb))" = 1 ] || { echo '::error::mpv.conf must hold exactly one PushMPC route'; exit 1; }
+          [ "$native" = "$nb" ] || { echo '::error::setup.sh and mpv.conf disagree on the route'; exit 1; }
           grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
-          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          # the ml backend through the installed runtime (no GPU here: what pmml does with OpenVINO on the CPU is recorded)
+          mkdir -p $HOME/.config/pushmpc; printf '[PushMPC]\nSmoother=2\nBackend=ml\n' > $HOME/.config/pushmpc/settings.ini
+          export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ml
+          timeout 120 mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=2 > /tmp/mpv-ml.txt 2>&1 || true
+          echo "--- ml backend:"; grep -h 'backend: \|ml: \|pmml' /tmp/vslog-ml/*.log 2>/dev/null | head -12 || true
+          echo "::notice title=ml backend on the runner::$(grep -h 'backend: \|ml: ' /tmp/vslog-ml/*.log 2>/dev/null | head -3 | tr '\n' ' ')"
+          printf '[PushMPC]\nSmoother=2\nBackend=portable\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ux
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv.txt 2>&1 || true
           grep -iE "config file|vapoursynth|pushmpc|user filter|error" /tmp/mpv.txt | head -30
-          grep -h 'backend: ' /tmp/vslog-ux/*.log 2>/dev/null | head -2 || true
-          grep -q 'portable: output YUV.*(x2)' /tmp/vslog-ux/*.log || { echo '::error::mpv did not run the plugin'; exit 1; }
+          if [ "$native" = 1 ]; then
+            grep -qi 'pushmpc' /tmp/mpv.txt || { echo '::error::mpv did not load the native hook'; exit 1; }
+          else
+            grep -h 'backend: ' /tmp/vslog-ux/*.log 2>/dev/null | head -2 || true
+            grep -q 'portable: output YUV.*(x2)' /tmp/vslog-ux/*.log || { echo '::error::mpv did not run the plugin'; exit 1; }
+          fi
           rm -r $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/setup.sh uninstall | tee /tmp/uninstall.txt
           snap > /tmp/after.txt
@@ -252,4 +350,4 @@ jobs:
           { echo '## linux-setup'; echo; echo '```'; cat /tmp/versions.txt; cat /tmp/setup.txt | grep -E 'Graphics|Vulkan|Engine|Players|No PushMPC|Capture|VLC|Kodi|Auto starts'; echo 'uninstall: HOME restored byte for byte'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: linux-setup-logs, path: "/tmp/*.txt\n/tmp/vslog-ux" }
+        with: { name: linux-setup-logs, path: "/tmp/*.txt\n/tmp/vslog-ux\n/tmp/vslog-ml" }

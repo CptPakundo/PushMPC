@@ -8,6 +8,8 @@ on:
   push:
     branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4', 'track/vlc-hwfmt']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
+  # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
+  workflow_call:
   workflow_dispatch:
     inputs:
       macos:
