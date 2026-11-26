@@ -4,6 +4,7 @@
 #   of its exports, checked with dumpbin)
 cmake_minimum_required(VERSION 3.20)
 project(pushmpc_libmpv_forward C ASM_MASM)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 
 file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/exports.txt lines REGEX "^mpv_")
 list(LENGTH lines n)

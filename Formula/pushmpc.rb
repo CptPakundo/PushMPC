@@ -137,10 +137,9 @@ class Pushmpc < Formula
     # capture mode (macOS): pushmpc-capture inside an app bundle, because macOS gives the Screen Recording permission to
     # an app ("PushMPC Capture" in System Settings > Privacy & Security). Its own build folder with the GPU engine.
     if OS.mac?
-      resource("vulkan-headers").stage(buildpath/"deps/vulkan-headers")
-      resource("volk").stage(buildpath/"deps/volk")
+      # the same pinned Vulkan-Headers and volk as the plugin's GPU engine (staged above)
       system "cmake", "-S", "vsplugin", "-B", "build-capture", "-DPUSHMPC_APPLE=ON", "-DPMML_ORT_INCLUDE=#{ort}",
-             "-DPMVS_VULKAN_HEADERS_DIR=#{buildpath}/deps/vulkan-headers", "-DPMVS_VOLK_DIR=#{buildpath}/deps/volk",
+             "-DPMVS_VULKAN_HEADERS_DIR=#{gpu}/vulkan-headers", "-DPMVS_VOLK_DIR=#{gpu}/volk",
              "-DPMVS_GLSLANG=#{Formula["glslang"].opt_bin}/glslangValidator", *std_cmake_args
       system "cmake", "--build", "build-capture", "--target", "pushmpc_capture", "capture_test", "--parallel"
       system "build-capture/capture_test"
