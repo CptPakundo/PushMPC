@@ -42,11 +42,19 @@ public:
         if (!Opt(o, "smoother").empty()) s.smoother = ParseSmoother(Opt(o, "smoother"), s.smoother);
         if (!Opt(o, "enable").empty()) s.enable = ParseBool(Opt(o, "enable"), s.enable);
         Config c; c.width = m_w; c.height = m_h; c.bits = m_bits;
+        // the zero-copy backend's settings (vulkan_backend.cpp): 8 px blocks on the full-size picture unless "fast"; motion Auto =
+        // hybrid where the device has NVIDIA's optical flow
+        const std::string q = Opt(o, "portable_quality", ReadSetting("PortableQuality"));
+        c.quality = q == "fast" || q == "0" ? 1 : 2;
+        const std::string mo = Opt(o, "motion", ReadSetting("PortableMotion"));
+        c.nvofHybrid = mo.empty() || mo == "auto" || mo == "hybrid";
+        c.blockMatcherOnly = mo != "nvof" && !c.nvofHybrid;
         DeviceRequest req; req.device = Opt(o, "vulkan_device", "auto"); req.allowCpu = Opt(o, "vulkan_allow_cpu") == "1";
         if (!m_eng.Configure(c, req, why)) { why = "Vulkan engine: " + why; return false; }
         const double srcFps = st.fps_num > 0 && st.fps_den > 0 ? double(st.fps_num) / st.fps_den : 0;
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
-        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, 1.0, 1.0, true)
+        const GpuCalibration cal = s.enable && s.smoother == 0 ? CalibrateGpu(m_eng) : GpuCalibration{};
+        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true)
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
         const size_t bps = m_bits > 8 ? 2 : 1;
