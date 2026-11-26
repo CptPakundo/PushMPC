@@ -1515,8 +1515,12 @@ struct PushCore {
     void initRepair() {
         spanVfgOk = false;
         if (!haveSettings || settings.heldFrames == 0 || !fg || multiplier < 2 || !heldEligible) return;
-        const bool useVfg = tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE;   // tryFg: what this graph runs (runFg is set after the build)
-        const bool useFlow = !useVfg && veyra::pushflow::runtimeInstalled(runtimeDir);
+        bool useVfg = tryFg == PUSHCORE_FG_VFG && ctx.adapter().vendorId == 0x10DE;   // tryFg: what this graph runs (runFg is set after the build)
+        // PUSHMPC_SPAN_STREAM=fsr | frc (tests: a midpoint stream on any GPU) or flow (PushFlow where VFG would run)
+        const char* force = std::getenv("PUSHMPC_SPAN_STREAM");
+        const std::string forced = force ? force : "";
+        if (forced == "fsr" || forced == "frc" || forced == "flow") useVfg = false;
+        const bool useFlow = !useVfg && forced != "fsr" && forced != "frc" && veyra::pushflow::runtimeInstalled(runtimeDir);
         if (!useVfg && !useFlow && !midStreamPossible()) { veyra::log::info("pushcore", "source repair off: the graph is not on VFG, PushFlow's runtime is not installed and no midpoint stream (AMD FRC, FSR 3.1) is available (held frames re-timed whole)"); return; }
         if (repairEnvOff()) { veyra::log::info("pushcore", "source repair off (PUSHMPC_REGION_REPAIR=0)"); return; }
         if (!repairPass.ready() && !repairPass.init(d11.Get())) { veyra::log::warn("pushcore", "source repair unavailable (held frames re-timed whole, graph at k): " + repairPass.why()); return; }
@@ -1527,7 +1531,7 @@ struct PushCore {
         spanIsFlow = useFlow;
         spanMid = 0;
         if (!useVfg && !useFlow) {
-            if (ctx.adapter().vendorId == 0x1002 && veyra::gfx::AmfFrcBackend::runtimeInstalled() && spanFrc.initialize(ctx.device(), ring.queue(), w, h, rgbFmt, false)) spanMid = 1;
+            if ((ctx.adapter().vendorId == 0x1002 || forced == "frc") && forced != "fsr" && veyra::gfx::AmfFrcBackend::runtimeInstalled() && spanFrc.initialize(ctx.device(), ring.queue(), w, h, rgbFmt, false)) spanMid = 1;
 #ifdef VEYRA_FSR_PAIR_API
             if (!spanMid && spanFsr.initializeIndependent(ctx.device(), w, h, rgbFmt, false)) {
                 auto zeroTex = [&](DXGI_FORMAT f, ComPtr<ID3D12Resource>& r) {   // committed resources start zeroed

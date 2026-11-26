@@ -484,12 +484,33 @@ static void TestRegionRules()
     }
 }
 
+// round 3: the midpoint streams' phases (AMD FRC / FSR 3.1), the cascade's future ends, the phase map
+static void TestRound3()
+{
+    using namespace pushmpc::held;
+    const MidpointPlan h = PlanMidpoints(0.5f), a = PlanMidpoints(1.f / 3.f), b = PlanMidpoints(2.f / 3.f), q = PlanMidpoints(0.25f), r = PlanMidpoints(0.75f);
+    Check(h.calls == 1 && h.t == 0.5f, "midpoints: twos (t 0.5) in one call, exact");
+    Check(a.calls == 2 && a.t == 0.25f && a.side[1] == 0 && b.calls == 2 && b.t == 0.75f && b.side[1] == 1, "midpoints: threes at 0.25 / 0.75 (mid(d0, M), mid(M, d1)), error 1/12 of the span");
+    Check(q.t == 0.25f && r.t == 0.75f && q.calls == 2 && r.calls == 2, "midpoints: fours exact (0.25, 0.5, 0.75)");
+    Check(std::fabs(PlanMidpoints(1.f / 3.f, 3).t - 0.375f) < 1e-6f, "midpoints: depth 3 gives 0.375 for a third");
+    RepairGroup g1; g1.d0 = 9; g1.d1 = 12; g1.pairFrom = 9; g1.t = 1.f / 3.f; g1.cells = 100; g1.mask.assign(4, 0); g1.mask[0] = 255;
+    RepairGroup g2 = g1; g2.d0 = 10; g2.pairFrom = 10; g2.d1 = 11; g2.t = 0.5f; g2.mask.assign(4, 0); g2.mask[1] = 255;
+    RepairGroup g3 = g1; g3.pairFrom = 10; g3.d1 = 11; g3.d0 = 9; g3.t = 0.5f; g3.mask.assign(4, 0); g3.mask[2] = 255; g3.cells = 300;
+    const auto ends = CascadeEnds({g1, g2, g3}, 10);
+    Check(ends.size() == 2 && ends[0] == 11 && ends[1] == 12, "cascade: the future ends to repair first, in order, once each");
+    std::vector<float> t, al;
+    g2.t = 0.25f;
+    Check(PairPhaseMap({g1, g2, g3}, 10, 11, t, al) && std::fabs(t[1] - 0.25f) < 1e-6f && std::fabs(t[2] - 0.5f) < 1e-6f && al[1] == 1.f && al[0] == 0.f
+          && std::fabs(t[3] - (0.25f * 100 + 0.5f * 300) / 400.f) < 1e-5f, "phase map: each part's t in its mask, the weighted mean elsewhere, alpha the masks");
+}
+
 int main()
 {
     TestRules();
     TestGpu();
     TestLayered();
     TestRegionRules();
+    TestRound3();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }
