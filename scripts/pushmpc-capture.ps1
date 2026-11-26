@@ -60,6 +60,7 @@ $StateFile = Join-Path $CaptureDir 'capture.json'
 $DataDir = Join-Path $CaptureDir 'data'
 $TempDir = Join-Path $CaptureDir 'temp'
 $Shortcut = Join-Path $StartMenu 'PushMPC Capture.lnk'
+$LegacyShortcut = Join-Path $StartMenu 'PushMPC Capture (fallback).lnk'   # the name builds before 0.6.0-ci.20 used (U-1)
 
 function M([string]$t) { [Console]::Out.WriteLine("@@$t"); [Console]::Out.Flush() }
 function Info([string]$t) { if ($Machine) { M "info|$t" } else { Write-Host "    $t" } }
@@ -199,6 +200,7 @@ switch ($Action) {
             $sh.Description = 'PushMPC capture mode (fallback for players without a PushMPC integration; about 50-60 ms delay, no DRM video)'
             $ico = Join-Path $InstallDir 'PushMpcSetup.exe'; if (Test-Path -LiteralPath $ico) { $sh.IconLocation = "$ico,0" }
             $sh.Save()
+            if (Test-Path -LiteralPath $LegacyShortcut) { Remove-Item -LiteralPath $LegacyShortcut -Force }
         }
         Write-CaptureState $s
         Info "Capture mode (fallback) is on for: $(if ($Players.Count) { $Players -join ', ' } else { 'any player' }). Start menu: PushMPC Capture"
@@ -207,6 +209,7 @@ switch ($Action) {
         if ($DryRun) { Info "[dry run] would remove $Shortcut and $CaptureDir (capture mode's PushFPS with it)"; break }
         if (Get-OwnProcesses) { Warn "Capture mode's PushFPS is running: close it, then remove capture mode again ($CaptureDir is kept)" }
         if (Test-Path -LiteralPath $Shortcut) { Remove-Item -LiteralPath $Shortcut -Force; Info 'Start menu entry PushMPC Capture removed' }
+        if (Test-Path -LiteralPath $LegacyShortcut) { Remove-Item -LiteralPath $LegacyShortcut -Force; Info 'Start menu entry PushMPC Capture (fallback) of an older build removed' }
         if ((Test-Path -LiteralPath $StartMenu) -and -not @(Get-ChildItem -LiteralPath $StartMenu -Force).Count) { Remove-Item -LiteralPath $StartMenu -Force }
         # capture mode's own folder only: PushFPS's -Uninstall is not used (it also deletes PushFPS's Start menu and
         # desktop shortcuts, which belong to a PushFPS the user may have installed)

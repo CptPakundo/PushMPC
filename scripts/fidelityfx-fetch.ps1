@@ -33,7 +33,7 @@ $Files = @(
 function Die([string]$m) { Write-Host "fidelityfx: $m" -ForegroundColor Red; if ($Record) { Save-Result $false $m }; exit 1 }
 function Save-Result([bool]$pass, [string]$why) {
     $k = 'HKCU:\Software\PushMPC\SelfTest\Fsr4Int8'
-    New-Item -Force $k | Out-Null
+    if (-not (Test-Path -LiteralPath $k)) { New-Item -Force $k | Out-Null }   # never -Force on an existing key: it would empty it
     Set-ItemProperty $k Key "fidelityfx-$Tag"; Set-ItemProperty $k Result $(if ($pass) { 'pass' } else { 'fail' })
     Set-ItemProperty $k Reason $why; Set-ItemProperty $k When ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
 }

@@ -171,6 +171,25 @@ jobs:
           function PlexSnap([string]$f) { @(foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") { Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }) + @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" }) | Set-Content $f }
           PlexSnap "$s\before-plex.txt"
           exit 0   # reg export of a key the runner does not have returns 1
+      # R-REG1: an existing HKCU\Software\PushMPC (the user's settings, Learned costs, the updater's state, MPC-VR's
+      # backup) must come through a fresh install and a repair value for value. Also leftovers of older builds that
+      # Setup must clean up (U-1): the old capture-mode shortcut name and an old MPC-VR backup file.
+      - name: An earlier PushMPC's settings and leftovers
+        run: |
+          $k = 'HKCU:\Software\PushMPC'
+          if (-not (Test-Path $k)) { New-Item $k | Out-Null }
+          Set-ItemProperty $k Smoother '3x'; Set-ItemProperty $k Osd 'Always'; Set-ItemProperty $k SubtitleHold 'Off'
+          New-ItemProperty $k -Name FrameLog -PropertyType DWord -Value 1 | Out-Null
+          foreach ($sub in 'Learned', 'Update', 'MpcVrBackup', 'Unlocks') { New-Item "$k\$sub" | Out-Null }
+          Set-ItemProperty "$k\Learned" Gpu 'Test GPU (CI)'; Set-ItemProperty "$k\Learned" FgScale1 '1.234'
+          Set-ItemProperty "$k\Update" CiMarker 'kept'
+          foreach ($n in 'HdrLocalToneMapping', 'HdrLocalToneMappingType', 'HdrDisplayNits') { Set-ItemProperty "$k\MpcVrBackup" $n 'absent' }
+          New-ItemProperty "$k\Unlocks" -Name NvofWarp -PropertyType DWord -Value 1 | Out-Null
+          reg export 'HKCU\Software\PushMPC' "$env:RUNNER_TEMP\snap\pushmpc-seeded.reg" /y | Out-Null
+          $sm = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC"; New-Item -ItemType Directory $sm -Force | Out-Null
+          Set-Content "$sm\PushMPC Capture (fallback).lnk" 'an older build''s shortcut'
+          $bk = "$env:LOCALAPPDATA\PushMPC\backup"; New-Item -ItemType Directory $bk -Force | Out-Null
+          Set-Content "$bk\MpcVideoRenderer64.0.11.2.2638.ax" 'an older build''s MPC-VR backup'
       - name: PushMPC-Setup.exe /S (simulated RTX 4090; the TensorRT-RTX pmml runtime fetched by its pins)
         timeout-minutes: 30
         env:
@@ -237,7 +256,35 @@ jobs:
           $mpvb = Test-Path "$env:LOCALAPPDATA\PushMPC\mpv-native\mpv.exe"; $mpvl = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC mpv.lnk"
           "PushMPC's mpv: mpv.exe $mpvb, Start menu entry $mpvl (zip $env:PUSHMPC_MPVBUILD_ZIP)" | Tee-Object -Append $log
           if ($env:PUSHMPC_MPVBUILD_ZIP -and -not ($mpvb -and $mpvl)) { $bad += "PushMPC's mpv was not installed" }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk") { $bad += 'the old capture shortcut name is still there' }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+          exit 0
+      - name: The earlier settings survive the install and a repair (R-REG1)
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"
+          # every value of the seeded key, by key and name: Setup may add values (MlRuntime), never drop or change one
+          function Values([string]$file) {
+            $o = @{}; $cur = ''
+            foreach ($l in Get-Content $file) { if ($l -match '^\[(.+)\]$') { $cur = $Matches[1] } elseif ($l -match '^"([^"]+)"=(.*)$') { $o["$cur|$($Matches[1])"] = $Matches[2] } }
+            $o
+          }
+          function Check([string]$when) {
+            $f = "$env:RUNNER_TEMP\snap\pushmpc-$when.reg"
+            reg export 'HKCU\Software\PushMPC' $f /y | Out-Null
+            $s = Values "$env:RUNNER_TEMP\snap\pushmpc-seeded.reg"; $now = if (Test-Path $f) { Values $f } else { @{} }
+            $lost = @($s.Keys | Where-Object { $now[$_] -ne $s[$_] } | Sort-Object)
+            "after the $when`: $($s.Count) seeded values, $($lost.Count) lost or changed$(if ($lost) { ': ' + ($lost -join ', ') })" | Tee-Object -Append $log | Out-Host
+            $lost.Count
+          }
+          $bad = Check 'install'
+          $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
+          $p = Start-Process "$env:LOCALAPPDATA\PushMPC\PushMpcSetup.exe" -ArgumentList '--repair', '--quiet' -PassThru
+          $env:PSModulePath = $keep
+          if (-not $p.WaitForExit(900000)) { $p.Kill(); throw 'repair timed out' }
+          "repair exit $($p.ExitCode)" | Tee-Object -Append $log
+          $bad += Check 'repair'
+          if ($p.ExitCode -ne 0) { Write-Host "::error::repair exit $($p.ExitCode)"; exit 1 }
+          if ($bad) { Write-Host "::error::Setup dropped or changed $bad of the earlier PushMPC settings (R-REG1)"; exit 1 }
           exit 0
       - name: A Plex update simulated (Plex's own avfilter-8.dll back), then the logon check sets the proxy up again
         timeout-minutes: 10

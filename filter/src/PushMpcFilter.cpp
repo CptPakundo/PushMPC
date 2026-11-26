@@ -119,7 +119,8 @@ static std::wstring LocalAppData()
 
 // ------------------------------------------------------------------------------------------------ log
 // Old logs go (F-LOG: nothing was ever deleted; one folder held 1702 files / 205 MB): the filter's own files only
-// (filter-*.log, filter-frames-*.csv, filter-gpu-*.csv, filter-exit-*.log, diagnostics-*.txt; Setup's and the updater's
+// (filter-*.log, filter-frames-*.csv, filter-gpu-*.csv, filter-exit-*.log, diagnostics-*.txt, and the frames-*.csv /
+// gpu-*.csv of builds before 0.6; Setup's and the updater's
 // logs stay), newest first, kept while within kKeepSessions playback sessions and kKeepBytes. A session is the files
 // that share one stamp (date-time-process id; filter-exit-<pid>.log goes with its process). At most 400 deletions per
 // start, so a huge backlog shrinks over a few starts without delaying one.
@@ -129,7 +130,7 @@ static void PruneLogs(const std::wstring& dir)
     constexpr uint64_t kKeepBytes = 50ull << 20;
     struct F { std::wstring name, key; uint64_t bytes; FILETIME t; };
     std::vector<F> files;
-    for (const wchar_t* pat : { L"filter-*.log", L"filter-frames-*.csv", L"filter-gpu-*.csv", L"diagnostics-*.txt" }) {
+    for (const wchar_t* pat : { L"filter-*.log", L"filter-frames-*.csv", L"filter-gpu-*.csv", L"diagnostics-*.txt", L"frames-*.csv", L"gpu-*.csv" }) {
         WIN32_FIND_DATAW fd{};
         HANDLE h = FindFirstFileW((dir + L"\\" + pat).c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
