@@ -115,7 +115,8 @@ int wmain(int argc, wchar_t** argv) {
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
     int sr = -1, fgOpt = -1, mult = -1;
-    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|none): the filter's route
+    uint32_t wantVendor = 0x10DE;
+    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|vpl|none, --srmethod rtx|fsr|nis|ivsr, --vendor nvidia|intel|amd): the filter's route
     bool useSettings = false;
     PushCoreSettings ps{};
     ps.structSize = sizeof(ps); ps.source = PUSHCORE_SETTINGS_PUSHMPC; ps.sr = 1; ps.srQuality = 4; ps.srTarget = PUSHCORE_SR_TARGET_4K;
@@ -126,13 +127,14 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--backend") {
             useSettings = true;
             ps.fgBackend = v == L"dlssg" ? PUSHCORE_FG_DLSSG : v == L"pushflow" ? PUSHCORE_FG_PUSHFLOW : v == L"fsr" ? PUSHCORE_FG_FSR
-                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : PUSHCORE_FG_VFG;
+                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : v == L"vpl" ? PUSHCORE_FG_VPL : PUSHCORE_FG_VFG;
             if (v == L"none") ps.multiplier = 1;
             continue;
         }
         if (k == L"--q") { ps.vfgQuality = uint32_t(_wtoi(v.c_str())); ps.fgTier = ps.vfgQuality; continue; }
         if (k == L"--srq") { const int q = _wtoi(v.c_str()); ps.sr = q > 0; ps.srQuality = q > 0 ? uint32_t(q) : 2u; continue; }
-        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX; continue; }
+        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : v == L"ivsr" ? PUSHCORE_SR_METHOD_IVSR : PUSHCORE_SR_METHOD_RTX; continue; }
+        if (k == L"--vendor") { wantVendor = v == L"intel" ? 0x8086u : v == L"amd" ? 0x1002u : 0x10DEu; continue; }
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
@@ -177,9 +179,10 @@ int wmain(int argc, wchar_t** argv) {
     SIZE_T bestMem = 0;
     for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 d{}; adapter->GetDesc1(&d);
-        if (d.VendorId == 0x10DE && d.DedicatedVideoMemory > bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory; }
+        // the NVIDIA adapter, or with --vendor intel|amd the largest one of that vendor (Intel VSR / VPL testers)
+        if (d.VendorId == wantVendor && d.DedicatedVideoMemory + 1 > bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory + 1; }
     }
-    if (!best) { std::cout << "no NVIDIA adapter\n"; return 1; }
+    if (!best) { std::cout << "no adapter of vendor " << std::hex << wantVendor << std::dec << "\n"; return 1; }
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> imm;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     if (FAILED(D3D11CreateDevice(best.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,

@@ -155,10 +155,15 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_FG_NVOF 5u        /* PUSHCORE_FEATURE_NVOF_FG: NVIDIA's optical-flow hardware (NVOFA: Turing except TU117, and
                                       later) as the motion of FSR 3.1's frame interpolation and warp, 2x: the flow costs no
                                       shader time (GTX 16 / RTX 20 where VFG does not run and PushFlow is too slow) */
+#define PUSHCORE_FG_VPL 7u         /* PUSHCORE_FEATURE_VPL_FI: Intel VPL AI frame interpolation (Intel Arc / Xe with the driver's VPL
+                                      runtime) after the graph, on a D3D11 device beside it; multipliers as the runtime accepts
+                                      (Query, up to 4); fallback VPL -> PushFlow -> FSR FG */
 #define PUSHCORE_FG_NONE 255u      /* (reported only) no frame generation could start */
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
 #define PUSHCORE_SR_METHOD_NIS 2u  /* NVIDIA Image Scaling (shaders, any GPU) */
+#define PUSHCORE_SR_METHOD_IVSR 4u /* PUSHCORE_FEATURE_IVSR: Intel Video Super Resolution (the driver's video processor with Intel's VPE
+                                      extension) before the graph, on a D3D11 device beside it; Intel GPUs only, else FSR */
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
@@ -312,6 +317,8 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
+#define PUSHCORE_FEATURE_VPL_FI (1u << 21) /* PushCoreSettings.fgBackend = PUSHCORE_FG_VPL, PUSHCORE_CAP_VPL_FI, pushcore_selfTest */
+#define PUSHCORE_FEATURE_IVSR (1u << 23)   /* PushCoreSettings.srMethod = PUSHCORE_SR_METHOD_IVSR, PUSHCORE_CAP_IVSR, pushcore_selfTest */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */
@@ -345,7 +352,11 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
-#define PUSHCORE_CAP_COUNT 14u
+#define PUSHCORE_CAP_VPL_FI 15u     /* PUSHCORE_FG_VPL: Intel GPU + this build links libvpl + the self-test passed (SelfTest\VplFi); when
+                                        available, reason[] holds "gate passed ..." (the default-on gate) or "candidate ..." */
+#define PUSHCORE_CAP_IVSR 17u       /* PUSHCORE_SR_METHOD_IVSR: Intel GPU + the self-test passed (SelfTest\IntelVsr); when available,
+                                        reason[] holds the measured cost ("ms4k=..") */
+#define PUSHCORE_CAP_COUNT 18u
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;
@@ -377,6 +388,16 @@ typedef struct PushCoreFlowBench {
     char note[256];            /* out: model / precision per tier, or why it failed */
 } PushCoreFlowBench;
 PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreFlowBench* io);
+/* Intel video self-tests (PUSHCORE_FEATURE_IVSR / VPL_FI; additive export): which = PUSHCORE_SELFTEST_* bits; report = one JSON
+   object (UTF-8) with the verdict lines ("pass; ..." / "fail: ..." / "unavailable: ..."). PUSHCORE_OK = every asked-for test
+   passed. FLAG_WARP runs on Windows' software adapter (CI); FLAG_RECORD writes the results into SelfTest\<Name> (testers). */
+#define PUSHCORE_SELFTEST_IVSR 1u
+#define PUSHCORE_SELFTEST_VPL_FI 2u
+#define PUSHCORE_SELFTEST_BRIDGE 4u   /* the D3D11 <-> D3D12 bridge round trip (pixels compared) */
+#define PUSHCORE_SELFTEST_FLAG_WARP 1u
+#define PUSHCORE_SELFTEST_FLAG_RECORD 2u
+PUSHCORE_API int pushcore_selfTest(uint64_t adapterLuid, const wchar_t* rootDir, uint32_t which, uint32_t flags, char* report, uint32_t reportSize);
+typedef int (*PushCoreSelfTestFn)(uint64_t, const wchar_t*, uint32_t, uint32_t, char*, uint32_t);
 typedef int (*PushCoreCapabilitiesFn)(uint64_t, const wchar_t*, PushCoreCaps*);
 typedef int (*PushCoreFlowBenchFn)(uint64_t, const wchar_t*, PushCoreFlowBench*);
 PUSHCORE_API int pushcore_submit2(PushCore* core, ID3D11Texture2D* texture, uint32_t arraySlice,

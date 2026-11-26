@@ -34,7 +34,8 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc
+  src/PushCoreD3D11Bridge.cpp src/PushCoreIntelVsr.cpp src/PushCoreVplFi.cpp src/PushCoreIntel.cpp)
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
 target_compile_options(pushcore_dll PRIVATE /utf-8)
@@ -76,3 +77,24 @@ target_compile_features(pushcore_hip_preflight PRIVATE cxx_std_20)
 target_compile_options(pushcore_hip_preflight PRIVATE /utf-8)
 target_include_directories(pushcore_hip_preflight PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_libraries(pushcore_hip_preflight PRIVATE veyra_engine ${FFMPEG_LIBRARIES} shell32)
+
+# Intel VPL (Intel Video Processing Library): its MIT dispatcher, static with the static CRT, linked into pushcore.dll for
+# PUSHCORE_FG_VPL (AI frame interpolation; the runtime itself comes with Intel's graphics driver). PUSHMPC_VPL_ROOT = a
+# libvpl install (.github/workflows/intel-video.yml and release.yml build it from the pinned tag). Without it pushcore
+# builds and reports VPL as "built without Intel VPL".
+set(PUSHMPC_VPL_ROOT "" CACHE PATH "libvpl install (include/vpl, lib/vpl.lib) for Intel VPL frame interpolation")
+if(PUSHMPC_VPL_ROOT AND EXISTS "${PUSHMPC_VPL_ROOT}/include/vpl/mfx.h" AND EXISTS "${PUSHMPC_VPL_ROOT}/lib/vpl.lib")
+  message(STATUS "pushcore: Intel VPL dispatcher from ${PUSHMPC_VPL_ROOT}")
+  target_include_directories(pushcore_dll PRIVATE "${PUSHMPC_VPL_ROOT}/include")
+  target_compile_definitions(pushcore_dll PRIVATE PUSHMPC_HAVE_VPL ONEVPL_EXPERIMENTAL)
+  target_link_libraries(pushcore_dll PRIVATE "${PUSHMPC_VPL_ROOT}/lib/vpl.lib" ole32 uuid advapi32)
+else()
+  message(STATUS "pushcore: no Intel VPL dispatcher (PUSHMPC_VPL_ROOT): VPL frame interpolation not built")
+endif()
+
+# Test tool: the Intel video self-tests and the D3D11 <-> D3D12 bridge round trip (pushcore_selfTest), for CI (WARP) and
+# testers (tests/intel-vsr-manual.ps1, tests/intel-vpl-manual.ps1). Loads pushcore.dll by path.
+add_executable(pushcore_selftest tools/pushcore_selftest.cpp)
+target_compile_features(pushcore_selftest PRIVATE cxx_std_20)
+target_compile_options(pushcore_selftest PRIVATE /utf-8)
+target_include_directories(pushcore_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

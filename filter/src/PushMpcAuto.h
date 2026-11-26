@@ -61,13 +61,18 @@ struct Source {
 };
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
-enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg, kCapCount };
+enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg,
+                     kCapVplFi = 15, kCapIvsr = 17, kCapCount };   // 14 XeSS FG, 16 XeSS SR, 18 ZLUDA VSR
 struct Gpu {
     uint32_t family = kRtx50;          // default for the headless test: this machine
     uint32_t available = 0xFFFFFFFFu;  // bit per Cap
     uint32_t hardware = 0xFFFFFFFFu;   // bit per Cap: the GPU could run it (with its files); 0 = a GPU limit
     std::wstring name;
     std::wstring reason[kCapCount];    // why not available
+    // Intel video methods: the self-tests' measured numbers (pushcore_capabilities reason[] of an available cap)
+    double ivsrMs4k = -1;              // Intel VSR, 1080p -> 4K blit, ms
+    double vplMs1080 = -1;             // Intel VPL FI, ms per source frame at 1080p 2x
+    bool vplGate = false;              // VPL passed the default-on gate (discrete Arc, quality and speed margins)
     bool has(uint32_t cap) const { return (available >> cap) & 1u; }
     bool hw(uint32_t cap) const { return (hardware >> cap) & 1u; }
     bool nvidia() const { return family >= kRtx50 && family <= kGtx; }
@@ -106,7 +111,7 @@ inline bool IsWeakGpu(uint32_t family, const std::wstring& name)
 }
 
 // Frame generation methods as Auto sees them (index = FgMethod - 1 = PUSHCORE_FG_*)
-enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kFgKeys };
+enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kKeyVpl, kFgKeys };
 
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
@@ -128,6 +133,12 @@ struct Costs {
     double nvofEngine = 2.0, nvofInterpShare = 0.6;
     bool nvofTuring = false;                        // set by Decide for RTX 20 / GTX 16
     double frc = 6.7;                               // AMD FRC 2x
+    // Intel VPL AI frame interpolation: ms per source frame at 1080p 2x (an estimate for Arc until its self-test measured it;
+    // then that number, absolute), per further generated frame the same again, with the output pixels
+    double vplFi = 12.0; bool vplMeasured = false;
+    // Intel VSR (the driver's video processor super resolution): ms for a 4K output (estimate; the self-test's measurement)
+    double ivsrSr = 2.0; bool ivsrMeasured = false;
+    double ivsrScale = 1.0; bool learnedIvsr = false;   // learned measured/prior ratio (pushcore's srMs while it runs)
     double vsrUp[4] = { 0.61, 0.76, 1.59, 2.40 };   // RTX VSR standard 1080p -> 4K, median
     double vsrUpHb[4] = { 1.19, 1.80, 2.73, 4.40 }; // VFX "high bitrate" 16..19 (measured, gpu-best 4b)
     double vsrUpSt[4] = { 1.59, 1.59, 4.52, 4.52 }; // VFX "streaming" 21 (tiers 1-2) / 23 (tiers 3-4)
@@ -144,7 +155,7 @@ struct Costs {
     double card = 1.0;                              // CardFactor for the priors (or the measured one, ApplyMeasuredCard)
     bool cardMeasured = false;                      // card comes from this GPU's own speed test, not the name table
     double vsrScale = 1.0;                          // learned measured/prior ratio for VSR
-    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
+    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
 };
@@ -216,6 +227,7 @@ inline double VsrCost(const Costs& c, int level, bool ar, double pix, int family
     if (level < 1) return 0;
     if (method == Upscaler::Fsr) return c.fsrSr * pix * c.vsrP95 * c.card;
     if (method == Upscaler::Nis) return c.nisSr * pix * c.vsrP95 * c.card;
+    if (method == Upscaler::IntelVsr) return c.ivsrSr * pix * c.vsrP95 * c.ivsrScale * (c.ivsrMeasured ? 1.0 : c.card);
     const double* table = ar ? c.vsrAr : family == int(VsrStyle::HighBitrate) ? c.vsrUpHb : family == int(VsrStyle::Streaming) ? c.vsrUpSt : c.vsrUp;
     return table[std::min(level, 4) - 1] * pix * c.vsrP95 * c.vsrScale * c.card;
 }
@@ -233,10 +245,11 @@ inline int FgKeyOf(FgMethod m, int quality)
     case FgMethod::Fsr: return kKeyFsr;
     case FgMethod::AmdFrc: return kKeyFrc;
     case FgMethod::Nvof: return kKeyNvof;
+    case FgMethod::Vpl: return kKeyVpl;
     default: return kKeyVfgMed;
     }
 }
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? 8 : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? 8 : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow || m == FgMethod::Vpl ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -258,6 +271,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     case FgMethod::Fsr: return c.fsrFg * pix * c.card;
     case FgMethod::AmdFrc: return c.frc * pix * c.card;
     case FgMethod::Nvof: return c.nvofEngine * (c.nvofTuring ? 2.0 : 1.0) + c.fsrFg * c.nvofInterpShare * pix * c.card;
+    case FgMethod::Vpl: return c.vplFi * (pix / 0.25) * (m - 1) * (c.vplMeasured ? 1.0 : c.card);
     default: return 0;
     }
 }
@@ -284,7 +298,7 @@ inline bool ApplyMeasuredCard(Costs& c)
 // fixed table).
 inline std::vector<FgMethod> FgOrder(const Gpu& g, const Costs& c)
 {
-    if (IsWeakGpu(g.family, g.name) && !c.pfBenched) return { FgMethod::Nvof, FgMethod::Fsr, FgMethod::PushFlow, FgMethod::AmdFrc };
+    if (IsWeakGpu(g.family, g.name) && !c.pfBenched) return { FgMethod::Nvof, FgMethod::Fsr, FgMethod::Vpl, FgMethod::PushFlow, FgMethod::AmdFrc };
     return FgOrder(g);
 }
 inline std::vector<FgMethod> FgOrder(const Gpu& g)
@@ -296,11 +310,15 @@ inline std::vector<FgMethod> FgOrder(const Gpu& g)
     case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
     case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
     case kGtx: return { FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
-    case kIntel: case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
+    // Intel: VPL AI frame interpolation first where it passed its default-on gate (discrete Arc: quality margin over a blend like
+    // PushFlow Fast's on the probe material, <= 20.8 ms per source frame), else a candidate after PushFlow; Decide takes the
+    // first that reaches 2x within the budget (its cost: the self-test's measurement, then live)
+    case kIntel: return g.vplGate ? std::vector<FgMethod>{ FgMethod::Vpl, FgMethod::PushFlow, FgMethod::Fsr } : std::vector<FgMethod>{ FgMethod::PushFlow, FgMethod::Vpl, FgMethod::Fsr };
+    case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
     default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon
     }
 }
-inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : m == FgMethod::Nvof ? kCapNvofFg : kCapFrc; }
+inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : m == FgMethod::Nvof ? kCapNvofFg : m == FgMethod::Vpl ? kCapVplFi : kCapFrc; }
 // base quality, upgrade, and the fallback when the base cannot reach 2x (VFG: Medium -> High, Low; PushFlow: Balanced ->
 // Quality, Fast); the user's FG quality fixes it (PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 struct Tiers { int base, upgrade, fallback; };
@@ -334,11 +352,28 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);
 
+    // the Intel self-tests' measurements are the priors (absolute: measured on this GPU)
+    if (g.ivsrMs4k > 0 && !c.ivsrMeasured) { c.ivsrSr = g.ivsrMs4k; c.ivsrMeasured = true; }
+    if (g.vplMs1080 > 0 && !c.vplMeasured) { c.vplFi = g.vplMs1080; c.vplMeasured = true; }
+    // Intel VSR on an Intel GPU (Auto): a candidate against FSR / NIS by cost: Auto takes it when it costs no frame
+    // generation step against the shader upscaler and fits the budget (decided on the same costs, measured where known)
+    if (s.upscaler == Upscaler::Auto && g.has(kCapIvsr) && !g.has(kCapRtxVsr)) {
+        Settings si = s; si.upscaler = Upscaler::IntelVsr;
+        Settings sf = s; sf.upscaler = g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
+        Choice ci = Decide(si, src, d, c, g), cf = Decide(sf, src, d, c, g);
+        if (!ci.sr) return cf;   // nothing to upscale: the same either way
+        const bool take = ci.multiplier >= cf.multiplier && (ci.predictedMs <= ci.budgetMs || ci.predictedMs <= cf.predictedMs);
+        Choice out = take ? ci : cf;
+        out.sharperNote += take ? std::wstring(L" (Intel VSR: no frame generation step lost)")
+                                : std::format(L" (Intel VSR would cost frame generation: {}x instead of {}x, or {:.1f} of {:.1f} ms)", ci.multiplier, cf.multiplier, ci.predictedMs, ci.budgetMs);
+        return out;
+    }
     // --- the upscaler: RTX VSR on NVIDIA RTX, else FSR, else NIS (the user's choice when this GPU can run it)
     Upscaler method = g.has(kCapRtxVsr) ? Upscaler::Rtx : g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
     std::wstring methodNote;
     if (s.upscaler == Upscaler::Rtx && !g.has(kCapRtxVsr)) methodNote = L" (RTX VSR: " + g.reason[kCapRtxVsr] + L")";
     else if (s.upscaler == Upscaler::Fsr && !g.has(kCapFsrSr)) methodNote = L" (FSR: " + g.reason[kCapFsrSr] + L")";
+    else if (s.upscaler == Upscaler::IntelVsr && !g.has(kCapIvsr)) methodNote = L" (Intel VSR: " + g.reason[kCapIvsr] + L")";
     else if (s.upscaler != Upscaler::Auto) method = s.upscaler;
     r.srMethod = method;
     const bool rtxSr = method == Upscaler::Rtx;
@@ -527,7 +562,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- the rest goes to VSR (Auto): raise 1 -> 4 while it fits; frame generation is never lowered for it
     const double fixedCost = baseCost(nr) + FgCost(c, r.fgMethod, r.fgQuality, r.multiplier, pixFg);
-    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : L"NIS";
+    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : method == Upscaler::IntelVsr ? L"Intel VSR" : L"NIS";
     if (s.sharper == kAuto) {
         if (!atOutput) {
             if (rtxSr) while (level < 4 && fixedCost + vsr(level + 1) <= r.budgetMs) ++level;
