@@ -324,7 +324,7 @@ class Pushmpc < Formula
 
   def caveats
     <<~EOS
-      To use PushMPC in mpv (and in IINA with "Use config directory" and a VapourSynth-enabled libmpv), run:
+      To use PushMPC in mpv, IINA and VLC, run:
         pushmpc-setup install
       Homebrew's mpv finds VapourSynth through a small global mpv script (#{HOMEBREW_PREFIX}/etc/mpv/scripts/
       pushmpc-vsscript.lua; it does nothing once PushMPC is uninstalled). mpv started with --no-config or
@@ -338,7 +338,7 @@ class Pushmpc < Formula
       On macOS, pushmpc-setup install also sets up Plex for Mac and Plex HTPC (in /Applications) when they are there, and
       re-applies itself after Plex updates. If macOS refuses, allow your terminal in System Settings > Privacy & Security >
       App Management, then run pushmpc-setup install again.
-      For IINA's own player, see the PushMPC IINA plugin (integrations/iina in the repository).
+      It also sets up IINA (the PushMPC plugin) and VLC when they are installed; neither app is changed.
     EOS
   end
 

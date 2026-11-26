@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -391,6 +392,7 @@ bool Feed(Bridge& b, AVFrame* f)
             if (f->format != AV_PIX_FMT_VIDEOTOOLBOX) { Log("the stream left VideoToolbox decoding: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
             dl = g_av.frame_alloc();
             if (!dl || g_av.hwframe_transfer_data(dl, f, 0) < 0) { if (dl) g_av.frame_free(&dl); Log("download failed: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
+            if (PmFormat(dl->format) != b.engFmt) { g_av.frame_free(&dl); Log("the downloaded format differs: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
             g_av.frame_copy_props(dl, f);
             src = dl;
         } else if (PmFormat(f->format) != b.engFmt) { Log("the format changed: pass-through"); b.mode = Bridge::Mode::Pass; return false; }

@@ -1247,7 +1247,7 @@ static int Open(vlc_object_t *obj)
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
         }
-    } else if (!sys->pc) {
+    } else if (!sys->pc && !PM_CVPX_ON(sys)) {   /* (the CVPX zero-copy path set k and why above) */
         sys->k = 1;
         snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
@@ -1370,7 +1370,12 @@ static int OpenOut(vlc_object_t *obj)
     filter_t *f = (filter_t *)obj;
     const vlc_chroma_description_t *d = vlc_fourcc_GetChromaDescription(f->fmt_in.video.i_chroma);
     int hwbits;
-    const bool opaque = pm_hw_chroma(f->fmt_in.video.i_chroma, &hwbits);   /* VA-API / VDPAU: passed on, not copied */
+    bool opaque = pm_hw_chroma(f->fmt_in.video.i_chroma, &hwbits);   /* VA-API / VDPAU: passed on, not copied */
+#ifdef __APPLE__
+    /* CVPX pictures (the zero-copy VideoToolbox path hands them on as they are): passed on too. Refusing them would make
+     * VLC's "chain" fallback put a CVPX -> software converter in front of this stage and the vout */
+    if (pm_cvpx_bits(f->fmt_in.video.i_chroma)) opaque = true;
+#endif
     if ((!opaque && (!d || d->plane_count == 0)) || f->fmt_in.video.i_chroma != f->fmt_out.video.i_chroma)
         return VLC_EGENERIC;
     out_sys_t *s = calloc(1, sizeof(*s));

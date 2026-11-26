@@ -331,7 +331,7 @@ jobs:
       HOMEBREW_NO_BOTTLE_SOURCE_FALLBACK: '1'
       # a public 10 s 720p H.264 clip (Big Buck Bunny, CC BY 3.0, Blender Foundation)
       CLIP_URL: https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
-      CLIP_SHA256: TODO-FIRST-RUN
+      CLIP_SHA256: 18b99ec25f32f6bd2223aa54e4b5632533328bf5cc81c283eba7604c42649f75
     steps:
       - uses: actions/checkout@v4
       # Homebrew's downloaded bottles and resources (ArtCNN files), the test clip; keyed on the formula, falling back to

@@ -16,7 +16,7 @@
 
 typedef struct pm_cvpx_eng pm_cvpx_eng;
 
-/* VLC_Version() inside the tested range (the layout check in build-mac-extras.sh covers exactly these tags) */
+/* the host VLC's version (libvlc_get_version) inside the tested range (the layout check in build-mac-extras.sh covers exactly these tags) */
 bool pm_cvpx_vlc_ok(char *why, size_t n);
 /* 8 / 10 for CVPX_NV12 / CVPX_P010, 0 otherwise */
 int pm_cvpx_bits(vlc_fourcc_t chroma);

@@ -24,7 +24,7 @@ struct cvpxpic_ctx
     CVPixelBufferRef cvpx;
     unsigned nb_fields;
 
-    atomic_uint ref;
+    atomic_uint ref_count;
     void (*on_released_cb)(CVPixelBufferRef, void *, unsigned);
     void *on_released_data;
 };
@@ -34,9 +34,12 @@ struct cvpxpic_ctx
 #define PM_CVPX_MIN_REV 20
 #define PM_CVPX_MAX_REV 24
 
+/* VLC 3.0's libvlccore exports no version call (VLC_Version is not in its libvlccore.sym); the host's libvlc has
+ * libvlc_get_version() ("3.0.24 Vetinari"), and every VLC 3 player has libvlc loaded before it loads modules */
 bool pm_cvpx_vlc_ok(char *why, size_t n)
 {
-    const char *v = VLC_Version();
+    const char *(*ver)(void) = (const char *(*)(void))dlsym(RTLD_DEFAULT, "libvlc_get_version");
+    const char *v = ver ? ver() : NULL;
     int a = 0, b = 0, c = 0;
     if (!v || sscanf(v, "%d.%d.%d", &a, &b, &c) != 3) { snprintf(why, n, "VLC version unknown"); return false; }
     if (a != 3 || b != 0 || c < PM_CVPX_MIN_REV || c > PM_CVPX_MAX_REV) {
@@ -83,7 +86,7 @@ void *pm_cvpx_in(const picture_t *p, const video_format_t *f, const char **why)
 static void CtxDestroy(picture_context_t *c)
 {
     struct cvpxpic_ctx *ctx = (struct cvpxpic_ctx *)c;
-    if (atomic_fetch_sub(&ctx->ref, 1) == 1) {
+    if (atomic_fetch_sub(&ctx->ref_count, 1) == 1) {
         CVPixelBufferRelease(ctx->cvpx);
         free(ctx);
     }
@@ -91,7 +94,7 @@ static void CtxDestroy(picture_context_t *c)
 static picture_context_t *CtxCopy(picture_context_t *c)
 {
     struct cvpxpic_ctx *ctx = (struct cvpxpic_ctx *)c;
-    atomic_fetch_add(&ctx->ref, 1);
+    atomic_fetch_add(&ctx->ref_count, 1);
     return &ctx->s;
 }
 
@@ -103,7 +106,7 @@ picture_t *pm_cvpx_out(const video_format_t *f, void *pb)
     ctx->s.copy = CtxCopy;
     ctx->cvpx = (CVPixelBufferRef)pb;   /* owned: released with the last reference */
     ctx->nb_fields = 1;
-    atomic_init(&ctx->ref, 1);
+    atomic_init(&ctx->ref_count, 1);
     picture_resource_t res;
     memset(&res, 0, sizeof(res));
     picture_t *p = picture_NewFromResource(f, &res);
@@ -144,7 +147,7 @@ pm_cvpx_eng *pm_cvpx_eng_open(const video_format_t *f, int bits, int smoother, d
     e->describe = (const char *(*)(void *))dlsym(m, "pme_apple_cvpx_describe");
     e->close = (void (*)(void *))dlsym(m, "pme_apple_cvpx_close");
     if (!op || !e->process || !e->forget || !e->describe || !e->close) { snprintf(why, n, "apple engine: no CVPixelBuffer interface"); free(e); return NULL; }
-    const int full = f->color_range == COLOR_RANGE_FULL;
+    const int full = f->b_color_range_full ? 1 : 0;   /* VLC 3.0's video_format_t field */
     /* VLC's colour enums -> H.273 codes for the apple engine */
     const int matrix = f->space == COLOR_SPACE_BT2020 ? 9 : f->space == COLOR_SPACE_BT601 ? 6 : 1;
     const int transfer = f->transfer == TRANSFER_FUNC_SMPTE_ST2084 ? 16 : f->transfer == TRANSFER_FUNC_HLG ? 18 : 1;
