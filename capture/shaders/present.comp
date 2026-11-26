@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC capture mode: a planar 8-bit YUV 4:2:0 picture (the engine's output in its buffer, or an upload) -> the
+// window's RGBA image: bilinear scaling to the window with the aspect ratio kept (black bars outside), BT.709 limited
+// range to R'G'B'. swapRB writes (B, G, R) for a BGRA swapchain that receives the image as a raw copy.
+#version 450
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer Yuv { uint words[]; };
+layout(rgba8, binding = 1) writeonly uniform image2D dst;
+layout(push_constant) uniform P {
+    int w, h, cw, ch;
+    int offY, offU, offV;    // bytes
+    int pitchY, pitchC;      // bytes
+    int dw, dh;
+    int vx, vy, vw, vh;
+    int swapRB;
+} pc;
+
+float Byte(int o) { return float((words[o >> 2] >> uint(8 * (o & 3))) & 255u); }
+
+float Bilinear(int off, int pitch, int pw, int ph, vec2 p)
+{
+    p -= 0.5;
+    vec2 f = fract(p);
+    ivec2 i = ivec2(floor(p));
+    ivec2 lo = clamp(i, ivec2(0), ivec2(pw - 1, ph - 1)), hi = clamp(i + 1, ivec2(0), ivec2(pw - 1, ph - 1));
+    float a = Byte(off + lo.y * pitch + lo.x), b = Byte(off + lo.y * pitch + hi.x);
+    float c = Byte(off + hi.y * pitch + lo.x), d = Byte(off + hi.y * pitch + hi.x);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main()
+{
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (g.x >= pc.dw || g.y >= pc.dh) return;
+    vec3 rgb = vec3(0.0);
+    if (g.x >= pc.vx && g.y >= pc.vy && g.x < pc.vx + pc.vw && g.y < pc.vy + pc.vh) {
+        vec2 uv = (vec2(g - ivec2(pc.vx, pc.vy)) + 0.5) / vec2(pc.vw, pc.vh);
+        float Y = Bilinear(pc.offY, pc.pitchY, pc.w, pc.h, uv * vec2(pc.w, pc.h));
+        float U = Bilinear(pc.offU, pc.pitchC, pc.cw, pc.ch, uv * vec2(pc.cw, pc.ch));
+        float V = Bilinear(pc.offV, pc.pitchC, pc.cw, pc.ch, uv * vec2(pc.cw, pc.ch));
+        float y = (Y - 16.0) / 219.0, u = (U - 128.0) / 224.0, v = (V - 128.0) / 224.0;
+        float r = y + 1.5748 * v, b = y + 1.8556 * u;
+        float gg = (y - 0.2126 * r - 0.0722 * b) / 0.7152;
+        rgb = clamp(vec3(r, gg, b), 0.0, 1.0);
+    }
+    imageStore(dst, g, pc.swapRB != 0 ? vec4(rgb.bgr, 1.0) : vec4(rgb, 1.0));
+}

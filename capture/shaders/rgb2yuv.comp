@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC capture mode: a captured 32-bit picture (BGRx / RGBx) -> the GPU engine's planar YUV 4:2:0 staging buffer
+// (8-bit samples, rows packed, four samples per word). BT.709, limited range; chroma = the mean of each 2 x 2 block.
+// SRC_IMAGE: the picture is a sampled image (a tiled dma-buf, an IOSurface), else a storage buffer of 32-bit pixels
+// (host memory, a linear dma-buf). One invocation writes one word of one plane.
+#version 450
+layout(local_size_x = 64) in;
+#ifdef SRC_IMAGE
+layout(binding = 0) uniform sampler2D srcImg;
+#else
+layout(std430, binding = 0) readonly buffer Src { uint px[]; };
+#endif
+layout(std430, binding = 1) writeonly buffer Dst { uint words[]; };
+layout(push_constant) uniform P {
+    int plane, w, h;     // this plane's size
+    int srcW, srcH;      // the picture's (luma) size
+    int srcPitch;        // buffer: row pitch in pixels; image: the crop's top row
+    int srcOff;          // buffer: the first pixel's index; image: the crop's left column
+    int dstWordOff;      // the plane's first word in Dst
+    int nwords;
+    int rgbx;            // buffer: 1 = R in the low byte
+} pc;
+
+vec3 Fetch(int x, int y)
+{
+    x = clamp(x, 0, pc.srcW - 1); y = clamp(y, 0, pc.srcH - 1);
+#ifdef SRC_IMAGE
+    return texelFetch(srcImg, ivec2(x + pc.srcOff, y + pc.srcPitch), 0).rgb;
+#else
+    uint v = px[pc.srcOff + y * pc.srcPitch + x];
+    vec3 c = vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) * (1.0 / 255.0);
+    return pc.rgbx != 0 ? c : c.bgr;
+#endif
+}
+
+const vec3 KY = vec3(0.2126, 0.7152, 0.0722);
+
+uint Sample(int b)
+{
+    int x = b % pc.w, y = b / pc.w;
+    if (pc.plane == 0) return uint(clamp(16.0 + 219.0 * dot(Fetch(x, y), KY) + 0.5, 0.0, 255.0));
+    vec3 c = (Fetch(2 * x, 2 * y) + Fetch(2 * x + 1, 2 * y) + Fetch(2 * x, 2 * y + 1) + Fetch(2 * x + 1, 2 * y + 1)) * 0.25;
+    float Y = dot(c, KY);
+    float v = pc.plane == 1 ? (c.b - Y) / 1.8556 : (c.r - Y) / 1.5748;
+    return uint(clamp(128.0 + 224.0 * v + 0.5, 0.0, 255.0));
+}
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 64u) + gl_GlobalInvocationID.x);
+    if (i >= pc.nwords) return;
+    int total = pc.w * pc.h;
+    uint word = 0u;
+    for (int k = 0; k < 4; ++k) {
+        int b = i * 4 + k;
+        if (b < total) word |= Sample(b) << uint(8 * k);
+    }
+    words[pc.dstWordOff + i] = word;
+}
