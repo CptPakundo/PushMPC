@@ -1,16 +1,22 @@
 # inputstream.pushmpc (PushMPC inside Kodi's own VideoPlayer) on hosted runners:
-#   build    the add-on for Kodi 21 Omega and 22 Piers (each against that release's kodi-dev-kit), Linux and Windows;
-#            cadence_test (timestamps + engine glue, no Kodi)
+#   build*   the add-on for Kodi 21 Omega and 22 Piers (each against that release's kodi-dev-kit) on every platform Kodi
+#            runs binary add-ons on: Windows x64 (with the pushcore route; its test on WARP with the stub core), Linux
+#            x86_64 (+ the NVIDIA engine) and aarch64 (manylinux_2_28: glibc 2.28, so also LibreELEC / CoreELEC "ne"),
+#            Linux armv7 (OSMC, CoreELEC "ng", LibreELEC for Raspberry Pi 2/3), Android arm64-v8a / armeabi-v7a / x86,
+#            macOS universal (arm64 + x86_64, MoltenVK next to the library); cadence_test everywhere (timestamps + engine
+#            glue, no Kodi)
+#   zips     inputstream.pushmpc-<version>-<platform>-kodi<major>.zip for Kodi's "Install from zip file"
 #   kodi-*   the real Kodi plays synthetic clips with the add-on installed and analyze.py judges every case from Kodi's
 #            debug log (LOGVIDEO + LOGAVTIMING) and JSON-RPC: Linux = Flathub Kodi (21.3 stable, 22 beta) under Xvfb
-#            with Mesa's software GL; Windows = the official 21.3 / 22.0 RC2 builds, portable mode, on WARP.
-# macOS builds run on manual dispatch only (private-repo minutes).
+#            with Mesa's software GL (x86_64 and aarch64); Windows = the official 21.3 / 22.0 RC2 builds, portable
+#            mode, on WARP (plus the pushcore route with the stub core); Android = Kodi 21.3 x86 in the emulator.
 name: kodi-addon
 
 on:
   push:
     paths: ['kodiaddon/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', '.github/workflows/kodi-addon.yml']
-  # release.yml builds the release's Kodi add-on through this workflow (artifacts pushmpc-kodi-Windows / -Linux)
+  # release.yml builds the release's Kodi add-on through this workflow (artifacts pushmpc-kodi-Windows / -Linux /
+  # -Linux-aarch64 / -macOS and pushmpc-kodi-zips)
   workflow_call:
     inputs:
       wayland:
@@ -22,15 +28,11 @@ on:
         type: boolean
         default: true
       part:
-        description: 'release.yml: "release" = what its build and linux jobs take (Windows and Linux add-on); "extra" = what only its publish job takes (Android); empty = everything'
+        description: 'release.yml: "release" = what its build and linux jobs take (Windows and Linux add-on, x86_64 + aarch64); "extra" = what only its publish and macos jobs take (Android, armv7, macOS); empty = everything'
         type: string
         default: ''
   workflow_dispatch:
     inputs:
-      macos:
-        description: 'also build on macOS'
-        type: boolean
-        default: false
       cases:
         description: 'comma-separated case names (empty = all)'
         type: string
@@ -51,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [windows-latest]   # Linux: build-linux (manylinux_2_28 containers)
         kodi: [21, 22]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -100,10 +102,21 @@ jobs:
           path: ${{ runner.temp }}/ffmpeg
           key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-v1
 
+      - name: Stub pushcore.dll (the pushcore route's test on WARP; never shipped)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cmake -S vsplugin -B bs -A x64 > /dev/null
+          cmake --build bs --config Release --target pushcore_stub
+          d=$RUNNER_TEMP/stubcore; mkdir -p "$d"
+          cp "$(find bs vsplugin/bin -name pushcore.dll 2>/dev/null | head -1)" "$d/"
+          echo "STUB_CORE=$d" >> "$GITHUB_ENV"
+
       - name: Configure and build
         shell: bash
         run: |
-          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
+          stub=(); [ -n "${STUB_CORE:-}" ] && stub=(-DPM_STUB_CORE_DIR="$STUB_CORE")
+          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release "${stub[@]}" \
             -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
           cmake --build build --config Release --parallel
           ls -la build/addon/inputstream.pushmpc
@@ -125,25 +138,133 @@ jobs:
             sudo udevadm settle || true; sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
-          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|platform:|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|platform:|cadence_test|pushcore|FAIL|Passed|Failed" || true
           ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v4
         with:
           name: addon-${{ runner.os }}-kodi${{ matrix.kodi }}
           path: build/addon
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && matrix.kodi == 22
+        with:
+          name: pushcore-stub
+          path: ${{ runner.temp }}/stubcore
+
+  build-linux:
+    if: ${{ inputs.part != 'extra' }}
+    # one build per architecture and Kodi major in a manylinux_2_28 container (glibc 2.28, static libstdc++): it loads
+    # in every Kodi 21 / 22 on Linux (Flathub, distro packages, LibreELEC, CoreELEC "ne", OSMC on aarch64). x86_64 also
+    # gets the NVIDIA engine (nvcc and the pinned Slang at build time only). The unit tests run on the host afterwards
+    # (the GPU engine on lavapipe, required)
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        kodi: [21, 22]
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, suffix: '', nvl: nvl }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, suffix: '-aarch64', nvl: '' }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kodi dev kit (sparse checkout of the release tag)
+        run: |
+          tag=$([ "${{ matrix.kodi }}" = 21 ] && echo "$KODI21_TAG" || echo "$KODI22_TAG")
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$tag" https://github.com/xbmc/xbmc.git "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+      - uses: actions/cache/restore@v4
+        id: ffcache
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-manylinux_2_28-${{ matrix.arch }}-v1
+      - name: Slang (pinned; the NVIDIA engine's GPU cut guard, build time only)
+        if: matrix.nvl == 'nvl'
+        run: |
+          url=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['url'])")
+          sha=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['sha256'])")
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/slang.tgz" "$url"
+          [ "$(sha256sum "$RUNNER_TEMP/slang.tgz" | cut -d' ' -f1 | tr a-f A-F)" = "$(echo "$sha" | tr a-f A-F)" ]
+          mkdir -p "$RUNNER_TEMP/slang" && tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
+          echo "SLANG_DIR=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
+      - name: Build in manylinux_2_28 (FFmpeg static on a cold cache)
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" -w "$GITHUB_WORKSPACE" \
+            -e FFMPEG_VERSION -e SLANG_DIR="${SLANG_DIR:-}" "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
+            bash kodiaddon/ci/build-linux.sh "$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" "$RUNNER_TEMP/ffmpeg" "$GITHUB_WORKSPACE/build" ${{ matrix.nvl }}
+          sudo chown -R "$(id -u):$(id -g)" build "$RUNNER_TEMP/ffmpeg"
+          ls -la build/addon/inputstream.pushmpc
+          cat build/addon/inputstream.pushmpc/addon.xml
+      - uses: actions/cache/save@v4
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-manylinux_2_28-${{ matrix.arch }}-v1
+      - name: Unit tests on the host (the GPU engine on lavapipe is required)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+          sudo modprobe udmabuf 2>/dev/null || echo "no udmabuf module"; sudo modprobe vgem 2>/dev/null || echo "no vgem module"
+          sudo udevadm settle || true; sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true
+          export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
+          ctest --test-dir build --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|platform:|cadence_test|nvl|FAIL|Passed|Failed" || true
+          ctest --test-dir build --output-on-failure
+          [ "${{ matrix.nvl }}" != nvl ] || ls -la build/addon/inputstream.pushmpc/pushmpc-nvvfx-selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-Linux${{ matrix.suffix }}-kodi${{ matrix.kodi }}
+          path: build/addon
+
+  build-linux-armv7:
+    if: ${{ inputs.part != 'release' }}   # release.yml: part extra (the armv7 zips are release assets)
+    # 32-bit ARM (armv7 hard-float): OSMC, CoreELEC "ng", LibreELEC for Raspberry Pi 2/3. Cross-built in debian:bullseye
+    # (glibc 2.31); cadence_test under qemu-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        kodi: [21, 22]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kodi dev kit
+        run: |
+          tag=$([ "${{ matrix.kodi }}" = 21 ] && echo "$KODI21_TAG" || echo "$KODI22_TAG")
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$tag" https://github.com/xbmc/xbmc.git "$RUNNER_TEMP/xbmc"
+          git -C "$RUNNER_TEMP/xbmc" sparse-checkout set xbmc/addons/kodi-dev-kit/include
+      - uses: actions/cache/restore@v4
+        id: ffcache
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-linux-armv7-v1
+      - name: Cross build in debian:bullseye
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" -w "$GITHUB_WORKSPACE" \
+            -e FFMPEG_VERSION debian:bullseye \
+            bash kodiaddon/ci/build-linux-armv7.sh "$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" "$RUNNER_TEMP/ffmpeg" "$GITHUB_WORKSPACE/build"
+          sudo chown -R "$(id -u):$(id -g)" build "$RUNNER_TEMP/ffmpeg"
+          ls -la build/addon/inputstream.pushmpc
+      - uses: actions/cache/save@v4
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-linux-armv7-v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-Linux-armv7-kodi${{ matrix.kodi }}
+          path: build/addon
 
   package:
     # one folder per OS: kodi21/ and kodi22/ builds plus the installer (what the PushMPC Setup ships and passes as
     # PUSHMPC_KODI_DIR); the installer's round trip runs on it
-    needs: build
-    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    needs: [build, build-linux, build-macos]
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-24.04, name: Linux }
-          - { os: windows-latest, name: Windows }
+        # release.yml: part release packages Windows and Linux (its build and linux jobs), part extra macOS (its macos job)
+        include: ${{ fromJSON(inputs.part == 'release' && '[{"os":"ubuntu-24.04","name":"Linux"},{"os":"ubuntu-24.04-arm","name":"Linux-aarch64"},{"os":"windows-latest","name":"Windows"}]' || inputs.part == 'extra' && '[{"os":"macos-15","name":"macOS"}]' || '[{"os":"ubuntu-24.04","name":"Linux"},{"os":"ubuntu-24.04-arm","name":"Linux-aarch64"},{"os":"windows-latest","name":"Windows"},{"os":"macos-15","name":"macOS"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -156,9 +277,10 @@ jobs:
         shell: bash
         run: |
           cp kodiaddon/install/install.sh kodiaddon/install/install.ps1 pkg/
+          chmod +x pkg/kodi*/inputstream.pushmpc/pushmpc-nvvfx-selftest 2>/dev/null || true   # artifacts drop the exec bits
           find pkg -maxdepth 3 | sort
-      - name: Installer round trip (Linux)
-        if: runner.os == 'Linux'
+      - name: Installer round trip (Linux, macOS)
+        if: runner.os != 'Windows'
         run: sh kodiaddon/tests/install-test.sh "$PWD/pkg"
       - name: Installer round trip (Windows)
         if: runner.os == 'Windows'
@@ -169,13 +291,38 @@ jobs:
           name: pushmpc-kodi-${{ matrix.name }}
           path: pkg
 
+  zips:
+    # Kodi's "Install from zip file" (Settings > Add-ons): one zip per platform and Kodi major, the add-on folder at its
+    # root. The release attaches them (release.yml publish)
+    needs: [build, build-linux, build-linux-armv7, build-android, build-macos]
+    if: ${{ !cancelled() && inputs.part == '' }}   # release.yml: its extras job makes them (after both parts)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            filter/src
+            kodiaddon/ci
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'addon-*-kodi*', path: a }
+      - name: Zip each build
+        run: |
+          set -eu
+          ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
+          sh kodiaddon/ci/make-zips.sh a zips "$ver"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pushmpc-kodi-zips
+          path: zips
+
   kodi-wayland:
     # Kodi 22 on Wayland (headless Weston, Mesa) with a dma-buf allocator (udmabuf) and its DRM-PRIME renderer on: the
     # add-on hands out dma-bufs where the renderer shows them (zero copy: the GPU engine writes into them in place).
     # The _noalloc cases take the allocator away: Kodi's thumbnail and stream-detail probes must keep working
-    needs: build
+    needs: build-linux
     # push and dispatch always; a caller (release.yml) may turn it off with wayland: false
-    if: ${{ !cancelled() && format('{0}', inputs.wayland) != 'false' }}   # inputs.wayland is empty on push and dispatch
+    if: ${{ !cancelled() && format('{0}', inputs.wayland) != 'false' && needs.build-linux.result != 'skipped' }}   # inputs.wayland is empty on push and dispatch
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -247,19 +394,23 @@ jobs:
           path: out
 
   kodi-linux:
-    needs: build
+    needs: build-linux
     if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # each OS runs with its own build even if the other OS's build failed; release.yml: off
     strategy:
       fail-fast: false
       matrix:
         kodi: [21, 22]
-    runs-on: ubuntu-24.04
+        arch: [x86_64, aarch64]   # aarch64: Flathub's aarch64 Kodi (what Raspberry Pi OS and other ARM desktops get)
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, suffix: '' }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, suffix: '-aarch64' }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: addon-Linux-kodi${{ matrix.kodi }}
+          name: addon-Linux${{ matrix.suffix }}-kodi${{ matrix.kodi }}
           path: addon
       - name: Audio (a PulseAudio null sink for Kodi's audio output; replaces sound-ci-helpers, which took about 15 min)
         run: |
@@ -296,7 +447,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kodi-linux-${{ matrix.kodi }}-logs
+          name: kodi-linux${{ matrix.suffix }}-${{ matrix.kodi }}-logs
           path: out
 
   kodi-windows:
@@ -339,24 +490,46 @@ jobs:
           python kodiaddon/ci/run_cases.py --kodi "C:\kodi\kodi.exe -p" --kill "taskkill /F /IM kodi.exe" `
             --home C:\kodi\portable_data --addon addon\inputstream.pushmpc --clips C:\clips --major ${{ matrix.kodi }} `
             --out out --cases "${{ inputs.cases }}"
+      - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() && inputs.cases == '' }}
+        continue-on-error: true
+        with: { name: pushcore-stub, path: stubcore }
+      - name: The pushcore route in Kodi (pm_pushcore.dll with the stub core on WARP)
+        if: ${{ !cancelled() && inputs.cases == '' && hashFiles('stubcore/pushcore.dll') != '' }}
+        shell: pwsh
+        run: |
+          $env:PUSHMPC_CORE_DIR = "$PWD\stubcore"; $env:PUSHMPC_KODI_WARP = '1'
+          python kodiaddon/ci/run_cases.py --kodi "C:\kodi\kodi.exe -p" --kill "taskkill /F /IM kodi.exe" `
+            --home C:\kodi\portable_data --addon addon\inputstream.pushmpc --clips C:\clips --major ${{ matrix.kodi }} `
+            --out out-pc --cases pushcore_x2
       - name: Summary
         if: always()
         shell: bash
-        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          cat out-pc/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: kodi-windows-${{ matrix.kodi }}-logs
-          path: out
+          path: |
+            out
+            out-pc
 
   build-android:
     if: ${{ inputs.part != 'release' }}   # release.yml: part extra (the Android zips are release assets)
-    # Android TV / Fire TV / Shield (arm64-v8a): build and package only. Kodi has no headless Android test path on a
-    # hosted runner yet; the engine is the GPU one (Vulkan, loaded at run time) with the CPU fallback.
+    # Android TV / Shield / Fire TV: arm64-v8a, armeabi-v7a (32-bit Kodi, most Fire TV sticks) and x86 (Android x86
+    # devices; Kodi 21.3 release and Kodi 22 nightlies; the emulator test runs it). The engine is the GPU one (Vulkan, loaded at run time) with
+    # the CPU fallback; MediaCodec decodes into hardware buffers the GPU engine imports.
     strategy:
       fail-fast: false
       matrix:
         kodi: [21, 22]
+        abi: [arm64-v8a, armeabi-v7a, x86]
+        include:
+          - { abi: arm64-v8a, name: arm64 }
+          - { abi: armeabi-v7a, name: armv7 }
+          - { abi: x86, name: x86 }
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -370,17 +543,17 @@ jobs:
         id: ffcache
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-${{ matrix.name }}-v2
       - name: FFmpeg static (NDK)
         if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
           sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -qq && sudo apt-get install -y -qq nasm > /dev/null
-          bash kodiaddon/ci/build-ffmpeg-android.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" "$ANDROID_NDK_LATEST_HOME"
+          bash kodiaddon/ci/build-ffmpeg-android.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" "$ANDROID_NDK_LATEST_HOME" ${{ matrix.abi }}
       - uses: actions/cache/save@v4
         if: steps.ffcache.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-${{ matrix.name }}-v2
       - name: glslang (pinned; the Android conversion shader)
         run: |
           d=$RUNNER_TEMP/glslang; mkdir -p "$d"
@@ -394,7 +567,7 @@ jobs:
         run: |
           cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
+            -DANDROID_ABI=${{ matrix.abi }} -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
             -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg" -DPM_GLSLANG="$GLSLANG"
           cmake --build build --parallel
           ls -la build/addon/inputstream.pushmpc
@@ -402,11 +575,62 @@ jobs:
           grep library_android build/addon/inputstream.pushmpc/addon.xml
       - uses: actions/upload-artifact@v4
         with:
-          name: addon-Android-arm64-kodi${{ matrix.kodi }}
+          name: addon-Android-${{ matrix.name }}-kodi${{ matrix.kodi }}
           path: build/addon
 
+  kodi-android:
+    # Kodi in the hosted Android emulator (KVM, x86_64 system image, software GLES): the add-on goes into Kodi's home as
+    # a zip install puts it, the clips into Kodi's app folder, the cases are driven over adb + JSON-RPC. x86 Kodi 21.3
+    # and a pinned Kodi 22 x86 nightly natively; the arm64 Kodi 21.3 with the arm64 add-on through the image's ARM
+    # translation (informational: skipped where the image has none). APKs pinned in kodiaddon/ci/kodi-apk-pins.json
+    needs: build-android
+    if: ${{ !cancelled() && format('{0}', inputs.tests) != 'false' }}   # release.yml: off
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { kodi: 21, abi: x86, art: x86, info: false }
+          - { kodi: 22, abi: x86, art: x86, info: false }
+          - { kodi: 21, abi: arm64-v8a, art: arm64, info: true }
+    continue-on-error: ${{ matrix.info }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: 'addon-Android-${{ matrix.art }}-kodi${{ matrix.kodi }}', path: addon }
+      - name: KVM, ffmpeg, clips, Kodi's APK (pinned)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+          python3 kodiaddon/ci/gen_clips.py ffmpeg "$RUNNER_TEMP/clips"
+          j() { python3 -c "import json,sys; print(json.load(open('kodiaddon/ci/kodi-apk-pins.json'))[sys.argv[1]][sys.argv[2]])" "$@"; }
+          key="${{ matrix.kodi }}-${{ matrix.art }}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.apk" "$(j "$key" url)"
+          echo "$(j "$key" sha256)  $RUNNER_TEMP/kodi.apk" | sha256sum -c - || { sha256sum "$RUNNER_TEMP/kodi.apk"; exit 1; }
+      - name: Play the cases in Kodi on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -memory 4096
+          script: bash kodiaddon/ci/android-test.sh "$RUNNER_TEMP/kodi.apk" addon/inputstream.pushmpc "$RUNNER_TEMP/clips" out ${{ matrix.kodi }} ${{ matrix.abi }} "${{ inputs.cases || 'h264_x2,h264_x4,auto,cpu_engine,off,hevc_x2,mpeg2_x2,seek,disabled' }}"
+      - name: Summary
+        if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-android-${{ matrix.kodi }}-${{ matrix.art }}-logs
+          path: out
+
   build-macos:
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    if: ${{ inputs.part != 'release' }}   # release.yml: part extra (the Kodi for Mac package: the macos job, the Homebrew formula)
+    # universal (arm64 + x86_64): Apple-silicon and Intel Macs. The GPU engine runs on Metal through MoltenVK, shipped
+    # next to the library (vk_context looks there first); tests on the runner (arm64) and under Rosetta (x86_64)
     strategy:
       fail-fast: false
       matrix:
@@ -424,19 +648,39 @@ jobs:
         id: ffcache
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-macOS-v1
-      - name: FFmpeg static
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-macOS-universal-v1
+      - name: FFmpeg static (universal)
         if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
           brew install nasm
-          bash kodiaddon/ci/build-ffmpeg.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg" --enable-videotoolbox
+          bash kodiaddon/ci/build-ffmpeg-macos.sh "$FFMPEG_VERSION" "$RUNNER_TEMP/ffmpeg"
+      - name: MoltenVK (pinned, vsplugin/engines/gpu/gpu-pins.json)
+        run: |
+          j() { python3 -c "import json,sys; v=json.load(open('vsplugin/engines/gpu/gpu-pins.json')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          d=$RUNNER_TEMP/mvk; mkdir -p "$d"
+          curl -fsSL --retry 3 -o "$d/mvk.tar" "$(j moltenvk url)"; echo "$(j moltenvk sha256)  $d/mvk.tar" | shasum -a 256 -c -
+          tar -xf "$d/mvk.tar" -C "$d"
+          lib=$(find "$d" -name libMoltenVK.dylib | grep -v -i ios | head -1); lipo -info "$lib"
+          echo "MVK_LIB=$lib" >> "$GITHUB_ENV"
+          echo "MVK_LICENSE=$(find "$d" -maxdepth 3 -name 'LICENSE*' | head -1)" >> "$GITHUB_ENV"
       - name: Build and test
         run: |
-          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+          cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
             -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
           cmake --build build --parallel
+          a=build/addon/inputstream.pushmpc
+          cp "$MVK_LIB" "$a/libMoltenVK.dylib"
+          [ -z "$MVK_LICENSE" ] || cp "$MVK_LICENSE" "$a/LICENSE.MoltenVK"
+          lipo -info "$a/inputstream.pushmpc.dylib"
+          otool -L "$a/inputstream.pushmpc.dylib"
+          codesign -s - -f "$a/inputstream.pushmpc.dylib" "$a/libMoltenVK.dylib"   # ad-hoc: Apple silicon refuses unsigned code
+          export PUSHMPC_VULKAN_LIBRARY="$PWD/$a/libMoltenVK.dylib"
           ctest --test-dir build --output-on-failure
-          otool -L build/addon/inputstream.pushmpc/inputstream.pushmpc.dylib
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "x86_64 slice under Rosetta:"; arch -x86_64 build/cadence_test
+          else
+            echo "::warning title=Kodi macOS::no Rosetta on this runner: the x86_64 slice was built, not run"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: addon-macOS-kodi${{ matrix.kodi }}

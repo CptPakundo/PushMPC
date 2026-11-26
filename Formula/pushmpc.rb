@@ -63,6 +63,16 @@ class Pushmpc < Formula
     end
   end
 
+  # PushMPC for Kodi on the Mac (kodi-addon.yml builds it, release.yml attaches it): the add-on inputstream.pushmpc
+  # (universal, for Kodi 21 and 22) and its installer. Kept as the archive; pushmpc-setup unpacks it and puts the add-on
+  # into Kodi. A release without that asset leaves this block out
+  on_macos do
+    resource "kodi-mac" do
+      url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-kodi-macos-0.6.0.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
   # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
   resource "artcnn-c4f16-onnx" do
     url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/ONNX/ArtCNN_C4F16.onnx"
@@ -176,6 +186,10 @@ class Pushmpc < Formula
       # packed again as it came (an archive in the keg is neither relocated nor re-signed by Homebrew)
       resource("plex-mac").stage { system "tar", "-czf", pkgshare/"plex-mac/pushmpc-plex-mac.tar.gz", "." }
     end
+    if OS.mac? && resources.any? { |r| r.name == "kodi-mac" }
+      (pkgshare/"kodi-mac").mkpath
+      resource("kodi-mac").stage { system "tar", "-czf", pkgshare/"kodi-mac/pushmpc-kodi-mac.tar.gz", "." }
+    end
     resource("pmml-graphs").stage { (pkgshare/"pmml/graphs").install Dir["*.onnx", "**/*.onnx"].uniq }
     (pkgshare/"pmml").install "scripts/ml-runtime-pin.json"
     libexec.install "packaging/homebrew/pmml-models.py"
@@ -251,6 +265,8 @@ class Pushmpc < Formula
       #              macOS 26 offers Apple's one-time super-resolution model download (pushmpc-apple model-download)
       #   uninstall  takes the block out (mpv.conf comes back byte for byte) and removes the LaunchAgent of earlier
       #              PushMPC test builds, if any
+      #   Kodi       on macOS, install also puts the PushMPC add-on into Kodi (in /Applications) for this user;
+      #              uninstall takes it out again
       #   Plex       on macOS, install also puts PushMPC into Plex for Mac / Plex HTPC when they are in /Applications
       #              (pushmpc-plex-mac.sh: Plex's original library backed up, a self-test with Plex's own player, a
       #              LaunchAgent that re-applies it after Plex updates); uninstall gives Plex back exactly
@@ -296,6 +312,24 @@ class Pushmpc < Formula
             if [ -f "$plexdir/pushmpc-plex-mac.sh" ]; then echo "Plex for Mac:"; /bin/sh "$plexdir/pushmpc-plex-mac.sh" uninstall; rm -rf "$plexdir"; rmdir "$data/pushmpc" 2>/dev/null; fi ;;
           status)
             [ ! -f "$plexdir/pushmpc-plex-mac.sh" ] || /bin/sh "$plexdir/pushmpc-plex-mac.sh" status --from "$plexdir" ;;
+        esac
+      fi
+      # Kodi: the add-on inputstream.pushmpc in Kodi's own player (install.sh from the package, unpacked into
+      # $data/pushmpc/kodi-mac; it picks the Kodi 21 or 22 build and enables the add-on)
+      koditgz="#{opt_pkgshare}/kodi-mac/pushmpc-kodi-mac.tar.gz"; kodidir="$data/pushmpc/kodi-mac"
+      if [ "$(uname -s)" = Darwin ]; then
+        case $action in
+          install)
+            if [ -f "$koditgz" ] && { [ -d /Applications/Kodi.app ] || [ -d "$HOME/Library/Application Support/Kodi" ]; }; then
+              echo "Kodi:"
+              if rm -rf "$kodidir.new" && mkdir -p "$kodidir.new" && tar -xzf "$koditgz" -C "$kodidir.new" && rm -rf "$kodidir" && mv "$kodidir.new" "$kodidir"; then
+                PUSHMPC_KODI_DIR="$kodidir" /bin/sh "$kodidir/install.sh" install || echo "  Kodi: not set up (see above); the rest of PushMPC is"
+              fi
+            fi ;;
+          uninstall)
+            if [ -f "$kodidir/install.sh" ]; then echo "Kodi:"; PUSHMPC_KODI_DIR="$kodidir" /bin/sh "$kodidir/install.sh" uninstall; rm -rf "$kodidir"; rmdir "$data/pushmpc" 2>/dev/null; fi ;;
+          status)
+            [ ! -f "$kodidir/install.sh" ] || PUSHMPC_KODI_DIR="$kodidir" /bin/sh "$kodidir/install.sh" status ;;
         esac
       fi
       script_dir="#{HOMEBREW_PREFIX}/etc/mpv/scripts"
@@ -356,6 +390,7 @@ class Pushmpc < Formula
       Settings: ~/.config/pushmpc/settings.ini (Smoother=auto|off|2..8, Backend=auto|apple|portable,
       AppleSuperResolution=auto|off|2|4|editing|artcnn|lowlatency, Content=live|anime, AppleTenBit=auto|off,
       AppleSrModelDownload=auto|never). Logs: ~/Library/Logs/PushMPC.
+      On macOS, pushmpc-setup install also puts the PushMPC add-on into Kodi (in /Applications) when it is there.
       On macOS, pushmpc-setup install also sets up Plex for Mac and Plex HTPC (in /Applications) when they are there, and
       re-applies itself after Plex updates. If macOS refuses, allow your terminal in System Settings > Privacy & Security >
       App Management, then run pushmpc-setup install again.

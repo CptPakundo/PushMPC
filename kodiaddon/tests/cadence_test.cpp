@@ -17,7 +17,7 @@ static int g_fail = 0;
 static void Schedule()
 {
     const double fu = 1e6 * 1001.0 / 24000.0;   // 41708.33 us
-    for (int k : {1, 2, 3, 4, 5, 10}) {
+    for (int k : {1, 2, 3, 4, 5, 10, 12, 16}) {
         std::vector<pmk::Slot> all;
         int64_t prev = 0;
         for (int i = 1; i <= 48; ++i) {

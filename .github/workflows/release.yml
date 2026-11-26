@@ -296,11 +296,10 @@ jobs:
         if: matrix.arch == 'x86_64'
         continue-on-error: true
         with: { name: clips, path: vlc-clips }
-      # the Kodi add-on with its installer (kodi-addon.yml, this run; x86_64)
+      # the Kodi add-on with its installer (kodi-addon.yml, this run; x86_64 and aarch64 builds)
       - uses: actions/download-artifact@v4
-        if: matrix.arch == 'x86_64'
         continue-on-error: true
-        with: { name: pushmpc-kodi-Linux, path: kodi-linux }
+        with: { name: "${{ matrix.arch == 'x86_64' && 'pushmpc-kodi-Linux' || 'pushmpc-kodi-Linux-aarch64' }}", path: kodi-linux }
       # the Linux NVIDIA engine's kernels (x86_64: NVIDIA publishes its Video Effects runtime for Linux x86-64 only)
       - uses: actions/download-artifact@v4
         if: matrix.arch == 'x86_64'
@@ -377,7 +376,7 @@ jobs:
             cc -O2 -Wall mpvnative/hook/libmpv_host.c -o /tmp/plexlin/pushmpc-plex-selftest -ldl
             export PUSHMPC_PLEX_DIR=/tmp/plexlin
           fi
-          if [ -f kodi-linux/install.sh ]; then export PUSHMPC_KODI_DIR=$PWD/kodi-linux; elif [ "${{ matrix.arch }}" = x86_64 ]; then echo "::warning title=Kodi add-on::no pushmpc-kodi-Linux artifact: the tarball has no kodi/"; fi
+          if [ -f kodi-linux/install.sh ]; then chmod +x kodi-linux/kodi*/inputstream.pushmpc/pushmpc-nvvfx-selftest 2>/dev/null || true; export PUSHMPC_KODI_DIR=$PWD/kodi-linux; else echo "::warning title=Kodi add-on::no pushmpc-kodi-Linux artifact for ${{ matrix.arch }}: the tarball has no kodi/"; fi
           if [ -f vlc-linux/libpushmpc_plugin.so ]; then export PUSHMPC_VLC_PLUGIN=$PWD/vlc-linux/libpushmpc_plugin.so; else echo "::warning title=VLC module::no plugin-linux artifact for ${{ matrix.arch }}: the tarball has no vlc/"; fi
           for c in vlc-clips/hwclip.mkv vlc-clips/clips/hwclip.mkv; do [ -f "$c" ] && export PUSHMPC_VLC_SELFTEST_CLIP=$PWD/$c && break; done
           tg="pushmpc_vs portable_test pmml_cli"; [ "${{ matrix.arch }}" = x86_64 ] && tg="$tg pushmpc-nvvfx-selftest nvl_test"
@@ -406,7 +405,7 @@ jobs:
   # the self-test and pushmpc-plex-mac.sh). The Homebrew formula's plex-mac resource; pushmpc-setup installs it into
   # the Plex apps. A failure there leaves it out of the release, nothing else.
   macos:
-    needs: [mpvnative-extra]
+    needs: [mpvnative-extra, kodi-extra]
     if: ${{ !cancelled() && format('{0}', inputs.components) != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -416,6 +415,10 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { name: plexmac, path: plexmac }
+      # the Kodi add-on for Kodi on the Mac (kodi-addon.yml part extra): universal builds for Kodi 21 / 22 and install.sh
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: pushmpc-kodi-macOS, path: kodimac }
       - name: pushmpc-plex-mac-<version>.tar.gz
         env:   # G13: a release (tag or beta, not a dry run) needs the bundle
           STRICT: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}
@@ -431,14 +434,24 @@ jobs:
             echo "::warning title=Plex for Mac::no plexmac artifact (mpv-native.yml plex-macos): the release has no Plex for Mac bundle"
             [ "$STRICT" != true ] || { echo "::error title=Plex for Mac::a release needs the Plex for Mac bundle"; exit 1; }
           fi
+          if [ -f kodimac/install.sh ] && [ -f kodimac/kodi22/inputstream.pushmpc/addon.xml ]; then
+            chmod +x kodimac/install.sh
+            tar -czf "dist/pushmpc-kodi-macos-$ver.tar.gz" -C kodimac .
+            tar -tzvf "dist/pushmpc-kodi-macos-$ver.tar.gz" | head -40
+            shasum -a 256 "dist/pushmpc-kodi-macos-$ver.tar.gz"
+          else
+            echo "::warning title=Kodi for Mac::no pushmpc-kodi-macOS artifact (kodi-addon.yml package): the release has no Kodi for Mac package"
+          fi
       - uses: actions/upload-artifact@v4
         with: { name: pushmpc-macos, path: dist/, if-no-files-found: ignore }
 
   # The separate release assets from the components' extra parts: the VLC module for macOS (universal), PushMPC's mpv
-  # as a Linux AppImage, and the Kodi add-on for Android (Kodi 21 and 22, arm64). Only publish waits for this job.
+  # as a Linux AppImage, and the Kodi add-on as "Install from zip file" archives for every platform (Android, LibreELEC /
+  # CoreELEC / OSMC on ARM, Linux, Windows, macOS; Kodi 21 and 22: kodiaddon/ci/make-zips.sh over both kodi parts'
+  # builds). Only publish waits for this job.
   # G13: the "extra" lines of scripts/release-components.txt are checked here (a release fails without one).
   extras:
-    needs: [vlc-extra, mpvnative-extra, kodi-extra]
+    needs: [vlc-extra, mpvnative-extra, kodi, kodi-extra]
     if: ${{ !cancelled() && format('{0}', inputs.components) != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -449,6 +462,7 @@ jobs:
           sparse-checkout: |
             filter/src
             scripts
+            kodiaddon/ci
           persist-credentials: false
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -458,7 +472,7 @@ jobs:
         with: { name: mpvnative-appimage, path: x/appimage }
       - uses: actions/download-artifact@v4
         continue-on-error: true
-        with: { pattern: 'addon-Android-arm64-kodi*', path: x/android }
+        with: { pattern: 'addon-*-kodi*', path: x/kodi }
       - name: The assets, and the components check
         env:
           STRICT: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}
@@ -468,10 +482,7 @@ jobs:
           [ -f x/vlc-macos/libpushmpc_plugin.dylib ] && (cd x/vlc-macos && zip -q "../../dist/pushmpc-vlc-macos-$ver.zip" libpushmpc_plugin.dylib)
           a=$(ls x/appimage/*.AppImage 2>/dev/null | head -1)
           [ -n "$a" ] && cp "$a" "dist/PushMPC-mpv-linux-x86_64-$ver.AppImage" && chmod +x "dist/PushMPC-mpv-linux-x86_64-$ver.AppImage"
-          for k in 21 22; do
-            d=x/android/addon-Android-arm64-kodi$k
-            [ -d "$d/inputstream.pushmpc" ] && (cd "$d" && zip -qr "../../../dist/pushmpc-kodi$k-android-arm64-$ver.zip" inputstream.pushmpc)
-          done
+          sh kodiaddon/ci/make-zips.sh x/kodi dist "$ver" || echo "::warning title=Kodi zips::no Kodi add-on builds in this run"
           ls -la dist
           missing=''
           while read -r name where path; do
@@ -513,7 +524,8 @@ jobs:
           python3 -I scripts/update-formula.py Formula/pushmpc.rb --version "$ver" \
             --src "src/pushmpc-$ver-src.tar.gz" --src-url "$base/pushmpc-$ver-src.tar.gz" \
             --pmml "a/pmml-graphs-$ver.tar.gz" --pmml-url "$base/pmml-graphs-$ver.tar.gz" \
-            --plex "m/pushmpc-plex-mac-$ver.tar.gz" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"
+            --plex "m/pushmpc-plex-mac-$ver.tar.gz" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz" \
+            --kodi "m/pushmpc-kodi-macos-$ver.tar.gz" --kodi-url "$base/pushmpc-kodi-macos-$ver.tar.gz"
           ruby -c Formula/pushmpc.rb
           git diff --stat; git diff Formula/pushmpc.rb
       - uses: actions/upload-artifact@v4
@@ -588,10 +600,12 @@ jobs:
           git clone -q --depth 1 --branch main "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" main-repo
           cd main-repo
           plex=""; [ ! -f "../release/pushmpc-plex-mac-$ver.tar.gz" ] || plex="../release/pushmpc-plex-mac-$ver.tar.gz"
+          kodi=""; [ ! -f "../release/pushmpc-kodi-macos-$ver.tar.gz" ] || kodi="../release/pushmpc-kodi-macos-$ver.tar.gz"
           python3 -I scripts/update-formula.py Formula/pushmpc.rb --version "$ver" \
             --src "../release/pushmpc-$ver-src.tar.gz" --src-url "$base/pushmpc-$ver-src.tar.gz" \
             --pmml "../release/pmml-graphs-$ver.tar.gz" --pmml-url "$base/pmml-graphs-$ver.tar.gz" \
-            ${plex:+--plex "$plex" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"}
+            ${plex:+--plex "$plex" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"} \
+            ${kodi:+--kodi "$kodi" --kodi-url "$base/pushmpc-kodi-macos-$ver.tar.gz"}
           git diff --quiet && { echo "the formula on main is already at $TAG"; exit 0; }
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -am "Homebrew formula: PushMPC $TAG"
           git push -q origin HEAD:main

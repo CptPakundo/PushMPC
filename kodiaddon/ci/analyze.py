@@ -136,11 +136,15 @@ if case.startswith("browse"):
            "kodi_decoder": not has_decoder and "a probe asked for the add-on's decoder" not in text}
     notes = [l.strip() for l in drive.splitlines() if l.startswith("DRIVE file")] + [
         f"add-on opened {sum(1 for l in lines if 'PushMPC: colour:' in l)} files for Kodi's probes"]
+if case.startswith("pushcore"):
+    # Windows: the pushcore route (pm_pushcore.dll and the stub core on WARP) produced the pictures
+    res["pushcore"] = "engine: pushcore:" in text
+    notes.append("pushcore frames: " + "; ".join(l.split("PushMPC:", 1)[1].strip() for l in lines if "PushMPC: pushcore" in l)[:400])
 if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
 # zerocopy (Wayland, software Vulkan) checks the buffer path only: the GPU engine is far below real time there
-required = ["addon", "pictures"] + ([] if case.startswith("zerocopy") else ["kodi"]) + ([] if case in ("seek", "chapter") or case.startswith("zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("buffers", "inplace") if x in res] + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+required = ["addon", "pictures"] + ([] if case.startswith("zerocopy") else ["kodi"]) + ([] if case in ("seek", "chapter") or case.startswith("zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + (["pushcore"] if "pushcore" in res else []) + [x for x in ("buffers", "inplace") if x in res] + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
 if case.startswith("browse"):
     required = ["alive", "probed", "kodi_decoder"]
 ok = all(res.get(x) for x in required)

@@ -15,5 +15,5 @@ mpvbuild    stage    filter/mpvbuild.json
 mpvbuild    release  PushMPC-mpv-windows-*.zip
 vlcmac      extra    pushmpc-vlc-macos-*.zip
 appimage    extra    PushMPC-mpv-linux-x86_64-*.AppImage
-kodiandroid extra    pushmpc-kodi21-android-arm64-*.zip
-kodiandroid extra    pushmpc-kodi22-android-arm64-*.zip
+kodiandroid extra    inputstream.pushmpc-*-android-arm64-kodi21.zip
+kodiandroid extra    inputstream.pushmpc-*-android-arm64-kodi22.zip

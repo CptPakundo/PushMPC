@@ -21,9 +21,14 @@ struct EngineCfg {
     int outWidth = 0, outHeight = 0;   // 0: source size; else the GPU upscaler's output (ignored by the CPU engine)
     int upscaler = 0;                  // 0 none, 1 NIS, 2 FSR1
     int backend = 0;                   // 0 Auto (GPU, else CPU), 1 CPU only, 2 GPU only
-    bool semiPlanar = false;
+    bool semiPlanar = false;           // GPU engine output NV12 / P010 (U and V interleaved; 10-bit in the high bits)
+    bool external = false;             // frames arrive on the GPU (PushExternal: Android hardware buffers), not as planes
+    // for engines that plan the multiplier when they open (nvl: NVIDIA VFG has a fixed FrameMultiplier)
+    double srcFps = 0, displayHz = 0;
+    int smoother = 0;                  // 0 Auto, 1 off, 2..
+    int matrix = 1;                    // H.273
+    bool fullRange = false, hdr = false;
     int fullscreen = -1;               // Kodi's window covers its screen: 1 / 0 / -1 unknown (Auto: the window composition per shown frame)
-    bool external = false;             // frames arrive on the GPU (PushExternal: Android hardware buffers), not as planes           // GPU engine output NV12 / P010 (U and V interleaved; 10-bit in the high bits)
 };
 
 // the GPU engine's output layout (packed rows); a player buffer laid out like this can be written in place
@@ -63,10 +68,21 @@ public:
     virtual bool GenerateInto(float /*t*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual bool RealInto(bool /*current*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual EngineStats Stats() const = 0;
+    // > 0: the multiplier this engine was opened for (it cannot change per stream)
+    virtual int FixedK() const { return 0; }
+    // the highest multiplier this engine produces; a fixed setting above it is clamped to it
+    virtual int MaxK() const { return FixedK() > 0 ? FixedK() : 8; }
     // Auto's multiplier for this engine (display refresh / source fps within the measured budget)
     virtual int DecideK(int smoother, double srcFps, double displayHz, std::string& why) = 0;
 };
 
+// the portable engines' (CPU and GPU) highest multiplier: vsplugin/src/backend.h kPortableMaxK, which equals PushMPC's
+// ceiling PUSHCORE_MAX_MULTIPLIER (16). Kept here as a number because this branch's backend.h predates kPortableMaxK;
+// at the merge it can become pmvs::kPortableMaxK.
+inline constexpr int kPortableEngineMaxK = 16;
+
+// Linux with NVIDIA: the nvl engine (kodi_nvl.cpp), or null with the reason
+std::unique_ptr<IEngine> OpenNvl(const EngineCfg& cfg, std::string& why);
 // the best engine for cfg, or the CPU engine with the GPU's reason in why; null only when even the CPU one fails
 std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why);
 // does this build have the GPU engine
