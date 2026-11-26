@@ -235,20 +235,22 @@ static void upscaleRun() {
         // RGBA8 to a caller's size (pushcore's route)
         pmml::UpscaleOptions o;
         o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.io = pmml::UpscaleIo::Rgba8; o.width = w; o.height = h; o.outWidth = 150; o.outHeight = 100;
+        o.inPitchPx = 72; o.outPitchPx = 160;   // D3D12-style padded rows (the zero-copy layout): cropped in, padded out
         std::string err;
         auto up = pmml::Upscaler::create(o, &err);
         if (!up) { std::printf("FAIL upscale rgba8 %s: %s\n", m.id, err.c_str()); ++failures; continue; }
         CHECK(up->outWidth() == 150 && up->outHeight() == 100);
-        std::vector<uint8_t> src(size_t(w) * 4 * h), dst(size_t(160) * 4 * 100, 7);
+        std::vector<uint8_t> src(size_t(72) * 4 * h), dst(size_t(160) * 4 * 100, 7);
         for (size_t i = 0; i < src.size(); i += 4) { src[i] = 200; src[i + 1] = 100; src[i + 2] = 50; src[i + 3] = 255; }
-        CHECK(up->runRgba(src.data(), w * 4, dst.data(), 160 * 4, &err));
+        for (int yy = 0; yy < h; ++yy) for (int xx = w; xx < 72; ++xx) src[size_t(yy) * 288 + xx * 4] = 0;   // the pad columns must not leak in
+        CHECK(up->runRgba(src.data(), 72 * 4, dst.data(), 160 * 4, &err));
         double e = 0;
         for (int yy = 10; yy < 90; ++yy)
             for (int xx = 10; xx < 140; ++xx)
                 for (int c = 0; c < 3; ++c) e = std::max(e, std::fabs(double(dst[size_t(yy) * 640 + xx * 4 + c]) - double(src[size_t(c)])));
         std::printf("upscale %-16s rgba8 %dx%d -> 150x100: flat colour max %.0f\n", m.id, w, h, e);
         CHECK(e <= (std::string(m.kind) == "animesr" ? 6 : 3));
-        CHECK(dst[size_t(50) * 640 + 150 * 4] == 7);   // the pitch padding is untouched
+        CHECK(dst[size_t(50) * 640 + 150 * 4] == 0);   // the graph pads the rows to the pitch
     }
 }
 

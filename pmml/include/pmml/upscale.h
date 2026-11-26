@@ -44,6 +44,7 @@ struct UpscaleOptions {
     Colour colour;                // Yuv420
     int width = 0, height = 0;    // input (even for Yuv420)
     int outWidth = 0, outHeight = 0;   // Rgba8 only: the final size (0 = width * scale)
+    int inPitchPx = 0, outPitchPx = 0; // Rgba8 only: row pitch of the input / output in pixels (0 = the width)
     bool syncTiming = false;
 };
 
@@ -64,6 +65,20 @@ public:
     virtual void reset() = 0;
     virtual UpscaleStats stats() const = 0;
     virtual std::string describe() const = 0;
+    // Zero copy (Rgba8): the picture stays in GPU memory the caller shares with pmml's device.
+    //   "dml":  ONNX Runtime with DirectML on pmml's own D3D12 device and queue (dmlDevice / dmlQueue): the caller opens
+    //           its shared buffers and fence there; wrapDml turns such a buffer (UAV-capable, COMMON state) into an
+    //           allocation for runRgbaDevice; the work is recorded on dmlQueue (the caller orders it with fence waits).
+    //   "cuda": TensorRT-RTX: runRgbaDevice takes CUDA device pointers (the caller's D3D12 buffers imported into CUDA);
+    //           it returns when the result is written.
+    //   "host": no zero copy (runRgba only).
+    virtual std::string deviceKind() const { return "host"; }
+    virtual void* dmlDevice() const { return nullptr; }   // ID3D12Device*
+    virtual void* dmlQueue() const { return nullptr; }    // ID3D12CommandQueue*
+    virtual void* wrapDml(void* d3d12Resource, std::string* err) { (void)d3d12Resource; if (err) *err = "no DirectML here"; return nullptr; }
+    virtual void freeDml(void* allocation) { (void)allocation; }
+    // in: [h][inPitchPx][4] bytes, out: [outHeight][outPitchPx][4] (as the options say), both in the EP's device memory
+    virtual bool runRgbaDevice(void* in, void* out, std::string* err) { (void)in; (void)out; if (err) *err = "no zero copy on this backend"; return false; }
 };
 
 // The files a model needs that are not there ("" = all present): the weights, the model graph, the wrappers.

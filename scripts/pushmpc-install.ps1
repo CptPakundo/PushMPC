@@ -2511,7 +2511,6 @@ function Install-AnimeUpscalers($state) {
         if (-not $graphs -and (Test-Path -LiteralPath (Join-Path $d 'anime-sr-graphs\anime-sr'))) { $graphs = Join-Path $d 'anime-sr-graphs' }
     }
     if (-not $fetch -or -not $graphs) { Warn 'anime upscalers: anime-models-fetch.ps1 / its pins / the graphs are not in this release: not installed'; return }
-    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'pmml\ort'))) { Warn 'anime upscalers: pmml''s runtime is not installed: not installed'; return }
     Info 'anime upscalers: ArtCNN (MIT, GitHub release), CuNNy (LGPL-3.0, its repository), AnimeSR v2 (Apache-2.0, the authors'' Google Drive), pinned by SHA-256'
     if ($DryRun) { Dry "would run anime-models-fetch.ps1 -Dest $dest -Graphs $graphs"; return }
     $out = & $fetch -Pin $pin -Dest $dest -Graphs $graphs -Cache (Join-Path $InstallDir 'download\anime-models') 2>&1
@@ -3136,6 +3135,9 @@ switch ($Action) {
         Set-MpcBeEntry $state
         Step 'PotPlayer'
         Set-PotPlayerEntry $state
+        # before the Kodi, Plex and mpv routes: their settings name the anime shaders when they are there
+        Step 'Anime upscalers (ArtCNN, CuNNy, AnimeSR)'
+        try { Install-AnimeUpscalers $state } catch { Warn "anime upscalers: not installed ($($_.Exception.Message)); RTX VSR / FSR stay the upscalers" }
         Step 'Kodi (the PushMPC add-on)'
         try { Install-KodiRoute $state } catch { Warn "Kodi add-on: not installed ($($_.Exception.Message))" }
         Step 'Plex (smoother motion inside Plex)'
@@ -3147,8 +3149,6 @@ switch ($Action) {
         if ($MpvBuild -eq 'Yes') { Step "PushMPC's own mpv"; try { Install-MpvBuild $state } catch { Warn "PushMPC's mpv: not installed ($($_.Exception.Message))" } }
         Step 'PushFlow runtime for this GPU (pmml)'
         try { Install-PmmlRuntime $state } catch { Warn "PushFlow runtime: not installed ($($_.Exception.Message)); PushFlow runs on DirectML" }
-        Step 'Anime upscalers (ArtCNN, CuNNy, AnimeSR)'
-        try { Install-AnimeUpscalers $state } catch { Warn "anime upscalers: not installed ($($_.Exception.Message)); RTX VSR / FSR stay the upscalers" }
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
         Step 'Auto: the engine for this PC'
         Progress 96 'Choosing the engine'

@@ -1,5 +1,5 @@
 {
- "_comment": "PushMPC's anime upscalers (Setup: scripts/anime-models-fetch.ps1; graphs: pmml/scripts/anime_sr_graphs.py). Every file is checked by size and SHA-256; a mismatch is refused. Sources: ArtCNN v1.6.2 (github.com/Artoriuz/ArtCNN, MIT), CuNNy at 906031bb00c15dd6a6bbbaa21c0eb0b724ca8437 (github.com/funnyplanter/CuNNy, LGPL-3.0), AnimeSR v2 (github.com/TencentARC/AnimeSR at 80a24bf7a5270907c703158ff6affb3248bf0dc2, Apache-2.0; the weights are only on the authors' Google Drive, pinned by hash). tensors: [name, dtype, shape, offset, length] of each weight inside its file (ONNX external data).",
+ "_comment": "PushMPC's anime upscalers (Setup: scripts/anime-models-fetch.ps1; graphs: pmml/scripts/anime_sr_graphs.py). Every file is checked by size and SHA-256; a mismatch is refused. Sources: ArtCNN v1.6.2 (github.com/Artoriuz/ArtCNN, MIT), CuNNy at 906031bb00c15dd6a6bbbaa21c0eb0b724ca8437 (github.com/funnyplanter/CuNNy, LGPL-3.0), AnimeSR v2 (github.com/TencentARC/AnimeSR at 80a24bf7a5270907c703158ff6affb3248bf0dc2, Apache-2.0; the weights are only on the authors' Google Drive, pinned by hash). tensors: [name, dtype, shape, offset, length] of each weight inside its file (ONNX external data). The .glsl files are the authors' own mpv user shaders (compute), for the mpv-based players (pushmpc.lua).",
  "schema": 1,
  "folder": "anime-sr",
  "files": [
@@ -114,6 +114,78 @@
    "size": 32109,
    "sha256": "e76e4ac4395070e74fc17fb370841055b93026ba95666b53bf772194ad77546f",
    "licence": "Apache-2.0"
+  },
+  {
+   "name": "ArtCNN_C4F16.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16.glsl",
+   "size": 212905,
+   "sha256": "03d0b3d31cb82c898a94a46663021a3e8f02c5a21d69c5cfdf0208de4bfd453e",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DS.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DS.glsl",
+   "size": 213065,
+   "sha256": "57df650fddec3969e17799f5522c9b03dd2d33b1aeace237fef216bf3858125a",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DN.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DN.glsl",
+   "size": 213279,
+   "sha256": "047f33cd43ca3751b00c7c81206e076ac921c1fbc06d49f23010a0b428271acf",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32.glsl",
+   "size": 761029,
+   "sha256": "f773bce6cf5fe7e5e5d599a695edd40df5cd7a20c3d08c4d164d07591d5bead3",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DS.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DS.glsl",
+   "size": 761546,
+   "sha256": "a04c9cba6fbb8e6db9239d61848390208aedf8e348ef116e12174c803d22077e",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DN.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DN.glsl",
+   "size": 763012,
+   "sha256": "6b51a6f7d75826c9492c3f78b5e60acffa24a71928e2d47c4a329423922a143c",
+   "licence": "MIT"
+  },
+  {
+   "name": "CuNNy-fast-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-fast-DS.glsl",
+   "size": 43586,
+   "sha256": "86681e39ef4a2f22ad5622be88c2bff179007f4f9b898e05638d6ab1239e03c0",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-4x16-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-4x16-DS.glsl",
+   "size": 146323,
+   "sha256": "2e9dba9e7915d7d8b35db4a08d63a64ff1406f3e975d377f2b6f90e37bb187f4",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-8x32-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-8x32-DS.glsl",
+   "size": 1012213,
+   "sha256": "87e79777b7b1ed347f1ca6bc9ab798c5b999bc827d09b2877c5ed5a783a90c66",
+   "licence": "LGPL-3.0"
   }
  ],
  "models": [

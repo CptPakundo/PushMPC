@@ -11,6 +11,9 @@
 #ifdef PMVS_GPU
 #include "gpu_backend.h"
 #endif
+#ifdef PMK_PMML
+#include "anime_sr_engine.h"
+#endif
 
 namespace pmk {
 
@@ -233,8 +236,44 @@ bool GpuBuilt() { return false; }
 
 bool NonNull(const void* p) { return p != nullptr; }
 
-std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
+std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfgIn, std::string& why)
 {
+    EngineCfg cfg = cfgIn;
+#ifdef PMK_PMML
+    // the anime upscaler: the inner engine runs at its output size; it falls back to the plain engine when it cannot start
+    if (!cfg.animeModel.empty() && !cfg.external) {
+        pmml::UpscaleOptions u;
+        u.runtimeDir = cfg.pmmlRuntime; u.graphsDir = cfg.pmmlRuntime + "/graphs"; u.cacheDir = cfg.pmmlRuntime;
+        u.model = cfg.animeModel; u.io = pmml::UpscaleIo::Yuv420; u.colour = pmml::Colour::limited(cfg.bits);
+        u.width = cfg.width; u.height = cfg.height;
+        std::string ue;
+        if (!cfg.pmmlBackend.empty()) pmml::Backend::parse(cfg.pmmlBackend, &u.backend);
+        else {
+            std::string log;
+            const auto devs = pmml::listDevices(cfg.pmmlRuntime, &log);
+            for (const char* ep : {"trt-rtx", "dml", "amdgpu", "openvino", "migraphx", "coreml", "qnn-gpu"}) {
+                auto it = std::find_if(devs.begin(), devs.end(), [&](const pmml::DeviceInfo& d) { return d.backend.ep == ep; });
+                if (it != devs.end()) { u.backend = it->backend; break; }
+            }
+        }
+        auto up = u.backend.ep == "cpu" && cfg.pmmlBackend.empty() ? nullptr : pmml::Upscaler::create(u, &ue);   // the CPU only when named (tests)
+        if (up) {
+            EngineCfg inner = cfg;
+            inner.animeModel.clear();
+            inner.width = up->outWidth(); inner.height = up->outHeight();
+            if (inner.outWidth > 0 && inner.outWidth <= inner.width * 11 / 10 && inner.outHeight <= inner.height * 11 / 10) { inner.upscaler = 0; inner.outWidth = inner.outHeight = 0; }
+            std::string innerWhy;
+            auto e = OpenEngine(inner, innerWhy);
+            if (e) {
+                why = innerWhy + "; anime upscaler " + cfg.animeModel + " first";
+                return std::make_unique<AnimeSrEngine>(std::move(up), std::move(e), cfg.width, cfg.height, cfg.bits);
+            }
+            ue = innerWhy;
+        }
+        why = "anime upscaler " + cfg.animeModel + " not used (" + (ue.empty() ? std::string("no GPU execution provider in the pmml runtime") : ue) + "); ";
+        cfg.animeModel.clear();
+    }
+#endif
     std::string gpuWhy;
 #ifdef PMVS_GPU
     if (cfg.backend != 1) {
@@ -247,8 +286,8 @@ std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
 #endif
     auto c = std::make_unique<CpuEngine>(cfg);
     std::string cpuWhy;
-    if (!c->Open(cpuWhy)) { why = "CPU engine: " + cpuWhy; return nullptr; }
-    why = cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + "): CPU engine";
+    if (!c->Open(cpuWhy)) { why += "CPU engine: " + cpuWhy; return nullptr; }
+    why += cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + "): CPU engine";
     return c;
 }
 

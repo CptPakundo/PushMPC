@@ -162,3 +162,7 @@ msgstr ""
 msgctxt "#30110"
 msgid "Off: Kodi plays HDR files as real HDR without frame generation (best on an HDR display). On: they get frame generation, converted to SDR."
 msgstr ""
+
+msgctxt "#30111"
+msgid "Anime upscaler (ArtCNN, CuNNy, AnimeSR)"
+msgstr ""

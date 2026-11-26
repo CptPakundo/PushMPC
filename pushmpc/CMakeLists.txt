@@ -41,6 +41,10 @@ target_compile_options(pushcore_dll PRIVATE /utf-8)
 target_include_directories(pushcore_dll PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
 # d3dcompiler: PushMPC's deband compute shader (PushCoreDeband.h) is compiled at open with the system's d3dcompiler_47.dll
 target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler)
+# the anime upscalers' TensorRT-RTX zero copy: the CUDA driver API types (nvcuda.dll is loaded at run time)
+if(VEYRA_CUDA_DRIVER_INCLUDE_DIR)
+  target_include_directories(pushcore_dll PRIVATE "${VEYRA_CUDA_DRIVER_INCLUDE_DIR}")
+endif()
 # anime upscalers (src/PushCoreAnimeSr.h): pmml, when PushFPS's tree builds it (PUSHMPC_PMML_ORT_INCLUDE); without it the
 # capability says so and srMethod PMML falls back to RTX VSR / FSR
 if(TARGET pmml)

@@ -43,6 +43,9 @@ from onnx import TensorProto, helper, numpy_helper
 
 OPSET = 17
 SENTINEL_OUT = {"outh": 0x504D4D4C00000005, "outw": 0x504D4D4C00000006}
+# RGBA8 rows wider than the picture (D3D12 copies want 256-byte row pitches): the input is cropped to INW pixels, the
+# output padded by OPAD pixels at the right
+SENTINEL_PITCH = {"inw": 0x504D4D4C00000007, "opad": 0x504D4D4C00000008}
 F32 = TensorProto.FLOAT
 
 
@@ -231,8 +234,9 @@ def _code(g, x, mx, name, dtype=TensorProto.UINT16):
 
 
 def _rgba_in(g):
-    g.inputs.append(helper.make_tensor_value_info("in_rgba", TensorProto.UINT8, [1, "pmml_h", "pmml_w", 4]))
-    x = g.op("Mul", [g.op("Cast", [g.op("Transpose", ["in_rgba"], perm=[0, 3, 1, 2])], to=F32), g.const(1.0 / 255.0)])
+    g.inputs.append(helper.make_tensor_value_info("in_rgba", TensorProto.UINT8, [1, "pmml_h", "pmml_ipw", 4]))
+    rows = g.op("Slice", ["in_rgba", g.i64([0]), g.const([SENTINEL_PITCH["inw"]], np.int64, name="in_width"), g.i64([2])])
+    x = g.op("Mul", [g.op("Cast", [g.op("Transpose", [rows], perm=[0, 3, 1, 2])], to=F32), g.const(1.0 / 255.0)])
     return g.op("Slice", [x, g.i64([0]), g.i64([3]), g.i64([1])])
 
 
@@ -244,8 +248,9 @@ def _rgba_out(g, rgb):
     alpha = g.op("Expand", [g.const(1.0), g.op("Concat", [g.i64([1, 1]), g.op("Slice", [shp, g.i64([2]), g.i64([4])])], axis=0)])
     rgba = g.op("Concat", [rgb, alpha], axis=1)
     q = g.op("Round", [g.op("Mul", [g.op("Clip", [rgba, g.const(0.0), g.const(1.0)]), g.const(255.0)])])
-    g.op("Transpose", [g.op("Cast", [q], to=TensorProto.UINT8)], out="out_rgba", perm=[0, 2, 3, 1])
-    g.outputs.append(helper.make_tensor_value_info("out_rgba", TensorProto.UINT8, [1, "pmml_oh", "pmml_ow", 4]))
+    pads = g.const([0, 0, 0, 0, 0, 0, SENTINEL_PITCH["opad"], 0], np.int64, name="out_pads")
+    g.op("Pad", [g.op("Transpose", [g.op("Cast", [q], to=TensorProto.UINT8)], perm=[0, 2, 3, 1]), pads], out="out_rgba", mode="constant")
+    g.outputs.append(helper.make_tensor_value_info("out_rgba", TensorProto.UINT8, [1, "pmml_oh", "pmml_opw", 4]))
 
 
 BT709 = (0.2126, 0.0722)

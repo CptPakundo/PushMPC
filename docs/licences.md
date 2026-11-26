@@ -37,5 +37,7 @@ them.
   Each file is checked against its pinned SHA-256 before it is used, and each project's licence text is installed next
   to its files. CuNNy stays a separate, replaceable component: PushMPC reads its weights straight from CuNNy's own file,
   so you can swap in your own CuNNy weights and remake the graph with `pmml/scripts/anime_sr_graphs.py`.
+  For the mpv-based players Setup also fetches ArtCNN's and CuNNy's own mpv shaders (same licences, the licence text is
+  in each file's header); each one stays its own file you can replace.
 
 See [release model](release-model.md) for how downloads are pinned and checked.

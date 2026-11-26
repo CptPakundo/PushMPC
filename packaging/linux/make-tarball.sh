@@ -34,6 +34,9 @@ fi
 if [ -n "${PUSHMPC_PMML_GRAPHS:-}" ] && [ -f "$PUSHMPC_PMML_GRAPHS/synth-yuv.onnx" ]; then
     mkdir -p "$d/pmml/graphs"; cp "$PUSHMPC_PMML_GRAPHS"/*.onnx "$d/pmml/graphs/"
     install -m 644 pmml/scripts/fetch_runtime.py "$d/pmml/fetch_runtime.py"; install -m 644 scripts/ml-runtime-pin.json "$d/pmml/ml-runtime-pin.json"
+    # the anime upscalers: the model graphs (no weights) and the pin setup.sh fetches them by
+    if [ -d "$PUSHMPC_PMML_GRAPHS/anime-sr" ]; then mkdir -p "$d/pmml/graphs/anime-sr"; cp "$PUSHMPC_PMML_GRAPHS"/anime-sr/*.onnx "$d/pmml/graphs/anime-sr/"; fi
+    install -m 644 scripts/anime-models-pin.json "$d/pmml/anime-models-pin.json"
 fi
 # optional: PushMPC's native hook for the distro mpv (PUSHMPC_MPVNATIVE_DIR = mpv-native.yml's hook folder:
 # pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so) with its installer, which setup.sh runs

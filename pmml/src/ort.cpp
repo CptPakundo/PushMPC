@@ -857,6 +857,8 @@ public:
         if (w < 8 || h < 8 || (!rgba_ && (w % 2 || h % 2))) { if (err) *err = "upscaler: bad input size"; return false; }
         outW_ = rgba_ && u.outWidth > 0 ? u.outWidth : w * s;
         outH_ = rgba_ && u.outHeight > 0 ? u.outHeight : h * s;
+        inPw_ = rgba_ && u.inPitchPx > w ? u.inPitchPx : w;
+        outPw_ = rgba_ && u.outPitchPx > outW_ ? u.outPitchPx : outW_;
         colour_ = u.colour.packed();
         PMML_TRY(ort->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &cpu_));
         PMML_TRY(ort->api->GetAllocatorWithDefaultOptions(&alloc_));
@@ -865,9 +867,10 @@ public:
         const int ch = rgba_ ? h : h / 2, cw = rgba_ ? w : w / 2;
         const std::vector<std::pair<std::string, int64_t>> dims = {
             {"pmml_h", h}, {"pmml_w", w}, {"pmml_ch", ch}, {"pmml_cw", cw}, {"H", h}, {"W", w}, {"H4", 4 * h}, {"W4", 4 * w},
-            {"pmml_oh2", h * s}, {"pmml_ow2", w * s}, {"pmml_oh2c", h * s / 2}, {"pmml_ow2c", w * s / 2}, {"pmml_oh", outH_}, {"pmml_ow", outW_}};
+            {"pmml_oh2", h * s}, {"pmml_ow2", w * s}, {"pmml_oh2c", h * s / 2}, {"pmml_ow2c", w * s / 2}, {"pmml_oh", outH_}, {"pmml_ow", outW_},
+            {"pmml_ipw", inPw_}, {"pmml_opw", outPw_}};
         const double t0 = nowMs();
-        if (!session(joinPath(u.graphsDir, "sr_in_" + kind + "-" + io + ".onnx"), dims, false, &in_, err)) return false;
+        if (!session(joinPath(u.graphsDir, "sr_in_" + kind + "-" + io + ".onnx"), dims, rgba_, &in_, err)) return false;
         if (!session(joinPath(dir, m_->graph), dims, false, &net_, err)) return false;
         if (!session(joinPath(u.graphsDir, "sr_out_" + kind + "-" + io + ".onnx"), dims, rgba_, &out_, err)) return false;
         for (OrtSession* x : {in_, net_, out_}) {
@@ -947,20 +950,54 @@ public:
         if (!rgba_) { if (err) *err = "this upscaler was created for YUV planes"; return false; }
         const int w = u_.width, h = u_.height;
         const uint8_t* src = in;
-        if (inPitch != ptrdiff_t(w) * 4) {
-            rgbaIn_.resize(size_t(w) * h * 4);
-            for (int y = 0; y < h; ++y) std::memcpy(&rgbaIn_[size_t(y) * w * 4], in + y * inPitch, size_t(w) * 4);
+        if (inPitch != ptrdiff_t(inPw_) * 4) {
+            rgbaIn_.resize(size_t(inPw_) * h * 4);
+            for (int y = 0; y < h; ++y) std::memcpy(&rgbaIn_[size_t(y) * inPw_ * 4], in + y * inPitch, size_t(w) * 4);
             src = rgbaIn_.data();
         }
         uint8_t* dst = out;
-        if (outPitch != ptrdiff_t(outW_) * 4) { rgbaOut_.resize(size_t(outW_) * outH_ * 4); dst = rgbaOut_.data(); }
+        if (outPitch != ptrdiff_t(outPw_) * 4) { rgbaOut_.resize(size_t(outPw_) * outH_ * 4); dst = rgbaOut_.data(); }
         std::vector<OrtValue*> tmp;
         OrtValue *iv = nullptr, *ov = nullptr;
-        bool ok = tensor(const_cast<uint8_t*>(src), {1, h, w, 4}, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, 1, &iv, err);
-        if (ok) { tmp.push_back(iv); ok = tensor(dst, {1, outH_, outW_, 4}, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, 1, &ov, err); }
+        bool ok = tensor(const_cast<uint8_t*>(src), {1, h, inPw_, 4}, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, 1, &iv, err);
+        if (ok) { tmp.push_back(iv); ok = tensor(dst, {1, outH_, outPw_, 4}, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, 1, &ov, err); }
         if (ok) { tmp.push_back(ov); ok = chain({{"in_rgba", iv}}, {{"out_rgba", ov}}, err); }
         if (ok && dst != out)
-            for (int y = 0; y < outH_; ++y) std::memcpy(out + y * outPitch, dst + size_t(y) * outW_ * 4, size_t(outW_) * 4);
+            for (int y = 0; y < outH_; ++y) std::memcpy(out + y * outPitch, dst + size_t(y) * outPw_ * 4, size_t(outW_) * 4);
+        for (OrtValue* v : tmp) ort->api->ReleaseValue(v);
+        return ok;
+    }
+
+    std::string deviceKind() const override {
+        if (!rgba_ || !choice_.deviceMemory) return "host";
+        return o_.backend.ep == "dml" ? "dml" : o_.backend.ep == "trt-rtx" ? "cuda" : "host";
+    }
+#if PMML_HAVE_DML
+    void* dmlDevice() const override { return deviceKind() == "dml" ? g_dml.device : nullptr; }
+    void* dmlQueue() const override { return deviceKind() == "dml" ? g_dml.queue : nullptr; }
+    void* wrapDml(void* resource, std::string* err) override {
+        const OrtDmlApi* dml = nullptr;
+        void* alloc = nullptr;
+        if (failed(ort->api->GetExecutionProviderApi("DML", ort->version, reinterpret_cast<const void**>(&dml)), "DML API", err) || !dml) return nullptr;
+        if (failed(dml->CreateGPUAllocationFromD3DResource(static_cast<ID3D12Resource*>(resource), &alloc), "CreateGPUAllocationFromD3DResource", err)) return nullptr;
+        return alloc;
+    }
+    void freeDml(void* alloc) override {
+        const OrtDmlApi* dml = nullptr;
+        if (alloc && !ort->api->GetExecutionProviderApi("DML", ort->version, reinterpret_cast<const void**>(&dml)) && dml) dml->FreeGPUAllocation(alloc);
+    }
+#endif
+    bool runRgbaDevice(void* in, void* out, std::string* err) override {
+        if (deviceKind() == "host") { if (err) *err = "no zero copy on " + o_.backend.key(); return false; }
+        std::vector<OrtValue*> tmp;
+        const int64_t inShape[4] = {1, u_.height, inPw_, 4}, outShape[4] = {1, outH_, outPw_, 4};
+        OrtValue *iv = nullptr, *ov = nullptr;
+        PMML_TRY(ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, in, size_t(u_.height) * inPw_ * 4, inShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &iv));
+        tmp.push_back(iv);
+        OrtStatus* s = ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, out, size_t(outH_) * outPw_ * 4, outShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &ov);
+        bool ok = !failed(s, "output tensor", err);
+        if (ok) { tmp.push_back(ov); ok = chain({{"in_rgba", iv}}, {{"out_rgba", ov}}, err); }
+        if (ok && deviceKind() == "cuda") ok = !failed(ort->api->SynchronizeBoundOutputs(bind_[2]), "sync", err);   // written when it returns
         for (OrtValue* v : tmp) ort->api->ReleaseValue(v);
         return ok;
     }
@@ -1052,9 +1089,9 @@ private:
         }
         // sr_out_*-rgba8: the output size sentinels (anime_sr_graphs.py SENTINEL_OUT) replaced in the bytes
         std::string bytes = readText(path);
-        for (int k = 0; k < 2; ++k) {
+        for (int k = 0; k < 4; ++k) {   // outh, outw, inw, opad
             const uint64_t sentinel = 0x504D4D4C00000000ull | uint64_t(5 + k);
-            const int64_t v = k == 0 ? outH_ : outW_;
+            const int64_t v = k == 0 ? outH_ : k == 1 ? outW_ : k == 2 ? u_.width : outPw_ - outW_;
             char pat[8], val[8];
             for (int i = 0; i < 8; ++i) { pat[i] = char((sentinel >> (8 * i)) & 0xff); val[i] = char((uint64_t(v) >> (8 * i)) & 0xff); }
             for (size_t pos = 0; (pos = bytes.find(std::string(pat, 8), pos)) != std::string::npos; pos += 8) bytes.replace(pos, 8, val, 8);
@@ -1108,7 +1145,7 @@ private:
     Options o_;
     const UpscaleModel* m_ = nullptr;
     bool rgba_ = false, recurrent_ = false, luma_ = true;
-    int outW_ = 0, outH_ = 0;
+    int outW_ = 0, outH_ = 0, inPw_ = 0, outPw_ = 0;
     std::array<float, 8> colour_{};
     OrtSession *in_ = nullptr, *net_ = nullptr, *out_ = nullptr;
     std::vector<OrtIoBinding*> bind_;

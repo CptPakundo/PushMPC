@@ -14,11 +14,14 @@
 // Cost: a prior per input megapixel on an RTX 5090-class card (calibrated on a published RealESRGAN-compact speed figure; DirectML /
 // TensorRT-RTX FP16) times the card factor, plus the host round trip of this version (readback of the source picture,
 // upload of the output); the running core's measurement (PushCoreStats.animeSrMs) replaces it per model on this card.
+// Portable (no Windows types): the VapourSynth ml route uses it too.
 // Fit: the upscaler may take at most kAnimeSrShare of a source frame's time (frame generation keeps the rest).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <cwchar>
+#include <cwctype>
 #include <string>
 
 namespace pm {
@@ -50,7 +53,8 @@ inline const AnimeSrModelInfo& AnimeSrModel(int i) {
 }
 inline int AnimeSrModelIndex(const std::wstring& id) {
     for (int i = 0; i < kAnimeSrModels; ++i)
-        if (_wcsicmp(id.c_str(), AnimeSrModel(i).id) == 0) return i;
+        if (std::equal(id.begin(), id.end(), AnimeSrModel(i).id, AnimeSrModel(i).id + std::wcslen(AnimeSrModel(i).id),
+                       [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); })) return i;
     return -1;
 }
 // best first (offline evidence above); the DS / DN variants are chosen from their base, never ranked themselves
@@ -58,11 +62,11 @@ constexpr int kAnimeSrRank[] = {6, 3, 0, 9, 8, 7, 10};
 constexpr bool kAnimeSrBeforeRtxVsr = false;   // RTX VSR stays Auto's first on RTX cards until the verdict (V8 / V9)
 constexpr double kAnimeSrShare = 0.35;         // the most of a source frame's time the upscaler may take
 constexpr double kAnimeSrTransferMsPerMpx = 0.35;   // host round trip per megapixel (source in + output out), PCIe 4/5
-constexpr UINT kDvdClassLines = 576;
+constexpr unsigned kDvdClassLines = 576;
 
 // the cost of a model for a source of srcW x srcH upscaled to outW x outH: learned (ms per input Mpx on this card, < 0
 // unknown) or the prior times the card factor, plus the transfer
-inline double AnimeSrCostMs(int model, UINT srcW, UINT srcH, UINT outW, UINT outH, double card, double learnedMsPerMpx)
+inline double AnimeSrCostMs(int model, unsigned srcW, unsigned srcH, unsigned outW, unsigned outH, double card, double learnedMsPerMpx)
 {
     const double inMpx = double(srcW) * srcH / 1e6, outMpx = double(outW) * outH / 1e6;
     const double net = learnedMsPerMpx > 0 ? learnedMsPerMpx * inMpx : AnimeSrModel(model).msPerMpx * inMpx * card;
@@ -78,7 +82,7 @@ struct AnimeSrPick {
 // Auto's anime upscaler for this source: the best-ranked candidate that is allowed at this source size and fits the
 // share of the frame time. lowBitrate: the DS variant of an ArtCNN C model. forced >= 0: the user's model (kept even
 // when over the share: the user asked for it; the note says so). learned[i]: ms per input Mpx on this card (< 0 unknown).
-inline AnimeSrPick PickAnimeSr(UINT srcW, UINT srcH, UINT outW, UINT outH, double fps, bool lowBitrate, double card, const double* learned, int forced)
+inline AnimeSrPick PickAnimeSr(unsigned srcW, unsigned srcH, unsigned outW, unsigned outH, double fps, bool lowBitrate, double card, const double* learned, int forced)
 {
     AnimeSrPick p;
     const double frameMs = 1000.0 / std::max(1.0, fps), budget = kAnimeSrShare * frameMs;
