@@ -72,7 +72,8 @@ conf_remove() {
 st_detail=''
 selftest() {   # selftest <Frameworks dir>: 0 active, 3 not, 2 no test possible
     [ -x "$from/pushmpc-plex-selftest" ] || { st_detail='no self-test (pushmpc-plex-selftest not shipped)'; return 2; }
-    out=$("$from/pushmpc-plex-selftest" "$1/libmpv.2.dylib" 2>&1); r=$?
+    # Plex's dylibs link each other through @rpath (the app sets it); the host (not hardened) finds them by leaf name
+    out=$(DYLD_LIBRARY_PATH="$1" "$from/pushmpc-plex-selftest" "$1/libmpv.2.dylib" 2>&1); r=$?
     st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
     case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
 }

@@ -26,7 +26,7 @@ for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in
             "$src/configure" --cc="clang -arch $arch" --arch="$arch" --target-os=darwin $cross \
                 --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
                 --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
-                --disable-postproc --disable-asm --install-name-dir='@rpath' \
+                --disable-postproc --disable-asm --disable-autodetect --install-name-dir='@rpath' \
                 --extra-cflags="-mmacosx-version-min=$min" --extra-ldflags="-arch $arch -mmacosx-version-min=$min" \
                 > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
             grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h
@@ -43,6 +43,8 @@ for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in
     lipo -create "${libs[@]}" -output "$out/$name"
     install_name_tool -id "@rpath/$name" "$out/$name" 2>/dev/null
     codesign -f -s - "$out/$name"
+    bad=$(otool -L "$out/$name" | sed 1d | awk '{print $1}' | grep -v -e '^@rpath/' -e '^/System/' -e '^/usr/lib/' | grep -v "^$out/" || true)
+    [ -z "$bad" ] || { echo "::error::$name links outside the app and the system: $bad"; exit 1; }
     echo "master@${commit:0:12} -> $name ($(lipo -archs "$out/$name")); links: $(otool -L "$out/$name" | sed 1,2d | awk '{print $1}' | grep -v '^/System\|^/usr/lib' | tr '\n' ' ')"
     # link-time stand-in for Plex's original under its new name (same exports: libavfilter 8 of the same release)
     stub="$work/libavfilter.8-plex.dylib"
