@@ -1,0 +1,56 @@
+# The Linux NVIDIA engine's GPU code as prebuilt fatbins (architecture-neutral device code: SASS for SM 75 / 86 / 89 /
+# 120 + PTX): nvl_kernels.fatbin (the colour and warp kernels) and nvl_guard_sc.fatbin / nvl_guard_fm.fatbin (the cut
+# guard's HLSL through Slang). Built once with the pinned CUDA toolkit's nvcc and Slang (build time only, never shipped
+# to users) and cached by their sources, so the release job (manylinux container, no nvcc) and the mpv-native checks
+# link the same kernels into the VapourSynth plugin, the hook's NVIDIA sidecar and pushmpc-nvvfx-selftest.
+# Artifact: nvl-kernels (the three fatbins).
+name: nvl-kernels
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CUDA_PKG_VERSION: '12-8'
+
+jobs:
+  fatbins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: nvl-kernels
+          key: nvl-kernels-${{ env.CUDA_PKG_VERSION }}-${{ hashFiles('vsplugin/engines/nvidia-linux/nvl_kernels.cu', 'vsplugin/engines/nvidia-linux/nvl_colour.h', 'vsplugin/engines/nvidia-linux/shaders/**', 'vsplugin/engines/nvidia-linux/nvl.cmake', 'scripts/slang-pin.json') }}
+      - name: CUDA toolkit (nvcc, NVIDIA's apt repository) and Slang (pinned)
+        if: steps.cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: |
+          set -eux
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-${CUDA_PKG_VERSION} cuda-cudart-dev-${CUDA_PKG_VERSION} cuda-cuobjdump-${CUDA_PKG_VERSION}
+          echo "CUDA_PATH=/usr/local/cuda-${CUDA_PKG_VERSION/-/.}" >> "$GITHUB_ENV"
+          url=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['url'])")
+          sha=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['sha256'])")
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/slang.tgz" "$url"
+          [ "$(sha256sum "$RUNNER_TEMP/slang.tgz" | cut -d' ' -f1 | tr a-f A-F)" = "$sha" ]
+          mkdir -p "$RUNNER_TEMP/slang" && tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
+          echo "SLANG_DIR=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
+      - name: The fatbins (vsplugin's nvl.cmake rules)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          cmake -S vsplugin -B build-nvl -DCMAKE_BUILD_TYPE=Release -DPMVS_NVIDIA_LINUX=ON -DPMVS_GPU=OFF
+          cmake --build build-nvl --target pmvs_nvl --parallel
+          mkdir -p nvl-kernels
+          cp build-nvl/nvl_kernels.fatbin build-nvl/nvl_guard_sc.fatbin build-nvl/nvl_guard_fm.fatbin nvl-kernels/
+          "$CUDA_PATH/bin/cuobjdump" --list-elf --list-ptx nvl-kernels/nvl_kernels.fatbin
+      - name: Check
+        run: ls -la nvl-kernels && test -s nvl-kernels/nvl_kernels.fatbin && test -s nvl-kernels/nvl_guard_sc.fatbin && test -s nvl-kernels/nvl_guard_fm.fatbin
+      - uses: actions/upload-artifact@v4
+        with: { name: nvl-kernels, path: nvl-kernels/, if-no-files-found: error, retention-days: 7 }

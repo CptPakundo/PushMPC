@@ -273,11 +273,19 @@ __attribute__((visibility("default"))) const void *avfilter_get_by_name(const ch
     return hook_get_by_name(name);
 }
 #else
+/* the filter's options with the display's refresh rate (Auto aims at its multiple; without it the engines take x2) */
+static void with_display(char *out, size_t n, const char *base, double fps)
+{
+    const char *eq = strchr(base, '=');   /* "@pushmpc:pushmpc" or "@pushmpc:pushmpc=opts" */
+    snprintf(out, n, "%s%sdisplay_fps=%.3f", base, eq ? ":" : "=", fps);
+}
+
 int mpv_open_cplugin(mpv_handle *h)
 {
     char *opts = mpv_get_property_string(h, "script-opts");
-    char cmd[2048] = "@pushmpc:pushmpc";
-    int append = 1;
+    char cmd[2048] = "@pushmpc:pushmpc", cur[2100];
+    int append = 1, own_fps = 0;
+    double applied = 0;
     const int ok = install() == 0;
     if (opts) {   /* script-opts=pushmpc-vf=smoother=4:display_fps=144 -> the filter's options */
         const char *p = strstr(opts, "pushmpc-vf=");
@@ -288,21 +296,46 @@ int mpv_open_cplugin(mpv_handle *h)
         }
         if (strstr(opts, "pushmpc-append=no"))
             append = 0;
+        if (strstr(opts, "pushmpc-display=no"))
+            own_fps = 1;
         mpv_free(opts);
     }
+    if (strstr(cmd, "display_fps="))
+        own_fps = 1;
     if (ok && append) {
         const char *args[] = { "vf", "append", cmd, NULL };
         const int r = mpv_command(h, args);
-        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, mpv_error_string(r));
+        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s
+", g_log, cmd, mpv_error_string(r));
+        /* the display's rate is known once the video output runs: then the filter is set again with it (one rebuild) */
+        if (!own_fps)
+            mpv_observe_property(h, 1, "display-fps", MPV_FORMAT_DOUBLE);
     } else if (ok) {
-        fprintf(stderr, "[pushmpc_hook] %s(no vf append)\n", g_log);
+        fprintf(stderr, "[pushmpc_hook] %s(no vf append)
+", g_log);
     } else {
-        fprintf(stderr, "[pushmpc_hook] not active: %s\n", g_log);
+        fprintf(stderr, "[pushmpc_hook] not active: %s
+", g_log);
     }
     for (;;) {
         mpv_event *ev = mpv_wait_event(h, -1);
         if (ev->event_id == MPV_EVENT_SHUTDOWN)
             break;
+        if (ev->event_id == MPV_EVENT_PROPERTY_CHANGE && ev->reply_userdata == 1) {
+            const mpv_event_property *pr = ev->data;
+            const double fps = pr && pr->format == MPV_FORMAT_DOUBLE && pr->data ? *(const double *)pr->data : 0;
+            if (fps > 1 && (applied <= 0 || fps - applied > 0.5 || applied - fps > 0.5)) {
+                const char *rm[] = { "vf", "remove", "@pushmpc", NULL };
+                const char *add[] = { "vf", "append", cur, NULL };
+                int r;
+                with_display(cur, sizeof(cur), cmd, fps);
+                mpv_command(h, rm);
+                r = mpv_command(h, add);
+                applied = fps;
+                fprintf(stderr, "[pushmpc_hook] display %.3f Hz: vf append %s -> %s
+", fps, cur, mpv_error_string(r));
+            }
+        }
     }
     return 0;
 }

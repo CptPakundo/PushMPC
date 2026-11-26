@@ -83,6 +83,11 @@ jobs:
     uses: ./.github/workflows/kodi-addon.yml
     with: { wayland: false }   # the Wayland playback test builds nothing for the release
 
+  # the Linux NVIDIA engine's kernels (nvl-kernels.yml: nvcc + Slang, cached by source): linked into the Linux plugin,
+  # the hook's NVIDIA sidecar and pushmpc-nvvfx-selftest by the linux job (its container has no nvcc)
+  nvl-kernels:
+    uses: ./.github/workflows/nvl-kernels.yml
+
   build:
     needs: [vlc, mpvnative, kodi]
     if: ${{ !cancelled() }}
@@ -601,7 +606,7 @@ jobs:
   # The Linux downloads: pushmpc-linux-<arch>-<version>.tar.gz (setup.sh, install.sh, the VapourSynth plugin built in
   # manylinux_2_28 with static libstdc++, as integrations.yml builds and tests it), attached to the release
   linux:
-    needs: [vlc, mpvnative, kodi]
+    needs: [vlc, mpvnative, kodi, nvl-kernels]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
@@ -644,6 +649,10 @@ jobs:
         if: matrix.arch == 'x86_64'
         continue-on-error: true
         with: { name: pushmpc-kodi-Linux, path: kodi-linux }
+      # the Linux NVIDIA engine's kernels (x86_64: NVIDIA publishes its Video Effects runtime for Linux x86-64 only)
+      - uses: actions/download-artifact@v4
+        if: matrix.arch == 'x86_64'
+        with: { name: nvl-kernels, path: nvl-kernels }
       # the native hook for distro mpv (mpv-native.yml, this run, the same runner type)
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -672,7 +681,21 @@ jobs:
       - name: Plugin and tarball
         run: |
           set -eu
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          # the plugin with the portable GPU engine (Vulkan, pinned headers) and, on x86_64, the NVIDIA backend (prebuilt kernels);
+          # the configure log must not say a backend is left out (a release without them is not a release)
+          nvl=''; [ "${{ matrix.arch }}" = x86_64 ] && nvl="-DPMVS_NVL_FATBIN=$PWD/nvl-kernels/nvl_kernels.fatbin -DPMVS_NVL_GUARD_DIR=$PWD/nvl-kernels"
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON $nvl -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc' 2>&1 | tee /tmp/configure.log
+          if grep -E "the backend is not built|CPU engine only|no ncnn package|GPU cut guard.*CPU cut guard only|no slangc / prebuilt guard" /tmp/configure.log; then echo "::error::a backend of the Linux plugin is not built (see above)"; exit 1; fi
+          if [ "${{ matrix.arch }}" = x86_64 ]; then grep -q "nvidia: GPU cut guard from the HLSL" /tmp/configure.log || { echo "::error::the NVIDIA backend's GPU cut guard is not built"; exit 1; }; fi
+          # the hook's sidecar engines (manylinux_2_28: they load into any distro's mpv): PushFlow (pmml), and NVIDIA's on x86_64
+          nve=''; [ "${{ matrix.arch }}" = x86_64 ] && nve="-DPME_NVL_FATBIN=$PWD/nvl-kernels/nvl_kernels.fatbin -DPME_NVL_GUARD_DIR=$PWD/nvl-kernels"
+          cmake -S mpvnative/engine -B build-sidecars -DCMAKE_BUILD_TYPE=Release -DPME_VULKAN=OFF $nve -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_MODULE_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc' 2>&1 | tee /tmp/configure-sidecars.log
+          if grep -E "no PushFlow sidecar|no ncnn package" /tmp/configure-sidecars.log || { [ "${{ matrix.arch }}" = x86_64 ] && grep -E "no NVIDIA sidecar|GPU cut guard OFF" /tmp/configure-sidecars.log; }; then echo "::error::a sidecar engine of the native hook is not built (see above)"; exit 1; fi
+          sc="pushmpc_engine_ml pmml_cli"; [ "${{ matrix.arch }}" = x86_64 ] && sc="$sc pushmpc_engine_nvl pme_nvvfx_selftest"
+          cmake --build build-sidecars --target $sc --parallel
+          ls -la build-sidecars/out
+          for f in build-sidecars/out/*.so; do readelf -d "$f" | grep -E "NEEDED.*(cuda|VideoFX|NVCV|onnxruntime)" && { echo "::error::$f links CUDA / NVIDIA / ONNX Runtime at build time"; exit 1; }; nm -D --defined-only "$f" | grep -E " T pmeng_" || true; done
+          if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then cp build-sidecars/out/libpushmpc_engine_*.so build-sidecars/out/pmml_cli mpvnative-art/hook/; [ -f build-sidecars/out/pushmpc-nvvfx-selftest ] && cp build-sidecars/out/pushmpc-nvvfx-selftest mpvnative-art/hook/; fi
           export PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then export PUSHMPC_MPVNATIVE_DIR=$PWD/mpvnative-art/hook; else echo "::warning title=native hook::no mpvnative-hook artifact for ${{ matrix.arch }}: the tarball has no mpvnative/"; fi
           # Plex from Flathub (LD_PRELOAD): the preload and the self-test host, built here (glibc 2.28); the libavfilter 8
@@ -686,12 +709,21 @@ jobs:
           if [ -f kodi-linux/install.sh ]; then export PUSHMPC_KODI_DIR=$PWD/kodi-linux; elif [ "${{ matrix.arch }}" = x86_64 ]; then echo "::warning title=Kodi add-on::no pushmpc-kodi-Linux artifact: the tarball has no kodi/"; fi
           if [ -f vlc-linux/libpushmpc_plugin.so ]; then export PUSHMPC_VLC_PLUGIN=$PWD/vlc-linux/libpushmpc_plugin.so; else echo "::warning title=VLC module::no plugin-linux artifact for ${{ matrix.arch }}: the tarball has no vlc/"; fi
           for c in vlc-clips/hwclip.mkv vlc-clips/clips/hwclip.mkv; do [ -f "$c" ] && export PUSHMPC_VLC_SELFTEST_CLIP=$PWD/$c && break; done
-          cmake --build build --target pushmpc_vs portable_test --parallel
+          tg="pushmpc_vs portable_test pmml_cli"; [ "${{ matrix.arch }}" = x86_64 ] && tg="$tg pushmpc-nvvfx-selftest nvl_test"
+          cmake --build build --target $tg --parallel
           ./build/portable_test | tail -3
+          if [ "${{ matrix.arch }}" = x86_64 ]; then ./build/nvl_test | tail -2; fi
+          if readelf -d vsplugin/bin/pushmpc_vs.so | grep -E "NEEDED.*(cuda|VideoFX|NVCV)"; then echo "::error::CUDA / VFX linked at build time"; exit 1; fi
+          export PUSHMPC_PMML_CLI=$PWD/build/pmml/pmml_cli
           ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
           git config --global --add safe.directory "$PWD"
-          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$ver"
-          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz
+          st=''; [ "${{ matrix.arch }}" = x86_64 ] && st=vsplugin/bin/pushmpc-nvvfx-selftest
+          sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$ver" $st
+          tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | tee /tmp/tarball.txt
+          # what this release must carry: the GPU engine's plugin, the NVIDIA backend's self-test, pmml_cli; the hook's sidecars
+          need="/pmml/pmml_cli"; [ "${{ matrix.arch }}" = x86_64 ] && need="$need /vsplugin/pushmpc-nvvfx-selftest"
+          if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then need="$need /mpvnative/libpushmpc_engine_ml.so"; [ "${{ matrix.arch }}" = x86_64 ] && need="$need /mpvnative/libpushmpc_engine_nvl.so /mpvnative/pushmpc-nvvfx-selftest"; fi
+          for n in $need; do grep -q "$n\$" /tmp/tarball.txt || { echo "::error::the tarball lacks $n"; exit 1; }; done
           if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep -q '/plex/pushmpc_preload.so$'; fi
           # pmml's graphs for the Homebrew formula (its pmml-graphs resource)
           if [ "${{ matrix.arch }}" = x86_64 ]; then tar -czf dist/pmml-graphs-$ver.tar.gz -C /tmp/pmml-graphs . && ls -la dist/pmml-graphs-$ver.tar.gz; fi

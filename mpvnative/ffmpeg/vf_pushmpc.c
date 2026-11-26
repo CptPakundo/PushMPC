@@ -56,7 +56,11 @@
 #if CONFIG_D3D11VA
 #include "libavutil/hwcontext_d3d11va.h"
 #endif
-#if CONFIG_VULKAN
+/* PM_HOOK_VULKAN: the runtime hook's private libavfilter (configured with --disable-everything, no --enable-vulkan, so it
+ * links no Vulkan code of its own) still takes FFmpeg's Vulkan frames: only the public hwcontext_vulkan.h types are used,
+ * against the pinned Vulkan-Headers (build-hook.sh, FFmpeg 7.1 and newer) */
+#if CONFIG_VULKAN || defined(PM_HOOK_VULKAN)
+#define PM_HAVE_VULKAN 1
 #include "libavutil/hwcontext_vulkan.h"
 /* zero copy into the engine's Vulkan engine: needs AVVulkanDeviceContext.qf (lavu 59.34, FFmpeg 7.1) */
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
@@ -65,6 +69,7 @@
 #define PM_VK_ZERO_COPY 0
 #endif
 #else
+#define PM_HAVE_VULKAN 0
 #define PM_VK_ZERO_COPY 0
 #endif
 
@@ -102,6 +107,7 @@ typedef struct PushMPCContext {
     pmeng_output out;
     int passthrough;
     int fallback;                 /* 1: download / CPU engine / upload */
+    int colour_own;               /* CPU output with the engine's own colour (Linux NVIDIA engine: BT.709 / HDR10) */
     int K;                        /* output multiplier (time base divisor) */
     enum AVPixelFormat in_fmt, sw_fmt;
     AVBufferRef *out_frames;      /* the output pool (hardware output) */
@@ -250,7 +256,7 @@ static const enum AVPixelFormat pix_fmts[] = {
 #if CONFIG_D3D11VA
     AV_PIX_FMT_D3D11,
 #endif
-#if CONFIG_VULKAN
+#if PM_HAVE_VULKAN
     AV_PIX_FMT_VULKAN,
 #endif
     AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
@@ -557,6 +563,10 @@ static int config_output(AVFilterLink *outlink)
     if (dev.mem == PMENG_MEM_CPU && s->in_fmt != s->sw_fmt)
         s->fallback = 1;
     s->K = s->out.multiplier >= 1 && s->out.multiplier <= 16 ? (int)s->out.multiplier : 1;
+    /* an engine writing host memory may convert the colour (non-zero fields that differ from the stream's, or HDR10) */
+    s->colour_own = s->out.mem == PMENG_MEM_CPU &&
+        (s->out.hdr_output || (s->out.range && s->out.range != st.range) || (s->out.matrix && s->out.matrix != st.matrix) ||
+         (s->out.primaries && s->out.primaries != st.primaries) || (s->out.transfer && s->out.transfer != st.transfer));
 
     outlink->w = s->out.width ? (int)s->out.width : inlink->w;
     outlink->h = s->out.height ? (int)s->out.height : inlink->h;
@@ -741,7 +751,7 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
 #endif
         out->pict_type = AV_PICTURE_TYPE_NONE;
     }
-    if (!s->fallback && s->out.mem != PMENG_MEM_CPU && s->out.fmt != pmeng_fmt_of(s->sw_fmt)) {
+    if ((!s->fallback && s->out.mem != PMENG_MEM_CPU && s->out.fmt != pmeng_fmt_of(s->sw_fmt)) || s->colour_own) {
         /* the engine's own colour (pushcore: RGB, HDR10 or sRGB) */
         static const enum AVFrameSideDataType dynamic[] = { AV_FRAME_DATA_DOVI_RPU_BUFFER, AV_FRAME_DATA_DOVI_METADATA,
                                                             AV_FRAME_DATA_DYNAMIC_HDR_PLUS,
@@ -751,10 +761,11 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
                                                           };
         static const enum AVFrameSideDataType stat[] = { AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
                                                          AV_FRAME_DATA_CONTENT_LIGHT_LEVEL };
-        out->color_range = s->out.range;
-        out->colorspace = s->out.matrix;
-        out->color_primaries = s->out.primaries;
-        out->color_trc = s->out.transfer;
+        /* colour_own: only what the engine names (0 keeps the frame's own) */
+        if (s->out.range || !s->colour_own) out->color_range = s->out.range;
+        if (s->out.matrix || !s->colour_own) out->colorspace = s->out.matrix;
+        if (s->out.primaries || !s->colour_own) out->color_primaries = s->out.primaries;
+        if (s->out.transfer || !s->colour_own) out->color_trc = s->out.transfer;
         if (!s->out.keep_dynamic_hdr)
             strip_side_data(out, dynamic, FF_ARRAY_ELEMS(dynamic));
         if (!s->out.hdr_output) {

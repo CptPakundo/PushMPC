@@ -7,6 +7,11 @@
 //   AppleBackend  (macOS, libpushmpc_engine_apple.dylib next to this module) VideoToolbox frame interpolation / frame-rate
 //                 conversion on software frames; Auto's first choice there.
 //   VulkanHostBackend the portable GPU engine on its own device for software frames (macOS: MoltenVK, bundled).
+//   NvlBackend    (Linux, libpushmpc_engine_nvl.so next to this module) NVIDIA's RTX VSR, RTX Video HDR and VFG (or
+//                 NVIDIA optical flow) through CUDA and the Video Effects runtime on frames in host memory; Auto's first
+//                 choice on an RTX card with NVIDIA's files installed.
+//   MlBackend     (Linux, libpushmpc_engine_ml.so) PushFlow (RIFE) through pmml on the GPU; Auto measures it against the
+//                 Vulkan engine and keeps the one that reaches the higher multiplier (RIFE on a tie).
 //   VulkanBackend the portable GPU engine (vsplugin/engines/gpu) on the decoder's own Vulkan device: FFmpeg's Vulkan
 //                 frames in and out with no copy through host memory (builds without its dependencies: open() fails
 //                 with the reason and the filter uses its copy fallback through the CPU engine).
@@ -44,6 +49,12 @@ Backend* OpenCpu(const pmeng_stream& st, const Options& o, pmeng_output& out, st
 // software frames on the engine's own Vulkan device (MoltenVK on macOS): Auto's GPU choice for frames in host memory
 Backend* OpenVulkanHost(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
 Backend* OpenVulkan(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
+#endif
+#ifdef PME_SIDECAR
+// a sidecar module (libpushmpc_engine_nvl.so, libpushmpc_engine_ml.so): its one engine for frames in host memory, and a
+// cheap check whether it would run here (pmeng_sidecar_probe)
+Backend* OpenSidecar(const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);
+bool ProbeSidecar(const Options& o, std::string& why);
 #endif
 #ifdef _WIN32
 Backend* OpenD3D11(const pmeng_device& dev, const pmeng_stream& st, const Options& o, pmeng_output& out, std::string& why);

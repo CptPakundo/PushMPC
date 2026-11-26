@@ -2,6 +2,7 @@
 // Arm (nvl_os.h).
 #ifndef _WIN32
 #include <dirent.h>
+#include <sys/stat.h>
 #endif
 #include <cstring>
 #include <cstdlib>
@@ -60,10 +61,16 @@ std::string DefaultRuntimeDir()
     const char* l = std::getenv("LOCALAPPDATA");   // scripts/nvidia-vfx-pin.json installDir.windows
     return l ? std::string(l) + "\\PushMPC\\runtime\\nvidia-vfx" : std::string();
 #else
+    // inside a Flatpak XDG_DATA_HOME is the app's own folder; setup.sh installs into the user's (the sandbox may see it)
     const char* x = std::getenv("XDG_DATA_HOME");
-    if (x && *x == '/') return std::string(x) + "/pushmpc/nvidia-vfx";
     const char* h = std::getenv("HOME");
-    return h ? std::string(h) + "/.local/share/pushmpc/nvidia-vfx" : std::string();
+    const std::string home = h ? std::string(h) + "/.local/share/pushmpc/nvidia-vfx" : std::string();
+    if (x && *x == '/') {
+        const std::string xdg = std::string(x) + "/pushmpc/nvidia-vfx";
+        struct stat a{}, b{};
+        return stat(xdg.c_str(), &a) != 0 && !home.empty() && stat(home.c_str(), &b) == 0 ? home : xdg;
+    }
+    return home;
 #endif
 }
 

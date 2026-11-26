@@ -34,11 +34,15 @@ fi
 if [ -n "${PUSHMPC_PMML_GRAPHS:-}" ] && [ -f "$PUSHMPC_PMML_GRAPHS/synth-yuv.onnx" ]; then
     mkdir -p "$d/pmml/graphs"; cp "$PUSHMPC_PMML_GRAPHS"/*.onnx "$d/pmml/graphs/"
     install -m 644 pmml/scripts/fetch_runtime.py "$d/pmml/fetch_runtime.py"; install -m 644 scripts/ml-runtime-pin.json "$d/pmml/ml-runtime-pin.json"
+    # pmml_cli (PUSHMPC_PMML_CLI): Auto's measurement of every PushFlow candidate on the user's GPU (setup.sh starts it)
+    if [ -n "${PUSHMPC_PMML_CLI:-}" ] && [ -f "$PUSHMPC_PMML_CLI" ]; then install -m 755 "$PUSHMPC_PMML_CLI" "$d/pmml/pmml_cli"; fi
 fi
 # optional: PushMPC's native hook for the distro mpv (PUSHMPC_MPVNATIVE_DIR = mpv-native.yml's hook folder:
-# pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so) with its installer, which setup.sh runs
+# pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so; the sidecar engines libpushmpc_engine_nvl.so and
+# libpushmpc_engine_ml.so with pushmpc-nvvfx-selftest and pmml_cli when the folder has them) with its installer
 if [ -n "${PUSHMPC_MPVNATIVE_DIR:-}" ] && [ -f "$PUSHMPC_MPVNATIVE_DIR/pushmpc_hook.so" ]; then
     mkdir -p "$d/mpvnative"; cp "$PUSHMPC_MPVNATIVE_DIR"/*.so "$d/mpvnative/"
+    for x in pushmpc-nvvfx-selftest pmml_cli; do [ -f "$PUSHMPC_MPVNATIVE_DIR/$x" ] && install -m 755 "$PUSHMPC_MPVNATIVE_DIR/$x" "$d/mpvnative/$x"; done
     [ -f "$PUSHMPC_MPVNATIVE_DIR/SOURCES.txt" ] && cp "$PUSHMPC_MPVNATIVE_DIR/SOURCES.txt" "$d/mpvnative/"
     install -m 755 mpvnative/install/pushmpc-native.sh "$d/mpvnative/pushmpc-native.sh"
 fi
@@ -48,7 +52,7 @@ if [ -n "${PUSHMPC_PLEX_DIR:-}" ] && [ -f "$PUSHMPC_PLEX_DIR/pushmpc_preload.so"
     mkdir -p "$d/plex"; install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc_preload.so" "$d/plex/pushmpc_preload.so"
     if [ -f "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" ]; then install -m 755 "$PUSHMPC_PLEX_DIR/pushmpc-plex-selftest" "$d/plex/pushmpc-plex-selftest"; fi
     install -m 755 mpvnative/install/pushmpc-plex-linux.sh "$d/plex/pushmpc-plex-linux.sh"
-    for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d/mpvnative/libpushmpc_engine.so" "$d/mpvnative/SOURCES.txt"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
+    for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d"/mpvnative/libpushmpc_engine*.so "$d/mpvnative/SOURCES.txt" "$d/mpvnative/pushmpc-nvvfx-selftest" "$d/mpvnative/pmml_cli"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
 fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"

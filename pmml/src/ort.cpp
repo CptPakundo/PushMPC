@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // pmml's ONNX Runtime backend. ONNX Runtime is loaded at run time from <runtimeDir>/ort/<flavor>/ (one flavor per
 // process); execution providers come from that build (CPU, DirectML, CoreML, MIGraphX) or are plugin EPs registered
-// from <runtimeDir>/eps/<ep>/ep.json (TensorRT-RTX, OpenVINO, QNN, AMD GPU; ONNX Runtime >= 1.22 plugin-EP ABI).
+// from <runtimeDir>/eps/<ep>/ep.json (TensorRT-RTX, OpenVINO, QNN, AMD GPU, WebGPU; ONNX Runtime >= 1.22 plugin-EP ABI).
 // Three small graphs run around the PushFlow model on the same EP (make_graphs.py): pack (once per pair), addt
 // (once per network run), synth (once per output frame). Intermediates stay in the EP's device memory (IoBinding
 // with BindOutputToDevice): DirectML sessions share one D3D12 device and queue that pmml creates, so their
@@ -133,7 +133,7 @@ struct PluginEp { std::string id, epName, library; };
 
 std::vector<PluginEp> pluginEps(const std::string& runtimeDir) {
     std::vector<PluginEp> v;
-    for (const char* id : {"trt-rtx", "openvino", "qnn", "amdgpu"}) {
+    for (const char* id : {"trt-rtx", "openvino", "qnn", "amdgpu", "webgpu"}) {
         const std::string dir = joinPath(joinPath(runtimeDir, "eps"), id);
         const std::string json = readText(joinPath(dir, "ep.json"));
         if (json.empty()) continue;

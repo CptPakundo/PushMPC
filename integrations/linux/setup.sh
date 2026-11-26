@@ -4,8 +4,9 @@
 # Auto starts with (the same rules as the plugin's Auto: vsplugin backend.h), and runs the per-player installers:
 #   install.sh        mpv, Flathub mpv, Celluloid, Haruna, SMPlayer, MPC-QT, the Jellyfin / Plex MPV shims,
 #                     Jellyfin Desktop, Kodi (mpv as its external player), NVIDIA's Video Effects (Linux, licence step)
-#   mpvnative/        PushMPC's native hook for the distro mpv (zero copy, no VapourSynth), when it activates in that mpv;
-#                     else the VapourSynth route (never both)
+#   mpvnative/        PushMPC's native hook for the distro mpv (no VapourSynth; the same engines, Vulkan frames with no
+#                     copy), when it activates in that mpv and carries this GPU's engine; else the VapourSynth route
+#                     (never both)
 #   pushmpc-vlc.sh    VLC 3 (native, Flathub, Snap), when this download has the VLC module (vlc/)
 #   kodi/install.sh   the Kodi add-on, when this download has it (kodi/)
 #   plex/             Plex desktop / HTPC from Flathub: PushMPC's filter in Plex's own player (LD_PRELOAD), when it
@@ -21,6 +22,7 @@
 #   sh setup.sh uninstall  [--keep-flatpak-mpv]
 #   sh setup.sh plan       the engine Auto starts with, per player route (no change)
 #   sh setup.sh status
+#   sh setup.sh pmml       only the PushFlow runtime (the same step as in install; uninstall removes it)
 # Nothing is asked unless a download needs your yes: the Flathub mpv (Ubuntu / Debian mpv cannot run VapourSynth) and
 # NVIDIA's Video Effects (NVIDIA's licence). Both are offered once in a terminal; --yes accepts both ahead, --flatpak /
 # --nvidia-vfx answer each one. Without a terminal neither is downloaded.
@@ -31,7 +33,7 @@
 set -u
 
 action=install
-case ${1:-} in install|uninstall|status|plan) action=$1; shift ;; esac
+case ${1:-} in install|uninstall|status|plan|pmml) action=$1; shift ;; esac
 pass=''; yes=0; dry=0; nopmml=0
 while [ $# -gt 0 ]; do
     case $1 in
@@ -40,7 +42,7 @@ while [ $# -gt 0 ]; do
         --dry-run) dry=1; pass="$pass --dry-run"; shift ;;
         --keep-flatpak-mpv) pass="$pass $1"; shift ;;
         --no-pmml) nopmml=1; shift ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 0 ;;
         *) echo "setup.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -203,25 +205,44 @@ do_vlc() {
     printf '%s\n' "$out" | sed 's/^/  /'
     if [ "$rc" = 0 ]; then record vlc; else say "  VLC's installer failed (exit $rc): VLC not changed"; fi
 }
-# The distro mpv: PushMPC's native hook (mpvnative/: zero copy, no VapourSynth needed) when it activates in this mpv,
-# else the VapourSynth route (install.sh); never both in one mpv. The hook's own installer decides "installed" (active)
-# or "installed-inactive" (exit 3: no build for this mpv's FFmpeg), which is undone again.
+# The distro mpv: PushMPC's native hook (mpvnative/: no VapourSynth needed) when it activates in this mpv, else the
+# VapourSynth route (install.sh); never both in one mpv. The hook carries the same engines as the VapourSynth route
+# (NVIDIA's engine and PushFlow as sidecar modules, the Vulkan GPU engine, the CPU engine; Auto picks at play time);
+# when the engine this GPU should get is not in this download's hook, the VapourSynth route is taken instead.
+# Vulkan decoding (hwdec=vulkan: frames straight into the Vulkan engine, no copy) when that engine is the one that
+# runs: a Vulkan GPU without NVIDIA's engine and without PushFlow (PushFlow is measured against it on copied frames).
+# The hook's own installer decides "installed" (active) or "installed-inactive" (exit 3: no build for this mpv's
+# FFmpeg), which is undone again.
 hookon=0
+native_engine() {   # the engine Auto will run in the hook: nvidia, ml, vulkan, cpu
+    case $fam in 'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') [ "$nvprop" = 1 ] && [ "$(uname -m)" = x86_64 ] && { echo nvidia; return; } ;; esac
+    if [ -f "$pm/pmml/graphs/synth-yuv.onnx" ] || { [ "$nopmml" = 0 ] && [ -n "$(pmml_eps)" ] && have python3 && [ -f "$here/pmml/fetch_runtime.py" ]; }; then echo ml; return; fi
+    if [ -n "$vk" ]; then echo vulkan; else echo cpu; fi
+}
 do_native() {
     hookon=0
     [ "$os" = Darwin ] && return 0
     ni=$here/mpvnative/pushmpc-native.sh
     [ -f "$ni" ] && have mpv || return 0
-    if [ "$dry" = 1 ]; then say "mpv (native hook): would try sh mpvnative/pushmpc-native.sh install --target native"; return 0; fi
+    eng=$(native_engine); hw=auto-safe; need=''
+    case $eng in
+        nvidia) need=libpushmpc_engine_nvl.so ;;
+        ml) need=libpushmpc_engine_ml.so ;;
+        vulkan) hw=vulkan ;;
+    esac
+    if [ -n "$need" ] && [ ! -f "$here/mpvnative/$need" ]; then
+        say "mpv (native hook): this download's hook has no $need (the $eng engine): the VapourSynth route instead"; return 0
+    fi
+    if [ "$dry" = 1 ]; then say "mpv (native hook): would try sh mpvnative/pushmpc-native.sh install --target native --hwdec $hw (engine: $eng)"; return 0; fi
     say "mpv (native hook):"
     mkdir -p "$pm/mpvnative-installer"; cp "$ni" "$pm/mpvnative-installer/pushmpc-native.sh"
-    out=$(sh "$ni" install --from "$here/mpvnative" --target native --json 2>"$pm/mpvnative-installer/install.log"); rc=$?
+    out=$(sh "$ni" install --from "$here/mpvnative" --target native --hwdec "$hw" --json 2>"$pm/mpvnative-installer/install.log"); rc=$?
     sed 's/^/  /' "$pm/mpvnative-installer/install.log" | tail -n 5
     state=$(printf '%s\n' "$out" | sed -n 's/.*"target":"native".*"state":"\([^"]*\)".*/\1/p' | head -n 1)
     detail=$(printf '%s\n' "$out" | sed -n 's/.*"target":"native".*"detail":"\([^"]*\)".*/\1/p' | head -n 1)
     if [ "$rc" = 0 ] && [ "$state" = installed ]; then
         hookon=1; record native
-        say "  the native hook is active in this mpv${detail:+ ($detail)}: the VapourSynth route is not added to it"
+        say "  the native hook is active in this mpv${detail:+ ($detail)}, engine: $eng${hw:+, hwdec $hw}: the VapourSynth route is not added to it"
     else
         say "  the native hook does not run in this mpv (${state:-exit $rc}${detail:+: $detail}): the VapourSynth route instead"
         sh "$ni" uninstall --target native >/dev/null 2>&1
@@ -230,14 +251,16 @@ do_native() {
 # PushFlow's models: from PushFPS's release zip (the same files and pins as the Windows Setup takes)
 PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip
 PF_ZIP_SHA=4bf3fe869eb8a2ca579dd7ade849c0c6cb2bf959f1a434fd53849f8e715f0af5
-pmml_eps() {   # the runtime for this GPU: "<ONNX Runtime flavors> <EPs>", "ncnn" (ncnn on Vulkan), or nothing
+# the runtime candidates for this GPU, "<ONNX Runtime flavors> <EPs> <ncnn: 1/0>" ('-' = none), or nothing; Auto
+# (pmml_cli auto, every candidate measured in its own process) then picks the one that does the most here
+pmml_eps() {
     case $fam in
-        'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') if [ "$nvprop" = 1 ]; then echo "core trt-rtx"; else echo ncnn; fi ;;
-        Intel) echo "core openvino" ;;
-        'RX 9000'|'RX 7000'|'RX 6000'|'RX 5000'|Radeon) if [ -d /opt/rocm ]; then echo "migraphx -"; else echo ncnn; fi ;;
-        # any other GPU with Vulkan (GeForce GTX, nouveau / NVK, others): ncnn
+        'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') if [ "$nvprop" = 1 ]; then echo "core trt-rtx 0"; else echo "core webgpu 1"; fi ;;
+        Intel) echo "core openvino,webgpu 1" ;;
+        'RX 9000'|'RX 7000'|'RX 6000'|'RX 5000'|Radeon) if [ -d /opt/rocm ]; then echo "core,migraphx webgpu 1"; else echo "core webgpu 1"; fi ;;
+        # any other GPU with Vulkan (GeForce GTX, nouveau / NVK, others): ncnn and ONNX Runtime's WebGPU EP (Dawn on Vulkan)
         none) ;;
-        *) echo ncnn ;;
+        *) echo "core webgpu 1" ;;
     esac
 }
 do_pmml() {
@@ -251,14 +274,11 @@ do_pmml() {
         [ -f "$here/$need" ] || { say "PushFlow runtime: this download has no $need: not installed"; return 0; }
     done
     arch=x64; case $(uname -m) in aarch64|arm64) arch=arm64 ;; esac
-    if [ "$sel" = ncnn ]; then
-        # PushFlow's RIFE models as ncnn models, on the GPU through Vulkan (no ONNX Runtime needed)
-        flv=''; ep=''; extra=--ncnn-models
-        say "PushFlow runtime for $fam: the RIFE models for ncnn on Vulkan and PushFlow's model settings (a download of about 150 MB, checked by SHA-256)"
-    else
-        flv=${sel%% *}; ep=${sel#* }; [ "$ep" = - ] && ep=''; extra=''
-        say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
-    fi
+    # shellcheck disable=SC2086
+    set -- $sel
+    flv=$1; ep=$2; [ "$ep" = - ] && ep=''; extra=''
+    [ "$3" = 1 ] && extra=--ncnn-models
+    say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep}${extra:+, the RIFE models for ncnn on Vulkan} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
     if [ "$dry" = 1 ]; then say "  would: python3 fetch_runtime.py --platform linux-$arch --flavors '$flv'${ep:+ --eps $ep} $extra --out $pm/pmml"; return 0; fi
     mkdir -p "$pm"; dl=$pm/pmml-download; rm -rf "$pm/pmml.part"
     out=$("$py" -I "$here/pmml/fetch_runtime.py" --pin "$here/pmml/ml-runtime-pin.json" --platform "linux-$arch" --out "$pm/pmml.part" --cache "$dl" \
@@ -302,9 +322,19 @@ print("ok      models: " + ", ".join(sorted(need)))
 PY
     then say "  PushFlow's models could not be taken from PushFPS's release: PushFlow runtime not installed"; rm -rf "$pm/pmml.part" "$dl"; return 0; fi
     cp -R "$here/pmml/graphs" "$pm/pmml.part/graphs"
+    [ -f "$here/pmml/pmml_cli" ] && install -m 755 "$here/pmml/pmml_cli" "$pm/pmml.part/pmml_cli"
     rm -rf "$pm/pmml" "$dl"; mv "$pm/pmml.part" "$pm/pmml"
     record pmml
     say "  PushFlow runtime installed in $pm/pmml (the mpv route's ml backend finds it there)"
+    # Auto's measurement of every candidate at 1080p, in the background and at the lowest priority (other sizes are
+    # measured the first time they play); PUSHMPC_NO_AUTOBENCH=1 skips it
+    if [ -x "$pm/pmml/pmml_cli" ] && [ "${PUSHMPC_NO_AUTOBENCH:-0}" != 1 ]; then
+        nc=''; [ -d "$pm/pmml/ncnn-models" ] && nc="--ncnn-models $pm/pmml/ncnn-models"
+        # shellcheck disable=SC2086
+        (nohup nice -n 19 "$pm/pmml/pmml_cli" auto --runtime "$pm/pmml" --cache "$pm/pmml" --size 1920x1080 --fps 23.976 --mult 5 $nc > "$pm/pmml/pmml-autobench-1920x1080.log" 2>&1 &)
+        : > "$pm/pmml/pmml-autobench-1920x1080.started"
+        say "  measuring PushFlow's options on this GPU in the background (a few minutes; log: $pm/pmml/pmml-autobench-1920x1080.log)"
+    fi
 }
 # Plex desktop / Plex HTPC from Flathub: PushMPC's filter inside Plex's own player through LD_PRELOAD (plex/, the
 # installer self-tests it through Plex's libmpv in its sandbox). A target that does not pass is undone again. Snap Plex
@@ -350,6 +380,7 @@ do_mac() {
 # ------------------------------------------------------------------------------------------------ actions
 case $action in
     plan) make_plan; show_plan; list_players ;;
+    pmml) make_plan; do_pmml; [ "$dry" = 1 ] || { mkdir -p "$pm"; [ "$here/setup.sh" = "$pm/setup.sh" ] || cp "$here/setup.sh" "$pm/setup.sh"; } ;;
     status)
         make_plan; show_plan; list_players
         [ -f "$sstate" ] && { say "Setup's changes ($sstate):"; sed 's/^/  /' "$sstate"; }

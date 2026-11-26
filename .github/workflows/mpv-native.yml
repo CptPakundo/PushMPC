@@ -11,8 +11,8 @@ name: mpv-native
 
 on:
   push:
-    branches: ['track/mpv-native', 'track/mpv-native-*']
-    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', '.github/workflows/mpv-native.yml']
+    branches: ['track/mpv-native', 'track/mpv-native-*', 'track/linuxgpu']
+    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', 'pmml/**', '.github/workflows/mpv-native.yml', '.github/workflows/nvl-kernels.yml']
   # release.yml builds the release's native hook, mpv and the Plex proxy through this workflow (artifacts
   # mpvnative-hook-<runner>, mpvnative-windows, plexnative)
   workflow_call:
@@ -312,6 +312,15 @@ jobs:
           path: /home/runner/pm-ccache-hook
           key: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/hook/pushmpc_hook_glue.c', 'mpvnative/pins.json') }}
           restore-keys: mpvnative-hooklib-${{ matrix.runner }}-${{ matrix.branch }}-
+      - name: Vulkan-Headers (pinned in gpu-pins.json; Vulkan frames into the engine for FFmpeg 7.1 and newer)
+        run: |
+          set -eu
+          url=$(python3 -c "import json; print(json.load(open('vsplugin/engines/gpu/gpu-pins.json'))['vulkanHeaders']['url'])")
+          sha=$(python3 -c "import json; print(json.load(open('vsplugin/engines/gpu/gpu-pins.json'))['vulkanHeaders']['sha256'])")
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/vh.tgz" "$url"
+          echo "$sha  $RUNNER_TEMP/vh.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/vh" && tar -xzf "$RUNNER_TEMP/vh.tgz" -C "$RUNNER_TEMP/vh" --strip-components=1
+          echo "PUSHMPC_VULKAN_HEADERS=$RUNNER_TEMP/vh" >> "$GITHUB_ENV"
       - name: Every tag of FFmpeg ${{ matrix.branch }} (pinned) and its private libavfilter
         run: bash mpvnative/hook/build-hook-branch.sh "${{ matrix.branch }}" "$RUNNER_TEMP/ffmpeg" "$RUNNER_TEMP/hooklib"
       - uses: actions/upload-artifact@v4
@@ -335,7 +344,7 @@ jobs:
       - name: Packages (the distro mpv and FFmpeg)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config gdb
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake ccache patchelf glslang-tools pkg-config gdb mesa-vulkan-drivers vulkan-tools
           mpv --version | head -1; dpkg -s libavfilter9 | grep -E '^Version'
       - uses: actions/download-artifact@v4
         with:
@@ -361,6 +370,9 @@ jobs:
           objdump -T "$RUNNER_TEMP/hook/libpushmpc_engine.so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/^/engine needs at most /'
       - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
         run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
+      - name: The engines Auto picks in the hook (software frames; the Vulkan engine on lavapipe)
+        if: ${{ !inputs.release }}
+        run: sh mpvnative/hook/test-hook-engines.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-engines"
       - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
         run: sh mpvnative/install/test-install.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-install"
       - name: Debian 13's mpv (FFmpeg 7.1)
@@ -379,6 +391,12 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" archlinux:latest sh -c \
             'pacman -Syu --noconfirm --needed mpv ffmpeg python >/dev/null 2>&1 && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - name: Arch's mpv with Vulkan frames (FFV1 Vulkan decoding on lavapipe, gpu-next under Xvfb) into the zero-copy engine
+        if: ${{ matrix.runner == 'ubuntu-24.04' && !inputs.release }}
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" archlinux:latest sh -c \
+            'pacman -Syu --noconfirm --needed mpv ffmpeg python vulkan-swrast xorg-server-xvfb xorg-xauth >/dev/null 2>&1 && sh /w/mpvnative/hook/test-hook-engines.sh /hook /tmp/t --vulkan-frames'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -386,6 +404,91 @@ jobs:
           path: |
             ${{ runner.temp }}/hook
             ${{ runner.temp }}/t-*/*.log
+          retention-days: 7
+
+  # the Linux NVIDIA engine's kernels (nvl-kernels.yml), for the hook's NVIDIA sidecar below
+  nvl-kernels:
+    if: ${{ !inputs.release }}
+    uses: ./.github/workflows/nvl-kernels.yml
+
+  # the hook's sidecar engines on the runner: libpushmpc_engine_nvl.so (no NVIDIA GPU here: it must load, refuse with
+  # the reason and leave the next engine to run; the self-test helper refuses too) and libpushmpc_engine_ml.so (PushFlow
+  # through pmml: ncnn on lavapipe and ONNX Runtime's WebGPU EP, the runtime installed by setup.sh's own pmml step), each
+  # in Ubuntu's mpv through the hook; Auto's ml-versus-Vulkan choice. A real NVIDIA GPU: not on hosted runners.
+  hook-sidecars:
+    if: ${{ !inputs.release }}
+    needs: [hook-libs, nvl-kernels]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MESA_SHADER_CACHE_DISABLE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mpv libmpv-dev ffmpeg build-essential cmake glslang-tools pkg-config mesa-vulkan-drivers vulkan-tools python3-venv
+          vulkaninfo --summary 2>/dev/null | grep -E "deviceName|driverInfo" | head -4 || true
+      - uses: actions/download-artifact@v4
+        with: { pattern: hooklib-x64-*, path: '${{ runner.temp }}/hooklibs' }
+      - uses: actions/download-artifact@v4
+        with: { name: nvl-kernels, path: nvl-kernels }
+      - uses: actions/cache@v4
+        with:
+          path: ~/pmml-dl
+          key: hook-sidecars-pmml-${{ hashFiles('scripts/ml-runtime-pin.json', 'integrations/linux/setup.sh') }}
+      - name: The pmml runtime's headers, ncnn (prebuilt, Vulkan) and pmml's graphs
+        run: |
+          set -eu
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-x64 --out /tmp/pmml-rt --cache ~/pmml-dl --flavors core --ncnn --headers
+          python3 -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 numpy==1.26.4
+          /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs
+      - name: The engine and its sidecars (NVIDIA with the prebuilt kernels, PushFlow with pmml + ncnn)
+        run: |
+          set -eu
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON \
+            -DPME_NVL_FATBIN=$PWD/nvl-kernels/nvl_kernels.fatbin -DPME_NVL_GUARD_DIR=$PWD/nvl-kernels \
+            -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/pmml-rt/ncnn 2>&1 | tee /tmp/cfg.log
+          if grep -E "no NVIDIA sidecar|no PushFlow sidecar|GPU cut guard OFF|no ncnn package|no Vulkan engine" /tmp/cfg.log; then echo "::error::an engine is not built"; exit 1; fi
+          cmake --build build-engine --parallel
+          ./build-engine/out/engine_test
+          d="$RUNNER_TEMP/hook"; mkdir -p "$d"
+          for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          cp build-engine/out/libpushmpc_engine*.so build-engine/out/pushmpc-nvvfx-selftest build-engine/out/pmml_cli "$d/"
+          ls -la "$d"
+          for f in "$d"/libpushmpc_engine_*.so; do readelf -d "$f" | grep -E "NEEDED.*(cuda|VideoFX|NVCV|onnxruntime)" && { echo "::error::$f links CUDA / NVIDIA / ONNX Runtime"; exit 1; }; nm -D --defined-only "$f" | grep -E " T pmeng_"; done
+          # no GPU: the self-test helper refuses (exit 2)
+          set +e; "$d/pushmpc-nvvfx-selftest" --gpu --runtime /nonexistent; rc=$?; set -e
+          [ "$rc" = 2 ] || { echo "::error::pushmpc-nvvfx-selftest without a GPU: exit $rc (want 2)"; exit 1; }
+      - name: "PushFlow runtime through setup.sh (a Radeon without ROCm: ONNX Runtime + WebGPU EP, ncnn, models)"
+        env:
+          PUSHMPC_TEST_GPU: '1002:744c:AMD Radeon RX 7900 XTX'
+          PUSHMPC_TEST_UNAME: Linux
+          PUSHMPC_NO_AUTOBENCH: '1'
+        run: |
+          set -eu
+          t=/tmp/su; mkdir -p "$t/pmml/graphs" "$HOME/su-home"
+          cp integrations/linux/setup.sh "$t/"; cp pmml/scripts/fetch_runtime.py scripts/ml-runtime-pin.json "$t/pmml/"
+          cp /tmp/pmml-graphs/*.onnx "$t/pmml/graphs/"; cp build-engine/out/pmml_cli "$t/pmml/"
+          HOME=$HOME/su-home XDG_DATA_HOME= sh "$t/setup.sh" pmml | tee /tmp/pmml-setup.txt
+          p=$HOME/su-home/.local/share/pushmpc/pmml
+          ls "$p" "$p/eps" 2>/dev/null
+          for f in graphs/synth-yuv.onnx pmml_cli eps/webgpu/ep.json ncnn-models/rife-v4.25-lite_ensembleFalse/flownet.param; do [ -e "$p/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
+          echo "PMML_RT=$p" >> "$GITHUB_ENV"
+          "$p/pmml_cli" list --runtime "$p" | tee /tmp/pmml-list.txt || true
+      - name: The sidecars in Ubuntu's mpv through the hook
+        env:
+          PUSHMPC_NO_AUTOBENCH: '1'
+        run: sh mpvnative/hook/test-hook-engines.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/t-sidecars" --sidecars "$PMML_RT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hook-sidecars-logs
+          path: |
+            ${{ runner.temp }}/t-sidecars
+            /tmp/*.txt
+            /tmp/cfg.log
           retention-days: 7
 
   # Plex HTPC / Plex for Windows: their libmpv-2.dll imports FFmpeg 5.x DLLs (avfilter-8.dll ...). A proxy avfilter-8.dll

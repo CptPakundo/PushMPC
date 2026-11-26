@@ -65,12 +65,21 @@ conf_remove() {
     elif [ -f "$c.pushmpc-native-absent" ] && [ ! -s "$c" ]; then rm -f "$c" "$c.pushmpc-native-absent"
     else rm -f "$c.pushmpc-native-backup" "$c.pushmpc-native-absent"; fi
 }
+# the sidecar engines (NVIDIA's Video Effects, PushFlow) and their helpers, copied when the download has them
+EXTRAS='libpushmpc_engine_nvl.so libpushmpc_engine_ml.so pushmpc-nvvfx-selftest pmml_cli'
+# Flatpak: the sandbox sees PushMPC's runtimes (NVIDIA's Video Effects, PushFlow's pmml) read-only, so the engines in
+# it find them; added only when the app has no filesystem override of the user's own (exact undo)
+FS_RO=xdg-data/pushmpc:ro
 files_ok() { [ -f "$from/pushmpc_preload.so" ] && [ -f "$from/libpushmpc_engine.so" ] && ls "$from"/libpushmpc-avfilter-8.*.so >/dev/null 2>&1; }
 copy_files() {
     mkdir -p "$1" && cp "$from/pushmpc_preload.so" "$from/libpushmpc_engine.so" "$from"/libpushmpc-avfilter-*.so "$1/" || return 1
-    for x in SOURCES.txt pushmpc-plex-selftest; do [ ! -f "$from/$x" ] || cp "$from/$x" "$1/"; done
+    for x in SOURCES.txt pushmpc-plex-selftest $EXTRAS; do [ ! -f "$from/$x" ] || cp "$from/$x" "$1/"; done
 }
-remove_files() { rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent" "$1/pushmpc-plex-selftest"; rmdir "$1" 2>/dev/null; }
+remove_files() {
+    rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent" "$1/pushmpc-plex-selftest"
+    for x in $EXTRAS; do rm -f "$1/$x"; done
+    rmdir "$1" 2>/dev/null
+}
 # selftest <dir> <libmpv path> <runner...>: Plex's own libmpv plays a generated Y4M with vf=pushmpc through the
 # preload (pushmpc-plex-selftest = mpvnative/hook/libmpv_host.c). Sets st_detail; returns 0 active, 3 not, 2 no test.
 selftest() {
@@ -106,6 +115,7 @@ do_flatpak() {   # do_flatpak <target name> <app id>
             if [ -f "$ovf" ]; then cp "$ovf" "$dest/override.backup"; else : > "$dest/override.absent"; fi
         fi
         flatpak override --user --env=LD_PRELOAD="$dest/pushmpc_preload.so" "$id" || { emit "$name" error "flatpak override failed"; return 1; }
+        if ! grep -q '^filesystems=' "$ovf" 2>/dev/null; then flatpak override --user --filesystem="$FS_RO" "$id" 2>/dev/null || log "$name: no read-only access to PushMPC's runtimes (flatpak override failed)"; fi
         conf_add "$conf"
         lib=$(flatpak run --command=sh "$id" -c 'find /app -name "libmpv.so*" 2>/dev/null | sort | head -1' 2>/dev/null)
         selftest "$dest" "$lib" flatpak run --command=sh "$id" -c 'exec "$@"' sh; s=$?
@@ -116,7 +126,7 @@ do_flatpak() {   # do_flatpak <target name> <app id>
         if [ "$cur" = "$dest/pushmpc_preload.so" ]; then
             # our key out of the keyfile (flatpak --unset-env would write "LD_PRELOAD=" plus unset-environment instead),
             # then the keyfile as it was before install when nothing else changed meanwhile
-            grep -vxF "LD_PRELOAD=$dest/pushmpc_preload.so" "$ovf" > "$ovf.pushmpc-tmp"; mv "$ovf.pushmpc-tmp" "$ovf"
+            grep -vxF -e "LD_PRELOAD=$dest/pushmpc_preload.so" -e "filesystems=$FS_RO;" "$ovf" > "$ovf.pushmpc-tmp"; mv "$ovf.pushmpc-tmp" "$ovf"
             keys() { grep -v -e "^\[" -e "^$" "$1" 2>/dev/null; }
             if [ -f "$dest/override.backup" ] && [ "$(keys "$ovf")" = "$(keys "$dest/override.backup")" ]; then cp "$dest/override.backup" "$ovf"
             elif [ -f "$dest/override.absent" ] && [ -z "$(keys "$ovf")" ]; then rm -f "$ovf"; fi
