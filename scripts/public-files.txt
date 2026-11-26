@@ -8,6 +8,8 @@ filter/src/**
 filter/tools/auto_test.cpp
 filter/tools/dshow_graph_test.cpp
 filter/tools/held_test.cpp
+filter/tools/content_test.cpp
+filter/tools/content_trace.inc
 pushmpc/CMakeLists.txt
 pushmpc/include/**
 pushmpc/src/**

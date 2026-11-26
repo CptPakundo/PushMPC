@@ -21,8 +21,9 @@ local options = require 'mp.options'
 -- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
 -- Anime upscaling shaders (pushmpc-anime-shaders: "id=path;..." best first; ArtCNN (MIT) and CuNNy (LGPL-3.0) as their
--- authors publish them, fetched and checked by Setup): used instead of the set above for animation (the file's path
--- names it: anime / animation / animated / cartoon(s) as whole words), only when the picture is enlarged (their
+-- authors publish them, fetched and checked by Setup): used instead of the set above for animation MEASURED in the
+-- picture (never from the file name: a signalstats tap counts frames that repeat the drawing before them; on at 20 % of
+-- the last ~4 s, off again below 10 % for ~8 s), only when the picture is enlarged (their
 -- //!WHEN guard), the "-ds" (denoise + sharpen) variant at a low bitrate. After a few seconds their measured render time
 -- (vo-passes) must stay within anime-share of a frame's time, else the next lighter one takes over. They are compute
 -- shaders: renderers without compute (OpenGL below 4.3) keep the fragment set.
@@ -36,15 +37,49 @@ for e in opts["anime-shaders"]:gmatch("[^;]+") do
     local id, path = e:match("^([^=]+)=(.+)$")
     if id then anime.list[#anime.list + 1] = { id = id, path = path } end
 end
-local function is_animation()
-    local p = (mp.get_property("path") or ""):lower():gsub("\\", "/")
-    for _, w in ipairs({ "anime", "animation", "animations", "animated", "cartoon", "cartoons" }) do
-        if p:find("%f[%w]" .. w .. "%f[^%w]") then return true end
+-- the source frame rate from the frames' timestamps (estimated-vf-fps), the container's tag only until it exists
+local function source_fps()
+    local e = mp.get_property_number("estimated-vf-fps", 0)
+    if e and e > 1 then return e end
+    return mp.get_property_number("container-fps", 24)
+end
+-- measured animation (whole-frame holds, as pushcore's held share): a pass-through signalstats filter on software frames
+-- (decoding without hwdec or with a -copy hwdec; never inserted on a hardware-frame chain); YDIF = mean |frame - previous|
+local meter = { on = false, held = {}, anim = false, since = 0, cb = nil }
+local function meter_stop()
+    if meter.on then mp.commandv("vf", "remove", "@pmcd"); mp.unobserve_property(meter.cb) end
+    meter.on, meter.held, meter.anim, meter.since = false, {}, false, 0
+end
+local function meter_start(on_change)
+    if meter.on then return true end
+    local hw = mp.get_property("hwdec-current") or "no"
+    if hw ~= "no" and hw ~= "" and not hw:find("%-copy$") then msg.info("animation measure: hardware frames (" .. hw .. "), not measured: the live-action set stays"); return false end
+    if not mp.commandv("vf", "append", "@pmcd:lavfi=[signalstats]") then return false end
+    meter.on = true
+    meter.cb = function(_, md)
+        local y = md and tonumber(md["lavfi.signalstats.YDIF"])
+        if not y then return end
+        local h = meter.held
+        h[#h + 1] = y < 0.5 and 1 or 0
+        if #h > 96 then table.remove(h, 1) end
+        if #h < 48 then return end
+        local n = 0; for _, v in ipairs(h) do n = n + v end
+        local share, now = n / #h, mp.get_time()
+        local want = meter.anim and share >= 0.10 or (not meter.anim and share >= 0.20)
+        if want ~= meter.anim then
+            if meter.since == 0 then meter.since = now end
+            if now - meter.since >= (want and 4 or 8) then
+                meter.anim, meter.since = want, 0
+                msg.info(string.format("animation measured: %s (%.0f %% of frames repeat the drawing)", want and "yes" or "no", 100 * share))
+                on_change(want)
+            end
+        else meter.since = 0 end
     end
-    return false
+    mp.observe_property("vf-metadata/pmcd", "native", meter.cb)
+    return true
 end
 local function low_bitrate()
-    local br, vp, fps = mp.get_property_number("video-bitrate", 0), mp.get_property_native("video-params"), mp.get_property_number("container-fps", 24)
+    local br, vp, fps = mp.get_property_number("video-bitrate", 0), mp.get_property_native("video-params"), source_fps()
     if br <= 0 or not vp or not vp.w or vp.w <= 0 then return false end
     return br / (vp.w * vp.h * math.max(fps, 1)) <= 0.05   -- bits per pixel per frame (H.264-class low bitrate)
 end
@@ -67,7 +102,7 @@ local function set_anime(i)
                 if ps.desc and (ps.desc:find("ArtCNN") or ps.desc:find("CuNNy")) then ns = ns + (ps.avg or 0) end
             end
         end
-        local fps = math.max(mp.get_property_number("display-fps", 0), mp.get_property_number("container-fps", 24))
+        local fps = math.max(mp.get_property_number("display-fps", 0), source_fps())
         local budget = tonumber(opts["anime-share"]) * 1e9 / math.max(fps, 1)
         msg.info(string.format("anime upscaling shader %s: %.2f ms a frame (%.2f allowed)", e.id, ns / 1e6, budget / 1e6))
         if ns > budget then
@@ -78,23 +113,36 @@ local function set_anime(i)
     end)
     return true
 end
-local function shaders(why)
-    if shaders_on then return end
-    if #anime.list > 0 and is_animation() then
-        local first = 1
-        while anime.list[first] and anime.list[first].id:find("%-ds$") do first = first + 1 end
-        if set_anime(first) then shaders_on = true; return end
-    end
+local function live_set(add)
     if opts.shaders == "" then return end
     local have = {}
     for _, p in ipairs(mp.get_property_native("glsl-shaders") or {}) do have[p] = true end
     for p in opts.shaders:gmatch("[^;]+") do
-        if not have[p] then mp.commandv("change-list", "glsl-shaders", "append", p) end
+        if add and not have[p] then mp.commandv("change-list", "glsl-shaders", "append", p) end
+        if not add and have[p] then mp.commandv("change-list", "glsl-shaders", "remove", p) end
     end
-    shaders_on = true
-    msg.info("upscaling shaders added (" .. why .. "): " .. opts.shaders)
 end
-mp.register_event("end-file", function() if anime.timer then anime.timer:kill() end; if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end; shaders_on = false end)
+local function shaders(why)
+    if shaders_on then return end
+    shaders_on = true
+    live_set(true)
+    if opts.shaders ~= "" then msg.info("upscaling shaders added (" .. why .. "): " .. opts.shaders) end
+    -- the anime set replaces it while the picture is measured as animation
+    if #anime.list > 0 then
+        meter_start(function(anim)
+            if anim then
+                local first = 1
+                while anime.list[first] and anime.list[first].id:find("%-ds$") do first = first + 1 end
+                if set_anime(first) then live_set(false) end
+            else
+                if anime.timer then anime.timer:kill() end
+                if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end
+                live_set(true)
+            end
+        end)
+    end
+end
+mp.register_event("end-file", function() meter_stop(); if anime.timer then anime.timer:kill() end; if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end; shaders_on = false end)
 
 if opts.mode == "vsr" then
     local failed_for, last = nil, nil

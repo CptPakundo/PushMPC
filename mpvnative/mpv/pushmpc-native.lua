@@ -21,9 +21,16 @@ local function multiple(src, disp)
     return k
 end
 
+local last_src = nil
 local function apply()
     local disp = mp.get_property_number("display-fps", 0)
-    local src = mp.get_property_number("container-fps", 0)
+    -- the source rate from the frames' timestamps (estimated-vf-fps); the container's tag only until mpv has measured it
+    -- (a "29.97" tag on a 24p body would give the wrong multiple)
+    local src = mp.get_property_number("estimated-vf-fps", 0)
+    if not src or src <= 1 then src = mp.get_property_number("container-fps", 0) end
+    -- whole numbers of frames only change k on a real rate change (+-5 %), not on the estimate's jitter
+    if last_src and src > 0 and math.abs(src - last_src) / src < 0.05 then src = last_src end
+    last_src = src
     local spec
     if opts.engine == "fruc" then
         local k = multiple(src, disp)
@@ -48,6 +55,7 @@ local function apply()
     last = spec
 end
 
-mp.register_event("file-loaded", apply)
+mp.register_event("file-loaded", function() last_src = nil; apply() end)
+mp.observe_property("estimated-vf-fps", "number", function() if last ~= nil then apply() end end)
 mp.observe_property("display-fps", "number", function() if last ~= nil or mp.get_property("path") then apply() end end)
 mp.observe_property("fullscreen", "bool", function() if last ~= nil then apply() end end)

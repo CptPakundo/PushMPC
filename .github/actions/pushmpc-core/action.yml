@@ -497,6 +497,9 @@ runs:
         # held-frame re-timing (animation on twos / threes): the rules, the GPU test pass on WARP, the output spacing
         & "$env:RUNNER_TEMP\filter-build\held_test.exe" | Tee-Object -Variable held | Select-Object -Last 14
         if ($LASTEXITCODE -ne 0) { Write-Host "::error::held_test failed: $(($held | Select-String '^RESULT').Line)"; exit 1 }
+        # ContentDetect: content class, interlacing and frame interval measured from pictures and timestamps (CPU)
+        & "$env:RUNNER_TEMP\filter-build\content_test.exe" | Tee-Object -Variable cdt | Select-Object -Last 6
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error::content_test failed: $(($cdt | Select-String '^FAIL').Line -join '; ')"; exit 1 }
         cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc -DPUSHMPC_UPDATER_DEV=OFF
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build "$env:RUNNER_TEMP\updater-build" --parallel

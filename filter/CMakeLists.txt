@@ -39,6 +39,13 @@ target_compile_definitions(auto_test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(auto_test PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(auto_test PRIVATE user32 advapi32 shell32)
 
+# ContentDetect (pushmpc/content_detect.h): what the picture is, interlacing and the frame interval, measured in the
+# picture and the timestamps (synthetic clips, replay of measured feature traces; CPU only)
+add_executable(content_test tools/content_test.cpp)
+set_target_properties(content_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(content_test PRIVATE "${PUSHMPC_CORE_INCLUDE}")
+target_compile_options(content_test PRIVATE /W3 /EHsc /O2 /utf-8)
+
 # Held-frame re-timing on the pushcore route (pushmpc/src/HeldFrames.h, PushCoreHeld.h): the rules, the GPU test pass on
 # WARP with a synthetic animation clip on twos and threes, and the output spacing (no GPU needed)
 add_executable(held_test tools/held_test.cpp)

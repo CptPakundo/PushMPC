@@ -68,30 +68,17 @@ struct Source {
     bool hdr = false;         // PQ / HLG
     double bppEq = -1;        // H.264-equivalent bits per pixel per frame (< 0 = unknown)
     bool tenBit = false;      // P010 input (10-bit)
-    bool animHint = false;    // the file's path names it animation (AnimationHint)
-    double heldShare = -1;    // held frames pushcore found (share of the last ~10 s; < 0 = not measured); sticky once >= kAnimationHeldShare
-    int showClass = 0;        // the show's class (PushMpcShows.h: 1 feature, 2 TV limited, 3 mixed CG; 0 not known yet)
-    int showChoice = -1;      // the user's mode for this show (0 Full, 1 Camera only, 2 Off; -1 none)
+    double heldShare = -1;    // held frames pushcore found (share of the last ~10 s; < 0 = not measured)
+    int contentClass = 0;     // ContentDetect's class of the picture now (pushmpc/content_detect.h: 0 measuring, 1 hand-drawn
+                              // animation, 2 3D CG animation, 3 live action, 4 game footage), measured per shot with hysteresis
+    float contentConf = 0;    // its smoothed probability
+    int showChoice = -1;      // the user's own mode for this show (0 Full, 1 Camera only, 2 Off; -1 none): a preference, not detection
 };
-// Animation (cartoons, anime): drawn on twos or threes, a quarter to two thirds of a TV episode's frames repeat the drawing
-// before them (pushcore's held-frame test); live action and 3D CG at 24 distinct frames have almost none. The path is the
-// early hint, before ~4 s of frames are measured: a folder or file named with a whole word anime / animation / animated /
-// cartoon(s).
+// Animation (cartoons, anime) is found in the picture, never from a file or folder name: ContentDetect's class (held cels
+// between drawing steps, hold lengths, flat colour and line statistics, measured per shot), else, before its first
+// decision, pushcore's whole-frame held share (a quarter to two thirds of a TV episode's frames repeat the drawing
+// before them; live action and 3D CG at 24 distinct frames have almost none).
 inline constexpr double kAnimationHeldShare = 0.20;
-inline bool AnimationHint(const std::wstring& path)
-{
-    std::wstring p = path;
-    for (auto& ch : p) ch = wchar_t(towlower(ch));
-    for (const wchar_t* w : { L"anime", L"animation", L"animations", L"animated", L"cartoon", L"cartoons" }) {
-        const size_t n = wcslen(w);
-        for (size_t i = p.find(w); i != std::wstring::npos; i = p.find(w, i + 1)) {
-            const bool before = i == 0 || !iswalpha(p[i - 1]);
-            const bool after = i + n >= p.size() || !iswalpha(p[i + n]);
-            if (before && after) return true;
-        }
-    }
-    return false;
-}
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
 enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg,
@@ -250,7 +237,7 @@ struct Choice {               // resolved values for pushcore and the filter
     FgMethod fgMethod = FgMethod::Vfg;   // the method in use (Auto never)
     int fgQuality = 1;        // VFG model 0..2, or PushFlow tier 0..2
     bool deband = false; int debandStrength = 1;
-    bool animation = false;   // treated as animation (Settings.animation On, or Auto: AnimationHint / held frames found)
+    bool animation = false;   // treated as animation (Settings.animation On, or Auto: measured as hand-drawn animation)
     std::wstring animNote;
     int animMode = 0;         // PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off
     uint32_t holdFlags = 0;   // PUSHCORE_HOLD_* bits (pushcore_abi.h)
@@ -534,9 +521,9 @@ inline const wchar_t* QualityName(FgMethod m, int q)
     return L"";
 }
 
-// Anime round 5: Auto's animation mode per show class, until the user's verdict on the split-screen pairs (V1-V4: two
-// "Camera only" answers for a class set its constant to 1). 0 Full, 1 Camera only, 2 Off.
-inline constexpr int kAnimModeFeature = 0, kAnimModeTv = 0, kAnimModeMixedCg = 0;
+// Anime round 5: Auto's animation mode until the user's verdict on the split-screen pairs (V1-V4: "Camera only" answers
+// set it to 1). 0 Full, 1 Camera only, 2 Off. One value for every drawn picture: no class is remembered per show.
+inline constexpr int kAnimModeAuto = 0;
 // V5-V7: transient hold and line-art protection on by default for animation (flash / impact hold on every video:
 // the user's rule, 2026-11-26)
 inline constexpr bool kHoldTransientsAuto = true, kHoldLiveTransientsAuto = true, kLineArtAuto = true;
@@ -575,18 +562,19 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // --- animation: held drawings are re-timed by pushcore whenever frame generation runs (unless Off)
     if (s.animation == kOff) { r.animation = false; r.animNote = L"off (held drawings are not re-timed)"; }
     else if (s.animation != kAuto) { r.animation = true; r.animNote = L"on"; }
+    else if (src.contentClass == 1) { r.animation = true; r.animNote = std::format(L"on, hand-drawn animation measured in the picture ({:.0f} %)", 100.0 * src.contentConf); }
+    else if (src.contentClass > 1) {
+        static const wchar_t* kWhat[5] = { L"", L"", L"3D CG animation", L"live action", L"game footage" };
+        r.animation = false; r.animNote = std::format(L"off, {} measured in the picture ({:.0f} %); held frames are still re-timed", kWhat[src.contentClass], 100.0 * src.contentConf);
+    }
     else if (src.heldShare >= kAnimationHeldShare) { r.animation = true; r.animNote = std::format(L"on, held drawings found ({:.0f} % of frames)", 100.0 * std::min(1.0, src.heldShare)); }
-    else if (src.animHint) { r.animation = true; r.animNote = L"on, the file name or folder says animation"; }
     else { r.animation = false; r.animNote = src.heldShare >= 0 ? std::format(L"off, no held drawings ({:.0f} % of frames); held frames are still re-timed", 100.0 * src.heldShare) : L"Auto, measuring"; }
-    // --- the animation mode (round 5): the setting, else the show's own choice, else Auto's constant for its class
+    // --- the animation mode (round 5): the setting, else the user's own choice for this show, else Auto's default
     {
         static const wchar_t* kModeName[3] = { L"Full", L"Camera only", L"Off" };
         if (s.animMode >= 0 && s.animMode <= 2) { r.animMode = s.animMode; r.animModeNote = std::wstring(kModeName[r.animMode]); }
         else if (src.showChoice >= 0 && src.showChoice <= 2) { r.animMode = src.showChoice; r.animModeNote = std::wstring(kModeName[r.animMode]) + L", this show's choice"; }
-        else {
-            r.animMode = src.showClass == 1 ? kAnimModeFeature : src.showClass == 3 ? kAnimModeMixedCg : kAnimModeTv;
-            r.animModeNote = std::wstring(kModeName[r.animMode]) + (src.showClass == 1 ? L" (Auto: feature)" : src.showClass == 2 ? L" (Auto: TV)" : src.showClass == 3 ? L" (Auto: mixed CG)" : L" (Auto)");
-        }
+        else { r.animMode = kAnimModeAuto; r.animModeNote = std::wstring(kModeName[r.animMode]) + L" (Auto)"; }
         const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
         const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation) : true;
         const bool signs = kSignsAuto && r.animation && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)

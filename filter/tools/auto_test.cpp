@@ -322,22 +322,22 @@ int main()
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;
         }
-        {   // Animation: the path hint, the held-frame share, Off / On, and DLSS-G behind PushFlow for animation
-            check(AnimationHint(L"videos/anime/show - 01.mkv") && AnimationHint(L"Cartoons/ep1.mkv") && AnimationHint(L"animated films/a.mkv")
-                  && !AnimationHint(L"videos/animal planet/a.mkv") && !AnimationHint(L"animes2/x.mkv") && !AnimationHint(L"movies/film.mkv"),
-                  L"Animation hint: whole words anime / cartoons / animated only");
+        {   // Animation: measured only (ContentDetect's class, else the held-frame share), Off / On, DLSS-G behind PushFlow
             Source s; s.fps = 23.976; Display d; d.refreshHz = 240; Gpu g = Family(kRtx40, L"NVIDIA GeForce RTX 4090"); g.available &= ~(1u << kCapVfg);
-            Source held = s; held.heldShare = 0.4; Source hint = s; hint.animHint = true; Source live = s; live.heldShare = 0.01;
+            Source held = s; held.heldShare = 0.4; Source hint = s; hint.contentClass = 1; hint.contentConf = 0.8f; Source live = s; live.heldShare = 0.01;
+            Source liveHeld = held; liveHeld.contentClass = 3; liveHeld.contentConf = 0.7f;   // held frames on live action (a still shot): the class wins
             Settings off; off.animation = kOff; Settings on; on.animation = 1;
             const Choice a = Decide({}, held, d, {}, g), b = Decide({}, live, d, {}, g), c2 = Decide({}, hint, d, {}, g), e = Decide(off, held, d, {}, g), f = Decide(on, live, d, {}, g);
-            check(a.animation && !b.animation && c2.animation && !e.animation && f.animation, L"Animation Auto: held share >= 20 % or the path; Off / On fixed", a.animNote + L" | " + b.animNote);
+            const Choice lh = Decide({}, liveHeld, d, {}, g);
+            check(a.animation && !b.animation && c2.animation && !lh.animation && !e.animation && f.animation, L"Animation Auto: the measured class (else held share >= 20 %); Off / On fixed",
+                  a.animNote + L" | " + c2.animNote + L" | " + lh.animNote);
             check(a.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
                   std::wstring(FgMethodLabel(a.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
-            // round 5: the animation mode (Auto = Full for every class until the verdict; the show's choice; the setting)
-            Source tv = held; tv.showClass = 2; Source picked = held; picked.showClass = 2; picked.showChoice = 1;
+            // round 5: the animation mode (Auto = Full until the verdict; the user's choice for the show; the setting)
+            Source tv = held; Source picked = held; picked.showChoice = 1;
             Settings cam; cam.animMode = 1; Settings noTrans; noTrans.holdTransients = kOff;
             const Choice m1 = Decide({}, tv, d, {}, g), m2 = Decide({}, picked, d, {}, g), m3 = Decide(cam, picked, d, {}, g), m4 = Decide(noTrans, live, d, {}, g), m5 = Decide({}, live, d, {}, g);
-            check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full by class until the verdict, a show's choice is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
+            check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full until the verdict, the user's choice for a show is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
             check((m1.holdFlags & 1) && (m1.holdFlags & 2) && (m5.holdFlags & 1) && (m5.holdFlags & 8) && !(m5.holdFlags & 2) && m4.holdFlags == 0,
                   L"holds: transients on for every video (flash / impact also on live action), line art on animation only; Off turns them off", std::to_wstring(m1.holdFlags) + L" / " + std::to_wstring(m5.holdFlags));
             check(ShowKeyFor(L"media/Show/Season 1/e01.mkv") == ShowKeyFor(L"Media/show/season 2/e05.mkv") && ShowKeyFor(L"media/Show/S01/e01.mkv") == ShowKeyFor(L"media/Show/e09.mkv")

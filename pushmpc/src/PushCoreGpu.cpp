@@ -25,6 +25,7 @@
 // the generated frames over the whole held span; HeldFrames.h).
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
+#include "pushmpc/content_detect.h"     // IntervalMeter: the source frame interval from the submitted timestamps
 #include "PushCoreDeband.h"
 #include "PushCoreQuickVsr.h"        // fast start Route B: driver RTX VSR through the D3D11 video processor
 #include "PushCoreXess.h"                   // G10: XeSS frame generation (headless swap chain) and XeSS SR
@@ -985,7 +986,15 @@ struct PushCore {
         return false;
 #endif
     }
-    double sourceIntervalMs() const { return stream.fpsNum > 0 && stream.fpsDen > 0 ? 1000.0 * double(stream.fpsDen) / double(stream.fpsNum) : 1000.0 / 23.976; }
+    // the source frame interval: measured from the submitted timestamps (per segment), the stream's nominal rate only until
+    // 8 steps exist (a "29.97" tag on a 24p body would make the budget 33 ms instead of 42 ms)
+    pushmpc::content::IntervalMeter intervalMeter;   // submit thread
+    std::atomic<double> measuredIntervalMs{0.0};
+    double sourceIntervalMs() const {
+        const double m = measuredIntervalMs.load(std::memory_order_relaxed);
+        if (m > 1.0) return m;
+        return stream.fpsNum > 0 && stream.fpsDen > 0 ? 1000.0 * double(stream.fpsDen) / double(stream.fpsNum) : 1000.0 / 23.976;
+    }
     void clearRegions() {
         { std::lock_guard<std::mutex> lk(planMx); ++planEpoch; planJobs.clear(); plans.clear(); }
         anyQueued = anyPlanQueued = false; lastQueued = lastPlanQueued = 0;
@@ -2361,6 +2370,11 @@ struct PushCore {
         const uint64_t copyValue = value11;
         const uint64_t seq = ingestSeq++;
         lastIngest = Clock::now();
+        if (intervalMeter.Push(double(pts) / 1e7, (submitFlags & PUSHCORE_SUBMIT_DISCONTINUITY) != 0)) {
+            const double was = measuredIntervalMs.exchange(intervalMeter.seconds() * 1000.0);
+            veyra::log::info("pushcore", std::format("source frame interval {:.3f} ms measured from the timestamps (nominal {:.3f} ms{})", intervalMeter.seconds() * 1000.0,
+                stream.fpsNum > 0 && stream.fpsDen > 0 ? 1000.0 * double(stream.fpsDen) / double(stream.fpsNum) : 0.0, was > 0 ? std::format(", was {:.3f} ms", was) : std::string()));
+        }
         if (retimingOn()) {
             // the held-frame test against the source frame before (same size, no discontinuity); the frame waits in
             // the queue until its result is read
@@ -3997,7 +4011,7 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             veyra::Logger::instance().setConsoleEnabled(false);
         }
         core = new PushCore();
-        core->stream = *stream;
+        core->stream = *stream; core->intervalMeter.Reset(); core->measuredIntervalMs = 0.0;
         core->dataDir = config->dataDir ? std::wstring(config->dataDir) : (veyra::runtime::userDataDirectory() / L"user-data-2.0.0").wstring();
         core->runtimeDir = config->runtimeDir && *config->runtimeDir ? std::wstring(config->runtimeDir) : veyra::runtime::localRuntimeDirectory().wstring();
         core->cfgSr = config->sr; core->cfgFg = config->fg; core->cfgMultiplier = config->multiplier; core->cfgVfgQuality = config->vfgQuality;

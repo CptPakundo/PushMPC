@@ -52,6 +52,7 @@
 #include "IMediaSideData.h"
 #include "pushmpc/pushcore_abi.h"
 #include "pushmpc/unlocks.h"            // T5b: vendor unlocks (off switches, self-test results)
+#include "pushmpc/content_detect.h"     // what the picture is (class per shot), interlacing and the frame interval, measured
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
@@ -2072,7 +2073,8 @@ public:
             FastStartKick();
             m_typeIlFlags = il;
             m_inInterlaced = m_typeInterlaced && (il & AMINTERLACE_1FieldPerSample) != 0;
-            m_ilDecided = !m_typeInterlaced; m_ilSeen = m_ilCount = 0;
+            m_ilDecided = false; m_ilSeen = m_ilCount = 0; m_comb.Reset();   // interlacing: measured in the picture (CheckInterlace)
+            m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentLogged = -1;
             m_baseStepMs = 0; m_ptsStepMs = 0; m_tracker = pm::StepTracker{}; m_trackReset = false; m_openFps = 0; m_reopenForRate = false; m_openDeferred = false;   // a new stream: measured again
             m_inArX = ax; m_inArY = ay;
             DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;
@@ -2281,7 +2283,7 @@ public:
         // interval at 1.0x divided by the rate, set at once (one Auto decision per change, no estimate converging)
         const double r = rate > 0 ? rate : 1.0, was = m_rate.load();
         m_rate = r;
-        m_trackReset = true;
+        m_trackReset = true; m_contentDisc = true;
         if (std::fabs(r - was) > 1e-6) {
             const double base = m_baseStepMs.load();
             if (base > 0) m_ptsStepMs = base / r;
@@ -2309,7 +2311,7 @@ public:
         m_flushing = true; m_flushGen++;
         m_flushStartQpc = Qpc();
         ClearSeekStep("BeginFlush");
-        m_trackReset = true;
+        m_trackReset = true; m_contentDisc = true;
         WakeAll();
         Log("BeginFlush");
         return CTransformFilter::BeginFlush(); // downstream first wakes a Deliver waiting inside MPC-VR
@@ -2555,7 +2557,7 @@ private:
     void LogChoice(const char* why, const pm::Choice& c);
     void StartAuto();
     void StopAuto();
-    void AnimationHintOnce();
+    void ShowChoiceOnce();
     void AutoLoop();
     void LearnCosts();
     void LoadLearned();
@@ -2875,12 +2877,19 @@ private:
     void ConvBegin(); void ConvEnd();
     uint32_t m_fgRun = PUSHCORE_FG_NONE, m_srRun = 0; bool m_cutGuardRun = false; std::wstring m_fgRunNote;   // what pushcore runs
     uint32_t m_subtitleState = 0, m_subtitlePixels = 0;   // PushFPS Subtitle Hold as pushcore reports it (PushCoreStats)
-    // Animation Auto: the path hint (once per file) and pushcore's held-frame share (sticky once it says animation)
-    std::atomic<int> m_animHint = -1;          // -1 not looked at yet, 0 / 1
+    // Animation Auto from the picture only: ContentDetect's class (fed on the streaming thread from every input sample)
+    // and pushcore's held-frame share (the latest, not sticky). The show key only addresses the user's own choice.
     std::atomic<double> m_heldShare = -1.0;
+    pushmpc::content::ContentDetector m_content;     // streaming thread only
+    pushmpc::content::CombMeter m_comb;              // streaming thread only
+    std::atomic<int> m_contentClass = 0;
+    std::atomic<bool> m_contentDisc = false;
+    std::atomic<float> m_contentConf = 0.f;
+    int m_contentLogged = -1;
+    void MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc);
+    bool m_showLooked = false;
     std::wstring m_showKey;                     // round 5: this file's show (PushMpcShows.h), empty = none
-    std::atomic<int> m_showClass = 0, m_showChoice = -1;
-    bool m_showClassSaved = false;
+    std::atomic<int> m_showChoice = -1;
     bool m_heldLogged = false;
 };
 
@@ -3459,15 +3468,18 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     if (m_openStarted) return;
     if (ShouldDeferOpen()) return;
     m_openStarted = true;
-    AnimationHintOnce();
+    ShowChoiceOnce();
     PushCoreStreamInfo si = {};
     si.structSize = sizeof(si);
     si.width = m_visW; si.height = m_visH;
     si.format = m_inP010 ? PUSHCORE_INPUT_P010 : PUSHCORE_INPUT_NV12;
-    si.fpsNum = 10000000; si.fpsDen = int32_t(m_atpf);
-    if (m_atpf >= 417080 && m_atpf <= 417090) { si.fpsNum = 24000; si.fpsDen = 1001; }
-    else if (m_atpf >= 333660 && m_atpf <= 333670) { si.fpsNum = 30000; si.fpsDen = 1001; }
-    else if (m_atpf >= 166830 && m_atpf <= 166840) { si.fpsNum = 60000; si.fpsDen = 1001; }
+    // the nominal rate pushcore starts from: the measured interval when the timestamps already gave one (a "29.97" tag on
+    // a 24p body), else the media type's (a prior; pushcore measures the submitted timestamps itself as well)
+    const REFERENCE_TIME atpf = m_baseStepMs.load() > 1.0 ? REFERENCE_TIME(std::llround(m_baseStepMs.load() * 1e4)) : m_atpf;
+    si.fpsNum = 10000000; si.fpsDen = int32_t(atpf);
+    if (atpf >= 417080 && atpf <= 417090) { si.fpsNum = 24000; si.fpsDen = 1001; }
+    else if (atpf >= 333660 && atpf <= 333670) { si.fpsNum = 30000; si.fpsDen = 1001; }
+    else if (atpf >= 166830 && atpf <= 166840) { si.fpsNum = 60000; si.fpsDen = 1001; }
     DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;   // the media type's control flags carry DXVA2_ExtendedFormat as is
     const bool hdr = InputHdr();
     si.range = m_inCtrl ? FfRange(ex.NominalRange) : 1;
@@ -4010,6 +4022,7 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
         StartOpen(nullptr);
     }
     if (!m_ilDecided) CheckInterlace(pIn);
+    MeasureContent(pIn, rtStart, pIn->IsDiscontinuity() == S_OK);
 
     if (!m_sideChecked) {
         m_sideChecked = true;
@@ -4721,12 +4734,13 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.fps = step > 1.0 ? 1000.0 / step : 1e7 / double(m_atpf > 0 ? m_atpf : 417083) * (m_rate.load() > 0 ? m_rate.load() : 1.0);
     s.hdr = InputHdr();
     s.tenBit = m_inP010;
-    s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
-    s.animHint = m_animHint.load() == 1;
+    // bits per pixel per frame at the measured frame rate (a "29.97" tag on a 24p body would make it 25 % low)
+    s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, step > 1.0 ? 1000.0 / m_baseStepMs.load() : 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
     s.heldShare = m_heldShare.load();
+    s.contentClass = m_contentClass.load(); s.contentConf = m_contentConf.load();
     // the page may set this show's choice while it plays (Shows\<key>\Choice)
     if (!m_showKey.empty()) m_showChoice = pm::ReadShow(m_showKey).choice;
-    s.showClass = m_showClass.load(); s.showChoice = m_showChoice.load();
+    s.showChoice = m_showChoice.load();
     return s;
 }
 // The stream's bitrate, for Clean up's Auto rule: the splitter's video type (dwBitRate), else the file's size over its
@@ -5170,28 +5184,37 @@ std::wstring CPushMpcFilter::SourceFile()
 // deinterlaces it (the connected output type never changes at run time).
 void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
 {
+    // The flags are a prior only (logged): LAV's type flag and its per-sample weave / field flags come from the bitstream,
+    // and encoders set them on progressive pictures too (RC1 F6: progressive SD XviD). The verdict is the picture's own
+    // field combing on moving areas (CombMeter: 24 moving frames, half or more combed = interlaced).
     DWORD flags = 0; bool have = false;
     ComPtr<IMediaSample2> s2;
     if (SUCCEEDED(pIn->QueryInterface(__uuidof(IMediaSample2), (void**)&s2)) && s2) {
         AM_SAMPLE2_PROPERTIES pr = {};
         if (SUCCEEDED(s2->GetProperties(sizeof(pr), (BYTE*)&pr))) { flags = pr.dwTypeSpecificFlags; have = true; }
     }
-    // no per-sample flags: the type's display mode (weave only = progressive display)
     const bool field = (flags & AM_VIDEO_FLAG_FIELD_MASK) != 0;
     const bool il = have ? (field || !(flags & AM_VIDEO_FLAG_WEAVE)) : (m_typeIlFlags & AMINTERLACE_DisplayModeMask) != AMINTERLACE_DisplayModeWeaveOnly;
-    if (m_ilSeen < 3) Log(std::format("sample {}: type interlace 0x{:X}, sample flags {} -> {}", m_ilSeen, m_typeIlFlags, have ? std::format("0x{:X}", flags) : std::string("none"),
-                                      il ? (field ? "a field" : "an interlaced frame") : "a progressive frame (weave)"));
+    if (m_ilSeen < 3) Log(std::format("sample {}: type interlace 0x{:X}, sample flags {} -> {} (a prior; the picture decides)", m_ilSeen, m_typeIlFlags,
+                                      have ? std::format("0x{:X}", flags) : std::string("none"), il ? (field ? "a field" : "an interlaced frame") : "a progressive frame (weave)"));
     m_ilSeen++;
-    if (il) m_ilCount++;
-    if (m_ilSeen < 8) return;
+    if (il && m_typeInterlaced) m_ilCount++;
+    BYTE* src = nullptr;
+    if (FAILED(pIn->GetPointer(&src)) || !src || pIn->GetActualDataLength() < LONG(m_inStride * m_inH)) return;
+    using pushmpc::content::CombMeter;
+    const CombMeter::Verdict v = m_inP010 ? m_comb.Push(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 8)
+                                          : m_comb.Push(src, ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 0);
+    // a still picture shows no combing whatever its fields: after ~10 s without enough motion it counts as progressive
+    if (v == CombMeter::kMeasuring && m_ilSeen < 240) return;
     m_ilDecided = true;
-    if (m_ilCount * 2 < m_ilSeen) {
-        Log(std::format("progressive: {} of {} samples interlaced (the type's interlace flag 0x{:X} is only a possibility)", m_ilCount, m_ilSeen, m_typeIlFlags));
+    if (v != CombMeter::kInterlaced) {
+        Log(std::format("progressive (measured): {} of {} moving frames combed{}; flags said {} of {} samples interlaced", m_comb.combed(), m_comb.measured(),
+                        v == CombMeter::kMeasuring ? " (too little motion to tell: treated as progressive)" : "", m_ilCount, m_ilSeen));
         return;
     }
     const std::wstring file = SourceFile();
     if (!file.empty()) { std::lock_guard<std::mutex> lk(g_ilLock); g_interlacedFiles.insert(file); }
-    const std::wstring why = std::format(L"interlaced input ({} of {} samples are interlaced frames)", m_ilCount, m_ilSeen);
+    const std::wstring why = std::format(L"interlaced input (field combing measured on {} of {} moving frames)", m_comb.combed(), m_comb.measured());
     LogW(L"interlaced: " + why);
     if (m_mode == Mode::Warmup || m_mode == Mode::Active) {
         CloseCore();
@@ -5199,23 +5222,49 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
         if (!file.empty() && !RequestReopen()) SetStatus(L"no PushFPS (source frames converted by the filter, not deinterlaced): " + why);
     }
 }
-// Animation Auto's early hint: the file's path (once per file, before the first decision)
-void CPushMpcFilter::AnimationHintOnce()
+// ContentDetect on every input sample (streaming thread): the luma / chroma cell grid of the system-memory sample
+// (NV12 or P010, ~0.5 ms at 1080p), its timestamp; the class goes to Auto through m_contentClass (no names, no flags)
+void CPushMpcFilter::MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc)
 {
-    if (m_animHint.load() >= 0) return;
-    m_animHint = pm::AnimationHint(SourceFile()) ? 1 : 0;
+    if (m_contentDisc.exchange(false) || disc) m_content.Discontinuity();
+    BYTE* src = nullptr;
+    if (FAILED(pIn->GetPointer(&src)) || !src || pIn->GetActualDataLength() < LONG(m_inStride * m_inH * 3 / 2) || m_inW < 16 || m_inH < 16) return;
+    using namespace pushmpc::content;
+    const bool limited = true;   // LAV's NV12 / P010 output is video range
+    const Cells c = m_inP010
+        ? CellsFromYuv(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), reinterpret_cast<const uint16_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint16_t*>(nullptr),
+                       ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 16, limited)
+        : CellsFromYuv(static_cast<const uint8_t*>(src), ptrdiff_t(m_inStride), static_cast<const uint8_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint8_t*>(nullptr),
+                       ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 8, limited);
+    if (!m_content.Push(c, double(pts) / 1e7)) return;
+    const State& st = m_content.Current();
+    m_contentConf = st.confidence;
+    if (st.cls != m_contentClass.load()) {
+        m_contentClass = st.cls;
+        // the Auto thread re-decides on its next tick (<= 1 s); the class changes at most once per 2 s (hysteresis)
+    }
+    if (st.cls != m_contentLogged) {
+        m_contentLogged = st.cls;
+        Log(std::format("content: {} ({:.0f} %), measured in the picture at {:.1f} s; probabilities drawn {:.2f} CG {:.2f} live {:.2f} game {:.2f}; class changes so far {}",
+                        ClassName(st.cls), 100.0 * st.confidence, double(pts) / 1e7, st.prob[kDrawn], st.prob[kCg], st.prob[kLive], st.prob[kGame], st.changes));
+    }
+}
+// The user's own animation-mode choice for this show (a preference store addressed by the series folder; nothing is
+// detected from the path: the picture's class comes from ContentDetect)
+void CPushMpcFilter::ShowChoiceOnce()
+{
+    if (m_showLooked) return;
+    m_showLooked = true;
     m_showKey = pm::ShowKeyFor(SourceFile());
     if (!m_showKey.empty()) {
-        const pm::ShowInfo si = pm::ReadShow(m_showKey);
-        m_showClass = si.cls; m_showChoice = si.choice; m_showClassSaved = si.cls != 0;
+        m_showChoice = pm::ReadShow(m_showKey).choice;
         pm::SetCurrentShow(m_showKey);
-        Log(std::format("animation mode: show class {}, choice {}", si.cls, si.choice));
+        if (m_showChoice.load() >= 0) Log(std::format("animation mode: the user's choice for this show is {}", m_showChoice.load()));
     }
-    if (m_animHint.load() == 1) Log("animation: the file name or folder says animation");
 }
 void CPushMpcFilter::StartAuto()
 {
-    AnimationHintOnce();
+    ShowChoiceOnce();
     if (m_autoThread.joinable()) return;
     m_hAutoStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_autoThread = std::thread([this] { AutoLoop(); });
@@ -5274,17 +5323,11 @@ void CPushMpcFilter::AutoLoop()
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
                 if (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) { m_subtitleState = st.subtitleHoldState; m_subtitlePixels = st.subtitleHoldPixels; }
-                if ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) && (st.animClass & 16u) && !m_showClassSaved && !m_showKey.empty()) {
-                    // the class pushcore measured over ~2 minutes: kept for this show (Auto per show)
-                    m_showClassSaved = true; m_showClass = int(st.animClass & 3u);
-                    pm::WriteShowDword(m_showKey, L"Class", int(st.animClass & 3u));
-                    Log(std::format("animation mode: show class {} measured and kept", st.animClass & 3u));
-                }
                 if ((g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && st.heldActive && st.heldTested >= 96) {
-                    // ~4 s of frames tested: the share of held drawings (kept once it says animation: a still or a 3D CG
-                    // scene in a cartoon does not undo it)
+                    // ~4 s of frames tested: the share of held drawings (the latest: ContentDetect's per-shot class with
+                    // its hysteresis decides first; this is the fallback until it has decided)
                     const double share = st.heldRatioPermille / 1000.0;
-                    if (m_heldShare.load() < pm::kAnimationHeldShare) m_heldShare = share;
+                    m_heldShare = share;
                     if (!m_heldLogged && share >= pm::kAnimationHeldShare) {
                         m_heldLogged = true;
                         Log(std::format("held drawings: {:.1f} % of the last {} frames (animation); re-timed spans {}, held frames given no graph pair {}, graph {}x",

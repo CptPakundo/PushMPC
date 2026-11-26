@@ -38,6 +38,7 @@ extern "C" {
 #if defined(_WIN32)
 #include <kodi/gui/General.h>   // GetHWContext: Kodi's own D3D11 device (logged next to pushcore's)
 #include "pushcore_route.h"
+#include "../../pushmpc/include/pushmpc/content_detect.h"   // what the picture is, interlacing: measured, never from names or flags
 #endif
 
 #include <algorithm>
@@ -567,16 +568,28 @@ private:
     {
         const AVCodecParameters* p = st->codecpar;
         int mode = m_settings.upscale;   // 0 Auto, 1 Kodi's scaler, 2 x2 (test), 3 NIS, 4 FSR1, 5 anime upscaler
-        // the anime upscaler (pmml: ArtCNN / CuNNy / AnimeSR, Setup's anime models): asked for (5), or Auto on animation
-        // (the path names it) when the picture is enlarged; the engine then runs at its output size (anime_sr_engine.h)
-        if (mode == 5 || (mode == 0 && AnimationPath(m_path))) {
+        // the anime upscaler (pmml: ArtCNN / CuNNy / AnimeSR, Setup's anime models): asked for (5), or Auto once the decoder
+        // MEASURES hand-drawn animation (ContentDetect; prepared here as animeAutoModel, switched on by the decoder) when the
+        // picture is enlarged; the engine then runs at its output size (anime_sr_engine.h)
+        const bool autoAnime = mode == 0;
+        if (mode == 5 || autoAnime) {
             const std::string rt = PmmlRuntime();
             const AVCodecParameters* q = st->codecpar;
             const bool bigger = m_screenW > q->width * 11 / 10 || m_screenH > q->height * 11 / 10;
             if (!rt.empty() && bigger && q->height <= 1080) {
                 const auto pick = pm::PickAnimeSr(unsigned(q->width), unsigned(q->height), unsigned(std::max(m_screenW, q->width)), unsigned(std::max(m_screenH, q->height)),
                                                   m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
-                if (pick.model >= 0) {
+                if (pick.model >= 0 && autoAnime) {
+                    // Auto: prepared only; the plain route below runs until the picture is measured as drawn
+                    const std::wstring id = pm::AnimeSrModel(pick.model).id;
+                    c.animeAutoModel.assign(id.begin(), id.end());
+                    c.pmmlRuntime = rt;
+                    const AVRational sar0 = st->sample_aspect_ratio.num ? st->sample_aspect_ratio : q->sample_aspect_ratio;
+                    const double dar0 = double(q->width) / q->height * (sar0.num > 0 && sar0.den > 0 ? av_q2d(sar0) : 1.0);
+                    int ow = m_screenW, oh = int(std::lround(m_screenW / dar0));
+                    if (oh > m_screenH) { oh = m_screenH; ow = int(std::lround(m_screenH * dar0)); }
+                    c.animeAutoOutW = ow & ~1; c.animeAutoOutH = oh & ~1;
+                } else if (pick.model >= 0) {
                     const std::wstring id = pm::AnimeSrModel(pick.model).id;
                     c.animeModel.assign(id.begin(), id.end());
                     c.pmmlRuntime = rt;
@@ -608,19 +621,6 @@ private:
               (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
     }
 
-    static bool AnimationPath(const std::string& p)
-    {
-        std::string s(p);
-        for (auto& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
-        for (const char* w : {"anime", "animation", "animations", "animated", "cartoon", "cartoons"}) {
-            const size_t n = std::strlen(w);
-            for (size_t at = s.find(w); at != std::string::npos; at = s.find(w, at + 1)) {
-                const bool l = at == 0 || !std::isalnum(static_cast<unsigned char>(s[at - 1])), r = at + n >= s.size() || !std::isalnum(static_cast<unsigned char>(s[at + n]));
-                if (l && r) return true;
-            }
-        }
-        return false;
-    }
     // pmml's runtime with the anime models: PMML_RUNTIME, else PushMPC's per-user folder
     static std::string PmmlRuntime()
     {
@@ -709,6 +709,52 @@ private:
         return trc;
     }
 
+    // Interlacing from the picture (the stream's field_order is a prior that says "look", never the verdict: encoders flag
+    // progressive pictures as interlaced, RC1 F6): up to maxPackets decoded from the start, CombMeter on native luma;
+    // a still start that shows no motion counts as progressive. The demuxer is rewound afterwards, as ProbeTransfer does.
+    pushmpc::content::CombMeter::Verdict ProbeCombing(int maxPackets)
+    {
+        using pushmpc::content::CombMeter;
+        CombMeter comb;
+        pushmpc::content::IntervalMeter iv;   // the frame interval from the decoded timestamps (a "29.97" tag on a 24p body)
+        AVStream* st = m_fmt->streams[m_videoIndex];
+        const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+        if (!dec) return CombMeter::kMeasuring;
+        AVCodecContext* ctx = avcodec_alloc_context3(dec);
+        avcodec_parameters_to_context(ctx, st->codecpar);
+        ctx->thread_count = 0;
+        AVPacket* pkt = av_packet_alloc();
+        AVFrame* frm = av_frame_alloc();
+        const AVDiscard saved = st->discard;
+        st->discard = AVDISCARD_DEFAULT;
+        if (avcodec_open2(ctx, dec, nullptr) >= 0) {
+            for (int n = 0; n < maxPackets && comb.verdict() == CombMeter::kMeasuring; ++n) {
+                if (av_read_frame(m_fmt, pkt) < 0) break;
+                if (pkt->stream_index == m_videoIndex && avcodec_send_packet(ctx, pkt) >= 0)
+                    while (avcodec_receive_frame(ctx, frm) >= 0) {
+                        if (frm->best_effort_timestamp != AV_NOPTS_VALUE) iv.Push(double(frm->best_effort_timestamp) * av_q2d(st->time_base), false);
+                        const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(frm->format));
+                        if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL) && frm->data[0]) {
+                            if (d->comp[0].depth > 8) comb.Push(reinterpret_cast<const uint16_t*>(frm->data[0]), ptrdiff_t(frm->linesize[0] / 2), frm->width, frm->height, d->comp[0].depth - 8);
+                            else comb.Push(static_cast<const uint8_t*>(frm->data[0]), ptrdiff_t(frm->linesize[0]), frm->width, frm->height, 0);
+                        }
+                        av_frame_unref(frm);
+                    }
+                av_packet_unref(pkt);
+            }
+        }
+        st->discard = saved;
+        av_seek_frame(m_fmt, -1, m_fmt->start_time != AV_NOPTS_VALUE ? m_fmt->start_time : 0, AVSEEK_FLAG_BACKWARD);
+        avformat_flush(m_fmt);
+        m_probeFps = iv.fps();
+        Log(ADDON_LOG_INFO, "interlacing measured: %d of %d moving frames combed -> %s (field_order flag %d, a prior)", comb.combed(), comb.measured(),
+            comb.verdict() == CombMeter::kInterlaced ? "interlaced" : "progressive", int(st->codecpar->field_order));
+        av_frame_free(&frm);
+        av_packet_free(&pkt);
+        avcodec_free_context(&ctx);
+        return comb.verdict();
+    }
+
     // does PushMPC decode the main video stream, and at which multiplier
     void DecideVideo()
     {
@@ -749,8 +795,14 @@ private:
         else if (IsHdrTransfer(trc) && PM_KODI22 && !m_settings.hdr) why = "HDR is off in the add-on settings";
         else if (IsHdrTransfer(trc) && !PM_KODI22 && !m_settings.hdr21Sdr)
             why = "HDR: Kodi 21 cannot take HDR pictures from an add-on (frame generation in SDR is an add-on setting)";
-        else if (p->field_order != AV_FIELD_PROGRESSIVE && p->field_order != AV_FIELD_UNKNOWN) why = "interlaced: Kodi deinterlaces it";
+        // every stream is measured; a stream flagged progressive gets a shorter look (the flag is only a prior)
+        else if (ProbeCombing(p->field_order == AV_FIELD_PROGRESSIVE ? 120 : 400) == pushmpc::content::CombMeter::kInterlaced) why = "interlaced (field combing measured): Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
+        // the frame rate the decoded timestamps show wins over the container's tag (measured while probing above)
+        if (why.empty() && m_probeFps > 1.0 && (m_fps <= 0 || std::fabs(m_probeFps - m_fps) / m_probeFps > 0.05)) {
+            Log(ADDON_LOG_INFO, "frame rate measured from the timestamps: %.3f fps (the stream says %.3f)", m_probeFps, m_fps);
+            m_fps = m_probeFps;
+        }
         else if (bits > 10) why = "more than 10 bits per sample";
         if (!why.empty()) {
             Log(ADDON_LOG_INFO, "video stays with Kodi's decoder: %s", why.c_str());
@@ -931,8 +983,9 @@ private:
     bool m_decode = false;
     int m_k = 1;
     double m_fps = 0;
+    double m_probeFps = 0;   // measured by ProbeCombing from the decoded timestamps
     int m_screenW = 0, m_screenH = 0, m_outW = 0, m_outH = 0;
-    std::string m_path;   // the stream's URL (the anime upscaler's animation hint)
+    std::string m_path;   // the stream's URL (opened by FFmpeg; never used to classify the content)
     uint64_t m_reads = 0;
     AVColorTransferCharacteristic m_trc = AVCOL_TRC_UNSPECIFIED;
     bool m_toneMap = false;
@@ -1282,6 +1335,7 @@ private:
         av_frame_unref(m_sw);
 
         const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
+        MeasureContent(m_pic[cur], pts, !contiguous);
         bool pushed = false;
         if (m_engine && (m_k > 1 || m_upscaled)) {
             pm_yuv src{};
@@ -1298,6 +1352,43 @@ private:
         if (!dup) m_prevSlot = cur;
         m_prevPts = pts;
         m_havePrev = true;
+    }
+
+    // ContentDetect on the decoded planes (the cell grid costs ~0.5 ms at 1080p); Auto's anime upscaler follows the measured
+    // class: on once the picture is hand-drawn animation, off again when a later shot is measured as something else
+    // (the class itself needs 2 s of margin to change; the engine is reopened at most once per 30 s)
+    void MeasureContent(const Planes& pl, int64_t ptsUs, bool disc)
+    {
+        using namespace pushmpc::content;
+        if (disc) m_content.Discontinuity();
+        if (pl.buf.empty() || !pl.data[0]) return;
+        const Cells c = m_bits > 8
+            ? CellsFromYuv(reinterpret_cast<const uint16_t*>(pl.data[0]), ptrdiff_t(pl.stride[0] / 2), reinterpret_cast<const uint16_t*>(pl.data[1]), reinterpret_cast<const uint16_t*>(pl.data[2]),
+                           ptrdiff_t(pl.stride[1] / 2), m_w, m_h, m_bits, !m_cfg.fullRange)
+            : CellsFromYuv(static_cast<const uint8_t*>(pl.data[0]), ptrdiff_t(pl.stride[0]), static_cast<const uint8_t*>(pl.data[1]), static_cast<const uint8_t*>(pl.data[2]),
+                           ptrdiff_t(pl.stride[1]), m_w, m_h, 8, !m_cfg.fullRange);
+        if (!m_content.Push(c, double(ptsUs) / 1e6)) return;
+        const State& st = m_content.Current();
+        if (st.cls == m_contentCls) return;
+        m_contentCls = st.cls;
+        Log(ADDON_LOG_INFO, "content: %s (%.0f %%), measured in the picture at %.1f s", ClassName(st.cls), 100.0 * st.confidence, double(ptsUs) / 1e6);
+        if (m_cfg.animeAutoModel.empty() || Pc() || m_cfg.external) return;
+        const bool want = st.cls == kDrawn;
+        const auto now = std::chrono::steady_clock::now();
+        if (want == !m_cfg.animeModel.empty() || (m_animeSwitched && now - m_animeSwitchAt < std::chrono::seconds(30))) return;
+        pmk::EngineCfg c2 = m_cfg;
+        if (want) { c2.animeModel = c2.animeAutoModel; c2.upscaler = 1; c2.outWidth = c2.animeAutoOutW; c2.outHeight = c2.animeAutoOutH; }
+        else { c2.animeModel.clear(); c2.upscaler = m_in ? m_in->EngineConfig().upscaler : 0; c2.outWidth = m_in ? m_in->EngineConfig().outWidth : 0; c2.outHeight = m_in ? m_in->EngineConfig().outHeight : 0; }
+        std::string why;
+        auto e = pmk::OpenEngine(c2, why);
+        if (!e) { Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: %s", why.c_str()); m_cfg.animeAutoModel.clear(); return; }
+        m_engine = std::move(e); m_cfg = c2;
+        m_animeSwitched = true; m_animeSwitchAt = now;
+        m_upscaled = m_engine->OutWidth() != m_w || m_engine->OutHeight() != m_h;
+        m_outW = (m_upscaled ? m_engine->OutWidth() : m_w) * (m_test2x ? 2 : 1);
+        m_outH = (m_upscaled ? m_engine->OutHeight() : m_h) * (m_test2x ? 2 : 1);
+        m_havePrev = false;
+        Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls));
     }
 
     void Setup(int w, int h, int bits)
@@ -1787,6 +1878,10 @@ private:
     }
 
     CPushInputStream* m_in = nullptr;
+    pushmpc::content::ContentDetector m_content;   // what the picture is (decoder thread)
+    int m_contentCls = 0;
+    bool m_animeSwitched = false;
+    std::chrono::steady_clock::time_point m_animeSwitchAt{};
     AVCodecContext* m_ctx = nullptr;
     AVFrame* m_frame = nullptr;
     AVFrame* m_sw = nullptr;
