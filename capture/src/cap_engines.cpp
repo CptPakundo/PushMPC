@@ -110,13 +110,15 @@ class MlEngine : public HostEngine {
 public:
     bool Open(const EngineRequest& r, std::string& why)
     {
-        if (r.bits > 8) { why = "PushFlow takes 8-bit pictures here (an HDR capture goes to another engine)"; return false; }
         const std::string rt = MlDir();
         if (rt.empty()) { why = "the PushFlow runtime (pmml) is not installed"; return false; }
         pmml::Options o;
         o.runtimeDir = rt; o.modelsDir = rt + "/models"; o.graphsDir = rt + "/graphs"; o.ncnnModelsDir = rt + "/ncnn-models"; o.cacheDir = rt;
         o.width = r.w; o.height = r.h;
-        o.colour = pmml::Colour::limited(8);
+        // the network's float input from 16-bit codes: pmml's own conversion with this picture's depth and matrix
+        // (an HDR capture: 10 bit, BT.2020 NCL; it interpolates the PQ signal, as every route does); output in the same codes
+        o.colour = r.pq ? pmml::Colour::limited(r.bits, 0.2627f, 0.0593f) : pmml::Colour::limited(r.bits);
+        m_bits = r.bits; m_pq = r.pq;
         std::string log;
         const auto devs = pmml::listDevices(rt, &log);
         static const char* order[] = { "trt-rtx", "dml", "amdgpu", "openvino", "migraphx", "coreml", "qnn-gpu", "vulkan" };
@@ -153,9 +155,15 @@ public:
         pmml::OutFrame o;
         for (int i = 0; i < 3; ++i) { o.plane[i] = m_o[i].data(); o.stride[i] = i ? m_w / 2 : m_w; }
         if (!m_interp->render(t, o, &err)) return false;
-        if (out.w != m_w || out.h != m_h) out.Resize(m_w, m_h);
+        if (!out.Same(m_w, m_h, m_bits)) out.Resize(m_w, m_h, m_bits);
+        out.pq = m_pq;
         std::vector<uint8_t>* dst[3] = { &out.y, &out.u, &out.v };
-        for (int i = 0; i < 3; ++i) for (size_t k = 0; k < m_o[i].size() && k < dst[i]->size(); ++k) (*dst[i])[k] = uint8_t(std::min<uint16_t>(255, m_o[i][k]));
+        const uint16_t top = uint16_t((1u << m_bits) - 1);
+        for (int i = 0; i < 3; ++i) {
+            const size_t n = std::min(m_o[i].size(), dst[i]->size() / size_t(out.bps()));
+            if (m_bits <= 8) { for (size_t k = 0; k < n; ++k) (*dst[i])[k] = uint8_t(std::min<uint16_t>(255, m_o[i][k])); }
+            else for (size_t k = 0; k < n; ++k) { const uint16_t v = std::min(top, m_o[i][k]); (*dst[i])[2 * k] = uint8_t(v & 255); (*dst[i])[2 * k + 1] = uint8_t(v >> 8); }
+        }
         return true;
     }
 private:
@@ -163,7 +171,12 @@ private:
     void To16(const I420& f, P16& o) const
     {
         const std::vector<uint8_t>* s[3] = { &f.y, &f.u, &f.v };
-        for (int i = 0; i < 3; ++i) { o.p[i].resize(s[i]->size()); for (size_t k = 0; k < s[i]->size(); ++k) o.p[i][k] = (*s[i])[k]; }
+        for (int i = 0; i < 3; ++i) {
+            const size_t n = s[i]->size() / size_t(f.bps());
+            o.p[i].resize(n);
+            if (f.bits <= 8) for (size_t k = 0; k < n; ++k) o.p[i][k] = (*s[i])[k];
+            else for (size_t k = 0; k < n; ++k) o.p[i][k] = uint16_t((*s[i])[2 * k] | ((*s[i])[2 * k + 1] << 8));
+        }
     }
     pmml::Frame View(const P16& p) const
     {
@@ -174,8 +187,8 @@ private:
     std::unique_ptr<pmml::Interpolator> m_interp;
     P16 m_p[2];
     std::vector<uint16_t> m_o[3];
-    int m_cur = 0, m_w = 0, m_h = 0, m_phases = 1;
-    bool m_have = false, m_seen = false;
+    int m_cur = 0, m_w = 0, m_h = 0, m_phases = 1, m_bits = 8;
+    bool m_have = false, m_seen = false, m_pq = false;
     std::string m_desc;
 };
 #endif

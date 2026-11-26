@@ -22,6 +22,8 @@ struct GpuRequest {
     int outW = 0, outH = 0;        // the window (the upscaling target); 0 = no upscaling
     std::string upscaler = "auto"; // auto | nis | fsr | off
     bool hostOut = false;          // outputs read back into host memory (the dump, tests) instead of Export
+    int bits = 8;                  // 8 (BT.709 SDR) or 10 (pq: an HDR capture, BT.2020 PQ): the engine's own 16-bit path
+    bool pq = false;
 };
 
 class GpuPipeline {
@@ -49,7 +51,7 @@ private:
     Entry* Find(uint64_t idx);
     bool Settle(Entry& e, std::string& err);
     void Trim();
-    bool RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc& d, VkBuffer src, VkDeviceSize srcBytes, int pitchPx, int offPx, int w, int h, bool rgbx, Upload& u, std::string& err);
+    bool RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc& d, VkBuffer src, VkDeviceSize srcBytes, int pitchPx, int offPx, int w, int h, PixFmt fmt, Upload& u, std::string& err);
     Vk* m_vk = nullptr;
     std::shared_ptr<pmvs::gpu::Engine> m_eng;
     pmvs::gpu::CutGuard m_guard;
@@ -61,7 +63,8 @@ private:
     std::deque<Entry> m_q;
     std::deque<Pending> m_pending;
     int m_w = 0, m_h = 0, m_outW = 0, m_outH = 0;
-    bool m_hostOut = false, m_dmabufFailed = false;
+    bool m_hostOut = false, m_dmabufFailed = false, m_pq = false;
+    int m_bits = 8;
     uint64_t m_generated = 0, m_cuts = 0, m_dmabufFrames = 0, m_hostFrames = 0;
 };
 

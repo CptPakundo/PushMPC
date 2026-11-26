@@ -120,12 +120,10 @@ bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int 
         if (n == "ml" && want == "auto" && !MlInstalled()) continue;
         if (n == "apple" && want == "auto" && !AppleAvailable(nullptr)) continue;
         if (n == "gpu") {
-            // the GPU engine takes 8-bit pictures: an HDR capture goes to an engine that keeps 10 bits
-            if (bits > 8) { note(n, "an HDR capture (10 bit) needs another engine"); continue; }
             if (!vk || !vk->dev) { note(n, "no Vulkan device"); continue; }
             auto g = std::make_unique<GpuPipeline>();
             GpuRequest r;
-            r.w = w; r.h = h; r.outW = outW; r.outH = outH; r.upscaler = o.upscaler; r.hostOut = hostOut;
+            r.w = w; r.h = h; r.outW = outW; r.outH = outH; r.upscaler = o.upscaler; r.hostOut = hostOut; r.bits = bits; r.pq = pq;
             std::string d, ge;
             if (!g->Open(*vk, r, d, ge)) { note(n, ge); continue; }
             e.gpu = std::move(g); e.name = "gpu"; e.desc = d;

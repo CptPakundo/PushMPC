@@ -13,7 +13,7 @@
 
 namespace pmc {
 namespace {
-struct ConvPush { int plane, w, h, srcW, srcH, srcPitch, srcOff, dstWordOff, nwords, rgbx; };
+struct ConvPush { int plane, w, h, srcW, srcH, srcPitch, srcOff, dstWordOff, nwords, rgbx, rgb10, bits; };
 }
 
 GpuPipeline::~GpuPipeline()
@@ -39,14 +39,14 @@ GpuPipeline::~GpuPipeline()
 
 bool GpuPipeline::Open(Vk& vk, const GpuRequest& r, std::string& desc, std::string& err)
 {
-    m_vk = &vk; m_w = r.w; m_h = r.h; m_hostOut = r.hostOut;
+    m_vk = &vk; m_w = r.w; m_h = r.h; m_hostOut = r.hostOut; m_bits = r.bits; m_pq = r.pq;
     std::string why;
     auto ctx = vk.EngineContext(why);
     if (!ctx) { err = "the GPU engine cannot run on " + vk.name + ": " + why; return false; }
     const pmvs::PortableSettings s = pmvs::LoadPortableSettings([](const char* n) { return pmvs::ReadSetting(n); });
     const pmvs::UpscaleChoice uc = pmvs::DecideUpscale(r.upscaler.empty() ? s.upscaler : r.upscaler, "screen", r.outW, r.outH, r.w, r.h);
     pmvs::gpu::Config c;
-    c.width = r.w; c.height = r.h; c.bits = 8;
+    c.width = r.w; c.height = r.h; c.bits = r.bits;   // 10: the engine's 16-bit planes (as P010 / 10-bit video in mpv)
     if (uc.kind != pmvs::GpuUpscaler::None) {
         c.outWidth = uc.w; c.outHeight = uc.h;
         c.upscaler = uc.kind == pmvs::GpuUpscaler::Nis ? pmvs::gpu::Upscaler::Nis : pmvs::gpu::Upscaler::Fsr;
@@ -83,10 +83,11 @@ bool GpuPipeline::Open(Vk& vk, const GpuRequest& r, std::string& desc, std::stri
     return true;
 }
 
-bool GpuPipeline::RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc& d, VkBuffer src, VkDeviceSize srcBytes, int pitchPx, int offPx, int w, int h, bool rgbx,
+bool GpuPipeline::RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc& d, VkBuffer src, VkDeviceSize srcBytes, int pitchPx, int offPx, int w, int h, PixFmt fmt,
                                 Upload& u, std::string& err)
 {
-    if (d.bps != 1) { err = "GPU engine: 8-bit staging expected"; return false; }
+    if (d.bps != (m_bits > 8 ? 2 : 1)) { err = "GPU engine: unexpected staging depth"; return false; }
+    const int per = d.bps == 2 ? 2 : 4;   // samples per 32-bit word
     if ((d.offU & 3) || (d.offV & 3)) { err = "GPU engine: unaligned planes"; return false; }
     VkDescriptorBufferInfo bs{ src, 0, srcBytes ? srcBytes : VK_WHOLE_SIZE }, bd{ d.buffer, 0, VK_WHOLE_SIZE };
     VkWriteDescriptorSet wr[2]{};
@@ -98,7 +99,8 @@ bool GpuPipeline::RecordConvert(VkCommandBuffer cb, const pmvs::gpu::Engine::Pla
     for (int plane = 0; plane < 3; ++plane) {
         const int pw = plane ? d.cw : d.width, ph = plane ? d.ch : d.height;
         const VkDeviceSize off = plane == 0 ? 0 : plane == 1 ? d.offU : d.offV;
-        ConvPush p{ plane, pw, ph, std::min(w, d.width), std::min(h, d.height), pitchPx, offPx, int(off / 4), int((int64_t(pw) * ph + 3) / 4), rgbx ? 1 : 0 };
+        ConvPush p{ plane, pw, ph, std::min(w, d.width), std::min(h, d.height), pitchPx, offPx, int(off / 4), int((int64_t(pw) * ph + per - 1) / per),
+                    fmt == PixFmt::RGBX ? 1 : 0, fmt == PixFmt::RGB10 ? 1 : 0, m_bits };
         vkCmdPushConstants(cb, m_conv.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         const uint32_t groups = uint32_t((p.nwords + 63) / 64);
         const uint32_t gx = std::min<uint32_t>(groups, 32768u), gy = (groups + gx - 1) / gx;
@@ -151,11 +153,11 @@ bool GpuPipeline::Add(uint64_t idx, bool discontinuity, SourceFrame& f, std::str
     } else {
         ++m_dmabufFrames;
     }
-    const bool rgbx = f.fmt == PixFmt::RGBX;
+    const PixFmt fmt = f.fmt;
     const int fw = f.width, fh = f.height;
     uint64_t ticket = 0;
     const int slot = m_eng->UploadWith([&](VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc& d, std::string& e) {
-        return RecordConvert(cb, d, src, srcBytes, pitchPx, offPx, fw, fh, rgbx, u, e);
+        return RecordConvert(cb, d, src, srcBytes, pitchPx, offPx, fw, fh, fmt, u, e);
     }, ticket, err);
     u.ticket = ticket;
     if (held) m_pending.push_back({ ticket, std::move(f.release) });
@@ -246,10 +248,11 @@ bool GpuPipeline::Show(const Pick& p, Screen* screen, I420* host, std::string& e
     if (!gen && !m_eng->Real(a->slot, out, tk, err)) return false;
     if (host) {
         if (!m_eng->Wait(tk, err)) return false;
-        if (host->w != m_outW || host->h != m_outH) host->Resize(m_outW, m_outH);
+        if (!host->Same(m_outW, m_outH, m_bits)) host->Resize(m_outW, m_outH, m_bits);
+        host->pq = m_pq;
         pmvs::gpu::YuvOut o;
         o.data[0] = host->y.data(); o.data[1] = host->u.data(); o.data[2] = host->v.data();
-        o.stride[0] = host->w; o.stride[1] = o.stride[2] = host->cw();
+        o.stride[0] = host->w * host->bps(); o.stride[1] = o.stride[2] = host->cw() * host->bps();
         m_eng->Read(out, o);
         return true;
     }
@@ -260,7 +263,7 @@ bool GpuPipeline::Show(const Pick& p, Screen* screen, I420* host, std::string& e
     if (!m_eng->Export(out, [&](VkCommandBuffer cb, const pmvs::gpu::OutSource& s, std::string& e) {
             YuvLayout L;
             L.offY = s.offset; L.offU = s.offset + s.offU; L.offV = s.offset + s.offV;
-            L.pitchY = s.pitchY; L.pitchC = s.pitchC; L.w = s.w; L.h = s.h; L.cw = s.cw; L.ch = s.ch;
+            L.pitchY = s.pitchY; L.pitchC = s.pitchC; L.w = s.w; L.h = s.h; L.cw = s.cw; L.ch = s.ch; L.bits = s.bits; L.pq = m_pq;
             return screen->Record(cb, s.buffer, L, e);
         }, sync, done, err)) return false;
     std::shared_ptr<pmvs::gpu::Engine> eng = m_eng;
