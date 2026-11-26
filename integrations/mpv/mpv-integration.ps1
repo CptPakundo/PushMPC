@@ -251,6 +251,13 @@ function Find-PmPlayers($E, [string[]]$MpvExe) {
                       @{ Name = 'Plex HTPC'; Dir = "$($E.ProgramFiles)\Plex\Plex HTPC"; Conf = "$($E.LocalAppData)\Plex HTPC\mpv.conf" })) {
         $dll = @("$($pl.Dir)\libmpv-2.dll", "$($pl.Dir)\mpv-2.dll") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         if (-not $dll) { continue }
+        # PushMPC's proxy avfilter-8.dll (pushmpc-plex-native.ps1): Plex's own libmpv plays through PushMPC's filter, and
+        # that installer keeps its own block in Plex's mpv.conf, so nothing is added here
+        if (Test-Path -LiteralPath "$($pl.Dir)\avfilter-8-plex.dll") {
+            $found += [pscustomobject]@{ Player = $pl.Name; Exe = $dll; Kind = 'plexnative'; Config = ''; Managed = $false
+                Note = "smoother motion through PushMPC's filter inside Plex's own player (set up by Setup's Plex step)" }
+            continue
+        }
         # a VapourSynth-enabled libmpv in Plex's folder (pushmpc-plex.ps1 apply): the full route, frame generation included,
         # with Plex's own CA bundle for its plex.direct HTTPS streams
         if (Test-PmLibmpvVs $dll) {

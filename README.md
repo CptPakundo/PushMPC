@@ -69,7 +69,7 @@ questions.
 | **VLC 3** | 🧪 | 🧪 | 🧪 |
 | **Kodi** | 🆕 | 🆕 | |
 | **Stremio** (5.0.28 and newer) | 🆕 | | |
-| **Plex** (Plex for Windows, Plex HTPC) | 🧪 | | |
+| **Plex** (Plex for Windows, Plex HTPC; Linux: from Flathub) | 🧪 | 🧪 | |
 | **Jellyfin** (Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim) | 🆕 | 🆕 | |
 | **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 capture mode | | |
 
@@ -175,7 +175,8 @@ files, Setup reuses them instead of downloading.
 ## 🗺️ Roadmap (after the first release)
 
 - Capture mode on Linux and Mac without OBS, with the best picture PushMPC can make there.
-- Plex support built by PushMPC itself, instead of the community mpv library Setup uses today.
+- Plex on Mac.
+- Faster AI frame generation on more graphics chips: AMD Radeon and Snapdragon on Windows, and more Linux setups.
 
 ## 📚 More
 

@@ -287,6 +287,15 @@ $env:PUSHMPC_GPU_VENDOR = 'AMD Radeon RX 9070'
 $rows = Run 'Status' $r
 Check (-not ($rows | Where-Object Player -eq 'Plex for Windows').Managed) 'Plex with an AMD GPU: not changed (no d3d11vpp super resolution)'
 $env:PUSHMPC_GPU_VENDOR = ''
+# 16b. Plex with PushMPC's proxy avfilter-8.dll (avfilter-8-plex.dll next to it): left to that installer, no block here
+$env:PUSHMPC_GPU_VENDOR = 'NVIDIA GeForce RTX 5090'
+[IO.File]::WriteAllText("$r\Program Files\Plex\Plex\avfilter-8-plex.dll", 'MZ')
+$before = Snapshot $r
+$rows = Run 'Install' $r
+Check (($rows | Where-Object Player -eq 'Plex for Windows').Result -eq 'skipped' -and -not ((Read-PmText $pc).Text -match 'PushMPC managed')) 'Plex with the proxy: mpv.conf left to the proxy installer'
+Run 'Uninstall' $r | Out-Null
+Check ((Compare-Object $before (Snapshot $r)) -eq $null) 'Plex with the proxy: nothing changed'
+$env:PUSHMPC_GPU_VENDOR = ''
 # 17. ArtCNN shader fallback by GPU tier (vsplugin\shaders next to pushmpc.vpy)
 $r = New-Root; $roots += $r
 Fake-Mpv "$r\Program Files\mpv"

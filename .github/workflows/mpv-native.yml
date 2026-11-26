@@ -13,8 +13,8 @@ on:
   push:
     branches: ['track/mpv-native', 'track/mpv-native-*']
     paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'vsplugin/stub/**', '.github/workflows/mpv-native.yml']
-  # release.yml builds the release's native hook and mpv through this workflow (artifacts mpvnative-hook-<runner>,
-  # mpvnative-windows)
+  # release.yml builds the release's native hook, mpv and the Plex proxy through this workflow (artifacts
+  # mpvnative-hook-<runner>, mpvnative-windows, plexnative)
   workflow_call:
   workflow_dispatch:
     inputs:
@@ -435,6 +435,12 @@ jobs:
           $p = "$env:RUNNER_TEMP\plexlibs"
           Copy-Item build-engine/out/pushmpc_engine.dll, mpvnative/install/pushmpc-plex-native.ps1, mpvnative/ci/SOURCES.txt $p
           Get-ChildItem $p | ForEach-Object { "{0,10:N0}  {1}" -f $_.Length, $_.Name }
+      # what release.yml stages as Setup's plexnative component (Setup self-tests it on the user's Plex)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexnative
+          path: ${{ runner.temp }}/plexlibs/
+          retention-days: 7
       - name: Plex HTPC and Plex for Windows (winget)
         timeout-minutes: 20
         run: |

@@ -137,14 +137,18 @@ Remove the filter there again when you uninstall PushMPC.
 
 ### Plex
 
-Plex for Windows and Plex HTPC get smoother motion too. To make that work, Setup replaces one file in Plex's folder with
-a version that PushMPC can work with. It keeps Plex's own file and puts it back when you uninstall PushMPC. Because
-Plex is installed for all users, Windows asks for administrator permission once.
+Plex for Windows and Plex HTPC get smoother motion too. Setup adds PushMPC's filter to Plex's own player, then plays a
+short test picture through Plex to check that it works. Plex's own files are backed up first and put back exactly as
+they were when you uninstall PushMPC. Because Plex is installed for all users, Windows asks for administrator
+permission once.
 
-- This is only done for Plex versions we have tested. With any other version, Plex keeps its own file and you can use
-  [capture mode](#capture-mode-fallback) instead.
-- When Plex updates itself, PushMPC checks at your next sign-in and sets it up again if the new version is a tested one.
+- If that test fails, Setup takes its files out again and uses its second way instead: it swaps in a player library
+  that PushMPC can work with (only on Plex versions we have tested). It never does both. On any other Plex version you
+  can use [capture mode](#capture-mode-fallback).
+- When Plex updates itself, PushMPC sets it up again at your next sign-in (if Plex is open then, at the one after).
 - Don't want this? Untick the Plex box on Setup's first page.
+- **On Linux**, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex,
+  and checks it with a test picture there too. The Snap version of Plex can't be set up this way and is left as it is.
 
 ### Capture mode (fallback)
 

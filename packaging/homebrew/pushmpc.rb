@@ -21,7 +21,16 @@ class Pushmpc < Formula
   # Homebrew's mpv is built with VapourSynth (it depends on the vapoursynth formula)
   depends_on "ffmpeg" # headers for the IINA bridge (mpv depends on it anyway)
   depends_on "mpv"
+  # PushFlow (RIFE) through pmml, the plugin's ml backend: Homebrew's ONNX Runtime (built with CoreML on macOS)
+  depends_on "onnxruntime"
   depends_on "vapoursynth"
+
+  # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release time
+  # set url / sha256 as for the tarball above (CI replaces both with a freshly generated archive)
+  resource "pmml-graphs" do
+    url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pmml-graphs-0.6.0.tar.gz"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  end
 
   # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
   resource "artcnn-c4f16-onnx" do
@@ -69,7 +78,11 @@ class Pushmpc < Formula
     # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers;
     # it refuses to patch anything when IINA's FFmpeg majors differ from these
     bridge = OS.mac? ? ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}"] : []
-    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", *bridge, *std_cmake_args
+    # the ml backend: ONNX Runtime's C API headers from Homebrew's onnxruntime (loaded at run time, nothing linked)
+    ort = Formula["onnxruntime"].opt_include
+    ort /= "onnxruntime" if (ort/"onnxruntime/onnxruntime_c_api.h").exist?
+    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", "-DPMML_ORT_INCLUDE=#{ort}",
+           *bridge, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
@@ -80,9 +93,14 @@ class Pushmpc < Formula
     plugin = Dir["vsplugin/bin/pushmpc_vs.*"].reject { |f| f.end_with?(".pdb") }.first
     (prefix/vs_site_packages/"vapoursynth/plugins").install plugin
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
+    # pushmpc.lua adds the filter at run time (the mpv.conf block names it, next to pushmpc.vpy)
+    pkgshare.install "integrations/mpv/pushmpc.lua"
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
     (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
+    resource("pmml-graphs").stage { (pkgshare/"pmml/graphs").install Dir["*.onnx", "**/*.onnx"].uniq }
+    (pkgshare/"pmml").install "scripts/ml-runtime-pin.json"
+    libexec.install "packaging/homebrew/pmml-models.py"
 
     # ArtCNN (MIT): the pinned ONNX files become the Metal engine's .pmnn weights (next to the plugin, where the
     # apple backend looks first) and fragment-shader GLSL (OpenGL-only renderers); the upstream compute GLSL is used
@@ -155,14 +173,32 @@ class Pushmpc < Formula
       #              macOS 26 offers Apple's one-time super-resolution model download (pushmpc-apple model-download)
       #   uninstall  takes the block out (mpv.conf comes back byte for byte) and removes the LaunchAgent of earlier
       #              PushMPC test builds, if any
+      #   PushFlow   install also sets up PushFlow (RIFE) for the ml backend in ~/.local/share/pushmpc/pmml: Homebrew's ONNX
+      #              Runtime (CoreML), the graphs, and PushFlow's models from PushFPS's release (pinned, about 130 MB the
+      #              first time); --no-pmml skips it, uninstall removes it
       action=${1:-install}
       [ $# -gt 0 ] && shift
-      artcnn=1
+      artcnn=1; pmml=1
       n=$#
       while [ "$n" -gt 0 ]; do
         a=$1; shift; n=$((n - 1))
-        if [ "$a" = --no-artcnn ]; then artcnn=0; else set -- "$@" "$a"; fi
+        if [ "$a" = --no-artcnn ]; then artcnn=0; elif [ "$a" = --no-pmml ]; then pmml=0; else set -- "$@" "$a"; fi
       done
+      data=${XDG_DATA_HOME:-$HOME/.local/share}; pm="$data/pushmpc/pmml"
+      if [ "$action" = install ] && [ "$pmml" = 1 ]; then
+        mkdir -p "$pm/ort/core" "$pm/models"
+        ln -sf "#{Formula["onnxruntime"].opt_lib}/libonnxruntime.dylib" "$pm/ort/core/libonnxruntime.dylib"
+        rm -rf "$pm/graphs"; ln -s "#{opt_pkgshare}/pmml/graphs" "$pm/graphs"
+        if "#{Formula[vs_python].opt_bin}/python#{vs_python.delete_prefix("python@")}" -I "#{opt_libexec}/pmml-models.py" "$pm/models" "#{opt_pkgshare}/pmml/ml-runtime-pin.json" "$data/pushmpc/pmml-download"; then
+          echo "PushFlow for the ml backend: $pm"; : > "$pm/.pushmpc-setup"
+        else
+          echo "PushFlow's models could not be fetched: the ml backend stays off (run pushmpc-setup install again later)"; rm -rf "$pm"
+        fi
+        rm -rf "$data/pushmpc/pmml-download"
+      fi
+      if [ "$action" = uninstall ] && [ -f "$pm/.pushmpc-setup" ]; then
+        rm -rf "$pm"; rmdir "$data/pushmpc" "$data" 2>/dev/null || true; echo "PushFlow for the ml backend removed"
+      fi
       script_dir="#{HOMEBREW_PREFIX}/etc/mpv/scripts"
       helper="#{opt_pkgshare}/mpv/pushmpc-vsscript.lua"
       tool="#{opt_libexec}/pushmpc-apple"
