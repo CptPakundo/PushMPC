@@ -449,9 +449,9 @@ jobs:
           pm="$HOME/.local/share/pushmpc/pmml"; ls -la "$pm" "$pm/ort/core" "$pm/models" | head -20
           for f in ort/core/libonnxruntime.dylib graphs/synth-yuv.onnx models/pushflow-fast.onnx; do [ -e "$pm/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
           export PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/brewlogs-ml"; mkdir -p "$PUSHMPC_VS_LOG_DIR"
-          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=ml timeout 300 "$(brew --prefix vapoursynth)/bin/vspipe" vsplugin/tests/ci/apple_clip.vpy /dev/null --progress || true
-          grep -h -E "backend|ml: |pmml" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-300 | head -20
-          grep -q -E "backend: ml|ml: " "$PUSHMPC_VS_LOG_DIR"/*.log || { echo "::error::the ml backend did not run"; exit 1; }
+          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=ml perl -e 'alarm 300; exec @ARGV' "$(brew --prefix vapoursynth)/bin/vspipe" vsplugin/tests/ci/apple_clip.vpy /dev/null --progress || true
+          grep -h -E "backend|ml: |pmml" "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | cut -c1-300 | head -20 || true
+          grep -q -E "backend: ml|ml: " "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null || { echo "::error::the ml backend did not run"; exit 1; }
           echo "::notice title=ml backend on macOS::$(grep -h -E 'backend: |ml: ' "$PUSHMPC_VS_LOG_DIR"/*.log | head -3 | tr '\n' ' ')"
           pushmpc-setup uninstall
           [ ! -e "$HOME/.config/mpv/mpv.conf" ] || { echo "::error::mpv.conf left behind"; exit 1; }
