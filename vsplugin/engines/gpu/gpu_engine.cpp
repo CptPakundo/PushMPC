@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // pushmpc.Enhance, portable GPU engine (see gpu_engine.h).
 #include "gpu_engine.h"
+#include <map>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -36,7 +37,7 @@ std::vector<PipeDesc> Descs()
         { kSpv_nis, sizeof(kSpv_nis), { UB, SMP, SIM, SIM, SIM, SI }, 0 },
         { kSpv_easu, sizeof(kSpv_easu), { CIS, SI }, 72 },
         { kSpv_rcas, sizeof(kSpv_rcas), { CIS, SI }, 24 },
-        { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 60 },
+        { kSpv_pack, sizeof(kSpv_pack), { CIS, CIS, CIS, SBD }, 64 },
         { kSpv_ofconv, sizeof(kSpv_ofconv), { SB, SB, SI, SI, SB, SB, SBD }, 52 },
         { kSpv_blur, sizeof(kSpv_blur), { SI, SI }, 8 },
     };
@@ -131,6 +132,9 @@ struct Engine::Impl {
     Buffer gpuPlanar; uint64_t gpuPlanarUse = 0;   // UploadWith's device-memory staging (made on first use)
     VkDeviceSize stOffU = 0, stOffV = 0;
     Buffer readback; VkDeviceSize outStride = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0;
+    // an imported output (a player's dma-buf frame buffer) replacing the readback slot for one Generate / Real
+    const Buffer* extOut = nullptr;
+    std::map<int, Buffer> imports; int nextImport = 1;
     Buffer rectBuf;   // ReadRect's host buffer (grown on demand)
     std::vector<bool> outUsed;
     Buffer dedupStats; int nextDedup = 0;
@@ -218,6 +222,7 @@ struct Engine::Impl {
     };
     bool Interp(Job& j, int sa, int sb, const Pair* pr, float t, int mode, int target, int out, std::string& err);
     bool UpscaleAndPack(Job& j, int out, std::string& err);
+    int OutFlags() const { return (cfg.semiPlanarOut ? 1 : 0) | ((cfg.msbOut && bps == 2 ? 16 - cfg.bits : 0) << 8); }
     bool MotionDir(Job& j, int sa, int sb, const Pair* prev, bool forward, Pair& pr, std::string& err);
     bool MotionOf(int sa, int sb, Pair& pr, bool fresh, bool hint, std::string& err);
     bool hintNow = false;   // the hybrid mode: MotionDir adds the hint fields as candidates
@@ -256,6 +261,8 @@ void Engine::Impl::Free()
     for (auto& b : sweep2) ctx->Destroy(b);
     sweep1.clear(); sweep2.clear();
     for (auto& b : staging) ctx->Destroy(b);
+    for (auto& kv : imports) ctx->Destroy(kv.second);
+    imports.clear();
     ctx->Destroy(rectBuf);
     ctx->Destroy(gpuPlanar);
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
@@ -468,7 +475,7 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     I.nextJob = 0;
 
     const VkFormat planeFmt = c.bits > 8 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
+    const VkImageUsageFlags planeUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.deviceReadback ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : c.importable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
     const VkImageUsageFlags pyrUse = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     I.useOf = I.ctx->OpticalFlow() && !c.blockMatcherOnly;
     if (const char* v = std::getenv("PUSHMPC_GPU_MOTION")) { if (std::strcmp(v, "blocks") == 0) I.useOf = false; }
@@ -502,8 +509,9 @@ bool Engine::Configure(const Config& c, std::shared_ptr<Context> ctx, std::strin
     for (auto& b : I.staging) if (!host(I.stOffV + cSz, 0, b)) return false;
     // readback: packed rows, 4-byte pitch, planes at 256-byte offsets; one slot per output in flight
     I.pitchY = int(Align(VkDeviceSize(I.outW) * VkDeviceSize(I.bps), 4)); I.pitchC = int(Align(VkDeviceSize(I.ocw) * VkDeviceSize(I.bps), 4));
+    if (c.semiPlanarOut) I.pitchC = int(Align(VkDeviceSize(I.ocw) * 2 * VkDeviceSize(I.bps), 16));   // U V pairs; whole 8-byte groups
     const VkDeviceSize align = std::max<VkDeviceSize>(256, I.ctx->Limits().minStorageBufferOffsetAlignment);
-    I.offU = Align(VkDeviceSize(I.pitchY) * VkDeviceSize(I.outH), align); I.offV = Align(I.offU + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
+    I.offU = Align(VkDeviceSize(I.pitchY) * VkDeviceSize(I.outH), align); I.offV = c.semiPlanarOut ? I.offU : Align(I.offU + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outStride = Align(I.offV + VkDeviceSize(I.pitchC) * VkDeviceSize(I.och), align);
     I.outUsed.assign(size_t(std::max(2, c.outSlots)), false);
     if (c.deviceReadback ? !dev(I.outStride * I.outUsed.size(), I.readback) : !host(I.outStride * I.outUsed.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, I.readback)) return false;
@@ -993,17 +1001,18 @@ bool Engine::Impl::Interp(Job& j, int sa, int sb, const Pair* pr, float t, int m
         int W, H, CW, CH, mode, plane, target, bps, pitchY, pitchC, offU, offV, fbx, fby, fbs, hold, zx, zy, zw, zh;
         float t, maxV, kRaw, errLow, errHigh;
         int refined; float boundaryPx;
-        float pad;
+        int outFlags;
     } pc{ cfg.width, cfg.height, cw, ch, mode, 0, target, bps, pitchY, pitchC, int(offU), int(offV), fbx, fby, fbs,
-          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, cfg.refined ? 1 : 0, cfg.boundaryPx, 0 };
-    const VkDeviceSize outOff = target == 0 ? outStride * VkDeviceSize(out) : 0;
+          pr && pr->holdOn && mode == 0 ? 1 : 0, pr ? pr->zx : 0, pr ? pr->zy : 0, pr ? pr->zw : 0, pr ? pr->zh : 0, t, maxV, kRaw, cfg.errorLow, cfg.errorHigh, cfg.refined ? 1 : 0, cfg.boundaryPx, OutFlags() };
+    const VkDeviceSize outOff = target == 0 && !extOut ? outStride * VkDeviceSize(out) : 0;
+    const Buffer& outB = extOut ? *extOut : readback;
     for (int plane = 0; plane < 2; ++plane) {
         pc.plane = plane;
         const int per = target == 0 ? 4 / bps : 1;
         const int w = plane ? cw : cfg.width, h = plane ? ch : cfg.height;
         Bind b(*this, j, PInterp);
         b.Img(0, A.y.view).Img(1, A.u.view).Img(2, A.v.view).Img(3, B.y.view).Img(4, B.u.view).Img(5, B.v.view)
-         .Buf(6, pr ? pr->fieldF : dummy).Buf(7, pr ? pr->fieldK : dummy).Buf(8, readback, outOff, outStride).Img(9, midY.view).Img(10, midU.view).Img(11, midV.view)
+         .Buf(6, pr ? pr->fieldF : dummy).Buf(7, pr ? pr->fieldK : dummy).Buf(8, outB, outOff, outStride).Img(9, midY.view).Img(10, midU.view).Img(11, midV.view)
          .Buf(12, pc.hold ? pr->hold : dummy).Buf(13, pr ? pr->consF : dummy).Buf(14, pr ? pr->consK : dummy);
         if (!b.Run(&pc, uint32_t(((w + per - 1) / per + 15) / 16), uint32_t((h + 7) / 8), err)) return false;
     }
@@ -1033,13 +1042,13 @@ bool Engine::Impl::UpscaleAndPack(Job& j, int out, std::string& err)
         if (!Bind(*this, j, PRcas).Img(0, upTmp.view).Img(1, upY.view).Run(&pr, uint32_t((outW + 7) / 8), uint32_t((outH + 7) / 8), err)) return false;
     }
     Barrier(j.cb);
-    struct { int OW, OH, OCW, OCH, SW, SH, SCW, SCH, plane, bps, pitchY, pitchC, offU, offV; float maxV; } pp{
-        outW, outH, ocw, och, cfg.width, cfg.height, cw, ch, 0, bps, pitchY, pitchC, int(offU), int(offV), maxV };
+    struct { int OW, OH, OCW, OCH, SW, SH, SCW, SCH, plane, bps, pitchY, pitchC, offU, offV; float maxV; int outFlags; } pp{
+        outW, outH, ocw, och, cfg.width, cfg.height, cw, ch, 0, bps, pitchY, pitchC, int(offU), int(offV), maxV, OutFlags() };
     const int per = 4 / bps;
     for (int plane = 0; plane < 2; ++plane) {
         pp.plane = plane;
         const int w = plane ? ocw : outW, h = plane ? och : outH;
-        if (!Bind(*this, j, PPack).Img(0, upY.view).Img(1, midU.view).Img(2, midV.view).Buf(3, readback, outStride * VkDeviceSize(out), outStride)
+        if (!Bind(*this, j, PPack).Img(0, upY.view).Img(1, midU.view).Img(2, midV.view).Buf(3, extOut ? *extOut : readback, extOut ? 0 : outStride * VkDeviceSize(out), outStride)
                  .Run(&pp, uint32_t(((w + per - 1) / per + 15) / 16), uint32_t((h + 7) / 8), err)) return false;
     }
     return true;
@@ -1048,7 +1057,7 @@ bool Engine::Impl::UpscaleAndPack(Job& j, int out, std::string& err)
 bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, std::string& err)
 {
     Impl& I = *m;
-    out = I.FreeOut();
+    out = I.extOut ? 0 : I.FreeOut();
     if (out < 0) { err = "GPU engine: no free readback slot"; return false; }
     Impl::Pair& pr = I.pairs[size_t(pair)];
     bool ok = true;
@@ -1057,12 +1066,12 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     const bool up = I.cfg.upscaler != Upscaler::None;
     const int sa = mode == 2 ? pr.b : pr.a, sb = mode == 1 ? pr.a : pr.b;
     // modes: 0 generated, 1 / 2 real A / B, 3 the plain blend of A and B (a dissolve or fade)
-    if (mode == 0 && I.synth) {
+    if (mode == 0 && I.synth && !I.cfg.semiPlanarOut) {
         // a plugged-in synthesis stage (Subtitle Hold is interp.comp's and does not apply)
         PairGpu pg;
         Engine::PairResources(pair, pg);
         SynthTarget st;
-        st.packed = !up; st.buffer = I.readback.buf; st.offset = I.outStride * VkDeviceSize(out); st.pitchY = I.pitchY; st.pitchC = I.pitchC; st.offU = I.offU; st.offV = I.offV;
+        st.packed = !up; st.buffer = I.extOut ? I.extOut->buf : I.readback.buf; st.offset = I.extOut ? 0 : I.outStride * VkDeviceSize(out); st.pitchY = I.pitchY; st.pitchC = I.pitchC; st.offU = I.offU; st.offV = I.offV;
         st.midY = I.midY.view; st.midU = I.midU.view; st.midV = I.midV.view;
         if (!I.synth->Record(j.cb, pg, t, st, err)) return false;
         I.Barrier(j.cb);
@@ -1071,7 +1080,7 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
     ticket = I.Submit(j, err);
     if (!ticket) return false;
     pr.lastUse = ticket;
-    I.outUsed[size_t(out)] = true;
+    if (!I.extOut) I.outUsed[size_t(out)] = true;
     I.times.outputs++;
     return true;
 }
@@ -1079,7 +1088,7 @@ bool Engine::Generate(int pair, float t, int mode, int& out, uint64_t& ticket, s
 bool Engine::Real(int slot, int& out, uint64_t& ticket, std::string& err)
 {
     Impl& I = *m;
-    out = I.FreeOut();
+    out = I.extOut ? 0 : I.FreeOut();
     if (out < 0) { err = "GPU engine: no free readback slot"; return false; }
     bool ok = true;
     Impl::Job& j = I.Begin(err, ok);
@@ -1089,9 +1098,76 @@ bool Engine::Real(int slot, int& out, uint64_t& ticket, std::string& err)
     if (up && !I.UpscaleAndPack(j, out, err)) return false;
     ticket = I.Submit(j, err);
     if (!ticket) return false;
-    I.outUsed[size_t(out)] = true;
+    if (!I.extOut) I.outUsed[size_t(out)] = true;
     I.times.outputs++;
     return true;
+}
+
+bool Engine::DmaBufImport() const { return m->ctx && m->ctx->DmaBuf(); }
+
+int Engine::ImportOutput(int fd, uint64_t size, std::string& err)
+{
+    Impl& I = *m;
+    if (size < I.outStride) { err = "imported buffer smaller than one output (" + std::to_string(size) + " < " + std::to_string(I.outStride) + ")"; return -1; }
+    Buffer b;
+    if (!I.ctx->ImportDmaBuf(fd, I.outStride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b, err)) return -1;
+    const int id = I.nextImport++;
+    I.imports[id] = b;
+    return id;
+}
+
+uint64_t Engine::HostImportAlignment() const { return m->ctx ? m->ctx->HostImportAlignment() : 0; }
+
+int Engine::ImportHostOutput(void* ptr, uint64_t size, std::string& err)
+{
+    Impl& I = *m;
+    if (size < I.outStride) { err = "imported range smaller than one output"; return -1; }
+    Buffer b;
+    if (!I.ctx->ImportHost(ptr, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b, err)) return -1;
+    const int id = I.nextImport++;
+    I.imports[id] = b;
+    return id;
+}
+
+void Engine::ReleaseOutput(int id)
+{
+    Impl& I = *m;
+    auto it = I.imports.find(id);
+    if (it == I.imports.end()) return;
+    std::string err;
+    I.ctx->WaitIdle();   // no submitted work may still write into it
+    I.ctx->Destroy(it->second);
+    I.imports.erase(it);
+}
+
+OutputLayout Engine::Layout() const
+{
+    const Impl& I = *m;
+    return OutputLayout{ I.pitchY, I.pitchC, uint64_t(I.offU), uint64_t(I.offV), uint64_t(I.outStride) };
+}
+
+bool Engine::GenerateInto(int pair, float t, int mode, int output, uint64_t& ticket, std::string& err)
+{
+    Impl& I = *m;
+    auto it = I.imports.find(output);
+    if (it == I.imports.end()) { err = "unknown imported output"; return false; }
+    I.extOut = &it->second;
+    int out = -1;
+    const bool ok = Generate(pair, t, mode, out, ticket, err);
+    I.extOut = nullptr;
+    return ok;
+}
+
+bool Engine::RealInto(int slot, int output, uint64_t& ticket, std::string& err)
+{
+    Impl& I = *m;
+    auto it = I.imports.find(output);
+    if (it == I.imports.end()) { err = "unknown imported output"; return false; }
+    I.extOut = &it->second;
+    int out = -1;
+    const bool ok = Real(slot, out, ticket, err);
+    I.extOut = nullptr;
+    return ok;
 }
 
 void Engine::Read(int out, const YuvOut& o)
@@ -1100,7 +1176,8 @@ void Engine::Read(int out, const YuvOut& o)
     if (!I.readback.map) { I.outUsed[size_t(out)] = false; return; }   // deviceReadback: Export, not Read
     const uint8_t* base = static_cast<const uint8_t*>(I.readback.map) + I.outStride * VkDeviceSize(out);
     for (int p = 0; p < 3; ++p) {
-        const int w = p ? I.ocw : I.outW, h = p ? I.och : I.outH, pitch = p ? I.pitchC : I.pitchY;
+        if (p == 2 && I.cfg.semiPlanarOut) break;   // U and V share plane 1
+        const int w = p ? I.ocw * (I.cfg.semiPlanarOut ? 2 : 1) : I.outW, h = p ? I.och : I.outH, pitch = p ? I.pitchC : I.pitchY;
         const uint8_t* src = base + (p == 0 ? 0 : p == 1 ? I.offU : I.offV);
         const size_t row = size_t(w) * size_t(I.bps);
         for (int y = 0; y < h; ++y) std::memcpy(o.data[p] + ptrdiff_t(y) * o.stride[p], src + size_t(y) * size_t(pitch), row);
@@ -1190,7 +1267,7 @@ uint64_t Engine::Impl::SubmitEx(Job& j, const ExternalSync& s, std::string& err)
 int Engine::Import(const ImportRecorder& rec, const ExternalSync& sync, std::string& err, uint64_t* ticket)
 {
     Impl& I = *m;
-    if (!I.cfg.deviceReadback) { err = "GPU engine: Import needs Config::deviceReadback"; return -1; }
+    if (!I.cfg.deviceReadback && !I.cfg.importable) { err = "GPU engine: Import needs Config::deviceReadback or importable"; return -1; }
     int slot = -1;
     for (size_t i = 0; i < I.slots.size(); ++i) if (!I.slots[i].used) { slot = int(i); break; }
     if (slot < 0) { err = "GPU engine: no free picture slot"; return -1; }

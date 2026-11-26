@@ -77,8 +77,13 @@ jobs:
   mpvnative:
     uses: ./.github/workflows/mpv-native.yml
 
+  # the Kodi add-on (kodi-addon.yml): Kodi 21 and 22 builds with their installer, for Setup (Windows) and the Linux
+  # tarballs; a failure there leaves the add-on out (Kodi then plays through mpv), nothing else
+  kodi:
+    uses: ./.github/workflows/kodi-addon.yml
+
   build:
-    needs: [vlc, mpvnative]
+    needs: [vlc, mpvnative, kodi]
     if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 100
@@ -457,6 +462,9 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { name: mpvnative-windows, path: '${{ runner.temp }}/mpv-windows' }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: pushmpc-kodi-Windows, path: '${{ runner.temp }}/kodi-windows' }
       - name: Stage and package (Setup, component zips, release.json + signature)
         timeout-minutes: 20
         env:
@@ -477,7 +485,9 @@ jobs:
             $tag = if ('${{ steps.version.outputs.tag }}') { '${{ steps.version.outputs.tag }}' } else { 'v${{ steps.version.outputs.version }}' }
             $mpvb = @{ MpvBuildZip = $mz; MpvBuildUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$(Split-Path $mz -Leaf)" }
           } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb
+          # the Kodi add-on (kodi-addon.yml): kodi21\, kodi22\ and its installer, staged as the optional kodi component
+          $kodi = @{}; if (Test-Path "$env:RUNNER_TEMP\kodi-windows\kodi21") { $kodi = @{ KodiPackage = "$env:RUNNER_TEMP\kodi-windows" } } else { Write-Host '::warning title=Kodi add-on::no pushmpc-kodi-Windows artifact: the release has no Kodi component' }
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb @kodi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {
@@ -575,7 +585,7 @@ jobs:
   # The Linux downloads: pushmpc-linux-<arch>-<version>.tar.gz (setup.sh, install.sh, the VapourSynth plugin built in
   # manylinux_2_28 with static libstdc++, as integrations.yml builds and tests it), attached to the release
   linux:
-    needs: [vlc, mpvnative]
+    needs: [vlc, mpvnative, kodi]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
@@ -613,6 +623,11 @@ jobs:
         if: matrix.arch == 'x86_64'
         continue-on-error: true
         with: { name: clips, path: vlc-clips }
+      # the Kodi add-on with its installer (kodi-addon.yml, this run; x86_64)
+      - uses: actions/download-artifact@v4
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        with: { name: pushmpc-kodi-Linux, path: kodi-linux }
       # the native hook for distro mpv (mpv-native.yml, this run, the same runner type)
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -644,6 +659,7 @@ jobs:
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
           export PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then export PUSHMPC_MPVNATIVE_DIR=$PWD/mpvnative-art/hook; else echo "::warning title=native hook::no mpvnative-hook artifact for ${{ matrix.arch }}: the tarball has no mpvnative/"; fi
+          if [ -f kodi-linux/install.sh ]; then export PUSHMPC_KODI_DIR=$PWD/kodi-linux; elif [ "${{ matrix.arch }}" = x86_64 ]; then echo "::warning title=Kodi add-on::no pushmpc-kodi-Linux artifact: the tarball has no kodi/"; fi
           if [ -f vlc-linux/libpushmpc_plugin.so ]; then export PUSHMPC_VLC_PLUGIN=$PWD/vlc-linux/libpushmpc_plugin.so; else echo "::warning title=VLC module::no plugin-linux artifact for ${{ matrix.arch }}: the tarball has no vlc/"; fi
           for c in vlc-clips/hwclip.mkv vlc-clips/clips/hwclip.mkv; do [ -f "$c" ] && export PUSHMPC_VLC_SELFTEST_CLIP=$PWD/$c && break; done
           cmake --build build --target pushmpc_vs portable_test --parallel

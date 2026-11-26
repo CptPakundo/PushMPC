@@ -113,6 +113,9 @@ jobs:
           $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           choco install vlc -y --no-progress --limit-output | Select-Object -Last 3
           "VLC (Chocolatey): exit $LASTEXITCODE; vlc.exe $(Test-Path "$env:ProgramFiles\VideoLAN\VLC\vlc.exe")" | Tee-Object -Append $log
+          choco install kodi -y --no-progress --limit-output | Select-Object -Last 3
+          $kx = @("$env:ProgramFiles\Kodi\kodi.exe", "${env:ProgramFiles(x86)}\Kodi\kodi.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          "Kodi (Chocolatey): exit $LASTEXITCODE; $(if ($kx) { "$kx $((Get-Item $kx).VersionInfo.ProductVersion)" } else { 'not found' })" | Tee-Object -Append $log
           choco install kmplayer -y --no-progress --limit-output | Select-Object -Last 3
           $km = @("$env:ProgramFiles\KMPlayer 64X\KMPlayer64.exe", "${env:ProgramFiles(x86)}\KMPlayer\KMPlayer.exe") | Where-Object { Test-Path $_ }
           "KMPlayer (Chocolatey): exit $LASTEXITCODE; $(if ($km) { $km -join ', ' } else { 'not found' })" | Tee-Object -Append $log
@@ -220,6 +223,10 @@ jobs:
           if (-not (Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll") -or "$vlcrc" -notmatch 'pushmpc') { $bad += 'the VLC module is not set up (plugin and vlcrc)' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
+          # the Kodi add-on (the release's kodi component) in the Chocolatey Kodi: its installer's marker
+          $km = "$env:APPDATA\PushMPC\kodi-addon.installed"
+          "Kodi add-on: marker $(Test-Path $km) $(if (Test-Path $km) { (Get-Content $km) -join ' | ' }); add-on folder $(Test-Path "$env:APPDATA\Kodi\addons\inputstream.pushmpc")" | Tee-Object -Append $log
+          if ((Test-Path "$env:ProgramFiles\Kodi\kodi.exe") -and -not (Test-Path $km)) { $bad += 'the Kodi add-on was not installed' }
           $mpvb = Test-Path "$env:LOCALAPPDATA\PushMPC\mpv-native\mpv.exe"; $mpvl = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC mpv.lnk"
           "PushMPC's mpv: mpv.exe $mpvb, Start menu entry $mpvl (zip $env:PUSHMPC_MPVBUILD_ZIP)" | Tee-Object -Append $log
           if ($env:PUSHMPC_MPVBUILD_ZIP -and -not ($mpvb -and $mpvl)) { $bad += "PushMPC's mpv was not installed" }
@@ -247,6 +254,8 @@ jobs:
           if ((@(Get-Content "$s\before-vlc.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-vlc.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += 'VLC settings differ' }
           foreach ($k in 'HKCU:\Software\PushMPC', 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC') { if (Test-Path $k) { $bad += "left: $k" } }
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
+          if (Test-Path "$env:APPDATA\PushMPC\kodi-addon.installed") { $bad += 'left: the Kodi add-on marker' }
+          if (Test-Path "$env:APPDATA\Kodi\addons\inputstream.pushmpc") { $bad += 'left: the Kodi add-on' }
           Get-ChildItem "$env:ProgramFiles\Plex" -Recurse -Filter '*mpv*.dll' -ErrorAction SilentlyContinue | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } | Set-Content "$s\after-plex.txt"
           if ((@(Get-Content "$s\before-plex.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-plex.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += "Plex's libmpv not put back" }
           @(foreach ($c in "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf") { "$c $(Test-Path $c)" }) | Set-Content "$s\after-plexconf.txt"
@@ -273,6 +282,14 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        with:
+          name: pushmpc-kodi-Linux
+          path: /tmp/kodi-art
+          run-id: '${{ inputs.release_run || github.run_id }}'
+          github-token: '${{ github.token }}'
       - uses: actions/download-artifact@v4
         if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
@@ -305,6 +322,7 @@ jobs:
           cmake --build build --target pushmpc_vs --parallel >/dev/null
           git config --global --add safe.directory "$PWD"
           [ -f /tmp/mpvnative-art/hook/pushmpc_hook.so ] && export PUSHMPC_MPVNATIVE_DIR=/tmp/mpvnative-art/hook && echo "native hook: $(ls /tmp/mpvnative-art/hook | tr '\n' ' ')"
+          [ -f /tmp/kodi-art/install.sh ] && export PUSHMPC_KODI_DIR=/tmp/kodi-art && echo "Kodi add-on: $(ls /tmp/kodi-art | tr '\n' ' ')"
           PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
           tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -E '/setup.sh$|/pmml/' | head
           tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
@@ -333,7 +351,15 @@ jobs:
           echo "route: native hook $native (block $nb), VapourSynth block $vsb"; echo "::notice title=Arch mpv route::native hook $native, VapourSynth block $vsb"
           [ "$((vsb + nb))" = 1 ] || { echo '::error::mpv.conf must hold exactly one PushMPC route'; exit 1; }
           [ "$native" = "$nb" ] || { echo '::error::setup.sh and mpv.conf disagree on the route'; exit 1; }
-          grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
+          # Kodi: the PushMPC add-on when this download has it (no mpv external player then), else mpv as its player
+          kmark=$HOME/.config/pushmpc/kodi-addon.installed
+          if grep -q -x 'kodi-addon' $HOME/.local/share/pushmpc/setup-state 2>/dev/null; then
+            echo "Kodi add-on installed: $(cat "$kmark" 2>/dev/null)"; echo "::notice title=Kodi::the PushMPC add-on is installed ($(cat "$kmark" 2>/dev/null | tr '\t\n' ' '))"
+            [ -f "$kmark" ] || { echo '::error::the Kodi add-on has no marker'; exit 1; }
+            ! grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml 2>/dev/null || { echo '::error::Kodi has both the add-on and the mpv external player'; exit 1; }
+          else
+            grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
+          fi
           # the ml backend through the installed runtime: ncnn on lavapipe (Vulkan on the CPU)
           vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|driverName' | head -4 || true
           mkdir -p $HOME/.config/pushmpc

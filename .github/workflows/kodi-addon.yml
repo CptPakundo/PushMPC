@@ -10,6 +10,8 @@ name: kodi-addon
 on:
   push:
     paths: ['kodiaddon/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', '.github/workflows/kodi-addon.yml']
+  # release.yml builds the release's Kodi add-on through this workflow (artifacts pushmpc-kodi-Windows / -Linux)
+  workflow_call:
   workflow_dispatch:
     inputs:
       macos:
@@ -103,15 +105,107 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers > /dev/null
+            # zero copy test: udmabuf stands in for Kodi's dma-buf frame buffers
+            sudo modprobe udmabuf 2>/dev/null || echo "no udmabuf module"; sudo modprobe vgem 2>/dev/null || echo "no vgem module"
+            sudo udevadm settle || true; sudo chmod 666 /dev/udmabuf /dev/dri/card* 2>/dev/null || true; ls -l /dev/udmabuf /dev/dri 2>&1 | head -5
             export PUSHMPC_VK_ALLOW_CPU=1 PM_REQUIRE_GPU=1
           fi
-          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|cadence_test|FAIL|Passed|Failed" || true
+          ctest --test-dir build -C Release --output-on-failure -V | grep -E "kodi engine|zero copy|host import|semi-planar|tone map|platform:|cadence_test|FAIL|Passed|Failed" || true
           ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v4
         with:
           name: addon-${{ runner.os }}-kodi${{ matrix.kodi }}
           path: build/addon
+
+  package:
+    # one folder per OS: kodi21/ and kodi22/ builds plus the installer (what the PushMPC Setup ships and passes as
+    # PUSHMPC_KODI_DIR); the installer's round trip runs on it
+    needs: build
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, name: Linux }
+          - { os: windows-latest, name: Windows }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: 'addon-${{ matrix.name }}-kodi21', path: pkg/kodi21 }
+      - uses: actions/download-artifact@v4
+        with: { name: 'addon-${{ matrix.name }}-kodi22', path: pkg/kodi22 }
+      - name: Assemble
+        shell: bash
+        run: |
+          cp kodiaddon/install/install.sh kodiaddon/install/install.ps1 pkg/
+          find pkg -maxdepth 3 | sort
+      - name: Installer round trip (Linux)
+        if: runner.os == 'Linux'
+        run: sh kodiaddon/tests/install-test.sh "$PWD/pkg"
+      - name: Installer round trip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./kodiaddon/tests/install-test.ps1 -Package "$PWD\pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pushmpc-kodi-${{ matrix.name }}
+          path: pkg
+
+  kodi-wayland:
+    # Kodi 22 on Wayland (headless Weston, Mesa) with a dma-buf allocator (udmabuf) and its DRM-PRIME renderer on: the
+    # add-on hands out dma-bufs where the renderer shows them (zero copy: the GPU engine writes into them in place).
+    # The _noalloc cases take the allocator away: Kodi's thumbnail and stream-detail probes must keep working
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: addon-Linux-kodi22, path: addon }
+      - uses: LABSN/sound-ci-helpers@v1
+      - name: Flatpak, Weston, ffmpeg, udmabuf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak weston ffmpeg dbus-x11 > /dev/null
+          # udev sets the node's mode after modprobe returns (root:kvm 0660): a rule, then wait for udev, then check
+          echo 'KERNEL=="udmabuf", MODE="0666"' | sudo tee /etc/udev/rules.d/99-pushmpc-udmabuf.rules > /dev/null
+          sudo udevadm control --reload || true
+          sudo modprobe udmabuf || echo "::warning::no udmabuf"
+          sudo udevadm settle || true
+          sudo chmod 666 /dev/udmabuf || true
+          ls -l /dev/udmabuf /dev/dma_heap 2>&1 || true
+          test -w /dev/udmabuf && echo "udmabuf writable" || echo "::warning::udmabuf not writable"
+          flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Kodi 22 from Flathub beta
+        timeout-minutes: 20
+        run: flatpak install --user -y --noninteractive flathub-beta tv.kodi.Kodi//beta > /dev/null
+      - name: Clips
+        run: python3 kodiaddon/ci/gen_clips.py ffmpeg "$RUNNER_TEMP/clips"
+      - name: Play on Wayland
+        run: |
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          weston --backend=headless --renderer=gl --socket=wayland-pm --width=1280 --height=720 > "$RUNNER_TEMP/weston.log" 2>&1 &
+          sleep 3; cat "$RUNNER_TEMP/weston.log" | tail -5
+          export WAYLAND_DISPLAY=wayland-pm
+          home="$HOME/.var/app/tv.kodi.Kodi/data"; mkdir -p "$home"
+          dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
+            --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --prime \
+            --alloc-off "sudo chmod 600 /dev/udmabuf" --alloc-on "sudo chmod 666 /dev/udmabuf" \
+            --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,zerocopy10,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
+      - name: Summary
+        if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-wayland-logs
+          path: out
 
   kodi-linux:
     needs: build
@@ -231,7 +325,7 @@ jobs:
         id: ffcache
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
       - name: FFmpeg static (NDK)
         if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
@@ -241,13 +335,22 @@ jobs:
         if: steps.ffcache.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/ffmpeg
-          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v1
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-android-arm64-v2
+      - name: glslang (pinned; the Android conversion shader)
+        run: |
+          d=$RUNNER_TEMP/glslang; mkdir -p "$d"
+          j() { python3 -c "import json,sys; v=json.load(open('vsplugin/engines/gpu/gpu-pins.json')); [v:=v[k] for k in sys.argv[1:]]; print(v)" "$@"; }
+          curl -fsSL --retry 3 -o "$d/g.tar.gz" "$(j glslang linux url)"
+          echo "$(j glslang linux sha256)  $d/g.tar.gz" | sha256sum -c -
+          tar -xzf "$d/g.tar.gz" -C "$d"
+          g=$(find "$d" -path "*bin/glslangValidator" | head -1); [ -n "$g" ] || g=$(find "$d" -path "*bin/glslang" | head -1)
+          chmod +x "$g"; echo "GLSLANG=$g" >> "$GITHUB_ENV"
       - name: Build
         run: |
           cmake -S kodiaddon -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
-            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg"
+            -DKODI_DEVKIT="$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" -DFFMPEG_ROOT="$RUNNER_TEMP/ffmpeg" -DPM_GLSLANG="$GLSLANG"
           cmake --build build --parallel
           ls -la build/addon/inputstream.pushmpc
           "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build/addon/inputstream.pushmpc/libinputstream.pushmpc.so | grep NEEDED
