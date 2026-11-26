@@ -28,6 +28,9 @@
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
 #include "veyra/pipeline/Rdna3NrBackend.h"
+#include "PushCoreIntel.h"                   // Intel VSR (before the graph) and Intel VPL frame interpolation (after it)
+#include "PushCoreIntelVsr.h"
+#include "veyra/pipeline/ResolutionPlan.h"   // srStageExtents: Intel VSR's output size = PushFPS's SR size rule
 #include "veyra/pipeline/AmdNrProvider.h"
 #include "veyra/pipeline/AmdHipPreflight.h"
 #include "veyra/pipeline/GpuPassUtils.h"
@@ -35,9 +38,7 @@
 #include "veyra/gfx/AmfFrcBackend.h"
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
-#include "PushCoreIntel.h"                   // Intel VSR (before the graph) and Intel VPL frame interpolation (after it)
-#include "PushCoreIntelVsr.h"
-#include "veyra/pipeline/ResolutionPlan.h"   // srStageExtents: Intel VSR's output size = PushFPS's SR size rule
+#include "PushCoreSelfTest.h"                // pushcore_features: the registered vendor methods' bits
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -191,6 +192,7 @@ const char* fgName(uint32_t b) {
     case PUSHCORE_FG_FSR: return "FSR FG";
     case PUSHCORE_FG_AMDFRC: return "AMD FRC";
     case PUSHCORE_FG_NVOF: return "NVOF FG";
+    case PUSHCORE_FG_XEFG: return "XeFG";
     case PUSHCORE_FG_VPL: return "Intel VPL FI";
     default: return "none";
     }
@@ -426,6 +428,7 @@ struct PushCore {
     std::string ivsrNote;
     pushmpc::VplEgress vpl;
     bool vplWanted = false, vplOn = false; uint32_t vplWant = 2;
+    int64_t lastRealPts = 0;              // VPL: the previous real frame's time (the generated frames' timestamps)
     bool ensureBridge(std::string& why) {
         if (bridge.ready()) return true;
         if (!bridge.init(ctx.device(), ctx.adapter().luid, why)) return false;
@@ -541,8 +544,7 @@ struct PushCore {
         uint64_t vplReady = 0; int64_t prevPts = 0; uint32_t vplNext = 0; int32_t fgLevel = 0;
     };
     std::deque<Batch> batches;
-    struct Lease { std::shared_ptr<veyra::pipeline::FrameLease> graphLease; uint32_t kind = 0, parity = 0; int outSlot = -1; int vplSlot = -1; };
-    int64_t lastRealPts = 0;
+    struct Lease { std::shared_ptr<veyra::pipeline::FrameLease> graphLease; uint32_t kind = 0, parity = 0; int outSlot = -1; int xefgSlot = -1, vplSlot = -1; };
     std::map<uint64_t, Lease> leases;
     uint64_t nextLease = 1;
     uint64_t sequence = 0, submittedCount = 0;
@@ -1758,7 +1760,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_IVSR | PUSHCORE_FEATURE_VPL_FI; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | pushmpc::selftest::features(); }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

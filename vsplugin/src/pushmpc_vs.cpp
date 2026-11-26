@@ -393,6 +393,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     if (h.Caps(caps)) {
         g.family = caps.family; g.available = caps.available; g.hardware = caps.hardware; g.name = Widen(caps.adapter);
         for (uint32_t i = 0; i < pm::kCapCount && i < PUSHCORE_CAP_COUNT; ++i) g.reason[i] = Widen(caps.reason[i]);
+        pm::ReadMeasured(g);
     } else for (auto& r : g.reason) r = L"pushcore_capabilities is not available";
     pm::Costs costs;
     costs.card = pm::CardFactor(g.name, g.family);

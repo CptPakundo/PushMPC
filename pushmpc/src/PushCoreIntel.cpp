@@ -1,7 +1,8 @@
-// PushMPC: Intel video methods glue (see PushCoreIntel.h) and the pushcore_selfTest export.
+// PushMPC: Intel video methods glue (see PushCoreIntel.h) and their pushcore_selfTest entries (PushCoreSelfTest.h).
 #define PUSHCORE_BUILD 1
 #include "PushCoreIntel.h"
 #include "PushCoreIntelVsr.h"
+#include "PushCoreSelfTest.h"
 #include "pushmpc/unlocks.h"
 #include "veyra/pipeline/PushMpcCutGuard.h"
 #include "veyra/Log.h"
@@ -299,79 +300,44 @@ void VplEgress::dropJobs()
 
 }  // namespace pushmpc
 
-// ------------------------------------------------------------------------------------------------ C export
-extern "C" PUSHCORE_API int pushcore_selfTest(uint64_t adapterLuid, const wchar_t* rootDir, uint32_t which, uint32_t flags, char* report, uint32_t reportSize)
+// ------------------------------------------------------------------------------------------------ self-tests
+// The pushcore_selfTest entries (PushCoreSelfTest.h): Intel VSR "ivsr", VPL frame interpolation "vplfi", the bridge "bridge".
+// Hardware results are recorded (FLAG_RECORD) under the key pushcore_capabilities reads; WARP results never.
+namespace pushmpc {
+namespace {
+selftest::Result testIvsr(const selftest::Context& ctx)
 {
-    (void)rootDir;
-    using namespace pushmpc;
-    std::string out = "{";
-    bool all = true;
-    auto add = [&](const char* k, const std::string& v) {
-        std::string e;
-        for (char ch : v) { if (ch == '"' || ch == '\\') e += '\\'; e += ch; }
-        out += std::format("{}\"{}\": \"{}\"", out.size() > 1 ? ", " : "", k, e);
-    };
-    const bool warp = (flags & PUSHCORE_SELFTEST_FLAG_WARP) != 0;
-    try {
-        // the adapter: by LUID, else the first hardware adapter
-        DXGI_ADAPTER_DESC1 d{};
-        bool haveAdapter = false;
-        {
-            ComPtr<IDXGIFactory6> f;
-            if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f)))) {
-                for (UINT i = 0;; ++i) {
-                    ComPtr<IDXGIAdapter1> a;
-                    if (warp) { if (i == 0 && SUCCEEDED(f->EnumWarpAdapter(IID_PPV_ARGS(&a)))) { a->GetDesc1(&d); haveAdapter = true; } break; }
-                    if (f->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&a)) == DXGI_ERROR_NOT_FOUND || !a) break;
-                    DXGI_ADAPTER_DESC1 x{}; a->GetDesc1(&x);
-                    if (x.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-                    const uint64_t l = (uint64_t(uint32_t(x.AdapterLuid.HighPart)) << 32) | x.AdapterLuid.LowPart;
-                    if (adapterLuid && l != adapterLuid) continue;
-                    d = x; haveAdapter = true; break;
-                }
-            }
-        }
-        if (!haveAdapter) { add("adapter", "none"); all = false; }
-        else add("adapter", std::format("{} (vendor {:04X} device {:04X})", narrowW(d.Description), d.VendorId, d.DeviceId));
-        const uint64_t luid = haveAdapter ? (uint64_t(uint32_t(d.AdapterLuid.HighPart)) << 32) | d.AdapterLuid.LowPart : 0;
-        out += std::format(", \"vplBuilt\": {}", VplFi::built() ? "true" : "false");
-        if (which & PUSHCORE_SELFTEST_BRIDGE) {
-            bool ok = false;
-            add("bridge", haveAdapter ? bridgeRoundTripTest(warp, luid, ok) : "no adapter");
-            all = all && ok;
-        }
-        if (which & PUSHCORE_SELFTEST_IVSR) {
-            D3D11Bridge b; std::string why; IvsrSelfTest r;
-            const bool up = haveAdapter && (warp ? b.initWarp(nullptr, why) : b.init(nullptr, luid, why));
-            if (up) r = intelVsrSelfTest(b); else r.reason = "fail: " + (haveAdapter ? why : std::string("no adapter"));
-            add("ivsr", r.reason);
-            all = all && r.pass;
-            if ((flags & PUSHCORE_SELFTEST_FLAG_RECORD) && up && !warp) {
-                ComPtr<IDXGIFactory4> f; ComPtr<IDXGIAdapter> a; LARGE_INTEGER v{};
-                std::wstring drv = L"unknown";
-                if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f))) && SUCCEEDED(f->EnumAdapterByLuid(d.AdapterLuid, IID_PPV_ARGS(&a))) &&
-                    SUCCEEDED(a->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v)))
-                    drv = std::format(L"{}.{}.{}.{}", HIWORD(v.HighPart), LOWORD(v.HighPart), HIWORD(v.LowPart), LOWORD(v.LowPart));
-                pmu::WriteSelfTest(pmu::Unlock::IntelVsr, pmu::SelfTestKey(d.VendorId, d.DeviceId, drv), r.pass, widen(r.reason));
-            }
-        }
-        if (which & PUSHCORE_SELFTEST_VPL_FI) {
-            const VplSelfTest r = haveAdapter ? vplFiSelfTest(luid, warp, 60000) : VplSelfTest{};
-            add("vplfi", haveAdapter ? r.reason : "fail: no adapter");
-            all = all && r.pass;
-            add("material", vplMaterialBaselines());
-            if ((flags & PUSHCORE_SELFTEST_FLAG_RECORD) && haveAdapter && !warp && r.ran && r.reason.rfind("unavailable", 0) != 0) {
-                ComPtr<IDXGIFactory4> f; ComPtr<IDXGIAdapter> a; LARGE_INTEGER v{};
-                std::wstring drv = L"unknown";
-                if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f))) && SUCCEEDED(f->EnumAdapterByLuid(d.AdapterLuid, IID_PPV_ARGS(&a))) &&
-                    SUCCEEDED(a->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v)))
-                    drv = std::format(L"{}.{}.{}.{}", HIWORD(v.HighPart), LOWORD(v.HighPart), HIWORD(v.LowPart), LOWORD(v.LowPart));
-                pmu::WriteSelfTest(pmu::Unlock::VplFi, pmu::SelfTestKey(d.VendorId, d.DeviceId, drv), r.pass, widen(r.reason));
-            }
-        }
-    } catch (const std::exception& e) { add("exception", e.what()); all = false; }
-    catch (...) { add("exception", "unknown"); all = false; }
-    out += "}";
-    if (report && reportSize) { const size_t n = std::min<size_t>(out.size(), reportSize - 1); std::memcpy(report, out.data(), n); report[n] = 0; }
-    return all ? PUSHCORE_OK : PUSHCORE_ERROR;
+    selftest::Result o;
+    D3D11Bridge b; std::string why; IvsrSelfTest r;
+    const bool up = ctx.warp ? b.initWarp(nullptr, why) : b.init(nullptr, ctx.luid, why);
+    if (up) r = intelVsrSelfTest(b); else r.reason = "fail: " + why;
+    o.pass = r.pass;
+    o.verdict = r.reason;
+    if (ctx.record && up)
+        pmu::WriteSelfTest(pmu::Unlock::IntelVsr, pmu::SelfTestKey(ctx.adapter.VendorId, ctx.adapter.DeviceId, ctx.driver), r.pass, widen(r.reason));
+    return o;
 }
+selftest::Result testVplFi(const selftest::Context& ctx)
+{
+    selftest::Result o;
+    const VplSelfTest r = vplFiSelfTest(ctx.luid, ctx.warp, 60000);
+    o.pass = r.pass;
+    o.verdict = r.reason;
+    o.fields = {{"built", VplFi::built() ? "true" : "false"}, {"material", vplMaterialBaselines()}};
+    if (ctx.record && r.ran && r.reason.rfind("unavailable", 0) != 0)
+        pmu::WriteSelfTest(pmu::Unlock::VplFi, pmu::SelfTestKey(ctx.adapter.VendorId, ctx.adapter.DeviceId, ctx.driver), r.pass, widen(r.reason));
+    return o;
+}
+selftest::Result testBridge(const selftest::Context& ctx)
+{
+    selftest::Result o;
+    bool ok = false;
+    o.verdict = bridgeRoundTripTest(ctx.warp, ctx.luid, ok);
+    o.pass = ok;
+    return o;
+}
+const selftest::Registrar kIvsr({PUSHCORE_SELFTEST_IVSR, "ivsr", PUSHCORE_FEATURE_IVSR, &testIvsr});
+const selftest::Registrar kVplFi({PUSHCORE_SELFTEST_VPL_FI, "vplfi", PUSHCORE_FEATURE_VPL_FI, &testVplFi});
+const selftest::Registrar kBridge({PUSHCORE_SELFTEST_BRIDGE, "bridge", 0u, &testBridge});
+}  // namespace
+}  // namespace pushmpc

@@ -343,6 +343,25 @@ jobs:
           & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core,directml --headers
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # G10: Intel VPL frame interpolation in pushcore needs Intel's MIT dispatcher (libvpl), pinned by tag + SHA-256 (as
+      # intel-video.yml), static with the static CRT; the runtime itself comes with Intel's graphics driver
+      - name: Intel VPL dispatcher (libvpl, pinned)
+        timeout-minutes: 15
+        env:
+          LIBVPL_TAG: v2.17.0
+          LIBVPL_SHA256: 4DE3E2FAF1E8307FB282E4A43F443191810F6A6B0A484FFFA7995BA1C814C6EC
+        run: |
+          $d = "$env:RUNNER_TEMP\vpl-dl"; New-Item -ItemType Directory -Force $d | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/intel/libvpl/archive/refs/tags/$env:LIBVPL_TAG.tar.gz" -OutFile "$d\libvpl.tar.gz"
+          if ((Get-FileHash "$d\libvpl.tar.gz" -Algorithm SHA256).Hash -ne $env:LIBVPL_SHA256) { throw 'libvpl SHA-256 mismatch' }
+          tar -xzf "$d\libvpl.tar.gz" -C $d
+          $src = (Get-ChildItem $d -Directory -Filter 'libvpl-*' | Select-Object -First 1).FullName
+          cmake -S $src -B "$env:RUNNER_TEMP\vplb" -A x64 -DBUILD_SHARED_LIBS=OFF -DUSE_MSVC_STATIC_RUNTIME=ON -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DINSTALL_EXAMPLES=OFF "-DCMAKE_INSTALL_PREFIX=$env:DEPS\vpl"
+          if ($LASTEXITCODE -ne 0) { throw 'libvpl configure failed' }
+          cmake --build "$env:RUNNER_TEMP\vplb" --config Release --target install
+          if ($LASTEXITCODE -ne 0) { throw 'libvpl build failed' }
+          Copy-Item "$src\LICENSE" "$env:DEPS\vpl\LICENSE.libvpl.txt"
+
       - name: Configure PushFPS with pushcore (PUSHMPC_SOURCE_DIR)
         timeout-minutes: 10
         run: |
@@ -352,6 +371,7 @@ jobs:
           if ($env:LIBDOVI_ROOT -and (Test-Path "$env:LIBDOVI_ROOT\bin\dolby_vision.dll")) { $dovi = @('-DVEYRA_ENABLE_LIBDOVI=ON', "-DVEYRA_LIBDOVI_ROOT=$env:LIBDOVI_ROOT") }
           else { Write-Host '::warning::libdovi was not built: no Dolby Vision RPU parsing in this build' }
           $nvof = @(); if ($env:NVOF_SDK_ROOT) { $nvof = @("-DVEYRA_NVOF_SDK_ROOT=$env:NVOF_SDK_ROOT") }
+          $vpl = @(); if (Test-Path "$env:DEPS\vpl\lib\vpl.lib") { $vpl = @("-DPUSHMPC_VPL_ROOT=$($env:DEPS.Replace('\','/'))/vpl") } else { Write-Host '::warning::no libvpl: Intel VPL frame interpolation not in this build' }
           cmake -S PushFPS -B $env:BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release `
             "-DCMAKE_PREFIX_PATH=$ffmpeg" `
             -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF `
@@ -367,7 +387,7 @@ jobs:
             "-DVEYRA_AMF_SDK_ROOT=$env:DEPS\amf\amf\public" `
             "-DVEYRA_ONNXRUNTIME_ROOT=$env:DEPS\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=$env:DEPS\pushflow\dml" `
             "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" `
-            "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi
+            "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi @vpl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and

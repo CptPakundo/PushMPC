@@ -1,19 +1,25 @@
-# Intel video methods in pushcore (Intel Video Super Resolution, Intel VPL AI frame interpolation): build and the checks
-# a hosted runner can do (it has no Intel GPU; its only adapter is WARP, Windows' software GPU):
+# Intel methods in pushcore (G10: Intel Video Super Resolution, Intel VPL AI frame interpolation, XeSS frame generation,
+# XeSS SR): build and the checks a hosted runner can do (it has no Intel GPU; its only adapter is WARP, Windows' software GPU):
 #   - libvpl (Intel's MIT dispatcher), pinned by tag + SHA-256, built static with the static CRT, linked into pushcore;
-#   - pushcore.dll + pushcore_selftest.exe with it;
+#   - pushcore.dll + pushcore_selftest.exe with it, the XeSS SDK headers (PushFPS's pin) and the XeSS slot patch;
+#   - scripts/xess-fetch.ps1 as Setup runs it: Intel's XeSS DLLs from Intel's repository, pins, versions, Intel signature;
 #   - on WARP: the D3D11 <-> D3D12 bridge round trip (D3D12 frame -> D3D11 video processor blit -> D3D12, pixels
 #     compared; NV12 upscale opened in D3D12), Intel VSR's self-test (the VPE extension must be refused cleanly ->
 #     capability reason), VPL frame interpolation's self-test (no Intel runtime -> a clean refusal), the procedural
-#     material's 50/50 blend baseline (calibration of the VPL quality gate);
+#     material's 50/50 blend baseline (calibration of the VPL quality gate), XeSS FG's self-test (its square test through
+#     pushcore's XefgStage on the headless swap chain, as xefg-spike proved on WARP), XeSS SR's self-test (runs or a clean
+#     refusal);
 #   - auto_test (the Auto rules, Intel rows included); the tester scripts parse.
-# Nothing of Intel's is uploaded except libvpl's install (its MIT licence included), kept 7 days.
+# Uploaded (7 days): libvpl's install (its MIT licence included) and, for Arc testers, pushcore.dll + pushcore_selftest.exe
+# with FFmpeg's DLLs (tests/intel-selftest-manual.ps1). Nothing of Intel's is uploaded.
 name: intel-video
 on:
   push:
-    branches: ['track/vendor-intelvp']
+    branches: ['track/vendor-intelvp', 'track/vendor-xess']
     paths: ['.github/workflows/intel-video.yml', 'pushmpc/src/PushCoreD3D11Bridge.*', 'pushmpc/src/PushCoreIntelVsr.*', 'pushmpc/src/PushCoreVplFi.*',
-            'pushmpc/tools/pushcore_selftest.cpp', 'tests/intel-v*-manual.ps1']
+            'pushmpc/src/PushCoreIntel.*', 'pushmpc/src/PushCoreXe*', 'pushmpc/src/PushCoreSelfTest.*', 'pushmpc/tools/pushcore_selftest.cpp',
+            'patches/pushfps-4.5.4-xess.patch', 'scripts/xess-fetch.ps1', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp',
+            'tests/intel-*-manual.ps1', 'tests/xess-fg-manual.ps1']
   workflow_dispatch:
 # a push whose commit message contains [libvpl only] builds and uploads only libvpl's install (a developer convenience)
 
@@ -95,7 +101,7 @@ jobs:
 
       - name: Tester scripts parse
         run: |
-          foreach ($f in 'repo/tests/intel-vsr-manual.ps1', 'repo/tests/intel-vpl-manual.ps1') {
+          foreach ($f in 'repo/tests/intel-selftest-manual.ps1', 'repo/tests/intel-vpl-manual.ps1', 'repo/tests/xess-fg-manual.ps1', 'repo/scripts/xess-fetch.ps1') {
             $e = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e) | Out-Null
             if ($e) { $e | ForEach-Object { Write-Host "::error::$f $_" }; exit 1 }
             "$f parses"
@@ -109,6 +115,13 @@ jobs:
           if ((git -C PushFPS rev-parse HEAD) -ne $env:PUSHFPS_COMMIT) { Write-Host "::error::tag moved"; exit 1 }
           git -C PushFPS apply --whitespace=nowarn "$env:GITHUB_WORKSPACE/repo/$env:PUSHFPS_PATCH"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # XeSS SR's slot (FsrSrBackend provider) and pushcore on WARP: until the combined patch carries these hunks
+          $x = "$env:GITHUB_WORKSPACE/repo/patches/pushfps-4.5.4-xess.patch"
+          if (Test-Path $x) {
+            git -C PushFPS apply --reverse --check $x 2>$null
+            if ($LASTEXITCODE -eq 0) { 'the XeSS hunks are already in the PushMPC patch' }
+            else { git -C PushFPS apply --whitespace=nowarn $x; if ($LASTEXITCODE -ne 0) { Write-Host '::error::pushfps-4.5.4-xess.patch does not apply'; exit 1 } }
+          }
           $wf = Get-Content PushFPS/.github/workflows/build-windows.yml -Raw
           foreach ($n in 'VCPKG_COMMIT', 'DLSS_TAG', 'NVCODEC_TAG', 'CUDART_ZIP', 'XESS_TAG', 'FFX1_TAG', 'FFX2_TAG', 'AMF_COMMIT') {
             $m = [regex]::Match($wf, "(?m)^\s+$($n):\s*(\S+)"); if (-not $m.Success) { exit 1 }
@@ -208,11 +221,21 @@ jobs:
             "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" `
             "-DPUSHMPC_VPL_ROOT=$($env:RUNNER_TEMP.Replace('\','/'))/vpl"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          cmake --build $env:BUILD --target veyra_shader_VfgShotChange pushcore_dll pushcore_selftest --parallel
+          $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
+          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_selftest --parallel
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length
 
-      - name: WARP checks (bridge round trip, Intel VSR and VPL refusals)
+      - name: xess-fetch.ps1 (Setup's XeSS step) - Intel's repository, pins, versions, Intel signature
+        if: hashFiles('repo/scripts/xess-fetch.ps1') != ''
+        timeout-minutes: 10
+        run: |
+          $root = "$env:RUNNER_TEMP\core-root"
+          ./repo/scripts/xess-fetch.ps1 -Dest "$root\runtime_local\intel\experimental" -Cache "$env:RUNNER_TEMP\xess-cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem "$root\runtime_local\intel\experimental" | Format-Table Name, Length
+
+      - name: WARP checks (bridge round trip, Intel VSR and VPL refusals, XeSS FG and SR self-tests)
         timeout-minutes: 15
         run: |
           $env:PATH = "$env:DEPS\vcpkg\installed\x64-windows\bin;$env:BUILD\pushmpc;$env:PATH"
@@ -224,11 +247,36 @@ jobs:
           $j = Get-Content "$env:RUNNER_TEMP\selftest.json" -Raw | ConvertFrom-Json
           $j | ConvertTo-Json -Depth 5
           $fail = 0
-          if ($j.bridge -notmatch 'PASS$') { Write-Host "::error::bridge round trip: $($j.bridge)"; $fail++ }
-          if ($j.ivsr -notmatch '^fail: ' -or $j.ivsr -notmatch 'VPE|extension') { Write-Host "::error::Intel VSR on WARP must be refused by the extension: $($j.ivsr)"; $fail++ }
-          if ($j.vplfi -notmatch '^(fail|unavailable): ') { Write-Host "::error::VPL on a runner must refuse cleanly: $($j.vplfi)"; $fail++ }
-          if (-not $j.vplBuilt) { Write-Host "::error::this pushcore was built without libvpl"; $fail++ }
+          # the checks of the methods this checkout has (a track branch carries one half; the merge both)
+          $vp = Test-Path repo/pushmpc/src/PushCoreVplFi.cpp; $xs = Test-Path repo/pushmpc/src/PushCoreXefg.cpp
+          if ($vp) {
+            if ($j.bridge -notmatch 'PASS$') { Write-Host "::error::bridge round trip: $($j.bridge)"; $fail++ }
+            if ($j.ivsr -notmatch '^fail: ' -or $j.ivsr -notmatch 'VPE|extension') { Write-Host "::error::Intel VSR on WARP must be refused by the extension: $($j.ivsr)"; $fail++ }
+            if ($j.vplfi -notmatch '^(fail|unavailable): ') { Write-Host "::error::VPL on a runner must refuse cleanly: $($j.vplfi)"; $fail++ }
+            if ($j.'vplfi.built' -ne 'true') { Write-Host "::error::this pushcore was built without libvpl"; $fail++ }
+          }
+          if ($xs) {
+            if ($j.xefg -notmatch '^pass') { Write-Host "::error::XeSS FG self-test on WARP: $($j.xefg)"; $fail++ }
+            if ($j.xesssr -match '^unavailable|exception' -or -not $j.xesssr) { Write-Host "::error::XeSS SR self-test did not run: $($j.xesssr)"; $fail++ }
+            if ($j.'xesssr.providerSlot' -ne 'yes') { Write-Host "::error::XeSS SR has no slot in this build: $($j.'xesssr.providerSlot')"; $fail++ }
+          }
+          $want = $(if ($xs) { (1 -shl 20) -bor (1 -shl 22) } else { 0 }) -bor $(if ($vp) { (1 -shl 21) -bor (1 -shl 23) } else { 0 })
+          if (([uint32]$j.features -band $want) -ne $want) { Write-Host "::error::pushcore_features lacks an Intel bit: $($j.features) (want $want)"; $fail++ }
           if ($j.capsNoDevice -notmatch 'no hardware adapter|ok') { Write-Host "::error::capabilities without a GPU: $($j.capsNoDevice)"; $fail++ }
-          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.material) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           if ($fail) { exit 1 }
           "WARP CHECKS PASS"
+
+      - name: Tester bundle (pushcore + pushcore_selftest + FFmpeg)
+        if: always()
+        run: |
+          $o = "$env:RUNNER_TEMP\intel-selftest"; New-Item -ItemType Directory -Force $o | Out-Null
+          Copy-Item "$env:BUILD\pushmpc\pushcore.dll", "$env:BUILD\pushmpc\pushcore_selftest.exe", repo/tests/intel-selftest-manual.ps1 $o -ErrorAction SilentlyContinue
+          Copy-Item "$env:DEPS\vcpkg\installed\x64-windows\bin\*.dll" $o -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: intel-selftest
+          path: ${{ runner.temp }}/intel-selftest
+          retention-days: 7
+          if-no-files-found: ignore

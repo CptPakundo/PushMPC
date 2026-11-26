@@ -240,6 +240,7 @@ public:
         if (cr == PUSHCORE_OK) {
             g.family = caps.family; g.available = caps.available; g.hardware = caps.hardware; g.name = Widen(caps.adapter);
             for (uint32_t i = 0; i < pm::kCapCount && i < PUSHCORE_CAP_COUNT; ++i) g.reason[i] = Widen(caps.reason[i]);
+            pm::ReadMeasured(g);   // the Intel methods' self-test numbers
             Log(std::format("d3d11: capabilities: {} ({}, vendor {:04X} device {:04X}), available 0x{:X}", caps.adapter,
                 Narrow(pm::FamilyName(g.family)), caps.vendorId, caps.deviceId, g.available));
         } else {
