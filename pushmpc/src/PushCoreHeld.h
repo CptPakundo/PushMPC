@@ -33,8 +33,10 @@ cbuffer Params : register(b0)
 };
 Texture2D<float> cur : register(t0);
 Texture2D<float> prev : register(t1);
+Texture2D<float2> curUV : register(t2);         // the current frame's chroma plane (half size)
 RWByteAddressBuffer counters : register(u0);   // 0 cells, 1 max, 2..5 over 2/4/8/16 codes, 6 sum
 RWStructuredBuffer<float> grid : register(u1);  // the current frame's cell means (codes), cells.x * cells.y (region tracking)
+RWStructuredBuffer<uint> aux : register(u2);    // per cell: bits 0-9 the largest 2x2 sub-cell change x 4 (codes), 10-20 Cb x 8, 21-31 Cr x 8
 
 groupshared uint sQ[64];
 groupshared uint sIn[64];
@@ -46,15 +48,26 @@ void CS_Held(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     if (id.x < cells.x && id.y < cells.y) {
         const int2 o = int2(id.xy * cellSize);
         float a = 0, b = 0;
+        float4 sa = 0, sb = 0, sn = 0;   // the four sub-cells (a thin line that moves inside the cell leaves its mean as it is)
         for (uint y = 0; y < cellSize; ++y)
             for (uint x = 0; x < cellSize; ++x) {
-                a += cur.Load(int3(o + int2(x, y), 0));
-                b += prev.Load(int3(o + int2(x, y), 0));
+                const float ca = cur.Load(int3(o + int2(x, y), 0)), cb = prev.Load(int3(o + int2(x, y), 0));
+                a += ca; b += cb;
+                const bool rt = x * 2 >= cellSize, bt = y * 2 >= cellSize;
+                const float4 sel = float4(!rt && !bt, rt && !bt, !rt && bt, rt && bt);
+                sa += sel * ca; sb += sel * cb; sn += sel;
             }
         const float codes = abs(a - b) * 255.0 / float(cellSize * cellSize);
         q = uint(codes * 16.0 + 0.5);
         inside = 1;
         grid[id.y * cells.x + id.x] = a * 255.0 / float(cellSize * cellSize);
+        const float subMax = max(max(abs(sa.x - sb.x) / sn.x, abs(sa.y - sb.y) / sn.y), max(abs(sa.z - sb.z) / sn.z, abs(sa.w - sb.w) / sn.w)) * 255.0;
+        const uint cs = max(1u, cellSize / 2);
+        const int2 oc = o / 2;
+        float2 uv = 0;
+        for (uint cy = 0; cy < cs; ++cy) for (uint cx = 0; cx < cs; ++cx) uv += curUV.Load(int3(oc + int2(cx, cy), 0));
+        uv *= 255.0 / float(cs * cs);
+        aux[id.y * cells.x + id.x] = min(uint(subMax * 4.0 + 0.5), 1023u) | (min(uint(uv.x * 8.0 + 0.5), 2047u) << 10) | (min(uint(uv.y * 8.0 + 0.5), 2047u) << 21);
     }
     sQ[gi] = q; sIn[gi] = inside;
     GroupMemoryBarrierWithGroupSync();
@@ -114,13 +127,22 @@ public:
         bd = {};
         bd.ByteWidth = kMaxCells * 4; bd.Usage = D3D11_USAGE_STAGING; bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         for (auto& r : results_) if (FAILED(dev_->CreateBuffer(&bd, nullptr, &r.gridStaging))) return failWith("CreateBuffer(grid staging)");
+        // the extras (sub-cells, chroma): one uint per cell, and their staging copies
+        bd = {};
+        bd.ByteWidth = kMaxCells * 4; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.StructureByteStride = 4;
+        if (FAILED(dev_->CreateBuffer(&bd, nullptr, &aux_))) return failWith("CreateBuffer(aux)");
+        if (FAILED(dev_->CreateUnorderedAccessView(aux_.Get(), &gu, &auxUav_))) return failWith("CreateUnorderedAccessView(aux)");
+        bd = {};
+        bd.ByteWidth = kMaxCells * 4; bd.Usage = D3D11_USAGE_STAGING; bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (auto& r : results_) if (FAILED(dev_->CreateBuffer(&bd, nullptr, &r.auxStaging))) return failWith("CreateBuffer(aux staging)");
         if (FAILED(dev_->CreateDeferredContext(0, &deferred_))) return failWith("CreateDeferredContext");
         ready_ = true;
         return true;
     }
     bool ready() const { return ready_; }
     const std::string& why() const { return why_; }
-    void forgetViews() { views_.clear(); }
+    void forgetViews() { views_.clear(); uvViews_.clear(); }
 
     // Records "compare cur with prev" into result `index` (mod kResults). Both are ingress textures (NV12 / P010).
     bool run(ID3D11DeviceContext* imm, ID3D11Texture2D* cur, ID3D11Texture2D* prev, uint32_t width, uint32_t height, uint64_t index)
@@ -128,7 +150,8 @@ public:
         if (!ready_ || !cur || !prev) return false;
         ID3D11ShaderResourceView* a = view(cur);
         ID3D11ShaderResourceView* b = view(prev);
-        if (!a || !b) return false;
+        ID3D11ShaderResourceView* c = view(cur, 1);
+        if (!a || !b || !c) return false;
         const uint32_t f = std::max<uint32_t>(2, (width + 479) / 480);
         const uint32_t cx = width / f, cy = height / f;
         if (!cx || !cy || uint64_t(cx) * cy > kMaxCells) return false;
@@ -136,17 +159,18 @@ public:
         imm->UpdateSubresource(cb_.Get(), 0, nullptr, params, 0, 0);
         const UINT zero[4] = { 0, 0, 0, 0 };
         deferred_->ClearUnorderedAccessViewUint(uav_.Get(), zero);
-        ID3D11ShaderResourceView* srv[] = { a, b };
-        ID3D11UnorderedAccessView* uav[] = { uav_.Get(), gridUav_.Get() };
+        ID3D11ShaderResourceView* srv[] = { a, b, c };
+        ID3D11UnorderedAccessView* uav[] = { uav_.Get(), gridUav_.Get(), auxUav_.Get() };
         ID3D11Buffer* cb[] = { cb_.Get() };
-        deferred_->CSSetShaderResources(0, 2, srv);
-        deferred_->CSSetUnorderedAccessViews(0, 2, uav, nullptr);
+        deferred_->CSSetShaderResources(0, 3, srv);
+        deferred_->CSSetUnorderedAccessViews(0, 3, uav, nullptr);
         deferred_->CSSetConstantBuffers(0, 1, cb);
         deferred_->CSSetShader(cs_.Get(), nullptr, 0);
         deferred_->Dispatch((cx + 7) / 8, (cy + 7) / 8, 1);
         auto& r = results_[index % kResults];
         deferred_->CopyResource(r.staging.Get(), counters_.Get());
         deferred_->CopyResource(r.gridStaging.Get(), grid_.Get());
+        deferred_->CopyResource(r.auxStaging.Get(), aux_.Get());
         r.cx = cx; r.cy = cy; r.cell = f;
         Microsoft::WRL::ComPtr<ID3D11CommandList> list;
         if (FAILED(deferred_->FinishCommandList(FALSE, &list))) return false;
@@ -176,37 +200,43 @@ public:
             D3D11_MAPPED_SUBRESOURCE g{};
             if (SUCCEEDED(imm->Map(r.gridStaging.Get(), 0, D3D11_MAP_READ, 0, &g))) { std::memcpy(grid->v.data(), g.pData, grid->v.size() * 4); imm->Unmap(r.gridStaging.Get(), 0); }
             else grid->v.clear();
+            grid->sub.clear(); grid->cb.clear(); grid->cr.clear();
+            D3D11_MAPPED_SUBRESOURCE x{};
+            if (grid->ok() && SUCCEEDED(imm->Map(r.auxStaging.Get(), 0, D3D11_MAP_READ, 0, &x))) { grid->unpackAux(static_cast<const uint32_t*>(x.pData)); imm->Unmap(r.auxStaging.Get(), 0); }
         }
         return true;
     }
 
 private:
     bool failWith(std::string w) { why_ = std::move(w); ready_ = false; return false; }
-    ID3D11ShaderResourceView* view(ID3D11Texture2D* t)
+    // plane 0: luma (R8 / R16), plane 1: chroma (R8G8 / R16G16)
+    ID3D11ShaderResourceView* view(ID3D11Texture2D* t, UINT plane = 0)
     {
-        auto it = views_.find(t);
-        if (it != views_.end()) return it->second.Get();
+        auto& map = plane ? uvViews_ : views_;
+        auto it = map.find(t);
+        if (it != map.end()) return it->second.Get();
         D3D11_TEXTURE2D_DESC d{}; t->GetDesc(&d);
+        const bool nv12 = d.Format == DXGI_FORMAT_NV12;
         D3D11_SHADER_RESOURCE_VIEW_DESC1 sv{};
-        sv.Format = d.Format == DXGI_FORMAT_NV12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM;
+        sv.Format = plane ? (nv12 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM) : (nv12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM);
         sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        sv.Texture2D.MipLevels = 1; sv.Texture2D.PlaneSlice = 0;
+        sv.Texture2D.MipLevels = 1; sv.Texture2D.PlaneSlice = plane;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView1> s;
-        if (FAILED(dev3_->CreateShaderResourceView1(t, &sv, &s))) { failWith("luma plane SRV"); return nullptr; }
-        if (views_.size() > 32) views_.clear();
-        views_[t] = s;
+        if (FAILED(dev3_->CreateShaderResourceView1(t, &sv, &s))) { failWith(plane ? "chroma plane SRV" : "luma plane SRV"); return nullptr; }
+        if (map.size() > 32) map.clear();
+        map[t] = s;
         return s.Get();
     }
-    struct Result { Microsoft::WRL::ComPtr<ID3D11Buffer> staging, gridStaging; bool pending = false; uint64_t index = 0; uint32_t cx = 0, cy = 0, cell = 0; };
+    struct Result { Microsoft::WRL::ComPtr<ID3D11Buffer> staging, gridStaging, auxStaging; bool pending = false; uint64_t index = 0; uint32_t cx = 0, cy = 0, cell = 0; };
     Microsoft::WRL::ComPtr<ID3D11Device> dev_;
     Microsoft::WRL::ComPtr<ID3D11Device3> dev3_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> deferred_;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> cs_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cb_, counters_;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav_, gridUav_;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> grid_;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav_, gridUav_, auxUav_;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> grid_, aux_;
     std::array<Result, kResults> results_{};
-    std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> views_;
+    std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> views_, uvViews_;
     bool ready_ = false;
     std::string why_;
 };

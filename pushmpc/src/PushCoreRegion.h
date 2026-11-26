@@ -28,7 +28,7 @@
 namespace pushmpc {
 
 inline constexpr const char* kRegionHlsl = R"HLSL(
-cbuffer Params : register(b0) { uint2 size; float2 maskScale; float lo, hi; float depthScale; float pad; };
+cbuffer Params : register(b0) { uint2 size; float2 maskScale; float lo, hi; float depthScale; float pad; float2 shift; float2 pad2; };   // shift: the camera residual (pixels)
 Texture2D<float> inY : register(t0);
 Texture2D<float2> inUV : register(t1);
 Texture2D<float4> rep : register(t2);
@@ -74,7 +74,7 @@ void CS_RepairY(uint3 id : SV_DispatchThreadID)
     if (id.x >= size.x || id.y >= size.y) return;
     const float y = inY.Load(int3(id.xy, 0));
     const float m = maskAt((float2(id.xy) + 0.5) / float2(size));
-    outY[id.xy] = m > 0.001 ? lerp(y, toYuv(rep.Load(int3(id.xy, 0)).rgb).x, m) : y;
+    outY[id.xy] = m > 0.001 ? lerp(y, toYuv(rep.SampleLevel(lin, (float2(id.xy) + 0.5 - shift) / float2(size), 0).rgb).x, m) : y;
 }
 [numthreads(16, 16, 1)]
 void CS_RepairUV(uint3 id : SV_DispatchThreadID)
@@ -84,9 +84,9 @@ void CS_RepairUV(uint3 id : SV_DispatchThreadID)
     const float2 uv = inUV.Load(int3(id.xy, 0));
     const float m = maskAt((float2(id.xy * 2) + 1.0) / float2(size));
     if (m <= 0.001) { outUV[id.xy] = uv; return; }
-    float3 s = 0;
-    [unroll] for (int j = 0; j < 2; ++j) [unroll] for (int i = 0; i < 2; ++i) s += rep.Load(int3(id.xy * 2 + uint2(i, j), 0)).rgb;
-    outUV[id.xy] = lerp(uv, toYuv(s * 0.25).yz, m);
+    // the 2 x 2 luma pixels of this chroma sample: bilinear at their centre is their mean (with the camera residual)
+    const float3 s = rep.SampleLevel(lin, (float2(id.xy * 2) + 1.0 - shift) / float2(size), 0).rgb;
+    outUV[id.xy] = lerp(uv, toYuv(s).yz, m);
 }
 )HLSL";
 
@@ -105,7 +105,7 @@ public:
         };
         if (!compile("CS_ToRgb", toRgb_) || !compile("CS_RepairY", repY_) || !compile("CS_RepairUV", repUV_)) return false;
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 32; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = 48; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         if (FAILED(dev_->CreateBuffer(&bd, nullptr, &cb_))) return failWith("CreateBuffer(region)");
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
@@ -146,12 +146,13 @@ public:
         imm->UpdateSubresource(maskTex_.Get(), 0, nullptr, m.data(), w, 0);
         return true;
     }
-    // out (NV12 / P010 with plane UAVs) = slot with the span frame `rep` laid in inside the mask
-    bool repair(ID3D11DeviceContext* imm, ID3D11Texture2D* slot, ID3D11Texture2D* rep, ID3D11Texture2D* out, uint32_t w, uint32_t h)
+    // out (NV12 / P010 with plane UAVs) = slot with the span frame `rep` laid in inside the mask, shifted by (sx, sy)
+    // pixels (the camera residual of a part that moves with the camera; 0 for the rest)
+    bool repair(ID3D11DeviceContext* imm, ID3D11Texture2D* slot, ID3D11Texture2D* rep, ID3D11Texture2D* out, uint32_t w, uint32_t h, float sx = 0.f, float sy = 0.f)
     {
         Planes* p = planes(slot); Planes* o = planes(out, true); ID3D11ShaderResourceView* r = srv(rep);
         if (!p || !o || !r || !maskSrv_) return false;
-        setParams(imm, w, h, p->p010);
+        setParams(imm, w, h, p->p010, sx, sy);
         ID3D11ShaderResourceView* srvs[] = { p->y.Get(), p->uv.Get(), r, maskSrv_.Get() };
         ID3D11UnorderedAccessView* uavs[] = { nullptr, o->uy.Get(), o->uuv.Get() };
         deferred_->CSSetShaderResources(0, 4, srvs);
@@ -164,11 +165,11 @@ public:
 private:
     struct Planes { Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> y, uv; Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uy, uuv; bool p010 = false; };
     bool failWith(std::string w) { why_ = std::move(w); ready_ = false; return false; }
-    void setParams(ID3D11DeviceContext* imm, uint32_t w, uint32_t h, bool p010)
+    void setParams(ID3D11DeviceContext* imm, uint32_t w, uint32_t h, bool p010, float shiftX = 0.f, float shiftY = 0.f)
     {
         // feather: maskScale steps of 0.75 cell per tap at feather 1
-        struct P { uint32_t w, h; float sx, sy, lo, hi, depth, pad; } p{ w, h, feather_ / float(std::max(1u, mw_)), feather_ / float(std::max(1u, mh_)), 0.15f, 0.85f,
-                                                                          p010 ? 65535.0f / 65472.0f * 1.0f : 1.0f, 0 };
+        struct P { uint32_t w, h; float sx, sy, lo, hi, depth, pad, shx, shy, pad2[2]; } p{ w, h, feather_ / float(std::max(1u, mw_)), feather_ / float(std::max(1u, mh_)), 0.15f, 0.85f,
+                                                                          p010 ? 65535.0f / 65472.0f * 1.0f : 1.0f, 0, shiftX, shiftY, {0, 0} };
         imm->UpdateSubresource(cb_.Get(), 0, nullptr, &p, 0, 0);
         ID3D11Buffer* cbs[] = { cb_.Get() };
         ID3D11SamplerState* ss[] = { sampler_.Get() };

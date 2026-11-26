@@ -362,6 +362,12 @@ static void TestLayered()
         ctx->Flush();
         DiffStats d; CellGrid g;
         if (!det.read(ctx.Get(), uint64_t(f), d, true, &g) || !g.ok()) { Check(false, "cell grid read back"); return; }
+        if (f == 1) {
+            // the pass's extras: sub-cells and chroma (the clip's chroma is 128 everywhere)
+            float cbMin = 999, cbMax = 0; for (size_t i = 0; i < g.cb.size(); ++i) { cbMin = std::min(cbMin, g.cb[i]); cbMax = std::max(cbMax, g.cr[i]); }
+            char bx[160]; std::snprintf(bx, sizeof(bx), "the pass reads back sub-cell changes and chroma means (Cb min %.2f, Cr max %.2f, truth 128)", cbMin, cbMax);
+            Check(g.hasSub() && g.hasChroma() && std::fabs(cbMin - 128.f) < 1.f && std::fabs(cbMax - 128.f) < 1.f, bx);
+        }
         if (f > 0) frames[uint64_t(f)] = CompareRegions(grids[uint64_t(f - 1)], g);
         grids[uint64_t(f)] = std::move(g);
     }
@@ -406,6 +412,76 @@ static void TestLayered()
     Check(stall(shownB, 4, 20) >= 0.8, b);
     Check(bgRepaired == 0, "the panning background is never repaired (" + std::to_string(bgRepaired) + ")");
     Check(acrossCut == 0, "no repair spans the cut (" + std::to_string(acrossCut) + ")");
+    // the mouth (threes) inside A (twos): where it is redrawn inside A's span and then kept, A's pair starts at the
+    // redrawn frame (substitution), so the new mouth moves with the body instead of being cut out of it
+    int subst = 0;
+    for (int f = 3; f + 3 < N; ++f)
+        for (const auto& g : PlanRepairs(uint64_t(f), frameAt, gridAt, kLookahead)) subst += g.pairFrom != g.d0;
+    Check(subst > 0, "a mouth redrawn inside the body's span: substitution pairs (" + std::to_string(subst) + ")");
+}
+
+// ---- per-region rules on synthetic cell grids (no GPU): nested cadences, fades, the gate, the noise floor ----
+// A flat background with texture panning on ones, a body block on twos, a limb block on threes riding on the body
+// (it moves with the body and changes pose on threes), and a second character on twos out of phase.
+static void TestRegionRules()
+{
+    const uint32_t W = 160, H = 90;
+    auto bodyX = [](int f) { return 20.0 + 6.0 * (f / 2); };
+    auto limbDy = [](int f) { return ((f / 3) % 2) ? 6.0 : 0.0; };
+    auto otherX = [](int f) { return 130.0 - 6.0 * ((f + 1) / 2); };
+    auto grid = [&](int f, float gain) {
+        CellGrid g; g.w = W; g.h = H; g.cell = 4; g.v.resize(size_t(W) * H);
+        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) {
+            const double bx = x + 1.0 * f;   // the background pans 1 cell per frame (on ones)
+            float v = float(70 + 25 * std::sin(bx * 0.37) * std::cos(y * 0.29) + 20 * std::sin(bx * 0.113 + y * 0.07) + 15 * std::cos(bx * 0.051 - y * 0.19));   // not periodic
+            const double b = bodyX(f);
+            if (x >= b && x < b + 14 && y >= 30 && y < 60) v = float(180 + 20 * std::sin(x * 0.9 - b * 0.9));   // the body (texture moves with it)
+            if (x >= b + 14 && x < b + 18 && y >= 34 + limbDy(f) && y < 44 + limbDy(f)) v = 220;                // the limb on threes
+            const double o = otherX(f);
+            if (x >= o && x < o + 10 && y >= 50 && y < 80) v = float(140 + 25 * std::cos(y * 0.8));          // the other character
+            g.v[size_t(y) * W + x] = v + gain;
+        }
+        return g;
+    };
+    for (int fade = 0; fade < 2; ++fade) {
+        const int N = 24;
+        std::map<uint64_t, CellGrid> grids; std::map<uint64_t, RegionFrame> frames;
+        for (int f = 0; f < N; ++f) {
+            grids[uint64_t(f)] = grid(f, fade ? 2.0f * f : 0.f);   // fade: +2 codes per frame
+            if (f) frames[uint64_t(f)] = CompareRegions(grids[uint64_t(f - 1)], grids[uint64_t(f)]);
+        }
+        auto frameAt = [&](uint64_t q) -> const RegionFrame* { auto it = frames.find(q); return it == frames.end() ? nullptr : &it->second; };
+        auto gridAt = [&](uint64_t q) -> const CellGrid* { auto it = grids.find(q); return it == grids.end() ? nullptr : &it->second; };
+        int body = 0, other = 0, limbSpan3 = 0, bg = 0, total = 0;
+        for (int f = 4; f + 4 < N; ++f)
+            for (const auto& g : PlanRepairs(uint64_t(f), frameAt, gridAt, kLookahead)) {
+                ++total;
+                auto on = [&](double x, double y) { return g.mask[size_t(y) * W + size_t(x)] != 0; };
+                if (on(bodyX(f) + 7, 45)) ++body;
+                if (on(otherX(f) + 5, 65)) ++other;
+                if (g.d1 - g.d0 >= 3 && on(bodyX(f) + 15, 38 + limbDy(f))) ++limbSpan3;
+                if (on(80, 10) || on(10, 85)) ++bg;
+            }
+        if (fade) { Check(total == 0, "a fade (2 codes per frame) stops every region repair (" + std::to_string(total) + " parts)"); continue; }
+        char b[200]; std::snprintf(b, sizeof(b), "nested cadences: body on twos repaired on %d frames, the other character (twos, out of phase) on %d, the background on ones %d", body, other, bg);
+        Check(body >= 6 && other >= 6 && bg == 0, b);
+        Check(limbSpan3 >= 1, "a limb on threes on the body on twos gets its own span of three (" + std::to_string(limbSpan3) + ")");
+    }
+    // the gate: wholly held / exact parts open it, live action's near-still frames do not
+    {
+        CadenceEvidence anim, live;
+        for (int i = 0; i < 240; ++i) { anim.Push(i % 4 == 0); live.Push(i % 60 == 0); }
+        Check(anim.Animation() && !live.Animation(), "animation gate: 25 % evidence opens it, 1.7 % (live action) does not");
+        CadenceEvidence h; for (int i = 0; i < 240; ++i) h.Push(i % 10 == 0); bool open = h.Animation();
+        for (int i = 0; i < 240; ++i) { h.Push(i % 14 == 0); open = h.Animation() && open; }
+        Check(open, "animation gate: hysteresis keeps it open at 7 % after 10 %");
+    }
+    {
+        NoiseFloor clean, grainy;
+        for (int i = 0; i < 20; ++i) { clean.Push(1.0f); grainy.Push(4.0f); }
+        char b[160]; std::snprintf(b, sizeof(b), "noise floor: change threshold %.1f codes on clean anime, %.1f on a grainy BD", clean.Threshold(), grainy.Threshold());
+        Check(std::fabs(clean.Threshold() - 5.0f) < 0.01f && std::fabs(grainy.Threshold() - 12.0f) < 0.01f, b);
+    }
 }
 
 int main()
@@ -413,6 +489,7 @@ int main()
     TestRules();
     TestGpu();
     TestLayered();
+    TestRegionRules();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }
