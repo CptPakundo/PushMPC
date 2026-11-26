@@ -69,7 +69,7 @@ questions.
 | **VLC 3** | 🧪 | 🧪 | 🧪 |
 | **Kodi** | 🆕 | 🆕 | |
 | **Stremio** (5.0.28 and newer) | 🆕 | | |
-| **Plex** (Plex for Windows, Plex HTPC; Linux: from Flathub) | 🧪 | 🧪 | |
+| **Plex** (Plex for Windows, Plex HTPC, Plex for Mac; Linux: from Flathub) | 🧪 | 🧪 | 🧪 |
 | **Jellyfin** (Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim) | 🆕 | 🆕 | |
 | **Any other player** (KMPlayer, GOM, Emby Theater, ...) | 🧪 capture mode | | |
 
@@ -110,6 +110,7 @@ cards, whether to accept NVIDIA's licence for their video effects. To remove it:
 uninstall`.
 
 **Mac:** a Homebrew package is on the way. Until then, see [mpv, IINA and other players](docs/players-mpv.md#macos).
+With it, `pushmpc-setup install` also sets up Plex for Mac and Plex HTPC, and puts PushMPC back after Plex updates.
 
 ## 🤖 How Auto picks
 
@@ -175,7 +176,6 @@ files, Setup reuses them instead of downloading.
 ## 🗺️ Roadmap (after the first release)
 
 - Capture mode on Linux and Mac without OBS, with the best picture PushMPC can make there.
-- Plex on Mac.
 - Faster AI frame generation on more graphics chips: AMD Radeon and Snapdragon on Windows, and more Linux setups.
 
 ## 📚 More

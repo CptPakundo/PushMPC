@@ -32,6 +32,17 @@ class Pushmpc < Formula
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
+  # PushMPC for Plex for Mac / Plex HTPC (mpv-native.yml builds it, release.yml attaches it): the universal proxy
+  # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the self-test and
+  # pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into Plex); pushmpc-setup
+  # unpacks it and puts it into the Plex apps. At release time set url / sha256 as for the tarball above
+  on_macos do
+    resource "plex-mac" do
+      url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
   # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
   resource "artcnn-c4f16-onnx" do
     url "https://raw.githubusercontent.com/Artoriuz/ArtCNN/0837e5326e710f49e2ab0a8d995da0708047442e/ONNX/ArtCNN_C4F16.onnx"
@@ -98,6 +109,11 @@ class Pushmpc < Formula
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
     (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
+    if OS.mac?
+      (pkgshare/"plex-mac").mkpath
+      resource("plex-mac").fetch
+      cp resource("plex-mac").cached_download, pkgshare/"plex-mac/pushmpc-plex-mac.tar.gz"
+    end
     resource("pmml-graphs").stage { (pkgshare/"pmml/graphs").install Dir["*.onnx", "**/*.onnx"].uniq }
     (pkgshare/"pmml").install "scripts/ml-runtime-pin.json"
     libexec.install "packaging/homebrew/pmml-models.py"
@@ -173,6 +189,9 @@ class Pushmpc < Formula
       #              macOS 26 offers Apple's one-time super-resolution model download (pushmpc-apple model-download)
       #   uninstall  takes the block out (mpv.conf comes back byte for byte) and removes the LaunchAgent of earlier
       #              PushMPC test builds, if any
+      #   Plex       on macOS, install also puts PushMPC into Plex for Mac / Plex HTPC when they are in /Applications
+      #              (pushmpc-plex-mac.sh: Plex's original library backed up, a self-test with Plex's own player, a
+      #              LaunchAgent that re-applies it after Plex updates); uninstall gives Plex back exactly
       #   PushFlow   install also sets up PushFlow (RIFE) for the ml backend in ~/.local/share/pushmpc/pmml: Homebrew's ONNX
       #              Runtime (CoreML), the graphs, and PushFlow's models from PushFPS's release (pinned, about 130 MB the
       #              first time); --no-pmml skips it, uninstall removes it
@@ -198,6 +217,24 @@ class Pushmpc < Formula
       fi
       if [ "$action" = uninstall ] && [ -f "$pm/.pushmpc-setup" ]; then
         rm -rf "$pm"; rmdir "$data/pushmpc" "$data" 2>/dev/null || true; echo "PushFlow for the ml backend removed"
+      fi
+      # Plex for Mac / Plex HTPC: vf_pushmpc inside Plex's own player (the proxy libavfilter in the app; pushmpc-plex-mac.sh,
+      # unpacked into $data/pushmpc/plex-mac), with a LaunchAgent that puts it back after a Plex update
+      plextgz="#{opt_pkgshare}/plex-mac/pushmpc-plex-mac.tar.gz"; plexdir="$data/pushmpc/plex-mac"
+      if [ "$(uname -s)" = Darwin ]; then
+        case $action in
+          install)
+            if [ -f "$plextgz" ] && { [ -d /Applications/Plex.app ] || [ -d "/Applications/Plex HTPC.app" ]; }; then
+              echo "Plex for Mac:"
+              if rm -rf "$plexdir.new" && mkdir -p "$plexdir.new" && tar -xzf "$plextgz" -C "$plexdir.new" && rm -rf "$plexdir" && mv "$plexdir.new" "$plexdir"; then
+                /bin/sh "$plexdir/pushmpc-plex-mac.sh" install --from "$plexdir" --agent || echo "  Plex: not set up (see above); the rest of PushMPC is"
+              fi
+            fi ;;
+          uninstall)
+            if [ -f "$plexdir/pushmpc-plex-mac.sh" ]; then echo "Plex for Mac:"; /bin/sh "$plexdir/pushmpc-plex-mac.sh" uninstall; rm -rf "$plexdir"; rmdir "$data/pushmpc" 2>/dev/null; fi ;;
+          status)
+            [ ! -f "$plexdir/pushmpc-plex-mac.sh" ] || /bin/sh "$plexdir/pushmpc-plex-mac.sh" status --from "$plexdir" ;;
+        esac
       fi
       script_dir="#{HOMEBREW_PREFIX}/etc/mpv/scripts"
       helper="#{opt_pkgshare}/mpv/pushmpc-vsscript.lua"
@@ -257,6 +294,9 @@ class Pushmpc < Formula
       Settings: ~/.config/pushmpc/settings.ini (Smoother=auto|off|2..8, Backend=auto|apple|portable,
       AppleSuperResolution=auto|off|2|4|editing|artcnn|lowlatency, Content=live|anime, AppleTenBit=auto|off,
       AppleSrModelDownload=auto|never). Logs: ~/Library/Logs/PushMPC.
+      On macOS, pushmpc-setup install also sets up Plex for Mac and Plex HTPC (in /Applications) when they are there, and
+      re-applies itself after Plex updates. If macOS refuses, allow your terminal in System Settings > Privacy & Security >
+      App Management, then run pushmpc-setup install again.
       For IINA's own player, see the PushMPC IINA plugin (integrations/iina in the repository).
     EOS
   end

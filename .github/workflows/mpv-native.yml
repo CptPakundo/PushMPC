@@ -16,6 +16,11 @@ on:
   # release.yml builds the release's native hook, mpv and the Plex proxy through this workflow (artifacts
   # mpvnative-hook-<runner>, mpvnative-windows, plexnative)
   workflow_call:
+    inputs:
+      release:
+        description: 'a release build (release.yml): also the Plex for Mac bundle (artifact plexmac)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -27,7 +32,7 @@ on:
         type: boolean
         default: false
       plex_macos:
-        description: 'also run the Plex for Mac inspection job'
+        description: 'also run the Plex for Mac job (build, install into both apps, self-test, launch)'
         type: boolean
         default: false
 
@@ -605,7 +610,7 @@ jobs:
   # dylibs (libavfilter.8.dylib = 8.29.100). Proxy libavfilter.8.dylib in Contents/Frameworks; self-test through Plex's
   # libmpv, a real launch of the modified app, uninstall bit-exact. Dispatch only (plex_macos input).
   plex-macos:
-    if: github.event_name == 'workflow_dispatch' && inputs.plex_macos
+    if: inputs.release || (github.event_name == 'workflow_dispatch' && inputs.plex_macos)
     strategy:
       fail-fast: false
       matrix:
@@ -691,3 +696,8 @@ jobs:
             done
           done
           [ "$fails" = 0 ] && echo "plex-macos: all checks passed" || exit 1
+      # the release's Plex for Mac bundle (release.yml: pushmpc-plex-mac-<version>.tar.gz; the Homebrew formula's
+      # plex-mac resource): what was just tested on this runner
+      - uses: actions/upload-artifact@v4
+        if: matrix.runner == 'macos-15'
+        with: { name: plexmac, path: '${{ runner.temp }}/plexmac/', if-no-files-found: error, retention-days: 7 }

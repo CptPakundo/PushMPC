@@ -316,7 +316,7 @@ jobs:
     if: inputs.jobs == 'all' || contains(inputs.jobs, 'homebrew')
     runs-on: macos-15
     # a green run takes about 4 min (bottles 1.5, the formula's own build 1, tests 1); 25 leaves room for a cold cache
-    timeout-minutes: 25
+    timeout-minutes: 60
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -355,6 +355,15 @@ jobs:
           mpv --vf=help | grep -i vapoursynth
           "$(brew --prefix vapoursynth)/bin/vspipe" --version
 
+      - name: Plex for Mac bundle (the formula's plex-mac resource, a release asset), built as mpv-native.yml does
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac" > "$RUNNER_TEMP/plexmac-build.log" 2>&1 || { tail -40 "$RUNNER_TEMP/plexmac-build.log"; exit 1; }
+          grep -E "^master@|^proxy|minimum macOS|libMoltenVK" "$RUNNER_TEMP/plexmac-build.log"
+          tar -czf "$RUNNER_TEMP/plexmac-ci.tar.gz" -C "$RUNNER_TEMP/plexmac" .
+
       - name: The formula from a local tap, built from the checkout's tarball
         timeout-minutes: 10
         shell: bash
@@ -370,16 +379,19 @@ jobs:
           gsha=$(shasum -a 256 "$gtgz" | cut -d' ' -f1)
           brew tap-new --no-git pushmpc/local
           tap=$(brew --repository pushmpc/local)
-          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" "$gtgz" "$gsha" <<'PY'
+          ptgz="$RUNNER_TEMP/plexmac-ci.tar.gz"; psha=$(shasum -a 256 "$ptgz" | cut -d' ' -f1)
+          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" "$gtgz" "$gsha" "$ptgz" "$psha" <<'PY'
           import re, sys
-          tgz, sha, out, gtgz, gsha = sys.argv[1:6]
+          tgz, sha, out, gtgz, gsha, ptgz, psha = sys.argv[1:8]
           f = open("packaging/homebrew/pushmpc.rb").read()
           f = re.sub(r'^  url ".*"$', f'  url "file://{tgz}"\n  version "0.6.0-ci"', f, count=1, flags=re.M)
           f = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', f, count=1, flags=re.M)
           f = re.sub(r'(resource "pmml-graphs" do\n    url )".*"(\n    sha256 )".*"', lambda m: f'{m.group(1)}"file://{gtgz}"{m.group(2)}"{gsha}"', f, count=1)
+          f = re.sub(r'(resource "plex-mac" do\n      url )".*"(\n      sha256 )".*"', lambda m: f'{m.group(1)}"file://{ptgz}"{m.group(2)}"{psha}"', f, count=1)
           open(out, "w").write(f)
           PY
           grep -n -A2 'resource "pmml-graphs"' "$tap/Formula/pushmpc.rb"
+          grep -n -A2 'resource "plex-mac"' "$tap/Formula/pushmpc.rb"; grep -q "file://$ptgz" "$tap/Formula/pushmpc.rb"
           grep -n -E '^  (url|version|sha256) ' "$tap/Formula/pushmpc.rb"
           brew install --build-from-source --verbose pushmpc/local/pushmpc
           brew test --verbose pushmpc/local/pushmpc
@@ -459,6 +471,47 @@ jobs:
           [ ! -e "$pm" ] || { echo "::error::the pmml runtime was left behind"; exit 1; }
           [ ! -e "$HOME/Library/LaunchAgents/com.pushmpc.vsscript.plist" ] || { echo "::error::a LaunchAgent is present"; exit 1; }
           if launchctl getenv VSSCRIPT_PATH | grep -q .; then echo "::error::a global VSSCRIPT_PATH is set"; exit 1; fi
+
+      - name: Plex for Mac through pushmpc-setup (install, the reapply agent after a simulated update, uninstall bit-exact)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -uo pipefail
+          u=$(curl -fsSL "https://plex.tv/api/downloads/6.json" | python3 -c "
+          import json, sys
+          def walk(o):
+              if isinstance(o, dict):
+                  for k, v in o.items():
+                      if k.lower() in ('macos', 'mac') and isinstance(v, dict):
+                          for r in v.get('releases', []):
+                              if r.get('url', '').endswith('.zip'): print(r['url']); return True
+                      if walk(v): return True
+              return False
+          walk(json.load(sys.stdin))")
+          echo "Plex for Mac: $u"
+          curl -fsSL -o "$RUNNER_TEMP/plex.zip" "$u" && ditto -x -k "$RUNNER_TEMP/plex.zip" /Applications
+          app=/Applications/Plex.app; fw="$app/Contents/Frameworks"
+          snap() { (cd "$app" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256); }
+          before=$(snap); fails=0
+          export HOME="$RUNNER_TEMP/home-plex"; mkdir -p "$HOME"
+          PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-plex.txt" | grep -A3 "Plex for Mac" | cut -c1-400
+          grep -q '"state":"installed"' "$RUNNER_TEMP/setup-plex.txt" && grep -q ', x2' "$RUNNER_TEMP/setup-plex.txt" || { echo "::error::pushmpc-setup did not put PushMPC into Plex for Mac"; fails=$((fails + 1)); }
+          grep -aq pushmpc_proxy_status "$fw/libavfilter.8.dylib" || { echo "::error::no proxy in Plex.app"; fails=$((fails + 1)); }
+          agent="$HOME/Library/LaunchAgents/com.pushmpc.plex-reapply.plist"
+          plutil -lint "$agent" || fails=$((fails + 1))
+          launchctl print "gui/$(id -u)/com.pushmpc.plex-reapply" 2>&1 | grep -E "state|program|path =" | head -4
+          pushmpc-setup status 2>&1 | grep -iE "plex|desktop" | cut -c1-300
+          # a Plex update: the app's own libavfilter.8.dylib comes back and Info.plist changes; the agent puts the proxy back
+          cp "$HOME/Library/Application Support/PushMPC/plex-native/desktop/libavfilter.8.dylib" "$fw/libavfilter.8.dylib"
+          touch "$app/Contents/Info.plist"
+          for i in $(seq 1 30); do grep -aq pushmpc_proxy_status "$fw/libavfilter.8.dylib" && break; sleep 2; done
+          if grep -aq pushmpc_proxy_status "$fw/libavfilter.8.dylib"; then echo "reapply agent: the proxy is back after the simulated update"
+          else echo "::error::the reapply agent did not put the proxy back"; cat "$HOME/Library/Logs/PushMPC/plex-reapply.log" 2>/dev/null | tail -5; fails=$((fails + 1)); fi
+          pushmpc-setup uninstall 2>&1 | grep -A2 "Plex for Mac" | cut -c1-300
+          [ "$(snap)" = "$before" ] && echo "Plex.app bit for bit stock after pushmpc-setup uninstall" || { echo "::error::Plex.app differs after uninstall"; fails=$((fails + 1)); }
+          [ ! -e "$agent" ] || { echo "::error::the reapply agent is left behind"; fails=$((fails + 1)); }
+          [ ! -e "$HOME/.local/share/pushmpc/plex-mac" ] || { echo "::error::the unpacked Plex bundle is left behind"; fails=$((fails + 1)); }
+          [ "$fails" = 0 ] || exit 1
 
       - uses: actions/upload-artifact@v4
         if: always()

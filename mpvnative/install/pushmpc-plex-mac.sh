@@ -6,13 +6,16 @@
 # Plex's signature allows it (hardened runtime with disable-library-validation). For Setup or by hand. POSIX sh.
 #
 #   pushmpc-plex-mac.sh install|uninstall|status [--app auto|desktop|htpc] [--app-path PATH] [--from DIR]
-#                       [--opts 'smoother=4:...'] [--no-conf] [--dry-run] [--json]
+#                       [--opts 'smoother=4:...'] [--no-conf] [--agent] [--if-needed] [--dry-run] [--json]
 #
 #   --app       desktop = /Applications/Plex.app, htpc = /Applications/Plex HTPC.app, auto = each one there (default)
 #   --app-path  the .app bundle when it is elsewhere (needs --app desktop or htpc)
 #   --from      folder with libavfilter.8.dylib (the proxy), pushmpc-avfilter-8.*.dylib, libpushmpc_engine.dylib,
 #               libpushmpc_engine_apple.dylib and libMoltenVK.dylib (the GPU engines; optional) and pushmpc-plex-selftest
 #               (default: here). The self-test line names the engine that ran (apple, portable-vulkan, portable-cpu).
+#   --agent     (install) also the LaunchAgent com.pushmpc.plex-reapply: at login and whenever a Plex app is replaced
+#               (an update: its Info.plist changes) it runs "install --if-needed" from this folder; uninstall removes it
+#   --if-needed (install) only apps that had PushMPC and lost the proxy (a Plex update); nothing else is touched
 #   --json      one JSON object per app on stdout ({"target","action","state","detail"}), the log on stderr
 # install backs up the original (~/Library/Application Support/PushMPC/plex-native/<app>, with its SHA-256), runs a
 # self-test with that Plex's own libmpv and is idempotent (an installed proxy keeps; the conf block is made sure of).
@@ -26,7 +29,7 @@ BEGIN_MARK='# >>> PushMPC native (Plex): do not edit between these lines (PushMP
 END_MARK='# <<< PushMPC native (Plex)'
 
 action=${1:-}; [ $# -gt 0 ] && shift
-app=auto; apath=''; from=''; opts=''; noconf=0; dry=0; json=0
+app=auto; apath=''; from=''; opts=''; noconf=0; dry=0; json=0; agent=0; ifneeded=0
 while [ $# -gt 0 ]; do
     case $1 in
         --app) app=$2; shift 2 ;;
@@ -34,6 +37,8 @@ while [ $# -gt 0 ]; do
         --from) from=$2; shift 2 ;;
         --opts) opts=$2; shift 2 ;;
         --no-conf) noconf=1; shift ;;
+        --agent) agent=1; shift ;;
+        --if-needed) ifneeded=1; shift ;;
         --dry-run) dry=1; shift ;;
         --json) json=1; shift ;;
         *) echo "pushmpc-plex-mac.sh: unknown option $1" >&2; exit 2 ;;
@@ -105,6 +110,10 @@ do_app() {   # do_app <name> <bundle> <mpv.conf>
         [ -f "$from/libavfilter.8.dylib" ] && [ -f "$from/libpushmpc_engine.dylib" ] && ls "$from"/pushmpc-avfilter-8.*.dylib >/dev/null 2>&1 \
             || { emit "$name" error "the files are not in $from"; return 1; }
         [ "$dry" = 1 ] && { emit "$name" "$([ "$installed" = 1 ] && echo installed || echo would-install)" "$bundle"; return 0; }
+        if [ "$ifneeded" = 1 ]; then   # the reapply agent: only a lost proxy of an app that had PushMPC
+            [ "$installed" = 1 ] && { emit "$name" installed "in place"; return 0; }
+            [ -d "$bk" ] || { emit "$name" not-installed "not chosen"; return 0; }
+        fi
         pkill -x Plex 2>/dev/null; pkill -x 'Plex HTPC' 2>/dev/null
         if ! touch "$fw/.pushmpc-write-test" 2>/dev/null; then
             emit "$name" refused "macOS does not allow writing into $bundle: allow this terminal (or Setup) in System Settings > Privacy & Security > App Management, or run as the user who installed Plex"
@@ -163,6 +172,34 @@ do_app() {   # do_app <name> <bundle> <mpv.conf>
     esac
 }
 
+AGENT=$HOME/Library/LaunchAgents/com.pushmpc.plex-reapply.plist
+agent_write() {
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/PushMPC"
+    cat > "$AGENT" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pushmpc.plex-reapply</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/sh</string><string>$from/pushmpc-plex-mac.sh</string><string>install</string><string>--from</string><string>$from</string><string>--if-needed</string><string>--json</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>WatchPaths</key>
+  <array><string>/Applications/Plex.app/Contents/Info.plist</string><string>/Applications/Plex HTPC.app/Contents/Info.plist</string></array>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/PushMPC/plex-reapply.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/PushMPC/plex-reapply.log</string>
+</dict>
+</plist>
+PLIST
+    launchctl bootout "gui/$(id -u)/com.pushmpc.plex-reapply" 2>/dev/null
+    launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null || log "the reapply agent is written; it starts at the next login"
+}
+agent_remove() {
+    [ -f "$AGENT" ] || return 0
+    launchctl bootout "gui/$(id -u)/com.pushmpc.plex-reapply" 2>/dev/null
+    rm -f "$AGENT"
+}
+
 rc=0; found=0
 for t in 'desktop:/Applications/Plex.app:Plex' 'htpc:/Applications/Plex HTPC.app:Plex HTPC'; do
     n=${t%%:*}; rest=${t#*:}; b=${rest%:*}; cdir=${rest##*:}
@@ -172,5 +209,16 @@ for t in 'desktop:/Applications/Plex.app:Plex' 'htpc:/Applications/Plex HTPC.app
     found=1
     do_app "$n" "$b" "$HOME/Library/Application Support/$cdir/mpv.conf" || { r=$?; [ $r -gt $rc ] && rc=$r; }
 done
+if [ "$found" = 0 ] && [ "$action" = uninstall ] && [ "$app" = auto ] && [ "$dry" != 1 ]; then
+    rm -rf "$HOME/Library/Application Support/PushMPC/plex-native"   # the Plex apps are gone: their backups too
+    rmdir "$HOME/Library/Application Support/PushMPC" 2>/dev/null
+    for c in Plex "Plex HTPC"; do [ ! -f "$HOME/Library/Application Support/$c/mpv.conf" ] || conf_remove "$HOME/Library/Application Support/$c/mpv.conf"; done
+    agent_remove
+fi
 [ "$found" = 1 ] || { emit "$app" unsupported "no Plex for Mac / Plex HTPC app found"; exit 3; }
+if [ "$dry" != 1 ]; then
+    if [ "$action" = install ] && [ "$agent" = 1 ] && [ "$rc" != 1 ]; then agent_write; fi
+    # the agent goes with the last app that has PushMPC
+    if [ "$action" = uninstall ] && [ ! -d "$HOME/Library/Application Support/PushMPC/plex-native" ]; then agent_remove; fi
+fi
 exit $rc
