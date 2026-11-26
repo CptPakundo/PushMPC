@@ -1439,7 +1439,7 @@ function Add-XessSdk([string]$dest) {
     if ($DryRun) { Dry "would add Intel's XeSS SDK 3.0.2 DLLs to runtime_local\intel\experimental (xess-fetch.ps1, about 100 MB)"; return }
     Step 'Intel XeSS (super resolution and frame generation), from Intel''s repository, pinned'
     $cache = if ($PackageCache) { Join-Path $PackageCache 'xess-v3.0.2' } else { Join-Path $InstallDir 'download\xess-v3.0.2' }
-    & $fetch -Dest (Join-Path $dest 'runtime_local\intel\experimental') -Cache $cache
+    & $fetch -Dest (Join-Path $dest 'runtime_local\intel\experimental') -Cache $cache -Licenses (Join-Path $dest 'licenses\intel-xess')
     if ($LASTEXITCODE -ne 0) { Warn "Intel XeSS not installed (xess-fetch.ps1 exit $LASTEXITCODE): XeSS SR and XeSS frame generation stay off" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + Intel XeSS SDK 3.0.2" }
 }
@@ -1604,6 +1604,9 @@ function Invoke-Stage {
     Copy-Item $CoreDll $c
     $preflight = Join-Path (Split-Path $CoreDll) 'pushcore_hip_preflight.exe'   # the AMD HIP self-test child (RX 9000 NR)
     if (Test-Path $preflight) { Copy-Item $preflight $c }
+    # licence texts of what is built into pushcore.dll (libvpl, the XeSS SDK; release.yml collects them next to the build)
+    $coreLic = Join-Path (Split-Path $CoreDll) 'licenses'
+    if (Test-Path $coreLic) { Copy-Item $coreLic $c -Recurse -Force }
     Copy-Item (Join-Path $ShaderDir '*') (Join-Path $c 'shaders') -Recurse -Include *.dxil
     if (Test-Path (Join-Path $ShaderDir 'dis')) { Copy-Item (Join-Path $ShaderDir 'dis') (Join-Path $c 'shaders') -Recurse -Force }
     Get-ChildItem (Join-Path $c 'shaders') -Recurse -File | Where-Object { $_.Extension -ne '.dxil' } | Remove-Item -Force
