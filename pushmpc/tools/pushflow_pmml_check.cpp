@@ -12,6 +12,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,12 +31,13 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 4) { std::cout << "usage: pushflow_pmml_check <runtime dir> <shader dir> <out.rgba> [--warp 1] [--size WxH] [--tier N]\n"; return 2; }
     const std::wstring runtimeDir = argv[1], shaderDir = argv[2], outFile = argv[3];
     bool warp = false;
-    uint32_t w = 512, h = 288, tier = 0;
+    uint32_t w = 512, h = 288, tier = 0, frames = 1;
     for (int i = 4; i + 1 < argc; i += 2) {
         const std::wstring k = argv[i], v = argv[i + 1];
         if (k == L"--warp") warp = v == L"1";
         else if (k == L"--size") { w = uint32_t(_wtoi(v.c_str())); h = uint32_t(_wtoi(v.substr(v.find(L'x') + 1).c_str())); }
         else if (k == L"--tier") tier = uint32_t(_wtoi(v.c_str()));
+        else if (k == L"--frames") frames = std::max(1u, uint32_t(_wtoi(v.c_str())));
     }
     veyra::runtime::setShaderDirectoryOverride(shaderDir);
 
@@ -110,11 +112,20 @@ int wmain(int argc, wchar_t** argv) {
     const auto& st = flow.status();
     std::cout << "PROVIDER " << st.provider << "\nMODEL " << st.model << " " << st.precision << " network " << st.modelW << "x" << st.modelH << " padded " << st.padW << "x"
               << st.padH << " rebuild " << (st.rebuild ? 1 : 0) << " grids " << (st.grids ? 1 : 0) << "\n";
-    bool ok = begin() && flow.pack(list.Get(), a.Get(), b.Get(), 0.5f) && submitWait() && flow.infer() && begin();
-    if (ok) {
-        barrier(output.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        ok = flow.resolve(list.Get(), a.Get(), b.Get(), output.Get()) && submitWait();
+    // --frames N: the same pair N times, every frame must be made (a pmml EP that fails mid-stream must hand over to
+    // DirectML within the frame: PMML_TEST_FAIL_RUN_AFTER); the last one is written
+    bool ok = true;
+    uint32_t failed = 0;
+    for (uint32_t f = 0; f < frames && ok; ++f) {
+        const bool made = begin() && flow.pack(list.Get(), a.Get(), b.Get(), 0.5f) && submitWait() && flow.infer();
+        if (!made) { ++failed; std::cout << "FRAME " << f << " failed\n"; ok = false; break; }
+        ok = begin();
+        if (ok) {
+            if (f == 0) barrier(output.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);   // later frames: still COPY_DEST
+            ok = flow.resolve(list.Get(), a.Get(), b.Get(), output.Get()) && submitWait();
+        }
     }
+    std::cout << "FRAMES " << frames << " failed " << failed << "\nPROVIDER-AFTER " << flow.status().provider << "\n";
     // read the generated frame back (the resolve leaves the output as a copy destination it wrote into)
     std::vector<uint8_t> pixels;
     if (ok) {

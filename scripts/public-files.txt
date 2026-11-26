@@ -64,6 +64,7 @@ scripts/pushmpc-capture.ps1
 scripts/test-autoplan.ps1
 scripts/pmml-fetch.ps1
 scripts/pushmpc-plex.ps1
+scripts/build-ncnn-static.sh
 vlcplugin/**
 pmml/CMakeLists.txt
 pmml/build.cmd

@@ -147,12 +147,13 @@ bool ResolveFeed(Feed& f, std::wstring& err) {
 }
 
 // ------------------------------------------------------------------ the installed state
-struct Installed { Manifest filter, core, runtime; std::string vendor; };
+struct Installed { Manifest filter, core, runtime, plexnative; std::string vendor; };
 Installed ReadInstalled() {
     Installed i;
     i.filter = ReadManifest(Dir(L"filter"));
     i.core = ReadManifest(Dir(L"core"));
     i.runtime = ReadManifest(Dir(L"runtime"));
+    i.plexnative = ReadManifest(Dir(L"plexnative"));   // the Plex proxy: updated where Setup installed it, never added
     i.vendor = i.runtime.get("vendor");
     if (i.vendor.empty()) i.vendor = "NVIDIA";
     return i;
@@ -205,10 +206,12 @@ bool Check(Plan& plan) {
     if (!in.filter.valid || !in.core.valid) { SetStatus(L"Error", L"PushMPC is not installed completely: run PushMPC setup (Repair)."); return false; }
     RegSetStr(HKEY_CURRENT_USER, g.regKey, L"InstalledVersion", Widen(in.filter.get("version")));
     bool older = false;
-    for (const char* name : { "filter", "core" }) {
+    for (const char* name : { "filter", "core", "plexnative" }) {
         const ReleaseComponent* c = plan.rel.find(name);
         if (!c) continue;
-        const Manifest& m = std::string(name) == "filter" ? in.filter : in.core;
+        const std::string n(name);
+        if (n == "plexnative" && !in.plexnative.valid) continue;
+        const Manifest& m = n == "filter" ? in.filter : n == "core" ? in.core : in.plexnative;
         int cmp = CompareVersions(c->version, m.get("version"));
         if (cmp < 0) older = true;
         if (cmp > 0) plan.changes.push_back(*c);
@@ -547,6 +550,11 @@ int Apply() {
     }
     DeleteFileW(Dir(L"pending.json").c_str());
     for (auto& d : done) RemoveTree(d.prev + L".keep");
+    // new Plex proxy files: Setup's Plex logon check (highest rights, no prompt) puts them into Plex's folders now
+    if (std::any_of(done.begin(), done.end(), [](const Swapped& s) { return s.name == "plexnative"; })) {
+        int rc = RunHidden(L"schtasks.exe /Run /TN \"\\PushMPC\\Plex proxy check\"", [](const std::string&) {});
+        Log::Writef(L"Plex proxy check started -> %d", rc);
+    }
     // the updater updates itself from the new filter component (a running exe can be renamed, not overwritten)
     std::wstring newUpd = JoinPath(Dir(L"filter"), kUpdaterExe), rootUpd = JoinPath(InstallDir(), kUpdaterExe);
     if (filterChanged && FileExists(newUpd) && !FilesEqual(newUpd, rootUpd)) {

@@ -106,11 +106,24 @@ Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its 
   `runtime\experimental\pushflow` folder tells pushcore which provider to use (a measurement in `pmml-autobench.json`
   wins). Switches: `-Pmml No`, `--no-pmml`.
 - **AMD FSR SDK 2.4:** `scripts/fidelityfx-fetch.ps1` on Radeon RX 6000-9000 (`-FidelityFx Package` declines it).
-- **Plex:** `scripts/pushmpc-plex.ps1` replaces Plex's `libmpv-2.dll` with a VapourSynth-enabled libmpv (shinchiro's mpv
-  build, SHA-256 pinned) after a self-test, on tested Plex versions only (`$Tested`), with a backup, elevated once; a
-  logon task (`\PushMPC\Plex libmpv check`) re-applies it after Plex updates; uninstall restores the original.
-  mpv-integration then writes PushMPC's block and `tls-ca-file=<Plex>\resources\cacert.pem` into Plex's `mpv.conf`.
-  `-PlexSwap No` declines it.
+- **Repair and update keep the first install's choices:** every install records `choices` (pmml, fsr, plex) in its
+  state; a later run whose options are still `Auto` (Setup's Repair and Update, quiet or not) follows them, so it never
+  adds a download the first install did not have. `-Pmml Yes` / `-PlexSwap Yes` ask for one explicitly.
+- **Plex:** two routes, never both (state `plexNative` / `plexSwap`). First the proxy: the optional `plexnative`
+  component (mpv-native.yml's `plexnative` artifact: proxy `avfilter-8.dll`, `pushmpc-avfilter-8.*.dll`,
+  `pushmpc_engine.dll`, staged with `-PlexNative`) installed by `mpvnative/install/pushmpc-plex-native.ps1 install -Json
+  -AllowBoth` (elevated once), which renames Plex's `avfilter-8.dll`, writes its own `mpv.conf` block and self-tests
+  through Plex's own libmpv; mpv-integration then leaves that Plex alone. If the self-test fails, the proxy is
+  uninstalled and `scripts/pushmpc-plex.ps1` replaces Plex's `libmpv-2.dll` with a VapourSynth-enabled libmpv
+  (shinchiro's mpv build, SHA-256 pinned) after its own self-test, on tested Plex versions only (`$Tested`), with a
+  backup; a logon task (`\PushMPC\Plex libmpv check`) re-applies it after Plex updates; mpv-integration then writes
+  PushMPC's block and `tls-ca-file=<Plex>\resources\cacert.pem` into Plex's `mpv.conf`. Uninstall reverses whichever
+  ran. `-PlexSwap No` declines both; `PUSHMPC_TEST_PLEX_PROXY=fail` forces the fallback in tests.
+- **Plex on Linux (Flathub):** the tarball's `plex/` holds `pushmpc_preload.so` and `pushmpc-plex-selftest` (built in
+  the release's manylinux job from `mpvnative/hook/pushmpc_preload.c` and `libmpv_host.c`), `pushmpc-plex-linux.sh`, and
+  symlinks to the native hook's `libpushmpc-avfilter-8.*.so` and `libpushmpc_engine.so` (`PUSHMPC_PLEX_DIR` for
+  make-tarball.sh). setup.sh runs `pushmpc-plex-linux.sh install --from plex --json` when a Plex Flatpak is installed;
+  a target that is not `installed` is uninstalled again; state `plex`. Snap Plex is skipped.
 - **VLC, Kodi:** optional `vlc` and `kodi` components (`stage -VlcPlugin`, `-KodiPackage`), installed by
   `vlcplugin/install/pushmpc-vlc.ps1` and `kodiaddon/install/install.ps1` when the player is found.
 - **Linux mpv:** `setup.sh` tries the native hook first (`mpvnative/install/pushmpc-native.sh`); when it does not activate

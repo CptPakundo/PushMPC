@@ -124,7 +124,7 @@ def from_rgb(g: G, rgb, fmt, colour, outs):
     cr = g.op("Div", [g.op("Sub", [r, yl]), g.op("Mul", [two, g.op("Sub", [one, kr])])])
     code(g.op("Add", [g.op("Mul", [yl, ys]), yo]), outs[0])
     uv = g.op("Concat", [cb, cr], axis=1)
-    uv = g.op("AveragePool", [uv], kernel_shape=[2, 2], strides=[2, 2])
+    uv = g.op("AveragePool", [uv], kernel_shape=[2, 2], strides=[2, 2], pads=[0, 0, 0, 0])   # explicit pads: CoreML's ML Program needs them
     uv = g.op("Add", [g.op("Mul", [uv, cs]), co])
     code(g.op("Slice", [uv, g.const([0], np.int64), g.const([1], np.int64), g.const([1], np.int64)]), outs[1])
     code(g.op("Slice", [uv, g.const([1], np.int64), g.const([2], np.int64), g.const([1], np.int64)]), outs[2])
