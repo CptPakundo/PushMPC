@@ -376,7 +376,7 @@ static void TestCadence()
     CHECK(m.count(6) && m[6].kind == Shot::Real && m[6].src == 3, "end: all settled");
     // the GPU's K rule has no 1080p cap; the upscale decision
     auto r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true);
-    CHECK(r.k == 8, "GPU at 4K: x8 when it fits (%d)", r.k);
+    CHECK(r.k == 10, "GPU at 4K: the display multiple x10 when it fits (was capped at x8; %d)", r.k);
     auto u = DecideUpscale("auto", "screen", 3840, 2160, 1920, 1080);
     CHECK(u.kind == kAutoUpscaler && u.w == 3840 && u.h == 2160, "upscale to the screen: %s", u.why.c_str());
     u = DecideUpscale("nis", "screen", 0, 0, 1920, 1080); CHECK(u.kind == GpuUpscaler::None, "unknown screen: none");
