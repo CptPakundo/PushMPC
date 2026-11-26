@@ -64,6 +64,11 @@ $txt = Join-Path $pf 'pmml.txt'
 Test-That ($p['pmmlBackend'] -eq 'ort:core:trt-rtx:0') "RTX 4090 + TensorRT-RTX EP: backend $($p['pmmlBackend'])"
 Test-That ((Test-Path $txt) -and (Get-Content $txt -Raw) -match "(?m)^backend=ort:core:trt-rtx:0" -and (Get-Content $txt -Raw) -match [regex]::Escape("runtime=$rt")) "pmml.txt written: $((Get-Content $txt -ErrorAction SilentlyContinue) -join ' | ')"
 Test-That (Test-Path (Join-Path $id 'auto-plan.json')) 'auto-plan.json written'
+# GTX 16 (Turing): TensorRT-RTX is installed as a candidate, but without a measurement PushFlow stays on DirectML
+$p = Get-Plan '10DE:2184:NVIDIA GeForce GTX 1660' $id @('-PmmlRuntime', $rt)
+Test-That ($p['pmmlEps'] -eq 'trt-rtx' -and -not $p['pmmlBackend']) "GTX 1660: candidate $($p['pmmlEps']), backend '$($p['pmmlBackend'])' ($($p['pmmlWhy']))"
+$p = Get-Plan '10DE:1B80:NVIDIA GeForce GTX 1080' $id @('-PmmlRuntime', $rt)
+Test-That (-not $p['pmmlEps']) "GTX 1080: no runtime candidate ('$($p['pmmlEps'])')"
 # an AMD card keeps DirectML (pmml's order without a measurement): pmml.txt goes again
 $p = Get-Plan '1002:744C:AMD Radeon RX 7900 XTX' $id @('-PmmlRuntime', $rt, '-Apply')
 Test-That (-not $p['pmmlBackend'] -and -not (Test-Path $txt)) "RX 7900 XTX without a measurement: DirectML, pmml.txt removed ($($p['pmmlWhy']))"

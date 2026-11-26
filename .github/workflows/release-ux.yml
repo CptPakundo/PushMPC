@@ -176,7 +176,9 @@ jobs:
           $log = "$env:RUNNER_TEMP\ux.txt"
           # Setup's Windows PowerShell 5.1 must not inherit pwsh's module path (as from Explorer); this step keeps its own
           $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
-          $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"
+          # PushMPC's own mpv too (--mpv-build); its zip is the release artifact's (the download URL exists only for a published release)
+          $env:PUSHMPC_MPVBUILD_ZIP = (Get-ChildItem "$env:RUNNER_TEMP\release" -Filter 'PushMPC-mpv-windows-*.zip' | Select-Object -First 1).FullName
+          $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S', '--mpv-build' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\setup-out.txt"
           $env:PSModulePath = $keep
           if (-not $p.WaitForExit(1400000)) { $p.Kill(); throw 'Setup timed out' }
           "Setup exit $($p.ExitCode)" | Tee-Object -Append $log
@@ -218,6 +220,9 @@ jobs:
           if (-not (Test-Path "$env:LOCALAPPDATA\PushMPC\vlc\libpushmpc_plugin.dll") -or "$vlcrc" -notmatch 'pushmpc') { $bad += 'the VLC module is not set up (plugin and vlcrc)' }
           if (-not $lnk) { $bad += 'no Start menu entry for capture mode' }
           if (-not $mpc) { $bad += 'no MPC-HC filter entry' }
+          $mpvb = Test-Path "$env:LOCALAPPDATA\PushMPC\mpv-native\mpv.exe"; $mpvl = Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC mpv.lnk"
+          "PushMPC's mpv: mpv.exe $mpvb, Start menu entry $mpvl (zip $env:PUSHMPC_MPVBUILD_ZIP)" | Tee-Object -Append $log
+          if ($env:PUSHMPC_MPVBUILD_ZIP -and -not ($mpvb -and $mpvl)) { $bad += "PushMPC's mpv was not installed" }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
           exit 0
       - name: Auto plan on the runner's own adapter (the installed script)
@@ -281,7 +286,7 @@ jobs:
       - name: Players and build tools from pacman (mpv requires vapoursynth on Arch)
         timeout-minutes: 15
         run: |
-          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils >/dev/null
+          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils unzip vulkan-icd-loader vulkan-swrast vulkan-tools >/dev/null
           pacman -Q mpv vapoursynth vlc kodi celluloid smplayer | tee /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
       - name: The plugin from this commit and the release tarball
@@ -294,7 +299,9 @@ jobs:
           # Arch's Python is newer than the pinned onnx wheels: the current ones (the graphs are plain opset-16 ONNX)
           python -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx numpy
           /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs >/dev/null
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include >/dev/null
+          # ncnn (Vulkan) from its pinned full source, static and PIC, as release.yml builds it: the ml backend's ncnn path
+          sh scripts/build-ncnn-static.sh /tmp/ncnn /tmp/ncnn-dl
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn >/dev/null
           cmake --build build --target pushmpc_vs --parallel >/dev/null
           git config --global --add safe.directory "$PWD"
           [ -f /tmp/mpvnative-art/hook/pushmpc_hook.so ] && export PUSHMPC_MPVNATIVE_DIR=/tmp/mpvnative-art/hook && echo "native hook: $(ls /tmp/mpvnative-art/hook | tr '\n' ' ')"
@@ -303,7 +310,8 @@ jobs:
           tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
       - name: setup.sh into a fresh HOME (detection, engine choice, players, the pmml runtime), mpv through the installed block, uninstall
         env:
-          PUSHMPC_TEST_GPU: '8086:56a0:Intel(R) Arc(TM) A770 Graphics'
+          # a Radeon without ROCm: PushFlow on ncnn (Vulkan); the runner's Vulkan device is lavapipe (Mesa, CPU)
+          PUSHMPC_TEST_GPU: '1002:744c:AMD Radeon RX 7900 XTX'
         run: |
           set -eu
           export HOME=/tmp/home-ux; mkdir -p $HOME/.config/mpv $HOME/.kodi/userdata; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
@@ -311,13 +319,13 @@ jobs:
           snap > /tmp/before.txt
           tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-0.6.0/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
-          for want in 'Graphics card: Intel' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: not available on Linux'; do
+          for want in 'Graphics card: AMD' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: not available on Linux'; do
             grep -q "$want" /tmp/setup.txt || { echo "::error::setup.sh output lacks '$want'"; exit 1; }
           done
           cat $HOME/.local/share/pushmpc/auto-plan.txt
           grep -q '^mpv=ml' $HOME/.local/share/pushmpc/auto-plan.txt
-          p=$HOME/.local/share/pushmpc/pmml; ls $p $p/ort/core $p/eps/openvino | head -40; cat $p/eps/openvino/ep.json
-          for f in ort/core/libonnxruntime.so graphs/synth-yuv.onnx models/pushflow-fast.onnx models/pushflow-quality.onnx eps/openvino/ep.json; do [ -f "$p/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
+          p=$HOME/.local/share/pushmpc/pmml; ls -R $p | head -40
+          for f in graphs/synth-yuv.onnx ncnn-models/rife-v4.25-lite_ensembleFalse/flownet.param ncnn-models/rife-v4.26_ensembleFalse/flownet.bin; do [ -f "$p/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
           # one route in mpv.conf, never both: the native hook's block when it activated, else the VapourSynth block
           native=0; grep -q -x 'native' $HOME/.local/share/pushmpc/setup-state 2>/dev/null && native=1
           vsb=0; grep -q 'PushMPC managed' $HOME/.config/mpv/mpv.conf && vsb=1
@@ -326,12 +334,18 @@ jobs:
           [ "$((vsb + nb))" = 1 ] || { echo '::error::mpv.conf must hold exactly one PushMPC route'; exit 1; }
           [ "$native" = "$nb" ] || { echo '::error::setup.sh and mpv.conf disagree on the route'; exit 1; }
           grep -q 'PushMPC mpv' $HOME/.kodi/userdata/playercorefactory.xml || { echo '::error::Kodi has no PushMPC external player'; exit 1; }
-          # the ml backend through the installed runtime (no GPU here: what pmml does with OpenVINO on the CPU is recorded)
-          mkdir -p $HOME/.config/pushmpc; printf '[PushMPC]\nSmoother=2\nBackend=ml\n' > $HOME/.config/pushmpc/settings.ini
+          # the ml backend through the installed runtime: ncnn on lavapipe (Vulkan on the CPU)
+          vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|driverName' | head -4 || true
+          mkdir -p $HOME/.config/pushmpc
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ml
-          timeout 120 mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=2 > /tmp/mpv-ml.txt 2>&1 || true
+          ffmpeg -v error -i /tmp/clip.mp4 -frames:v 9 -vf scale=640:360 -pix_fmt yuv420p -y /tmp/ml.y4m
+          PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PMML_RUNTIME=$p PMML_TEST_CLIP=/tmp/ml.y4m PMML_TEST_W=640 PMML_TEST_H=360 PMML_TEST_BACKEND=ncnn:ncnn:vulkan:0 PUSHMPC_TEST_K=2 \
+            timeout 300 vspipe vsplugin/tests/ci/ml_clip.vpy /dev/null > /tmp/vspipe-ml.txt 2>&1 || true
+          tail -5 /tmp/vspipe-ml.txt
           echo "--- ml backend:"; grep -h 'backend: \|ml: \|pmml' /tmp/vslog-ml/*.log 2>/dev/null | head -12 || true
-          echo "::notice title=ml backend on the runner::$(grep -h 'backend: \|ml: ' /tmp/vslog-ml/*.log 2>/dev/null | head -3 | tr '\n' ' ')"
+          echo "::notice title=ml backend on the runner::$(grep -h 'backend: \|ml: ' /tmp/vslog-ml/*.log 2>/dev/null | head -4 | tr '\n' ' ')"
+          grep -qi 'ml: .*ncnn' /tmp/vslog-ml/*.log || { echo '::error::the ml backend did not run on ncnn'; exit 1; }
+          grep -q 'ml: output YUV' /tmp/vslog-ml/*.log || { echo '::error::the ml backend produced no output'; exit 1; }
           printf '[PushMPC]\nSmoother=2\nBackend=portable\n' > $HOME/.config/pushmpc/settings.ini
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ux
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 > /tmp/mpv.txt 2>&1 || true

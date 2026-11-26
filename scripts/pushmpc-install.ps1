@@ -119,6 +119,13 @@ param(
     # staged as kodi\ with kodiaddon\install\install.ps1; install: -NoKodi skips it
     [string]$KodiPackage = '',
     [switch]$NoKodi,
+    # PushMPC's own mpv build for Windows (mpv-native.yml): stage: the release asset's zip and its download URL (the
+    # filter component gets mpvbuild.json with both and the SHA-256); install: -MpvBuild Yes installs it (Setup's
+    # checkbox, off by default)
+    [string]$MpvBuildZip = '',
+    [string]$MpvBuildUrl = '',
+    [ValidateSet('No', 'Yes')]
+    [string]$MpvBuild = 'No',
     # capture mode, the fallback for players without a native route: Auto = on only when such a player is found
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$Capture = 'Auto',
@@ -1569,6 +1576,15 @@ function Invoke-Stage {
     Stage-VsPlugin $filterVersion
     Stage-Vlc $filterVersion
     Stage-Kodi $filterVersion
+    if ($MpvBuildZip -and (Test-Path -LiteralPath $MpvBuildZip) -and $MpvBuildUrl) {
+        # the zip itself is a release asset (package copies it); the filter component carries where to get it and its hash
+        [ordered]@{ asset = (Split-Path $MpvBuildZip -Leaf); url = $MpvBuildUrl; sha256 = (Get-Sha256 $MpvBuildZip); size = (Get-Item -LiteralPath $MpvBuildZip).Length } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $f 'mpvbuild.json') -Encoding ASCII
+        $ni = Join-Path $repo 'mpvnative\install\pushmpc-native.ps1'; if (Test-Path -LiteralPath $ni) { Copy-Item -LiteralPath $ni $f }
+        Copy-Item -LiteralPath $MpvBuildZip (Join-Path $StageDir (Split-Path $MpvBuildZip -Leaf))
+        Write-Manifest $f @{ component = 'filter'; version = $filterVersion; repo = $PushMpcRepo; clsid = $FilterClsid }
+        Info "PushMPC's mpv build: $(Split-Path $MpvBuildZip -Leaf) (an optional download; mpvbuild.json in the filter component)"
+    }
     Step 'Staged'
     foreach ($n in $Components) {
         if ($n -eq 'runtime' -and -not $WithRuntime) { Info ("{0,-8} not staged: a release never contains it (Veyra's package at install time)" -f $n); continue }
@@ -1650,6 +1666,8 @@ function Invoke-Package {
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     New-Item -ItemType Directory -Force $out | Out-Null
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
+    # PushMPC's own mpv build (an optional release asset, not in Setup's payload)
+    foreach ($z in @(Get-ChildItem -LiteralPath $StageDir -Filter 'PushMPC-mpv-windows-*.zip' -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $z.FullName $ReleaseDir -Force }
     foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
@@ -2407,14 +2425,17 @@ function Find-PmmlRuntime {
 # TensorRT-RTX on an NVIDIA RTX card, OpenVINO on Intel. Every other GPU keeps PushFlow on DirectML, pushcore's own
 # zero-copy session: Radeon (the AMD GPU EP is not published as a plugin EP; MIGraphX is Linux / ROCm only),
 # GeForce GTX (TensorRT-RTX needs RTX), Snapdragon (QNN's NPU path for PushFlow is not built yet).
-function Get-PmmlEps([string]$fam) {
-    switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } default { return @() } }
+# GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5, the oldest TensorRT-RTX runs on): a candidate only; pmml's measurement
+# must prefer it, without one PushFlow stays on DirectML there (Get-PmmlChoice)
+function Get-PmmlEps([string]$fam, $g = $null) {
+    switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } default { return @() } }
 }
 function Get-PmmlFetchFiles { foreach ($d in @((Join-Path $InstallDir 'filter'), (Join-Path $StageDir 'filter'), $here)) { $s = Join-Path $d 'pmml-fetch.ps1'; $p = Join-Path $d 'ml-runtime-pin.json'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath $p)) { return @($s, $p) } }; return @() }
 function Install-PmmlRuntime($state) {
     $dir = Join-Path $InstallDir 'pmml'
-    $fam = Get-GpuFamily (Get-GpuInfo)
-    $eps = @(Get-PmmlEps $fam)
+    $gi = Get-GpuInfo
+    $fam = Get-GpuFamily $gi
+    $eps = @(Get-PmmlEps $fam $gi)
     $ours = [bool](Get-StateValue $state 'pmmlInstalled')
     if ($Pmml -eq 'No' -or -not $eps.Count) {
         Info $(if ($Pmml -eq 'No') { 'PushFlow runtime: not installed (-Pmml No); PushFlow runs on DirectML' } else { "PushFlow runtime: none needed for $fam (PushFlow runs on DirectML, pushcore's own session)" })
@@ -2510,7 +2531,7 @@ function Get-AutoPlan {
         directshow = $dshow; mpv = $mpv
         vlc = $(if ($hwGpu) { 'the VLC module on pushcore (frame generation; VLC''s own RTX / Intel super resolution)' } else { 'the VLC module on the portable engine' })
         pushflow = $(if ($pushflow) { 'installed' } else { 'not installed' })
-        pmmlRuntime = $rt; pmmlBackend = $pm.backend; pmmlWhy = $pm.why
+        pmmlRuntime = $rt; pmmlBackend = $pm.backend; pmmlWhy = $pm.why; pmmlEps = (@(Get-PmmlEps $fam $g) -join ',')
         fsrSdk240 = $(if ($fsrOffer) { if ($FidelityFx -eq 'Package') { 'offered, declined (the package''s FSR SDK 2.3 set)' } else { 'on: AMD FSR SDK 2.4.0 (FSR 4.1 INT8 upscaling)' } } else { 'not for this GPU' })
     }
 }
@@ -2651,6 +2672,70 @@ function Uninstall-KodiRoute($state) {
     if (Test-Path -LiteralPath (Join-Path $dst 'install.ps1')) { [void](Invoke-KodiInstaller $dst 'uninstall') }
     Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
     if ($state.PSObject.Properties['kodiAddon']) { $state.PSObject.Properties.Remove('kodiAddon') }
+}
+
+# ------------------------------------------------------------------------------------------------ PushMPC's own mpv (optional)
+# The mpv build from the release (mpvbuild.json in the filter component: URL and SHA-256), installed by
+# mpvnative\install\pushmpc-native.ps1 into <InstallDir>\mpv-native, with a Start menu entry "PushMPC mpv". The user's own
+# mpv keeps the VapourSynth route.
+$MpvLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'PushMPC\PushMPC mpv.lnk'
+function Install-MpvBuild($state) {
+    if ($MpvBuild -ne 'Yes') { return }
+    $fd = @((Join-Path $StageDir 'filter'), (Join-Path $InstallDir 'filter')) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'mpvbuild.json') } | Select-Object -First 1
+    if (-not $fd -or -not (Test-Path -LiteralPath (Join-Path $fd 'pushmpc-native.ps1'))) { Warn "PushMPC's mpv: this build has none"; return }
+    $mb = Get-Content -LiteralPath (Join-Path $fd 'mpvbuild.json') -Raw | ConvertFrom-Json
+    $zip = Join-Path $InstallDir "download\$($mb.asset)"
+    if ($DryRun) { Dry "would download $($mb.url) (SHA-256 $($mb.sha256)) and install it into $InstallDir\mpv-native"; return }
+    New-Item -ItemType Directory -Force (Split-Path $zip) | Out-Null
+    # the release asset already on disk: next to the stage, or PUSHMPC_MPVBUILD_ZIP (tests); its SHA-256 is checked either way
+    $local = if ($env:PUSHMPC_MPVBUILD_ZIP -and (Test-Path -LiteralPath $env:PUSHMPC_MPVBUILD_ZIP)) { $env:PUSHMPC_MPVBUILD_ZIP } else { Join-Path $StageDir $mb.asset }
+    if (Test-Path -LiteralPath $local) { Copy-Item -LiteralPath $local $zip -Force }
+    if (-not ((Test-Path -LiteralPath $zip) -and (Get-Sha256 $zip) -ieq $mb.sha256)) {
+        Info "Downloading PushMPC's mpv ($([math]::Round($mb.size / 1MB)) MB)"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & (Join-Path $env:SystemRoot 'System32\curl.exe') -L --fail --retry 3 -C - -s -S -o $zip $mb.url 2>&1 | Out-Null
+        $ErrorActionPreference = $eap
+    }
+    if (-not (Test-Path -LiteralPath $zip) -or (Get-Sha256 $zip) -ine $mb.sha256) { Warn "PushMPC's mpv: the download failed or does not match its SHA-256: not installed"; Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; return }
+    $x = Join-Path $InstallDir 'staging\mpvbuild'
+    if (Test-Path -LiteralPath $x) { Remove-Item -LiteralPath $x -Recurse -Force }
+    Expand-Archive -LiteralPath $zip -DestinationPath $x -Force
+    $from = (Get-ChildItem -LiteralPath $x -Recurse -Filter 'mpv.exe' | Select-Object -First 1).DirectoryName
+    if (-not $from) { Warn "PushMPC's mpv: the archive has no mpv.exe"; return }
+    $ni = Join-Path $InstallDir 'mpv-native-installer.ps1'
+    Copy-Item -LiteralPath (Join-Path $fd 'pushmpc-native.ps1') $ni -Force
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $out = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $ni install -From $from -Dest (Join-Path $InstallDir 'mpv-native') -Json 2>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE
+    $ErrorActionPreference = $eap
+    Remove-Item -LiteralPath $x, $zip -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($l in $out) { if ($l.Trim()) { Info "mpv: $l" } }
+    if ($rc -ne 0) { Warn "PushMPC's mpv: its installer returned $rc"; return }
+    $exe = Join-Path $InstallDir 'mpv-native\mpv.exe'
+    if (Test-Path -LiteralPath $exe) {
+        New-Item -ItemType Directory -Force (Split-Path $MpvLink) | Out-Null
+        $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($MpvLink); $sh.TargetPath = $exe; $sh.WorkingDirectory = Split-Path $exe
+        $sh.Description = "PushMPC's own mpv player"; $sh.Save()
+    }
+    Set-StateValue $state 'mpvBuild' (Get-Date).ToString('s')
+    Info "PushMPC's mpv is installed (Start menu: PushMPC mpv)"
+}
+function Uninstall-MpvBuild($state) {
+    if (-not (Get-StateValue $state 'mpvBuild') -and -not (Test-Path -LiteralPath (Join-Path $InstallDir 'mpv-native'))) { return }
+    if ($DryRun) { Dry "would remove PushMPC's mpv"; return }
+    $ni = Join-Path $InstallDir 'mpv-native-installer.ps1'
+    if (Test-Path -LiteralPath $ni) {
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $out = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $ni uninstall -Dest (Join-Path $InstallDir 'mpv-native') 2>&1 | ForEach-Object { "$_" })
+        $ErrorActionPreference = $eap
+        foreach ($l in $out) { if ($l.Trim()) { Info "mpv: $l" } }
+        Remove-Item -LiteralPath $ni -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'mpv-native') -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $MpvLink) { Remove-Item -LiteralPath $MpvLink -Force }
+    $smd = Split-Path $MpvLink; if ((Test-Path -LiteralPath $smd) -and -not @(Get-ChildItem -LiteralPath $smd -Force).Count) { Remove-Item -LiteralPath $smd -Force }
+    if ($state.PSObject.Properties['mpvBuild']) { $state.PSObject.Properties.Remove('mpvBuild') }
 }
 
 # ------------------------------------------------------------------------------------------------ capture mode (fallback)
@@ -2801,6 +2886,7 @@ switch ($Action) {
         Install-MpvRoute $state
         Step 'VLC'
         $vlcOk = $false; try { $vlcOk = Install-VlcRoute $state } catch { Warn "VLC: not set up ($($_.Exception.Message)); capture mode covers VLC" }
+        if ($MpvBuild -eq 'Yes') { Step "PushMPC's own mpv"; try { Install-MpvBuild $state } catch { Warn "PushMPC's mpv: not installed ($($_.Exception.Message))" } }
         Step 'PushFlow runtime for this GPU (pmml)'
         try { Install-PmmlRuntime $state } catch { Warn "PushFlow runtime: not installed ($($_.Exception.Message)); PushFlow runs on DirectML" }
         # Auto's engine for this PC (logged; auto-plan.json; PushFlow's pmml.txt from it)
@@ -2955,6 +3041,7 @@ switch ($Action) {
         else { Remove-MpcHcEntry $state; Restore-MpcVrHdr }
         if ($NoMpcBe) { Info 'MPC-BE settings left as they are (-NoMpcBe)' } else { Remove-MpcBeEntry $state }
         if ($NoPotPlayer) { Info 'PotPlayer settings left as they are (-NoPotPlayer)' } else { Remove-PotPlayerEntry $state }
+        try { Uninstall-MpvBuild $state } catch { Warn "PushMPC's mpv: not removed ($($_.Exception.Message))" }
         try { Uninstall-KodiRoute $state } catch { Warn "Kodi add-on: not removed ($($_.Exception.Message))" }
         try { Uninstall-PlexRoute $state } catch { Warn "Plex: its own libmpv was not put back ($($_.Exception.Message)); the backup is in $InstallDir\plex\backup" }
         Uninstall-MpvRoute $state

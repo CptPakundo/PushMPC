@@ -1,4 +1,4 @@
-# The Apple side of PushMPC on hosted runners (manual runs only: macOS minutes cost 10x while the repo is private).
+# The Apple side of PushMPC on hosted runners (manual runs; standard macOS runners are free for this public repository).
 #   iina      (ubuntu)   the IINA plugin: Info.json and preference checks, the pinned shaders fetched and hash-checked,
 #                        linted for IINA's OpenGL 4.1 (no compute passes), JavaScript checked with node, packed as
 #                        .iinaplgz (artifact).
@@ -348,7 +348,7 @@ jobs:
           set -euo pipefail
           brew --version
           # everything the formula needs, as bottles, before the formula itself (so its build step only builds PushMPC)
-          brew install mpv ffmpeg vapoursynth cmake pkgconf
+          brew install mpv ffmpeg vapoursynth cmake pkgconf onnxruntime
           brew deps mpv | grep -x vapoursynth
           brew info --json=v2 vapoursynth | python3 -c "import json,sys; f=json.load(sys.stdin)['formulae'][0]; print('vapoursynth', f['versions']['stable'], 'deps', f['dependencies'])"
           mpv --version | head -2
@@ -363,16 +363,23 @@ jobs:
           tgz="$RUNNER_TEMP/pushmpc-ci.tar.gz"
           git archive --format=tar.gz --prefix=PushMPC-ci/ HEAD > "$tgz"
           sha=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
+          # pmml's graphs, generated here as release.yml does (the formula's pmml-graphs resource is a release asset)
+          python3 -m venv "$RUNNER_TEMP/g" && "$RUNNER_TEMP/g/bin/python" -m pip install --disable-pip-version-check -q onnx numpy
+          "$RUNNER_TEMP/g/bin/python" -I pmml/scripts/make_graphs.py --out "$RUNNER_TEMP/pmml-graphs" >/dev/null
+          gtgz="$RUNNER_TEMP/pmml-graphs-ci.tar.gz"; tar -czf "$gtgz" -C "$RUNNER_TEMP/pmml-graphs" .
+          gsha=$(shasum -a 256 "$gtgz" | cut -d' ' -f1)
           brew tap-new --no-git pushmpc/local
           tap=$(brew --repository pushmpc/local)
-          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" <<'PY'
+          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" "$gtgz" "$gsha" <<'PY'
           import re, sys
-          tgz, sha, out = sys.argv[1:4]
+          tgz, sha, out, gtgz, gsha = sys.argv[1:6]
           f = open("packaging/homebrew/pushmpc.rb").read()
           f = re.sub(r'^  url ".*"$', f'  url "file://{tgz}"\n  version "0.6.0-ci"', f, count=1, flags=re.M)
           f = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', f, count=1, flags=re.M)
+          f = re.sub(r'(resource "pmml-graphs" do\n    url )".*"(\n    sha256 )".*"', lambda m: f'{m.group(1)}"file://{gtgz}"{m.group(2)}"{gsha}"', f, count=1)
           open(out, "w").write(f)
           PY
+          grep -n -A2 'resource "pmml-graphs"' "$tap/Formula/pushmpc.rb"
           grep -n -E '^  (url|version|sha256) ' "$tap/Formula/pushmpc.rb"
           brew install --build-from-source --verbose pushmpc/local/pushmpc
           brew test --verbose pushmpc/local/pushmpc
@@ -437,8 +444,18 @@ jobs:
           echo "$log" | grep -E "backend|apple|portable:" | cut -c1-400 | head -20
           [ "$outn" -ge $((2 * srcn - 4)) ] && [ "$outn" -le $((2 * srcn + 2)) ] || { echo "::error::mpv output has $outn frames for $srcn source frames (want about x2)"; exit 1; }
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
+          # PushFlow through pmml (the ml backend) with Homebrew's ONNX Runtime (CoreML; the VM has no GPU for it, so the
+          # CPU may run it): pushmpc-setup put the runtime in ~/.local/share/pushmpc/pmml
+          pm="$HOME/.local/share/pushmpc/pmml"; ls -la "$pm" "$pm/ort/core" "$pm/models" | head -20
+          for f in ort/core/libonnxruntime.dylib graphs/synth-yuv.onnx models/pushflow-fast.onnx; do [ -e "$pm/$f" ] || { echo "::error::the pmml runtime lacks $f"; exit 1; }; done
+          export PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/brewlogs-ml"; mkdir -p "$PUSHMPC_VS_LOG_DIR"
+          PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=ml timeout 300 "$(brew --prefix vapoursynth)/bin/vspipe" vsplugin/tests/ci/apple_clip.vpy /dev/null --progress || true
+          grep -h -E "backend|ml: |pmml" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-300 | head -20
+          grep -q -E "backend: ml|ml: " "$PUSHMPC_VS_LOG_DIR"/*.log || { echo "::error::the ml backend did not run"; exit 1; }
+          echo "::notice title=ml backend on macOS::$(grep -h -E 'backend: |ml: ' "$PUSHMPC_VS_LOG_DIR"/*.log | head -3 | tr '\n' ' ')"
           pushmpc-setup uninstall
           [ ! -e "$HOME/.config/mpv/mpv.conf" ] || { echo "::error::mpv.conf left behind"; exit 1; }
+          [ ! -e "$pm" ] || { echo "::error::the pmml runtime was left behind"; exit 1; }
           [ ! -e "$HOME/Library/LaunchAgents/com.pushmpc.vsscript.plist" ] || { echo "::error::a LaunchAgent is present"; exit 1; }
           if launchctl getenv VSSCRIPT_PATH | grep -q .; then echo "::error::a global VSSCRIPT_PATH is set"; exit 1; fi
 
@@ -448,4 +465,5 @@ jobs:
           name: homebrew-logs
           path: |
             ${{ runner.temp }}/brewlogs
+            ${{ runner.temp }}/brewlogs-ml
             ${{ runner.temp }}/home/Library/Logs/PushMPC

@@ -228,11 +228,14 @@ do_native() {
 # PushFlow's models: from PushFPS's release zip (the same files and pins as the Windows Setup takes)
 PF_ZIP_URL=https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.3-win64.zip
 PF_ZIP_SHA=8466ab7187d9ad7f8db7ac54582e3482ffa4e75d3ff97b28e434816b8fa7ff31
-pmml_eps() {   # the ONNX Runtime flavors and EPs for this GPU: "<flavors> <eps>", or nothing
+pmml_eps() {   # the runtime for this GPU: "<ONNX Runtime flavors> <EPs>", "ncnn" (ncnn on Vulkan), or nothing
     case $fam in
-        'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') [ "$nvprop" = 1 ] && echo "core trt-rtx" ;;
+        'RTX 50'|'RTX 40'|'RTX 30'|'RTX 20') if [ "$nvprop" = 1 ]; then echo "core trt-rtx"; else echo ncnn; fi ;;
         Intel) echo "core openvino" ;;
-        'RX 9000'|'RX 7000'|'RX 6000'|'RX 5000'|Radeon) [ -d /opt/rocm ] && echo "migraphx -" ;;
+        'RX 9000'|'RX 7000'|'RX 6000'|'RX 5000'|Radeon) if [ -d /opt/rocm ]; then echo "migraphx -"; else echo ncnn; fi ;;
+        # any other GPU with Vulkan (GeForce GTX, nouveau / NVK, others): ncnn
+        none) ;;
+        *) echo ncnn ;;
     esac
 }
 do_pmml() {
@@ -245,19 +248,26 @@ do_pmml() {
     for need in pmml/fetch_runtime.py pmml/ml-runtime-pin.json pmml/graphs/synth-yuv.onnx; do
         [ -f "$here/$need" ] || { say "PushFlow runtime: this download has no $need: not installed"; return 0; }
     done
-    flv=${sel%% *}; ep=${sel#* }; [ "$ep" = - ] && ep=''
     arch=x64; case $(uname -m) in aarch64|arm64) arch=arm64 ;; esac
-    say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
-    if [ "$dry" = 1 ]; then say "  would: python3 fetch_runtime.py --platform linux-$arch --flavors $flv${ep:+ --eps $ep} --out $pm/pmml"; return 0; fi
+    if [ "$sel" = ncnn ]; then
+        # PushFlow's RIFE models as ncnn models, on the GPU through Vulkan (no ONNX Runtime needed)
+        flv=''; ep=''; extra=--ncnn-models
+        say "PushFlow runtime for $fam: the RIFE models for ncnn on Vulkan (a small download, checked by SHA-256)"
+    else
+        flv=${sel%% *}; ep=${sel#* }; [ "$ep" = - ] && ep=''; extra=''
+        say "PushFlow runtime for $fam: ONNX Runtime ($flv)${ep:+ + $ep} and PushFlow's models (downloads of about 300 MB, checked by SHA-256)"
+    fi
+    if [ "$dry" = 1 ]; then say "  would: python3 fetch_runtime.py --platform linux-$arch --flavors '$flv'${ep:+ --eps $ep} $extra --out $pm/pmml"; return 0; fi
     mkdir -p "$pm"; dl=$pm/pmml-download; rm -rf "$pm/pmml.part"
     out=$("$py" -I "$here/pmml/fetch_runtime.py" --pin "$here/pmml/ml-runtime-pin.json" --platform "linux-$arch" --out "$pm/pmml.part" --cache "$dl" \
-            --flavors "$flv" ${ep:+--eps "$ep"} 2>&1); rc=$?
+            --flavors "$flv" ${ep:+--eps "$ep"} $extra 2>&1); rc=$?
     printf '%s\n' "$out" | grep -E '^(ok|skip|fetch|cached|::error)' | sed 's/^/  /'
     if [ "$rc" != 0 ]; then
         say "  the fetch failed: PushFlow runtime not installed (the GPU engine interpolates)"; rm -rf "$pm/pmml.part" "$dl"; return 0
     fi
-    # PushFlow's models (pushflow-fast / -quality with the grid and mask outputs) out of PushFPS's release zip
-    if ! "$py" -I - "$PF_ZIP_URL" "$PF_ZIP_SHA" "$dl" "$pm/pmml.part/models" "$here/pmml/ml-runtime-pin.json" <<'PY'
+    # PushFlow's models (pushflow-fast / -quality with the grid and mask outputs) out of PushFPS's release zip; the
+    # ncnn route has its own models
+    if [ "$sel" != ncnn ] && ! "$py" -I - "$PF_ZIP_URL" "$PF_ZIP_SHA" "$dl" "$pm/pmml.part/models" "$here/pmml/ml-runtime-pin.json" <<'PY'
 import hashlib, json, sys, urllib.request, zipfile, pathlib
 url, want, cache, dest, pin = sys.argv[1:6]
 cache = pathlib.Path(cache); cache.mkdir(parents=True, exist_ok=True); dest = pathlib.Path(dest); dest.mkdir(parents=True, exist_ok=True)
@@ -281,7 +291,7 @@ with zipfile.ZipFile(z) as a:
     for n in a.namelist():
         base = n.rsplit("/", 1)[-1]
         if "/runtime/experimental/pushflow/" not in n.replace("\\", "/"): continue
-        if base in need or base in ("models.json", "RIFE_LICENSE.txt"):
+        if base in need or base in ("models.json", "RIFE_LICENSE.txt") or base in [f + ".txt" for f in need]:
             out = dest / base
             out.write_bytes(a.read(n))
 for f, s in need.items():

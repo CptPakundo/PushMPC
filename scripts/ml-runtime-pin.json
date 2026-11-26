@@ -169,8 +169,14 @@
         "sha256": "ef9fe4463e5db0f41484ad25e91686e709b91e400858639aed631c280dfa91d4"
       },
       "osx": {
-        "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-macos.zip",
-        "sha256": "e33de27e608da9f71c7c47b61cc2c443f08371f1df47a8222ea493ccd93e3f2d"
+        "what": "the Vulkan build (macos.zip is CPU-only); Vulkan through MoltenVK (Homebrew molten-vk)",
+        "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-macos-vulkan.zip",
+        "sha256": "fab47e1b97f5301ddb32ec7f7e0ba59ea5241adbed91a659a808598c0341534e"
+      },
+      "source": {
+        "what": "the full source with submodules (glslang), for builds no prebuilt package fits: manylinux_2_28 (glibc 2.28), static and PIC, simplevk (dlopens libvulkan.so.1 at run time) and simpleomp",
+        "url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-full-source.zip",
+        "sha256": "699d9acc67489eee0993a551ca1ebc247bbf0f4e33babe1dec810e6a9a52b988"
       }
     },
     "models": {

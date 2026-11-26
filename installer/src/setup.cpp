@@ -9,7 +9,7 @@
 // which runs again as Repair / Update / Uninstall.
 //
 // Command line: [--uninstall | --repair | --update] [--quiet] [--install-dir <dir>] [--dry-run] [--package-cache <dir>]
-//               [--no-existing] [--sandbox] [--mirror <base url>]
+//               [--no-existing] [--sandbox] [--mirror <base url>] [--mpv-build]
 //   --sandbox: a test install that touches nothing outside the install folder (no regsvr32, no MPC-HC or MPC-VR or
 //              NVIDIA settings, no logon task; Apps entry "PushMPC-Sandbox"; settings key Software\PushMPC-Sandbox).
 //   --mirror:  developer tests: fetch the runtime and PushFlow packages from <base url>/<asset> (same SHA-256 checks).
@@ -51,6 +51,7 @@ struct Payload {
     std::string release, filter, core;
     bool vsplugin = false;   // the optional mpv route component is inside
     bool vlc = false;        // the optional VLC module is inside
+    bool mpvbuild = false;   // PushMPC's own mpv build is offered (filter\mpvbuild.json: its download and SHA-256)
     bool load() {
         HRSRC r = FindResourceW(nullptr, L"PAYLOAD", RT_RCDATA);
         if (!r) return false;
@@ -61,6 +62,7 @@ struct Payload {
         bool ok = each([&](const std::string& path, const unsigned char* p, uint64_t n) {
             if (path.rfind("vsplugin\\", 0) == 0) vsplugin = true;
             if (path.rfind("vlc\\", 0) == 0) vlc = true;
+            if (path == "filter\\mpvbuild.json") mpvbuild = true;
             if (path != "payload.txt") return true;
             std::string t(reinterpret_cast<const char*>(p), size_t(n));
             auto val = [&](const char* k) { size_t a = t.find(std::string(k) + "="); if (a == std::string::npos) return std::string(); a += strlen(k) + 1; return Trim(t.substr(a, t.find('\n', a) - a)); };
@@ -379,6 +381,8 @@ std::atomic<bool> g_fsrSdk{ true };
 std::atomic<bool> g_pmml{ true };
 // Plex: frame generation through a VapourSynth-enabled libmpv in Plex's folder, on by default (-PlexSwap No when unchecked)
 std::atomic<bool> g_plexSwap{ true };
+// PushMPC's own mpv player (a separate download), off by default (-MpvBuild Yes when checked)
+std::atomic<bool> g_mpvBuild{ false };
 
 Result DoInstall(Op op, bool autoUpdates) {
     Result res;
@@ -430,7 +434,7 @@ Result DoInstall(Op op, bool autoUpdates) {
     fail.clear();
     if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
     rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package") + (g_pmml ? L"" : L" -Pmml No") +
-                   (g_plexSwap ? L"" : L" -PlexSwap No"), scriptLo, 98, nullptr, fail);
+                   (g_plexSwap ? L"" : L" -PlexSwap No") + (g_mpvBuild ? L" -MpvBuild Yes" : L""), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -566,7 +570,7 @@ bool EnsurePlayersClosed(HWND owner) {
 enum Page { PWelcome, PMaintenance, PLicence, PProgress, PFinish };
 enum Ctl {
     IDC_TITLE = 100, IDC_SUBTITLE, IDC_BODY, IDC_WARN, IDC_AUTOUPD, IDC_LICENCE, IDC_ACCEPT, IDC_R_REPAIR, IDC_R_UPDATE, IDC_R_UNINSTALL,
-    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK, IDC_FSRSDK, IDC_PMML, IDC_PLEX
+    IDC_PROGRESS, IDC_STATUS, IDC_DETAILS, IDC_BACK, IDC_NEXT, IDC_CANCEL, IDC_LINK, IDC_FSRSDK, IDC_PMML, IDC_PLEX, IDC_MPVBUILD
 };
 HFONT g_font = nullptr, g_titleFont = nullptr, g_boldFont = nullptr;
 int g_dpi = 96;
@@ -587,6 +591,7 @@ bool NoPlayerFound() { return g_mpc.exe.empty() && g_mpcBe.exe.empty() && g_pot.
 std::wstring PmmlOffer() {
     std::wstring n = g_gpu; for (auto& c : n) c = wchar_t(towupper(c));
     if (n.find(L"NVIDIA") != std::wstring::npos && n.find(L"RTX") != std::wstring::npos) return L"about 255 MB";
+    if (n.find(L"NVIDIA") != std::wstring::npos && (n.find(L"GTX 16") != std::wstring::npos || n.find(L"MX450") != std::wstring::npos || n.find(L"MX550") != std::wstring::npos)) return L"about 255 MB";
     if (n.find(L"INTEL") != std::wstring::npos) return L"about 220 MB";
     return L"";
 }
@@ -674,6 +679,7 @@ void ShowPage(Page p) {
         if (!PmmlOffer().empty()) SetText(IDC_PMML, L"Download faster AI frame generation for this graphics card (" + PmmlOffer() + L")");
         Show(IDC_PMML, !PmmlOffer().empty());
         Show(IDC_PLEX, PlexFound());
+        Show(IDC_MPVBUILD, g_payload.mpvbuild);
         SetText(IDC_NEXT, L"Next");
         break;
     }
@@ -742,6 +748,7 @@ void Layout() {
         MoveWindow(C(IDC_FSRSDK), m, top + S(276), W - 2 * m, S(22), TRUE);
         MoveWindow(C(IDC_PMML), m, top + S(298), W - 2 * m, S(22), TRUE);
         MoveWindow(C(IDC_PLEX), m, top + S(320), W - 2 * m, S(22), TRUE);
+        MoveWindow(C(IDC_MPVBUILD), m, top + S(342), W - 2 * m, S(22), TRUE);
         break;
     case PMaintenance:
         MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(22), TRUE);
@@ -822,6 +829,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         Button_SetCheck(mk(L"BUTTON", L"Download AMD's newest FSR upscaling (FSR 4.1) for this Radeon", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_FSRSDK), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"Download faster AI frame generation for this graphics card", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PMML), BST_CHECKED);
         Button_SetCheck(mk(L"BUTTON", L"Give Plex smoother motion (replaces one Plex file, puts it back on uninstall; asks for administrator permission)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PLEX), BST_CHECKED);
+        mk(L"BUTTON", L"Also install PushMPC's own mpv player (a separate download; Start menu: PushMPC mpv)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_MPVBUILD);
         Button_SetCheck(mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP, IDC_R_REPAIR), BST_CHECKED);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UPDATE);
         mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, IDC_R_UNINSTALL);
@@ -872,6 +880,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_FSRSDK: g_fsrSdk = Button_GetCheck(C(IDC_FSRSDK)) == BST_CHECKED; return 0;
         case IDC_PMML: g_pmml = Button_GetCheck(C(IDC_PMML)) == BST_CHECKED; return 0;
         case IDC_PLEX: g_plexSwap = Button_GetCheck(C(IDC_PLEX)) == BST_CHECKED; return 0;
+        case IDC_MPVBUILD: g_mpvBuild = Button_GetCheck(C(IDC_MPVBUILD)) == BST_CHECKED; return 0;
         case IDCANCEL:
         case IDC_CANCEL:
             if (g_busy) {
@@ -933,6 +942,7 @@ bool ParseArgs() {
         else if (a == L"--dry-run") opt.dryRun = true;
         else if (a == L"--sandbox") opt.sandbox = true;
         else if (a == L"--no-existing") opt.noExisting = true;
+        else if (a == L"--mpv-build") g_mpvBuild = true;   // scripted installs: PushMPC's own mpv too
         else if (a == L"--install-dir") next(opt.installDir);
         else if (a == L"--package-cache") next(opt.packageCache);
         else if (a == L"--mirror") next(opt.mirror);

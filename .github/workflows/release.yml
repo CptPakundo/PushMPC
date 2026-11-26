@@ -469,7 +469,15 @@ jobs:
           $nvofReq = @{}; if ('${{ inputs.dry_run }}' -ne 'true') { $nvofReq = @{ RequireNvof = $true } }
           $vlc = @{}; $vd = "$env:RUNNER_TEMP\vlc-win64\libpushmpc_plugin.dll"
           if (Test-Path $vd) { $vlc = @{ VlcPlugin = $vd } } else { Write-Host '::warning title=VLC module::no plugin-win64 artifact: the release has no VLC component' }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc
+          # PushMPC's own mpv build for Windows (mpv-native.yml): a release asset; Setup offers it (off by default)
+          $mpvb = @{}
+          if (Test-Path "$env:RUNNER_TEMP\mpv-windows\*") {
+            $mz = "$env:RUNNER_TEMP\PushMPC-mpv-windows-${{ steps.version.outputs.version }}.zip"
+            Compress-Archive -Path "$env:RUNNER_TEMP\mpv-windows\*" -DestinationPath $mz -Force
+            $tag = if ('${{ steps.version.outputs.tag }}') { '${{ steps.version.outputs.tag }}' } else { 'v${{ steps.version.outputs.version }}' }
+            $mpvb = @{ MpvBuildZip = $mz; MpvBuildUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$(Split-Path $mz -Leaf)" }
+          } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\repo\filter\bin" -UpdaterExe "$env:GITHUB_WORKSPACE\repo\updater\bin\PushMpcUpdater.exe" @nvofReq @vlc @mpvb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {
@@ -482,11 +490,7 @@ jobs:
           ./repo/scripts/pushmpc-install.ps1 package -ReleaseDir $rel -ReleaseVersion '${{ steps.version.outputs.version }}' @pre
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ('${{ steps.version.outputs.tag }}' -and '${{ inputs.dry_run }}' -ne 'true' -and -not (Test-Path "$rel\release.json.sig")) { Write-Host '::error::release.json is not signed (secret PUSHMPC_SIGNING_KEY missing): not publishing'; exit 1 }
-          # PushMPC's own mpv build for Windows (mpv-native.yml), an optional download next to Setup
-          if (Test-Path "$env:RUNNER_TEMP\mpv-windows\*") {
-            Compress-Archive -Path "$env:RUNNER_TEMP\mpv-windows\*" -DestinationPath "$rel\PushMPC-mpv-windows-${{ steps.version.outputs.version }}.zip" -Force
-            Copy-Item ./repo/mpvnative/install/pushmpc-native.ps1 $rel -ErrorAction SilentlyContinue
-          } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
+
           Get-ChildItem $rel -File | Format-Table Name, Length
 
       - uses: actions/upload-artifact@v4
@@ -623,10 +627,21 @@ jobs:
           $PY -m venv /tmp/g && /tmp/g/bin/python -m pip install --disable-pip-version-check -q onnx==1.17.0 numpy==1.26.4
           /tmp/g/bin/python -I pmml/scripts/make_graphs.py --out /tmp/pmml-graphs
           ls /tmp/pmml-graphs
+      # ncnn (Vulkan) from its pinned full source, static and PIC: pmml's ncnn backend for GPUs without an ONNX Runtime
+      # EP (Linux AMD without ROCm, any Vulkan GPU); no prebuilt ncnn package fits glibc 2.28
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/ncnn
+          key: ncnn-static-${{ matrix.arch }}-${{ hashFiles('scripts/ml-runtime-pin.json', 'scripts/build-ncnn-static.sh') }}
+      - name: ncnn (static, PIC, Vulkan)
+        run: |
+          set -eu
+          [ -d /tmp/ncnn/lib/cmake/ncnn ] || PY=/opt/python/cp312-cp312/bin/python sh scripts/build-ncnn-static.sh /tmp/ncnn /tmp/ncnn-dl
+          ls /tmp/ncnn/lib
       - name: Plugin and tarball
         run: |
           set -eu
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
           export PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then export PUSHMPC_MPVNATIVE_DIR=$PWD/mpvnative-art/hook; else echo "::warning title=native hook::no mpvnative-hook artifact for ${{ matrix.arch }}: the tarball has no mpvnative/"; fi
           if [ -f vlc-linux/libpushmpc_plugin.so ]; then export PUSHMPC_VLC_PLUGIN=$PWD/vlc-linux/libpushmpc_plugin.so; else echo "::warning title=VLC module::no plugin-linux artifact for ${{ matrix.arch }}: the tarball has no vlc/"; fi
@@ -637,6 +652,8 @@ jobs:
           git config --global --add safe.directory "$PWD"
           sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$ver"
           tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz
+          # pmml's graphs for the Homebrew formula (its pmml-graphs resource)
+          if [ "${{ matrix.arch }}" = x86_64 ]; then tar -czf dist/pmml-graphs-$ver.tar.gz -C /tmp/pmml-graphs . && ls -la dist/pmml-graphs-$ver.tar.gz; fi
       - uses: actions/upload-artifact@v4
         with: { name: 'pushmpc-linux-${{ matrix.arch }}', path: dist/, if-no-files-found: error }
 
