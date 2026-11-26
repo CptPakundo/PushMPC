@@ -284,6 +284,86 @@ static void Centroid(const Pic& f, double& cx, double& cy)
     cx = sw > 0 ? sx / sw : -1; cy = sw > 0 ? sy / sw : -1;
 }
 
+// The held-drawing repair (Engine::Cells / RepairSlot): a background panning 2 px a frame (on ones) and a dark sprite on
+// twos (drawn at sx in d0 = A and held in s = S, drawn at sx + 12 in d1 = B). The part's mask covers the sprite's sweep;
+// RepairSlot(S, pair (A, B), t 0.5) must put the sprite halfway (sx + 6) and keep S bit-exact away from the mask.
+// Tolerances: sprite centre within 1.5 px of sx + 6; background inside the mask (sprite band excluded) mean |error|
+// <= 3 codes (8-bit scale) against the true frame; outside the mask + feather (12 px off) 0 codes; cell means within
+// 0.05 codes of the CPU means, Cb within 0.125.
+static void TestRegionRepair(int bits)
+{
+    const int W = 640, H = 360, SW = 24, sy = 160, sx = 300;
+    const int s8 = 1 << (bits - 8);
+    auto frame = [&](int f, int spriteX) {
+        Pic p = Make(W, H, bits, 2.0 * f, 0);
+        for (int y = sy; y < sy + SW; ++y) for (int x = spriteX; x < spriteX + SW; ++x) p.At(0, x, y) = uint16_t(4 * s8);
+        return p;
+    };
+    Pic A = frame(0, sx), S = frame(1, sx), B = frame(2, sx + 12), T = frame(1, sx + 6);   // T: the truth at s
+    Config c; c.width = W; c.height = H; c.bits = bits; c.regionRepair = true; c.sourceSlots = 6;
+    Engine e; std::string err;
+    if (!MakeEngine(e, c, err)) { CHECK(false, "engine (repair, %d-bit): %s", bits, err.c_str()); return; }
+    if (!e.RepairAvailable()) { std::printf("  region repair (%d-bit): skipped, this build has no repair shaders\n", bits); return; }
+    const int a = e.Upload(A.View(), err), s = e.Upload(S.View(), err), b = e.Upload(B.View(), err);
+    CHECK(a >= 0 && s >= 0 && b >= 0, "uploads: %s", err.c_str());
+    if (a < 0 || s < 0 || b < 0) return;
+    // the cell grid of S (against A): means and chroma as the CPU computes them
+    Engine::CellGridOut g;
+    CHECK(e.Cells(s, a, g, err), "Cells: %s", err.c_str());
+    const int f = std::max(2, W / 480);
+    CHECK(g.cell == f && g.w == W / f && g.h == H / f, "cell grid %dx%d of %d px (expected %dx%d of %d)", g.w, g.h, g.cell, W / f, H / f, f);
+    double worstMean = 0, worstCb = 0;
+    for (int cy = 0; cy < g.h; cy += 7)
+        for (int cx = 0; cx < g.w; cx += 7) {
+            double m = 0, cb = 0;
+            for (int y = 0; y < f; ++y) for (int x = 0; x < f; ++x) m += S.At(0, cx * f + x, cy * f + y);
+            m = m / (f * f) / s8;
+            const int cs = std::max(1, f / 2);
+            for (int y = 0; y < cs; ++y) for (int x = 0; x < cs; ++x) cb += S.At(1, cx * f / 2 + x, cy * f / 2 + y);
+            cb = cb / (cs * cs) / s8;
+            const size_t i = size_t(cy) * size_t(g.w) + size_t(cx);
+            worstMean = std::max(worstMean, std::fabs(m - g.v[i]));
+            worstCb = std::max(worstCb, std::fabs(cb - double((g.aux[i] >> 10) & 2047u) / 8.0));
+        }
+    CHECK(worstMean <= 0.05 && worstCb <= 0.125 + 1e-6, "cell means vs the CPU (%d-bit): worst %.3f codes, Cb %.3f", bits, worstMean, worstCb);
+    // the part: the sprite's sweep plus 16 px (sx - 16 .. sx + 12 + SW + 16, sy - 16 .. sy + SW + 16) in cells
+    std::vector<uint8_t> mask(size_t(g.w) * size_t(g.h), 0);
+    const int x0 = (sx - 16) / f, x1 = (sx + 12 + SW + 16) / f, y0 = (sy - 16) / f, y1 = (sy + SW + 16) / f;   // + 12 px of background
+    for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) mask[size_t(y) * size_t(g.w) + size_t(x)] = 255;
+    Engine::RepairPart part; part.slotA = a; part.slotB = b; part.t = 0.5f; part.mask = &mask;
+    CHECK(e.RepairSlot(s, &part, 1, 1.0f, true, err), "RepairSlot: %s", err.c_str());
+    int out = -1; uint64_t tk = 0;
+    Pic R(W, H, bits);
+    if (!e.Real(s, out, tk, err) || !e.Wait(tk, err)) { CHECK(false, "read back: %s", err.c_str()); return; }
+    YuvOut o = R.Out(); e.Read(out, o); R.FromBytes();
+    // the sprite's centre (dark pixels inside the mask box)
+    double sxs = 0, n = 0;
+    for (int y = y0 * f; y < (y1 + 1) * f; ++y) for (int x = x0 * f; x < (x1 + 1) * f; ++x) if (R.At(0, x, y) < 16 * s8) { sxs += x; ++n; }
+    const double cxs = n > 0 ? sxs / n - (SW - 1) / 2.0 : -1;
+    CHECK(std::fabs(cxs - (sx + 6)) <= 1.5, "repaired sprite at x %.2f (truth %d, held %d), %d-bit", cxs, sx + 6, sx, bits);
+    // background inside the mask, away from the sprite (sweep band +-4 px): against the true frame
+    double eb = 0; int nb = 0;
+    for (int y = y0 * f; y < (y1 + 1) * f; ++y)
+        for (int x = x0 * f; x < (x1 + 1) * f; ++x) {
+            if (y >= sy - 4 && y < sy + SW + 4 && x >= sx - 4 && x < sx + 12 + SW + 4) continue;
+            eb += std::fabs(double(R.At(0, x, y)) - double(T.At(0, x, y))) / s8; ++nb;
+        }
+    CHECK(nb > 0 && eb / nb <= 3.0, "background in the mask: mean |error| %.2f codes over %d px (%d-bit)", nb ? eb / nb : -1.0, nb, bits);
+    // away from the mask and its feather: S as it was
+    int changed = 0;
+    for (int pl = 0; pl < 3; ++pl) {
+        const int sc = pl ? 2 : 1;
+        for (int y = 0; y < R.PH(pl); ++y)
+            for (int x = 0; x < R.PW(pl); ++x) {
+                const int X = x * sc, Y = y * sc;
+                if (X >= x0 * f - 12 && X < (x1 + 1) * f + 12 && Y >= y0 * f - 12 && Y < (y1 + 1) * f + 12) continue;
+                changed += R.At(pl, x, y) != S.At(pl, x, y);
+            }
+    }
+    CHECK(changed == 0, "outside the mask: %d samples changed (%d-bit)", changed, bits);
+    for (int sl : { a, s, b }) e.ReleaseSlot(sl);
+}
+
 static void TestBackendBox(int bits)
 {
     const int W = 320, H = 240, K = 4, N = 20;
@@ -520,6 +600,8 @@ int main(int argc, char** argv)
     TestUpscale(Upscaler::Nis, 0.f);
     TestUpscale(Upscaler::Fsr, 0.f);
     TestOpticalFlow();
+    TestRegionRepair(8);
+    TestRegionRepair(10);
     if (timings) Timings();
     const uint64_t ve = ctx->ValidationErrors();
     CHECK(ve == 0, "validation errors: %llu", (unsigned long long)ve);
