@@ -322,6 +322,8 @@ jobs:
     runs-on: ubuntu-24.04
     container: archlinux:latest
     timeout-minutes: 80   # ncnn from source on a cold machine
+    env:
+      MESA_SHADER_CACHE_DISABLE: 'true'   # lavapipe's shader cache in HOME would fail the HOME check (it is the test's, not PushMPC's)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
