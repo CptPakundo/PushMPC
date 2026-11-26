@@ -24,5 +24,6 @@ ID3D12Resource* XefgStage::slotResource(uint32_t) const { return nullptr; }
 XefgStage::Counters XefgStage::counters() const { return {}; }
 XefgSelfTestResult xefgSelfTest(uint64_t, bool, uint32_t, uint32_t, uint32_t, uint32_t) { XefgSelfTestResult r; r.note = kWhy; return r; }
 const void* srProvider(uint32_t) { return nullptr; }
+bool srProviderBuilt() { return false; }
 XessSrSelfTestResult xessSrSelfTest(uint64_t, bool, uint32_t, uint32_t, uint32_t) { XessSrSelfTestResult r; r.note = kWhy; return r; }
 }  // namespace pushmpc::xess

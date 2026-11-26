@@ -124,6 +124,8 @@ XefgSelfTestResult xefgSelfTest(uint64_t adapterLuid, bool warp, uint32_t multip
 // quality 1..4 = PushMPC's sharpening levels: Performance, Balanced, Quality, Ultra Quality (the XeSS preset whose input
 // range holds the real scale; Native AA when the source is at the output size).
 const void* srProvider(uint32_t quality);
+// this build has FsrSrBackend's provider slot (PushFPS with patches/pushfps-4.5.4-xess.patch)
+bool srProviderBuilt();
 struct XessSrSelfTestResult {
     bool ran = false, passed = false;
     double psnrXess = -1, psnrBilinear = -1, msPerFrame = -1;
@@ -135,5 +137,18 @@ struct XessSrSelfTestResult {
 // initialises and executes on this adapter, the output is not blank and its PSNR against the ground truth is at least
 // that of a bilinear upscale minus 0.5 dB.
 XessSrSelfTestResult xessSrSelfTest(uint64_t adapterLuid, bool warp, uint32_t width, uint32_t height, uint32_t frames);
+
+
+// ---------------------------------------------------------------------------------------------------- capabilities
+// PushCoreXessCaps.cpp: the hardware rule, the files, the unlock decisions (XessFg / XessSr; a missing self-test result is
+// measured once per adapter + driver when runTests), the measured XeSS SR cost (4K output) for Auto
+struct XessCaps {
+    bool fgHw = false, fgOn = false;
+    std::string fgWhy;            // the decision line (or why not)
+    bool srHw = false, srOn = false;
+    std::string srWhy;
+    double srMs4k = -1;           // XeSS SR ms per frame for a 4K output (self-test), -1 = unknown
+};
+XessCaps capabilities(const DXGI_ADAPTER_DESC1& adapter, const std::wstring& driver, bool runTests);
 
 }  // namespace pushmpc::xess

@@ -296,12 +296,25 @@ void srDestroy(void* ctx) {
     delete c;
 }
 const char* srVersion(void* ctx) { return ctx ? static_cast<SrContext*>(ctx)->version.c_str() : "XeSS SR"; }
+#ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE   // the slot (patches/pushfps-4.5.4-xess.patch); without it XeSS SR reports "no slot"
 veyra::gfx::FsrSrBackend::ProviderOverride gProvider{&srCreate, &srEvaluate, &srDestroy, &srVersion, &gSrQuality};
+#endif
 }  // namespace
 
 const void* srProvider(uint32_t quality) {
     gSrQuality = std::clamp(quality, 1u, 4u);
+#ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE
     return &gProvider;
+#else
+    return nullptr;
+#endif
+}
+bool srProviderBuilt() {
+#ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE
+    return true;
+#else
+    return false;
+#endif
 }
 
 // ============================================================================================ SR self-test

@@ -20,10 +20,10 @@ namespace pmu {
 // the registry root of the unlock values (tests point it at a scratch key so the user's settings stay untouched)
 inline std::wstring& RegBase() { static std::wstring b = L"Software\\PushMPC"; return b; }
 
-enum class Unlock : int { Gtx16Vsr, ZludaVsr, XeFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, XessSr, Count };
+enum class Unlock : int { Gtx16Vsr, ZludaVsr, XessFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, XessSr, IntelVsr, Count };
 inline const wchar_t* UnlockName(Unlock u)
 {
-    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XeFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"XessSr" };
+    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XessFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"XessSr", L"IntelVsr" };
     const int i = int(u);
     return i >= 0 && i < int(Unlock::Count) ? n[i] : L"?";
 }
@@ -31,8 +31,9 @@ inline const wchar_t* UnlockName(Unlock u)
 inline const wchar_t* UnlockLabel(Unlock u)
 {
     static const wchar_t* n[] = { L"RTX VSR on GTX 16 (Turing kernels, NGX gate bypass)", L"RTX VSR + RTX Video HDR on RX 7000 / 9000 (ZLUDA)",
-        L"Intel XeSS frame generation (headless swap chain)", L"Intel VPL AI frame interpolation", L"Intel VPL AI super resolution",
-        L"NVIDIA optical flow + PushMPC warp frame generation", L"FSR 4.1 INT8 upscaling (RX 6000 / 7000)", L"Subtitle Hold on while burned-in text is found", L"Intel XeSS super resolution" };
+        L"XeSS frame generation (headless swap chain)", L"Intel VPL AI frame interpolation", L"Intel VPL AI super resolution",
+        L"NVIDIA optical flow + PushMPC warp frame generation", L"FSR 4.1 INT8 upscaling (RX 6000 / 7000)", L"Subtitle Hold on while burned-in text is found",
+        L"Intel XeSS super resolution", L"Intel Video Super Resolution (driver video processor)" };
     const int i = int(u);
     return i >= 0 && i < int(Unlock::Count) ? n[i] : L"?";
 }

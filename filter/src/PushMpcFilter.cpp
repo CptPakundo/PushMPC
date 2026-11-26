@@ -676,6 +676,7 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
     SehCaps(luid, rt.root.c_str(), &c);
     g.family = c.family; g.available = c.available; g.hardware = c.hardware; g.name = Widen(c.adapter);
     for (uint32_t i = 0; i < pm::kCapCount && i < PUSHCORE_CAP_COUNT; ++i) g.reason[i] = Widen(c.reason[i]);
+    pm::ReadMeasured(g);   // the Intel methods' self-test numbers (reason[] of an available capability)
     // NIS: pushcore_capabilities looks for the NIS shaders in PushFPS's shader folder, which pushcore's FIRST open in a
     // process sets (RuntimePaths override): before that open it looked next to mpc-hc64.exe and said "missing", after it
     // in core\shaders (RC1 F5: "not on this GPU" in the first filter of a process, available in a later one). Checked
@@ -690,7 +691,9 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
     }
     if (log) {
         std::wstring s = std::format(L"GPU {} ({}, vendor {:04X} device {:04X}): available", g.name, pm::FamilyName(g.family), c.vendorId, c.deviceId);
-        static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG" };
+        static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG",
+                                          L"XeSS FG", L"Intel VPL FI", L"XeSS SR", L"Intel VSR", L"ZLUDA VSR" };
+        static_assert(std::size(names) >= pm::kCapCount, "a name per capability");
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += std::wstring(L" ") + names[i];
         s += L"; not:";
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", names[i], g.reason[i]);
@@ -4285,7 +4288,8 @@ pm::Choice CPushMpcFilter::DecideNow(const pm::Settings& s, const pm::Display& d
     return pm::Decide(s, SourceInfo(), d, c, g);
 }
 static uint32_t CoreFg(pm::FgMethod m) { return m == pm::FgMethod::Auto ? PUSHCORE_FG_VFG : uint32_t(int(m) - 1); }
-static pm::FgMethod MethodOf(uint32_t coreFg) { return coreFg <= PUSHCORE_FG_NVOF ? pm::FgMethod(int(coreFg) + 1) : pm::FgMethod::Auto; }
+static bool KnownFg(uint32_t coreFg) { return coreFg <= PUSHCORE_FG_VPL; }   // a method Auto knows (not NONE)
+static pm::FgMethod MethodOf(uint32_t coreFg) { return KnownFg(coreFg) ? pm::FgMethod(int(coreFg) + 1) : pm::FgMethod::Auto; }
 PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice& c)
 {
     PushCoreSettings p = {};
@@ -4299,7 +4303,8 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.sr = c.sr ? 1 : 0;
     p.srQuality = c.srLevel >= 1 ? uint32_t(c.srLevel) : 2u;
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
-    p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX;
+    p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS
+               : c.srMethod == pm::Upscaler::IntelVsr ? PUSHCORE_SR_METHOD_IVSR : c.srMethod == pm::Upscaler::Xess ? PUSHCORE_SR_METHOD_XESS : PUSHCORE_SR_METHOD_RTX;
     p.deband = c.deband ? 1 : 0;
     p.debandStrength = uint32_t(std::clamp(c.debandStrength, 0, 2));
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
@@ -4378,6 +4383,8 @@ void CPushMpcFilter::LoadLearned()
         auto num = [&](const std::wstring& n, double& v, bool* flag, double lo, double hi) { const std::wstring s = pm::RegReadStr(k, n.c_str()); const double x = s.empty() ? -1 : _wtof(s.c_str()); if (x >= lo && x <= hi) { v = x; if (flag) *flag = true; return true; } return false; };
         for (int i = 0; i < pm::kFgKeys; ++i) num(std::format(L"FgScale{}", i), m_costs.fgScale[i], &m_costs.fgLearned[i], 0.05, 20);
         num(L"VsrScale", m_costs.vsrScale, &m_costs.learnedVsr, 0.1, 10);
+        num(L"IvsrScale", m_costs.ivsrScale, &m_costs.learnedIvsr, 0.1, 10);
+        num(L"XessScale", m_costs.xessScale, &m_costs.learnedXess, 0.1, 10);
         num(L"NrMs", m_costs.nrMs, &m_costs.learnedNr, 0.05, 200);
         num(L"Hdr4kMs", m_costs.hdr4k, &m_costs.learnedHdr, 0.05, 30);
         num(L"Deband1080Ms", m_costs.deband1080, &m_costs.learnedDeband, 0.001, 20);
@@ -4398,7 +4405,7 @@ void CPushMpcFilter::SaveLearned()
 {
     pm::Costs c;
     { std::lock_guard<std::mutex> lk(m_autoLock); c = m_costs; }
-    bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband;
+    bool any = c.learnedVsr || c.learnedIvsr || c.learnedXess || c.learnedNr || c.learnedHdr || c.learnedDeband;
     for (bool b : c.fgLearned) any = any || b;
     if (m_gpuName.empty() || !any) return;
     HKEY k = nullptr;
@@ -4412,6 +4419,8 @@ void CPushMpcFilter::SaveLearned()
     str(L"Model", L"2");
     for (int i = 0; i < pm::kFgKeys; ++i) if (c.fgLearned[i]) str(std::format(L"FgScale{}", i), std::format(L"{:.3f}", c.fgScale[i]));
     if (c.learnedVsr) str(L"VsrScale", std::format(L"{:.3f}", c.vsrScale));
+    if (c.learnedIvsr) str(L"IvsrScale", std::format(L"{:.3f}", c.ivsrScale));
+    if (c.learnedXess) str(L"XessScale", std::format(L"{:.3f}", c.xessScale));
     if (c.learnedNr) str(L"NrMs", std::format(L"{:.3f}", c.nrMs));
     if (c.learnedHdr) str(L"Hdr4kMs", std::format(L"{:.3f}", c.hdr4k));
     if (c.learnedDeband) str(L"Deband1080Ms", std::format(L"{:.4f}", c.deband1080));
@@ -4493,7 +4502,7 @@ void CPushMpcFilter::LearnCosts()
     auto p95 = [](std::vector<double>& v) { std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, size_t(v.size() * 0.95))]; };
     auto ema = [](double& v, double x) { v = v * 0.5 + x * 0.5; };
     pm::Costs& c = m_costs;
-    if (fg.size() >= 48 && m_fgRun <= PUSHCORE_FG_NVOF) {
+    if (fg.size() >= 48 && KnownFg(m_fgRun)) {
         // what pushcore really runs (after its own fallback), at the applied multiplier (capped for 2x-only methods)
         const pm::FgMethod m = MethodOf(m_fgRun);
         const int q = m == pm::FgMethod::PushFlow ? int(a.fgTier) : int(a.vfgQuality);
@@ -4504,11 +4513,14 @@ void CPushMpcFilter::LearnCosts()
         if (std::isfinite(x) && x > 0.05 && x < 20) { if (!c.fgLearned[key]) c.fgScale[key] = x; else ema(c.fgScale[key], x); c.fgLearned[key] = true; }
     }
     if (sr.size() >= 48) {
-        pm::Costs prior = c; prior.vsrScale = 1.0;
-        const pm::Upscaler um = a.srMethod == PUSHCORE_SR_METHOD_FSR ? pm::Upscaler::Fsr : a.srMethod == PUSHCORE_SR_METHOD_NIS ? pm::Upscaler::Nis : pm::Upscaler::Rtx;
+        pm::Costs prior = c; prior.vsrScale = 1.0; prior.ivsrScale = 1.0; prior.xessScale = 1.0;
+        const pm::Upscaler um = a.srMethod == PUSHCORE_SR_METHOD_FSR ? pm::Upscaler::Fsr : a.srMethod == PUSHCORE_SR_METHOD_NIS ? pm::Upscaler::Nis
+                              : a.srMethod == PUSHCORE_SR_METHOD_IVSR ? pm::Upscaler::IntelVsr : a.srMethod == PUSHCORE_SR_METHOD_XESS ? pm::Upscaler::Xess : pm::Upscaler::Rtx;
         const double base = pm::VsrCost(prior, int(a.srQuality), m_choice.artifactReduction, pix, int(a.srFamily), um);
         const double x = base > 0 ? p95(sr) / base : 0;
         if (x > 0.1 && x < 10 && um == pm::Upscaler::Rtx) { if (!c.learnedVsr) c.vsrScale = x; else ema(c.vsrScale, x); c.learnedVsr = true; }
+        if (x > 0.1 && x < 10 && um == pm::Upscaler::IntelVsr) { if (!c.learnedIvsr) c.ivsrScale = x; else ema(c.ivsrScale, x); c.learnedIvsr = true; }
+        if (x > 0.1 && x < 10 && um == pm::Upscaler::Xess) { if (!c.learnedXess) c.xessScale = x; else ema(c.xessScale, x); c.learnedXess = true; }
     }
     if (nr.size() >= 48) { const double x = p95(nr); if (!c.learnedNr) c.nrMs = x; else ema(c.nrMs, x); c.learnedNr = true; }
     if (hdr.size() >= 48) { const double x = p95(hdr) / pix; if (!c.learnedHdr) c.hdr4k = x; else ema(c.hdr4k, x); c.learnedHdr = true; }
@@ -4733,10 +4745,10 @@ void CPushMpcFilter::AutoLoop()
         if (m_mode == Mode::Active) {
             const pm::FgMethod rm = MethodOf(m_fgRun);
             const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : int(applied.vfgQuality);
-            running = m_fgRun > PUSHCORE_FG_NVOF || applied.multiplier < 2 ? std::wstring(L"off")
+            running = !KnownFg(m_fgRun) || applied.multiplier < 2 ? std::wstring(L"off")
                     : std::format(L"{} {}x{}, cut guard {}", pm::FgMethodLabel(rm), std::min<int>(int(applied.multiplier), pm::MaxMultiplier(rm)),
                                   *pm::QualityName(rm, rq) ? std::wstring(L" ") + pm::QualityName(rm, rq) : std::wstring(), m_cutGuardRun ? (c.guardNote.empty() ? std::wstring(L"on") : L"on, " + c.guardNote) : std::wstring(L"off"));
-            if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF && m_subtitleState)
+            if (applied.multiplier >= 2 && KnownFg(m_fgRun) && m_subtitleState)
                 running += m_subtitleState == 1 ? (m_subtitlePixels ? std::format(L", subtitle hold on ({} px held)", m_subtitlePixels) : std::wstring(L", subtitle hold on"))
                          : m_subtitleState == 2 ? std::wstring(L", subtitle hold unavailable") : std::wstring(L", subtitle hold not with this method");
             if (!m_fgRunNote.empty()) running += L" (" + m_fgRunNote + L")";
@@ -4748,8 +4760,10 @@ void CPushMpcFilter::AutoLoop()
             else if (m_mode == Mode::Active) {
                 const pm::FgMethod rm = MethodOf(m_fgRun);
                 const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : int(applied.vfgQuality);
-                if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
-                if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel) : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : L" \u00B7 NIS");
+                if (applied.multiplier >= 2 && KnownFg(m_fgRun)) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
+                if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel)
+                               : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : c.srMethod == pm::Upscaler::Xess ? L" \u00B7 XeSS"
+                                              : c.srMethod == pm::Upscaler::IntelVsr ? L" \u00B7 Intel VSR" : L" \u00B7 NIS");
                 osd += std::format(L" \u00B7 {:.0f} fps", fps);
                 if (c.hdr) osd += L" \u00B7 SDR\u2192HDR";
                 if (d.vrr) osd += L" \u00B7 VRR";
@@ -5168,18 +5182,20 @@ private:
         auto item = [&](const wchar_t* label, uint32_t cap) {
             return std::wstring(label) + (!m_capsKnown || m_capsGpu.has(cap) ? L"" : m_capsGpu.hw(cap) ? L" (files missing)" : L" (not on this GPU)"); };
         const std::wstring f[] = { L"Auto", item(L"NVIDIA VFG", pm::kCapVfg), item(L"DLSS-G", pm::kCapDlssg), item(L"PushFlow", pm::kCapPushFlow),
-                                   item(m_capsGpu.family == pm::kRdna4 ? L"FSR 4 FG" : L"FSR 3.1 FG", pm::kCapFsrFg), item(L"AMD FRC", pm::kCapFrc), item(L"NVOF FG (NVIDIA optical flow + FSR)", pm::kCapNvofFg) };
+                                   item(m_capsGpu.family == pm::kRdna4 ? L"FSR 4 FG" : L"FSR 3.1 FG", pm::kCapFsrFg), item(L"AMD FRC", pm::kCapFrc), item(L"NVOF FG (NVIDIA optical flow + FSR)", pm::kCapNvofFg),
+                                   item(L"XeSS FG (Intel)", pm::kCapXefg), item(L"Intel VPL frame interpolation", pm::kCapVplFi) };
         SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_RESETCONTENT, 0, 0);
         for (const auto& s : f) SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_ADDSTRING, 0, (LPARAM)s.c_str());
-        const std::wstring u[] = { L"Auto", item(L"RTX VSR", pm::kCapRtxVsr), item(L"FSR", pm::kCapFsrSr), item(L"NIS", pm::kCapNis) };
+        const std::wstring u[] = { L"Auto", item(L"RTX VSR", pm::kCapRtxVsr), item(L"FSR", pm::kCapFsrSr), item(L"NIS", pm::kCapNis),
+                                   item(L"XeSS SR (Intel)", pm::kCapXessSr), item(L"Intel VSR", pm::kCapIvsr) };
         SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_RESETCONTENT, 0, 0);
         for (const auto& s : u) SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_ADDSTRING, 0, (LPARAM)s.c_str());
         if (fsel >= 0) ComboSet(m_Dlg, IDC_PM_FGMETHOD, fsel);
         if (usel >= 0) ComboSet(m_Dlg, IDC_PM_UPSCALER, usel);
         // the rows this GPU has nothing to choose in are greyed out
         auto count = [&](std::initializer_list<uint32_t> caps) { int n = 0; for (uint32_t c : caps) n += m_capsGpu.has(c) ? 1 : 0; return n; };
-        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_FGMETHOD), !m_capsKnown || count({ pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc, pm::kCapNvofFg }) > 0);
-        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_UPSCALER), !m_capsKnown || count({ pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis }) > 1);
+        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_FGMETHOD), !m_capsKnown || count({ pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc, pm::kCapNvofFg, pm::kCapXefg, pm::kCapVplFi }) > 0);
+        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_UPSCALER), !m_capsKnown || count({ pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr }) > 1);
         EnableWindow(GetDlgItem(m_Dlg, IDC_PM_STYLE), !m_capsKnown || m_capsGpu.has(pm::kCapVsrFamilies));
         EnableWindow(GetDlgItem(m_Dlg, IDC_PM_HDR), !m_capsKnown || true);
         UpdateCapsNote();
@@ -5190,10 +5206,10 @@ private:
         if (!m_capsKnown) note = L"What this GPU can run shows here once a file has played.";
         else {
             const int f = ComboSel(m_Dlg, IDC_PM_FGMETHOD), u = ComboSel(m_Dlg, IDC_PM_UPSCALER);
-            const uint32_t fc[] = { 0, pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc };
-            const uint32_t uc[] = { 0, pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis };
-            if (f > 0 && f < 6 && !m_capsGpu.has(fc[f])) note += std::format(L"{}: {}; Auto's method is used. ", pm::FgMethodLabel(pm::FgMethod(f)), m_capsGpu.reason[fc[f]]);
-            if (u > 0 && u < 4 && !m_capsGpu.has(uc[u])) note += std::format(L"Upscaler: {}; Auto's is used. ", m_capsGpu.reason[uc[u]]);
+            const uint32_t fc[] = { 0, pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc, pm::kCapNvofFg, pm::kCapXefg, pm::kCapVplFi };
+            const uint32_t uc[] = { 0, pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr };
+            if (f > 0 && f < int(std::size(fc)) && !m_capsGpu.has(fc[f])) note += std::format(L"{}: {}; Auto's method is used. ", pm::FgMethodLabel(pm::FgMethod(f)), m_capsGpu.reason[fc[f]]);
+            if (u > 0 && u < int(std::size(uc)) && !m_capsGpu.has(uc[u])) note += std::format(L"Upscaler: {}; Auto's is used. ", m_capsGpu.reason[uc[u]]);
             if (!m_capsGpu.has(pm::kCapVsrFamilies)) note += L"Upscale style: " + m_capsGpu.reason[pm::kCapVsrFamilies] + L". ";
             if (!m_capsGpu.has(pm::kCapNr)) note += L"Clean up: " + m_capsGpu.reason[pm::kCapNr] + L". ";
             if (ComboSel(m_Dlg, IDC_PM_HDRMETHOD) == 1 && !m_capsGpu.has(pm::kCapRtxHdr)) note += L"RTX Video HDR: " + m_capsGpu.reason[pm::kCapRtxHdr] + L"; PushMPC's curve is used. ";
@@ -5248,9 +5264,9 @@ private:
         s.onBattery = pm::BatteryMode(std::clamp(ComboSel(m_Dlg, IDC_PM_BATTERY), 0, 1));
         { wchar_t b[32] = {}; GetDlgItemTextW(m_Dlg, IDC_PM_DISPPEAK, b, 32); const int p = _wtoi(b); s.displayPeak = p >= 100 && p <= 10000 ? p : 0; }
         { const int q = ComboSel(m_Dlg, IDC_PM_FGQ); s.fgQuality = q <= 0 ? pm::FgQuality::Auto : pm::FgQuality(std::clamp(q - 1, 0, 2)); }
-        s.fgMethod = pm::FgMethod(std::clamp(ComboSel(m_Dlg, IDC_PM_FGMETHOD), 0, 6));
+        s.fgMethod = pm::FgMethod(std::clamp(ComboSel(m_Dlg, IDC_PM_FGMETHOD), 0, int(pm::FgMethod::Vpl)));
         s.vrr = pm::VrrMode(std::clamp(ComboSel(m_Dlg, IDC_PM_VRR), 0, 2));
-        s.upscaler = pm::Upscaler(std::clamp(ComboSel(m_Dlg, IDC_PM_UPSCALER), 0, 3));
+        s.upscaler = pm::Upscaler(std::clamp(ComboSel(m_Dlg, IDC_PM_UPSCALER), 0, int(pm::Upscaler::IntelVsr)));
         s.target = pm::UpscaleTarget(std::clamp(ComboSel(m_Dlg, IDC_PM_TARGET), 0, 3));
         s.strength = pm::CleanStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_STRENGTH), 0, 2));
         { const int v = ComboSel(m_Dlg, IDC_PM_STYLE); s.vsrStyle = v <= 0 ? pm::VsrStyle::Auto : pm::VsrStyle(std::clamp(v - 1, 0, 2)); }

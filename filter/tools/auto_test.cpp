@@ -256,6 +256,30 @@ int main()
         }
         wprintf(L"  vendor paths: %d failed\n", fails);
     }
+    // ---- G10 Intel methods: XeSS FG / XeSS SR / Intel VSR / VPL FI in Auto, pushcore's numbering of them
+    wprintf(L"\n[intel video] G10\n");
+    {
+        int fails = 0;
+        auto check = [&](bool ok, const wchar_t* what, const std::wstring& detail = L"") { wprintf(L"  %-74ls [%ls]%ls%ls\n", what, ok ? L"PASS" : L"FAIL", detail.empty() ? L"" : L"  ", detail.c_str()); fails += ok ? 0 : 1; };
+        const Source film{ 1920, 1080, 23.976, false, 0.5 };
+        Costs cold; cold.card = 6.0;
+        Gpu arc = Family(kIntel, L"Intel(R) Arc(TM) B580 Graphics"); arc.available |= 1u << kCapXefg;
+        const Choice x1 = Decide({}, film, d60, cold, arc);
+        check(x1.fgMethod == FgMethod::XeFg && x1.multiplier >= 2, L"Arc with XeSS FG (self-test passed): XeSS FG first", x1.smootherNote + L" | " + x1.stoppedAt);
+        const Choice x2 = Decide({}, film, d60, cold, Family(kIntel, L"Intel(R) Arc(TM) B580 Graphics"));
+        check(x2.fgMethod != FgMethod::XeFg && x2.fgMethod != FgMethod::Vpl, L"Arc without the Intel capabilities: never XeSS FG / VPL", x2.smootherNote);
+        Gpu arcSr = arc; arcSr.available |= 1u << kCapXessSr; arcSr.reason[kCapXessSr] = L"ms4k=2.50"; ReadMeasured(arcSr);
+        const Display d4k{ L"4K 60", 60.0, 3840, 2160, false };
+        const Choice x3 = Decide({}, film, d4k, cold, arcSr);
+        check(arcSr.xessMs4k > 2.4 && arcSr.xessMs4k < 2.6 && x3.sr && x3.srMethod == Upscaler::Xess,
+              L"Arc with XeSS SR, 4K screen: XeSS SR (measured ms4k read from the capability)", x3.sharperNote);
+        check(CoreFgFor(FgMethod::XeFg) == 6u && CoreFgFor(FgMethod::Vpl) == 7u && CoreSrMethod(Upscaler::Xess) == 3u && CoreSrMethod(Upscaler::IntelVsr) == 4u
+              && UpscalerOfCore(3) == Upscaler::Xess && UpscalerOfCore(4) == Upscaler::IntelVsr, L"XeSS FG 6, VPL 7, XeSS SR 3, Intel VSR 4 (PUSHCORE_FG_* / SR_METHOD_*)");
+        Gpu vplArc = Family(kIntel, L"Intel(R) Arc(TM) A770 Graphics"); vplArc.available |= 1u << kCapVplFi; vplArc.reason[kCapVplFi] = L"gate passed ms=9.50 psnr=31.0 maxM=4";
+        ReadMeasured(vplArc);
+        check(vplArc.vplGate && vplArc.vplMs1080 > 9.4 && vplArc.vplMs1080 < 9.6 && FgOrder(vplArc).front() == FgMethod::Vpl, L"VPL's gate and cost read from the capability; VPL first once gated");
+        wprintf(L"  intel video: %d failed\n", fails);
+    }
     Display real = QueryDisplay(PlayerWindow());
     wprintf(L"this machine's primary display: %ls %.3f Hz %ux%u HDR %d VRR %d (%ls)\n", real.name.c_str(), real.refreshHz, real.width, real.height, real.hdr, real.vrr, real.vrrHow.c_str());
     return 0;

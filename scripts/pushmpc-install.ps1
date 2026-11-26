@@ -88,6 +88,11 @@ param(
     # switched off (PUSHMPC_DISABLE_FSR4INT8=1 or HKCU\Software\PushMPC\Unlocks Fsr4Int8 = 0)
     [ValidateSet('Auto', 'Package', 'Sdk240')]
     [string]$FidelityFx = 'Auto',
+    # Intel's XeSS DLLs (XeSS SR, XeSS frame generation, XeLL; scripts\xess-fetch.ps1, Intel SDK 3.0.2, pinned, Intel-signed) into
+    # runtime\runtime_local\intel\experimental: Auto = on an Intel GPU unless both unlocks XessFg and XessSr are switched off,
+    # Yes = on any GPU (XeSS runs on every Shader Model 6.4 GPU; pushcore's self-tests decide), No = never
+    [ValidateSet('Auto', 'Yes', 'No')]
+    [string]$Xess = 'Auto',
     # reuse an existing PushFPS / Veyra install's files as hard links (same volume) instead of copies
     [switch]$LinkExisting,
     # never reuse an existing install's files (always the package)
@@ -1389,6 +1394,7 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     $extraNote = 'none'
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
     Add-FidelityFxSdk $dest
+    Add-XessSdk $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
@@ -1413,6 +1419,30 @@ function Add-FidelityFxSdk([string]$dest) {
     if ($LASTEXITCODE -ne 0) { Warn "FSR SDK 2.4.0 not installed (fidelityfx-fetch.ps1 exit $LASTEXITCODE): the package's FidelityFX 2.3.0 stays" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + FidelityFX SDK 2.4.0" }
 }
+# Intel's XeSS DLLs (G10: XeSS SR, XeSS frame generation): fetched pinned and checked by xess-fetch.ps1; pushcore decides
+# per GPU and driver by their self-tests. A failure leaves them out (XeSS then says "not installed"; everything else runs).
+function Test-XessWanted {
+    if ($Xess -eq 'No') { return $false }
+    if ($Xess -eq 'Yes') { return $true }
+    $off = 0
+    foreach ($u in 'XessFg', 'XessSr') {
+        $o = [Environment]::GetEnvironmentVariable("PUSHMPC_DISABLE_$($u.ToUpper())") -match '^(1|true|yes|on)$'
+        try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $u -ErrorAction Stop).$u -eq 0) { $o = $true } } catch {}
+        if ($o) { $off++ }
+    }
+    return $GpuVendor -eq 'Intel' -and $off -lt 2
+}
+function Add-XessSdk([string]$dest) {
+    if (-not (Test-XessWanted)) { return }
+    $fetch = Join-Path $PSScriptRoot 'xess-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'xess-fetch.ps1 is not next to the installer: Intel XeSS is left out'; return }
+    if ($DryRun) { Dry "would add Intel's XeSS SDK 3.0.2 DLLs to runtime_local\intel\experimental (xess-fetch.ps1, about 100 MB)"; return }
+    Step 'Intel XeSS (super resolution and frame generation), from Intel''s repository, pinned'
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'xess-v3.0.2' } else { Join-Path $InstallDir 'download\xess-v3.0.2' }
+    & $fetch -Dest (Join-Path $dest 'runtime_local\intel\experimental') -Cache $cache
+    if ($LASTEXITCODE -ne 0) { Warn "Intel XeSS not installed (xess-fetch.ps1 exit $LASTEXITCODE): XeSS SR and XeSS frame generation stay off" }
+    else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + Intel XeSS SDK 3.0.2" }
+}
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
     $pfNote = if ($pushflow) { $pushflow } else { 'not installed' }
@@ -1425,6 +1455,7 @@ function Test-RuntimeCurrent([string]$dir, $pkg = $Runtime) {
     $m = Read-Manifest $dir
     if (-not $m) { return $false }
     if ($m.kv['version'] -ne $pkg.Version -or $m.kv['package-sha256'] -ne $pkg.Sha256 -or $m.kv['subset'] -ne $Runtime.Subset) { return $false }
+    if ((Test-XessWanted) -and -not (Test-Path -LiteralPath (Join-Path $dir 'runtime_local\intel\experimental\libxess.dll'))) { return $false }   # XeSS added later
     return -not (Test-ComponentFiles $dir)
 }
 # A repair or update (quiet ones too) keeps what the first install chose and downloads only what it had: an optional
@@ -1454,6 +1485,7 @@ function Prepare-Runtime($pkg = $Runtime) {
     if (Get-ExistingRuntime $dest $pkg) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
         Add-FidelityFxSdk $dest
+        Add-XessSdk $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1560,7 +1592,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1708,7 +1740,7 @@ function Invoke-Package {
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
     # PushMPC's own mpv build (an optional release asset, not in Setup's payload)
     foreach ($z in @(Get-ChildItem -LiteralPath $StageDir -Filter 'PushMPC-mpv-windows-*.zip' -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $z.FullName $ReleaseDir -Force }
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
     [IO.File]::WriteAllText((Join-Path $out 'Install-PushMPC.cmd'), ($cmd -join "`r`n") + "`r`n")

@@ -116,12 +116,13 @@ int wmain(int argc, wchar_t** argv) {
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
     int sr = -1, fgOpt = -1, mult = -1;
-    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|xefg|none): the filter's route
+    // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|xefg|vpl|none, --srmethod rtx|fsr|nis|xess|ivsr): the filter's route
     bool useSettings = false;
     // G10: --adapter nvidia (default) | intel | amd | any | warp (Windows' software GPU, sets PUSHMPC_TEST_WARP=1 for pushcore);
     // <video> = synthetic:WxH = no file: a textured square moving over a textured background, a hard cut at --cut N
     // (default 0 = none), 30 fps; --check 1 reads every output back and checks the square's position in the generated
-    // frames and the hold on the cut pair; --selftest xefg|xess runs pushcore_selfTest on the adapter (--record 1 stores it)
+    // frames and the hold on the cut pair; --selftest xefg|xess|ivsr|vpl|bridge|all runs pushcore_selfTest on the adapter
+    // (--record 1 stores the hardware results; tools/pushcore_selftest is the stand-alone version)
     std::wstring adapterPick = L"nvidia", selfTest;
     uint64_t cutAt = 0; bool checkMotion = false, selfTestRecord = false;
     PushCoreSettings ps{};
@@ -133,14 +134,15 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--backend") {
             useSettings = true;
             ps.fgBackend = v == L"dlssg" ? PUSHCORE_FG_DLSSG : v == L"pushflow" ? PUSHCORE_FG_PUSHFLOW : v == L"fsr" ? PUSHCORE_FG_FSR
-                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : v == L"xefg" ? PUSHCORE_FG_XEFG : PUSHCORE_FG_VFG;
+                         : v == L"frc" ? PUSHCORE_FG_AMDFRC : v == L"nvof" ? PUSHCORE_FG_NVOF : v == L"xefg" ? PUSHCORE_FG_XEFG : v == L"vpl" ? PUSHCORE_FG_VPL : PUSHCORE_FG_VFG;
             if (v == L"none") ps.multiplier = 1;
             continue;
         }
         if (k == L"--q") { ps.vfgQuality = uint32_t(_wtoi(v.c_str())); ps.fgTier = ps.vfgQuality; continue; }
         if (k == L"--srq") { const int q = _wtoi(v.c_str()); ps.sr = q > 0; ps.srQuality = q > 0 ? uint32_t(q) : 2u; continue; }
-        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : v == L"xess" ? PUSHCORE_SR_METHOD_XESS : PUSHCORE_SR_METHOD_RTX; continue; }
-        if (k == L"--adapter") { adapterPick = v; continue; }
+        if (k == L"--srmethod") { ps.srMethod = v == L"fsr" ? PUSHCORE_SR_METHOD_FSR : v == L"nis" ? PUSHCORE_SR_METHOD_NIS : v == L"xess" ? PUSHCORE_SR_METHOD_XESS
+                                                       : v == L"ivsr" ? PUSHCORE_SR_METHOD_IVSR : PUSHCORE_SR_METHOD_RTX; continue; }
+        if (k == L"--adapter" || k == L"--vendor") { adapterPick = v; continue; }
         if (k == L"--cut") { cutAt = uint64_t(_wtoi64(v.c_str())); continue; }
         if (k == L"--check") { checkMotion = _wtoi(v.c_str()) != 0; continue; }
         if (k == L"--selftest") { selfTest = v; continue; }
@@ -204,14 +206,16 @@ int wmain(int argc, wchar_t** argv) {
     if (!selfTest.empty()) {
         auto fn = reinterpret_cast<PushCoreSelfTestFn>(GetProcAddress(dll, "pushcore_selfTest"));
         if (!fn) { std::cout << "pushcore_selfTest missing\n"; return 1; }
-        PushCoreSelfTest t{}; t.structSize = sizeof(t);
-        t.which = selfTest == L"xess" ? PUSHCORE_SELFTEST_XESS_SR : PUSHCORE_SELFTEST_XEFG;
-        t.multiplier = mult >= 2 ? uint32_t(mult) : 2; t.frames = maxFrames != 120 ? maxFrames : 0; t.warp = warpAdapter ? 1 : 0; t.record = selfTestRecord ? 1 : 0;
-        const int r = fn(warpAdapter ? 0 : bestLuid, pushfps.c_str(), &t);
-        std::cout << std::format("SELFTEST {} on {}: ran {} passed {} (return {}) metrics {:.3f} {:.3f} {:.3f} {:.3f} real {} generated {} expected {}\n  {}\n", utf8(selfTest), t.adapter,
-                                 t.ran, t.passed, r, t.metric[0], t.metric[1], t.metric[2], t.metric[3], t.realOut, t.generatedOut, t.expectedGenerated, t.note);
-        std::cout << (t.passed ? "PASS" : "FAIL") << "\n";
-        return t.passed ? 0 : 1;
+        const uint32_t which = selfTest == L"xess" ? PUSHCORE_SELFTEST_XESS_SR : selfTest == L"ivsr" ? PUSHCORE_SELFTEST_IVSR
+                             : selfTest == L"vpl" ? PUSHCORE_SELFTEST_VPL_FI : selfTest == L"bridge" ? PUSHCORE_SELFTEST_BRIDGE
+                             : selfTest == L"all" ? 31u : PUSHCORE_SELFTEST_XEFG;
+        if (mult >= 2) SetEnvironmentVariableW(L"PUSHMPC_SELFTEST_XEFG_MULTIPLIER", std::to_wstring(mult).c_str());
+        if (maxFrames != 120) SetEnvironmentVariableW(L"PUSHMPC_SELFTEST_FRAMES", std::to_wstring(maxFrames).c_str());
+        std::vector<char> report(32768);
+        const uint32_t flags = (warpAdapter ? PUSHCORE_SELFTEST_FLAG_WARP : 0u) | (selfTestRecord ? PUSHCORE_SELFTEST_FLAG_RECORD : 0u);
+        const int r = fn(warpAdapter ? 0 : bestLuid, pushfps.c_str(), which, flags, report.data(), uint32_t(report.size()));
+        std::cout << "SELFTEST " << utf8(selfTest) << ": " << report.data() << "\n" << (r == PUSHCORE_OK ? "PASS" : "FAIL") << "\n";
+        return r == PUSHCORE_OK ? 0 : 1;
     }
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> imm;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};

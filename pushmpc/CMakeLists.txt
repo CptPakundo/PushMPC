@@ -34,24 +34,20 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-# G10: Intel XeSS frame generation (headless swap chain) and XeSS SR need the XeSS SDK headers (PushFPS's VEYRA_XESS_ROOT);
-# without them pushcore says so in pushcore_capabilities (PushCoreXessStub.cpp)
-if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h" AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess/xess_d3d12.h")
-  set(PUSHCORE_XESS_SOURCES src/PushCoreXefg.cpp src/PushCoreXessSr.cpp)
-else()
-  set(PUSHCORE_XESS_SOURCES src/PushCoreXessStub.cpp)
-  message(STATUS "pushcore: XeSS SDK headers not found (VEYRA_XESS_ROOT): XeFG and XeSS SR are built as unavailable")
-endif()
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h src/PushCoreXess.h ${PUSHCORE_XESS_SOURCES} include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
-if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h")
-  target_include_directories(pushcore_dll PRIVATE "${VEYRA_XESS_ROOT}/inc")
-endif()
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc)
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
 target_compile_options(pushcore_dll PRIVATE /utf-8)
 target_include_directories(pushcore_dll PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
 # d3dcompiler: PushMPC's deband compute shader (PushCoreDeband.h) is compiled at open with the system's d3dcompiler_47.dll
-target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler bcrypt wintrust crypt32 version)
+target_link_libraries(pushcore_dll PRIVATE veyra_engine ${FFMPEG_LIBRARIES} d3d11 d3d12 dxgi d3dcompiler)
+# Vendor self-tests (pushcore_selfTest; PushCoreSelfTest.h: each method registers its own test and feature bits) and their
+# test tool (CI on WARP, testers on hardware: tests/xess-fg-manual.ps1, tests/intel-vsr-manual.ps1, tests/intel-vpl-manual.ps1)
+target_sources(pushcore_dll PRIVATE src/PushCoreSelfTest.cpp src/PushCoreSelfTest.h)
+add_executable(pushcore_selftest tools/pushcore_selftest.cpp)
+target_compile_features(pushcore_selftest PRIVATE cxx_std_20)
+target_compile_options(pushcore_selftest PRIVATE /utf-8)
+target_include_directories(pushcore_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # GPU harness: loads pushcore.dll by path, decodes with D3D11VA on its own D3D11 device (as LAV does),
 # feeds the textures in and "presents" the outputs in D3D11. FFmpeg is delay-loaded so the
@@ -63,6 +59,19 @@ target_include_directories(pushcore_gpu_harness PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(pushcore_gpu_harness PRIVATE ${FFMPEG_LIBRARIES} d3d11 dxgi windowscodecs ole32 delayimp)
 target_link_options(pushcore_gpu_harness PRIVATE /DELAYLOAD:avformat-63.dll /DELAYLOAD:avcodec-63.dll
   /DELAYLOAD:avutil-61.dll /DELAYLOAD:avfilter-12.dll /DELAYLOAD:swscale-10.dll /DELAYLOAD:swresample-7.dll)
+
+# G10: Intel XeSS frame generation (headless swap chain) and XeSS SR need the XeSS SDK headers (PushFPS's VEYRA_XESS_ROOT,
+# fetched by release.yml); without them pushcore builds and reports both as "built without the Intel XeSS SDK"
+# (PushCoreXessStub.cpp). XeSS SR also needs the FsrSrBackend provider slot (patches/pushfps-4.5.4-xess.patch).
+if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h" AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess/xess_d3d12.h")
+  target_sources(pushcore_dll PRIVATE src/PushCoreXefg.cpp src/PushCoreXessSr.cpp)
+  target_include_directories(pushcore_dll PRIVATE "${VEYRA_XESS_ROOT}/inc")
+else()
+  target_sources(pushcore_dll PRIVATE src/PushCoreXessStub.cpp)
+  message(STATUS "pushcore: XeSS SDK headers not found (VEYRA_XESS_ROOT): XeFG and XeSS SR are built as unavailable")
+endif()
+target_sources(pushcore_dll PRIVATE src/PushCoreXess.h src/PushCoreXessCaps.cpp)
+target_link_libraries(pushcore_dll PRIVATE bcrypt wintrust crypt32 version)
 
 # Test tool: edits a COPY of a PushFPS chain session (multiplier, SR/FG switches) the way PushFPS saves it,
 # for the renderer's live-reload test. Never point it at the user's own data folder.
