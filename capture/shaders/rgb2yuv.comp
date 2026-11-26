@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC capture mode: a captured 32-bit picture -> the GPU engine's planar YUV 4:2:0 staging buffer, rows packed:
+//   BGRx / RGBx (8 bit each)  -> 8-bit samples, four a word, BT.709 limited range
+//   RGB10 (x2R10G10B10, an HDR capture in BT.2020 PQ) -> `bits`-bit samples in 16 bits, two a word (the engine's own
+//                                16-bit staging, as for P010 / 10-bit video), BT.2020 NCL limited range
+// An 8-bit picture into a deeper engine is scaled up; chroma = the mean of each 2 x 2 block.
+// SRC_IMAGE: the picture is a sampled image (a tiled dma-buf, an IOSurface), else a storage buffer of 32-bit pixels
+// (host memory, a linear dma-buf). One invocation writes one word of one plane.
+#version 450
+layout(local_size_x = 64) in;
+#ifdef SRC_IMAGE
+layout(binding = 0) uniform sampler2D srcImg;
+#else
+layout(std430, binding = 0) readonly buffer Src { uint px[]; };
+#endif
+layout(std430, binding = 1) writeonly buffer Dst { uint words[]; };
+layout(push_constant) uniform P {
+    int plane, w, h;     // this plane's size
+    int srcW, srcH;      // the picture's (luma) size
+    int srcPitch;        // buffer: row pitch in pixels; image: the crop's top row
+    int srcOff;          // buffer: the first pixel's index; image: the crop's left column
+    int dstWordOff;      // the plane's first word in Dst
+    int nwords;
+    int rgbx;            // buffer: 1 = R in the low byte
+    int rgb10;           // buffer, BT.2020 PQ: 1 x2R10G10B10 (B in the low 10 bits), 2 x2B10G10R10 (R low)
+    int bits;            // the staging's sample depth: 8 (one byte) or 9..16 (two bytes)
+} pc;
+
+vec3 Fetch(int x, int y)
+{
+    x = clamp(x, 0, pc.srcW - 1); y = clamp(y, 0, pc.srcH - 1);
+#ifdef SRC_IMAGE
+    return texelFetch(srcImg, ivec2(x + pc.srcOff, y + pc.srcPitch), 0).rgb;
+#else
+    uint v = px[pc.srcOff + y * pc.srcPitch + x];
+    if (pc.rgb10 != 0) {   // 1: B in the low 10 bits (x2R10G10B10), 2: R in the low bits (x2B10G10R10)
+        vec3 c = vec3(float((v >> 20) & 1023u), float((v >> 10) & 1023u), float(v & 1023u)) * (1.0 / 1023.0);
+        return pc.rgb10 == 2 ? c.bgr : c;
+    }
+    vec3 c = vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) * (1.0 / 255.0);
+    return pc.rgbx != 0 ? c : c.bgr;
+#endif
+}
+
+uint Sample(int b)
+{
+    // BT.709 for SDR pictures, BT.2020 NCL for an HDR capture
+    vec3 KY = pc.rgb10 != 0 ? vec3(0.2627, 0.6780, 0.0593) : vec3(0.2126, 0.7152, 0.0722);
+    float scale = float(1 << max(pc.bits - 8, 0)), top = 255.0 * scale + (scale - 1.0);
+    int x = b % pc.w, y = b / pc.w;
+    if (pc.plane == 0) return uint(clamp((16.0 + 219.0 * dot(Fetch(x, y), KY)) * scale + 0.5, 0.0, top));
+    vec3 c = (Fetch(2 * x, 2 * y) + Fetch(2 * x + 1, 2 * y) + Fetch(2 * x, 2 * y + 1) + Fetch(2 * x + 1, 2 * y + 1)) * 0.25;
+    float Y = dot(c, KY);
+    float v = pc.plane == 1 ? (c.b - Y) / (2.0 * (1.0 - KY.z)) : (c.r - Y) / (2.0 * (1.0 - KY.x));
+    return uint(clamp((128.0 + 224.0 * v) * scale + 0.5, 0.0, top));
+}
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 64u) + gl_GlobalInvocationID.x);
+    if (i >= pc.nwords) return;
+    int total = pc.w * pc.h;
+    int per = pc.bits > 8 ? 2 : 4;   // samples per word
+    uint word = 0u;
+    for (int k = 0; k < per; ++k) {
+        int b = i * per + k;
+        if (b < total) word |= Sample(b) << uint((32 / per) * k);
+    }
+    words[pc.dstWordOff + i] = word;
+}

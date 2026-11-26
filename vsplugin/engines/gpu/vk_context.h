@@ -41,6 +41,11 @@ struct ExternalDevice {
     void (*queueLock)(void* ctx, uint32_t family, uint32_t index) = nullptr;
     void (*queueUnlock)(void* ctx, uint32_t family, uint32_t index) = nullptr;
     void* lockCtx = nullptr;
+    // Appended (capture mode): NVIDIA's optical-flow queue when the owner enabled VK_NV_optical_flow (with
+    // synchronization2 and format_feature_flags2) and created a queue of an optical-flow family other than `family`;
+    // the engine then offers the flow as it does on its own device. VK_NULL_HANDLE: none.
+    uint32_t ofFamily = 0;
+    VkQueue ofQueue = VK_NULL_HANDLE;
 };
 
 struct Buffer { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkDeviceSize size = 0; void* map = nullptr; };

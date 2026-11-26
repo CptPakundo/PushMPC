@@ -327,9 +327,22 @@ jobs:
         with:
           path: /tmp/ncnn
           key: ncnn-static-${{ matrix.arch }}-${{ hashFiles('scripts/ml-runtime-pin.json', 'scripts/build-ncnn-static.sh') }}
+      # capture mode (capture/capture.cmake): pushmpc-capture for the players PushMPC cannot plug into (X11 capture, the
+      # screen-capture portal + PipeWire, the X11 / Wayland overlay) on the portable GPU engine (Vulkan-Headers and volk by
+      # their pins). Its own build folder; a failure leaves capture/ out of the tarball, nothing else
+      - name: Capture mode (pushmpc-capture)
+        continue-on-error: true
+        run: |
+          set -eu
+          dnf install -y libX11-devel libXcomposite-devel libXdamage-devel libXext-devel libXrandr-devel dbus-devel pipewire-devel wayland-devel wayland-protocols-devel
+          dnf install -y glslang || { dnf install -y epel-release && dnf install -y glslang; }
+          cmake -S vsplugin -B build-capture -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake --build build-capture --target pushmpc_capture --parallel
+          ls -la build-capture/pushmpc-capture
       - name: Plugin and tarball
         run: |
           set -eu
+          if [ -x build-capture/pushmpc-capture ]; then export PUSHMPC_CAPTURE_BIN=$PWD/build-capture/pushmpc-capture; else echo "::warning title=capture mode::no pushmpc-capture for ${{ matrix.arch }}: the tarball has no capture/"; fi
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
           export PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then export PUSHMPC_MPVNATIVE_DIR=$PWD/mpvnative-art/hook; else echo "::warning title=native hook::no mpvnative-hook artifact for ${{ matrix.arch }}: the tarball has no mpvnative/"; fi

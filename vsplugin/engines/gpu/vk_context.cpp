@@ -242,6 +242,8 @@ std::shared_ptr<Context> Context::Adopt(const ExternalDevice& ext, std::string& 
         if (!c->FormatOk(f, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { why = c->m_info.name + ": no storage support for a plane format the engine writes"; return nullptr; }
     vkGetDeviceQueue(ext.device, ext.family, ext.queueIndex, &c->m_queue);
     if (!c->m_queue) { why = "external Vulkan device: no queue " + std::to_string(ext.family) + "/" + std::to_string(ext.queueIndex); return nullptr; }
+    // the owner's optical-flow queue (its own family: SubmitOf locks only m_ofLock there)
+    if (ext.ofQueue && ext.ofFamily != ext.family && vkCreateOpticalFlowSessionNV) { c->m_ofFamily = ext.ofFamily; c->m_ofQueue = ext.ofQueue; }
     g_ctx = c;
     return c;
 }

@@ -8,6 +8,7 @@
 #     vsplugin/pushmpc.vpy       the script mpv runs (vsplugin/scripts/pushmpc.vpy)
 #     vsplugin/pushmpc.lua       adds the filter at run time (integrations/mpv/pushmpc.lua)
 #     vsplugin/shaders/          ArtCNN C4F16 / C4F32 fragment shaders (integrations/mpv/make-shaders.py)
+#     capture/                   capture mode: pushmpc-capture and pushmpc-capture.sh (PUSHMPC_CAPTURE_BIN, optional)
 #     LICENSE, README.txt
 #   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version> [<pushmpc-nvvfx-selftest>]   (run from the repository root)
 set -eu
@@ -51,6 +52,11 @@ if [ -n "${PUSHMPC_PLEX_DIR:-}" ] && [ -f "$PUSHMPC_PLEX_DIR/pushmpc_preload.so"
     for f in "$d"/mpvnative/libpushmpc-avfilter-8.*.so "$d/mpvnative/libpushmpc_engine.so" "$d/mpvnative/SOURCES.txt"; do if [ -f "$f" ]; then ln -s "../mpvnative/$(basename "$f")" "$d/plex/$(basename "$f")"; fi; done
 fi
 if [ -n "${PUSHMPC_KODI_DIR:-}" ] && [ -f "$PUSHMPC_KODI_DIR/install.sh" ]; then mkdir -p "$d/kodi"; cp -R "$PUSHMPC_KODI_DIR/." "$d/kodi/"; fi
+# optional: capture mode (PUSHMPC_CAPTURE_BIN = the pushmpc-capture binary) with its launcher, which setup.sh installs for
+# the players PushMPC cannot plug into
+if [ -n "${PUSHMPC_CAPTURE_BIN:-}" ] && [ -f "$PUSHMPC_CAPTURE_BIN" ]; then
+    mkdir -p "$d/capture"; install -m 755 "$PUSHMPC_CAPTURE_BIN" "$d/capture/pushmpc-capture"; install -m 755 scripts/pushmpc-capture.sh "$d/capture/pushmpc-capture.sh"
+fi
 install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
@@ -74,7 +80,9 @@ Remove:
 mpv needs VapourSynth. Arch, Manjaro and EndeavourOS have it; Ubuntu, Debian and Mint build mpv without it, so the
 installer offers mpv from Flathub (io.mpv.Mpv, user install) instead. Players set up when found: mpv, mpv from
 Flathub, Celluloid, Haruna, SMPlayer, MPC-QT, Jellyfin MPV Shim, Plex-MPV-Shim and Kodi (mpv as its external player).
-VLC gets the PushMPC module when this download has it (vlc/). setup.sh prints the engine Auto starts with for your
+VLC gets the PushMPC module when this download has it (vlc/). Players PushMPC cannot plug into (Flathub Celluloid,
+Stremio, Totem, Clapper, browsers) get capture mode (capture/): a menu entry "<Player> with PushMPC" that shows the
+player's picture with smoother motion over its window. setup.sh prints the engine Auto starts with for your
 graphics card (sh setup.sh plan). Every change is backed up and undone exactly by the uninstall.
 
 Settings: ~/.config/pushmpc/settings.ini (Smoother=Auto, 2..8 or Off). Logs: ~/.local/state/pushmpc/logs.

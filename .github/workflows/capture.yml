@@ -1,0 +1,251 @@
+# PushMPC capture mode for Linux and macOS (capture/: pushmpc-capture) on hosted runners:
+#   linux-x11     ubuntu-24.04: the build (X11 + portal + Wayland parts, the GPU engine), capture_test, the self-test
+#                 on Mesa lavapipe; then on Xvfb: mpv (--vo=x11) plays a 24 fps clip of a moving square, pushmpc-capture
+#                 captures its window (XComposite + XDamage + MIT-SHM) and writes what it would show at 60 Hz
+#                 (--no-present --dump): with frame generation the square must move evenly (check_motion.py against
+#                 --smoother off, the 3:2 judder); then a presented run (the X11 overlay through lavapipe's X11 WSI):
+#                 the overlay window must be mapped over mpv's with the player's size, and the screen there not black.
+#   linux-nvl     ubuntu-24.04: pushmpc-capture with the nvl engine (NVIDIA Video Effects) compiled in, the kernels'
+#                 fatbin from a green run's artifact (else nvcc); the self-test's probe must refuse cleanly (no GPU).
+#   linux-portal  ubuntu-24.04, informational: a headless Sway (pixman) with PipeWire, WirePlumber and
+#                 xdg-desktop-portal-wlr (no picker: the headless output) inside a private session bus: pushmpc-capture
+#                 --monitor through the ScreenCast portal (shared memory there), --no-present to a dump; then the
+#                 layer-shell overlay on lavapipe's Wayland WSI for a few seconds.
+#   macos         macos-15: the build (ScreenCaptureKit, AppKit, MoltenVK), capture_test, --list (no permission
+#                 needed), the self-test (informational: the runner's Metal device through MoltenVK), and a start
+#                 without the Screen Recording permission: the plain message and exit code 3.
+# Not coverable here (a real desktop is needed): the portal's window picker and restore token, dma-buf zero copy, real
+# compositor timing, lip sync by ear, GNOME's full-screen fallback, ScreenCaptureKit frames (TCC), black copy-protected
+# video, a MoltenVK swapchain over a full-screen player. Pins: vsplugin/engines/gpu/gpu-pins.json.
+name: capture
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['capture/**', 'scripts/pushmpc-capture.sh', '.github/workflows/capture.yml']
+
+concurrency:
+  group: capture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x11:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Packages
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools mesa-vulkan-drivers \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
+            libwayland-dev wayland-protocols xvfb x11-utils mpv ffmpeg >/dev/null
+          dpkg-query -W mesa-vulkan-drivers mpv glslang-tools libpipewire-0.3-dev
+      - uses: actions/cache@v4
+        with:
+          path: vsplugin/build-capture/_deps
+          key: capture-deps-linux-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Build
+        run: |
+          set -eu
+          cmake -S vsplugin -B vsplugin/build-capture -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON
+          cmake --build vsplugin/build-capture --target pushmpc_capture capture_test
+          ./vsplugin/build-capture/capture_test
+          ./vsplugin/build-capture/pushmpc-capture --help | head -3
+      - name: Self-test (the GPU engine on lavapipe, the CPU engine)
+        run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
+      - name: Clip (24 fps, a square moving 96 px a second)
+        run: |
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=640x360:r=24" -f lavfi -i "color=c=white:s=64x64:r=24" \
+            -filter_complex "[0][1]overlay=x='mod(t*96,560)':y=148,format=yuv420p" -t 40 -c:v libx264 -crf 12 -g 24 /tmp/square.mkv
+          ffprobe -hide_banner -v error -show_entries format=duration -of csv=p=0 /tmp/square.mkv
+      - name: Capture on Xvfb (dumped, Auto vs off)
+        env: { DISPLAY: ':99' }
+        run: |
+          set -eu
+          Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
+          for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
+          mpv --vo=x11 --no-audio --loop=inf --geometry=640x360+40+40 --no-border --title=pmc-square --really-quiet /tmp/square.mkv &
+          for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
+          sleep 1
+          ./vsplugin/build-capture/pushmpc-capture --list
+          b=./vsplugin/build-capture/pushmpc-capture
+          $b --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
+          $b --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log
+          $b --player mpv --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log
+          echo "GPU engine:"; python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed 96 --hz 60
+          echo "CPU engine:"; python3 -I capture/tests/check_motion.py /tmp/cpu.y4m /tmp/off.y4m --speed 96 --hz 60
+      - name: Presented run (the X11 overlay over mpv)
+        env: { DISPLAY: ':99' }
+        run: |
+          set -eu
+          ./vsplugin/build-capture/pushmpc-capture --player mpv --allow-cpu-vulkan --display-hz 60 --seconds 8 --log /tmp/capture-present.log -v &
+          cap=$!
+          sleep 5
+          xwininfo -root -tree | grep -E 'pmc-square|PushMPC capture' | tee /tmp/tree.txt
+          grep -q 'PushMPC capture' /tmp/tree.txt
+          geo=$(xwininfo -name 'PushMPC capture' | sed -n 's/^ *-geometry //p'); echo "overlay $geo"
+          case $geo in 640x360+40+40*) ;; *) echo "::error::the overlay is not over the player ($geo)"; exit 1 ;; esac
+          xwd -root -silent -out /tmp/root.xwd
+          ffmpeg -hide_banner -loglevel error -y -i /tmp/root.xwd -vf "crop=600:300:60:70,scale=1:1:flags=area,format=gray" -f rawvideo /tmp/mean.raw
+          m=$(od -An -tu1 /tmp/mean.raw | tr -d ' '); echo "mean luma over the player: $m"
+          [ "$m" -gt 30 ] || { echo "::error::the overlay shows black"; exit 1; }
+          wait $cap
+          grep -E 'frames shown|generated' /tmp/capture-present.log | tail -3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capture-linux-x11-logs, path: /tmp/capture-*.log, if-no-files-found: ignore }
+
+  # the nvl engine (NVIDIA Video Effects) compiled in: the kernels' fatbin from the newest green run of the workflow that
+  # builds it (nvl-kernels.yml when it exists, else vsplugin-nvidia-linux.yml: artifact nvl-kernels-fatbin), else
+  # nvcc from NVIDIA's apt repository builds it here. No GPU on the runner: the probe must refuse cleanly.
+  linux-nvl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions: { contents: read, actions: read }
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Packages
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools mesa-vulkan-drivers \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
+            libwayland-dev wayland-protocols >/dev/null
+      - name: The kernels' fatbin (a green run's artifact, else nvcc)
+        env: { GH_TOKEN: '${{ github.token }}', REPO: '${{ github.repository }}' }
+        run: |
+          set -u
+          mkdir -p fatbin
+          for wf in nvl-kernels.yml vsplugin-nvidia-linux.yml; do
+            id=$(gh api "repos/$REPO/actions/workflows/$wf/runs?status=success&per_page=1" --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            [ -n "$id" ] && [ "$id" != null ] || continue
+            if gh run download "$id" -R "$REPO" -n nvl-kernels-fatbin -D fatbin 2>/dev/null && [ -f fatbin/nvl_kernels.fatbin ]; then
+              echo "fatbin from $wf run $id"; echo "NVL_FATBIN=$PWD/fatbin/nvl_kernels.fatbin" >> "$GITHUB_ENV"; break
+            fi
+          done
+          if [ ! -f fatbin/nvl_kernels.fatbin ]; then
+            echo "::notice::no fatbin artifact: nvcc 12.8 from NVIDIA's apt repository builds the kernels"
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+            sudo dpkg -i cuda-keyring_1.1-1_all.deb
+            sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+            sudo apt-get install -y -qq --no-install-recommends cuda-nvcc-12-8 cuda-cudart-dev-12-8 >/dev/null
+            echo "CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
+          fi
+          ls -la fatbin
+      - uses: actions/cache@v4
+        with:
+          path: vsplugin/build-nvl/_deps
+          key: capture-deps-linux-nvl-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Build (pushmpc-capture with the nvl engine)
+        run: |
+          set -eu
+          extra=""
+          if [ -n "${NVL_FATBIN:-}" ]; then
+            extra="-DPMVS_NVL_FATBIN=$NVL_FATBIN"
+            [ -f fatbin/nvl_guard_sc.fatbin ] && extra="$extra -DPMVS_NVL_GUARD_DIR=$PWD/fatbin"
+          fi
+          # shellcheck disable=SC2086
+          cmake -S vsplugin -B vsplugin/build-nvl -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DPMVS_NVIDIA_LINUX=ON $extra 2>&1 | tee /tmp/configure.log
+          grep -q 'the nvl engine (NVIDIA Video Effects) is built in' /tmp/configure.log || { echo "::error::the nvl engine is not in this build"; exit 1; }
+          cmake --build vsplugin/build-nvl --target pushmpc_capture capture_test
+          ./vsplugin/build-nvl/capture_test | tail -2
+      - name: The probe refuses cleanly (no NVIDIA driver here)
+        run: |
+          set -eu
+          ./vsplugin/build-nvl/pushmpc-capture --selftest --allow-cpu-vulkan 2>&1 | tee /tmp/capture-nvl-selftest.log
+          grep -E 'selftest: nvl: not available' /tmp/capture-nvl-selftest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capture-linux-nvl-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
+
+  linux-portal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true   # informational: the headless portal stack is a stand-in for a real desktop
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Packages
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools mesa-vulkan-drivers \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
+            libwayland-dev wayland-protocols sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr dbus mpv ffmpeg grim >/dev/null
+          dpkg-query -W sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr
+      - uses: actions/cache@v4
+        with:
+          path: vsplugin/build-capture/_deps
+          key: capture-deps-linux-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Build
+        run: |
+          cmake -S vsplugin -B vsplugin/build-capture -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON
+          cmake --build vsplugin/build-capture --target pushmpc_capture
+      - name: Portal capture on a headless Sway
+        run: |
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=640x360:r=24" -f lavfi -i "color=c=white:s=64x64:r=24" \
+            -filter_complex "[0][1]overlay=x='mod(t*96,560)':y=148,format=yuv420p" -t 40 -c:v libx264 -crf 12 /tmp/square.mkv
+          mkdir -p ~/.config/xdg-desktop-portal-wlr ~/.config/xdg-desktop-portal ~/.config/sway
+          printf '[screencast]\noutput_name=HEADLESS-1\nchooser_type=none\nmax_fps=60\n' > ~/.config/xdg-desktop-portal-wlr/config
+          printf '[preferred]\ndefault=wlr;gtk\n' > ~/.config/xdg-desktop-portal/sway-portals.conf
+          printf 'output HEADLESS-1 resolution 1280x720\n' > ~/.config/sway/config
+          cat > /tmp/run.sh <<'EOF'
+          set -eu
+          export XDG_RUNTIME_DIR=$(mktemp -d); chmod 700 "$XDG_RUNTIME_DIR"
+          export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
+          sway -c ~/.config/sway/config > /tmp/capture-sway.log 2>&1 &
+          for i in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && break; sleep 0.1; done
+          export WAYLAND_DISPLAY=wayland-1
+          dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR XDG_SESSION_TYPE || true
+          pipewire > /tmp/capture-pipewire.log 2>&1 &
+          sleep 1; wireplumber > /tmp/capture-wireplumber.log 2>&1 &
+          /usr/libexec/xdg-desktop-portal-wlr -l DEBUG > /tmp/capture-xdpw.log 2>&1 &
+          sleep 1; /usr/libexec/xdg-desktop-portal -r > /tmp/capture-xdp.log 2>&1 &
+          sleep 2
+          mpv --vo=wlshm --no-audio --loop=inf --fs --really-quiet /tmp/square.mkv &
+          sleep 2
+          b=$GITHUB_WORKSPACE/vsplugin/build-capture/pushmpc-capture
+          $b --monitor --no-present --display-hz 60 --engine cpu --frames 240 --dump /tmp/portal.y4m --log /tmp/capture-portal.log -v
+          grep -E 'portal|shared memory|dma-buf' /tmp/capture-portal.log | head -5
+          # the layer-shell overlay through lavapipe's Wayland WSI, a few seconds
+          $b --monitor --allow-cpu-vulkan --seconds 6 --log /tmp/capture-overlay.log -v || true
+          grep -E 'layer-shell|frames shown' /tmp/capture-overlay.log || true
+          grim /tmp/screen.png || true
+          EOF
+          dbus-run-session -- sh /tmp/run.sh
+          ls -la /tmp/portal.y4m
+          python3 -I capture/tests/check_motion.py /tmp/portal.y4m --speed 96 --hz 60 || echo "::warning::portal capture: motion check did not pass (headless timing)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capture-linux-portal-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Packages
+        run: brew install glslang molten-vk ninja
+      - name: Build
+        run: |
+          set -eu
+          cmake -S vsplugin -B vsplugin/build-capture -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DPUSHMPC_APPLE=ON
+          cmake --build vsplugin/build-capture --target pushmpc_capture capture_test
+          ./vsplugin/build-capture/capture_test
+          ./vsplugin/build-capture/pushmpc-capture --list
+      - name: Self-test (MoltenVK; informational)
+        continue-on-error: true
+        run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
+      - name: Without the Screen Recording permission
+        run: |
+          set +e
+          out=$(./vsplugin/build-capture/pushmpc-capture --player Finder --no-present --frames 30 2>&1); rc=$?
+          echo "$out"; echo "exit $rc"
+          if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "the plain message: ok"; exit 0; fi
+          if printf '%s' "$out" | grep -q 'capturing'; then echo "::notice::this runner grants screen capture: the capture ran instead"; exit 0; fi
+          echo "::error::neither the permission message nor a capture"; exit 1

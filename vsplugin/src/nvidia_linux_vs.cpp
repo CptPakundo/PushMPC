@@ -23,6 +23,7 @@
 #include "backend.h"
 #include "nvl_backend.h"
 #include "nvl_engine.h"
+#include "nvl_host.h"
 #include "nvl_selftest.h"
 #include "nvl_settings.h"
 #include "platform.h"
@@ -63,29 +64,8 @@ struct NInst {
     std::vector<const VSFrame*> held;
 };
 
-// the optical-flow tier's measured costs per GPU and size (CUDA events in the engine), read by Auto the next time:
-// <cache>/pushmpc/nvl-flow-costs, one line "<gpu>|<src w>x<h>|<out h> TAB <flow ms> TAB <warp ms>"
-std::string FlowCostKey(const std::string& gpu, int w, int h, int outH) { return gpu + "|" + std::to_string(w) + "x" + std::to_string(h) + "|" + std::to_string(outH); }
-std::string FlowCostFile() { std::string p = SelfTestCachePath(); const size_t s = p.find_last_of("/\\"); return s == std::string::npos ? std::string() : p.substr(0, s + 1) + "nvl-flow-costs"; }
-void ReadFlowCosts(const std::string& key, double& flow, double& warp)
-{
-    std::ifstream f(FlowCostFile());
-    std::string line;
-    while (std::getline(f, line)) {
-        const size_t a = line.find('\t'), b = line.find('\t', a + 1);
-        if (a != std::string::npos && b != std::string::npos && line.substr(0, a) == key) { flow = std::atof(line.c_str() + a + 1); warp = std::atof(line.c_str() + b + 1); }
-    }
-}
-void WriteFlowCosts(const std::string& key, double flow, double warp)
-{
-    const std::string file = FlowCostFile();
-    if (file.empty() || flow <= 0 || warp <= 0) return;
-    double f0 = 0, w0 = 0;
-    ReadFlowCosts(key, f0, w0);   // mpv reloads the script on every seek: write only what changed by more than 10 %
-    if (f0 > 0 && w0 > 0 && std::fabs(flow - f0) <= 0.1 * f0 && std::fabs(warp - w0) <= 0.1 * w0) return;
-    std::ofstream f(file, std::ios::app);
-    f << key << '\t' << flow << '\t' << warp << '\n';   // the last line of a key wins
-}
+// the optical-flow tier's measured costs (FlowCostKey, ReadFlowCosts, WriteFlowCosts) and the probe with the RTX 30 VFG
+// gate: nvl_host.h (shared with capture mode)
 
 std::string NArg(const VSMap* in, const VSAPI* a, const char* key)
 {
@@ -103,30 +83,10 @@ int64_t PInt(const VSMap* m, const VSAPI* a, const char* key, int64_t def, bool*
     return err ? def : v;
 }
 
-// once per process: the GPU, the runtime, the RTX 30 self-test (a child process, cached per GPU / driver)
+// once per process: the GPU, the runtime, the RTX 30 self-test (a child process, cached per GPU / driver): nvl_host.h
 const GpuInfo& Probe(const VSMap* in, const VSAPI* a)
 {
-    static std::mutex m;
-    static bool done = false;
-    static GpuInfo g;
-    std::lock_guard<std::mutex> lk(m);
-    if (done) return g;
-    done = true;
-    g = ProbeGpu(int(NArgI(in, a, "cuda_device", -1)), NArg(in, a, "runtime_dir"));
-    if (!g.driver) { Log("nvidia (Linux): " + g.why); return g; }
-    Log(std::format("nvidia (Linux): {} (SM {}.{}, {}, {} MB), driver {}.{}; runtime {}{}", g.name, g.major, g.minor, GpuClassName(g.cls), g.memBytes >> 20,
-        g.driverVersion / 1000, (g.driverVersion % 1000) / 10, g.runtimeDir, g.runtime ? "" : " MISSING (" + g.runtimeWhy + ")"));
-    if (g.runtime && VfgAmpere(g.major, g.minor)) {
-        const char* force = std::getenv("PUSHMPC_VFG_AMPERE");
-        const std::string key = SelfTestKey(g);
-        int r = force ? (std::strcmp(force, "0") ? 1 : 0) : ReadSelfTest(key);
-        std::string log = force ? std::string("PUSHMPC_VFG_AMPERE=") + force : std::string("cached");
-        if (r < 0) r = RunSelfTest(SelfTestExe(), g.runtimeDir, g.device, 120, log);
-        if (r == 1) { g.caps.vfg = true; g.caps.vfgWhy.clear(); }
-        else g.caps.vfgWhy = r == 0 ? "RTX 30: the VFG compatibility self-test failed on this GPU / driver (" + log + ")" : "RTX 30: the VFG compatibility self-test could not run (" + log + ")";
-        Log("nvidia (Linux): RTX 30 VFG compatibility: " + std::string(r == 1 ? "on" : "off") + " (" + (r == 1 ? log : g.caps.vfgWhy) + ")");
-    }
-    return g;
+    return ProbeGated(int(NArgI(in, a, "cuda_device", -1)), NArg(in, a, "runtime_dir"), [](const std::string& m) { Log(m); });
 }
 
 uint32_t FamilyOf(GpuClass c)
