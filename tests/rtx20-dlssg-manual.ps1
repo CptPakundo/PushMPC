@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Manual check of DLSS frame generation on a GeForce RTX 20 card (unlock TuringDlssg, the community port
-  sdli1995/dlssg_for_sm86), for RTX 2060 / 2070 / 2080 / TITAN RTX / Quadro RTX owners.
+  Manual check of DLSS frame generation on a GeForce RTX 20 or GTX 16 card (unlock TuringDlssg, the community port
+  sdli1995/dlssg_for_sm86), for RTX 20 owners, and GTX 1650 / 1660 owners (unproven there: the self-test decides).
 
 .DESCRIPTION
   Setup downloads the port on RTX 20 cards (scripts\dlssg-port-fetch.ps1). pushcore runs its self-test the first time
@@ -30,7 +30,7 @@ $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.PNPDeviceID -ma
 if (-not $gpu) { Write-Host 'No NVIDIA GPU found.' -ForegroundColor Red; exit 1 }
 $dev = if ("$($gpu.PNPDeviceID)" -match 'DEV_([0-9A-Fa-f]{4})') { $Matches[1] } else { '?' }
 Write-Host ("GPU: {0}  device {1}  driver {2}" -f $gpu.Name, $dev, $gpu.DriverVersion)
-if ($gpu.Name -notmatch 'RTX 20|TITAN RTX|Quadro RTX') { Write-Host 'Note: this is not an RTX 20 card; the port is used on RTX 20 only.' -ForegroundColor Yellow }
+if ($gpu.Name -notmatch 'RTX 20|TITAN RTX|Quadro RTX|GTX 16|GTX 1650|GTX 1660') { Write-Host 'Note: this is not an RTX 20 or GTX 16 card; the port is used on those only.' -ForegroundColor Yellow }
 
 $backend = @(Get-ChildItem -LiteralPath $Root -Recurse -Filter 'sm86_backend.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\community\\dlssg-sm75\\dlssg_sm86\\backend\\' })
 if (-not $backend.Count) { Write-Host "The port is not installed under $Root (Setup fetches it on RTX 20 cards; check Setup's output)." -ForegroundColor Red; exit 1 }
@@ -61,7 +61,7 @@ foreach ($l in $logs) {
 }
 $portLog = $logs | Where-Object { $_.Name -eq 'dlssg-port.log' } | Select-Object -First 1
 if ($portLog) { Write-Host "`n=== the port's log (last 40 lines) ==="; Get-Content -LiteralPath $portLog.FullName -Tail 40 | ForEach-Object { Write-Host $_ } }
-if ($st -and $st.Result -eq 'pass') { Write-Host "`nPASS: DLSS-G runs on this RTX 20 card; Auto uses it where it fits the frame budget." -ForegroundColor Green; exit 0 }
+if ($st -and $st.Result -eq 'pass') { Write-Host "`nPASS: DLSS-G runs on this card; Auto uses it where it fits the frame budget." -ForegroundColor Green; exit 0 }
 if ($st -and $st.Result -eq 'fail') { Write-Host "`nFAIL: $($st.Reason). PushMPC uses the next method on this card." -ForegroundColor Red; exit 1 }
 Write-Host "`nNo result yet: play a video with DLSS-G at 2x or more for at least 30 seconds." -ForegroundColor Yellow
 exit 2

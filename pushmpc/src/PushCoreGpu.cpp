@@ -269,7 +269,13 @@ pmu::UnlockDecision gtx16VsrDecision(const DXGI_ADAPTER_DESC1& d, bool files) {
     const pmu::SelfTest t = pmu::ReadSelfTest(pmu::Unlock::Gtx16Vsr, pmu::SelfTestKey(d.VendorId, d.DeviceId, driverVersionOf(d.AdapterLuid)));
     return pmu::DecideUnlock(pmu::Unlock::Gtx16Vsr, mode, files, L"nvngx_vsr.dll is not installed", t, false, src);
 }
-// DLSS-G on RTX 20 (unlock TuringDlssg): NVIDIA's DLSS-G runtime 310.9.16 with the community port's SM75 kernels
+// The GPUs the community DLSS-G port serves: Turing (compute capability 7.5), i.e. RTX 20 and the GTX 16 chips TU116 /
+// TU117 (no tensor cores: the same SM 7.5 instruction set, the matrix work runs on their FP16 units, as for Gtx16Vsr;
+// unproven upstream, so only the self-test decides)
+bool turingPortGpu(uint32_t vendor, uint32_t device, uint32_t fam) {
+    return vendor == 0x10DE && (fam == PUSHCORE_FAMILY_RTX20 || pmu::IsTu116(vendor, device) || pmu::IsTu117(vendor, device));
+}
+// DLSS-G on RTX 20 / GTX 16 (unlock TuringDlssg): NVIDIA's DLSS-G runtime 310.9.16 with the community port's SM75 kernels
 // (PushCoreDlssgPort.h; Setup fetches the port pinned). Eligible when the pinned files are there; Auto tries it once on a
 // new adapter + driver (the first DLSS-G open is the self-test: the port installs, NGX reports frame generation, the
 // graph starts and delivers valid generated frames) and keeps it on only after that passed. Off switch
@@ -278,7 +284,7 @@ pmu::UnlockDecision turingDlssgDecision(uint32_t vendor, uint32_t device, const 
     std::wstring src;
     const pmu::UnlockMode mode = pmu::ReadUnlockMode(pmu::Unlock::TuringDlssg, &src);
     const pmu::SelfTest t = pmu::ReadSelfTest(pmu::Unlock::TuringDlssg, pmu::SelfTestKey(vendor, device, driverVersionOf(luid)));
-    return pmu::DecideUnlock(pmu::Unlock::TuringDlssg, mode, files, L"the community DLSS-G port is not installed (Setup fetches it on RTX 20 cards)", t, false, src);
+    return pmu::DecideUnlock(pmu::Unlock::TuringDlssg, mode, files, L"the community DLSS-G port is not installed (Setup fetches it on RTX 20 and GTX 16 cards)", t, false, src);
 }
 // Crash guard for the TuringDlssg self-test: the value "Running" (the adapter + driver key) is set while a self-test
 // graph runs and cleared when it records a result or closes cleanly. Found at the next open, the earlier attempt ended
@@ -328,8 +334,8 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
     }
     set(PUSHCORE_CAP_VFG, vfgHw, veyra::pipeline::VfgBackend::runtimeAvailable(rt), "needs an NVIDIA RTX 30, 40 or 50 card",
         "the VFG files are not installed (runtime\\nvidia-vfg)");
-    if (nvidia && fam == PUSHCORE_FAMILY_RTX20) {
-        // RTX 20: the community port (unlock TuringDlssg); available while its self-test is pending (the first DLSS-G
+    if (turingPortGpu(v, d.DeviceId, fam)) {
+        // RTX 20 / GTX 16: the community port (unlock TuringDlssg); available while its self-test is pending (the first DLSS-G
         // open runs it; a failure falls back to the next method and turns it off for this adapter + driver) or passed
         const bool files = pmport::PortFilesPresent(runtimeDir);
         const pmu::UnlockDecision u = turingDlssgDecision(v, d.DeviceId, d.AdapterLuid, files);
@@ -337,7 +343,7 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         veyra::log::info("pushcore", std::format("unlock {}", why));
         const bool off = pmu::ReadUnlockMode(pmu::Unlock::TuringDlssg) == pmu::UnlockMode::Off;
         set(PUSHCORE_CAP_DLSSG, !off, files && (u.on || u.runSelfTest), why.c_str(),
-            files ? why.c_str() : "RTX 20: the community DLSS-G port is not installed (Setup fetches it on RTX 20 cards)");
+            files ? why.c_str() : "the community DLSS-G port is not installed (Setup fetches it on RTX 20 and GTX 16 cards)");
     } else {
         set(PUSHCORE_CAP_DLSSG, nvidia && rtx, fileExists(runtimeDir / L"nvngx_dlssg.dll"), "needs an NVIDIA RTX 20, 30, 40 or 50 card",
             "the DLSS-G files are not installed (nvngx_dlssg.dll)");
@@ -825,7 +831,7 @@ struct PushCore {
         const bool nvidia = ctx.adapter().vendorId == 0x10DE, amd = ctx.adapter().vendorId == 0x1002;
         auto add = [&](uint32_t b, uint32_t cap) {
             if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
-            if (b == PUSHCORE_FG_DLSSG && family == PUSHCORE_FAMILY_RTX20 && !turingDlssgAllowed()) return;
+            if (b == PUSHCORE_FG_DLSSG && turingPortGpu(ctx.adapter().vendorId, ctx.adapter().deviceId, family) && !turingDlssgAllowed()) return;
             for (const auto& e : c) if (e.first == b && e.second == cap) return;
             c.push_back({b, cap});
         };
@@ -911,7 +917,7 @@ struct PushCore {
         // RTX 20: DLSS-G through the community port; its runtime folder goes first in NGX's search path (patch hunk
         // EnhanceGraphDesc::pushMpcDlssgDirectory); the port's backend is installed once per process, before NGX starts
         turingPortGraph = false;
-        if (options.fg && options.settings.frameGenerationBackend == engine::FrameGenerationBackend::Dlss && family == PUSHCORE_FAMILY_RTX20) {
+        if (options.fg && options.settings.frameGenerationBackend == engine::FrameGenerationBackend::Dlss && turingPortGpu(ctx.adapter().vendorId, ctx.adapter().deviceId, family)) {
             const std::wstring tkey = turingKey();
             if (!turingRecorded && !turingGuardSet && !pmu::ReadSelfTest(pmu::Unlock::TuringDlssg, tkey).known) {
                 if (turingRunningKey() == tkey) {

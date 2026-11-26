@@ -1,8 +1,8 @@
 // PushMPC "Auto": the upgrade ladder.
 //
 //  1. Frame generation first. The method by GPU family (RTX 50/40/30: NVIDIA VFG, then DLSS-G, PushFlow, FSR FG;
-//     RTX 20: DLSS-G through the community port once its self-test passed, then PushFlow, NVOF FG, FSR FG; GTX: PushFlow,
-//     then FSR FG; Radeon: PushFlow, then FSR FG (FSR 4 ML on RX 9000), then AMD FRC; Intel:
+//     RTX 20: DLSS-G through the community port once its self-test passed, then PushFlow, NVOF FG, FSR FG; GTX: the same
+//     port on GTX 16, then PushFlow, FSR FG; Radeon: PushFlow, then FSR FG (FSR 4 ML on RX 9000), then AMD FRC; Intel:
 //     PushFlow, then FSR FG), the next one only when the method is not available on this GPU or cannot reach 2x
 //     within the budget. The multiplier with the method's base quality (VFG Medium, PushFlow Balanced): the largest M
 //     whose output fits the display (fps x M <= refresh x 1.02) and whose predicted p95 GPU cost fits the budget
@@ -296,7 +296,7 @@ inline std::vector<FgMethod> FgOrder(const Gpu& g)
     // RTX 5090, T5b), and its flow costs no shader time; Decide takes it only where it fits (else FSR FG)
     case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
     case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
-    case kGtx: return { FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    case kGtx: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };   // DLSS-G: GTX 16 with the port only (kCapDlssg)
     case kIntel: case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
     default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon
     }
@@ -328,7 +328,9 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     c.nvofTuring = g.family == kGtx || g.family == kRtx20;
     // DLSS-G on RTX 20 runs NVIDIA's Ada kernels re-targeted to Turing by the community port (SM75 images, FP16 tensor
     // cores, no FP8): its prior is 1.5x the card-scaled one until the running graph has measured it (fgScale learned)
+    // GTX 16 has no tensor cores (FP16 units instead): 4x, as for RTX VSR there
     if (g.family == kRtx20 && !c.fgLearned[kKeyDlssg]) c.fgScale[kKeyDlssg] *= 1.5;
+    if (g.family == kGtx && !c.fgLearned[kKeyDlssg]) c.fgScale[kKeyDlssg] *= 4.0;
     // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
     // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
     // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
