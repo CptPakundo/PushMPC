@@ -3285,8 +3285,8 @@ switch ($Action) {
             }
         }
         Progress 60 'Removing the files'
-        # pmml: the PushFlow runtime Setup installed (a folder someone else put there stays)
-        foreach ($d in @('filter', 'core', 'runtime', 'previous', 'staging', 'download') + @(if (Get-StateValue $state 'pmmlInstalled') { 'pmml' })) {
+        # pmml: the PushFlow runtime Setup installed (a folder someone else put there stays); cache: the filter's compiled shaders
+        foreach ($d in @('filter', 'core', 'runtime', 'previous', 'staging', 'download', 'cache') + @(if (Get-StateValue $state 'pmmlInstalled') { 'pmml' })) {
             $p = Join-Path $InstallDir $d
             if (Test-Path $p) { if ($DryRun) { Dry "would remove $p" } else { Remove-Item $p -Recurse -Force } }
         }

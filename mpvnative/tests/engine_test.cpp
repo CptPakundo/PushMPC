@@ -6,10 +6,15 @@
 //   Spacing, every OS: a 32 px box moving 4 px a frame at x4 and x8: even steps, no repeated positions.
 //   D3D11, Windows: WARP device, NV12 textures, the stub pushcore (CPU blend) -> BGRA textures with the right pixels,
 //   x2 order, pending() drains to 0.
+//   Fast start (Windows, WARP + stub): quick graph, full graph on the worker, handover with no frame lost or doubled, a
+//   seek in the quick phase and after the handover, a close while the full graph opens (set PUSHMPC_ENGINE_LOG to also
+//   confirm the handover from the engine log).
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 #include "pmeng.h"
@@ -315,6 +320,174 @@ static void TestD3D11Auto(const pmeng_api* api, bool capsFail)
     }
     _putenv_s("PUSHCORE_STUB_CAPS_FAIL", "0");
 }
+
+// Fast start in mpv's own route against the stub (PUSHCORE_STUB_FAST_START=1 is not needed here; PUSHMPC_TEST_QUICK_ANY_GPU=1
+// lets the quick start run on WARP): the quick graph opens, the full graph opens on the backend's worker after
+// PUSHCORE_STUB_FULL_OPEN_MS and takes over at a submit. Checked: every output in order, real frames right, no frame
+// missing or doubled at the handover, a flush (seek) right after it, and a close while the full graph is still opening.
+static std::string ReadFile(const char* path)
+{
+    std::string t; FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") || !f) return t;
+    char b[4096]; size_t n;
+    while ((n = fread(b, 1, sizeof(b), f)) > 0) t.append(b, n);
+    fclose(f);
+    return t;
+}
+static int Count(const std::string& t, const char* needle)
+{
+    int n = 0;
+    for (size_t at = t.find(needle); at != std::string::npos; at = t.find(needle, at + 1)) ++n;
+    return n;
+}
+static void TestD3D11Quick(const pmeng_api* api)
+{
+    const char* logEnv = std::getenv("PUSHMPC_ENGINE_LOG");
+    const bool haveLog = logEnv && *logEnv;
+    const char* logPath = haveLog ? logEnv : "";
+    if (!haveLog) std::printf("quick: PUSHMPC_ENGINE_LOG not set: frame checks only (the handover is not confirmed from the log)\n");
+    _putenv_s("PUSHMPC_TEST_QUICK_ANY_GPU", "1");
+    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+    D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1 };
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+    CHECK(SUCCEEDED(hr), "quick: WARP device: 0x%08lx", hr);
+    if (FAILED(hr)) return;
+    ComPtr<ID3D10Multithread> mt; if (SUCCEEDED(ctx.As(&mt))) mt->SetMultithreadProtected(TRUE);
+    const UINT W = 160, H = 90;
+    pmeng_device pd{}; pd.struct_size = sizeof(pd); pd.mem = PMENG_MEM_D3D11; pd.d3d11_device = dev.Get();
+    // sharper=on asks for RTX VSR (the stub reports an RTX 50 class GPU): an NGX stage, so the quick start is wanted
+    const std::string opts = std::string("core_dir=") + PME_STUB_DIR + "\nsmoother=2\nsharper=on\ndisplay_fps=48\nforce_multiplier=2\n";
+    D3D11_TEXTURE2D_DESC td = {}; td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_NV12;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+    ComPtr<ID3D11Texture2D> in;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &in))) { std::printf("quick: SKIP (no NV12 textures on this adapter)\n"); return; }
+    std::vector<uint8_t> nv12(size_t(W) * H * 3 / 2);
+
+    struct Run {
+        void* h = nullptr; pmeng_output out{}; int outputs = 0, reals = 0, wrong = 0, order = 0; int64_t lastSrc = -1; uint32_t lastSub = 0;
+        std::deque<int> sources;   // the submitted source numbers whose real frame has not come out yet (pixel check)
+    };
+    auto open = [&](Run& r, int fps) {
+        pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = PMENG_FMT_NV12; st.fps_num = fps; st.fps_den = 1;
+        st.range = 1; st.matrix = 1; st.primaries = 1; st.transfer = 1;
+        r.out.struct_size = sizeof(r.out);
+        char err[512] = {};
+        r.h = api->open(&pd, &st, opts.c_str(), &r.out, err, sizeof(err));
+        CHECK(r.h, "quick: open: %s", err);
+        return r.h != nullptr;
+    };
+    D3D11_TEXTURE2D_DESC od = {}; od.Width = W; od.Height = H; od.MipLevels = 1; od.ArraySize = 1; od.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    od.SampleDesc.Count = 1; od.Usage = D3D11_USAGE_DEFAULT; od.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    D3D11_TEXTURE2D_DESC sd = od; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> stage; dev->CreateTexture2D(&sd, nullptr, &stage);
+    auto take = [&](Run& r, uint32_t timeout) {
+        pmeng_out_info oi{};
+        while (api->peek(r.h, &oi, timeout) == 1) {
+            ComPtr<ID3D11Texture2D> o; dev->CreateTexture2D(&od, nullptr, &o);
+            pmeng_image di{}; di.mem = PMENG_MEM_D3D11; di.fmt = PMENG_FMT_BGRA; di.width = r.out.width; di.height = r.out.height; di.d3d11_texture = o.Get();
+            CHECK(api->write(r.h, &di) == PMENG_OK, "quick: write: %s", api->last_error(r.h));
+            ++r.outputs;
+            // presentation order: (source s, subframe 1) before (s, 0)? pushcore order is generated 1..k-1 then the real frame
+            if (oi.subframe == 0) {
+                ++r.reals;
+                if (int64_t(oi.source) != r.lastSrc + 1 && r.lastSrc >= 0) ++r.order;
+                r.lastSrc = int64_t(oi.source);
+                ctx->CopyResource(stage.Get(), o.Get());
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if (SUCCEEDED(ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+                    const uint8_t* px = static_cast<const uint8_t*>(m.pData) + size_t(H / 2) * m.RowPitch + (W / 2) * 4;
+                    const int sn = r.sources.empty() ? -1 : r.sources.front();
+                    if (!r.sources.empty()) r.sources.pop_front();
+                    const int want = int(std::lround(4.0 * (sn % 50) * 255.0 / 219.0));
+                    if (std::abs(int(px[1]) - want) > 6) { ++r.wrong; std::printf("quick: real %llu: G %d, expected ~%d\n", (unsigned long long)oi.source, px[1], want); }
+                    ctx->Unmap(stage.Get(), 0);
+                }
+            }
+            timeout = 0;
+        }
+    };
+    auto submit = [&](Run& r, int s, uint32_t flags) {
+        std::memset(nv12.data(), 16 + 4 * (s % 50), size_t(W) * H);
+        std::memset(nv12.data() + size_t(W) * H, 128, size_t(W) * H / 2);
+        ctx->UpdateSubresource(in.Get(), 0, nullptr, nv12.data(), W, W * H);
+        r.sources.push_back(s);
+        pmeng_image im{}; im.mem = PMENG_MEM_D3D11; im.fmt = PMENG_FMT_NV12; im.width = W; im.height = H; im.d3d11_texture = in.Get(); im.d3d11_slice = 0;
+        im.range = 1; im.matrix = 1; im.primaries = 1; im.transfer = 1;
+        int rc, tries = 0;
+        while ((rc = api->submit(r.h, &im, int64_t(s) * 41667, flags)) == PMENG_BUSY && tries++ < 500) take(r, 20);
+        CHECK(rc == PMENG_OK, "quick: submit %d -> %d %s", s, rc, api->last_error(r.h));
+        take(r, 0);
+    };
+    auto drain = [&](Run& r) { for (int i = 0; i < 200 && api->pending(r.h) > 0; ++i) take(r, 20); CHECK(api->pending(r.h) == 0, "quick: pending %u", api->pending(r.h)); };
+
+    // 1) continuous across the handover, then a seek (flush) right after it
+    _putenv_s("PUSHCORE_STUB_FULL_OPEN_MS", "300");
+    const int hand0 = Count(ReadFile(logPath), "quick start: handover at");
+    {
+        Run r;
+        if (open(r, 24)) {
+            const std::string t0 = ReadFile(logPath);
+            CHECK(!haveLog || Count(t0, "open (cold): quick graph, the full graph follows") >= 1, "quick: the quick start did not run (see the engine log: 'quick start not used')");
+            const int N = 30;
+            for (int s = 0; s < N; ++s) { if (s == 8) Sleep(500); submit(r, s, 0); }
+            drain(r);
+            const uint32_t k = r.out.multiplier;
+            CHECK(!haveLog || Count(ReadFile(logPath), "quick start: handover at") == hand0 + 1, "quick: no handover");
+            CHECK(r.reals == N, "quick: %d real frames, expected %d", r.reals, N);
+            CHECK(r.outputs == N + (N - 1) * int(k - 1), "quick: %d outputs, expected %d (x%u): a frame missing or doubled at the handover", r.outputs, N + (N - 1) * int(k - 1), k);
+            CHECK(r.order == 0 && r.wrong == 0, "quick: %d out-of-order, %d wrong real frames", r.order, r.wrong);
+            std::printf("quick: continuous %d outputs (%d real), x%u\n", r.outputs, r.reals, k);
+            // a seek right after the handover
+            CHECK(api->flush(r.h) == PMENG_OK, "quick: flush: %s", api->last_error(r.h));
+            Run s2; s2.h = r.h; s2.out = r.out;
+            for (int s = 60; s < 70; ++s) submit(s2, s, s == 60 ? PMENG_SUBMIT_DISCONTINUITY : 0);
+            drain(s2);
+            CHECK(s2.reals == 10 && s2.outputs == 10 + 9 * int(k - 1) && s2.wrong == 0, "quick: after the seek %d outputs (%d real, %d wrong)", s2.outputs, s2.reals, s2.wrong);
+            api->close(r.h);
+        }
+    }
+    // 2) a seek during the quick phase, then the handover
+    _putenv_s("PUSHCORE_STUB_FULL_OPEN_MS", "600");
+    {
+        Run r;
+        if (open(r, 25)) {
+            for (int s = 0; s < 5; ++s) submit(r, s, 0);
+            CHECK(api->flush(r.h) == PMENG_OK, "quick: flush in the quick phase: %s", api->last_error(r.h));
+            Run s2; s2.h = r.h; s2.out = r.out;
+            for (int s = 40; s < 45; ++s) submit(s2, s, s == 40 ? PMENG_SUBMIT_DISCONTINUITY : 0);
+            Sleep(800);   // the full graph is ready now
+            for (int s = 45; s < 60; ++s) submit(s2, s, 0);
+            drain(s2);
+            const uint32_t k = r.out.multiplier;
+            CHECK(!haveLog || Count(ReadFile(logPath), "quick start: handover at") == hand0 + 2, "quick: no handover after the seek");
+            CHECK(s2.reals == 20 && s2.outputs == 20 + 19 * int(k - 1) && s2.wrong == 0 && s2.order == 0, "quick: seek in the quick phase: %d outputs (%d real, %d wrong, %d order)", s2.outputs, s2.reals, s2.wrong, s2.order);
+            api->close(r.h);
+        }
+    }
+    // 3) close while the full graph is still opening: its worker closes it later, nothing is left open
+    _putenv_s("PUSHCORE_STUB_FULL_OPEN_MS", "700");
+    {
+        Run r;
+        if (open(r, 26)) {
+            for (int s = 0; s < 3; ++s) submit(r, s, 0);
+            drain(r);
+            api->close(r.h);
+        }
+        // the next open drops the quick state (a reopen) and the late full graph is closed by its worker
+        Run r2;
+        _putenv_s("PUSHCORE_STUB_FULL_OPEN_MS", "100");
+        if (open(r2, 27)) {
+            for (int i = 0; i < 150 && Count(ReadFile(logPath), "no longer wanted) closed") < 1; ++i) Sleep(20);
+            CHECK(!haveLog || Count(ReadFile(logPath), "no longer wanted) closed") >= 1, "quick: the late full graph was not closed");
+            for (int s = 0; s < 10; ++s) { if (s == 3) Sleep(300); submit(r2, s, 0); }
+            drain(r2);
+            CHECK(r2.reals == 10 && r2.wrong == 0, "quick: after the late open %d real, %d wrong", r2.reals, r2.wrong);
+            api->close(r2.h);
+        }
+    }
+    _putenv_s("PUSHCORE_STUB_FULL_OPEN_MS", "");
+    _putenv_s("PUSHMPC_TEST_QUICK_ANY_GPU", "");
+}
 #endif
 
 int main()
@@ -341,6 +514,7 @@ int main()
     TestD3D11(api);
     TestD3D11Auto(api, false);
     TestD3D11Auto(api, true);
+    TestD3D11Quick(api);
 #endif
     std::printf(g_fail ? "engine_test: %d FAILED\n" : "engine_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;

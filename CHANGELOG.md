@@ -33,6 +33,8 @@ sets itself up for your graphics card and display.
 - Every setting picks itself for your graphics card, display, refresh rate (fixed, G-SYNC or FreeSync) and video, and
   keeps adjusting while you watch. It steps down rather than dropping frames.
 - A lighter profile on laptop battery.
+- Quick start in MPC-HC and MPC-BE: the picture appears sooner and smooth motion starts about half a second after it,
+  even on the first video after starting the player. The sharpest upscaling joins a few seconds later, without a pause.
 
 ### Setup and updates
 

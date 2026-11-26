@@ -24,6 +24,7 @@
 #define PUSHCORE_BUILD 1
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
+#include "PushCoreQuickVsr.h"        // fast start Route B: driver RTX VSR through the D3D11 video processor
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
@@ -52,6 +53,7 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/gfx/GpuSchedulingPriority.h"
 #include "veyra/ngx/NgxCoreCache.h"
+#include "veyra/ngx/FgCompatibilitySession.h"
 #include "veyra/diagnostics/FrameMetrics.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/Log.h"
@@ -66,6 +68,8 @@
 #include <cmath>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <fstream>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -74,6 +78,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -480,6 +485,34 @@ struct PushCore {
     bool debandEligible = false;           // 8-bit SDR stream and the pass initialised on this device
     int debandLogged = -1;                 // last state logged (on/off/strength), to log changes only
     bool debandWanted() const { return debandEligible && haveSettings && settings.deband != 0; }
+    // ---- fast start, Route B (PUSHCORE_FLAG_QUICK_VSR, PushCoreQuickVsr.h) ----
+    pushmpc::QuickVsr qvsr;
+    uint32_t qvsrSrcW = 0, qvsrSrcH = 0;   // the source size before the video processor (stream holds the scaled size)
+    // The quick graph asked for Route B: when upscaling is wanted, the source gets larger, this is an NVIDIA adapter and
+    // the driver's VSR answers the check, the video processor scales into the ingress ring and the graph runs on the SR
+    // target size with its own SR stage off. Otherwise nothing changes (the caller's settings, e.g. NVIDIA Image Scaling).
+    void setupQuickVsr() {
+        if (!(flags & PUSHCORE_FLAG_QUICK_VSR)) return;
+        auto skip = [](const std::string& why) { veyra::log::info("quick-vsr", "not used: " + why); };
+        if (!haveSettings || !settings.sr) return skip("no upscaling asked for");
+        if (!ctx.adapter().isNvidia) return skip("not an NVIDIA GPU");
+        const auto target = settings.srTarget == PUSHCORE_SR_TARGET_1440P ? veyra::pipeline::SrTarget::Qhd
+                          : settings.srTarget == PUSHCORE_SR_TARGET_5K ? veyra::pipeline::SrTarget::Uhd5K : veyra::pipeline::SrTarget::Uhd4K;
+        const auto e = veyra::pipeline::srStageExtents({stream.width, stream.height}, target).evaluated;
+        if (e.width <= stream.width || e.height <= stream.height) return skip("the source is already at the target size");
+        const auto t = Clock::now();
+        if (!qvsr.init(d11.Get(), imm.Get(), stream.width, stream.height, e.width, e.height, stream.format == PUSHCORE_INPUT_P010,
+                       stream.range, stream.matrix, stream.transfer)) {
+            veyra::log::info("quick-vsr", std::format("not used ({:.0f} ms): {}", msSince(t), qvsr.why()));
+            qvsr.reset();
+            return;
+        }
+        qvsrSrcW = stream.width; qvsrSrcH = stream.height;
+        stream.width = e.width; stream.height = e.height;           // the graph's source is the scaled picture
+        frame->width = int(e.width); frame->height = int(e.height);
+        settings.sr = 0;                                            // its SR is done; the graph keeps frame generation etc.
+        veyra::log::info("quick-vsr", std::format("on in {:.0f} ms: {}", msSince(t), qvsr.why()));
+    }
     AVFrame* frame = nullptr;
     veyra::pipeline::ColorDescription color;
     bool dvP5Logged = false;
@@ -1027,14 +1060,18 @@ struct PushCore {
             fail(std::format("input texture format {} does not match the stream", int(sd.Format)));
             return false;
         }
-        if (sd.Width == inW && sd.Height == inH && sd.Format == inFormat && inSlots[0].tex) return true;
+        // Route B: the ring holds the video processor's output (the SR target size), whatever the decoder's surface size
+        const UINT wantW = qvsr.active() ? qvsr.outWidth() : sd.Width, wantH = qvsr.active() ? qvsr.outHeight() : sd.Height;
+        if (wantW == inW && wantH == inH && sd.Format == inFormat && inSlots[0].tex) return true;
         if (inSlots[0].tex) ring.drainQueue();
         for (auto& slot : inSlots) {
+            if (slot.tex) qvsr.forget(slot.tex.Get());
             slot = {};
             D3D11_TEXTURE2D_DESC d{};
-            d.Width = sd.Width; d.Height = sd.Height; d.MipLevels = 1; d.ArraySize = 1;
+            d.Width = wantW; d.Height = wantH; d.MipLevels = 1; d.ArraySize = 1;
             d.Format = sd.Format == DXGI_FORMAT_P016 ? DXGI_FORMAT_P010 : sd.Format;
-            d.SampleDesc = {1, 0}; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            d.SampleDesc = {1, 0}; d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (qvsr.active() ? D3D11_BIND_RENDER_TARGET : 0u);   // the processor's output view
             d.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
             if (hrFail(d11->CreateTexture2D(&d, nullptr, &slot.tex), "ingress ring texture")) return false;
             ComPtr<IDXGIResource1> dr; HANDLE h = nullptr;
@@ -1045,7 +1082,7 @@ struct PushCore {
             CloseHandle(h);
             if (hrFail(hr, "D3D12 OpenSharedHandle(ingress ring)")) return false;
         }
-        inW = sd.Width; inH = sd.Height; inFormat = sd.Format;
+        inW = wantW; inH = wantH; inFormat = sd.Format;
         veyra::log::info("pushcore", std::format("ingress ring: {} shared textures {}x{} format {} (source mips {} array {})",
                                                  kIngressSlots, inW, inH, int(inFormat), sd.MipLevels, sd.ArraySize));
         return true;
@@ -1122,6 +1159,7 @@ struct PushCore {
 
         auto& slot = inSlots[inIndex % kIngressSlots];
         ++inIndex;
+        if (!gpuOnlyInput) {
         // Deband (PushMPC): the source slice goes through the pass into a scratch texture, which then takes the place
         // of the source in the ingress copy. Same immediate context, so the order is kept with no wait.
         ID3D11Texture2D* copySrc = src;
@@ -1139,9 +1177,15 @@ struct PushCore {
             }
         }
         if (slot.freeValue) imm4->Wait(fence12in11.Get(), slot.freeValue);   // GPU-side: graph consumed it
-        imm->CopySubresourceRegion(slot.tex.Get(), 0, 0, 0, 0, copySrc, copySub, nullptr);
+        if (qvsr.active()) {   // Route B: driver RTX VSR scales the source into the slot
+            std::string vpErr;
+            if (!qvsr.blit(copySrc, copySub, slot.tex.Get(), vpErr)) return fail("quick VSR: " + vpErr);
+        } else {
+            imm->CopySubresourceRegion(slot.tex.Get(), 0, 0, 0, 0, copySrc, copySub, nullptr);
+        }
         if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(ingress)")) return PUSHCORE_ERROR;
         imm4->Flush();
+        }   // gpuOnlyInput (PUSHCORE_FLAG_WARMUP_GPU_ONLY warm-up): the slot as it is, no D3D11 work, no new fence value
 
         pipeline::HardwareSurfaceInput hw;
         hw.texture = slot.res.Get(); hw.subresourceIndex = 0;
@@ -1467,8 +1511,12 @@ struct PushCore {
 
     // Runs a few synthetic frames through the new graph so its first-use stalls (RTX VSR's first evaluate,
     // ~65 ms, and VFG's first pair) happen here, on the opening thread, and not on the first real frames.
+    bool gpuOnlyInput = false;   // set during a PUSHCORE_FLAG_WARMUP_GPU_ONLY warm-up
     void warmUp() {
         const auto t = Clock::now();
+        const bool gpuOnly = (flags & PUSHCORE_FLAG_WARMUP_GPU_ONLY) != 0;
+        gpuOnlyInput = gpuOnly;
+        struct Reset { bool& b; ~Reset() { b = false; } } resetGpuOnly{gpuOnlyInput};
         ComPtr<ID3D11Texture2D> tex;
         D3D11_TEXTURE2D_DESC d{};
         d.Width = (stream.width + 1) & ~1u; d.Height = (stream.height + 1) & ~1u; d.MipLevels = 1; d.ArraySize = 1;
@@ -1495,7 +1543,7 @@ struct PushCore {
         auto drainSome = [&](uint32_t timeoutMs) {
             PushCoreFrame f[16]; uint32_t n = 0;
             if (poll(f, 16, &n, timeoutMs) != PUSHCORE_OK) return false;
-            for (uint32_t k = 0; k < n; ++k) { presented(f[k].lease, imm.Get()); ++outputs; }
+            for (uint32_t k = 0; k < n; ++k) { presented(f[k].lease, gpuOnly ? nullptr : imm.Get()); ++outputs; }
             return true;
         };
         for (int i = 0; i < 3 && ok; ++i) {
@@ -1511,7 +1559,7 @@ struct PushCore {
             for (auto& kv : leases) left.push_back(kv.first);
             for (auto l : left) presented(l, nullptr);
         }
-        imm4->Flush();
+        if (!gpuOnly) imm4->Flush();
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
         haveReal = false; needReset = true;
@@ -1539,6 +1587,7 @@ struct PushCore {
             }
             cache = nullptr;
         }
+        qvsr.reset();
         for (auto& s : inSlots) s = {};
         deband = pushmpc::Deband{}; debandEligible = false;
         copyList.Reset();
@@ -1555,13 +1604,193 @@ struct PushCore {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Fast start (PushMPC 1.0): pushcore_prewarm. The first open in a process creates the adapter's D3D12 device (~100 ms
+// with its context) and initialises CUDA with the device's primary context for VFG (~80 ms). A background thread does
+// both while the player is still connecting its filters and keeps them alive until the next open succeeded (the open
+// then holds its own references, so the device and the context are found ready) or 30 s passed.
+namespace prewarm {
+std::mutex lock;
+HANDLE release = nullptr;     // set by a successful open (or the timeout)
+bool running = false;
+std::string note;             // what the prewarm did, for the next open's log
+// pushcore_prewarm2: the NGX core as well. NGX Init (~2 s on an RTX 5090: it loads and checks every feature the driver
+// knows) needs only the D3D12 device, so it runs here, outside the graph lock, while the quick graph builds; the core is
+// published into the process-wide cache under the key the full graph will build, and the full graph borrows it.
+struct NgxJob { bool want = false; std::wstring runtimeDir; PushCoreSettings settings{}; };
+int ngxState = 0;             // 1 = an NGX Init for gSharedCache runs now (graphs wait for it in waitNgx)
+std::condition_variable ngxCv;
+void waitNgx(veyra::ngx::NgxCoreCache* cache) {
+    if (cache != gSharedCache) return;
+    std::unique_lock<std::mutex> lk(lock);
+    const auto t = Clock::now();
+    const bool waited = ngxState == 1;
+    ngxCv.wait_for(lk, std::chrono::seconds(15), [] { return ngxState != 1; });
+    if (waited) veyra::log::info("prewarm", std::format("the graph waited {:.0f} ms for the NGX core of the prewarm", msSince(t)));
+}
+std::string ngxPrewarm(veyra::gfx::D3D12DeviceContext& ctx, const NgxJob& job) {
+    using namespace veyra;
+    const auto t = Clock::now();
+    // the key EnhanceGraph builds (EnhanceGraph::initialize, the NGX core block; PushMPC keys frame generation only for DLSS-G)
+    ngx::NgxCoreCache::Key key;
+    key.device = ctx.device();
+    key.runtimeDirectory = std::filesystem::absolute(job.runtimeDir).lexically_normal().wstring();
+    engine::NrRuntime nr = engine::NrRuntime::Ampere;   // as buildFromPushMpc
+    {
+        const std::filesystem::path rt(job.runtimeDir);
+        std::error_code ec;
+        if (!std::filesystem::exists(rt / L"nr-ampere" / L"nvngx_dlssnr.dll", ec) && std::filesystem::exists(rt / L"nr-original" / L"nvngx_dlssnr.dll", ec)) nr = engine::NrRuntime::NvidiaOriginal;
+    }
+    key.nrRuntime = int(engine::currentNrRuntime(nr));
+    key.frameGeneration = false; key.fgBackend = 0; key.fgMultiplier = 1;
+    const bool enabled = !ngx::FgCompatibilitySession::requested(ctx.adapter().vendorId, ctx.adapter().deviceId) &&
+                         !GetEnvironmentVariableW(L"VEYRA_TEST_DISABLE_NGX_CORE_REUSE", nullptr, 0);
+    if (!enabled) return "NGX core: not prewarmed (no core reuse on this GPU)";
+    std::ifstream ids(job.runtimeDir + L"\\..\\config\\ngx-local.json", std::ios::binary);
+    const std::string idText((std::istreambuf_iterator<char>(ids)), std::istreambuf_iterator<char>());
+    auto scan = [&idText](const char* k) {
+        const std::string needle = std::string("\"") + k + "\"";
+        size_t q = idText.find(needle);
+        if (q == std::string::npos) return std::string();
+        q = idText.find('"', idText.find(':', q + needle.size()));
+        if (q == std::string::npos) return std::string();
+        return idText.substr(q + 1, idText.find('"', q + 1) - q - 1);
+    };
+    const std::string projectId = scan("ngxProjectId"), engineVersion = scan("engineVersion");
+    if (projectId.empty()) return "NGX core: not prewarmed (ngx-local.json missing)";
+    {
+        std::lock_guard<std::mutex> g(gGraphLock);
+        if (gSharedDevice || gSharedCacheUser) return "NGX core: not prewarmed (the process already has a warm or busy core)";
+        if (!gSharedCache) gSharedCache = new ngx::NgxCoreCache();
+        std::lock_guard<std::mutex> lk(lock);
+        ngxState = 1;
+    }
+    auto host = std::make_shared<ngx::NgxCoreHost>();
+    Status st = Status::Ok;
+    const bool ok = host->initialize(ctx.device(), job.runtimeDir, projectId.c_str(), engineVersion.c_str(), st);
+    bool published = false;
+    if (ok && gSharedCache->prepare(std::move(key), true)) {   // no graph uses the cache now: it waits in waitNgx
+        gSharedCache->publish(host);
+        gSharedDevice = ctx.device();
+        published = true;
+    }
+    host.reset();
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        ngxState = 0;
+    }
+    ngxCv.notify_all();
+    return std::format("NGX core {} in {:.0f} ms", published ? "initialised and kept for the graph" : ok ? "initialised but not kept" : "did not initialise", msSince(t));
+}
+using CuInit = int(__stdcall*)(unsigned);
+using CuCount = int(__stdcall*)(int*);
+using CuGet = int(__stdcall*)(int*, int);
+using CuLuid = int(__stdcall*)(char*, unsigned*, int);
+using CuRetain = int(__stdcall*)(void**, int);
+using CuRelease = int(__stdcall*)(int);
+void run(uint64_t luid, NgxJob job) {
+    const auto t0 = Clock::now();
+    veyra::gfx::D3D12DeviceContext ctx;
+    veyra::Status status = veyra::Status::Ok;
+    veyra::gfx::DeviceContextDesc dd;
+    dd.commandSlotCount = 1;
+    dd.requiredLuid = luid;
+    std::thread deband([] { pushmpc::Deband::precompile(); });   // the deband pass's shaders, in parallel
+    const bool d3d = ctx.initialize(dd, status);
+    const double d3dMs = msSince(t0);
+    int cuDevice = -1; CuRelease cuRelease = nullptr; double cudaMs = -1;
+    if (d3d && ctx.adapter().vendorId == 0x10DE) {
+        const auto t1 = Clock::now();
+        if (HMODULE cu = LoadLibraryExW((system32() / L"nvcuda.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+            auto init = reinterpret_cast<CuInit>(GetProcAddress(cu, "cuInit"));
+            auto count = reinterpret_cast<CuCount>(GetProcAddress(cu, "cuDeviceGetCount"));
+            auto get = reinterpret_cast<CuGet>(GetProcAddress(cu, "cuDeviceGet"));
+            auto getLuid = reinterpret_cast<CuLuid>(GetProcAddress(cu, "cuDeviceGetLuid"));
+            auto retain = reinterpret_cast<CuRetain>(GetProcAddress(cu, "cuDevicePrimaryCtxRetain"));
+            cuRelease = reinterpret_cast<CuRelease>(GetProcAddress(cu, "cuDevicePrimaryCtxRelease_v2"));
+            int n = 0;
+            if (init && count && get && getLuid && retain && cuRelease && init(0) == 0 && count(&n) == 0) {
+                for (int i = 0; i < n && cuDevice < 0; ++i) {
+                    int dev = -1; uint64_t l = 0; unsigned node = 0;
+                    if (get(&dev, i) != 0 || getLuid(reinterpret_cast<char*>(&l), &node, dev) != 0) continue;
+                    void* c = nullptr;   // the LUID bytes as DXGI has them (LowPart, then HighPart)
+                    if (l == ctx.adapter().luid && retain(&c, dev) == 0) cuDevice = dev;
+                }
+            }
+            cudaMs = msSince(t1);
+        }
+    }
+    {   // logged by the next open (the log file is opened there)
+        std::lock_guard<std::mutex> lk(lock);
+        note = std::format("fast start: D3D12 device {} in {:.0f} ms, CUDA primary context {} ({:.0f} ms), adapter {}",
+            d3d ? "ready" : "failed", d3dMs, cuDevice >= 0 ? "retained" : "not used", cudaMs, d3d ? narrow(ctx.adapter().description) : std::string("-"));
+    }
+    deband.join();
+    if (d3d && job.want && ctx.adapter().vendorId == 0x10DE) {
+        const std::string n = ngxPrewarm(ctx, job);
+        std::lock_guard<std::mutex> lk(lock);
+        note += "; " + n;
+    }
+    WaitForSingleObject(release, 30000);
+    if (cuDevice >= 0 && cuRelease) cuRelease(cuDevice);
+    if (ctx.initialized()) ctx.shutdown();
+    std::lock_guard<std::mutex> lk(lock);
+    running = false;
+}
+void done() {   // a successful open: it holds its own references now
+    std::lock_guard<std::mutex> lk(lock);
+    if (running && release) SetEvent(release);
+}
+}  // namespace prewarm
+
+// ---------------------------------------------------------------------------------------------
 // C ABI
 extern "C" {
+
+// the player's filter is going away: nothing of the prewarm may stay (thread, device, CUDA context)
+int pushcore_prewarmRelease(void) { try { prewarm::done(); } catch (...) {} return PUSHCORE_OK; }
+static int startPrewarm(uint64_t adapterLuid, prewarm::NgxJob job) {
+    try {
+        veyra::pipeline::pushMpcBeforeNgxCore = &prewarm::waitNgx;
+        std::lock_guard<std::mutex> lk(prewarm::lock);
+        if (prewarm::running) return PUSHCORE_OK;
+        if (!prewarm::release) prewarm::release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!prewarm::release) return PUSHCORE_ERROR;
+        ResetEvent(prewarm::release);
+        prewarm::running = true;
+        std::thread([adapterLuid, job] {
+            try { prewarm::run(adapterLuid, job); }
+            catch (...) {
+                std::lock_guard<std::mutex> l(prewarm::lock);
+                prewarm::running = false;
+                if (prewarm::ngxState == 1) { prewarm::ngxState = 0; prewarm::ngxCv.notify_all(); }
+            }
+        }).detach();
+        return PUSHCORE_OK;
+    } catch (...) { return PUSHCORE_ERROR; }
+}
+int pushcore_prewarm(uint64_t adapterLuid) { return startPrewarm(adapterLuid, {}); }
+int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* settings, uint64_t adapterLuid) {
+    prewarm::NgxJob job;
+    try {
+        if (config && config->structSize >= sizeof(PushCoreConfig) && settings && copySettings(settings, job.settings)) {
+            const PushCoreSettings& ps = job.settings;
+            // the NGX core is wanted when the full graph has an NGX stage and DLSS-G (keyed by its multiplier) is not the method
+            job.want = ((ps.sr && ps.srMethod == PUSHCORE_SR_METHOD_RTX) || ps.nr || ps.videoHdr) && !(ps.multiplier > 1 && ps.fgBackend == PUSHCORE_FG_DLSSG);
+            if (job.want) {
+                // the runtime folder as pushcore_open resolves it (RuntimePaths override first)
+                const std::filesystem::path root = config->pushfpsDir && *config->pushfpsDir ? std::filesystem::path(config->pushfpsDir) : moduleDirectory();
+                veyra::runtime::setApplicationRootOverride(root);
+                job.runtimeDir = config->runtimeDir && *config->runtimeDir ? std::wstring(config->runtimeDir) : veyra::runtime::localRuntimeDirectory().wstring();
+            }
+        }
+    } catch (...) { job.want = false; }
+    return startPrewarm(adapterLuid, job);
+}
 
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -1582,7 +1811,11 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
         veyra::runtime::setApplicationRootOverride(root);
         if (config->shaderDir && *config->shaderDir) veyra::runtime::setShaderDirectoryOverride(config->shaderDir);
         if (config->logFile && *config->logFile) {
-            veyra::Logger::instance().openFile(config->logFile);
+            // a second instance in the same process (the filter's quick-start graph, then the full one) keeps writing the
+            // same file instead of truncating it
+            static std::mutex logLock; static std::wstring logPath;
+            std::lock_guard<std::mutex> lk(logLock);
+            if (logPath != config->logFile && veyra::Logger::instance().openFile(config->logFile)) logPath = config->logFile;
             veyra::Logger::instance().setConsoleEnabled(false);
         }
         core = new PushCore();
@@ -1601,9 +1834,11 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             const auto preflight = moduleDirectory() / L"pushcore_hip_preflight.exe";
             if (std::filesystem::exists(preflight)) veyra::pipeline::amdhip::setPreflightExecutable(preflight.wstring());
         }
+        { std::lock_guard<std::mutex> lk(prewarm::lock); if (!prewarm::note.empty()) { veyra::log::info("prewarm", prewarm::note); prewarm::note.clear(); } }
         veyra::log::info("pushcore", std::format("open root={} shaders={} runtime={} data={}", narrow(root.wstring()),
                                                  narrow(veyra::runtime::shaderDirectory().wstring()), narrow(core->runtimeDir), narrow(core->dataDir)));
         int built = core->openDevices(device);
+        if (built == PUSHCORE_OK) core->setupQuickVsr();
         if (built == PUSHCORE_OK) {
             std::lock_guard<std::mutex> lk(gGraphLock);
             built = core->buildGraph();
@@ -1615,8 +1850,12 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             return nullptr;
         }
         if (!(core->flags & PUSHCORE_FLAG_NO_WARMUP)) core->warmUp();
+        prewarm::done();
+        veyra::pipeline::pushMpcBeforeNgxCore = &prewarm::waitNgx;
+        veyra::Logger::instance().flush();   // the open's timeline on disk now (a player's fast exit skips the buffered rest)
         ++gOpenInstances;
         core->description += std::format("; GPU priority class {}", veyra::gfx::gpuPriorityStatus().actual);
+        if (core->qvsr.active()) core->description += std::format("; quick start: driver RTX VSR (D3D11) from {}x{}", core->qvsrSrcW, core->qvsrSrcH);
         return core;
     } catch (const std::exception& e) {
         report(std::string("exception: ") + e.what());
@@ -1697,6 +1936,7 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.cutGuardCuts = core->cutsSeen.load(std::memory_order_relaxed);
     core->st.subtitleHoldState = core->subtitleState.load(std::memory_order_relaxed);
     core->st.subtitleHoldPixels = core->subtitlePixels.load(std::memory_order_relaxed);
+    core->st.quickVsr = core->qvsr.active() ? 1u : 0u;
     std::snprintf(core->st.fgNote, sizeof(core->st.fgNote), "%s", core->fgNote.c_str());
     std::memcpy(s, &core->st, size);
     return PUSHCORE_OK;

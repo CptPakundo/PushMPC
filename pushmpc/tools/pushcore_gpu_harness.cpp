@@ -110,7 +110,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::filesystem::path outDir = argv[2];
     std::wstring pushfps = L"C:\\pm\\run", data, shaderDir;
     bool haveData = false;
-    unsigned maxFrames = 120, warmup = 10;
+    unsigned maxFrames = 120, warmup = 10, idleMs = 0;
     double start = 1752;
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
@@ -148,6 +148,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--fg") fgOpt = _wtoi(v.c_str());
         else if (k == L"--multiplier") mult = _wtoi(v.c_str());
         else if (k == L"--warmup") warmup = unsigned(_wtoi(v.c_str()));
+        else if (k == L"--idle") idleMs = unsigned(_wtoi(v.c_str()));   // keep the open core idle this long before the close (idle cost)
         else if (k == L"--save") {
             save.clear();
             size_t p = 0;
@@ -452,6 +453,7 @@ int wmain(int argc, wchar_t** argv) {
                       presentedCount == expected && (m == 1 || generated > 0);
     std::cout << (pass ? "PASS" : "FAIL") << "\n";
 
+    if (idleMs) { std::cout << "IDLE " << idleMs << " ms (core open, no frames)" << std::endl; Sleep(idleMs); std::cout << "IDLE done" << std::endl; }
     api->close(core);
     av_frame_free(&decoded); av_packet_free(&pkt);
     avcodec_free_context(&dec); av_buffer_unref(&hwdev); avformat_close_input(&fmt);
