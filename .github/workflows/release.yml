@@ -402,6 +402,24 @@ jobs:
           Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
 
+      # Third-party licence texts of what is built into pushcore.dll go with the core component (core\licenses\; staged by
+      # pushmpc-install.ps1 stage, listed in docs/licences.md): libvpl (MIT, linked statically) and the Intel XeSS SDK's
+      # licence + third-party notices (its headers are compiled in; pins = scripts/xess-fetch.ps1's, XeSS SDK v3.0.2)
+      - name: Third-party notices for the core (licenses folder)
+        timeout-minutes: 2
+        run: |
+          $lic = "$env:BUILD\pushmpc\licenses"; New-Item -ItemType Directory -Force $lic | Out-Null
+          $vplLic = "$env:DEPS\vpl\LICENSE.libvpl.txt"
+          if (Test-Path $vplLic) { Copy-Item $vplLic "$lic\libvpl-LICENSE.txt" } else { Write-Host '::warning::no libvpl licence (libvpl not built)' }
+          $pins = @{ 'LICENSE.txt' = '784BE42C39A4A4D03CF85D88E15E59D75828FCA773CE45B8DBFFFBD7EAF208DF'; 'third-party-programs.txt' = 'E8D8899DBFC4DE0E8CA25560BE9358E03C1405D7C956D20A1838C3C709B9B51C' }
+          foreach ($n in $pins.Keys) {
+            $src = Join-Path $env:XESS_ROOT $n
+            if (-not (Test-Path $src)) { Write-Host "::error::XeSS SDK $n missing in $env:XESS_ROOT"; exit 1 }
+            if ((Get-FileHash $src -Algorithm SHA256).Hash -ne $pins[$n]) { Write-Host "::warning::XeSS SDK $n differs from the v3.0.2 pin (PushFPS moved XESS_TAG): shipped as found" }
+            Copy-Item $src "$lic\intel-xess-$n"
+          }
+          Get-ChildItem $lic | Format-Table Name, Length
+
       # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
       # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
       # (VEYRA_PUSHFLOW_PMML; a DirectML choice stays on PushFlow's own zero-copy session by design), the generated
