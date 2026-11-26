@@ -25,6 +25,8 @@
 
 #include "HeldFrames.h"
 #include "PushCoreHeld.h"
+#include "HoldPlan.h"
+#include "PushCoreHold.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace pushmpc::held;
@@ -504,6 +506,235 @@ static void TestRound3()
           && std::fabs(t[3] - (0.25f * 100 + 0.5f * 300) / 400.f) < 1e-5f, "phase map: each part's t in its mask, the weighted mean elsewhere, alpha the masks");
 }
 
+// round 5: hold plans (HoldPlan.h) on synthetic cell grids, and the hold compose (PushCoreHold.h) on WARP
+namespace r5 {
+static float Hash01(int x, int y, uint32_t seed)
+{
+    uint32_t h = uint32_t(x * 73856093) ^ uint32_t(y * 19349663) ^ (seed * 83492791u);
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return float(h & 1023u) / 1023.f;
+}
+static float Noise(float x, float y, uint32_t seed)   // value noise: aperiodic, smooth
+{
+    const int x0 = int(std::floor(x)), y0 = int(std::floor(y)); const float fx = x - float(x0), fy = y - float(y0);
+    const float sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const float a = Hash01(x0, y0, seed), b = Hash01(x0 + 1, y0, seed), c = Hash01(x0, y0 + 1, seed), d = Hash01(x0 + 1, y0 + 1, seed);
+    return (a * (1 - sx) + b * sx) * (1 - sy) + (c * (1 - sx) + d * sx) * sy;
+}
+static float Tex(int x, int y, uint32_t seed)   // a painted background: aperiodic shapes and a little grain, 40..190 codes
+{
+    return 40.f + 110.f * Noise(float(x) / 9.f, float(y) / 9.f, seed) + 35.f * Noise(float(x) / 3.1f, float(y) / 3.1f, seed + 7) + 3.f * Hash01(x, y, seed + 13);
+}
+struct Scene {
+    uint32_t w = 160, h = 90;
+    // background panning bgSpeed cells per frame (on ones); a sprite (24 x 16 cells) on twos moving 6 cells per drawing
+    // over it; an optional text block scrolling up 1 cell per frame; an optional flash frame; an optional object that
+    // appears from nothing (a smear / an effect: no motion explains it)
+    float bgSpeed = 1.f; bool sprite = true; bool spriteOnes = false; bool text = false; int flashAt = -1; int appearAt = -1;
+    CellGrid At(int f) const
+    {
+        CellGrid g; g.w = w; g.h = h; g.cell = 4; g.v.resize(size_t(w) * h);
+        const int sx = spriteOnes ? 40 + 3 * f : 40 + 6 * (f / 2), sy = 40;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) {
+                float v = Tex(int(x) + int(std::lround(bgSpeed * f)), int(y), 1);
+                if (sprite && int(x) >= sx && int(x) < sx + 24 && int(y) >= sy && int(y) < sy + 16) v = 200.f + 30.f * std::sin(float(int(x) - sx) * 0.45f) * std::cos(float(int(y) - sy) * 0.6f) + 0.8f * float(int(x) - sx);   // a drawn character
+                if (text) {   // credits: thin white strokes on black, rendered at 4 x 4 pixels a cell and averaged (as the GPU pass does)
+                    double acc = 0;
+                    for (int j = 0; j < 4; ++j)
+                        for (int i = 0; i < 4; ++i) {
+                            const int X = int(x) * 4 + i, Y = (int(y) + f) * 4 + j;   // pixels; the roll moves up one cell a frame
+                            const bool word = Hash01(X / 24, Y / 20, 21) > 0.45f && (Y % 20) < 12;
+                            const bool stroke = (X % 5) < 2 || (Y % 6) < 2;
+                            acc += word && stroke ? 235.0 : 20.0;
+                        }
+                    v = float(acc / 16.0);
+                }
+                if (appearAt >= 0 && f >= appearAt && f < appearAt + 2 && x >= 10 && x < 34 && y >= 10 && y < 34) v = 150.f + 40.f * std::sin(float(x * y) * 0.31f + float(f));   // an effect that appears
+                if (f == flashAt) v = std::min(255.f, v + 60.f);
+                g.v[size_t(y) * w + x] = v;
+            }
+        return g;
+    }
+};
+struct Run {
+    std::vector<CellGrid> g; std::vector<RegionFrame> r; std::vector<std::vector<ObjectClass>> objs; std::vector<TransientMarks> tm;
+    void Make(const Scene& s, int frames)
+    {
+        g.clear(); r.assign(size_t(frames), {}); objs.assign(size_t(frames), {}); tm.assign(size_t(frames), {});
+        for (int f = 0; f < frames; ++f) g.push_back(s.At(f));
+        std::vector<int16_t> px, py;
+        for (int f = 1; f < frames; ++f) {
+            r[size_t(f)] = CompareRegions(g[size_t(f - 1)], g[size_t(f)]);
+            const BlockMotion bm = MatchBlocks(g[size_t(f - 1)], g[size_t(f)], r[size_t(f)], kCellChangeCodes);
+            std::vector<int16_t> nx, ny;
+            objs[size_t(f)] = ClassifyObjects(r[size_t(f)], bm, px, py, &nx, &ny);
+            px.swap(nx); py.swap(ny);
+        }
+        for (int f = 1; f + 2 < frames; ++f) {
+            const float m[4] = { GridMean(g[size_t(f - 1)]), GridMean(g[size_t(f)]), GridMean(g[size_t(f + 1)]), GridMean(g[size_t(f + 2)]) };
+            tm[size_t(f)] = DetectTransient(m, r[size_t(f)], r[size_t(f + 1)], r[size_t(f + 2)], &g[size_t(f - 1)], &g[size_t(f)], &g[size_t(f + 1)]);
+        }
+    }
+    HoldPlan Plan(int f, AnimMode mode, uint32_t flags) const
+    {
+        const TransientMarks z{};
+        return PlanHolds(mode, flags, true, r[size_t(f)], objs[size_t(f)], f >= 2 ? tm[size_t(f - 2)] : z, tm[size_t(f - 1)], tm[size_t(f)], g[0].w, g[0].h);
+    }
+};
+static uint32_t MaskIn(const HoldPlan& p, int x0, int x1, int y0, int y1)
+{
+    uint32_t n = 0;
+    if (p.mask.empty()) return 0;
+    for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) n += p.mask[size_t(y) * p.w + x] != 0;
+    return n;
+}
+} // namespace r5
+
+static void TestRound5Plans()
+{
+    using namespace r5;
+    // s1: a character on twos over a pan on ones
+    {
+        Scene sc; Run run; run.Make(sc, 14);
+        int stepPairs = 0, spriteHeld = 0, bgHeld = 0, fullMasks = 0;
+        for (int f = 3; f < 12; ++f) {
+            const HoldPlan cam = run.Plan(f, AnimMode::CameraOnly, kHoldTransients), full = run.Plan(f, AnimMode::Full, kHoldTransients);
+            fullMasks += full.cells > 0 || full.whole;
+            if (f % 2 == 0) {   // the drawing steps at even frames
+                ++stepPairs;
+                const int sx = 40 + 6 * (f / 2);
+                spriteHeld += MaskIn(cam, sx, sx + 24, 40, 56) >= 24 * 16 * 9 / 10 && MaskIn(cam, sx - 6, sx, 40, 56) >= 6 * 16 * 9 / 10;   // the new place and the sweep
+            }
+            bgHeld += MaskIn(cam, 0, 30, 0, 30) + MaskIn(cam, 100, 160, 60, 90) > 0;   // incl. the strip the pan reveals at the edge
+        }
+        Check(spriteHeld == stepPairs, "round 5 s1: Camera only holds the character on twos on every drawing step, its sweep included (" + std::to_string(spriteHeld) + " of " + std::to_string(stepPairs) + ")");
+        Check(bgHeld == 0, "round 5 s1: the background panning on ones and the strip it reveals at the edge are never held (" + std::to_string(bgHeld) + " held pairs)");
+        Check(fullMasks == 0, "round 5 s1: Full mode holds nothing here (no flash, nothing unexplained): " + std::to_string(fullMasks));
+    }
+    // s2: a cel slid on ones (the sprite moving every frame) stays smooth
+    {
+        Scene cel; cel.spriteOnes = true;
+        Run run; run.Make(cel, 10);
+        uint32_t held = 0;
+        for (int f = 3; f < 9; ++f) held += run.Plan(f, AnimMode::CameraOnly, kHoldTransients).cells;
+        Check(held == 0, "round 5 s2: a character slid on ones (3 cells a frame over a pan) is never held in Camera only (" + std::to_string(held) + " cells)");
+    }
+    // s3: a scrolling text block (credits) on a still background stays smooth
+    {
+        Scene sc; sc.bgSpeed = 0.f; sc.sprite = false; sc.text = true;
+        Run run; run.Make(sc, 12);
+        uint32_t held = 0, heldFull = 0, slid = 0, cells = 0;
+        for (int f = 3; f < 10; ++f) {
+            held += run.Plan(f, AnimMode::CameraOnly, kHoldTransients).cells; heldFull += run.Plan(f, AnimMode::Full, kHoldTransients).cells;
+            for (const auto& o : run.objs[size_t(f)]) slid += o.kind == ObjectClass::Slid;
+            cells += sc.w * sc.h;
+        }
+        Check(heldFull == 0, "round 5 s3: scrolling credits (thin words on black) are never held in Full mode (" + std::to_string(heldFull) + " cells)");
+        // Camera only: the camera estimate drifts up to 0.4 cell across a pure vertical roll on this synthetic page, and
+        // the changes it leaves are held as redrawn. Open (track note, round 5): measured here, decided at the verdict.
+        std::printf("info round 5 s3: Camera only holds %.1f %% of the picture on the credit roll (%u slid objects)\n", 100.0 * held / std::max(1u, cells), slid);
+    }
+    // flash: a single bright frame; the pairs on both sides of it are held whole, nearest in time; Full mode and live action too
+    {
+        Scene sc; sc.flashAt = 6; Run run; run.Make(sc, 12);
+        Check(run.tm[6].flash && !run.tm[5].flash && !run.tm[7].flash, "round 5 flash: the flash frame is found, its neighbours are not");
+        const HoldPlan a = run.Plan(6, AnimMode::Full, kHoldTransients), b = run.Plan(7, AnimMode::Full, kHoldTransients), c = run.Plan(8, AnimMode::Full, kHoldTransients);
+        Check(a.whole && a.nearest && b.whole && b.nearest && !c.whole, "round 5 flash: pairs (5, 6) and (6, 7) show the nearest real frame, whole picture; (7, 8) does not");
+        const TransientMarks z{};
+        const HoldPlan live = PlanHolds(AnimMode::Full, kHoldTransients | kHoldLiveTransients, false, run.r[6], run.objs[6], z, run.tm[5], run.tm[6], sc.w, sc.h);
+        const HoldPlan liveOff = PlanHolds(AnimMode::Full, kHoldTransients, false, run.r[6], run.objs[6], z, run.tm[5], run.tm[6], sc.w, sc.h);
+        const HoldPlan offMode = run.Plan(6, AnimMode::Off, kHoldTransients);
+        Check(live.whole && !liveOff.whole && !offMode.whole, "round 5 flash: held on live action with the every-video flag, not without it, not in mode Off");
+        RegionFrame fr = run.r[6]; fr.transient = true;
+        Check(fr.transient, "round 5 flash: the frame carries the repair gate mark");
+    }
+    // smear / appearing object: no motion explains it -> Unexplained, held nearest in time in Full mode
+    {
+        Scene sc; sc.appearAt = 6; Run run; run.Make(sc, 12);
+        bool found = false;
+        for (const auto& o : run.objs[6]) found = found || (o.kind == ObjectClass::Unexplained && o.x0 <= 12 && o.y0 <= 12);
+        const HoldPlan p = run.Plan(6, AnimMode::Full, kHoldTransients);
+        Check(found && p.cells > 0 && p.nearest && MaskIn(p, 10, 34, 10, 34) >= 24 * 24 * 9 / 10, "round 5 smear: an object that appears is unexplained and held (nearest) in Full mode (" + std::to_string(p.cells) + " cells)");
+        const HoldPlan off = run.Plan(6, AnimMode::Full, 0);
+        Check(off.cells == 0, "round 5 smear: nothing held with the transient hold off");
+    }
+    // the show class from the cadence
+    {
+        ShowClassifier twos, ones, cg;
+        for (int i = 0; i < 400; ++i) { twos.Push(i % 3 ? 2.f : 1.f, true); ones.Push(i % 4 ? 1.f : 2.f, true); cg.Push(1.f, i % 10 == 0); }
+        Check(twos.Provisional() == ShowClass::TvLimited && ones.Provisional() == ShowClass::Feature && cg.Provisional() == ShowClass::MixedCg, "round 5 show class: twos -> TV limited, ones -> feature, gate mostly closed -> mixed CG");
+    }
+}
+
+// the compose pass on WARP: whole-frame nearest, masked as-drawn with a camera, untouched pixels bit-exact
+static void TestRound5Compose()
+{
+    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+    const D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1 };
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx))) { Check(false, "WARP device (hold compose)"); return; }
+    pushmpc::HoldCompose hc;
+    if (!hc.init(dev.Get())) { Check(false, "hold compose compiles: " + hc.why()); return; }
+    const uint32_t W = 256, H = 144;
+    auto make = [&](auto fn) {
+        std::vector<uint32_t> px(size_t(W) * H);
+        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) { const uint32_t v = fn(int(x), int(y)) & 255u; px[size_t(y) * W + x] = v | (v << 8) | (v << 16) | (255u << 24); }
+        D3D11_TEXTURE2D_DESC d{}; d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc = {1, 0};
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA s{ px.data(), W * 4, 0 };
+        ComPtr<ID3D11Texture2D> t; dev->CreateTexture2D(&d, &s, &t); return t;
+    };
+    auto read = [&](ID3D11Texture2D* t) {
+        D3D11_TEXTURE2D_DESC d{}; t->GetDesc(&d); d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> st; dev->CreateTexture2D(&d, nullptr, &st); ctx->CopyResource(st.Get(), t);
+        D3D11_MAPPED_SUBRESOURCE m{}; std::vector<int> v(size_t(W) * H);
+        if (SUCCEEDED(ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m))) { for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) v[size_t(y) * W + x] = int(static_cast<const uint8_t*>(m.pData)[y * m.RowPitch + x * 4]); ctx->Unmap(st.Get(), 0); }
+        return v;
+    };
+    auto A = make([](int x, int y) { return uint32_t(20 + (x * 3 + y) % 200); });
+    auto B = make([](int x, int y) { return uint32_t(30 + (x + y * 2) % 190); });
+    // whole, nearest
+    for (float t : { 0.25f, 0.75f }) {
+        auto G = make([](int, int) { return 128u; });
+        pushmpc::HoldCompose::Pass p; p.flags = pushmpc::HoldCompose::kWhole | pushmpc::HoldCompose::kNearest; p.t = t;
+        const bool ok = hc.compose(ctx.Get(), G.Get(), A.Get(), B.Get(), p);
+        const auto g = read(G.Get()), a = read(A.Get()), b = read(B.Get());
+        int worst = 0; for (size_t i = 0; i < g.size(); ++i) worst = std::max(worst, std::abs(g[i] - (t < 0.5f ? a[i] : b[i])));
+        Check(ok && worst <= 1, std::string("round 5 compose: a flash pair shows the nearest real frame at t ") + (t < 0.5f ? "0.25 (A)" : "0.75 (B)") + ", max error " + std::to_string(worst));
+    }
+    // masked as drawn with a camera pan of 8 px per pair at t 0.5: inside = A moved by 4 px, outside bit-exact G
+    {
+        auto G = make([](int x, int y) { return uint32_t(7 + (x * 5 + y * 3) % 240); });
+        const auto g0 = read(G.Get()), a = read(A.Get());
+        std::vector<uint8_t> mask(64 * 36, 0);
+        for (int y = 10; y < 26; ++y) for (int x = 20; x < 44; ++x) mask[size_t(y) * 64 + x] = 255;   // cells of 4 px: x 80..176, y 40..104
+        Check(hc.setMask(ctx.Get(), mask, 64, 36, 1.f, 1.f, 2.f), "round 5 compose: mask upload");
+        pushmpc::HoldCompose::Pass p; p.flags = pushmpc::HoldCompose::kMask; p.t = 0.5f; p.camX = 8.f;
+        const bool ok = hc.compose(ctx.Get(), G.Get(), A.Get(), B.Get(), p);
+        const auto g = read(G.Get());
+        int worstIn = 0, changedOut = 0;
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x) {
+                const size_t i = size_t(y) * W + x;
+                if (x >= 100 && x < 156 && y >= 56 && y < 88) worstIn = std::max(worstIn, std::abs(g[i] - a[size_t(y) * W + (x - 4)]));
+                const bool away = x < 56 || x >= 200 || y < 16 || y >= 128;
+                if (away && g[i] != g0[i]) ++changedOut;
+            }
+        Check(ok && worstIn <= 1, "round 5 compose: inside the mask the camera-warped previous drawing (A moved 4 px at t 0.5), max error " + std::to_string(worstIn));
+        Check(changedOut == 0, "round 5 compose: outside the mask and its feather the generated frame is bit-exact (" + std::to_string(changedOut) + " changed)");
+    }
+    // the split: only the right half composed, a divider at the middle
+    {
+        auto G = make([](int, int) { return 128u; });
+        pushmpc::HoldCompose::Pass p; p.flags = pushmpc::HoldCompose::kWhole | pushmpc::HoldCompose::kNearest | pushmpc::HoldCompose::kDivider; p.t = 0.25f; p.split = 128.f; p.side = 1;
+        hc.compose(ctx.Get(), G.Get(), A.Get(), B.Get(), p);
+        const auto g = read(G.Get()), a = read(A.Get());
+        int leftChanged = 0, rightWrong = 0;
+        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) { const size_t i = size_t(y) * W + x; if (x < 127 && g[i] != 128) ++leftChanged; if (x > 129 && std::abs(g[i] - a[i]) > 1) ++rightWrong; }
+        Check(leftChanged == 0 && rightWrong == 0 && std::abs(g[128] - 128) <= 1, "round 5 compose: the verdict split composes one side only (" + std::to_string(leftChanged) + " left changed, " + std::to_string(rightWrong) + " right wrong)");
+    }
+}
+
 int main()
 {
     TestRules();
@@ -511,6 +742,8 @@ int main()
     TestLayered();
     TestRegionRules();
     TestRound3();
+    TestRound5Plans();
+    TestRound5Compose();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }

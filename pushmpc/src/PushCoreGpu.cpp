@@ -27,6 +27,8 @@
 #include "pushmpc/pushcore_abi.h"
 #include "PushCoreDeband.h"
 #include "PushCoreHeld.h"          // held-frame re-timing (HeldFrames.h): animation on twos / threes
+#include "HoldPlan.h"              // anime round 5: hold plans for generated frames (motion classes, transients)
+#include "PushCoreHold.h"          // ... and their compose pass
 #include "PushCoreRegion.h"        // per-region re-timing: source repair (held parts between their drawings)
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
@@ -76,6 +78,7 @@
 #include <filesystem>
 #include <format>
 #include <map>
+#include <array>
 #include <set>
 #include <memory>
 #include <mutex>
@@ -560,7 +563,7 @@ struct PushCore {
     // source frame, measured offline). It owns gridOf, regionOf, whollyHeld, noiseFloor and cadenceHist; the submit thread
     // queues jobs and takes finished plans. A seek bumps planEpoch: the thread then starts over.
     struct PlanJob { uint64_t seq = 0, epoch = 0; bool plan = false, wholly = false; pushmpc::held::CellGrid grid; };
-    struct PlanResult { std::vector<pushmpc::held::RepairGroup> groups; bool wholly = false; float cellPx = 1.f; };
+    struct PlanResult { std::vector<pushmpc::held::RepairGroup> groups; bool wholly = false; float cellPx = 1.f; pushmpc::held::HoldPlan hold[2]; };
     std::thread planner;
     std::mutex planMx;
     std::condition_variable planCv;
@@ -568,6 +571,29 @@ struct PushCore {
     std::map<uint64_t, PlanResult> plans;
     uint64_t planEpoch = 0, lastQueued = 0, lastPlanQueued = 0; bool anyQueued = false, anyPlanQueued = false, planStop = false;
     pushmpc::held::CellCadence cadenceHist;
+    // ---- anime round 5: the hold compose (HoldPlan.h, PushCoreHold.h) ----
+    // Per side (two only with the verdict split PUSHMPC_SPLIT): the animation mode and hold flags. holdOn: plans are made
+    // (planner thread: block match, objects, transients, plans; submit thread: compose after the graph, before egress).
+    pushmpc::HoldCompose holdPass;
+    bool holdOn = false, holdSplit = false;
+    pushmpc::held::AnimMode holdMode[2]{};
+    uint32_t holdFlg[2]{};
+    uint64_t holdSwapAt = UINT64_MAX;                            // PUSHMPC_AB_SWAP=<source frame>: the sides swap there
+    std::atomic<float> holdCellPx{4.f}, holdCoverW{1.f}, holdCoverH{1.f};
+    std::map<uint64_t, float> meanOf;                           // planner thread: grid means
+    std::map<uint64_t, std::vector<pushmpc::held::ObjectClass>> objOf;
+    std::map<uint64_t, pushmpc::held::TransientMarks> marksOf;
+    std::map<uint64_t, std::array<pushmpc::held::HoldPlan, 2>> holdOf;
+    std::vector<int16_t> slidX, slidY;
+    pushmpc::held::ShowClassifier showClass;
+    std::atomic<uint32_t> animClassNow{0};
+    std::atomic<bool> holdAnimNow{false};
+    std::atomic<double> holdMatchMs{0.0};                       // planner CPU per pair for the block match (running mean)
+    std::map<uint64_t, std::array<pushmpc::held::HoldPlan, 2>> holdReady;   // submit thread: plans taken with their frame
+    ID3D12Resource* holdPrevReal = nullptr;
+    uint64_t holdPairs = 0, holdFrames = 0, holdFlashes = 0, holdLineFrames = 0, holdFail = 0, holdGated = 0;
+    bool holdRepairWanted() const { return !holdOn || holdMode[0] == pushmpc::held::AnimMode::Full || holdMode[1] == pushmpc::held::AnimMode::Full; }
+    bool holdRetimeWanted() const { return !holdOn || (holdMode[0] == pushmpc::held::AnimMode::Full && holdMode[1] == pushmpc::held::AnimMode::Full); }
     std::atomic<float> planThr{pushmpc::held::kCellChangeCodes}, planNoise{0.f};
     ComPtr<ID3D11Texture2D> repairOut;                         // NV12 / P010 with plane UAVs
     uint64_t pairA = UINT64_MAX, pairB = UINT64_MAX; int pairParity = 0;   // what the span stream holds now
@@ -932,9 +958,9 @@ struct PushCore {
         return c;
     }
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
-    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false;
+    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false; int32_t builtAnimMode = 0; uint32_t builtHoldFlags = 0;
     int buildGraph() {
-        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0;
+        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0; builtAnimMode = settings.animationMode; builtHoldFlags = settings.holdFlags;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
@@ -1080,7 +1106,7 @@ struct PushCore {
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
         const int er = buildEgress();
-        if (er == PUSHCORE_OK) initRepair();
+        if (er == PUSHCORE_OK) { initHoldModes(); initRepair(); initHold(); }
         return er;
     }
 
@@ -1420,6 +1446,7 @@ struct PushCore {
             inflight.push_back({startMs + cost, value12 + 1});   // the Signal below
             if (inflight.size() > 16) inflight.pop_front();
         }
+        if (holdOn) { const int hr = composeHolds(b, gap, sourceIndex); if (hr != PUSHCORE_OK) return hr; }
         // One shared fence value after everything this source frame queued (VFG's CUDA work is a
         // queue Wait inside process, so queue order covers generated frames too).
         if (hrFail(ring.queue()->Signal(fence12.Get(), ++value12), "D3D12 Signal(batch)")) return PUSHCORE_ERROR;
@@ -1465,7 +1492,7 @@ struct PushCore {
             if (p.compared) {
                 const bool wait = final || pendingIn.size() >= 2;
                 CellGrid grid;
-                const bool wantGrid = spanVfgOk && retimingOn();
+                const bool wantGrid = (spanVfgOk || holdOn) && retimingOn();
                 if (!held.read(imm.Get(), p.seq, d, wait, wantGrid ? &grid : nullptr)) { if (!wait) break; d = {}; }
                 // where the source repair runs, a partly changed frame stays with the graph (its held parts are repaired);
                 // where it does not, small changes (a mouth, a blink) count as held, so the body's drawing waits as a whole
@@ -1481,7 +1508,7 @@ struct PushCore {
             pendingIn.pop_front();
             acts.clear();
             // repair mode: a held frame is repaired, not dropped (its parts get their in-betweens at the source rate)
-            retimer.Push(seq, isHeld && !repairMode(), disc, acts);
+            retimer.Push(seq, isHeld && !repairMode() && holdRetimeWanted(), disc, acts);
             for (const auto& a : acts) {
                 if (a.kind == Action::Drop) { waiting.erase(a.frame); ++st.heldDropped; }
                 else readyGraph.push_back({a.frame, a.multiplier, a.gap});
@@ -1496,7 +1523,7 @@ struct PushCore {
         while (!readyGraph.empty() && graph && graph->nextFrameSlotAvailable()) {
             const ReadyGraph r = readyGraph.front();
             // source repair: a frame goes to the graph once the frames its parts' next drawings could be in are classified
-            if (repairMode() && !planReady(r.seq, final)) break;
+            if ((repairMode() || holdOn) && !planReady(r.seq, final)) break;
             readyGraph.pop_front();
             auto it = waiting.find(r.seq);
             if (it == waiting.end()) continue;
@@ -1505,12 +1532,222 @@ struct PushCore {
             // every frame in repair mode (a01e74f repaired only frames whose pair spanned one source frame and only after
             // a 96-frame gate on wholly held frames: 3 of 300 frames on TV anime, where an offline replay finds 400 of 900)
             if (repairMode() && r.gap == 1) { const int rr = repairFrame(p); if (rr != PUSHCORE_OK) return rr; }
+            else if (holdOn) { PlanResult hp; takePlan(p.seq, false, hp); }   // the hold plans only (no repair)
+            holdAnimNow = animationGate() || (heldRatio.Size() >= 48 && heldRatio.Ratio() >= 0.20);
             const int rc = processFrame(p.slot, p.copyValue, p.pts, p.flags, p.haveTiming ? &p.timing : nullptr, r.multiplier, r.gap, p.seq, Clock::now());
             if (rc != PUSHCORE_OK) return rc;
         }
         return PUSHCORE_OK;
     }
 
+    // ---- anime round 5: the hold compose ----
+    // The verdict split (test only, not in the UI): PUSHMPC_SPLIT=<A>|<B> (or HKCU\Software\PushMPC\Test\Split, a string),
+    // each side "full", "camera" or "off", optionally followed by +t / -t (transient hold), +l / -l (line art):
+    // e.g. "full|camera", "full-t|full+t", "full|full+l". Left half = A, right half = B, a 2-pixel divider on generated
+    // frames. PUSHMPC_AB_SWAP=<source frame>: the sides swap from that frame on (a side bias shows up).
+    static bool parseSide(std::string v, pushmpc::held::AnimMode& m, uint32_t& f) {
+        using pushmpc::held::AnimMode;
+        for (auto& c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
+        size_t k = v.find_first_of("+-");
+        const std::string name = v.substr(0, k);
+        if (name == "full") m = AnimMode::Full; else if (name == "camera") m = AnimMode::CameraOnly; else if (name == "off") m = AnimMode::Off; else return false;
+        while (k != std::string::npos && k + 1 < v.size()) {
+            const bool on = v[k] == '+'; const char w = v[k + 1];
+            const uint32_t bit = w == 't' ? pushmpc::held::kHoldTransients : w == 'l' ? pushmpc::held::kHoldLineArt : 0u;
+            if (on) f |= bit; else f &= ~bit;
+            k = v.find_first_of("+-", k + 1);
+        }
+        return true;
+    }
+    void initHoldModes() {
+        using namespace pushmpc::held;
+        holdSplit = false; holdSwapAt = UINT64_MAX;
+        const AnimMode mode = !haveSettings ? AnimMode::Full : settings.animationMode == PUSHCORE_ANIM_CAMERA_ONLY ? AnimMode::CameraOnly : settings.animationMode == PUSHCORE_ANIM_OFF ? AnimMode::Off : AnimMode::Full;
+        const uint32_t flags = haveSettings ? settings.holdFlags : 0u;
+        holdMode[0] = holdMode[1] = mode; holdFlg[0] = holdFlg[1] = flags;
+        std::string split;
+        if (const char* e = std::getenv("PUSHMPC_SPLIT")) split = e;
+        else {
+            wchar_t buf[128]{}; DWORD sz = sizeof(buf);
+            if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\PushMPC\\Test", L"Split", RRF_RT_REG_SZ, nullptr, buf, &sz) == ERROR_SUCCESS)
+                for (const wchar_t* c = buf; *c; ++c) split.push_back(char(*c & 0x7f));
+        }
+        const size_t bar = split.find('|');
+        if (bar != std::string::npos) {
+            AnimMode m[2] = { mode, mode }; uint32_t f[2] = { flags, flags };
+            if (parseSide(split.substr(0, bar), m[0], f[0]) && parseSide(split.substr(bar + 1), m[1], f[1])) {
+                holdSplit = true;
+                for (int i = 0; i < 2; ++i) { holdMode[i] = m[i]; holdFlg[i] = f[i]; }
+                if (const char* sw = std::getenv("PUSHMPC_AB_SWAP")) holdSwapAt = std::strtoull(sw, nullptr, 10);
+                veyra::log::info("pushcore", std::format("verdict split: left \"{}\", right \"{}\"{}", split.substr(0, bar), split.substr(bar + 1),
+                    holdSwapAt != UINT64_MAX ? std::format(", sides swap at source frame {}", holdSwapAt) : std::string()));
+            } else veyra::log::warn("pushcore", "PUSHMPC_SPLIT not understood (sides: full | camera | off, with +t -t +l -l): " + split);
+        }
+    }
+    void initHold() {
+        using namespace pushmpc::held;
+        holdOn = false;
+        const bool wanted = holdSplit || holdMode[0] != AnimMode::Full || holdFlg[0] != 0;
+        if (!wanted || !heldEligible || !haveSettings || settings.heldFrames == 0 || !fg || multiplier < 2) return;
+        if (!holdPass.ready() && !holdPass.init(d11.Get())) { veyra::log::warn("pushcore", "hold compose unavailable: " + holdPass.why()); return; }
+        holdOn = true;
+        holdPrevReal = nullptr; holdReady.clear();
+        showClass.Reset(); animClassNow = 0;
+        holdPairs = holdFrames = holdFlashes = holdLineFrames = holdFail = holdGated = 0;
+        startPlanner();
+        auto modeName = [](AnimMode m) { return m == AnimMode::CameraOnly ? "Camera only" : m == AnimMode::Off ? "Off" : "Full"; };
+        veyra::log::info("pushcore", std::format("hold compose on: animation mode {}, transients {}{}, line art {}{}", modeName(holdMode[0]),
+            (holdFlg[0] & kHoldTransients) ? "on" : "off", (holdFlg[0] & kHoldLiveTransients) ? " (flash / impact on every video)" : "",
+            (holdFlg[0] & kHoldLineArt) ? "on" : "off", holdSplit ? " (verdict split: see above)" : ""));
+    }
+    // planner thread: block match + objects of the pair (seq - 1, seq); transient marks of seq - 2; the hold plans of
+    // the pair ending at seq - 2 (its marks need two frames after it)
+    void holdClassify(uint64_t seq) {
+        using namespace pushmpc::held;
+        const CellGrid& cur = gridOf[seq];
+        meanOf[seq] = GridMean(cur);
+        if (cur.cell) { holdCellPx = float(cur.cell); if (stream.width && stream.height) { holdCoverW = float(cur.w * cur.cell) / float(stream.width); holdCoverH = float(cur.h * cur.cell) / float(stream.height); } }
+        const auto rit = regionOf.find(seq);
+        const auto pit = gridOf.find(seq - 1);
+        std::vector<ObjectClass> objs;
+        if (rit != regionOf.end() && rit->second.valid && !rit->second.cut && pit != gridOf.end()) {
+            const auto t0 = Clock::now();
+            const BlockMotion bm = MatchBlocks(pit->second, cur, rit->second, noiseFloor.Threshold());
+            std::vector<int16_t> nx, ny;
+            objs = ClassifyObjects(rit->second, bm, slidX, slidY, &nx, &ny);
+            slidX.swap(nx); slidY.swap(ny);
+            holdMatchMs = holdMatchMs.load() * 0.98 + msSince(t0) * 0.02;
+        } else { slidX.clear(); slidY.clear(); }
+        objOf[seq] = std::move(objs);
+        if (rit != regionOf.end() && rit->second.valid) {
+            const RegionFrame& r = rit->second;
+            const float cad = r.changedShare() > 0.002 ? cadenceHist.Median(seq, r.changed.size(), [&](size_t i) { return r.changed[i] != 0; }, 7) : 0.f;
+            showClass.Push(cad, holdAnimNow.load());
+            animClassNow = uint32_t(showClass.Provisional());
+        }
+        if (seq >= 3) {
+            const uint64_t s = seq - 2;
+            static const RegionFrame none{};
+            auto rf = [&](uint64_t q) -> RegionFrame* { auto it = regionOf.find(q); return it == regionOf.end() ? nullptr : &it->second; };
+            auto gr = [&](uint64_t q) -> const CellGrid* { auto it = gridOf.find(q); return it == gridOf.end() ? nullptr : &it->second; };
+            float m[4];
+            for (int k = 0; k < 4; ++k) { auto it = meanOf.find(s - 1 + uint64_t(k)); m[k] = it == meanOf.end() ? std::nanf("") : it->second; }
+            const RegionFrame* r0 = rf(s); const RegionFrame* r1 = rf(s + 1); const RegionFrame* r2 = rf(s + 2);
+            const TransientMarks tm = DetectTransient(m, r0 ? *r0 : none, r1 ? *r1 : none, r2 ? *r2 : none, gr(s - 1), gr(s), gr(s + 1));
+            marksOf[s] = tm;
+            // the source repair spans no flash / impact frame (PlanRepairs' gate)
+            if (tm.flash || tm.insert || tm.flash2) { if (RegionFrame* x = rf(s)) x->transient = true; }
+            if (tm.flash2) { if (RegionFrame* x = rf(s + 1)) x->transient = true; }
+            auto mk = [&](uint64_t q) { auto it = marksOf.find(q); return it == marksOf.end() ? TransientMarks{} : it->second; };
+            const auto oit = objOf.find(s);
+            static const std::vector<ObjectClass> noObjs;
+            const CellGrid* gs = gr(s);
+            std::array<HoldPlan, 2> plans;
+            if (r0 && gs)
+                for (int side = 0; side < (holdSplit ? 2 : 1); ++side)
+                    plans[size_t(side)] = PlanHolds(holdMode[side], holdFlg[side], true, *r0, oit == objOf.end() ? noObjs : oit->second, mk(s - 2), mk(s - 1), tm, gs->w, gs->h);
+            holdOf[s] = std::move(plans);
+        }
+        while (meanOf.size() > 16) meanOf.erase(meanOf.begin());
+        while (objOf.size() > 8) objOf.erase(objOf.begin());
+        while (marksOf.size() > 16) marksOf.erase(marksOf.begin());
+        while (holdOf.size() > 32) holdOf.erase(holdOf.begin());
+    }
+    // the split: a side that does not run Full gets no source repair (its half of every part's mask is given back)
+    void clipRepairToSplit(PlanResult& r, uint64_t seq) {
+        using pushmpc::held::AnimMode;
+        const bool swap = seq >= holdSwapAt;
+        const bool fullL = holdMode[swap ? 1 : 0] == AnimMode::Full, fullR = holdMode[swap ? 0 : 1] == AnimMode::Full;
+        if (fullL && fullR) return;
+        for (auto& g : r.groups) {
+            if (!g.w || g.mask.size() != size_t(g.w) * g.h) continue;
+            for (uint32_t y = 0; y < g.h; ++y)
+                for (uint32_t x = 0; x < g.w; ++x) {
+                    const bool left = x < g.w / 2;
+                    if ((left && !fullL) || (!left && !fullR)) g.mask[size_t(y) * g.w + x] = 0;
+                }
+        }
+    }
+    // submit thread, right after graph->process(s): the generated frames of the pair (s - 1, s) composed in place on the
+    // caller's D3D11 device. The D3D11 work waits for the graph's queue (fence12) and the batch fence waits for it
+    // (fence11), so egress (direct or copy) hands out composed frames only.
+    int composeHolds(Batch& b, uint32_t gap, uint64_t seq) {
+        using namespace pushmpc::held;
+        using veyra::pipeline::FrameKind;
+        ID3D12Resource* realNow = nullptr;
+        for (uint32_t i = 0; i < b.out.batch.count; ++i) { auto& f = b.out.batch.frames[i]; if (f.kind == FrameKind::Real && f.lease) realNow = f.lease->texture.Get(); }
+        ID3D12Resource* realPrev = holdPrevReal;
+        holdPrevReal = realNow;
+        std::array<HoldPlan, 2> hp;
+        if (auto it = holdReady.find(seq); it != holdReady.end()) { hp = std::move(it->second); holdReady.erase(it); }
+        if (!realNow || !realPrev || gap != 1 || !(b.out.batch.b100ns > b.out.batch.a100ns)) return PUSHCORE_OK;
+        const bool anim = holdAnimNow.load();
+        const bool swap = seq >= holdSwapAt;
+        struct SidePass { const HoldPlan* plan = nullptr; bool hold = false, line = false; uint32_t side = 0; };
+        SidePass sp[2];
+        const int sides = holdSplit ? 2 : 1;
+        bool any = holdSplit;   // the split draws its divider on every generated frame
+        for (int i = 0; i < sides; ++i) {
+            const HoldPlan& p = hp[size_t(i)];
+            sp[i].plan = &p;
+            sp[i].side = uint32_t(swap ? 1 - i : i);
+            // a held object needs the animation gate; a flash / impact frame was planned with it already (live action too
+            // only with PUSHCORE_HOLD_LIVE_TRANSIENTS)
+            const bool liveOk = (holdFlg[i] & kHoldLiveTransients) != 0;
+            sp[i].hold = p.whole ? (anim || liveOk) : (p.cells > 0 && anim);
+            if (!p.whole && p.cells > 0 && !anim) ++holdGated;
+            sp[i].line = (holdFlg[i] & kHoldLineArt) != 0 && anim && !p.whole;
+            any = any || sp[i].hold || sp[i].line;
+        }
+        if (!any) return PUSHCORE_OK;
+        if (!openDirect(realNow) || !openDirect(realPrev)) { ++holdFail; return PUSHCORE_OK; }
+        if (hrFail(ring.queue()->Signal(fence12.Get(), ++value12), "D3D12 Signal(hold)")) return PUSHCORE_ERROR;
+        imm4->Wait(fence12in11.Get(), value12);
+        ID3D11Texture2D* A = opened[realPrev].Get();
+        ID3D11Texture2D* B = opened[realNow].Get();
+        const float out2src = stream.width ? float(graph->workWidth()) / float(stream.width) : 1.f;
+        const float px = holdCellPx.load() * out2src;
+        const double a100 = double(b.out.batch.a100ns), span = double(b.out.batch.b100ns) - a100;
+        bool pairHeld = false, pairFlash = false;
+        for (uint32_t i = 0; i < b.out.batch.count; ++i) {
+            auto& f = b.out.batch.frames[i];
+            if (f.kind != FrameKind::Generated || !f.lease) continue;
+            const float t = float((double(f.pts100ns) - a100) / span);
+            if (!(t > 0.f && t < 1.f)) continue;   // a forecast (extrapolated) frame: not between the pair
+            if (!openDirect(f.lease->texture.Get())) { ++holdFail; continue; }
+            ID3D11Texture2D* G = opened[f.lease->texture.Get()].Get();
+            bool composed = false;
+            for (int k = 0; k < sides; ++k) {
+                const HoldPlan& p = *sp[k].plan;
+                pushmpc::HoldCompose::Pass pass;
+                pass.t = t; pass.camX = p.camDx * px; pass.camY = p.camDy * px; pass.camScale = p.camScale;
+                if (holdSplit) { pass.split = 0.5f * float(graph->workWidth()); pass.side = sp[k].side; if (k == 0) pass.flags |= pushmpc::HoldCompose::kDivider; }
+                if (sp[k].hold) {
+                    pass.flags |= p.whole ? pushmpc::HoldCompose::kWhole : pushmpc::HoldCompose::kMask;
+                    if (p.nearest) pass.flags |= pushmpc::HoldCompose::kNearest;
+                    if (!p.whole && !holdPass.setMask(imm.Get(), p.mask, p.w, p.h, holdCoverW.load(), holdCoverH.load(), 2.0f)) { ++holdFail; continue; }
+                    pairHeld = true; pairFlash = pairFlash || p.whole;
+                }
+                if (sp[k].line) pass.flags |= pushmpc::HoldCompose::kLineArt;
+                if (!pass.flags) continue;
+                if (!holdPass.compose(imm.Get(), G, A, B, pass)) { ++holdFail; continue; }
+                composed = true;
+                if (sp[k].line) ++holdLineFrames;
+            }
+            if (composed) ++holdFrames;
+        }
+        holdPairs += pairHeld; holdFlashes += pairFlash;
+        if (hrFail(imm4->Signal(fence11.Get(), ++value11), "D3D11 Signal(hold)")) return PUSHCORE_ERROR;
+        imm4->Flush();
+        ring.queue()->Wait(fence11in12.Get(), value11);
+        return PUSHCORE_OK;
+    }
+    void holdLogClose() {
+        veyra::log::info("pushcore", std::format("hold compose: {} pairs held ({} flash / impact pairs whole), {} generated frames composed, {} with line art; "
+            "{} pairs gated (not animation), {} failures; block match {:.2f} ms a pair (planner thread); class {} (0 unknown, 1 feature, 2 TV limited, 3 mixed CG)",
+            holdPairs, holdFlashes, holdFrames, holdLineFrames, holdGated, holdFail, holdMatchMs.load(), animClassNow.load()));
+        holdPass.forgetViews();
+    }
     // ---- source repair: setup ----
     void initRepair() {
         spanVfgOk = false;
@@ -1523,6 +1760,7 @@ struct PushCore {
         const bool useFlow = !useVfg && forced != "fsr" && forced != "frc" && veyra::pushflow::runtimeInstalled(runtimeDir);
         if (!useVfg && !useFlow && !midStreamPossible()) { veyra::log::info("pushcore", "source repair off: the graph is not on VFG, PushFlow's runtime is not installed and no midpoint stream (AMD FRC, FSR 3.1) is available (held frames re-timed whole)"); return; }
         if (repairEnvOff()) { veyra::log::info("pushcore", "source repair off (PUSHMPC_REGION_REPAIR=0)"); return; }
+        if (!holdRepairWanted()) { veyra::log::info("pushcore", "source repair off: Animation mode Camera only / Off (drawings keep their own timing)"); return; }
         if (!repairPass.ready() && !repairPass.init(d11.Get())) { veyra::log::warn("pushcore", "source repair unavailable (held frames re-timed whole, graph at k): " + repairPass.why()); return; }
         const uint32_t w = (stream.width + 1) & ~1u, h = (stream.height + 1) & ~1u;
         const bool p010 = stream.format == PUSHCORE_INPUT_P010;
@@ -1761,13 +1999,14 @@ struct PushCore {
                 if (planStop) return;
                 j = std::move(planJobs.front()); planJobs.pop_front();
             }
-            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); }
+            if (j.epoch != epoch) { epoch = j.epoch; gridOf.clear(); regionOf.clear(); whollyHeld.clear(); cadenceHist.Reset(); meanOf.clear(); objOf.clear(); marksOf.clear(); holdOf.clear(); slidX.clear(); slidY.clear(); }
             if (!j.plan) { classifyRegion(j.seq, std::move(j.grid), j.wholly); continue; }
             PlanResult r;
             try {
                 auto frameAt = [&](uint64_t q) -> const RegionFrame* { auto it = regionOf.find(q); return it == regionOf.end() ? nullptr : &it->second; };
                 auto gridAt = [&](uint64_t q) -> const CellGrid* { auto it = gridOf.find(q); return it == gridOf.end() ? nullptr : &it->second; };
-                r.groups = PlanRepairs(j.seq, frameAt, gridAt, kLookahead, PhaseShape::Linear, noiseFloor.Threshold(), &cadenceHist);
+                if (spanVfgOk) r.groups = PlanRepairs(j.seq, frameAt, gridAt, kLookahead, PhaseShape::Linear, noiseFloor.Threshold(), &cadenceHist);
+                if (auto h = holdOf.find(j.seq); h != holdOf.end()) { r.hold[0] = std::move(h->second[0]); r.hold[1] = std::move(h->second[1]); holdOf.erase(h); }
                 const auto wh = whollyHeld.find(j.seq);
                 r.wholly = wh != whollyHeld.end() && wh->second;
                 if (const auto g = gridOf.find(j.seq); g != gridOf.end() && g->second.cell) r.cellPx = float(g->second.cell);
@@ -1789,6 +2028,7 @@ struct PushCore {
             cadenceHist.Push(seq, regionOf[seq]);
         }
         gridOf[seq] = std::move(grid);
+        if (holdOn) holdClassify(seq);
         while (gridOf.size() > 16) gridOf.erase(gridOf.begin());     // d0 - 1 (the step signature) .. s + kCascadeLookahead
         while (regionOf.size() > 16) regionOf.erase(regionOf.begin());
     }
@@ -1810,6 +2050,8 @@ struct PushCore {
         auto it = plans.find(seq);
         if (it == plans.end()) return false;
         out = std::move(it->second); plans.erase(it);
+        if (holdOn) { holdReady[seq] = { std::move(out.hold[0]), std::move(out.hold[1]) }; while (holdReady.size() > 32) holdReady.erase(holdReady.begin()); }
+        if (holdSplit) clipRepairToSplit(out, seq);
         return true;
     }
     // repairs the held parts of p's frame in place (its ingress slot), before the graph takes it. The full cascade
@@ -2161,6 +2403,7 @@ struct PushCore {
                 repairWhy[0], repairWhy[1], repairWhy[2], repairWhy[3], repairWhy[4], repairWhy[5], repairWhy[6], repairWhy[7], repairWhy[8],
                 costRepair.p50(), costRepair.pct(0.95), planThr.load(), planNoise.load(), 100.0 * evidence.Ratio(), cascadeEnds, cascadeMissed, midCalls, midApprox, midApprox ? midErrSum / double(midApprox) : 0.0));
         }
+        if (holdOn) holdLogClose();
         spanVfg.shutdown(); spanFlow.shutdown(); shutdownMid(); spanVfgOk = false; spanIsFlow = false; rgbSlots.clear(); for (auto& rs : repSlots) rs = {}; repairOut.Reset(); repairPass.forgetViews();
         opened.clear(); outSlots.clear();
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
@@ -2174,7 +2417,7 @@ struct PushCore {
         using namespace veyra;
         if (!graph) return fail("not open");
         const auto t = Clock::now();
-        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld)) {
+        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld || settings.animationMode != builtAnimMode || settings.holdFlags != builtHoldFlags)) {
             veyra::log::info("pushcore", "frame generation method, upscaler, cut guard, Subtitle Hold or held-frame re-timing changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
@@ -2449,6 +2692,9 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.repairActive = core->repairOn() ? 1u : 0u;
     core->st.repairedFrames = core->repairedFrames;
     core->st.repairedParts = core->repairedParts;
+    core->st.holdActive = core->holdOn ? 1u : 0u;
+    core->st.animClass = core->animClassNow.load(std::memory_order_relaxed);
+    core->st.holdPairs = core->holdPairs; core->st.holdFrames = core->holdFrames; core->st.holdFlashes = core->holdFlashes;
     {
         const auto f = core->costFull.recentP50(std::chrono::milliseconds(3000));
         const auto r = core->costReduced.recentP50(std::chrono::milliseconds(3000));

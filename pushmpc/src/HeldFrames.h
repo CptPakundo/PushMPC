@@ -124,6 +124,7 @@ struct RegionFrame {
     float gain = 0;                     // median signed change of the cells (codes): a fade, a flash, a light change
     bool zoom = false;                  // a zoom faster than kZoomGate per frame (the similarity model below does not hold)
     float scale = 1.f;                  // camera scale against the previous frame about the picture centre (push-ins, pull-outs)
+    bool transient = false;             // a flash / impact frame (HoldPlan.h DetectTransient): no span is repaired across it
     double changedShare() const { return cells ? double(changedCells) / cells : 0.0; }
 };
 inline constexpr float kCellChangeCodes = 8.0f;    // the change threshold until NoiseFloor has seen the clip
@@ -431,7 +432,7 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
     for (int k = 1; k <= lookahead; ++k) { if (s < uint64_t(k)) break; const RegionFrame* f = frameAt(s - uint64_t(k)); if (!f || !f->valid || f->changed.size() != n) break; back.push_back(f); }
     for (int k = 1; k <= lookahead; ++k) { const RegionFrame* f = frameAt(s + uint64_t(k)); if (!f || !f->valid || f->changed.size() != n) break; ahead.push_back(f); }
     if (back.empty() || ahead.empty()) return out;
-    auto bad = [](const RegionFrame* f) { return f->cut || f->changedShare() > kFadeShare || std::fabs(f->gain) >= kFadeGain || f->zoom; };
+    auto bad = [](const RegionFrame* f) { return f->cut || f->changedShare() > kFadeShare || std::fabs(f->gain) >= kFadeGain || f->zoom || f->transient; };
     if (bad(fs)) return out;
     // the change AT frame j, for j in [s - back.size(), s + ahead.size()] (j = s - back.size() is the oldest change known)
     auto rfAt = [&](uint64_t j) -> const RegionFrame* {

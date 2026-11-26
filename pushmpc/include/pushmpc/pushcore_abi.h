@@ -151,7 +151,23 @@ typedef struct PushCoreSettings {
        source timestamps; pushcore takes up to 9 source frames ahead to wait for the next distinct one. 2 = the same, and
        the per-region source repair runs without waiting for held drawings to be found (Animation On). Default 0. */
     int32_t heldFrames;
+    /* Appended (PUSHCORE_FEATURE_ANIME_HOLD): how drawn animation is shown (with heldFrames != 0).
+       animationMode: 0 Full (default: held drawings re-timed, every part moves at its own cadence), 1 Camera only (keep
+       the drawn feel: what slides rigidly on ones - pans, scrolls, a cel slid over the background - stays smooth; what
+       is redrawn shows each drawing for its own time, camera-warped, as drawn; no source repair), 2 Off (plain frame
+       generation, no re-timing). holdFlags (PUSHCORE_HOLD_*): generated frames show the real frame where frame
+       generation cannot be right; default 0 (a smaller struct). */
+    int32_t animationMode;
+    uint32_t holdFlags;
 } PushCoreSettings;
+#define PUSHCORE_ANIM_FULL 0
+#define PUSHCORE_ANIM_CAMERA_ONLY 1
+#define PUSHCORE_ANIM_OFF 2
+#define PUSHCORE_HOLD_TRANSIENTS 1u      /* flashes and impact frames shown as drawn (nearest real frame, whole picture), and
+                                            objects no motion explains (smears, appearing objects) on animation */
+#define PUSHCORE_HOLD_LINE_ART 2u        /* line contrast of generated frames matched to the drawing; doubled lines replaced */
+#define PUSHCORE_HOLD_SIGNS 4u           /* typeset signs (text drawn into the picture) held with the Subtitle Hold pass */
+#define PUSHCORE_HOLD_LIVE_TRANSIENTS 8u /* flash / impact hold on every video, live action too */
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
 #define PUSHCORE_FG_VFG 0u         /* NVIDIA Video Effects frame generation (RTX 40/50; RTX 30 through VfgAmpereCompat) */
@@ -272,6 +288,14 @@ typedef struct PushCoreStats {
     uint32_t repairReserved;
     uint64_t repairedFrames;      /* source frames repaired */
     uint64_t repairedParts;       /* parts laid in (one span-stream frame each) */
+    /* Appended (PUSHCORE_FEATURE_ANIME_HOLD): the hold compose on generated frames */
+    uint32_t holdActive;          /* 1 = hold plans are made for this stream */
+    uint32_t animClass;           /* the picture's class from its cadence (Auto per show): 0 not known yet, 1 feature
+                                     (moving parts mostly on ones), 2 TV limited (twos / threes), 3 mixed CG (rarely
+                                     drawn on twos); known after ~2 minutes, provisional before */
+    uint64_t holdPairs;           /* source pairs with a hold */
+    uint64_t holdFrames;          /* generated frames composed */
+    uint64_t holdFlashes;         /* flash / impact pairs held whole */
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -333,6 +357,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_HELD_FRAMES 2048u /* PushCoreSettings.heldFrames, PushCoreStats.held* */
+#define PUSHCORE_FEATURE_ANIME_HOLD (1u << 19) /* PushCoreSettings.animationMode / holdFlags, PushCoreStats.hold* / animClass */
 #define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
 #define PUSHCORE_MAX_MULTIPLIER 16u
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
