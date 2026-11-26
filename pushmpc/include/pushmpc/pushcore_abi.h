@@ -155,6 +155,8 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_FG_NVOF 5u        /* PUSHCORE_FEATURE_NVOF_FG: NVIDIA's optical-flow hardware (NVOFA: Turing except TU117, and
                                       later) as the motion of FSR 3.1's frame interpolation and warp, 2x: the flow costs no
                                       shader time (GTX 16 / RTX 20 where VFG does not run and PushFlow is too slow) */
+#define PUSHCORE_FG_HELIXFG 8u     /* PUSHCORE_FEATURE_HELIXSR: HelixSR's frame generation (community, FidelityFX-based, 2x-6x) as a
+                                      direct DLSS-G provider on GPUs without DLSS-G / VFG (GTX, Radeon, Intel); Setup fetches it */
 #define PUSHCORE_FG_NONE 255u      /* (reported only) no frame generation could start */
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
@@ -311,6 +313,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
+#define PUSHCORE_FEATURE_HELIXSR (1u << 18) /* PUSHCORE_FG_HELIXFG, PUSHCORE_CAP_HELIX_FG / PUSHCORE_CAP_HLX_FSR4 */
 #define PUSHCORE_FEATURE_TURING_DLSSG (1u << 17) /* PUSHCORE_FG_DLSSG on RTX 20 through the community port (Setup fetches it;
                                                     self-tested on the first DLSS-G open, unlock TuringDlssg); PUSHCORE_CAP_DLSSG says
                                                     whether it is usable on this card */
@@ -348,7 +351,10 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
-#define PUSHCORE_CAP_COUNT 14u
+#define PUSHCORE_CAP_HELIX_FG 19u    /* PUSHCORE_FG_HELIXFG: the HelixSR files + its self-test pending or passed (unlock HelixFg) */
+#define PUSHCORE_CAP_HLX_FSR4 20u    /* FSR upscaling runs HelixSR's HLX FSR 4 (AMD's FSR 4 network as compute shaders) here: RX 5000
+                                        (Full) and GTX 16 / 10 (Lite), after its self-test (unlock HlxFsr4); else FSR 3.1 */
+#define PUSHCORE_CAP_COUNT 21u
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;

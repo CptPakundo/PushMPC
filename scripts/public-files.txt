@@ -79,3 +79,4 @@ scripts/ml-runtime-pin.json
 kodiaddon/**
 mpvnative/**
 scripts/dlssg-port-fetch.ps1
+scripts/helixsr-fetch.ps1

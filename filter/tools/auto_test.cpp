@@ -297,6 +297,26 @@ int main()
                 const Choice r7 = Decide({}, sd, d144, k, Family(kRdna3, L"AMD Radeon RX 7800 XT"));
                 check(r6.sr == r7.sr && std::abs(r6.predictedMs - r7.predictedMs) < 0.01, L"RX 6000 and RX 7000: the same FSR 4.1 INT8 prior", std::format(L"{:.2f} vs {:.2f} ms", r6.predictedMs, r7.predictedMs));
             }
+            {   // HelixSR frame generation (kCapHelixFg): only where pushcore offers it; after PushFlow, before FSR FG; up to 6x
+                const Source sd{ 1920, 1080, 23.976, false, 0.5 };
+                Costs slow = cold; slow.card = 3.0; slow.pfBenched = true; for (int t = 0; t < 3; ++t) { slow.pfFirst[t] = 90; slow.pfNext[t] = 80; }
+                Gpu rx = Family(kRdna2, L"AMD Radeon RX 6600"); Gpu rxH = rx; rxH.available |= 1u << kCapHelixFg;
+                const Choice h0 = Decide({}, sd, d144, slow, rx), h1 = Decide({}, sd, d144, slow, rxH);
+                check(h0.fgMethod != FgMethod::HelixFg, L"RX 6600 without HelixSR: never HelixSR FG", h0.smootherNote);
+                check(h1.fgMethod == FgMethod::HelixFg && h1.multiplier >= 2, L"RX 6600, PushFlow measured too slow, HelixSR offered: HelixSR FG", h1.smootherNote + L" | " + h1.stoppedAt);
+                check(h1.multiplier >= h0.multiplier, L"HelixSR FG reaches at least FSR FG's multiplier", std::format(L"{} vs {}", h1.multiplier, h0.multiplier));
+                Costs fast = cold; fast.card = 0.5;
+                check(Decide({}, sd, d144, fast, rxH).fgMethod == FgMethod::PushFlow, L"RX 6600 where PushFlow fits: PushFlow stays first", L"");
+                check(MaxMultiplier(FgMethod::HelixFg) == 6 && FgKeyOf(FgMethod::HelixFg, 1) == kKeyHelixFg && CapOf(FgMethod::HelixFg) == kCapHelixFg, L"HelixSR FG: up to 6x, own cost key, own capability bit");
+                check(FgMethodStr(FgMethod::HelixFg) == std::wstring(L"HELIXFG") && int(FgMethod::HelixFg) - 1 == 8, L"HelixSR FG maps to PUSHCORE_FG_HELIXFG (8)");
+                // HLX FSR 4 on RX 5000: a higher FSR upscaler prior until measured, only where pushcore offers it
+                const Source sd720{ 1280, 720, 23.976, false, 0.5 };
+                Gpu r5 = Family(kRdna1, L"AMD Radeon RX 5700 XT"); Gpu r5h = r5; r5h.available |= 1u << kCapHlxFsr4;
+                Costs k5 = cold; k5.card = 2.0; k5.pfBenched = true;
+                const Choice s0 = Decide({}, sd720, d144, k5, r5), s1 = Decide({}, sd720, d144, k5, r5h);
+                check(s0.sr && s1.sr && s1.srMethod == Upscaler::Fsr && s1.predictedMs >= s0.predictedMs, L"RX 5700 XT with HLX FSR 4: FSR upscaling, costed higher until measured",
+                      std::format(L"{:.2f} vs {:.2f} ms", s1.predictedMs, s0.predictedMs));
+            }
             Settings fm; fm.fgMethod = FgMethod::Nvof;
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;

@@ -1390,6 +1390,7 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
     Add-FidelityFxSdk $dest
     Add-DlssgPort $dest
+    Add-HelixSr $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
@@ -1444,6 +1445,36 @@ function Add-DlssgPort([string]$dest) {
         $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + community DLSS-G port 0.4.2"
     }
 }
+# HelixSR 3.4.1 (community, HelixSR Freeware License: free use; PushMPC does not redistribute it, Setup fetches the official
+# release on this PC, pinned and hashed, scripts\helixsr-fetch.ps1) into runtime_local\community\helixsr:
+#   its frame generation (2x-6x) on GPUs without DLSS-G / VFG (GTX, Radeon, Intel; unlock HelixFg);
+#   HLX FSR 4 (AMD's FSR 4 network as compute shaders) as the FSR upscaler on RX 5000 (Full) and GTX (Lite; unlock HlxFsr4).
+# pushcore runs each only after its self-test on the card; a failure falls back (FSR FG / PushFlow; AMD's FSR 3.1).
+# Off: -ExperimentalExtras No, PUSHMPC_DISABLE_HELIXFG=1 / PUSHMPC_DISABLE_HLXFSR4=1, or HKCU\Software\PushMPC\Unlocks HelixFg / HlxFsr4 = 0.
+function Add-HelixSr([string]$dest) {
+    if ($ExperimentalExtras -eq 'No') { return }
+    $gi = Get-GpuInfo
+    $fam = Get-GpuFamily $gi
+    $isOff = { param($u) ([Environment]::GetEnvironmentVariable("PUSHMPC_DISABLE_$($u.ToUpperInvariant())") -match '^(1|true|yes|on)$') -or
+                         ($(try { (Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $u -ErrorAction Stop).$u -eq 0 } catch { $false })) }
+    $parts = @()
+    if ($fam -in 'GTX', 'RX 9000', 'RX 7000', 'RX 6000', 'RX 5000', 'Radeon', 'Intel', 'other' -and -not (& $isOff 'HelixFg')) { $parts += 'Fg' }
+    if (-not (& $isOff 'HlxFsr4')) { if ($fam -eq 'RX 5000') { $parts += 'Fsr4Full' } elseif ($fam -eq 'GTX') { $parts += 'Fsr4Lite' } }
+    if (-not $parts.Count) { return }
+    $fetch = Join-Path $PSScriptRoot 'helixsr-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'helixsr-fetch.ps1 is not next to the installer: HelixSR is not set up'; return }
+    $target = Join-Path $dest 'runtime_local\community\helixsr'
+    $loader = Join-Path $dest 'runtime_local\amd\fidelityfx\amd_fidelityfx_loader_dx12.dll'
+    if ($DryRun) { Dry "would add HelixSR 3.4.1 ($($parts -join ', '); pinned) in $target (helixsr-fetch.ps1)"; return }
+    Step "HelixSR 3.4.1 ($($parts -join ', ')), community work, from its GitHub release, pinned"
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'helixsr-3.4.1' } else { Join-Path $InstallDir 'download\helixsr-3.4.1' }
+    & $fetch -Dest $target -Parts $parts -Loader $loader -Cache $cache
+    if ($LASTEXITCODE -ne 0) { Warn "HelixSR not installed (helixsr-fetch.ps1 exit $LASTEXITCODE): the other methods stay" }
+    else {
+        Info 'HelixSR turns on after a self-test on your card (during the first videos that use it)'
+        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + HelixSR 3.4.1"
+    }
+}
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
     $pfNote = if ($pushflow) { $pushflow } else { 'not installed' }
@@ -1486,6 +1517,7 @@ function Prepare-Runtime($pkg = $Runtime) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
         Add-FidelityFxSdk $dest
         Add-DlssgPort $dest
+        Add-HelixSr $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1592,7 +1624,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1', 'helixsr-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1740,7 +1772,7 @@ function Invoke-Package {
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
     # PushMPC's own mpv build (an optional release asset, not in Setup's payload)
     foreach ($z in @(Get-ChildItem -LiteralPath $StageDir -Filter 'PushMPC-mpv-windows-*.zip' -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $z.FullName $ReleaseDir -Force }
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1', 'helixsr-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
     [IO.File]::WriteAllText((Join-Path $out 'Install-PushMPC.cmd'), ($cmd -join "`r`n") + "`r`n")

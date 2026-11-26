@@ -27,6 +27,7 @@
 #include "pushmpc/unlocks.h"            // T5b: off switches and self-test results of the vendor unlocks
 #include "PushCoreDlssgPort.h"          // DLSS-G on RTX 20 / GTX 16 / RTX 30 through the community port (sdli1995/dlssg_for_sm86)
 #include "pushmpc/dlssg_route.h"        // RTX 30: Transfusion or the port, per open, from the stored per-backend record
+#include "PushCoreHelix.h"              // HelixSR (community): its frame generation and HLX FSR 4, fetched by Setup
 #include "veyra/ngx/FgCompatibilitySession.h"   // processHealthy: Transfusion's in-process patches rolled back cleanly
 #include "veyra/pipeline/VfxSrBackend.h"     // runtimeAvailable: the VFX VideoSuperRes files (high bitrate / streaming)
 #include "veyra/pipeline/VfgBackend.h"
@@ -191,6 +192,7 @@ const char* fgName(uint32_t b) {
     case PUSHCORE_FG_FSR: return "FSR FG";
     case PUSHCORE_FG_AMDFRC: return "AMD FRC";
     case PUSHCORE_FG_NVOF: return "NVOF FG";
+    case PUSHCORE_FG_HELIXFG: return "HelixSR FG";
     default: return "none";
     }
 }
@@ -316,6 +318,34 @@ void setPortRunning(pmu::Unlock u, const std::wstring& key) {
     RegCloseKey(k);
 }
 
+// HelixSR (PushCoreHelix.h). Its frame generation: on GPUs without DLSS-G / VFG (GTX, Radeon, Intel, other hardware);
+// HLX FSR 4 as the FSR upscaler: RX 5000 (Full network) and GTX 16 / GTX 10 (Lite), where AMD's DLL only has FSR 3.1.
+// Both are unproven on these cards by their author ("expected"), so each runs only after its self-test on this adapter
+// + driver (unlocks HelixFg / HlxFsr4; off: PUSHMPC_DISABLE_HELIXFG=1 / PUSHMPC_DISABLE_HLXFSR4=1 or Unlocks\<Name> = 0).
+bool helixFgGpu(uint32_t vendor, uint32_t fam) {
+    if (vendor == 0 || vendor == 0x1414) return false;   // no hardware GPU (WARP)
+    return !(vendor == 0x10DE && rtxFamily(fam));
+}
+int hlxFsr4Kind(uint32_t vendor, uint32_t fam) {   // 2 = Full (RX 5000), 1 = Lite (GTX), 0 = not here
+    if (fam == PUSHCORE_FAMILY_RDNA1) return 2;
+    if (vendor == 0x10DE && fam == PUSHCORE_FAMILY_GTX) return 1;
+    return 0;
+}
+std::filesystem::path helixRoot() { return pmhelix::Root(veyra::runtime::localDataDirectory()); }
+std::filesystem::path hlxFsr4Dir(int kind) { return helixRoot() / (kind == 2 ? L"fsr4-full" : L"fsr4"); }
+bool hlxFsr4Files(int kind) {
+    const auto ld = veyra::runtime::localDataDirectory();
+    return kind == 2 ? pmhelix::Fsr4FullPresent(ld) : kind == 1 ? pmhelix::Fsr4LitePresent(ld) : false;
+}
+pmu::UnlockDecision communityDecision(pmu::Unlock u, uint32_t vendor, uint32_t device, const LUID& luid, bool files, const wchar_t* notInstalled) {
+    std::wstring src;
+    const pmu::UnlockMode mode = pmu::ReadUnlockMode(u, &src);
+    const pmu::SelfTest t = pmu::ReadSelfTest(u, pmu::SelfTestKey(vendor, device, driverVersionOf(luid)));
+    return pmu::DecideUnlock(u, mode, files, notInstalled, t, false, src);
+}
+// HLX FSR 4 is loaded once per process (the FidelityFX loader finds its provider by name): the folder this process uses
+std::atomic<int> gHlxFsr4Process{0};   // 0 = not decided, 1 = HLX FSR 4, 2 = AMD's (after a failed HLX self-test)
+
 void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeDir, PushCoreCaps& c) {
     const std::wstring name = d.Description;
     const uint32_t v = d.VendorId, fam = familyOf(v, name);
@@ -375,6 +405,20 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
     } else {
         set(PUSHCORE_CAP_DLSSG_LITE, nvidia && fam == PUSHCORE_FAMILY_RTX50, veyra::ngx::dlssgLiteRuntimePresent(runtimeDir),
             "DLSS-G performance mode runs on RTX 50 (and RTX 30 through the community port)", "the DLSS-G Lite runtime is not installed (dlssg-lite)");
+    }
+    {   // HelixSR (community): frame generation and HLX FSR 4, each available while its self-test is pending or passed
+        const bool fgHw = helixFgGpu(v, fam);
+        const bool fgFiles = pmhelix::FgPresent(veyra::runtime::localDataDirectory());
+        const pmu::UnlockDecision uf = communityDecision(pmu::Unlock::HelixFg, v, d.DeviceId, d.AdapterLuid, fgFiles, L"HelixSR is not installed (Setup fetches it)");
+        const std::string wf = narrow(uf.why);
+        set(PUSHCORE_CAP_HELIX_FG, fgHw, fgFiles && (uf.on || uf.runSelfTest), "RTX cards run DLSS-G / VFG instead", fgFiles ? wf.c_str() : "HelixSR is not installed (Setup fetches it)");
+        const int hk = hlxFsr4Kind(v, fam);
+        const bool srFiles = hlxFsr4Files(hk);
+        const pmu::UnlockDecision us = communityDecision(pmu::Unlock::HlxFsr4, v, d.DeviceId, d.AdapterLuid, srFiles, L"HLX FSR 4 is not installed (Setup fetches it)");
+        const std::string ws = narrow(us.why);
+        set(PUSHCORE_CAP_HLX_FSR4, hk != 0, srFiles && (us.on || us.runSelfTest), "only for RX 5000 and GTX cards (others have AMD's FSR 4 or RTX VSR)",
+            srFiles ? ws.c_str() : "HLX FSR 4 is not installed (Setup fetches it)");
+        if (fgHw || hk) veyra::log::info("pushcore", std::format("unlock {}; unlock {}", wf, ws));
     }
     std::wstring why;
     const bool pf = veyra::pushflow::runtimeInstalled(rt, &why);
@@ -663,6 +707,14 @@ struct PushCore {
             s.frameGenerationBackend = FrameGenerationBackend::AmdFrc;
             cap = 2;
             break;
+        case PUSHCORE_FG_HELIXFG:
+            // HelixSR frame generation: PushFPS's direct DLSS-G provider path (Anr) on HelixSR's provider DLL, fed like
+            // DLSS-G (FidelityFX optical flow, refined motion, NVIDIA's motion convention); up to 6x
+            s.frameGenerationBackend = FrameGenerationBackend::Anr;
+            s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;
+            s.fgMotionRefine = true;
+            cap = 6;
+            break;
         default:
             s.frameGenerationBackend = FrameGenerationBackend::Vfg;
             break;
@@ -852,6 +904,41 @@ struct PushCore {
         veyra::log::info("pushcore", std::format("self-test {}: {} ({})", narrow(pmu::UnlockName(u)), pass ? "pass" : "FAIL", why));
     }
 
+    // HelixSR self-tests (frame generation: 240 valid generated frames; HLX FSR 4: 240 frames with the FSR upscaler
+    // measured), each with the crash guard of the port's self-test (SelfTest\<Name> "Running")
+    struct CommunityTest { pmu::Unlock u; bool active = false, recorded = false, guard = false; uint64_t count = 0, seen = 0; };
+    CommunityTest helixFgTest{pmu::Unlock::HelixFg}, hlxFsrTest{pmu::Unlock::HlxFsr4};
+    bool helixFgGraph = false, hlxGraph = false;
+    bool communityAllowed(pmu::Unlock u, bool files) const {
+        const pmu::UnlockDecision d = communityDecision(u, ctx.adapter().vendorId, ctx.adapter().deviceId, adapterLuid(), files, L"not installed");
+        return d.on || d.runSelfTest;
+    }
+    bool helixFgAllowed() const { return helixFgGpu(ctx.adapter().vendorId, family) && communityAllowed(pmu::Unlock::HelixFg, pmhelix::FgPresent(veyra::runtime::localDataDirectory())); }
+    // false: an earlier self-test of this unlock ended the process (recorded as a failure now)
+    bool testBegin(CommunityTest& t) {
+        t.active = true; t.count = 0; t.seen = 0;
+        if (t.recorded || t.guard) return true;
+        const std::wstring key = adapterKey();
+        if (pmu::ReadSelfTest(t.u, key).known) return true;
+        if (portRunningKey(t.u) == key) { testRecord(t, false, "an earlier self-test did not finish (the player closed unexpectedly)"); setPortRunning(t.u, {}); return false; }
+        setPortRunning(t.u, key);
+        t.guard = true;
+        return true;
+    }
+    void testRecord(CommunityTest& t, bool pass, const std::string& why) {
+        if (t.recorded) return;
+        t.recorded = true;
+        if (t.guard) { setPortRunning(t.u, {}); t.guard = false; }
+        const std::wstring key = adapterKey();
+        if (pmu::ReadSelfTest(t.u, key).known) return;
+        pmu::WriteSelfTest(t.u, key, pass, std::wstring(why.begin(), why.end()));
+        veyra::log::info("pushcore", std::format("self-test {}: {} ({})", narrow(pmu::UnlockName(t.u)), pass ? "pass" : "FAIL", why));
+    }
+    void testEnd(CommunityTest& t) {   // clean close before a result: not a failure, the next open tests again
+        if (t.guard && !t.recorded) { setPortRunning(t.u, {}); t.guard = false; }
+        t.active = false;
+    }
+
     // RTX 30: which DLSS-G backend runs (pmu::ChooseDlssgRoute), its per-backend record (runs, fails, crashes, GPU ms per
     // generated frame at 4K), and the crash guard of the backend whose graph runs. One backend per process (gDlssgLatch).
     pmu::DlssgRoute routeGraph = pmu::DlssgRoute::None;   // the backend of the current graph (RTX 30 DLSS-G only)
@@ -950,12 +1037,14 @@ struct PushCore {
         auto add = [&](uint32_t b, uint32_t cap) {
             if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
             if (b == PUSHCORE_FG_DLSSG && portUnlock() == pmu::Unlock::TuringDlssg && !portDlssgAllowed()) return;
+            if (b == PUSHCORE_FG_HELIXFG && !helixFgAllowed()) return;
             for (const auto& e : c) if (e.first == b && e.second == cap) return;
             c.push_back({b, cap});
         };
         switch (settings.fgBackend) {
         case PUSHCORE_FG_DLSSG: add(PUSHCORE_FG_DLSSG, 8); if (m > 4) add(PUSHCORE_FG_DLSSG, 4); if (m > 2) add(PUSHCORE_FG_DLSSG, 2); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); break;
-        case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_HELIXFG, 6); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        case PUSHCORE_FG_HELIXFG: add(PUSHCORE_FG_HELIXFG, 8); if (m > 2) add(PUSHCORE_FG_HELIXFG, 2); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
         case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
@@ -1100,6 +1189,32 @@ struct PushCore {
                 portGraph = true;
             }
         }
+        // HelixSR frame generation: the provider's root (anr\nvngx_dlssg.dll) and DLSS-G's motion convention (patch hunk
+        // EnhanceGraphDesc::pushMpcDirectFgRoot / pushMpcDirectFgNvidiaMotion); the first graph on this adapter + driver is
+        // its self-test
+        helixFgGraph = false;
+        if (options.fg && tryFg == PUSHCORE_FG_HELIXFG && options.settings.frameGenerationBackend == engine::FrameGenerationBackend::Anr) {
+            if (!testBegin(helixFgTest)) { lastFailed = engine::FailedBackend::Fg; return fail("HelixSR frame generation: an earlier self-test did not finish"); }
+            gd.pushMpcDirectFgRoot = helixRoot().wstring();
+            gd.pushMpcDirectFgNvidiaMotion = true;
+            helixFgGraph = true;
+        }
+        // HLX FSR 4 as the FSR upscaler on RX 5000 / GTX (one folder per process, PUSHMPC_FSR_SR_DIR, patch hunk in
+        // FsrSrBackend); after a failed self-test the process goes back to AMD's FidelityFX DLL (FSR 3.1 there)
+        hlxGraph = false;
+        {
+            const int hk = hlxFsr4Kind(ctx.adapter().vendorId, family);
+            const bool wantHlx = hk && options.sr && runSr == PUSHCORE_SR_METHOD_FSR && gHlxFsr4Process.load() != 2 && !hlxFsrTest.recorded
+                                 ? communityAllowed(pmu::Unlock::HlxFsr4, hlxFsr4Files(hk)) : (hk && options.sr && runSr == PUSHCORE_SR_METHOD_FSR && gHlxFsr4Process.load() == 1);
+            if (wantHlx && testBegin(hlxFsrTest)) {
+                SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_DIR", hlxFsr4Dir(hk).wstring().c_str());
+                gHlxFsr4Process.store(1);
+                hlxGraph = true;
+                veyra::log::info("pushcore", std::format("FSR upscaling: HLX FSR 4 {} (HelixSR {})", hk == 2 ? "Full" : "Lite", pmhelix::kVersion));
+            } else if (gHlxFsr4Process.load() == 2) {
+                SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_DIR", nullptr);
+            }
+        }
         // initializePreview(), file branch:
         gd.vfgAsyncSubmission = options.settings.frameGenerationBackend == engine::FrameGenerationBackend::Vfg;
         gd.vfgFastFallback = false;          // live 2X sources only
@@ -1162,6 +1277,7 @@ struct PushCore {
             if (lastFailed == engine::FailedBackend::Fg || lastFailed == engine::FailedBackend::NgxCore) {
                 lastRouteFailed = routeGraph;
                 dlssgFailed(std::format("the DLSS-G graph did not start (failed backend {})", int(lastFailed)));
+                if (helixFgGraph) testRecord(helixFgTest, false, std::format("HelixSR frame generation did not start (failed backend {})", int(lastFailed)));
             }
             return fail(std::format("enhancement graph did not start (failed backend {})", int(graph->failedBackend())));
         }
@@ -1172,6 +1288,7 @@ struct PushCore {
             lastFailed = engine::FailedBackend::Fg;
             lastRouteFailed = routeGraph;
             dlssgFailed("DLSS-G did not start");
+            if (helixFgGraph) testRecord(helixFgTest, false, "HelixSR frame generation did not start");
             return fail("frame generation did not start");
         }
         if (haveSettings && settings.activeArea[2] > settings.activeArea[0] && settings.activeArea[3] > settings.activeArea[1])
@@ -1359,6 +1476,14 @@ struct PushCore {
                 p.nrMs = sum;
             }
             p.videoHdrMs = ms(GpuStage::VideoHdr);
+            if (hlxGraph && !hlxFsrTest.recorded) {   // HLX FSR 4's self-test: the FSR upscaler measured on 240 frames
+                ++hlxFsrTest.seen;
+                if (p.srMs > 0 && ++hlxFsrTest.count == kPortSelfTestFrames) testRecord(hlxFsrTest, true, std::format("HLX FSR 4 upscaled {} frames", kPortSelfTestFrames));
+                else if (hlxFsrTest.seen >= 2 * kPortSelfTestFrames && hlxFsrTest.count == 0) {
+                    testRecord(hlxFsrTest, false, "HLX FSR 4 did not run (the FSR upscaler did not start with it)");
+                    gHlxFsr4Process.store(2);   // later graphs in this process: AMD's FidelityFX DLL
+                }
+            }
             if (auto it = decisionOf.find(p.sourceFrameId); it != decisionOf.end()) {
                 // GPU work of the frame = its measured stages (colour, VSR, the FG group). The graph's execution span
                 // also contains the queue's waits (presentation release fence, VFG's CUDA hand-off) and overstated
@@ -1468,6 +1593,8 @@ struct PushCore {
             if (portGraph && portValidGenerated < kPortSelfTestFrames)
                 recordPortSelfTest(false, std::format("DLSS-G failed after {} generated frames (failed backend {})", portValidGenerated, int(graph->failedBackend())));
             if (routeGraph != pmu::DlssgRoute::None) routeFailed(std::format("DLSS-G failed while running (failed backend {})", int(graph->failedBackend())));
+            if (helixFgGraph && helixFgTest.count < kPortSelfTestFrames)
+                testRecord(helixFgTest, false, std::format("HelixSR frame generation failed after {} generated frames (failed backend {})", helixFgTest.count, int(graph->failedBackend())));
             return fail(std::format("graph process failed (failed backend {})", int(graph->failedBackend())));
         }
         if (!useAdmission) decision = fg ? 0 : 2;
@@ -1565,6 +1692,8 @@ struct PushCore {
             if (f.kind == FrameKind::Generated && f.validity != GenerationValidity::Valid) {
                 ++st.skippedGenerated; f.lease.reset(); ++b.next; continue;
             }
+            if (helixFgGraph && f.kind == FrameKind::Generated && !helixFgTest.recorded && ++helixFgTest.count == kPortSelfTestFrames)
+                testRecord(helixFgTest, true, std::format("HelixSR frame generation ran: {} valid generated frames", kPortSelfTestFrames));
             if (portGraph && f.kind == FrameKind::Generated && !portRecorded && ++portValidGenerated == kPortSelfTestFrames)
                 recordPortSelfTest(true, std::format("DLSS-G ran on the community port: {} valid generated frames", kPortSelfTestFrames));
             int outSlot = -1;
@@ -1683,6 +1812,8 @@ struct PushCore {
         // a self-test graph that closes cleanly before its result is not a failure: the next open tests again
         if (portGuardSet && !portRecorded) { setPortRunning(portUnlock(), {}); portGuardSet = false; }
         routeGraphEnded();
+        testEnd(helixFgTest); helixFgGraph = false;
+        testEnd(hlxFsrTest); hlxGraph = false;
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
         opened.clear(); outSlots.clear();
@@ -1841,7 +1972,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_TURING_DLSSG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_TURING_DLSSG | PUSHCORE_FEATURE_HELIXSR; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

@@ -20,10 +20,10 @@ namespace pmu {
 // the registry root of the unlock values (tests point it at a scratch key so the user's settings stay untouched)
 inline std::wstring& RegBase() { static std::wstring b = L"Software\\PushMPC"; return b; }
 
-enum class Unlock : int { Gtx16Vsr, ZludaVsr, XessFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, TuringDlssg, AmpereDlssg, Count };
+enum class Unlock : int { Gtx16Vsr, ZludaVsr, XessFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, TuringDlssg, AmpereDlssg, HelixFg, HlxFsr4, Count };
 inline const wchar_t* UnlockName(Unlock u)
 {
-    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XessFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"TuringDlssg", L"AmpereDlssg" };
+    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XessFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"TuringDlssg", L"AmpereDlssg", L"HelixFg", L"HlxFsr4" };
     const int i = int(u);
     return i >= 0 && i < int(Unlock::Count) ? n[i] : L"?";
 }

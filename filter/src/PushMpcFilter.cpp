@@ -690,7 +690,8 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
     }
     if (log) {
         std::wstring s = std::format(L"GPU {} ({}, vendor {:04X} device {:04X}): available", g.name, pm::FamilyName(g.family), c.vendorId, c.deviceId);
-        static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG" };
+        static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG", L"cap 14", L"cap 15", L"cap 16", L"cap 17", L"cap 18", L"HelixSR FG", L"HLX FSR 4" };
+        static_assert(sizeof(names) / sizeof(names[0]) == pm::kCapCount, "a name per capability");
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += std::wstring(L" ") + names[i];
         s += L"; not:";
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", names[i], g.reason[i]);
@@ -4285,7 +4286,9 @@ pm::Choice CPushMpcFilter::DecideNow(const pm::Settings& s, const pm::Display& d
     return pm::Decide(s, SourceInfo(), d, c, g);
 }
 static uint32_t CoreFg(pm::FgMethod m) { return m == pm::FgMethod::Auto ? PUSHCORE_FG_VFG : uint32_t(int(m) - 1); }
-static pm::FgMethod MethodOf(uint32_t coreFg) { return coreFg <= PUSHCORE_FG_NVOF ? pm::FgMethod(int(coreFg) + 1) : pm::FgMethod::Auto; }
+// a frame generation method this filter knows (PUSHCORE_FG_NONE and unknown ids: none)
+static bool KnownFg(uint32_t coreFg) { return coreFg <= PUSHCORE_FG_NVOF || coreFg == PUSHCORE_FG_HELIXFG; }
+static pm::FgMethod MethodOf(uint32_t coreFg) { return KnownFg(coreFg) ? pm::FgMethod(int(coreFg) + 1) : pm::FgMethod::Auto; }
 PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice& c)
 {
     PushCoreSettings p = {};
@@ -4494,7 +4497,7 @@ void CPushMpcFilter::LearnCosts()
     auto p95 = [](std::vector<double>& v) { std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, size_t(v.size() * 0.95))]; };
     auto ema = [](double& v, double x) { v = v * 0.5 + x * 0.5; };
     pm::Costs& c = m_costs;
-    if (fg.size() >= 48 && m_fgRun <= PUSHCORE_FG_NVOF) {
+    if (fg.size() >= 48 && KnownFg(m_fgRun)) {
         // what pushcore really runs (after its own fallback), at the applied multiplier (capped for 2x-only methods)
         const pm::FgMethod m = MethodOf(m_fgRun);
         const int q = m == pm::FgMethod::PushFlow ? int(a.fgTier) : m == pm::FgMethod::Dlssg ? (a.fgLite ? pm::kDlssgLiteQ : 0) : int(a.vfgQuality);
@@ -4734,10 +4737,10 @@ void CPushMpcFilter::AutoLoop()
         if (m_mode == Mode::Active) {
             const pm::FgMethod rm = MethodOf(m_fgRun);
             const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : rm == pm::FgMethod::Dlssg ? (applied.fgLite ? pm::kDlssgLiteQ : 0) : int(applied.vfgQuality);
-            running = m_fgRun > PUSHCORE_FG_NVOF || applied.multiplier < 2 ? std::wstring(L"off")
+            running = !KnownFg(m_fgRun) || applied.multiplier < 2 ? std::wstring(L"off")
                     : std::format(L"{} {}x{}, cut guard {}", pm::FgMethodLabel(rm), std::min<int>(int(applied.multiplier), pm::MaxMultiplier(rm)),
                                   *pm::QualityName(rm, rq) ? std::wstring(L" ") + pm::QualityName(rm, rq) : std::wstring(), m_cutGuardRun ? (c.guardNote.empty() ? std::wstring(L"on") : L"on, " + c.guardNote) : std::wstring(L"off"));
-            if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF && m_subtitleState)
+            if (applied.multiplier >= 2 && KnownFg(m_fgRun) && m_subtitleState)
                 running += m_subtitleState == 1 ? (m_subtitlePixels ? std::format(L", subtitle hold on ({} px held)", m_subtitlePixels) : std::wstring(L", subtitle hold on"))
                          : m_subtitleState == 2 ? std::wstring(L", subtitle hold unavailable") : std::wstring(L", subtitle hold not with this method");
             if (!m_fgRunNote.empty()) running += L" (" + m_fgRunNote + L")";
@@ -4749,7 +4752,7 @@ void CPushMpcFilter::AutoLoop()
             else if (m_mode == Mode::Active) {
                 const pm::FgMethod rm = MethodOf(m_fgRun);
                 const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : rm == pm::FgMethod::Dlssg ? (applied.fgLite ? pm::kDlssgLiteQ : 0) : int(applied.vfgQuality);
-                if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
+                if (applied.multiplier >= 2 && KnownFg(m_fgRun)) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
                 if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel) : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : L" \u00B7 NIS");
                 osd += std::format(L" \u00B7 {:.0f} fps", fps);
                 if (c.hdr) osd += L" \u00B7 SDR\u2192HDR";
