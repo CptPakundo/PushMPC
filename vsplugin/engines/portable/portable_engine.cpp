@@ -390,7 +390,7 @@ bool Engine::Configure(const Config& c, std::string& err)
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     m_threads = c.threads > 0 ? c.threads : int(std::min(16u, hw));
     m_ms = {};
-    m_ms.finestLevel = c.quality == 0 ? 2 : 1;   // as PushFPS's Engine (Auto, -1, is balanced: 16 px vectors)
+    m_ms.finestLevel = c.quality <= 0 ? 2 : 1;   // as PushFPS's Engine
     Forget();
     m_stats = {};
     return true;
@@ -486,7 +486,7 @@ Calibration Calibrate(int width, int height, int bits, int threads, int quality)
     // interpolation always runs) and its write into an output frame
     Picture pa, pb, out;
     FillPicture(v[0], pa); FillPicture(v[1], pb);
-    veyra::portable::MotionSettings ms; ms.finestLevel = quality == 0 ? 2 : 1;
+    veyra::portable::MotionSettings ms; ms.finestLevel = quality <= 0 ? 2 : 1;
     const MotionEstimator est(ms);
     const double t0 = NowMs();
     auto back = std::async(std::launch::async, [&] { return est.estimate(*pb.pyramid, *pa.pyramid, nullptr); });
