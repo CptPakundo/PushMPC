@@ -526,6 +526,7 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
     std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     size_t pairsUsed = 0;
     std::vector<std::pair<uint64_t, uint64_t>> pairList;
+    std::vector<std::pair<size_t, RepairGroup>> subs;   // substitution sub-parts (parent index), placed after the whole parts
     for (const auto& g : groups) {
         if (out.size() >= kMaxGroups) break;
         const int k0 = g.first.first, k1 = g.first.second;
@@ -698,12 +699,20 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
             pairList.push_back(pr); ++pairsUsed;
         }
         out.push_back(std::move(r));
-        if (sub.cells && out.size() < kMaxGroups) {
-            const std::pair<uint64_t, uint64_t> ps{sub.pairFrom, sub.d1};
-            if (std::find(pairList.begin(), pairList.end(), ps) != pairList.end() || pairsUsed < kMaxPairs) {
-                if (std::find(pairList.begin(), pairList.end(), ps) == pairList.end()) { pairList.push_back(ps); ++pairsUsed; }
-                out.push_back(std::move(sub));
-            }
+        // a substitution sub-part waits until every whole part has its place (a blob inside one character must not
+        // take the pair of another character: two characters on twos out of phase, a mouth redrawn in one of them)
+        if (sub.cells) subs.push_back({out.size() - 1, std::move(sub)});
+    }
+    for (auto& [parent, sp] : subs) {
+        const std::pair<uint64_t, uint64_t> ps{sp.pairFrom, sp.d1};
+        const bool havePair = std::find(pairList.begin(), pairList.end(), ps) != pairList.end();
+        if (out.size() < kMaxGroups && (havePair || pairsUsed < kMaxPairs)) {
+            if (!havePair) { pairList.push_back(ps); ++pairsUsed; }
+            out.push_back(std::move(sp));
+        } else {   // no room: the blob stays in its body's span (as before the substitution rule)
+            auto& pm = out[parent].mask;
+            for (size_t i = 0; i < pm.size() && i < sp.mask.size(); ++i) if (sp.mask[i]) pm[i] = 255;
+            out[parent].substituted = 0;
         }
     }
     AssignOwners(out);
