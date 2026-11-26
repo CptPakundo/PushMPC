@@ -1,4 +1,4 @@
-# T5b vendor paths: structural checks on hosted runners (no vendor GPU there).
+# Vendor paths: structural checks on hosted runners (no vendor GPU there).
 #   - auto_test (the Auto rules, including the [vendor paths] checks: weak-GPU cold start, measured card factor, unlock gates);
 #   - vsr_gate_probe (the Gtx16Vsr / ZludaVsr self-test tool): builds against NVIDIA's DLSS SDK (headers + static NGX
 #     library, the tag PushFPS pins) and runs on the runner, where every route must fail cleanly (no NVIDIA GPU);

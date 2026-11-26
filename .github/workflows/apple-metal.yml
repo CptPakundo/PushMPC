@@ -1,5 +1,5 @@
 # The Apple checks that need real Apple silicon (bare metal: the Neural Engine and the scaler that hosted VMs lack).
-# Runs on a SELF-HOSTED runner labelled apple-metal: a rented Mac (Scaleway Mac mini M4 or AWS mac-m4.metal) set up
+# Runs on a SELF-HOSTED runner labelled apple-metal: a Mac set up
 # with scripts/apple-metal-runner.sh. Manual runs only; nothing here runs on GitHub's hosted runners.
 #   probe      what VideoToolbox offers on this Mac (formats, sizes, the editing-grade model, Metal), macOS 27 size
 #              queries when present

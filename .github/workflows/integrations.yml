@@ -1,4 +1,4 @@
-# Player integrations and packaging (track T4) on hosted runners, no GPU:
+# Player integrations and packaging on hosted runners, no GPU:
 #   win-writers     every config writer against fake roots (mpv-integration, mpv/MPC-BE/PotPlayer steps of pushmpc-install)
 #   win-players     real portable players with the plugin (portable backend): mpv (shinchiro), mpv.net, MPC-QT, Kodi
 #                   (external player), a Jellyfin MPV Shim config; install, play, byte-exact uninstall

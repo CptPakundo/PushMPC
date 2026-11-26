@@ -1,6 +1,6 @@
 name: xefg-spike
 
-# SP6: XeSS frame generation through a headless IDXGISwapChain4 shim, smoke-tested on WARP.
+# XeSS frame generation through a headless IDXGISwapChain4 shim, smoke-tested on WARP.
 on:
   push:
     paths:

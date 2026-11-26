@@ -1,4 +1,4 @@
-# The native mpv route (track T10): FFmpeg 9.1 + vf_pushmpc + mpv 0.42 built on the runners, the engine module
+# The native mpv route: FFmpeg 9.1 + vf_pushmpc + mpv 0.42 built on the runners, the engine module
 # (pushmpc_engine), and headless checks (mpvnative/tests/run-tests.sh):
 #   linux    ubuntu-24.04: Vulkan-Headers, libplacebo, FFmpeg (+ fruc_vulkan), mpv; engine_test; ffmpeg CPU / 10-bit /
 #            Vulkan (lavapipe, copy fallback) / pass-through; mpv encode mode, lavfi graph, display-resample on vo=null;
