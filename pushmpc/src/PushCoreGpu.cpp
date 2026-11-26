@@ -388,7 +388,7 @@ struct PushCore {
     bool haveSettings = false;
     PushCoreSettings settings{};
     // PushMPC 0.6: the frame generation method that is tried now (the fallback chain moves it), what runs, why
-    uint32_t tryFg = PUSHCORE_FG_VFG, tryMultiplierCap = 8;
+    uint32_t tryFg = PUSHCORE_FG_VFG, tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER;
     uint32_t runFg = PUSHCORE_FG_NONE, runSr = PUSHCORE_SR_METHOD_RTX;
     bool fgFellBack = false, cutGuardOn = false;
     uint64_t cutBase = 0;                    // cuts of graphs torn down (the guard's count restarts with each graph)
@@ -547,7 +547,7 @@ struct PushCore {
     // node on with its default parameters (one layer: flat fields, nrLayerCount 0) and PushQuickSetup's look writes
     // model.tone/structure; "SDR to HDR" videoHdr.enabled with VideoHdrSettings' defaults. One deliberate difference:
     // the frame generation backend is NVIDIA VFG (PushFPS's fresh default on NVIDIA is DLSS-G, which PushMPC does not
-    // ship; VFG is the video interpolation and goes up to 8X).
+    // ship; VFG is the video interpolation and goes up to 16X here: 8X in the SDK multiplier mode, above in its timestep mode).
     bool buildFromPushMpc(veyra::engine::EnhancementSettings& s, std::optional<veyra::engine::ChainRuntimeOrder>& order) {
         using namespace veyra::engine;
         s = EnhancementSettings{};
@@ -555,7 +555,7 @@ struct PushCore {
         const uint32_t vendor = ctx.adapter().vendorId;
         const bool nvidia = vendor == 0x10DE, amd = vendor == 0x1002;
         // frame generation method (tryFg: the asked-for one, or the next of the fallback chain)
-        uint32_t cap = 8;
+        uint32_t cap = PUSHCORE_MAX_MULTIPLIER;   // VFG
         switch (tryFg) {
         case PUSHCORE_FG_DLSSG:
             // DLSS-G on video: the FidelityFX optical flow (NVIDIA's hardware flow and GPU-DIS give it the same picture:
@@ -700,7 +700,9 @@ struct PushCore {
         dd.requiredLuid = luid;
         if (!ctx.initialize(dd, status)) return fail(std::format("no D3D12 device on adapter LUID {:016X}", luid));
         if (ctx.adapter().luid != luid) return fail("D3D12 device is on a different adapter");
-        if (!ring.initialize(ctx.device(), ctx.directQueue(), ctx.fence(), ctx.fenceEvent(), 16, status))
+        // one command list per generated frame plus the rest of the graph, two source frames in flight: 16 slots were enough
+        // for 8x, VFG 16x needs 32 (with 16 the ring wrapped inside one source frame and submit waited on the GPU: 35 ms at 16x)
+        if (!ring.initialize(ctx.device(), ctx.directQueue(), ctx.fence(), ctx.fenceEvent(), 16 + 2 * (PUSHCORE_MAX_MULTIPLIER - 8), status))
             return fail("command ring did not start");
         // PushFPS playback (PreviewGpuSession::initialize) raises the process GPU scheduling class to its
         // "gpuPriority" preference, High when unset (the default). Same here, for parity under GPU contention.
@@ -757,8 +759,8 @@ struct PushCore {
     // not fail because of one backend: the rest of the picture work still runs).
     std::vector<std::pair<uint32_t, uint32_t>> fallbackChain() const {
         std::vector<std::pair<uint32_t, uint32_t>> c;
-        const uint32_t m = std::clamp<uint32_t>(settings.multiplier, 1, 8);
-        if (m < 2) { c.push_back({settings.fgBackend, 8}); return c; }
+        const uint32_t m = std::clamp<uint32_t>(settings.multiplier, 1, PUSHCORE_MAX_MULTIPLIER);
+        if (m < 2) { c.push_back({settings.fgBackend, PUSHCORE_MAX_MULTIPLIER}); return c; }
         const bool nvidia = ctx.adapter().vendorId == 0x10DE, amd = ctx.adapter().vendorId == 0x1002;
         auto add = [&](uint32_t b, uint32_t cap) {
             if ((b == PUSHCORE_FG_VFG || b == PUSHCORE_FG_DLSSG || b == PUSHCORE_FG_NVOF) && !nvidia) return;
@@ -772,7 +774,7 @@ struct PushCore {
         case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
         case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
-        default: add(PUSHCORE_FG_VFG, 8); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        default: add(PUSHCORE_FG_VFG, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
         return c;
@@ -781,7 +783,7 @@ struct PushCore {
     uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false;
     int buildGraph() {
         builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0;
-        if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = 8; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
+        if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
         std::string notes;
         fgFellBack = false;
@@ -799,7 +801,7 @@ struct PushCore {
             if (deviceLost || i + 1 == chain.size()) return r;
             // only a frame generation failure moves down the chain; anything else is the open's error, as before
             if (lastFailed != veyra::engine::FailedBackend::Fg && lastFailed != veyra::engine::FailedBackend::NgxCore && lastFailed != veyra::engine::FailedBackend::OpticalFlow) return r;
-            notes += std::format("{}{} did not start ({}); ", fgName(tryFg), chain[i].second < 8 ? std::format(" at {}x", std::min(settings.multiplier, chain[i].second)) : std::string(), error);
+            notes += std::format("{}{} did not start ({}); ", fgName(tryFg), chain[i].second < std::min<uint32_t>(settings.multiplier, PUSHCORE_MAX_MULTIPLIER) ? std::format(" at {}x", std::min(settings.multiplier, chain[i].second)) : std::string(), error);
             veyra::log::warn("pushcore", std::format("{} did not start (failed backend {}): trying {}", fgName(tryFg), int(lastFailed), fgName(chain[i + 1].first)));
             teardownGraph();
             error.clear();
@@ -816,7 +818,7 @@ struct PushCore {
         options = engine::PlayerOptions::from(s, order);
         if (cfgSr >= 0) options.sr = cfgSr != 0;
         if (cfgFg >= 0) options.fg = cfgFg != 0;
-        if (cfgMultiplier >= 2) options.fgMultiplier = uint32_t(std::clamp(cfgMultiplier, 2, 8));
+        if (cfgMultiplier >= 2) options.fgMultiplier = uint32_t(std::clamp(cfgMultiplier, 2, int(PUSHCORE_MAX_MULTIPLIER)));
         if (cfgVfgQuality >= 0) options.settings.vfgQuality = uint32_t(cfgVfgQuality);
         if (options.fg && engine::presentSinkFrameGeneration(options.settings.frameGenerationBackend))
             return fail("the saved frame generation method presents on its own (XeSS) and cannot feed a renderer");
@@ -1431,7 +1433,7 @@ struct PushCore {
         auto next = engine::PlayerOptions::from(s, order);
         if (cfgSr >= 0) next.sr = cfgSr != 0;
         if (cfgFg >= 0) next.fg = cfgFg != 0;
-        if (cfgMultiplier >= 2) next.fgMultiplier = uint32_t(std::clamp(cfgMultiplier, 2, 8));
+        if (cfgMultiplier >= 2) next.fgMultiplier = uint32_t(std::clamp(cfgMultiplier, 2, int(PUSHCORE_MAX_MULTIPLIER)));
         if (next.sr != options.sr || next.fg != options.fg || next.nr != options.nr || (next.fg && next.fgMultiplier != options.fgMultiplier) ||
             next.settings.useHdrPreview(gd.hdrInput, stream.displayHdr != 0) != gd.hdrOutput) {
             veyra::log::info("pushcore", "settings change needs a graph rebuild (stages or HDR output)");
@@ -1561,7 +1563,7 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_VFG16; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

@@ -3,7 +3,7 @@
 //
 // Values (REG_SZ, absent = the default; case-insensitive):
 //   Enable           DWORD 1/0                       default 1
-//   Smoother         Auto | Off | 2..8               default Auto   (NVIDIA VFG frame generation multiplier)
+//   Smoother         Auto | Off | 2..16              default Auto   (NVIDIA VFG frame generation multiplier)
 //   Sharper          Auto | Off | 1..4               default Auto   (RTX Video Super Resolution quality)
 //   CleanUp          Auto | Off | On                 default Auto   (PushFPS "AI picture enhancement", NR)
 //   SdrToHdr         Auto | Off | On                 default Auto   (SDR video as HDR10 when Windows HDR is on)
@@ -36,6 +36,7 @@ namespace pm {
 
 inline constexpr const wchar_t* kSettingsKey = L"Software\\PushMPC";
 inline constexpr int kAuto = -1, kOff = 0;
+inline constexpr int kMaxSmoother = 16;   // the largest fixed Smoother (NVIDIA VFG 16x; other methods stop lower)
 
 enum class FgQuality { Low = 0, Medium = 1, High = 2, Auto = 3 };
 // Frame generation method (pushcore PUSHCORE_FG_* + 1; Auto = by GPU family and budget)
@@ -56,7 +57,8 @@ enum class BatteryMode { Light = 0, Same = 1 };
 
 struct Settings {
     bool enable = true;
-    int smoother = kAuto;   // kAuto, kOff, 2..8
+    int smoother = kAuto;   // kAuto, kOff, 2..16
+    int autoCap = 0;        // runtime only (never stored): Auto's multiplier cap after frames came late at the higher one
     int sharper = kAuto;    // kAuto, kOff, 1..4
     int cleanUp = kAuto;    // kAuto, kOff, 1 = on
     int sdrToHdr = kAuto;   // kAuto, kOff, 1 = on
@@ -177,7 +179,7 @@ inline Settings LoadSettings()
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return s;
     s.enable = RegReadBool(k, L"Enable", true);
-    s.smoother = ParseChoice(RegReadStr(k, L"Smoother"), 2, 8, kAuto);
+    s.smoother = ParseChoice(RegReadStr(k, L"Smoother"), 2, kMaxSmoother, kAuto);
     s.sharper = ParseChoice(RegReadStr(k, L"Sharper"), 1, 4, kAuto);
     s.cleanUp = ParseOnOff(RegReadStr(k, L"CleanUp"), kAuto);
     s.sdrToHdr = ParseOnOff(RegReadStr(k, L"SdrToHdr"), kAuto);

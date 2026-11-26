@@ -71,6 +71,19 @@ index 32e47f4c..b9d4bd27 100644
 +void setShaderDirectoryOverride(const std::filesystem::path& dir);
 +
  } // namespace veyra::runtime
+diff --git a/include/veyra/engine/EnhancementSettings.h b/include/veyra/engine/EnhancementSettings.h
+index c6f8bf93..1dcfad91 100644
+--- a/include/veyra/engine/EnhancementSettings.h
++++ b/include/veyra/engine/EnhancementSettings.h
+@@ -721,7 +721,7 @@ struct EnhancementSettings {
+         if(!pipeline::validSrOutput(srOutput))return "invalid SR output";
+         if(!pipeline::validSrTarget(dualSrTarget)||!validVideoSrQuality(dualSrQuality))return "invalid second SR target or quality";
+         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";
+-        if(multiplier<1||multiplier>(frameGenerationBackend==FrameGenerationBackend::Vfg?8u:6u))return "unsupported multiplier";
++        if(multiplier<1||multiplier>(frameGenerationBackend==FrameGenerationBackend::Vfg?16u:6u))return "unsupported multiplier";   // PushMPC (local addition): VFG 16X (FrameBatch::Capacity)
+         // 0 = auto quality; explicit values are capped at 300 Mbps so a typo
+         // cannot ask a driver for a nonsense rate.
+         if(exportBitrateMbps>300)return "export bitrate out of range";
 diff --git a/include/veyra/pipeline/DolbyVisionP5.h b/include/veyra/pipeline/DolbyVisionP5.h
 index 0f501aa8..ad0d5747 100644
 --- a/include/veyra/pipeline/DolbyVisionP5.h
@@ -163,6 +176,25 @@ index 3deeab3b..2f77591b 100644
      std::unique_ptr<PushOverlayPass> subtitles_; // PushFPS: Subtitle Hold (fills overlay_'s input when both run)
      bool initHudLock();
      void composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity);
+diff --git a/include/veyra/pipeline/FrameBatch.h b/include/veyra/pipeline/FrameBatch.h
+index 7e6ded23..d0e77b58 100644
+--- a/include/veyra/pipeline/FrameBatch.h
++++ b/include/veyra/pipeline/FrameBatch.h
+@@ -39,12 +39,12 @@ struct BatchFrame {
+     std::shared_ptr<FrameLease> lease;
+ };
+ struct FrameBatch {
+-    static constexpr uint32_t Capacity=8;
++    static constexpr uint32_t Capacity=16;   // PushMPC (local addition): VFG up to 16X (upstream 8)
+     uint64_t batchId=0;
+     FrameIdentity identity;
+     int64_t a100ns=0,b100ns=0;
+     // 8X multi-frame generation needs one real frame plus up to seven generated
+-    // frames in a single batch.
++    // frames in a single batch (PushMPC: 16X, one real plus fifteen generated).
+     std::array<BatchFrame,Capacity> frames{};
+     uint32_t count=0;
+     static int64_t interpolate(int64_t a,int64_t b,uint32_t j,uint32_t n) {
 diff --git a/include/veyra/pipeline/FramePacket.h b/include/veyra/pipeline/FramePacket.h
 index 772f1556..799b1aa1 100644
 --- a/include/veyra/pipeline/FramePacket.h
@@ -310,7 +342,7 @@ index 00000000..19ea835a
 +};
 +}
 diff --git a/include/veyra/pipeline/VfgBackend.h b/include/veyra/pipeline/VfgBackend.h
-index f8c2bb50..9abd42ab 100644
+index f8c2bb50..670a01a3 100644
 --- a/include/veyra/pipeline/VfgBackend.h
 +++ b/include/veyra/pipeline/VfgBackend.h
 @@ -5,6 +5,7 @@
@@ -321,7 +353,7 @@ index f8c2bb50..9abd42ab 100644
  // Public NvVFX 1.3 API. SDK metadata is allocated by NVCVImage.dll; no SDK
  // headers, models or implementation are vendored into the source repository.
  // Borrowed encoded textures stay in the graph's normal FrameLease pool.
-@@ -29,8 +30,12 @@ public:
+@@ -29,25 +30,34 @@ public:
      // The same list also runs the GPU shot-change test of this pair against
      // the other parity's input (comparePrevious=false when the pair has no
      // valid A, e.g. after a reset); copyOutput() of the pair's subframes is
@@ -336,7 +368,14 @@ index f8c2bb50..9abd42ab 100644
      // Signals an OWNED producer fence and queues a GPU wait before copyOutput.
      // Preview offloads the serial CUDA wait/run/signal to a bounded worker;
      // synchronous/export callers retain the immediate SDK rejection verdict.
-@@ -42,12 +47,15 @@ public:
+     // fast: this pair uses the second effect, see fastReady().
+-    bool generate(unsigned parity,unsigned subframe,unsigned multiplier,bool reset,bool fast=false);
++    // PushMPC (local addition): timestep in (0,1) generates at that position instead of subframe/multiplier (the SDK's
++    // timestep mode; the output still goes to the subframe's slot), so a caller can ask for any t of a pair.
++    bool generate(unsigned parity,unsigned subframe,unsigned multiplier,bool reset,bool fast=false,float timestep=0.f);
+     // A second effect is loaded: a mixed tier's second model, or with fastFallback
+     // the next faster model, for pairs the chosen one would finish too late for.
+     bool fastReady() const;
      // Poll after the corresponding consumer fence. A submitted copy is not
      // proof that the SDK accepted the generated frame.
      SubmissionState submissionState(unsigned slot) const;
@@ -1645,7 +1684,7 @@ index 5c76c5f3..02aa97d4 100644
 +
  } // namespace veyra::runtime
 diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
-index 17c476a8..6b2db47d 100644
+index 17c476a8..a79a0e5a 100644
 --- a/src/pipeline/EnhanceGraph.cpp
 +++ b/src/pipeline/EnhanceGraph.cpp
 @@ -796,6 +796,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
@@ -1936,7 +1975,7 @@ index 17c476a8..6b2db47d 100644
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
              gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);
              if(!submitGraph(slot))return false;
-@@ -4601,7 +4732,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4601,13 +4732,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              if(!vfgBackend_->generate(parity,sub,resetFg?2u:outputMultiplier,resetFg,out.fgFast)){failedBackend_=engine::FailedBackend::Fg;return false;}
              auto* flist=ring_.acquireNext(slot,st);if(!flist)return false;
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1945,7 +1984,17 @@ index 17c476a8..6b2db47d 100644
              if(!resetFg)composeOverlay(flist,generatedSlot,parity,float(sub)/float(outputMultiplier));
              composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
              if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
-@@ -4698,6 +4829,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+             tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
+-            const auto timingStage=GpuStage(unsigned(GpuStage::Fg1)+sub-1);gpuTimer_.mark(flist,timingStage,true);
+-            if(sub<fgCalls)gpuTimer_.mark(flist,GpuStage(unsigned(GpuStage::Fg1)+sub));
++            // PushMPC (local addition): per-subframe spans Fg1..Fg7 only (above 8X the later subframes count in FgBatch alone)
++            constexpr unsigned kTimedSubframes=unsigned(GpuStage::Fg7)-unsigned(GpuStage::Fg1)+1;
++            if(sub<=kTimedSubframes)gpuTimer_.mark(flist,GpuStage(unsigned(GpuStage::Fg1)+sub-1),true);
++            if(sub<fgCalls){if(sub<kTimedSubframes)gpuTimer_.mark(flist,GpuStage(unsigned(GpuStage::Fg1)+sub));}
+             else{gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
+             if(!submitGraph(slot))return false;
+             if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
+@@ -4698,6 +4831,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          if(!resetFg)composeOverlay(flist,generatedSlot,parity,float(sub)/float(outputMultiplier));
          composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
          if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
@@ -1953,7 +2002,7 @@ index 17c476a8..6b2db47d 100644
          tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
          tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_COMMON);
          tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
-@@ -5046,6 +5178,7 @@ void EnhanceGraph::shutdown()
+@@ -5046,6 +5180,7 @@ void EnhanceGraph::shutdown()
      }
      (void)ring_.drainQueue();(void)ring_.discardRecording();
      presentationFences_={};presentationValues_={};
@@ -2374,7 +2423,7 @@ index 00000000..d52c6834
 +}
 +}  // namespace veyra::pipeline
 diff --git a/src/pipeline/VfgBackend.cpp b/src/pipeline/VfgBackend.cpp
-index 94591579..e58d9d72 100644
+index 94591579..26925e93 100644
 --- a/src/pipeline/VfgBackend.cpp
 +++ b/src/pipeline/VfgBackend.cpp
 @@ -1,5 +1,6 @@
@@ -2384,16 +2433,28 @@ index 94591579..e58d9d72 100644
  #include "veyra/pipeline/FrameBatch.h"
  #include "veyra/pipeline/GpuPassUtils.h"
  #include "veyra/core/SceneCadenceAnalyzer.h"
-@@ -28,8 +29,6 @@ namespace veyra::pipeline {
+@@ -28,8 +29,10 @@ namespace veyra::pipeline {
  namespace {
  namespace fs=std::filesystem;
  constexpr unsigned kOutputs=2*(FrameBatch::Capacity-1);
 -constexpr unsigned kShotChangeConstants=12;  // VfgShotChange.hlsl cbuffer
 -constexpr UINT64 kShotChangeBytes=256;       // flags, scores and a cut count
++// PushMPC (local addition): the SDK's multiplier mode takes FrameMultiplier 2..8 only ("must be 0 or in [2, 8]");
++// above that the same effect runs in its explicit timestep mode (FrameMultiplier 0, Timestep = sub / M in (0, 1)),
++// as NVIDIA's VFX docs describe. VEYRA_TEST_VFG_TIMESTEP=1 uses the timestep mode at every multiplier (A/B check).
++constexpr unsigned kSdkIndexedMultiplierMax=8;
  void transition(D3D12_RESOURCE_BARRIER& barrier,ID3D12Resource* resource,D3D12_RESOURCE_STATES from,D3D12_RESOURCE_STATES to){
      barrier={};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;barrier.Transition={resource,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,from,to};
  }
-@@ -110,6 +109,8 @@ struct VfgBackend::Impl {
+@@ -83,6 +86,7 @@ struct VfgBackend::Impl {
+     int (__cdecl* create)(const char*,void**)=nullptr;
+     void (__cdecl* destroy)(void*)=nullptr;
+     int (__cdecl* setU32)(void*,const char*,unsigned)=nullptr;
++    int (__cdecl* setF32)(void*,const char*,float)=nullptr;   // PushMPC (local addition): Timestep above 8X
+     int (__cdecl* setImage)(void*,const char*,void*)=nullptr;
+     int (__cdecl* setStream)(void*,const char*,CUstream)=nullptr;
+     int (__cdecl* loadEffect)(void*)=nullptr;
+@@ -110,6 +114,8 @@ struct VfgBackend::Impl {
          void* image=nullptr;
      };
      std::array<Buffer,2> inputs;
@@ -2402,7 +2463,7 @@ index 94591579..e58d9d72 100644
      std::array<Buffer,kOutputs> outputs;
      gfx::D3D12DeviceContext* context=nullptr;
      Microsoft::WRL::ComPtr<ID3D12Fence> producer,completion;
-@@ -139,10 +140,12 @@ struct VfgBackend::Impl {
+@@ -139,11 +145,15 @@ struct VfgBackend::Impl {
      // AutomaticShotChangeDetection; VEYRA_TEST_VFG_AUTO_SHOT_CHANGE=1 restores
      // the SDK detection (and skips this test) for same-EXE A/B runs.
      bool gpuShotChange=false;
@@ -2410,16 +2471,20 @@ index 94591579..e58d9d72 100644
 -    Microsoft::WRL::ComPtr<ID3D12PipelineState> cutPso;
 -    Microsoft::WRL::ComPtr<ID3D12Resource> cutResults;
 -    D3D12_RESOURCE_STATES cutState=D3D12_RESOURCE_STATE_COMMON;
+-    struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;};
 +    // PushMPC (local addition): the pair test is PushMpcCutGuard's (adaptive, dark, warp and active-area rules in
 +    // VfgShotChange.hlsl; VEYRA_TEST_VFG_FIXED_SHOT_CHANGE=1 keeps PushFPS's fixed thresholds only) and, on a cut,
 +    // the pair's first real frame A is held through the generated slots instead of B shown early
 +    // (VEYRA_TEST_VFG_CUT_SHOWS_CURRENT=1 restores upstream's B).
 +    bool cutHoldsPrevious=true;
++    bool forceTimestep=false;   // PushMPC (local addition): VEYRA_TEST_VFG_TIMESTEP=1
++    bool timestepMode(unsigned multiplier)const{return forceTimestep||multiplier>kSdkIndexedMultiplierMax;}
 +    CutGuard guard;
-     struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;};
++    struct Job {unsigned parity,sub,multiplier;bool reset;uint64_t revision,value;bool fast;float t=0.f;};
      std::array<std::atomic<SubmissionState>,kOutputs> states{};
      std::atomic<bool> failed=false;
-@@ -264,54 +267,32 @@ struct VfgBackend::Impl {
+     uint64_t queuedFence=0; // jobsMutex: greatest completion dependency queued for D3D12
+@@ -264,54 +274,32 @@ struct VfgBackend::Impl {
      // Root signature: 12 constants (b0), the previous/current input buffers as
      // raw root SRVs (t0/t1) and the result buffer as a raw root UAV (u0). The
      // shared inputs are plain byte buffers, so no descriptor heap is involved.
@@ -2493,15 +2558,92 @@ index 94591579..e58d9d72 100644
      }
      void releaseBuffer(Buffer& buffer){
          if(buffer.image){imageDestroy(buffer.image);buffer.image=nullptr;}
-@@ -494,6 +475,7 @@ bool VfgBackend::initialize(gfx::D3D12DeviceContext& context,const std::wstring&
+@@ -320,7 +308,7 @@ struct VfgBackend::Impl {
+         buffer.resource.Reset();
+     }
+     bool cudaJob(const Job& job){
+-        const auto [parity,sub,multiplier,reset,revision,value,fast]=job;
++        const auto [parity,sub,multiplier,reset,revision,value,fast,t]=job;
+         Current current(*this);if(!current.active)return false;
+         CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS wait{};wait.params.fence.value=value;
+         bool ok=!failed.load()&&cu(cpuCall(2,[&]{return cuWaitExternalSemaphoresAsyncFn(&inputSemaphore,&wait,1,stream);}),"cuWaitExternalSemaphoresAsync");
+@@ -347,12 +335,14 @@ struct VfgBackend::Impl {
+                 cv(cpuCall(6,[&]{return setU32(e.handle,"ShotChange",reset?1u:0u);}),"SetU32 ShotChange");
+             if(ok)e.boundPair=pairSerial;
+         }
+-        if(ok&&e.boundMultiplier!=multiplier){
+-            ok=cv(cpuCall(7,[&]{return setU32(e.handle,"FrameMultiplier",multiplier);}),"SetU32 FrameMultiplier");
+-            if(ok)e.boundMultiplier=multiplier;
++        const bool timestep=t>0.f||timestepMode(multiplier);const unsigned sdkMultiplier=timestep?0u:multiplier;
++        if(ok&&e.boundMultiplier!=sdkMultiplier){   // boundMultiplier: the value the SDK holds (0 = timestep mode)
++            ok=cv(cpuCall(7,[&]{return setU32(e.handle,"FrameMultiplier",sdkMultiplier);}),"SetU32 FrameMultiplier");
++            if(ok)e.boundMultiplier=sdkMultiplier;
+         }
+         ok=ok&&cv(cpuCall(5,[&]{return setImage(e.handle,"DstImage0",outputs[parity+2*(sub-1)].image);}),"SetImage output")&&
+-            cv(cpuCall(8,[&]{return setU32(e.handle,"FrameIndex",sub);}),"SetU32 FrameIndex");
++            (timestep?cv(cpuCall(8,[&]{return setF32(e.handle,"Timestep",t>0.f?t:float(sub)/float(multiplier));}),"SetF32 Timestep")
++                     :cv(cpuCall(8,[&]{return setU32(e.handle,"FrameIndex",sub);}),"SetU32 FrameIndex"));
+         if(ok&&testRunDelayMs>0){
+             const auto until=std::chrono::steady_clock::now()+std::chrono::duration<double,std::milli>(testRunDelayMs*(second?.3:1));
+             while(std::chrono::steady_clock::now()<until)std::this_thread::yield();
+@@ -433,13 +423,13 @@ struct VfgBackend::Impl {
+             {std::lock_guard lock(jobsMutex);--outstanding;}
+         }
+     }
+-    bool handoff(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast){
++    bool handoff(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast,float t=0.f){
+         const unsigned slot=parity+2*(sub-1);
+         if(!asynchronous){
+             std::lock_guard submit(cudaSubmissionMutex);
+             const uint64_t value=++signalValue;
+             if(!hr(cpuCall(1,[&]{return context->directQueue()->Signal(producer.Get(),value);}),"signal VFG producer"))return false;
+-            const bool ok=cudaJob({parity,sub,multiplier,reset,inputRevision,value,fast});
++            const bool ok=cudaJob({parity,sub,multiplier,reset,inputRevision,value,fast,t});
+             if(!ok){
+                 failed.store(true);Current current(*this);
+                 if(current.active&&stream)cu(cuStreamSynchronizeFn(stream),"rejected synchronous job drain");
+@@ -466,7 +456,7 @@ struct VfgBackend::Impl {
+         if(!hr(cpuCall(1,[&]{return context->directQueue()->Signal(producer.Get(),value);}),"signal VFG producer"))return false;
+         // Allocate the queue entry before adding a GPU dependency. Even a host
+         // allocation exception cannot leave a wait with no job to signal it.
+-        jobs.push_back({parity,sub,multiplier,reset,inputRevision,value,fast});
++        jobs.push_back({parity,sub,multiplier,reset,inputRevision,value,fast,t});
+         if(!hr(cpuCall(11,[&]{return context->directQueue()->Wait(completion.Get(),value);}),"queue wait VFG completion")){
+             jobs.pop_back();return false;
+         }
+@@ -494,6 +484,8 @@ bool VfgBackend::initialize(gfx::D3D12DeviceContext& context,const std::wstring&
      p.mixed=engine::vfgMixedQuality(quality);
      p.effects[0].mode=engine::vfgPrimaryMode(quality);p.effects[1].mode=engine::vfgSecondaryMode(quality);
      p.gpuShotChange=GetEnvironmentVariableW(L"VEYRA_TEST_VFG_AUTO_SHOT_CHANGE",nullptr,0)==0;
 +    p.cutHoldsPrevious=GetEnvironmentVariableW(L"VEYRA_TEST_VFG_CUT_SHOWS_CURRENT",nullptr,0)==0;
++    p.forceTimestep=GetEnvironmentVariableW(L"VEYRA_TEST_VFG_TIMESTEP",nullptr,0)>0;   // PushMPC (local addition)
      p.profileCpu=GetEnvironmentVariableW(L"VEYRA_TEST_VFG_CPU_PROFILE",nullptr,0)>0;
      {wchar_t delay[16]{};if(GetEnvironmentVariableW(L"VEYRA_TEST_VFG_DELAY_MS",delay,16))p.testRunDelayMs=std::clamp(_wtof(delay),0.0,40.0);}
      wchar_t reject[16]{};
-@@ -647,7 +629,7 @@ bool VfgBackend::created()const{
+@@ -569,7 +561,7 @@ bool VfgBackend::initialize(gfx::D3D12DeviceContext& context,const std::wstring&
+     }
+     log::info("vfg",std::format("compatibility={} compute={}.{}",ampere?"SM86-experimental":"native-no-patches",major,minor));
+ #define BIND_VFX(member,name) if(!bind(core,name,p.member))return false
+-    BIND_VFX(create,"NvVFX_CreateEffect");BIND_VFX(destroy,"NvVFX_DestroyEffect");BIND_VFX(setU32,"NvVFX_SetU32");BIND_VFX(setImage,"NvVFX_SetImage");
++    BIND_VFX(create,"NvVFX_CreateEffect");BIND_VFX(destroy,"NvVFX_DestroyEffect");BIND_VFX(setU32,"NvVFX_SetU32");BIND_VFX(setF32,"NvVFX_SetF32");BIND_VFX(setImage,"NvVFX_SetImage");
+     BIND_VFX(setStream,"NvVFX_SetCudaStream");BIND_VFX(loadEffect,"NvVFX_Load");BIND_VFX(run,"NvVFX_Run");BIND_VFX(getVersion,"NvVFX_GetVersion");
+ #undef BIND_VFX
+ #define BIND_IMAGE(member,name) if(!bind(image,name,p.member))return false
+@@ -609,10 +601,11 @@ bool VfgBackend::initialize(gfx::D3D12DeviceContext& context,const std::wstring&
+            !p.cv(p.setU32(e.handle,"Mode",e.mode),"Mode")||!p.cv(p.setU32(e.handle,"AutomaticShotChangeDetectionEnabled",automaticShotChange),"AutomaticShotChangeDetectionEnabled")||
+            !p.cv(p.setImage(e.handle,"SrcImage0",p.inputs[0].image),"initial previous")||!p.cv(p.setImage(e.handle,"SrcImage1",p.inputs[1].image),"initial current")||
+            !p.cv(p.loadEffect(e.handle),loadName)||!p.cv(p.setImage(e.handle,"DstImage0",p.outputs[0].image),"initial output")||
+-           !p.cv(p.setU32(e.handle,"FrameMultiplier",multiplier),"initial multiplier"))return false;
+-        e.boundMultiplier=multiplier;return true;
++           !p.cv(p.setU32(e.handle,"FrameMultiplier",p.timestepMode(multiplier)?0u:multiplier),"initial multiplier"))return false;
++        e.boundMultiplier=p.timestepMode(multiplier)?0u:multiplier;return true;
+     };
+     for(unsigned i=0;i<(p.mixed?2u:1u);++i)if(!createEffect(p.effects[i],i?"NvVFX_Load second model":"NvVFX_Load"))return false;
++    if(p.timestepMode(multiplier))log::info("vfg",std::format("multiplier={} runs in the SDK timestep mode (FrameMultiplier 0, Timestep sub/{})",multiplier,multiplier));   // PushMPC (local addition)
+     // Live 2X: the next faster model, for the pairs the engine picks (LivePresentationTiming.h).
+     // Without it the chosen model runs every pair, so a failure here costs nothing else.
+     // It takes about 1.9 GB at 4K, as much again as the chosen model, which D3D's usage
+@@ -647,7 +640,7 @@ bool VfgBackend::created()const{
      return false;
  #endif
  }
@@ -2510,7 +2652,7 @@ index 94591579..e58d9d72 100644
  #ifdef VEYRA_HAVE_CUDA_DRIVER_HEADERS
      auto& p=*impl_;if(!p.ready||p.failed.load()||!list||!texture||parity>1)return false;
      const auto desc=texture->GetDesc();if(desc.Width!=p.width||desc.Height!=p.height||desc.Format!=p.format)return false;
-@@ -657,11 +639,35 @@ bool VfgBackend::capture(ID3D12GraphicsCommandList* list,ID3D12Resource* texture
+@@ -657,11 +650,35 @@ bool VfgBackend::capture(ID3D12GraphicsCommandList* list,ID3D12Resource* texture
      D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=texture;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
      D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=buffer;dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=p.footprint;
      list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
@@ -2548,7 +2690,24 @@ index 94591579..e58d9d72 100644
  #endif
  }
  bool VfgBackend::fastReady()const{
-@@ -686,7 +692,7 @@ VfgBackend::SubmissionState VfgBackend::submissionState(unsigned slot)const{
+@@ -671,12 +688,12 @@ bool VfgBackend::fastReady()const{
+     return false;
+ #endif
+ }
+-bool VfgBackend::generate(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast){
++bool VfgBackend::generate(unsigned parity,unsigned sub,unsigned multiplier,bool reset,bool fast,float timestep){
+ #ifdef VEYRA_HAVE_CUDA_DRIVER_HEADERS
+-    auto& p=*impl_;if(!p.ready||p.failed.load()||parity>1||multiplier<2||multiplier>p.maxMultiplier||sub<1||sub>=multiplier)return false;
+-    return p.handoff(parity,sub,multiplier,reset,fast);
++    auto& p=*impl_;if(!p.ready||p.failed.load()||parity>1||multiplier<2||multiplier>p.maxMultiplier||sub<1||sub>=multiplier||!(timestep>=0.f&&timestep<1.f))return false;
++    return p.handoff(parity,sub,multiplier,reset,fast,timestep);
+ #else
+-    (void)parity;(void)sub;(void)multiplier;(void)reset;(void)fast;return false;
++    (void)parity;(void)sub;(void)multiplier;(void)reset;(void)fast;(void)timestep;return false;
+ #endif
+ }
+ VfgBackend::SubmissionState VfgBackend::submissionState(unsigned slot)const{
+@@ -686,7 +703,7 @@ VfgBackend::SubmissionState VfgBackend::submissionState(unsigned slot)const{
      (void)slot;return SubmissionState::Failed;
  #endif
  }
@@ -2557,7 +2716,7 @@ index 94591579..e58d9d72 100644
  #ifdef VEYRA_HAVE_CUDA_DRIVER_HEADERS
      auto& p=*impl_;if(!p.ready||!list||!texture||slot>=2*(p.maxMultiplier-1))return false;
      const auto desc=texture->GetDesc();if(desc.Width!=p.width||desc.Height!=p.height||desc.Format!=p.format)return false;
-@@ -699,24 +705,37 @@ bool VfgBackend::copyOutput(ID3D12GraphicsCommandList* list,ID3D12Resource* text
+@@ -699,24 +716,37 @@ bool VfgBackend::copyOutput(ID3D12GraphicsCommandList* list,ID3D12Resource* text
          list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
          std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);list->ResourceBarrier(1,&barrier);return true;
      }
@@ -2606,7 +2765,7 @@ index 94591579..e58d9d72 100644
      transition(barriers[0],buffer,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
      transition(barriers[1],current,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
      list->ResourceBarrier(2,barriers.data());return true;
-@@ -726,7 +745,14 @@ bool VfgBackend::copyOutput(ID3D12GraphicsCommandList* list,ID3D12Resource* text
+@@ -726,7 +756,14 @@ bool VfgBackend::copyOutput(ID3D12GraphicsCommandList* list,ID3D12Resource* text
  }
  ID3D12Resource* VfgBackend::shotChangeResultsForTest()const{
  #ifdef VEYRA_HAVE_CUDA_DRIVER_HEADERS
@@ -2622,7 +2781,7 @@ index 94591579..e58d9d72 100644
  #else
      return nullptr;
  #endif
-@@ -742,6 +768,7 @@ void VfgBackend::shutdown(){
+@@ -742,6 +779,7 @@ void VfgBackend::shutdown(){
              if(p.stream)p.cu(p.cuStreamSynchronizeFn(p.stream),"teardown cuStreamSynchronize");
              for(auto& e:p.effects)if(e.handle){p.destroy(e.handle);e.handle=nullptr;log::info("vfg","NvVFX_DestroyEffect completed (void API)");}
              for(auto& b:p.outputs)p.releaseBuffer(b);for(auto& b:p.inputs)p.releaseBuffer(b);

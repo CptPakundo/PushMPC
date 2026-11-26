@@ -228,6 +228,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     if (GetFileAttributesW(sh.c_str()) != INVALID_FILE_ATTRIBUTES) paths.shaderDir = sh;
     std::string e;
     if (!host.Load(paths, e)) { SetErr(err, errsize, e); return nullptr; }
+    pm::VfgCeiling() = (host.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;   // VFG above 8x only with a core that has it
     if (device ? !host.AdoptDevice(device, e) : !host.EnsureDevice(0, cfg->warp ? AdapterPick::Warp : AdapterPick::Auto, e)) {
         SetErr(err, errsize, e); return nullptr;
     }
@@ -235,7 +236,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     // Auto with the user's PushMPC settings; VLC keeps the source size and shows its own real frames
     pm::Settings s = pm::LoadSettings();
     if (cfg->smoother == 1) s.smoother = pm::kOff;
-    else if (cfg->smoother >= 2) s.smoother = std::clamp(cfg->smoother, 2, 8);
+    else if (cfg->smoother >= 2) s.smoother = std::clamp(cfg->smoother, 2, pm::kMaxSmoother);
     s.sharper = pm::kOff; s.cleanUp = pm::kOff; s.deband = pm::kOff; s.sdrToHdr = pm::kOff;
     pm::Gpu g; g.available = 0; g.hardware = 0; g.family = pm::kFamUnknown;
     PushCoreCaps caps;
@@ -288,7 +289,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     } else if (!host.ConfigureEgress(cfg->bits > 8 || oi.hdrOutput ? OutFmt::Yuv420P10 : OutFmt::Yuv420P8, oi.hdrOutput != 0, e)) {
         host.Release(pc->token); SetErr(err, errsize, "egress: " + e); delete pc; return nullptr;
     }
-    pc->k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : ps.multiplier, 1, 8));
+    pc->k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : ps.multiplier, 1, PUSHCORE_MAX_MULTIPLIER));
     pc->describe = std::format("{} ({} in {:.0f} ms on {}; Auto: x{} {}){}", oi.description, ReuseName(how), ms, host.DeviceName(),
                                c.multiplier, Narrow(pm::FgMethodLabel(c.fgMethod)), device ? "; zero copy on VLC's D3D11 device" : "");
     Log("VLC: " + pc->describe);

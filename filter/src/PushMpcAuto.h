@@ -111,10 +111,12 @@ enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFas
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
 struct Costs {
-    // FG batch p95 per multiplier M = 2..8 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
-    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's.
-    double vfgMedium[7] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51 };
-    double vfgHigh[7]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91 };
+    // FG batch p95 per multiplier M = 2..16 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
+    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's. 10x, 12x and 16x Medium: measured 2026-11-26
+    // the same way (RTX 5090, clip A 1080p -> 3840x2080 VSR 4, two runs; batch p95 26.6 / 31.9 / 42.3 ms, 8x 20.3 in the
+    // same runs: about 2.6 ms per generated frame); 9x, 11x, 13x-15x interpolated. High above 8x: 8x plus 9.4 ms per frame (not measured).
+    double vfgMedium[15] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51, 25.09, 27.66, 30.38, 33.09, 35.80, 38.51, 41.22, 43.93 };
+    double vfgHigh[15]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91, 72.32, 81.73, 91.14, 100.55, 109.96, 119.37, 128.78, 138.19 };
     double vfgLowShare = 0.40;                      // VFG Low ~0.35-0.4 x Medium (1080p quality runs)
     // DLSS-G with FidelityFX flow: flow + refine per source frame, then per generated frame (2x 1.47, 4x 3.87 p95)
     double dlssgFlow = 1.8, dlssgPerFrame = 1.2;
@@ -147,6 +149,7 @@ struct Costs {
     double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
+    bool learnedBase = false;                       // base4k from the measured graph minus its stages (LearnCosts)
 };
 
 struct Choice {               // resolved values for pushcore and the filter
@@ -175,10 +178,11 @@ inline constexpr double kCadenceTolerance = 0.02; // refresh / output fps within
 inline constexpr double kHighSpareMs = 3.0;       // High (PushFlow Quality) only with this much p95 to spare
 // Clean up Auto: H.264-equivalent bits per pixel per frame at or below this is "streaming level". Blu-ray 1080p H.264
 // at 25-35 Mbit/s is 0.5-0.7; a web stream 1080p24 at 6 Mbit/s H.264 is 0.12, YouTube AV1 at 2.5 Mbit/s ~0.09
-// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.48 equivalent. Codec factors in CodecEfficiency.
+// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.68 equivalent, a 4K HEVC web stream at 16.5 Mbit/s 0.19 (at
+// 1080p quality, BitsPerPixel). Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
 inline constexpr double kDebandBpp8Bit = 0.25;
-// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.48): high bitrate
+// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.68): high bitrate
 inline constexpr double kHighBitrateBpp = 0.40;
 
 inline bool CadenceEven(double refresh, double outFps)
@@ -236,7 +240,50 @@ inline int FgKeyOf(FgMethod m, int quality)
     default: return kKeyVfgMed;
     }
 }
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? 8 : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
+// NVIDIA VFG: up to 16x (8x in the SDK multiplier mode, above in its timestep mode); a pushcore without
+// PUSHCORE_FEATURE_VFG16 stops at 8x (the filter lowers VfgCeiling() when it loads one).
+inline int& VfgCeiling() { static int v = 16; return v; }
+// The no-output guard (the filter): source frames keep going into pushcore while none has come out for this long (and for
+// this many submits) -> the filter shows the source frames itself, so a stuck engine never leaves a black picture
+inline constexpr double kNoOutputMs = 1500.0;
+inline constexpr int kNoOutputSubmits = 24;
+inline bool CoreOutputStalled(double msSinceOutput, int submitsSinceOutput, bool running)
+{
+    return running && submitsSinceOutput >= kNoOutputSubmits && msSinceOutput >= kNoOutputMs;
+}
+// The delivery check (the filter, every 10 s of playback): this many generated frames dropped or shown late in the window
+// means the multiplier does not hold here even when the GPU timings fit (the renderer's own per-frame work, for one, is
+// not in them): Auto caps the multiplier one step lower (DeliveryCap below)
+inline bool DeliveryOverloaded(uint64_t lateFrames, uint64_t generatedFrames)
+{
+    return lateFrames >= 10 && lateFrames * 100 >= generatedFrames;
+}
+// The cap the delivery check keeps for one file: a multiplier that came late caps Auto one step below it; after a clean
+// stretch (60 s, doubled for each time that multiplier failed, at most 16 min) the cap opens one step again, so Auto
+// can go back up. Within the cap Auto's usual rules pick (VRR: the largest that fits; a fixed refresh: the shortest hold,
+// a tie going to the even cadence).
+struct DeliveryCap {
+    int cap = 0;                 // 0 = none
+    int fails[kMaxSmoother + 2] = {};
+    double cleanMs = 0;          // clean playback since the last change
+    // one 10-s window at the applied multiplier; true when the cap changed
+    bool Update(bool overloaded, int applied, double windowMs)
+    {
+        if (overloaded && applied > 2) {
+            ++fails[std::min(applied, kMaxSmoother + 1)];
+            cap = applied - 1; cleanMs = 0;
+            return true;
+        }
+        if (overloaded) { cleanMs = 0; return false; }
+        if (!cap) return false;
+        cleanMs += windowMs;
+        const int n = std::max(1, fails[std::min(cap + 1, kMaxSmoother + 1)]);
+        if (cleanMs < std::min(60000.0 * double(1 << std::min(n - 1, 4)), 960000.0)) return false;
+        cap = cap + 1 >= kMaxSmoother ? 0 : cap + 1; cleanMs = 0;
+        return true;
+    }
+};
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -245,7 +292,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     const double sizeVfg = 0.75 + 0.25 * pix;
     switch (method) {
     case FgMethod::Vfg: {
-        const double med = c.vfgMedium[std::min(m, 8) - 2], high = c.vfgHigh[std::min(m, 8) - 2];
+        const double med = c.vfgMedium[std::clamp(m, 2, 16) - 2], high = c.vfgHigh[std::clamp(m, 2, 16) - 2];
         const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
         return v * sizeVfg * c.card;
     }
@@ -438,7 +485,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         double bestHold = HoldMs(d, fps);
         bool bestEven = true;
         std::wstring brk;
-        const int maxM = MaxMultiplier(m);
+        const int maxM = s.autoCap >= 2 ? std::min(MaxMultiplier(m), s.autoCap) : MaxMultiplier(m);
         for (int mm = 2; mm <= maxM; ++mm) {
             const double out = fps * mm;
             if (out > d.refreshHz * kRefreshSlack) { brk = std::format(L"refresh {:.2f} Hz ({}x would be {:.1f} fps)", d.refreshHz, mm, out); break; }
@@ -450,7 +497,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
             const bool better = h < bestHold - 0.05 || (std::fabs(h - bestHold) <= 0.05 && (even && !bestEven || even == bestEven));
             if (best == 1 || better) { best = mm; bestHold = h; bestEven = even; }
         }
-        if (brk.empty()) brk = std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
+        if (brk.empty()) brk = maxM < MaxMultiplier(m) ? std::format(L"{}x: frames came late at {}x during this file (delivery measured)", maxM, maxM + 1)
+                                                        : std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
         if (best >= 2 && !bestEven) brk = std::format(L"{}x is uneven at {:.2f} Hz but holds shortest ({:.1f} ms); next: {}", best, d.refreshHz, bestHold, brk);
         else if (lastFit > best) brk = std::format(L"cadence at {:.2f} Hz ({}x would not show frames shorter); next: {}", d.refreshHz, lastFit, brk);
         stop = brk;
@@ -503,9 +551,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (s.cleanUp != kAuto) { nr = true; r.cleanNote = L"on"; }
     else if (!lowBitrate) { r.cleanNote = L"off, " + rateNote; }
     else {
-        const int mNr = chooseFg(baseCost(true)).mult;
+        const Pick withNr = chooseFg(baseCost(true));
+        const int mNr = withNr.mult;
+        // the whole plan with clean-up must fit: frame generation at the multiplier it then gets (a fixed Smoother does not
+        // step down for it), the upscaler at its lowest level
+        const double planNr = baseCost(true) + vsr(level) + (mNr >= 2 ? FgCost(c, withNr.m, withNr.q, mNr, pixFg) : 0.0);
         if (mNoNr >= 2 && mNr < 2) r.cleanNote = L"off, " + rateNote + L" but it would cost frame generation";
-        else if (baseCost(true) + vsr(level) > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget", nrPrior);
+        else if (planNr > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget (the plan with it: {:.1f} of {:.1f} ms)", nrPrior, planNr, r.budgetMs);
         else { nr = true; r.cleanNote = L"on, " + rateNote; }
     }
     r.nr = nr;
@@ -647,7 +699,10 @@ inline double CodecEfficiency(DWORD fourcc)
 inline double BitsPerPixel(double bitsPerSecond, UINT w, UINT h, double fps, DWORD fourcc)
 {
     if (bitsPerSecond <= 0 || !w || !h || fps <= 0) return -1;
-    return bitsPerSecond * CodecEfficiency(fourcc) / (double(w) * h * fps);
+    // normalised to 1080p: a larger picture needs fewer bits per pixel for the same quality (bitrate ~ pixels^0.75, so
+    // 4K needs about 2.8x the bits of 1080p, not 4x); the thresholds below are set at 1080p
+    const double pix = double(w) * h;
+    return bitsPerSecond * CodecEfficiency(fourcc) / (pix * fps) * std::pow(pix / (1920.0 * 1080.0), 0.25);
 }
 
 // ------------------------------------------------------------------------------------------------ VRR (G-SYNC)

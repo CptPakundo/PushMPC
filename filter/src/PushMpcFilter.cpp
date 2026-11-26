@@ -367,6 +367,7 @@ struct Config {
     std::wstring folder;       // PushFpsFolder (developer): run on a PushFPS folder as the runtime root (its own shaders)
     std::wstring dataDir;      // DataDir (developer): use a PushFPS chain session instead of PushMPC's settings
     int simulateLostSec = 0, simulateLostMode = 1;
+    bool simulateNoOutput = false; // debug SimulateNoOutput: pushcore's frames are returned unshown (tests the no-output guard)
     std::wstring forceFallback; // debug: pass-through with this reason
     bool forceP010 = false;     // debug ForceP010: skip Y416/Y410 (tests the P010 HDR output)
     bool skipY416 = false;      // debug SkipY416: no Y416 at all
@@ -408,6 +409,7 @@ static Config ReadConfig()
     RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k);
     { std::wstring e; if (EnvStr(L"Enable", e)) c.enable = _wtoi(e.c_str()) != 0; }
     // HdrPushFpsToneMap (retired 2026-11-23): PushFPS's SDR tone map encoded piecewise sRGB; MPC-VR's is the route
+    ReadB(k, L"HdrPushFpsToneMap", c.hdrPushFps);   // debug (A/B): PushFPS tone-maps HDR to SDR at ingress instead
     ReadDw(k, L"LeadUs", c.leadUs);
     ReadB(k, L"Admission", c.admission);
     ReadB(k, L"WatchSettings", c.watch);
@@ -420,6 +422,7 @@ static Config ReadConfig()
     ReadS(k, L"PushFpsFolder", c.folder);
     ReadS(k, L"DataDir", c.dataDir);
     ReadDw(k, L"SimulateDeviceLost", c.simulateLostSec);
+    ReadB(k, L"SimulateNoOutput", c.simulateNoOutput);
     ReadDw(k, L"SimulateDeviceLostMode", c.simulateLostMode);
     ReadS(k, L"ForceFallback", c.forceFallback);
     ReadB(k, L"ForceP010", c.forceP010);
@@ -650,6 +653,7 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     if (!api || api->structSize < sizeof(PushCoreApi) || !api->submit2 || !api->setSettings || !api->importChainSession) { err = L"pushcore ABI mismatch in " + rt.corePath + L" (the filter and the core must be the same release)"; return nullptr; }
     g_api = api; g_libRoot = rt.root;
     if (auto feat = reinterpret_cast<uint32_t(*)(void)>(GetProcAddress(h, "pushcore_features"))) g_coreFeatures = feat();
+    pm::VfgCeiling() = (g_coreFeatures & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
     g_capsFn = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     g_benchFn = reinterpret_cast<PushCoreFlowBenchFn>(GetProcAddress(h, "pushcore_pushFlowBench"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
@@ -2140,7 +2144,54 @@ public:
         m_stopReq = false;
         WakeAll();
         Log(std::format("Pause (from {})", was == State_Stopped ? "stopped" : was == State_Running ? "running" : "paused"));
+        if (was == State_Stopped && !m_graphLogged) { m_graphLogged = true; LogGraph(); }
         return hr;
+    }
+    // the playback graph once per connection (filters, their CLSIDs and pin connections): what really sits upstream
+    bool m_graphLogged = false;
+    int64_t m_segQpc = 0; std::atomic<int> m_segSamples = 0;
+    // the filters upstream of our input, nearest first (LAV Video, then the splitter, ...)
+    std::wstring UpstreamChain()
+    {
+        std::wstring s; IPin* p = m_pInput ? m_pInput->GetConnected() : nullptr; ComPtr<IPin> hold;
+        for (int i = 0; p && i < 6; ++i) {
+            PIN_INFO pi = {}; if (FAILED(p->QueryPinInfo(&pi)) || !pi.pFilter) break;
+            ComPtr<IBaseFilter> f; f.Attach(pi.pFilter);
+            FILTER_INFO fi = {}; f->QueryFilterInfo(&fi); if (fi.pGraph) fi.pGraph->Release();
+            s += (s.empty() ? L"" : L" <- ") + std::wstring(fi.achName);
+            ComPtr<IEnumPins> e; ComPtr<IPin> in, up; p = nullptr;
+            if (FAILED(f->EnumPins(&e))) break;
+            while (e->Next(1, &in, nullptr) == S_OK) { PIN_DIRECTION d; in->QueryDirection(&d); if (d == PINDIR_INPUT && SUCCEEDED(in->ConnectedTo(&up)) && up) break; in.Reset(); }
+            if (!up) break;
+            hold = up; p = hold.Get();
+        }
+        return s.empty() ? std::wstring(L"(not connected)") : s;
+    }
+    void LogGraph()
+    {
+        if (!m_pGraph) return;
+        ComPtr<IEnumFilters> ef;
+        if (FAILED(m_pGraph->EnumFilters(&ef))) return;
+        ComPtr<IBaseFilter> f;
+        while (ef->Next(1, &f, nullptr) == S_OK) {
+            FILTER_INFO fi = {}; f->QueryFilterInfo(&fi); if (fi.pGraph) fi.pGraph->Release();
+            CLSID cls = {}; f->GetClassID(&cls); wchar_t g[64] = {}; StringFromGUID2(cls, g, 64);
+            std::wstring line = std::wstring(L"graph: ") + fi.achName + L" " + g;
+            ComPtr<IEnumPins> ep;
+            if (SUCCEEDED(f->EnumPins(&ep))) {
+                ComPtr<IPin> p;
+                while (ep->Next(1, &p, nullptr) == S_OK) {
+                    PIN_DIRECTION d = PINDIR_INPUT; p->QueryDirection(&d);
+                    ComPtr<IPin> peer; p->ConnectedTo(&peer);
+                    PIN_INFO pi = {}; FILTER_INFO pf = {};
+                    if (peer && SUCCEEDED(peer->QueryPinInfo(&pi)) && pi.pFilter) { pi.pFilter->QueryFilterInfo(&pf); if (pf.pGraph) pf.pGraph->Release(); pi.pFilter->Release(); }
+                    line += std::wstring(d == PINDIR_INPUT ? L" | in<-" : L" | out->") + (peer ? pf.achName : L"(none)");
+                    p.Reset();
+                }
+            }
+            LogW(line);
+            f.Reset();
+        }
     }
     STDMETHODIMP Run(REFERENCE_TIME t) override
     {
@@ -2154,6 +2205,7 @@ public:
     HRESULT NewSegment(REFERENCE_TIME start, REFERENCE_TIME stop, double rate) override
     {
         Log(std::format("NewSegment start {:.3f} s rate {}", start / 1e7, rate));
+        m_segQpc = Qpc(); m_segSamples = 0;
         // the playback rate (F9): the splitter's timestamps are divided by it, so the source interval is the measured
         // interval at 1.0x divided by the rate, set at once (one Auto decision per change, no estimate converging)
         const double r = rate > 0 ? rate : 1.0, was = m_rate.load();
@@ -2214,6 +2266,13 @@ public:
     HRESULT EndOfStream() override
     {
         Log("EndOfStream from upstream");
+        if (m_segQpc && m_segSamples.load() == 0) {
+            // the decoder ended the video without one frame since the segment started: the audio plays on over a black
+            // picture. Not ours to fix (no frame came in), but it must not be silent: say it in the log and the status.
+            Log(std::format("WARNING: the video stream ended {:.0f} ms after NewSegment with NO video frame from upstream (audio may play on over a black picture); the upstream chain: {}",
+                QpcMs(Qpc() - m_segQpc), Narrow(UpstreamChain())));
+            SetStatus(L"the video decoder sent no frames (end of stream right after the start); see the log");
+        }
         if (m_mode == Mode::PassSys) return CTransformFilter::EndOfStream();
         if (m_mode == Mode::Active) { m_eos = true; SetEvent(m_hSubmit); return S_OK; }
         PushReady(ReadyItem{ nullptr, 0, 0, 3, 0, m_flushGen.load(), Qpc() });
@@ -2539,6 +2598,9 @@ private:
     bool m_coreDisc = true, m_firstAfterFlush = false;
     std::atomic<uint32_t> m_mult = 4;
     int64_t m_openQpc = 0, m_activeQpc = 0, m_flushStartQpc = 0, m_lastSubmitQpc = 0;
+    std::atomic<int64_t> m_lastCoreOutQpc = 0;   // the last pushcore frame copied for delivery (the no-output guard)
+    int m_submitsSinceOut = 0; int64_t m_seenOutQpc = 0;
+    pm::DeliveryCap m_capState; int m_autoCap = 0; int64_t m_capWinQpc = 0; uint64_t m_capLate = 0, m_capGen = 0;   // the delivery check (Auto loop)
     REFERENCE_TIME m_lastSubmitPts = INT64_MIN;
     std::atomic<double> m_ptsStepMs = 0;
     double m_uploadMs = 0, m_submitMs = 0;
@@ -3528,6 +3590,7 @@ HRESULT CPushMpcFilter::PassSysmem(IMediaSample* pIn)
 
 HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
 {
+    ++m_segSamples;
     if (m_flushing || m_stopReq) return S_OK;
     AM_MEDIA_TYPE* pmt = nullptr;
     if (pIn->GetMediaType(&pmt) == S_OK && pmt) {
@@ -3746,6 +3809,16 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
             }
             m_lastSubmitQpc = Qpc();
             SetEvent(m_hSubmit);
+            {   // the no-output guard: source frames go in, nothing comes out -> the source frames are shown instead
+                const int64_t out = m_lastCoreOutQpc.load();
+                if (out != m_seenOutQpc) { m_seenOutQpc = out; m_submitsSinceOut = 0; } else ++m_submitsSinceOut;
+                const int64_t since = std::max({ out, m_activeQpc, m_flushStartQpc });
+                if (pm::CoreOutputStalled(QpcMs(Qpc() - since), m_submitsSinceOut, m_State == State_Running && !m_reloading)) {
+                    Log(std::format("no-output guard: {} source frames went into pushcore and none came out for {:.0f} ms", m_submitsSinceOut, QpcMs(Qpc() - since)));
+                    m_faulted = true; m_submitsSinceOut = 0;
+                    Fallback(L"pushcore gave no frames (the source frames are shown instead)");
+                }
+            }
             }
         }
         if (submitErr != PUSHCORE_OK) {
@@ -3841,6 +3914,7 @@ void CPushMpcFilter::CopierLoop()
             std::lock_guard<std::mutex> lk(m_coreLock);
             if (!m_core) { if (s) s->Release(); break; }
             if (!s) { m_api->presented(m_core, fr[i].lease, nullptr); continue; }
+            if (m_cfg.simulateNoOutput) { s->Release(); m_api->presented(m_core, fr[i].lease, nullptr); continue; }   // debug: nothing reaches the screen
             m_ctx4->Wait(fr[i].readyFence, fr[i].readyValue);
             const bool hdrIn = fr[i].texture && [&] { D3D11_TEXTURE2D_DESC d; fr[i].texture->GetDesc(&d); return d.Format == DXGI_FORMAT_R10G10B10A2_UNORM; }();
             if (s->fmt.fmt == Fmt::Y410 || s->fmt.fmt == Fmt::Y416) {
@@ -3880,6 +3954,7 @@ void CPushMpcFilter::CopierLoop()
             ReadyItem it{ s, fr[i].pts100ns, fr[i].pts100ns + srcStep / mult, fr[i].kind == PUSHCORE_FRAME_REAL ? 0 : 1, fr[i].sourceIndex, m_flushGen.load(), Qpc() };
             PushReady(it);
             copied++;
+            m_lastCoreOutQpc = Qpc();
         }
         if (n == 0) {
             if (m_eos) {
@@ -4305,7 +4380,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
     if (c.artifactReduction) t = m_visH > 2160 || m_visW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4; // never a downscale
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
-    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, 8));
+    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::VfgCeiling()));
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
@@ -4381,6 +4456,7 @@ void CPushMpcFilter::LoadLearned()
         num(L"NrMs", m_costs.nrMs, &m_costs.learnedNr, 0.05, 200);
         num(L"Hdr4kMs", m_costs.hdr4k, &m_costs.learnedHdr, 0.05, 30);
         num(L"Deband1080Ms", m_costs.deband1080, &m_costs.learnedDeband, 0.001, 20);
+        num(L"Base4kMs", m_costs.base4k, &m_costs.learnedBase, 0.05, 20);
         bool bench = true;
         for (int t = 0; t < 3; ++t) {
             bench = num(std::format(L"PfFirst{}", t), m_costs.pfFirst[t], nullptr, 0.1, 500) && bench;
@@ -4388,9 +4464,9 @@ void CPushMpcFilter::LoadLearned()
         }
         m_costs.pfBenched = bench;
         if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
-        Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p",
+        Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
             Narrow(m_gpuName), m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
-            m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080));
+            m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080, m_costs.base4k, m_costs.learnedBase ? "" : " (prior)"));
     }
     RegCloseKey(k);
 }
@@ -4398,7 +4474,7 @@ void CPushMpcFilter::SaveLearned()
 {
     pm::Costs c;
     { std::lock_guard<std::mutex> lk(m_autoLock); c = m_costs; }
-    bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband;
+    bool any = c.learnedVsr || c.learnedNr || c.learnedHdr || c.learnedDeband || c.learnedBase;
     for (bool b : c.fgLearned) any = any || b;
     if (m_gpuName.empty() || !any) return;
     HKEY k = nullptr;
@@ -4415,6 +4491,7 @@ void CPushMpcFilter::SaveLearned()
     if (c.learnedNr) str(L"NrMs", std::format(L"{:.3f}", c.nrMs));
     if (c.learnedHdr) str(L"Hdr4kMs", std::format(L"{:.3f}", c.hdr4k));
     if (c.learnedDeband) str(L"Deband1080Ms", std::format(L"{:.4f}", c.deband1080));
+    if (c.learnedBase) str(L"Base4kMs", std::format(L"{:.3f}", c.base4k));
     RegCloseKey(k);
 }
 // PushFlow's once-per-card speed test (pushcore_pushFlowBench, a port of PushFPS's PushFlowBench): run lazily, the first
@@ -4482,13 +4559,18 @@ void CPushMpcFilter::LearnCosts()
     // 3 s after the graph started, and 3 s after a playback-rate change (R-RATE1: the admission's reduced groups and the
     // old rate's frames are still in the timings then and taught Auto that High at 5x costs 8 ms)
     const int64_t from = std::max<int64_t>(m_graphQpc, m_rateQpc.load()) + int64_t(3.0 * QpcFreq());
-    std::vector<double> fg, sr, nr, hdr;
+    std::vector<double> fg, sr, nr, hdr, rest;
     for (const auto& s : m_autoTimings) {
         if (s.qpc < from) continue;
         if (a.multiplier >= 2 && s.fgLevel == 0 && s.t.fgBatchMs > 0) fg.push_back(s.t.fgBatchMs);
         if (a.sr && s.t.srMs > 0) sr.push_back(s.t.srMs);
         if (a.nr && s.t.nrMs > 0) nr.push_back(s.t.nrMs);
         if (a.videoHdr && s.t.videoHdrMs > 0) hdr.push_back(s.t.videoHdrMs);
+        // the rest of the graph (colour, conversions, the cut guard, deband): the graph span minus the timed stages, full groups only
+        if (s.t.graphMs > 0 && (a.multiplier < 2 || (s.fgLevel == 0 && s.t.fgBatchMs > 0))) {
+            double st = 0; for (double x : { s.t.fgBatchMs, s.t.srMs, s.t.nrMs, s.t.videoHdrMs }) if (x > 0) st += x;
+            rest.push_back(std::max(0.0, s.t.graphMs - st));
+        }
     }
     auto p95 = [](std::vector<double>& v) { std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, size_t(v.size() * 0.95))]; };
     auto ema = [](double& v, double x) { v = v * 0.5 + x * 0.5; };
@@ -4512,6 +4594,13 @@ void CPushMpcFilter::LearnCosts()
     }
     if (nr.size() >= 48) { const double x = p95(nr); if (!c.learnedNr) c.nrMs = x; else ema(c.nrMs, x); c.learnedNr = true; }
     if (hdr.size() >= 48) { const double x = p95(hdr) / pix; if (!c.learnedHdr) c.hdr4k = x; else ema(c.hdr4k, x); c.learnedHdr = true; }
+    if (rest.size() >= 48) {
+        // base4k: what the model adds besides the stages it times (Decide: base4k x size x card, the guard's test and flow, deband)
+        const double guard = a.multiplier >= 2 ? c.guardScore * c.card + (m_choice.guardFlow ? c.guardFlow * c.card : 0.0) : 0.0;
+        const double deb = a.deband && m_visW && m_visH ? pm::DebandCost(c, int(a.debandStrength), m_visW, m_visH) : 0.0;
+        const double x = (p95(rest) - guard - deb) / std::max(1e-3, pix * c.card);
+        if (std::isfinite(x)) { const double v = std::clamp(x, 0.2, 20.0); if (!c.learnedBase) c.base4k = v; else ema(c.base4k, v); c.learnedBase = true; }
+    }
     // deband: pushcore's median of the last 64 passes, back to the medium-strength 1080p equivalent (x1.3 for the p95)
     if (a.deband && m_debandMsNow.load() > 0 && m_visW && m_visH) {
         const double unit = pm::DebandCost(pm::Costs{}, int(a.debandStrength), m_visW, m_visH) / pm::Costs{}.deband1080;
@@ -4708,6 +4797,29 @@ void CPushMpcFilter::AutoLoop()
         }
         LearnCosts();
         if (tick % 30 == 0) SaveLearned();
+        if (m_mode == Mode::Active && s.smoother == pm::kAuto) {
+            // the delivery check: generated frames late or dropped at this multiplier although the GPU timings fit -> one
+            // step lower for the rest of this file (DeliveryOverloaded); windows within 5 s of a start, rebuild or seek do not count
+            const int64_t nq = Qpc();
+            const uint64_t late = m_dropGen + m_lateDelivered, gen = m_delGen;
+            int64_t gq; PushCoreSettings ap; { std::lock_guard<std::mutex> lk(m_autoLock); gq = m_graphQpc; ap = m_applied; }
+            const bool settle = QpcMs(nq - std::max({ gq, m_flushStartQpc, m_activeQpc })) < 5000.0 || m_fgRun > PUSHCORE_FG_NVOF;
+            if (!m_capWinQpc || settle) { m_capWinQpc = nq; m_capLate = late; m_capGen = gen; }
+            else if (QpcMs(nq - m_capWinQpc) >= 10000.0) {
+                const uint64_t dl = late - m_capLate, dg = gen - m_capGen;
+                const bool lateNow = pm::DeliveryOverloaded(dl, dg);
+                const bool over = lateNow && ap.multiplier > 2 && (!m_capState.cap || int(ap.multiplier) <= m_capState.cap);
+                const int was = m_capState.cap;
+                if (lateNow && !over) m_capState.cleanMs = 0;   // late, but nothing to lower: not a clean stretch either
+                else if (m_capState.Update(over, int(ap.multiplier), QpcMs(nq - m_capWinQpc))) {
+                    if (over) Log(std::format("Auto: {} of {} generated frames came late or were dropped in 10 s at {}x although the GPU timings fit: at most {}x for now", dl, dg, ap.multiplier, m_capState.cap));
+                    else Log(std::format("Auto: delivery clean for a while at most {}x: {}", was, m_capState.cap ? std::format("up to {}x again", m_capState.cap) : std::string("no cap")));
+                }
+                m_autoCap = m_capState.cap;
+                m_capWinQpc = nq; m_capLate = late; m_capGen = gen;
+            }
+        }
+        s.autoCap = m_autoCap;
         const pm::Source src = SourceInfo();
         pm::Choice c;
         bool weakPf = false;   // a weak GPU with PushFlow installed (its speed test decides PushFlow vs FSR FG)
@@ -4794,7 +4906,7 @@ void CPushMpcFilter::AutoLoop()
         }
         const bool inputs = !(s == appliedS) || !(d == appliedD) || (appliedFps > 0 && std::fabs(src.fps - appliedFps) / appliedFps > 0.03);
         const uint32_t rateSerial = m_rateSerial.load();
-        const char* why = !(s == appliedS) ? "settings" : !(d == appliedD) ? "display" : rateSerial != rateSeen ? "playback rate" : "measured frame rate";
+        const char* why = !(s == appliedS) ? (s.autoCap != appliedS.autoCap ? "delivery check" : "settings") : !(d == appliedD) ? "display" : rateSerial != rateSeen ? "playback rate" : "measured frame rate";
         const int rateKey = int(std::lround(m_rate.load() * 100.0));
         if (inputs && rateSerial != rateSeen && s == appliedS && d == appliedD) {
             // R-RATE1: back at a rate this playback ran before, with the same settings and display: its graph again (it
@@ -4962,7 +5074,7 @@ static void FillCombo(HWND dlg, int id, std::initializer_list<const wchar_t*> it
 }
 static int ComboSel(HWND dlg, int id) { return int(SendDlgItemMessageW(dlg, id, CB_GETCURSEL, 0, 0)); }
 static void ComboSet(HWND dlg, int id, int i) { SendDlgItemMessageW(dlg, id, CB_SETCURSEL, WPARAM(i), 0); }
-// combo index <-> value: Smoother Auto 0, Off 1, n = n (2..8); Sharper Auto 0, Off 1, level n = n + 1; on/off Auto 0, Off 1, On 2
+// combo index <-> value: Smoother Auto 0, Off 1, n = n (2..16); Sharper Auto 0, Off 1, level n = n + 1; on/off Auto 0, Off 1, On 2
 static int SmoothIdx(int v) { return v == pm::kAuto ? 0 : v == pm::kOff ? 1 : v; }
 static int SmoothVal(int i) { return i <= 0 ? pm::kAuto : i == 1 ? pm::kOff : i; }
 static int SharpIdx(int v) { return v == pm::kAuto ? 0 : v == pm::kOff ? 1 : v + 1; }
@@ -4995,7 +5107,7 @@ public:
     HRESULT OnApplyChanges() override { return Guarded("PushMPC page Apply", E_FAIL, [&] { return ApplyImpl(); }); }
     HRESULT ActivateImpl()
     {
-        FillCombo(m_Dlg, IDC_PM_SMOOTH, { L"Auto", L"Off", L"2x", L"3x", L"4x", L"5x", L"6x", L"7x", L"8x" });
+        FillCombo(m_Dlg, IDC_PM_SMOOTH, { L"Auto", L"Off", L"2x", L"3x", L"4x", L"5x", L"6x", L"7x", L"8x", L"9x", L"10x", L"11x", L"12x", L"13x", L"14x", L"15x", L"16x" });
         FillCombo(m_Dlg, IDC_PM_SHARP, { L"Auto", L"Off", L"Level 1", L"Level 2", L"Level 3", L"Level 4" });
         FillCombo(m_Dlg, IDC_PM_CLEAN, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_HDR, { L"Auto", L"Off", L"On" });
@@ -5334,7 +5446,7 @@ private:
             return;
         }
         pm::Settings s = Read();
-        s.smoother = in.multiplier >= 2 ? int(std::min(in.multiplier, 8u)) : pm::kOff;
+        s.smoother = in.multiplier >= 2 ? std::min(int(in.multiplier), pm::kMaxSmoother) : pm::kOff;
         s.sharper = !in.sr ? pm::kOff : in.srQuality >= 1 && in.srQuality <= 4 ? int(in.srQuality) : pm::kAuto;
         s.cleanUp = in.nr ? 1 : pm::kOff;
         s.sdrToHdr = in.videoHdr ? 1 : pm::kOff;

@@ -143,7 +143,9 @@ static void TestAuto()
     Settings s; Source src; src.w = 1920; src.h = 1080; src.fps = 24000.0 / 1001;
     Display d; d.refreshHz = 240;
     Plan p = Decide(s, src, d, c5090, costs);
-    CHECK(p.k == 5 && p.vfgQuality == 1 && p.vsr && p.vsrLevel == 4 && p.outW == 3840 && p.outH == 2160 && !p.hdr, "5090 1080p24 at 240 Hz: %s", p.why.c_str());
+    CHECK(p.k == 10 && p.vfgQuality == 1 && p.vsr && p.vsrLevel >= 1 && p.outW == 3840 && p.outH == 2160 && !p.hdr, "5090 1080p24 at 240 Hz: x10 (one new frame per refresh): %s", p.why.c_str());
+    { Source s15 = src; s15.fps = 15.0; const Plan p15 = Decide(s, s15, d, c5090, costs); CHECK(p15.k == 16, "15 fps at 240 Hz: x16 VFG (timestep mode above x8): %s", p15.why.c_str()); }
+    { Settings f16 = s; f16.smoother = 16; const Plan pf = Decide(f16, src, d, c5090, costs); CHECK(pf.k == 16, "Smoother 16 is honoured: %s", pf.why.c_str()); }
     d.refreshHz = 0;
     p = Decide(s, src, d, c5090, costs);
     CHECK(p.k == 2, "unknown display -> x2: %s", p.why.c_str());
