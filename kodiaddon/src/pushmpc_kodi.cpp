@@ -41,6 +41,9 @@ extern "C" {
 #include <thread>
 #if defined(__linux__)
 #include <sys/stat.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <unistd.h>
+#endif
 #endif
 #include <cstdlib>
 #include <cstdio>
@@ -1183,7 +1186,8 @@ private:
         picture.width = uint32_t(ow);
         picture.height = uint32_t(oh);
         CheckBufferPool(picture);   // before the layout: dma-bufs only where Kodi's renderer takes them
-        const uint64_t hostAlign = engineLayout && !m_hostOff && !DmaPath() ? m_engine->HostAlignment() : 0;
+        // host import never on a dma-buf: Kodi fixes its plane layout when it hands the buffer out (no aligned start)
+        const uint64_t hostAlign = engineLayout && !m_hostOff && !m_dmaOk ? m_engine->HostAlignment() : 0;
         picture.planeOffsets[0] = 0;
         picture.stride[0] = uint32_t(ow * bytes);
         if (engineLayout) {
@@ -1376,15 +1380,28 @@ private:
             return -1;
         }
         const auto* d = static_cast<const KODI_DRM_FRAME_DESCRIPTOR*>(pb.handle);
+        // Kodi's CVideoBufferDMA leaves the object size at 0: the dma-buf's own size
+        uint64_t objSize = d->nb_objects >= 1 ? uint64_t(d->objects[0].size) : 0;
+        if (!objSize && d->nb_objects >= 1 && d->objects[0].fd >= 0) {
+            const off_t end = lseek(d->objects[0].fd, 0, SEEK_END);
+            if (end > 0) objSize = uint64_t(end);
+            lseek(d->objects[0].fd, 0, SEEK_SET);
+        }
         // planar (3 planes: Y, U, V) or the engine's semi-planar P010 / NV12 (2 planes: Y, interleaved UV)
         const bool semi = EngineSemi();
         const auto& L = d->layers[0];
-        const bool layoutOk = d->nb_objects == 1 && d->objects[0].fd >= 0 && d->objects[0].size >= m_layout.size && d->nb_layers >= 1 &&
+        const bool layoutOk = d->nb_objects == 1 && d->objects[0].fd >= 0 && objSize >= m_layout.size && d->nb_layers >= 1 &&
                               L.nb_planes == (semi ? 2 : 3) && L.planes[0].offset == 0 && L.planes[1].offset == m_layout.offU &&
                               (semi || L.planes[2].offset == m_layout.offV) &&
                               int(L.planes[0].pitch) == m_layout.pitchY && int(L.planes[1].pitch) == m_layout.pitchC;
         if (!layoutOk) {
-            Log(ADDON_LOG_WARNING, "zero copy: Kodi's dma-buf layout differs (objects %u, layers %u): copy path", d->nb_objects, d->nb_layers);
+            const auto& P = d->layers[0].planes;
+            Log(ADDON_LOG_WARNING, "zero copy: Kodi's dma-buf layout differs (objects %u size %llu, layers %u, planes %u, offsets %llu/%llu/%llu "
+                "pitches %lld/%lld; engine size %llu offsets 0/%llu/%llu pitches %d/%d): copy path", d->nb_objects,
+                static_cast<unsigned long long>(objSize), d->nb_layers, d->layers[0].nb_planes, static_cast<unsigned long long>(P[0].offset),
+                static_cast<unsigned long long>(P[1].offset), static_cast<unsigned long long>(P[2].offset), static_cast<long long>(P[0].pitch),
+                static_cast<long long>(P[1].pitch), static_cast<unsigned long long>(m_layout.size), static_cast<unsigned long long>(m_layout.offU),
+                static_cast<unsigned long long>(m_layout.offV), m_layout.pitchY, m_layout.pitchC);
             m_zcOff = true;
             return -1;
         }
@@ -1395,7 +1412,7 @@ private:
         auto it = m_imports.find(key);
         if (it != m_imports.end()) return it->second;
         std::string err;
-        const int id = m_engine->Import(fd, d->objects[0].size, err);
+        const int id = m_engine->Import(fd, objSize, err);
         if (id < 0) {
             Log(ADDON_LOG_WARNING, "zero copy: import of Kodi's dma-buf failed (%s): copy path", err.c_str());
             m_zcOff = true;

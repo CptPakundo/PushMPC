@@ -122,9 +122,12 @@ if case == "fonts":
     res["fonts"] = "fonts: 1 attachment(s) written" in text
 if case == "hdr10_x2" and decode:
     res["hdrmeta"] = bool(re.search(r"hdr metadata: mastering yes \(max 1000\.0, min 0\.0001 cd/m2\).*MaxCLL 1000, MaxFALL 400", text))
-if case == "zerocopy":
-    # Kodi chose the frame buffers (dma-buf only when its renderer takes them); playback must work either way
+if case.startswith("zerocopy"):
+    # Kodi chose the frame buffers (dma-buf only when its renderer takes them); playback must work either way, and
+    # where the add-on found Kodi's DRM-PRIME renderer the GPU engine must write into the dma-bufs in place
     res["buffers"] = "PushMPC: frame buffers:" in text
+    if "PushMPC: frame buffers: dma-buf allowed" in text:
+        res["inplace"] = "zero copy: the engine writes into Kodi's dma-buf" in text and "layout differs" not in text
     notes.append("zero copy used: " + str("zero copy: the engine writes into Kodi" in text))
 if case.startswith("browse"):
     # Kodi's thumbnail and stream-detail probes: Kodi stays up, the add-on opens the files, its decoder is never asked for
@@ -137,7 +140,7 @@ if case == "nis" and size == "up":
     res["gpu"] = "engine: GPU" in text
 # a seek or chapter jump pauses the clock while Kodi refills: the render rate is judged on plain playback only
 # zerocopy (Wayland, software Vulkan) checks the buffer path only: the GPU engine is far below real time there
-required = ["addon", "pictures"] + ([] if case == "zerocopy" else ["kodi"]) + ([] if case in ("seek", "chapter", "zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + (["buffers"] if "buffers" in res else []) + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
+required = ["addon", "pictures"] + ([] if case.startswith("zerocopy") else ["kodi"]) + ([] if case in ("seek", "chapter") or case.startswith("zerocopy") else ["render"]) + (["gpu"] if "gpu" in res else []) + [x for x in ("buffers", "inplace") if x in res] + [x for x in ("fonts", "hdrmeta") if x in res] + [x for x in ("seek_ok", "chapter_ok", "subs", "audio_ok", "playing") if x in res]
 if case.startswith("browse"):
     required = ["alive", "probed", "kodi_decoder"]
 ok = all(res.get(x) for x in required)

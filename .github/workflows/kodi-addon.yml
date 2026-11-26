@@ -195,7 +195,7 @@ jobs:
             --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --prime \
             --alloc-off "sudo chmod 600 /dev/udmabuf" --alloc-on "sudo chmod 666 /dev/udmabuf" \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
-            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,zerocopy10,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
       - name: Summary
         if: always()
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true

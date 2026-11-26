@@ -51,6 +51,7 @@ CASES = [
 ]
 # run only when named (kodi-wayland): the GPU engine with Kodi's frame buffers, dma-buf or system memory
 EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2, True, "640x360", "play"),
+         ("zerocopy10", "hdr10.mkv", {"smoother": 2, "engine": 0, "upscale": 1}, 2, kodi22, "640x360", "play"),   # P010
          # without a dma-buf allocator (Kodi's probes then crash if they reach an add-on decoder): the HDR file, whose
          # stream details Kodi probes from a decoded frame at play start, and a Videos listing of every clip, where Kodi
          # extracts thumbnails and stream details
