@@ -832,6 +832,6 @@ jobs:
             --pmml "../release/pmml-graphs-$ver.tar.gz" --pmml-url "$base/pmml-graphs-$ver.tar.gz" \
             ${plex:+--plex "$plex" --plex-url "$base/pushmpc-plex-mac-$ver.tar.gz"}
           git diff --quiet && { echo "the formula on main is already at $TAG"; exit 0; }
-          git -c user.name=CptPakundo -c user.email=CptPakundo@users.noreply.github.com commit -q -am "Homebrew formula: PushMPC $TAG"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -am "Homebrew formula: PushMPC $TAG"
           git push -q origin HEAD:main
           echo "::notice title=Homebrew formula::Formula/pushmpc.rb on main points at $TAG"
