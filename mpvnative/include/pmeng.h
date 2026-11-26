@@ -26,6 +26,13 @@ extern "C" {
 #endif
 
 #define PMENG_ABI_VERSION 1u
+/* Additions within ABI 1 are append-only and never change an existing field, so every filter works with every module:
+ *   minor 1: PMENG_MEM_CUDA (pmeng_device.cuda_*, pmeng_image.cuda_*), pmeng_output.want_out_depth, the source_bits option.
+ * A module that does not know a memory kind answers through pmeng_output.mem (PMENG_MEM_CPU: the filter's copy
+ * fallback) or fails open (the filter retries with PMENG_MEM_CPU). New fields of pmeng_device and pmeng_output are read
+ * only when struct_size covers them; pmeng_image's CUDA fields only when mem is PMENG_MEM_CUDA (which only a filter of
+ * minor 1 or later sends). */
+#define PMENG_ABI_MINOR 1u
 
 #if defined(_WIN32)
 #define PMENG_EXPORT __declspec(dllexport)
@@ -37,6 +44,7 @@ extern "C" {
 #define PMENG_MEM_CPU    0u
 #define PMENG_MEM_D3D11  1u   /* ID3D11Texture2D + array slice (FFmpeg AV_PIX_FMT_D3D11) */
 #define PMENG_MEM_VULKAN 2u   /* AVVkFrame-style image + timeline semaphore (FFmpeg AV_PIX_FMT_VULKAN) */
+#define PMENG_MEM_CUDA   3u   /* CUDA device memory in the decoder's CUcontext (FFmpeg AV_PIX_FMT_CUDA: NVDEC / nvdec) */
 
 /* pixel formats (the software format for hardware memory) */
 #define PMENG_FMT_NONE      0u
@@ -77,6 +85,12 @@ typedef struct pmeng_image {
         uint64_t value;            /* the semaphore's current value */
     } vk[3];
     uint32_t vk_planes;            /* 2 (NV12 / P010) or 3 (YUV 4:2:0 three-plane) */
+    /* Appended (minor 1, PMENG_MEM_CUDA): the planes as CUdeviceptr values with their pitches, in pmeng_device's
+       cuda_ctx. Input: ready once cuda_stream has run up to now (the module orders itself after it). Output: written
+       by the time write() returns. */
+    uint64_t cuda_ptr[3];
+    ptrdiff_t cuda_pitch[3];
+    uint32_t cuda_planes;          /* 2 (NV12 / P010) or 3 */
 } pmeng_image;
 
 typedef struct pmeng_device {
@@ -97,6 +111,10 @@ typedef struct pmeng_device {
     void (*vk_lock_queue)(void* ctx, uint32_t family, uint32_t index);
     void (*vk_unlock_queue)(void* ctx, uint32_t family, uint32_t index);
     void* vk_lock_ctx;
+    /* Appended (minor 1, PMENG_MEM_CUDA): the decoder's CUDA context and stream (FFmpeg's AVCUDADeviceContext:
+       cuda_ctx, stream; NULL stream = the context's default stream) */
+    void* cuda_ctx;                /* CUcontext */
+    void* cuda_stream;             /* CUstream */
 } pmeng_device;
 
 typedef struct pmeng_stream {
@@ -121,6 +139,11 @@ typedef struct pmeng_output {
     float mastering_peak_nits, mastering_min_nits, max_cll_nits, max_fall_nits; /* output static metadata, 0 = keep */
     char engine[32];              /* "pushcore", "portable-cpu", "portable-vulkan" */
     char description[512];        /* one line for the log */
+    /* Appended (minor 1): the engine would do more with a deeper stream than this one (10 = the NVIDIA engine's RTX
+       Video HDR on an 8-bit stream in host memory, where the filter cannot change the CPU format). The filter tags its
+       output frames with it (frame metadata pushmpc.want_depth); the mpv hook then converts the stream to 10 bits ahead
+       of the filter. 0 = nothing wanted. */
+    uint32_t want_out_depth;
 } pmeng_output;
 
 typedef struct pmeng_out_info {
@@ -133,7 +156,9 @@ typedef struct pmeng_out_info {
 typedef struct pmeng_api {
     uint32_t struct_size, abi_version;
     const char* (*version)(void);
-    /* options: "key=value" lines separated by newlines (smoother, sharper, backend, display_fps, display_hdr, core_dir, adapter ...).
+    /* options: "key=value" lines separated by newlines (smoother, sharper, backend, display_fps, display_hdr, core_dir, adapter ...;
+       minor 1: source_bits=8 when the player converted an 8-bit source to the 10 bits the engine asked for; -1 when the
+       player converts every stream to 10 bits and the source depth is unknown: the engine decides at the first frame).
        Returns NULL on failure (err holds the reason). */
     void* (*open)(const pmeng_device* dev, const pmeng_stream* stream, const char* options, pmeng_output* out,
                   char* err, uint32_t err_size);

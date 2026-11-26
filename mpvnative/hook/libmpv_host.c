@@ -4,6 +4,8 @@
  * files it tries a Y4M it writes itself (rawvideo: no decoder download needed). Prints whether the filter was
  * accepted, the filter's own log line, the end-of-file reason and, on failure, the log's error lines. Exit 0:
  * accepted, the x2 filter line seen, played to the end; 2: libmpv not usable; 3: otherwise. Self-tests only.
+ * PUSHMPC_HOST_SCRIPT=<pushmpc_hook.so>: also loads it as a C plugin (script-opts pushmpc-append=no) and reports whether
+ * this libmpv ran it ("host: C plugin: loaded" / "not loaded").
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -77,12 +79,16 @@ int main(int argc, char **argv)
     snprintf(y4m, sizeof(y4m), "/tmp/libmpv-host-%d.y4m", (int)getpid());
     if (write_y4m(y4m) == 0) files[nf++] = y4m;
     for (f = 0; f < nf && !ok; f++) {
-        int vfrc, reason = -1, i, seen = 0, shown = 0;
+        int vfrc, reason = -1, i, seen = 0, shown = 0, script = 0;
         FILE *lf;
         snprintf(log, sizeof(log), "/tmp/libmpv-host-%d-%d.log", (int)getpid(), f);
         ctx = create();
         set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v"); set(ctx, "input-media-keys", "no");
         vfrc = set(ctx, "vf", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc=smoother=2");   /* CI: a forced backend */
+        if (getenv("PUSHMPC_HOST_SCRIPT") && *getenv("PUSHMPC_HOST_SCRIPT")) {
+            set(ctx, "scripts", getenv("PUSHMPC_HOST_SCRIPT"));
+            set(ctx, "script-opts", "pushmpc-append=no");
+        }
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
             const char *args[] = { "loadfile", files[f], NULL };
@@ -95,8 +101,15 @@ int main(int argc, char **argv)
         }
         destroy(ctx);
         lf = fopen(log, "r");
-        while (lf && fgets(line, sizeof(line), lf))
+        while (lf && fgets(line, sizeof(line), lf)) {
             if (strstr(line, "frames") && strstr(line, " -> ") && strstr(line, ", x2;")) { seen = 1; printf("host: %s", line); }
+            /* mpv's "Loading cplugin script .../pushmpc_hook.so" or the plugin's own client tag; never its refusal
+               ("Can't load unknown script") */
+            if (strstr(line, "pushmpc_hook") && !strstr(line, "unknown") && !strstr(line, "annot") && !strstr(line, "rror")
+                && (strstr(line, "Loading") || strstr(line, "[pushmpc_hook]")))
+                script = 1;
+        }
+        if (getenv("PUSHMPC_HOST_SCRIPT") && *getenv("PUSHMPC_HOST_SCRIPT")) printf("host: C plugin: %s\n", script ? "loaded" : "not loaded");
         printf("host: %s: vf %s; end of file reason %d (0 = eof)\n", strrchr(files[f], '/') ? strrchr(files[f], '/') + 1 : files[f],
                vfrc >= 0 ? "accepted" : (errstr ? errstr(vfrc) : "refused"), reason);
         ok = vfrc >= 0 && seen && reason == 0;

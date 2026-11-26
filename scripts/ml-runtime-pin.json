@@ -127,6 +127,30 @@
       ],
       "note": "On Windows every OpenVINO DLL carries an embedded manifest that depends on the private side-by-side assembly 'openvino_runtime' 1.8.1.0, described by openvino_runtime.manifest next to them: without that file each LoadLibrary fails with error 14001 (sxstrace: 'Resolving reference openvino_runtime ... Activation Context generation failed', CI run 45643575147). The .manifest files are extracted with the DLLs."
     },
+    "webgpu": {
+      "what": "ONNX Runtime's WebGPU EP as a plugin EP (onnxruntime-ep-webgpu 0.5.0; Dawn on Vulkan on Linux): any Vulkan GPU, the second ONNX Runtime candidate next to ncnn where no vendor EP runs (AMD without ROCm, Intel next to OpenVINO, other Vulkan GPUs). Needs ORT >= 1.24.4 and the system's libvulkan.so.1. Host: ort/core. MIT.",
+      "epName": "WebGpuExecutionProvider",
+      "version": "0.5.0",
+      "platforms": {
+        "linux-x64": {
+          "url": "https://files.pythonhosted.org/packages/e2/1d/ac0ccbe8bd6435b6e1946fea964790ffa3d73ee2513775e90958fd6b860e/onnxruntime_ep_webgpu-0.5.0-py3-none-manylinux_2_28_x86_64.whl",
+          "sha256": "b6baa3e223d9a679023388b1179e5597b6bc0d282ba72f2afe38d46ef37deeb4"
+        },
+        "linux-arm64": {
+          "url": "https://files.pythonhosted.org/packages/93/ca/71f305dc822d62ef33d7f3862ba7058a0099086112d9ab679d8252e7b77d/onnxruntime_ep_webgpu-0.5.0-py3-none-manylinux_2_28_aarch64.whl",
+          "sha256": "d39e0769f8b2ff7a4b04a492ef882510474d52cf722408d393569b36558b2829"
+        }
+      },
+      "extract": [
+        "**/*.so*",
+        "**/LICENSE*",
+        "**/ThirdPartyNotices*"
+      ],
+      "library": [
+        "*onnxruntime_providers_webgpu*"
+      ],
+      "note": "The wheel holds one library, onnxruntime_ep_webgpu/libonnxruntime_providers_webgpu.so (its zip directory, 0.5.0). 0.5.0 (2026-10-29) rather than 0.6.0 (2026-11-16): the newer one was under two weeks old at pin time."
+    },
     "qnn": {
       "what": "Qualcomm QNN (Hexagon NPU, Adreno GPU backend) as an ONNX Runtime plugin EP (onnxruntime-qnn 2.8.0, needs ORT >= 1.24.2). Snapdragon X on Windows ARM64. Host: ort/core.",
       "epName": "QNNExecutionProvider",

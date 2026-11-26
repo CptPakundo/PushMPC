@@ -39,7 +39,7 @@ bool Backend::parse(const std::string& text, Backend* out) {
         if (e == "ncnn" || e == "vulkan") { b.runtime = "ncnn"; b.flavor = "ncnn"; b.ep = "vulkan"; }
         else if (e == "dml" || e == "directml") { b.flavor = "directml"; b.ep = "dml"; }
         else if (e == "migraphx") { b.flavor = "migraphx"; b.ep = "migraphx"; }
-        else if (e == "cpu" || e == "trt-rtx" || e == "openvino" || e == "qnn" || e == "qnn-gpu" || e == "qnn-split" || e == "amdgpu" || e == "coreml") { b.ep = e; }
+        else if (e == "cpu" || e == "trt-rtx" || e == "openvino" || e == "qnn" || e == "qnn-gpu" || e == "qnn-split" || e == "amdgpu" || e == "coreml" || e == "webgpu") { b.ep = e; }
         else return false;
         *out = b;
         return true;

@@ -15,8 +15,18 @@ grep -q 'pushmpc_hook_glue.o' "$tree/libavfilter/Makefile" || \
 grep -q 'pushmpc_hook_glue.o' "$tree/libavfilter/Makefile"
 cd "$tree"
 cc=cc; command -v ccache >/dev/null && cc="ccache cc"
+# FFmpeg 7.1 and newer (libavutil 59.34+): Vulkan frames into the engine with no copy (PM_HOOK_VULKAN, vf_pushmpc.c),
+# with the Vulkan-Headers given in PUSHMPC_VULKAN_HEADERS (the pin in vsplugin/engines/gpu/gpu-pins.json); no Vulkan
+# code is configured or linked, so a distro libavutil without Vulkan still loads the library
+vkflags=''
+lavu=$( (cat libavutil/version_major.h libavutil/version.h 2>/dev/null || true) | sed -n 's/^#define LIBAVUTIL_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
+lavumin=$(sed -n 's/^#define LIBAVUTIL_VERSION_MINOR *\([0-9]*\).*/\1/p' libavutil/version.h | head -1)
+if [ -n "${PUSHMPC_VULKAN_HEADERS:-}" ] && [ -f "$PUSHMPC_VULKAN_HEADERS/include/vulkan/vulkan_core.h" ] && \
+   { [ "${lavu:-0}" -gt 59 ] || { [ "${lavu:-0}" -eq 59 ] && [ "${lavumin:-0}" -ge 34 ]; }; }; then
+    vkflags="-DPM_HOOK_VULKAN -I$PUSHMPC_VULKAN_HEADERS/include"
+fi
 if ! grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h; then
-    ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
+    ./configure --cc="$cc" ${vkflags:+--extra-cflags="$vkflags"} --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
         --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
         $(./configure --help | grep -q disable-postproc && echo --disable-postproc) --disable-asm > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
 fi

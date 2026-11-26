@@ -261,7 +261,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
             // no measurement: the first GPU EP this runtime offers, in quality order
             std::string log;
             auto devs = pmml::listDevices(rt, &log);
-            static const char* order[] = {"trt-rtx", "dml", "amdgpu", "openvino", "migraphx", "coreml", "qnn-gpu", "vulkan", "cpu"};
+            static const char* order[] = {"trt-rtx", "dml", "amdgpu", "openvino", "migraphx", "coreml", "qnn-gpu", "vulkan", "webgpu", "cpu"};
             for (const char* ep : order) {
                 auto it = std::find_if(devs.begin(), devs.end(), [&](const pmml::DeviceInfo& d) { return d.backend.ep == ep; });
                 if (it != devs.end()) { o.backend = it->backend; break; }

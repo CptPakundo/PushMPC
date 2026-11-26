@@ -30,6 +30,14 @@ struct CUDA_MEMCPY2D {
     size_t dstXInBytes, dstY; CUmemorytype dstMemoryType; void* dstHost; CUdeviceptr dstDevice; void* dstArray; size_t dstPitch;
     size_t WidthInBytes, Height;
 };
+// a pitched copy between two contexts of one device (cuda.h CUDA_MEMCPY3D_PEER; Depth 1 for a picture plane)
+struct CUDA_MEMCPY3D_PEER {
+    size_t srcXInBytes, srcY, srcZ, srcLOD; CUmemorytype srcMemoryType; const void* srcHost; CUdeviceptr srcDevice; void* srcArray; CUcontext srcContext;
+    size_t srcPitch, srcHeight;
+    size_t dstXInBytes, dstY, dstZ, dstLOD; CUmemorytype dstMemoryType; void* dstHost; CUdeviceptr dstDevice; void* dstArray; CUcontext dstContext;
+    size_t dstPitch, dstHeight;
+    size_t WidthInBytes, Height, Depth;
+};
 
 struct CudaApi {
     void* lib = nullptr;
@@ -71,6 +79,10 @@ struct CudaApi {
     CUresult (*cuLaunchKernel)(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, CUstream, void**, void**) = nullptr;
     CUresult (*cuGetErrorName)(CUresult, const char**) = nullptr;
     CUresult (*cuGetErrorString)(CUresult, const char**) = nullptr;
+    // the decoder's CUDA frames (PMENG_MEM_CUDA, the mpv hook's zero-copy route): optional, bound when the driver has them
+    CUresult (*cuMemcpy3DPeer)(const CUDA_MEMCPY3D_PEER*) = nullptr;
+    CUresult (*cuMemcpy3DPeerAsync)(const CUDA_MEMCPY3D_PEER*, CUstream) = nullptr;
+    CUresult (*cuMemcpy2D)(const CUDA_MEMCPY2D*) = nullptr;
 
     // dlopen libcuda.so.1 (or `path`) and bind everything; false with the reason when anything is missing
     bool Load(std::string& why, const char* path = nullptr);

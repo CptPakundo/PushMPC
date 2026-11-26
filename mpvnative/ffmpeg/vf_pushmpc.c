@@ -8,7 +8,8 @@
  *
  * vf_pushmpc: a thin libavfilter front end over the PushMPC engine module (pmeng.h), loaded at run time.
  *   - hardware frames in and out: D3D11 (zero copy into pushcore's D3D11 ingress; the output is a GPU texture of the
- *     same device), Vulkan (handed to the module when it takes Vulkan images; otherwise the copy fallback);
+ *     same device), Vulkan (handed to the module when it takes Vulkan images; otherwise the copy fallback), CUDA
+ *     (Linux, hwdec=nvdec: NVIDIA's engine copies device to device in and out; otherwise the copy fallback);
  *   - the copy fallback: when the module cannot take the input memory (no pushcore, no Vulkan engine) the filter
  *     downloads the frame, runs the module's CPU engine and uploads the result into a pool of the input's kind, so the
  *     graph's formats never change;
@@ -56,7 +57,11 @@
 #if CONFIG_D3D11VA
 #include "libavutil/hwcontext_d3d11va.h"
 #endif
-#if CONFIG_VULKAN
+/* PM_HOOK_VULKAN: the runtime hook's private libavfilter (configured with --disable-everything, no --enable-vulkan, so it
+ * links no Vulkan code of its own) still takes FFmpeg's Vulkan frames: only the public hwcontext_vulkan.h types are used,
+ * against the pinned Vulkan-Headers (build-hook.sh, FFmpeg 7.1 and newer) */
+#if CONFIG_VULKAN || defined(PM_HOOK_VULKAN)
+#define PM_HAVE_VULKAN 1
 #include "libavutil/hwcontext_vulkan.h"
 /* zero copy into the engine's Vulkan engine: needs AVVulkanDeviceContext.qf (lavu 59.34, FFmpeg 7.1) */
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
@@ -65,7 +70,23 @@
 #define PM_VK_ZERO_COPY 0
 #endif
 #else
+#define PM_HAVE_VULKAN 0
 #define PM_VK_ZERO_COPY 0
+#endif
+
+/* CUDA frames (AV_PIX_FMT_CUDA, NVDEC) on Linux: only AVCUDADeviceContext's public fields are read (cuda_ctx, stream),
+ * so neither the CUDA SDK nor ffnvcodec is needed; the hook's private libavfilter gets it too. PM_NO_CUDA turns it off. */
+#if defined(__linux__) && !defined(PM_NO_CUDA)
+#define PM_HAVE_CUDA 1
+#ifndef CUDA_VERSION
+typedef struct CUctx_st *CUcontext;
+typedef struct CUstream_st *CUstream;
+#define CUDA_VERSION 7050
+#define PM_CUDA_OWN_TYPES 1
+#endif
+#include "libavutil/hwcontext_cuda.h"
+#else
+#define PM_HAVE_CUDA 0
 #endif
 
 #ifdef _WIN32
@@ -102,6 +123,9 @@ typedef struct PushMPCContext {
     pmeng_output out;
     int passthrough;
     int fallback;                 /* 1: download / CPU engine / upload */
+    int colour_own;               /* CPU output with the engine's own colour (Linux NVIDIA engine: BT.709 / HDR10) */
+    int want_depth;               /* the engine asked for a deeper stream (pmeng_output.want_out_depth): frame metadata */
+    int source_depth;             /* option: the bits of the source before the player converted it (8 -> 10) */
     int K;                        /* output multiplier (time base divisor) */
     enum AVPixelFormat in_fmt, sw_fmt;
     AVBufferRef *out_frames;      /* the output pool (hardware output) */
@@ -250,8 +274,11 @@ static const enum AVPixelFormat pix_fmts[] = {
 #if CONFIG_D3D11VA
     AV_PIX_FMT_D3D11,
 #endif
-#if CONFIG_VULKAN
+#if PM_HAVE_VULKAN
     AV_PIX_FMT_VULKAN,
+#endif
+#if PM_HAVE_CUDA
+    AV_PIX_FMT_CUDA,
 #endif
     AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
     AV_PIX_FMT_NONE
@@ -454,6 +481,10 @@ static int config_output(AVFilterLink *outlink)
         dev.mem = PMENG_MEM_D3D11;
     else if (s->in_fmt == AV_PIX_FMT_VULKAN)
         dev.mem = PMENG_MEM_VULKAN;
+#if PM_HAVE_CUDA
+    else if (s->in_fmt == AV_PIX_FMT_CUDA)
+        dev.mem = PMENG_MEM_CUDA;
+#endif
     else
         dev.mem = PMENG_MEM_CPU;
     if (dev.mem != PMENG_MEM_CPU && !ifc)
@@ -492,6 +523,14 @@ static int config_output(AVFilterLink *outlink)
     }
 #endif
 
+#if PM_HAVE_CUDA
+    if (dev.mem == PMENG_MEM_CUDA) {
+        AVCUDADeviceContext *cu = ifc->device_ctx->hwctx;
+        dev.cuda_ctx = (void *)cu->cuda_ctx;
+        dev.cuda_stream = (void *)cu->stream;
+    }
+#endif
+
     st.width = inlink->w;
     st.height = inlink->h;
     st.fmt = pmeng_fmt_of(s->sw_fmt);
@@ -525,6 +564,10 @@ static int config_output(AVFilterLink *outlink)
         snprintf(num, sizeof(num), "%d", s->display_hdr);
         add_opt(opts, sizeof(opts), "display_hdr", num);
     }
+    if (s->source_depth != 0) {
+        snprintf(num, sizeof(num), "%d", s->source_depth);
+        add_opt(opts, sizeof(opts), "source_bits", num);
+    }
     if (s->extra && *s->extra) {      /* "key=value|key=value" */
         char *e = av_strdup(s->extra), *p;
         if (!e)
@@ -557,6 +600,15 @@ static int config_output(AVFilterLink *outlink)
     if (dev.mem == PMENG_MEM_CPU && s->in_fmt != s->sw_fmt)
         s->fallback = 1;
     s->K = s->out.multiplier >= 1 && s->out.multiplier <= 16 ? (int)s->out.multiplier : 1;
+    /* minor 1: an older module's struct ends before want_out_depth */
+    s->want_depth = s->out.struct_size >= offsetof(pmeng_output, want_out_depth) + sizeof(s->out.want_out_depth) ? (int)s->out.want_out_depth : 0;
+    if (s->want_depth)
+        av_log(ctx, AV_LOG_INFO, "the engine would do more with a %d-bit stream (frames tagged pushmpc.want_depth=%d)\n",
+               s->want_depth, s->want_depth);
+    /* an engine writing host memory or CUDA frames may convert the colour (non-zero fields that differ, or HDR10) */
+    s->colour_own = (s->out.mem == PMENG_MEM_CPU || s->out.mem == PMENG_MEM_CUDA) &&
+        (s->out.hdr_output || (s->out.range && s->out.range != st.range) || (s->out.matrix && s->out.matrix != st.matrix) ||
+         (s->out.primaries && s->out.primaries != st.primaries) || (s->out.transfer && s->out.transfer != st.transfer));
 
     outlink->w = s->out.width ? (int)s->out.width : inlink->w;
     outlink->h = s->out.height ? (int)s->out.height : inlink->h;
@@ -569,7 +621,7 @@ static int config_output(AVFilterLink *outlink)
         PM_FRAME_RATE(outlink) = av_mul_q(PM_FRAME_RATE(inlink), (AVRational){ s->K, 1 });
 
     /* output memory */
-    if (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN) {
+    if (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN || s->in_fmt == AV_PIX_FMT_CUDA) {
         enum AVPixelFormat sw = s->fallback ? s->sw_fmt : av_fmt_of(s->out.fmt);
         if (sw == AV_PIX_FMT_NONE)
             return start_passthrough(ctx, "the engine reported an unknown output format");
@@ -586,7 +638,7 @@ static int config_output(AVFilterLink *outlink)
     }
 
     av_log(ctx, AV_LOG_INFO, "%s (%s) on %s frames%s: %dx%d -> %dx%d, x%d; %s\n", s->out.engine, g_api_from,
-           av_get_pix_fmt_name(s->in_fmt), s->fallback ? " through the copy fallback" : (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN) ? " (zero copy)" : "",
+           av_get_pix_fmt_name(s->in_fmt), s->fallback ? " through the copy fallback" : (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN || s->in_fmt == AV_PIX_FMT_CUDA) ? " (zero copy)" : "",
            inlink->w, inlink->h, outlink->w, outlink->h, s->K, s->out.description);
     return 0;
 }
@@ -633,6 +685,17 @@ static void fill_image(pmeng_image *im, AVFrame *f, uint32_t mem, uint32_t fmt)
 #if PM_VK_ZERO_COPY
     else if (mem == PMENG_MEM_VULKAN && f->hw_frames_ctx) {
         vk_fill(im, f);
+    }
+#endif
+#if PM_HAVE_CUDA
+    else if (mem == PMENG_MEM_CUDA) {   /* device pointers of the planes in the decoder's context */
+        const AVHWFramesContext *fc = f->hw_frames_ctx ? (const AVHWFramesContext *)f->hw_frames_ctx->data : NULL;
+        const int planes = fc ? av_pix_fmt_count_planes(fc->sw_format) : 2;
+        for (i = 0; i < 3 && i < planes; i++) {
+            im->cuda_ptr[i] = (uint64_t)(uintptr_t)f->data[i];
+            im->cuda_pitch[i] = f->linesize[i];
+        }
+        im->cuda_planes = planes > 3 ? 3 : (uint32_t)planes;
     }
 #endif
 }
@@ -741,7 +804,7 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
 #endif
         out->pict_type = AV_PICTURE_TYPE_NONE;
     }
-    if (!s->fallback && s->out.mem != PMENG_MEM_CPU && s->out.fmt != pmeng_fmt_of(s->sw_fmt)) {
+    if ((!s->fallback && s->out.mem != PMENG_MEM_CPU && s->out.fmt != pmeng_fmt_of(s->sw_fmt)) || s->colour_own) {
         /* the engine's own colour (pushcore: RGB, HDR10 or sRGB) */
         static const enum AVFrameSideDataType dynamic[] = { AV_FRAME_DATA_DOVI_RPU_BUFFER, AV_FRAME_DATA_DOVI_METADATA,
                                                             AV_FRAME_DATA_DYNAMIC_HDR_PLUS,
@@ -751,10 +814,11 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
                                                           };
         static const enum AVFrameSideDataType stat[] = { AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
                                                          AV_FRAME_DATA_CONTENT_LIGHT_LEVEL };
-        out->color_range = s->out.range;
-        out->colorspace = s->out.matrix;
-        out->color_primaries = s->out.primaries;
-        out->color_trc = s->out.transfer;
+        /* colour_own: only what the engine names (0 keeps the frame's own) */
+        if (s->out.range || !s->colour_own) out->color_range = s->out.range;
+        if (s->out.matrix || !s->colour_own) out->colorspace = s->out.matrix;
+        if (s->out.primaries || !s->colour_own) out->color_primaries = s->out.primaries;
+        if (s->out.transfer || !s->colour_own) out->color_trc = s->out.transfer;
         if (!s->out.keep_dynamic_hdr)
             strip_side_data(out, dynamic, FF_ARRAY_ELEMS(dynamic));
         if (!s->out.hdr_output) {
@@ -776,6 +840,12 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
                 md->has_primaries = md->has_luminance = 1;
             }
         }
+    }
+
+    if (s->want_depth) {   /* the mpv hook reads it (vf-metadata) and converts the stream ahead of this filter */
+        char d[16];
+        snprintf(d, sizeof(d), "%d", s->want_depth);
+        av_dict_set(&out->metadata, "pushmpc.want_depth", d, 0);
     }
 
     s->last_out_pts = out->pts;
@@ -866,6 +936,8 @@ static int process(AVFilterContext *ctx, AVFrame *in)
         fill_image(&im, in, PMENG_MEM_D3D11, pmeng_fmt_of(s->sw_fmt));
     } else if (s->in_fmt == AV_PIX_FMT_VULKAN) {
         fill_image(&im, in, PMENG_MEM_VULKAN, pmeng_fmt_of(s->sw_fmt));
+    } else if (s->in_fmt == AV_PIX_FMT_CUDA) {
+        fill_image(&im, in, PMENG_MEM_CUDA, pmeng_fmt_of(s->sw_fmt));
     } else {
         fill_image(&im, in, PMENG_MEM_CPU, pmeng_fmt_of(s->in_fmt));
     }
@@ -1005,6 +1077,7 @@ static const AVOption pushmpc_options[] = {
     { "display_hdr", "the player presents HDR10 (-1: the engine finds out)", OFFSET(display_hdr), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, FLAGS },
     { "passthrough", "pass the video through when the engine is missing or fails to open", OFFSET(passthrough_on_error), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
     { "wait_ms", "longest wait for the engine", OFFSET(wait_ms), AV_OPT_TYPE_INT, { .i64 = 10000 }, 100, 120000, FLAGS },
+    { "source_depth", "bits of the source before the player converted it (0: as it arrives; -1: every stream converted, unknown)", OFFSET(source_depth), AV_OPT_TYPE_INT, { .i64 = 0 }, -1, 16, FLAGS },
     { NULL }
 };
 

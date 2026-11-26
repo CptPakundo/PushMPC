@@ -2,6 +2,7 @@
 // Arm (nvl_os.h).
 #ifndef _WIN32
 #include <dirent.h>
+#include <sys/stat.h>
 #endif
 #include <cstring>
 #include <cstdlib>
@@ -41,7 +42,11 @@ bool CudaApi::Load(std::string& why, const char* path)
         && Bind(lib, "cuModuleLoadData", cuModuleLoadData, why) && Bind(lib, "cuModuleGetFunction", cuModuleGetFunction, why) && Bind(lib, "cuModuleUnload", cuModuleUnload, why)
         && Bind(lib, "cuModuleGetGlobal_v2", cuModuleGetGlobal, why) && Bind(lib, "cuMemsetD8Async", cuMemsetD8Async, why)
         && Bind(lib, "cuLaunchKernel", cuLaunchKernel, why) && Bind(lib, "cuGetErrorName", cuGetErrorName, why) && Bind(lib, "cuGetErrorString", cuGetErrorString, why);
-    if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; }
+    if (!ok) { why = std::string(os::kDriver) + ": " + why; lib = nullptr; return false; }
+    // optional (CUDA frames from the decoder): every driver since CUDA 4 has them; missing = the copy route only
+    cuMemcpy3DPeer = reinterpret_cast<decltype(cuMemcpy3DPeer)>(os::Sym(lib, "cuMemcpy3DPeer"));
+    cuMemcpy3DPeerAsync = reinterpret_cast<decltype(cuMemcpy3DPeerAsync)>(os::Sym(lib, "cuMemcpy3DPeerAsync"));
+    cuMemcpy2D = reinterpret_cast<decltype(cuMemcpy2D)>(os::Sym(lib, "cuMemcpy2D_v2"));
     return ok;
 }
 
@@ -60,10 +65,16 @@ std::string DefaultRuntimeDir()
     const char* l = std::getenv("LOCALAPPDATA");   // scripts/nvidia-vfx-pin.json installDir.windows
     return l ? std::string(l) + "\\PushMPC\\runtime\\nvidia-vfx" : std::string();
 #else
+    // inside a Flatpak XDG_DATA_HOME is the app's own folder; setup.sh installs into the user's (the sandbox may see it)
     const char* x = std::getenv("XDG_DATA_HOME");
-    if (x && *x == '/') return std::string(x) + "/pushmpc/nvidia-vfx";
     const char* h = std::getenv("HOME");
-    return h ? std::string(h) + "/.local/share/pushmpc/nvidia-vfx" : std::string();
+    const std::string home = h ? std::string(h) + "/.local/share/pushmpc/nvidia-vfx" : std::string();
+    if (x && *x == '/') {
+        const std::string xdg = std::string(x) + "/pushmpc/nvidia-vfx";
+        struct stat a{}, b{};
+        return stat(xdg.c_str(), &a) != 0 && !home.empty() && stat(home.c_str(), &b) == 0 ? home : xdg;
+    }
+    return home;
 #endif
 }
 

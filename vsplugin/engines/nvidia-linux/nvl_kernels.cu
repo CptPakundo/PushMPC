@@ -29,6 +29,21 @@ extern "C" __global__ void nvl_yuv16_to_packed(Planes in, int w, int h, InFormat
 {
     ToPacked<uint16_t>(in, w, h, f, k, tenBitOut, out, outPitch);
 }
+// The decoder's own CUDA frames (NVDEC: NV12, or P010 with the samples in the top bits): luma in.p[0], interleaved
+// chroma in.p[1]; wide = 16-bit words, shift = how far the code sits above bit 0 (P010: 6). One thread per pixel.
+extern "C" __global__ void nvl_semi_to_packed(Planes in, int w, int h, InFormat f, Coeffs k, int tenBitOut, int wide, int shift, uint32_t* out, unsigned outPitch)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    const int cw = (w + 1) >> 1, ch = (h + 1) >> 1;
+    auto read = [&](int plane, int px, int py) -> uint32_t {
+        const int p = plane == 0 ? 0 : 1, i = plane == 0 ? px : 2 * px + plane - 1;
+        const uint8_t* row = in.p[p] + size_t(py) * in.pitch[p];
+        return wide ? uint32_t(reinterpret_cast<const uint16_t*>(row)[i]) >> shift : uint32_t(row[i]);
+    };
+    const uint32_t v = PixelToPacked(f, k, x, y, cw, ch, tenBitOut != 0, read);
+    reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(out) + size_t(y) * outPitch)[x] = v;
+}
 
 // hold: when the GPU cut guard flags this pair (holdFlag[0] != 0), the picture comes from `alt` (the pair's first real
 // frame A) instead of `in` (the generated frame): Windows' predicated copies, decided on the GPU with no host wait.
@@ -63,6 +78,31 @@ extern "C" __global__ void nvl_packed_to_yuv420(const uint32_t* in, unsigned inP
     } else {
         (out.p[1] + size_t(cy) * out.pitch[1])[cx] = uint8_t(u);
         (out.p[2] + size_t(cy) * out.pitch[2])[cx] = uint8_t(v);
+    }
+}
+
+// The planar output (nvl_packed_to_yuv420's 8-bit bytes or 10-bit LSB words) as NV12 / P010 for the decoder's CUDA
+// frames (PMENG_MEM_CUDA output): luma and interleaved chroma, shifted up by `shift` (P010: 6). One thread per 2x2.
+extern "C" __global__ void nvl_planar_to_semi(OutPlanes in, int w, int h, int wide, int shift, uint8_t* y, unsigned yPitch, uint8_t* uv, unsigned uvPitch)
+{
+    const int cx = blockIdx.x * blockDim.x + threadIdx.x, cy = blockIdx.y * blockDim.y + threadIdx.y;
+    const int cw = (w + 1) >> 1, ch = (h + 1) >> 1;
+    if (cx >= cw || cy >= ch) return;
+    for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) {
+            const int xx = 2 * cx + dx, yy = 2 * cy + dy;
+            if (xx >= w || yy >= h) continue;
+            if (wide) reinterpret_cast<uint16_t*>(y + size_t(yy) * yPitch)[xx] = uint16_t(reinterpret_cast<const uint16_t*>(in.p[0] + size_t(yy) * in.pitch[0])[xx] << shift);
+            else (y + size_t(yy) * yPitch)[xx] = (in.p[0] + size_t(yy) * in.pitch[0])[xx];
+        }
+    if (wide) {
+        uint16_t* o = reinterpret_cast<uint16_t*>(uv + size_t(cy) * uvPitch);
+        o[2 * cx] = uint16_t(reinterpret_cast<const uint16_t*>(in.p[1] + size_t(cy) * in.pitch[1])[cx] << shift);
+        o[2 * cx + 1] = uint16_t(reinterpret_cast<const uint16_t*>(in.p[2] + size_t(cy) * in.pitch[2])[cx] << shift);
+    } else {
+        uint8_t* o = uv + size_t(cy) * uvPitch;
+        o[2 * cx] = (in.p[1] + size_t(cy) * in.pitch[1])[cx];
+        o[2 * cx + 1] = (in.p[2] + size_t(cy) * in.pitch[2])[cx];
     }
 }
 

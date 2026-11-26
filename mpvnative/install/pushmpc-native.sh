@@ -3,10 +3,15 @@
 # no rebuilt mpv), for Setup (integrations/linux/setup.sh) or by hand. POSIX sh.
 #
 #   pushmpc-native.sh install|uninstall|status [--from DIR] [--target auto|native|flatpak] [--opts 'smoother=4:...']
-#                     [--conf FILE] [--dest DIR] [--allow-both] [--dry-run] [--json]
+#                     [--hwdec auto-safe|vulkan|nvdec] [--conf FILE] [--dest DIR] [--allow-both] [--dry-run] [--json]
 #
 #   --from     folder with pushmpc_hook.so, libpushmpc-avfilter-<ver>.so (one per FFmpeg release) and
-#              libpushmpc_engine.so (default: the folder of this script, then ../lib)
+#              libpushmpc_engine.so (default: the folder of this script, then ../lib); the sidecar engines
+#              libpushmpc_engine_nvl.so (NVIDIA) and libpushmpc_engine_ml.so (PushFlow), pushmpc-nvvfx-selftest and
+#              pmml_cli are copied too when they are there
+#   --hwdec    vulkan: decode on the GPU into Vulkan frames that go to the Vulkan engine with no copy (hwdec=vulkan,
+#              then auto-safe; gpu-api=vulkan), when this mpv takes it (checked); nvdec: NVIDIA's decoder into CUDA
+#              frames that NVIDIA's engine takes device to device (hwdec=nvdec, then auto-safe; checked); default auto-safe
 #   --target   native   the distro's mpv (and libmpv players that read ~/.config/mpv/mpv.conf)
 #              flatpak  io.mpv.Mpv (files inside its sandbox folders)
 #              auto     every one of them that is installed (default)
@@ -20,7 +25,8 @@
 #   - puts a marked block at the top of mpv.conf (before any [profile]):
 #       scripts-append=<dest>/pushmpc_hook.so    (loads the hook; it appends @pushmpc:pushmpc to vf)
 #       script-opts-append=pushmpc-vf=<opts>     (only with --opts)
-#       hwdec=auto-safe / video-sync=display-resample / interpolation=no / hr-seek-framedrop=no
+#       hwdec=auto-safe (or vulkan,auto-safe + gpu-api=vulkan, or nvdec,auto-safe) / video-sync=display-resample / interpolation=no /
+#       hr-seek-framedrop=no
 #     the original file is kept as mpv.conf.pushmpc-native-backup (or .pushmpc-native-absent);
 #   - checks that the hook activates in that mpv (a 1-frame probe): "active", or why not (no build for its FFmpeg).
 # Exit: 0 done, 1 error, 2 usage, 3 not supported here (macOS, no mpv, no build for this mpv's FFmpeg).
@@ -31,12 +37,13 @@ END_MARK='# <<< PushMPC native'
 VS_MARK='# >>> PushMPC managed'
 
 action=${1:-}; [ $# -gt 0 ] && shift
-from=''; target=auto; opts=''; conf_override=''; dest_override=''; allow_both=0; dry=0; json=0
+from=''; target=auto; opts=''; conf_override=''; dest_override=''; allow_both=0; dry=0; json=0; hwdec=auto-safe
 while [ $# -gt 0 ]; do
     case $1 in
         --from) from=$2; shift 2 ;;
         --target) target=$2; shift 2 ;;
         --opts) opts=$2; shift 2 ;;
+        --hwdec) hwdec=$2; shift 2 ;;
         --conf) conf_override=$2; shift 2 ;;
         --dest) dest_override=$2; shift 2 ;;
         --allow-both) allow_both=1; shift ;;
@@ -47,6 +54,9 @@ while [ $# -gt 0 ]; do
 done
 case $action in install|uninstall|status) ;; *) sed -n '2,12p' "$0" >&2; exit 2 ;; esac
 case $target in auto|native|flatpak) ;; *) echo "pushmpc-native.sh: --target must be auto, native or flatpak" >&2; exit 2 ;; esac
+case $hwdec in auto-safe|vulkan|nvdec) ;; *) echo "pushmpc-native.sh: --hwdec must be auto-safe, vulkan or nvdec" >&2; exit 2 ;; esac
+# the optional pieces next to the engine (copied and removed with it)
+EXTRAS='libpushmpc_engine_nvl.so libpushmpc_engine_ml.so pushmpc-nvvfx-selftest pmml_cli'
 
 log() { printf '%s\n' "$*" >&2; }
 run() { if [ "$dry" = 1 ]; then log "would: $*"; else "$@"; fi; }
@@ -72,7 +82,12 @@ block() {
     printf '%s%s' "$BEGIN_MARK" "$nl"
     printf 'scripts-append=%s/pushmpc_hook.so%s' "$1" "$nl"
     [ -n "$opts" ] && printf 'script-opts-append=pushmpc-vf=%s%s' "$opts" "$nl"
-    printf 'hwdec=auto-safe%svideo-sync=display-resample%sinterpolation=no%shr-seek-framedrop=no%s' "$nl" "$nl" "$nl" "$nl"
+    case $hw in
+        vulkan) printf 'hwdec=vulkan,auto-safe%sgpu-api=vulkan%s' "$nl" "$nl" ;;
+        nvdec) printf 'hwdec=nvdec,auto-safe%s' "$nl" ;;
+        *) printf 'hwdec=auto-safe%s' "$nl" ;;
+    esac
+    printf 'video-sync=display-resample%sinterpolation=no%shr-seek-framedrop=no%s' "$nl" "$nl" "$nl"
     printf '%s%s' "$END_MARK" "$nl"
 }
 line_ending() { if [ -f "$1" ] && [ "$(tr -dc '\r' < "$1" | wc -c | tr -d ' ')" != 0 ]; then echo crlf; else echo lf; fi; }
@@ -104,6 +119,18 @@ probe() {   # probe <mpv command...>
     rm -rf "$t"
 }
 
+# does this mpv take `hwdec=<list>` (and gpu-api=vulkan for the Vulkan list; a list needs mpv 0.36)? A one-frame run,
+# no window ($hwlist: the list to try)
+hwdec_ok() {   # hwdec_ok <mpv command...>
+    if [ -n "$probe_base" ]; then t=$probe_base/pushmpc-hwprobe.$$; else t=$(mktemp -d 2>/dev/null || echo "/tmp/pushmpc-hwprobe.$$"); fi
+    mkdir -p "$t" || return 1
+    { printf 'YUV4MPEG2 W16 H16 F24:1 Ip A1:1 C420jpeg\nFRAME\n'; head -c 384 /dev/zero; } > "$t/p.y4m"
+    if [ "$hwlist" = vulkan,auto-safe ]; then set -- "$@" --gpu-api=vulkan; fi
+    "$@" --no-config --hwdec="$hwlist" --vo=null --ao=null --frames=1 "$t/p.y4m" >/dev/null 2>&1; r=$?
+    rm -rf "$t"
+    return $r
+}
+
 do_target() {   # do_target <name> <conf> <dest> <mpv command...>
     name=$1; conf=$2; dest=$3; shift 3
     [ -n "$conf_override" ] && conf=$conf_override
@@ -128,6 +155,13 @@ do_target() {   # do_target <name> <conf> <dest> <mpv command...>
         run mkdir -p "$dest" "$(dirname "$conf")" || return 1
         run cp "$from/pushmpc_hook.so" "$from/libpushmpc_engine.so" "$from"/libpushmpc-avfilter-*.so "$dest/" || return 1
         [ -f "$from/SOURCES.txt" ] && run cp "$from/SOURCES.txt" "$dest/"
+        for x in $EXTRAS; do [ -f "$from/$x" ] && run cp "$from/$x" "$dest/$x"; done
+        # Vulkan / NVDEC decoding into the zero-copy engines: only when this mpv accepts the hwdec list (mpv 0.36+)
+        hw=auto-safe
+        if [ "$hwdec" != auto-safe ]; then
+            hwlist=$hwdec,auto-safe
+            if [ "$dry" = 1 ] || hwdec_ok "$@"; then hw=$hwdec; else log "$name: this mpv does not take hwdec=$hwlist: auto-safe"; fi
+        fi
         if [ "$dry" = 1 ]; then emit "$name" would-install "$conf"; return 0; fi
         if [ ! -f "$backup" ] && [ ! -f "$absent" ]; then
             if [ -f "$conf" ]; then cp "$conf" "$backup"; else : > "$absent"; fi
@@ -153,6 +187,7 @@ do_target() {   # do_target <name> <conf> <dest> <mpv command...>
         fi
         rm -f "$absent" 2>/dev/null
         rm -f "$dest/pushmpc_hook.so" "$dest/libpushmpc_engine.so" "$dest"/libpushmpc-avfilter-*.so "$dest/SOURCES.txt"
+        for x in $EXTRAS; do rm -f "$dest/$x"; done
         rmdir "$dest" 2>/dev/null
         emit "$name" uninstalled "$conf"
         ;;

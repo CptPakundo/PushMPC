@@ -1,6 +1,6 @@
 # The PushMPC engine module for FFmpeg's vf_pushmpc (pmeng.h): pushmpc_engine.dll (MSVC, /MT) on Windows,
 # libpushmpc_engine.so / .dylib elsewhere. Engines: the portable CPU engine (vsplugin/engines/portable, every OS) and
-# pushcore on D3D11 (Windows). Plus engine_test (CPU paths everywhere; D3D11 against the stub pushcore on WARP).
+# pushcore on D3D11 (Windows), the Vulkan engines, and on Linux the NVIDIA and PushFlow sidecars (below). Plus engine_test (CPU paths everywhere; D3D11 against the stub pushcore on WARP).
 #   cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release && cmake --build build-engine --config Release
 cmake_minimum_required(VERSION 3.21)
 project(PushMpcEngine C CXX)
@@ -194,6 +194,67 @@ if(APPLE AND PME_APPLE)
     "-framework CoreMedia" "-framework VideoToolbox" "-framework Metal")
   set_target_properties(pushmpc_engine_apple PROPERTIES PREFIX "lib" SUFFIX ".dylib" CXX_VISIBILITY_PRESET hidden OBJCXX_VISIBILITY_PRESET hidden
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
+endif()
+
+# ---- Linux: the sidecar engines, each a pmeng module of its own next to libpushmpc_engine.so, which loads them on use
+#   libpushmpc_engine_nvl.so   NVIDIA's RTX VSR, RTX Video HDR and VFG through CUDA (vsplugin/engines/nvidia-linux);
+#                              needs the kernels' prebuilt fatbin (-DPME_NVL_FATBIN=..., the release job builds it with
+#                              nvcc; -DPME_NVL_GUARD_DIR=... adds the GPU cut guard's two fatbins) + pushmpc-nvvfx-selftest
+#   libpushmpc_engine_ml.so    PushFlow through pmml (-DPMML_ORT_INCLUDE=..., -DPMML_NCNN_DIR=... for ncnn) + pmml_cli
+# Neither links CUDA, NVIDIA's runtime or ONNX Runtime: all are loaded at run time.
+set(PME_NVL_FATBIN "" CACHE FILEPATH "nvl_kernels.fatbin for libpushmpc_engine_nvl.so")
+set(PME_NVL_GUARD_DIR "" CACHE PATH "nvl_guard_sc.fatbin / nvl_guard_fm.fatbin (the GPU cut guard)")
+set(PME_SIDECAR_DIRS "${CMAKE_CURRENT_SOURCE_DIR}" "${ROOT}/mpvnative/include" "${ROOT}/vsplugin/src")
+if(UNIX AND NOT APPLE AND PME_NVL_FATBIN)
+  set(_n "${ROOT}/vsplugin/engines/nvidia-linux")
+  set(_nsrc "${_n}/nvl_loader.cpp" "${_n}/nvl_engine.cpp" "${_n}/nvl_ampere.cpp" "${_n}/nvl_selftest.cpp" "${_n}/nvl_gpuguard.cpp" "${_n}/nvl_nvof.cpp"
+            "${CMAKE_BINARY_DIR}/pme_nvl_kernels.cpp")
+  add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/pme_nvl_kernels.cpp"
+    COMMAND "${CMAKE_COMMAND}" -DIN=${PME_NVL_FATBIN} -DOUT=${CMAKE_BINARY_DIR}/pme_nvl_kernels.cpp -P "${_n}/bin2cpp.cmake"
+    DEPENDS "${PME_NVL_FATBIN}" "${_n}/bin2cpp.cmake" VERBATIM)
+  set(_nguard OFF)
+  if(PME_NVL_GUARD_DIR AND EXISTS "${PME_NVL_GUARD_DIR}/nvl_guard_sc.fatbin" AND EXISTS "${PME_NVL_GUARD_DIR}/nvl_guard_fm.fatbin")
+    set(_nguard ON)
+    foreach(g sc fm)
+      add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/pme_nvl_guard_${g}.cpp"
+        COMMAND "${CMAKE_COMMAND}" -DIN=${PME_NVL_GUARD_DIR}/nvl_guard_${g}.fatbin -DOUT=${CMAKE_BINARY_DIR}/pme_nvl_guard_${g}.cpp -DNAME=nvl_guard_${g}_fatbin -P "${_n}/bin2cpp.cmake"
+        DEPENDS "${PME_NVL_GUARD_DIR}/nvl_guard_${g}.fatbin" VERBATIM)
+      list(APPEND _nsrc "${CMAKE_BINARY_DIR}/pme_nvl_guard_${g}.cpp")
+    endforeach()
+  endif()
+  add_library(pme_nvl STATIC ${_nsrc})
+  target_include_directories(pme_nvl PUBLIC "${_n}" "${ROOT}/vsplugin/src")
+  target_link_libraries(pme_nvl PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
+  if(_nguard)
+    target_compile_definitions(pme_nvl PRIVATE PMVS_NVL_GPU_GUARD)
+  endif()
+  set_target_properties(pme_nvl PROPERTIES CXX_VISIBILITY_PRESET hidden)
+  add_library(pushmpc_engine_nvl MODULE pmeng_module.cpp nvl_backend.cpp)
+  target_compile_definitions(pushmpc_engine_nvl PRIVATE PME_SIDECAR)
+  target_include_directories(pushmpc_engine_nvl PRIVATE ${PME_SIDECAR_DIRS})
+  target_link_libraries(pushmpc_engine_nvl PRIVATE pme_nvl)
+  set_target_properties(pushmpc_engine_nvl PROPERTIES PREFIX "lib" CXX_VISIBILITY_PRESET hidden
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
+  # the RTX 30 VFG gate runs in its own process next to the module (nvl_selftest.h SelfTestExe)
+  add_executable(pme_nvvfx_selftest "${_n}/nvl_selftest_main.cpp")
+  target_link_libraries(pme_nvvfx_selftest PRIVATE pme_nvl)
+  set_target_properties(pme_nvvfx_selftest PROPERTIES OUTPUT_NAME pushmpc-nvvfx-selftest RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
+  message(STATUS "pushmpc_engine: NVIDIA sidecar (libpushmpc_engine_nvl.so), GPU cut guard ${_nguard}")
+elseif(UNIX AND NOT APPLE)
+  message(STATUS "pushmpc_engine: no NVIDIA sidecar (PME_NVL_FATBIN not given)")
+endif()
+if(UNIX AND NOT APPLE AND PMML_ORT_INCLUDE)
+  add_subdirectory("${ROOT}/pmml" pmml)
+  add_library(pushmpc_engine_ml MODULE pmeng_module.cpp ml_backend.cpp)
+  target_compile_definitions(pushmpc_engine_ml PRIVATE PME_SIDECAR)
+  target_include_directories(pushmpc_engine_ml PRIVATE ${PME_SIDECAR_DIRS})
+  target_link_libraries(pushmpc_engine_ml PRIVATE pmml ${CMAKE_DL_LIBS})
+  set_target_properties(pushmpc_engine_ml PROPERTIES PREFIX "lib" CXX_VISIBILITY_PRESET hidden
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
+  set_target_properties(pmml_cli PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
+  message(STATUS "pushmpc_engine: PushFlow sidecar (libpushmpc_engine_ml.so; ncnn: PMML_NCNN_DIR=${PMML_NCNN_DIR})")
+elseif(UNIX AND NOT APPLE)
+  message(STATUS "pushmpc_engine: no PushFlow sidecar (PMML_ORT_INCLUDE not given)")
 endif()
 
 add_executable(engine_test "${ROOT}/mpvnative/tests/engine_test.cpp")

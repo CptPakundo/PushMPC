@@ -183,6 +183,15 @@ static int install(void)
     const char *env = getenv("PUSHMPC_AVFILTER");
     unsigned v;
 
+#ifndef PUSHMPC_PRELOAD
+    {   /* Plex: pushmpc_preload.so (LD_PRELOAD) already put the filter in; the hook only adds what it learns at play time */
+        const char *pre = getenv("LD_PRELOAD");
+        if (pre && strstr(pre, "pushmpc_preload.so")) {
+            logf_("the filter comes from pushmpc_preload.so (LD_PRELOAD); ");
+            return 0;
+        }
+    }
+#endif
     g_sys_handle = dlopen("libavfilter.so", RTLD_NOW | RTLD_NOLOAD);
     if (!g_sys_handle) {
         /* the soname carries the major version: find the loaded one through the symbol */
@@ -273,11 +282,43 @@ __attribute__((visibility("default"))) const void *avfilter_get_by_name(const ch
     return hook_get_by_name(name);
 }
 #else
+/* the filter's options with what the hook learned at play time: the display's refresh rate (Auto aims at its multiple;
+ * without it the engines take x2) and source_depth=8 when the stream is converted to 10 bits for the engine */
+static void with_extras(char *out, size_t n, const char *base, double fps, int depth8)
+{
+    const char *eq = strchr(base, '=');   /* "@pushmpc:pushmpc" or "@pushmpc:pushmpc=opts" */
+    int k = snprintf(out, n, "%s", base);
+    if (fps > 0 && k > 0 && (size_t)k < n)
+        k += snprintf(out + k, n - (size_t)k, "%sdisplay_fps=%.3f", eq ? ":" : "=", fps), eq = "=";
+    if (depth8 && k > 0 && (size_t)k < n)
+        snprintf(out + k, n - (size_t)k, "%ssource_depth=8", eq ? ":" : "=");
+}
+
+/* the engine's request for a deeper stream, from the filter's frame metadata (vf_pushmpc: pushmpc.want_depth) */
+static int wanted_depth(mpv_handle *h)
+{
+    char *v = mpv_get_property_string(h, "vf-metadata/pushmpc/by-key/pushmpc.want_depth");
+    int d = 0;
+    if (!v) {   /* older mpv: the whole map as a string */
+        char *all = mpv_get_property_string(h, "vf-metadata/pushmpc");
+        const char *q = all ? strstr(all, "pushmpc.want_depth") : NULL;
+        if (q && (q = strpbrk(q, "0123456789")))
+            d = atoi(q);
+        if (all)
+            mpv_free(all);
+        return d;
+    }
+    d = atoi(v);
+    mpv_free(v);
+    return d;
+}
+
 int mpv_open_cplugin(mpv_handle *h)
 {
     char *opts = mpv_get_property_string(h, "script-opts");
-    char cmd[2048] = "@pushmpc:pushmpc";
-    int append = 1;
+    char cmd[2048] = "@pushmpc:pushmpc", cur[2200];
+    int append = 1, own_fps = 0, own_depth = 0, depth8 = 0, checks = 0;
+    double applied = 0;
     const int ok = install() == 0;
     if (opts) {   /* script-opts=pushmpc-vf=smoother=4:display_fps=144 -> the filter's options */
         const char *p = strstr(opts, "pushmpc-vf=");
@@ -288,21 +329,82 @@ int mpv_open_cplugin(mpv_handle *h)
         }
         if (strstr(opts, "pushmpc-append=no"))
             append = 0;
+        if (strstr(opts, "pushmpc-display=no"))
+            own_fps = 1;
+        if (strstr(opts, "pushmpc-depth=no"))
+            own_depth = 1;
         mpv_free(opts);
     }
+    if (strstr(cmd, "display_fps="))
+        own_fps = 1;
+    if (strstr(cmd, "source_depth="))
+        own_depth = 1;
     if (ok && append) {
         const char *args[] = { "vf", "append", cmd, NULL };
         const int r = mpv_command(h, args);
         fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, mpv_error_string(r));
+        /* the display's rate is known once the video output runs: then the filter is set again with it (one rebuild) */
+        if (!own_fps)
+            mpv_observe_property(h, 1, "display-fps", MPV_FORMAT_DOUBLE);
     } else if (ok) {
         fprintf(stderr, "[pushmpc_hook] %s(no vf append)\n", g_log);
     } else {
         fprintf(stderr, "[pushmpc_hook] not active: %s\n", g_log);
     }
     for (;;) {
-        mpv_event *ev = mpv_wait_event(h, -1);
+        /* while a request of the engine may be on its way (after a start or a seek), look every half second */
+        mpv_event *ev = mpv_wait_event(h, checks > 0 ? 0.5 : -1);
+        double fps = applied;
+        int want = depth8, change = 0;
         if (ev->event_id == MPV_EVENT_SHUTDOWN)
             break;
+        if (!ok || !append)
+            continue;
+        if (ev->event_id == MPV_EVENT_PROPERTY_CHANGE && ev->reply_userdata == 1) {
+            const mpv_event_property *pr = ev->data;
+            const double f = pr && pr->format == MPV_FORMAT_DOUBLE && pr->data ? *(const double *)pr->data : 0;
+            if (f > 1 && (applied <= 0 || f - applied > 0.5 || applied - f > 0.5)) {
+                fps = f;
+                change = 1;
+            }
+        }
+        if (!own_depth) {
+            if (ev->event_id == MPV_EVENT_START_FILE && depth8) {
+                want = 0;   /* a new file: its own depth; the engine asks again when it needs it */
+                change = 1;
+            }
+            if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART || ev->event_id == MPV_EVENT_VIDEO_RECONFIG || ev->event_id == MPV_EVENT_FILE_LOADED)
+                checks = 12;
+            else if (ev->event_id == MPV_EVENT_NONE && checks > 0)
+                checks--;
+            if (checks > 0 && !depth8 && wanted_depth(h) == 10) {
+                want = 1;
+                change = 1;
+                checks = 0;
+            }
+        }
+        if (change) {
+            /* RTX Video HDR on an 8-bit stream in host memory: the stream converted to 10 bits ahead of the filter
+               (the filter itself cannot change the CPU format it negotiated) */
+            const char *rm[] = { "vf", "remove", "@pushmpc", NULL };
+            const char *rmfmt[] = { "vf", "remove", "@pushmpcdepth", NULL };
+            const char *addfmt[] = { "vf", "append", "@pushmpcdepth:lavfi=[format=yuv420p10le]", NULL };
+            const char *add[] = { "vf", "append", cur, NULL };
+            int r;
+            with_extras(cur, sizeof(cur), cmd, fps > 1 ? fps : 0, want);
+            mpv_command(h, rm);
+            if (want != depth8) {
+                if (want)
+                    mpv_command(h, addfmt);
+                else
+                    mpv_command(h, rmfmt);
+            }
+            r = mpv_command(h, add);
+            applied = fps;
+            depth8 = want;
+            fprintf(stderr, "[pushmpc_hook] set up again (display %.3f Hz%s): vf append %s -> %s\n", applied,
+                    depth8 ? "; 10-bit stream for the engine" : "", cur, mpv_error_string(r));
+        }
     }
     return 0;
 }
