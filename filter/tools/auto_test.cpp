@@ -32,7 +32,7 @@ static uint32_t CoreFgFor(FgMethod m) { return uint32_t(int(m) - 1); }   // the 
 int main()
 {
     Display d4k{ L"4K 240", 239.96, 3840, 2160, false };
-    Display d4kVrr = d4k; d4kVrr.vrr = true;
+    Display d4kVrr = d4k; d4kVrr.vrr = true; d4kVrr.fullscreen = true;   // G-SYNC fullscreen-only: VRR means the player is fullscreen
     Display d60{ L"60", 60.0, 1920, 1080, false };
     Display d144{ L"1440p144", 144.0, 2560, 1440, false };
     Display d120{ L"4K 120", 119.88, 3840, 2160, false };
@@ -278,6 +278,35 @@ int main()
             VfgCeiling() = 16;
             check(o1.multiplier == 5 && o2.multiplier == 8 && o3.multiplier == 8, L"VFG16: a core without 16x: 5x windowed, 8x VRR, Smoother 12x stops at 8x",
                   std::format(L"{}x / {}x / {}x", o1.multiplier, o2.multiplier, o3.multiplier));
+        }
+        {   // the renderer's work per shown frame (ShowCost), HDR to SDR Auto, and the fixed-refresh spare (windowed 10x at the budget edge)
+            const Source dd{ 3840, 2160, 23.976, true, 0.188, true };   // a 4K HDR10 web episode (not low bitrate)
+            const Display w240 = d4k, vrr240 = d4kVrr;
+            Display hdrOn = d4k; hdrOn.hdr = true;
+            const Costs c0{};
+            check(std::fabs(ShowCost(c0, w240, true, false, 10, 1.0, 1.0) - 10 * (c0.rendererTm4k + c0.compose4k)) < 1e-9
+                  && std::fabs(ShowCost(c0, vrr240, true, true, 10, 1.0, 1.0) - c0.coreTm4k) < 1e-9 && ShowCost(c0, vrr240, false, false, 10, 1.0, 1.0) == 0.0,
+                  L"show cost: renderer tone map + composition per shown frame; PushMPC's tone map once; fullscreen SDR nothing");
+            const Choice a = Decide({}, dd, w240, {}, {});
+            check(a.coreToneMap && a.multiplier == 10 && a.predictedMs <= a.budgetMs, L"HDR on an SDR desktop, windowed 240 Hz: PushMPC tone-maps, 10x fits",
+                  std::format(L"{}x core {} {:.1f}/{:.1f} | {}", a.multiplier, int(a.coreToneMap), a.predictedMs, a.budgetMs, a.toneMapNote));
+            Settings player; player.hdrToSdr = HdrToSdr::Player;
+            const Choice b = Decide(player, dd, w240, {}, {}), bf = Decide(player, dd, vrr240, {}, {});
+            check(!b.coreToneMap && b.multiplier == 5 && bf.multiplier == 10, L"HDR to SDR by the renderer: windowed 240 Hz 5x (10x would not fit), fullscreen VRR 10x",
+                  std::format(L"{}x / {}x | {}", b.multiplier, bf.multiplier, b.stoppedAt));
+            const Choice h = Decide({}, dd, hdrOn, {}, {});
+            check(!h.coreToneMap && h.toneMapNote.find(L"Windows HDR is on") != std::wstring::npos, L"Windows HDR on: no tone map (HDR10 to the renderer)", h.toneMapNote);
+            Settings forced; forced.hdrToSdr = HdrToSdr::PushMpc; forced.smoother = kOff;
+            check(Decide(forced, dd, w240, {}, {}).coreToneMap && !Decide({}, { 1920, 1080, 23.976, false, 0.5 }, w240, {}, {}).coreToneMap,
+                  L"HdrToSdr PushMPC is honoured (Smoother off too); an SDR source never tone-maps");
+            // the fixed-refresh spare: a GPU 10 % slower than the 5090 tables
+            Costs slower; slower.fgScale[kKeyVfgMed] = 1.1;
+            const Source clipA{ 1920, 1040, 23.976, false, 0.5 };
+            const Choice f = Decide({}, clipA, w240, slower, {}), v = Decide({}, clipA, vrr240, slower, {});
+            check(EveryRefresh(w240, 239.76) && !EveryRefresh(w240, 119.88) && !EveryRefresh(vrr240, 239.76),
+                  L"one new frame per refresh: 10x at 240 Hz fixed, not 5x, not with VRR");
+            check(f.multiplier == 5 && f.stoppedAt.find(L"spare") != std::wstring::npos && v.multiplier == 10,
+                  L"windowed 10x at the budget edge: 5x (even cadence, said so); fullscreen VRR keeps 10x", std::format(L"{}x / {}x | {}", f.multiplier, v.multiplier, f.stoppedAt));
         }
         check(!CoreOutputStalled(800, 40, true) && !CoreOutputStalled(5000, 10, true) && !CoreOutputStalled(5000, 40, false) && CoreOutputStalled(1600, 24, true),
               L"no-output guard: source frames shown after 1.5 s and 24 frames in, nothing out (playing)");

@@ -359,7 +359,7 @@ static const wchar_t* kRegKey = L"Software\\PushMPC\\Filter";
 struct Config {
     pm::Settings user;         // HKCU\Software\PushMPC
     bool enable = true;        // user.enable (PUSHMPC_FILTER_Enable overrides it for tests)
-    bool hdrPushFps = false;   // HdrPushFpsToneMap: PushFPS tone-maps HDR to SDR (BGRA); default: HDR10 (Y416/Y410/P010) to MPC-VR
+    bool hdrPushFps = false;   // HdrPushFpsToneMap (debug): PushMPC (PushFPS) tone-maps HDR to SDR (BGRA) whatever HdrToSdr Auto says
     int leadUs = -1;           // LeadUs: Deliver this long before the frame's time; -1 = auto (half a refresh period - 0.4 ms)
     bool admission = true, watch = true, frameLog = true, preroll = true, reopenOnLost = true, warmCache = true; // WarmCache 0 moves the NGX release into the graph teardown (3-5 s, MPC-HC watchdog): see "Fixes"
     std::wstring runtimeRoot;  // RuntimeRoot: the runtime folder (default %LOCALAPPDATA%\PushMPC\runtime)
@@ -408,8 +408,9 @@ static Config ReadConfig()
     HKEY k = nullptr;
     RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k);
     { std::wstring e; if (EnvStr(L"Enable", e)) c.enable = _wtoi(e.c_str()) != 0; }
-    // HdrPushFpsToneMap (retired 2026-11-23): PushFPS's SDR tone map encoded piecewise sRGB; MPC-VR's is the route
-    ReadB(k, L"HdrPushFpsToneMap", c.hdrPushFps);   // debug (A/B): PushFPS tone-maps HDR to SDR at ingress instead
+    // HdrPushFpsToneMap: PushFPS's SDR tone map now encodes for the SDR display's 2.2 (was piecewise sRGB, retired then on
+    // 2026-11-23); the user setting HdrToSdr (Auto | Player | PushMPC) picks the route, this forces PushMPC's for A/B runs
+    ReadB(k, L"HdrPushFpsToneMap", c.hdrPushFps);
     ReadDw(k, L"LeadUs", c.leadUs);
     ReadB(k, L"Admission", c.admission);
     ReadB(k, L"WatchSettings", c.watch);
@@ -861,7 +862,7 @@ VSOut VS(uint id : SV_VertexID) {
 }
 // --- colour helpers. SDR content in an HDR10 output: BT.1886 (gamma 2.4) -> linear -> BT.2020 -> PQ with SDR white at
 // 203 cd/m2 (BT.2408). HDR source in an SDR output (warm-up only, until PushFPS's own tone map runs): PQ -> linear
-// (203 cd/m2 = 1.0) -> BT.709 -> extended Reinhard on the max channel (1000 cd/m2 to white) -> gamma 1/2.4.
+// (203 cd/m2 = 1.0) -> BT.709 -> extended Reinhard on the max channel (1000 cd/m2 to white) -> gamma 1/2.2 (the SDR display's).
 static const float3x3 M709to2020 = { 0.6274, 0.3293, 0.0433, 0.0691, 0.9195, 0.0114, 0.0164, 0.0880, 0.8956 };
 static const float3x3 M2020to709 = { 1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187 };
 float3 PqOetf(float3 y) { float3 p = pow(max(y, 0.0), 0.1593017578125); return pow((0.8359375 + 18.8515625 * p) / (1.0 + 18.6875 * p), 78.84375); }
@@ -1144,6 +1145,22 @@ enum class Fmt { None, BGRA, Y410, NV12, P010, P010H, Y416 };
 static const char* FmtName(Fmt f) { switch (f) { case Fmt::BGRA: return "ARGB32 (BGRA)"; case Fmt::Y410: return "Y410"; case Fmt::Y416: return "Y416"; case Fmt::NV12: return "NV12"; case Fmt::P010: return "P010"; case Fmt::P010H: return "P010 (HDR10 output)"; default: return "none"; } }
 static DXGI_FORMAT Dxgi(Fmt f) { switch (f) { case Fmt::BGRA: return DXGI_FORMAT_B8G8R8A8_UNORM; case Fmt::Y410: return DXGI_FORMAT_Y410; case Fmt::Y416: return DXGI_FORMAT_Y416; case Fmt::NV12: return DXGI_FORMAT_NV12; case Fmt::P010: case Fmt::P010H: return DXGI_FORMAT_P010; default: return DXGI_FORMAT_UNKNOWN; } }
 static bool IsHdrFmt(Fmt f) { return f == Fmt::Y410 || f == Fmt::Y416 || f == Fmt::P010H; }
+// the multiplier cap has one source (VFG16 track): pushcore's PUSHCORE_MAX_MULTIPLIER; the filter's settings and Auto follow it
+static_assert(pm::kMaxSmoother == int(PUSHCORE_MAX_MULTIPLIER), "kMaxSmoother (PushMpcSettings.h) must equal PUSHCORE_MAX_MULTIPLIER (pushcore_abi.h)");
+// MPC Video Renderer's SDR "display nits" (HKCU\Software\MPC-BE Filters\MPC Video Renderer, DisplayNits, 25..400, default
+// 125: IVideoRenderer.h SDR_NITS_*): the SDR white its own HDR to SDR tone map uses. Read only; PushMPC's tone map uses the
+// same white, so the picture does not change brightness with the route.
+static int MpcVrSdrNits()
+{
+    DWORD v = 0, sz = sizeof(v), type = 0;
+    HKEY k = nullptr;
+    int nits = 125;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\MPC-BE Filters\\MPC Video Renderer", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(k, L"DisplayNits", nullptr, &type, (BYTE*)&v, &sz) == ERROR_SUCCESS && type == REG_DWORD && v >= 25 && v <= 400) nits = int(v);
+        RegCloseKey(k);
+    }
+    return nits;
+}
 struct OutFmt {
     Fmt fmt = Fmt::None;
     UINT w = 0, h = 0;
@@ -1577,7 +1594,7 @@ public:
             Narrow(pm::OnOffStr(m_cfg.user.cleanUp)), Narrow(pm::OnOffStr(m_cfg.user.sdrToHdr)), Narrow(pm::FgQualityStr(m_cfg.user.fgQuality)),
             Narrow(pm::TargetStr(m_cfg.user.target)), Narrow(pm::StrengthStr(m_cfg.user.strength)),
             Narrow(pm::VsrStyleStr(m_cfg.user.vsrStyle)), Narrow(pm::OnOffStr(m_cfg.user.deband)), Narrow(pm::DebandStrengthStr(m_cfg.user.debandStrength)),
-            m_cfg.hdrPushFps ? "PushFPS tone map" : "HDR10 to MPC-VR", m_cfg.leadUs, m_cfg.admission));
+            m_cfg.hdrPushFps ? "HDR to SDR by PushMPC (HdrPushFpsToneMap)" : Narrow(std::wstring(L"HDR to SDR ") + pm::HdrToSdrStr(m_cfg.user.hdrToSdr)), m_cfg.leadUs, m_cfg.admission));
     }
     ~CPushMpcFilter() override
     {
@@ -1934,7 +1951,19 @@ public:
             Log(std::format("connect-time Auto: display {} {:.3f} Hz {}x{} Windows HDR {}; SDR to HDR {}", Narrow(m_display.name), m_display.refreshHz,
                 m_display.width, m_display.height, m_display.hdr ? "on" : "off", Narrow(c.hdrNote)));
         }
-        if ((InputHdr() && !m_cfg.hdrPushFps) || sdrToHdr) {
+        m_coreToneMap = InputHdr() && m_cfg.hdrPushFps;   // the legacy (PushFPS session) route: only the debug switch
+        if (!LegacyMode() && InputHdr()) {
+            // HDR to SDR (Windows HDR off): PushMPC tone-maps (BGRA out) or the renderer does (HDR10 out). Decided now, as
+            // the output format cannot change while playing: Auto's plan for this display (HdrToSdr Auto: the cheaper one)
+            EnsureGpu(0);
+            m_display = pm::QueryDisplay(pm::PlayerWindow(), m_cfg.user.vrr, m_gpu.nvidia());
+            const pm::Choice c = DecideNow(m_cfg.user, m_display);
+            m_coreToneMap = !m_display.hdr && (m_cfg.hdrPushFps || c.coreToneMap);
+            Log(std::format("connect-time Auto: display {} {:.3f} Hz {}x{} Windows HDR {} {}; HDR to SDR {}{}", Narrow(m_display.name), m_display.refreshHz,
+                m_display.width, m_display.height, m_display.hdr ? "on" : "off", m_display.fullscreen ? "fullscreen" : "windowed", Narrow(c.toneMapNote),
+                m_cfg.hdrPushFps && !m_display.hdr ? " -> PushMPC (HdrPushFpsToneMap)" : ""));
+        }
+        if ((InputHdr() && !m_coreToneMap) || sdrToHdr) {
             // Y410 before Y416 (R-HDR1): MPC Video Renderer draws Y416 sheared, with green blocks, in some small windows
             // (3840x2160 or 1920x1080 into ~590x330 in a tall window); Y410 and P010 are clean there. Both are 4:4:4, and
             // the Y410 pass dithers its 10-bit codes
@@ -2542,6 +2571,7 @@ private:
     // formats
     CMediaType m_inMt;
     bool m_inP010 = false, m_inInterlaced = false;
+    bool m_coreToneMap = false;   // HDR source on an SDR display: PushMPC tone-maps (BGRA connection), decided at connect time
     UINT m_inW = 0, m_inH = 0, m_inStride = 0, m_visW = 0, m_visH = 0, m_outStride = 0;
     DWORD m_inCtrl = 0, m_inArX = 0, m_inArY = 0;
     REFERENCE_TIME m_atpf = 417083, m_lastInPts = 0;
@@ -3300,9 +3330,15 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
             si.maxFallNits = float(reinterpret_cast<const MediaSideDataHDRContentLightLevel*>(it->second.data())->MaxFALL);
         }
         // HDR10 (Y410) to MPC-VR: PushFPS's rule useHdrPreview(hdr, displayHdr = 1) gives its HDR10 output;
-        // HdrPushFpsToneMap: an SDR presenter, so PushFPS tone-maps (BT.2390) to SDR RGB8
-        // (only when the connection took Y410: otherwise pushcore tone-maps, so its output fits the BGRA samples)
-        { std::lock_guard<std::mutex> lk(m_fmtLock); si.displayHdr = (!m_cfg.hdrPushFps && IsHdrFmt(m_outFmt.fmt)) ? 1 : 0; }
+        // HDR to SDR by PushMPC (m_coreToneMap: a BGRA connection): an SDR presenter, so PushFPS tone-maps (BT.2390) to SDR
+        // RGB8, encoded for the SDR display's 2.2, with SDR white at MPC Video Renderer's own "display nits" (DisplayNits,
+        // default 125) so both routes give the same brightness
+        { std::lock_guard<std::mutex> lk(m_fmtLock); si.displayHdr = (!m_coreToneMap && IsHdrFmt(m_outFmt.fmt)) ? 1 : 0; }
+        if (!si.displayHdr) {
+            const int nits = MpcVrSdrNits();
+            SetEnvironmentVariableW(L"VEYRA_HDR_SDR_WHITE_NITS", std::to_wstring(nits).c_str());
+            Log(std::format("HDR to SDR in PushMPC: BT.2390 to SDR white {} cd/m2 (MPC Video Renderer's DisplayNits), gamma 2.2", nits));
+        }
     } else {
         // SDR source in an HDR10 connection (SDR to HDR): pushcore presents HDR10 when RTX Video HDR is on
         { std::lock_guard<std::mutex> lk(m_fmtLock); si.displayHdr = IsHdrFmt(m_outFmt.fmt) ? 1 : 0; }
@@ -4424,6 +4460,8 @@ void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
     bool hdrFmt = false;
     { std::lock_guard<std::mutex> lk(m_fmtLock); hdrFmt = IsHdrFmt(m_outFmt.fmt); }
     if (c.hdr && !hdrFmt && m_mode != Mode::None && !InputHdr()) hdr = L"off for this file (Windows HDR came on after it was opened; reopen the file)";
+    // an HDR source: who tone-maps it for this file (decided when the player connected)
+    if (InputHdr() && !m_display.hdr) hdr += m_coreToneMap ? L"; tone-mapped to SDR by PushMPC" : L"; tone-mapped to SDR by the renderer";
     std::wstring deband = c.debandNote;
     if (c.deband) {
         const double ms = m_debandMsNow.load();
@@ -4435,9 +4473,10 @@ void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
 void CPushMpcFilter::LogChoice(const char* why, const pm::Choice& c)
 {
     Log(std::format("Auto ({}): frame generation {} [stopped at: {}]; sharpen {}; clean up {}; SDR to HDR {}; deband {}; output {}x{}; predicted {:.1f} ms of {:.1f} ms budget; "
-        "display {} {:.3f} Hz HDR {} VRR {} ({}); GPU {} ({}, prior factor {:.1f})",
+        "HDR to SDR {} (connected: {}); display {} {:.3f} Hz HDR {} VRR {} ({}) {}; GPU {} ({}, prior factor {:.1f})",
         why, Narrow(c.smootherNote), Narrow(c.stoppedAt), Narrow(c.sharperNote), Narrow(c.cleanNote), Narrow(c.hdrNote), Narrow(c.debandNote), c.outW, c.outH, c.predictedMs, c.budgetMs,
-        Narrow(m_display.name), m_display.refreshHz, m_display.hdr ? "on" : "off", m_display.vrr ? "on" : "off", Narrow(m_display.vrrHow),
+        c.toneMapNote.empty() ? "-" : Narrow(c.toneMapNote), !InputHdr() ? "-" : m_coreToneMap ? "PushMPC" : "the renderer",
+        Narrow(m_display.name), m_display.refreshHz, m_display.hdr ? "on" : "off", m_display.vrr ? "on" : "off", Narrow(m_display.vrrHow), m_display.fullscreen ? "fullscreen" : "windowed",
         Narrow(m_gpu.name), Narrow(pm::FamilyName(m_gpu.family)), m_costs.card));
 }
 // Learned costs per GPU (HKCU\Software\PushMPC\Learned), so the next file starts from what this GPU measured: a
@@ -4448,7 +4487,7 @@ void CPushMpcFilter::LoadLearned()
     m_learnedLoaded = true;
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PushMPC\\Learned", 0, KEY_READ, &k) != ERROR_SUCCESS) return;
-    if (pm::RegReadStr(k, L"Gpu") == m_gpuName && !m_gpuName.empty() && pm::RegReadStr(k, L"Model") == L"2") {
+    if (pm::RegReadStr(k, L"Gpu") == m_gpuName && !m_gpuName.empty() && pm::RegReadStr(k, L"Model") == L"3") {
         std::lock_guard<std::mutex> lk(m_autoLock);
         auto num = [&](const std::wstring& n, double& v, bool* flag, double lo, double hi) { const std::wstring s = pm::RegReadStr(k, n.c_str()); const double x = s.empty() ? -1 : _wtof(s.c_str()); if (x >= lo && x <= hi) { v = x; if (flag) *flag = true; return true; } return false; };
         for (int i = 0; i < pm::kFgKeys; ++i) num(std::format(L"FgScale{}", i), m_costs.fgScale[i], &m_costs.fgLearned[i], 0.05, 20);
@@ -4485,7 +4524,7 @@ void CPushMpcFilter::SaveLearned()
         for (int t = 0; t < 3; ++t) { RegDeleteValueW(k, std::format(L"PfFirst{}", t).c_str()); RegDeleteValueW(k, std::format(L"PfNext{}", t).c_str()); }
     }
     str(L"Gpu", m_gpuName);
-    str(L"Model", L"2");
+    str(L"Model", L"3");
     for (int i = 0; i < pm::kFgKeys; ++i) if (c.fgLearned[i]) str(std::format(L"FgScale{}", i), std::format(L"{:.3f}", c.fgScale[i]));
     if (c.learnedVsr) str(L"VsrScale", std::format(L"{:.3f}", c.vsrScale));
     if (c.learnedNr) str(L"NrMs", std::format(L"{:.3f}", c.nrMs));
@@ -4525,7 +4564,7 @@ void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
                 if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\PushMPC\\Learned", 0, nullptr, 0, KEY_WRITE | KEY_READ, nullptr, &k, nullptr) == ERROR_SUCCESS) {
                     auto str = [&](const std::wstring& n, const std::wstring& v) { RegSetValueExW(k, n.c_str(), 0, REG_SZ, (const BYTE*)v.c_str(), DWORD((v.size() + 1) * sizeof(wchar_t))); };
                     if (pm::RegReadStr(k, L"Gpu") != c->gpu) { RegDeleteTreeW(k, nullptr); str(L"Gpu", c->gpu); }
-                    str(L"Model", L"2");
+                    str(L"Model", L"3");
                     for (int t = 0; t < 3; ++t) {
                         // a tier that did not run: from Balanced, by the 5090's tier ratios
                         const double ratio[3] = { 4.49 / 5.68, 1.0, 11.96 / 5.68 };
@@ -4582,7 +4621,10 @@ void CPushMpcFilter::LearnCosts()
         const int mult = std::min<int>(int(a.multiplier), pm::MaxMultiplier(m));
         const double prior = pm::FgPrior(c, m, q, mult, pix);
         const int key = pm::FgKeyOf(m, q);
-        const double x = prior > 0 ? p95(fg) / prior : 0;
+        // the renderer's work for the shown frames runs on the same GPU meanwhile and stretches the batch: Decide adds it
+        // separately (ShowCost), so it is taken out here (learned model 3)
+        const double show = pm::ShowCost(c, m_display, InputHdr() && !m_display.hdr, m_coreToneMap, mult, pix, pm::Pix(m_visW ? m_visW : w, m_visH ? m_visH : h));
+        const double x = prior > 0 ? std::max(p95(fg) - show, p95(fg) * 0.5) / prior : 0;
         if (std::isfinite(x) && x > 0.05 && x < 20) { if (!c.fgLearned[key]) c.fgScale[key] = x; else ema(c.fgScale[key], x); c.fgLearned[key] = true; }
     }
     if (sr.size() >= 48) {
