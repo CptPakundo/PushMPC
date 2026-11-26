@@ -654,6 +654,7 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     g_api = api; g_libRoot = rt.root;
     if (auto feat = reinterpret_cast<uint32_t(*)(void)>(GetProcAddress(h, "pushcore_features"))) g_coreFeatures = feat();
     pm::VfgCeiling() = (g_coreFeatures & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
+    pm::PushFlowCeiling() = (g_coreFeatures & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;   // PushFlow above 4x (flow once) only with a core that has it
     g_capsFn = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     g_benchFn = reinterpret_cast<PushCoreFlowBenchFn>(GetProcAddress(h, "pushcore_pushFlowBench"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
@@ -4380,7 +4381,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
     if (c.artifactReduction) t = m_visH > 2160 || m_visW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4; // never a downscale
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
-    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::VfgCeiling()));
+    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::CoreCeiling()));
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
@@ -4463,6 +4464,10 @@ void CPushMpcFilter::LoadLearned()
             bench = num(std::format(L"PfNext{}", t), m_costs.pfNext[t], nullptr, 0.1, 500) && bench;
         }
         m_costs.pfBenched = bench;
+        // flow once (PushFlow above 4x): the rebuild per tier, from a speed test that measured it (PfBenchVersion 2)
+        bool rebuild = bench && pm::RegReadStr(k, L"PfBenchVersion") == L"2";
+        for (int t = 0; t < 3 && rebuild; ++t) rebuild = num(std::format(L"PfRebuild{}", t), m_costs.pfRebuild[t], nullptr, 0.01, 200);
+        m_costs.pfRebuildBenched = rebuild;
         if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
         Log(std::format("learned GPU costs for {}: VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
             Narrow(m_gpuName), m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
@@ -4482,7 +4487,8 @@ void CPushMpcFilter::SaveLearned()
     auto str = [&](const std::wstring& n, const std::wstring& v) { RegSetValueExW(k, n.c_str(), 0, REG_SZ, (const BYTE*)v.c_str(), DWORD((v.size() + 1) * sizeof(wchar_t))); };
     if (pm::RegReadStr(k, L"Gpu") != m_gpuName) {
         // another GPU's values: start over (the speed test is per card too)
-        for (int t = 0; t < 3; ++t) { RegDeleteValueW(k, std::format(L"PfFirst{}", t).c_str()); RegDeleteValueW(k, std::format(L"PfNext{}", t).c_str()); }
+        for (int t = 0; t < 3; ++t) { RegDeleteValueW(k, std::format(L"PfFirst{}", t).c_str()); RegDeleteValueW(k, std::format(L"PfNext{}", t).c_str()); RegDeleteValueW(k, std::format(L"PfRebuild{}", t).c_str()); }
+        RegDeleteValueW(k, L"PfBenchVersion");
     }
     str(L"Gpu", m_gpuName);
     str(L"Model", L"2");
@@ -4503,7 +4509,8 @@ static std::atomic<uint32_t> g_benchSerial = 0;
 void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
 {
     if (!g_benchFn || m_rt.root.empty() || g_benchStarted.exchange(true)) return;
-    { std::lock_guard<std::mutex> lk(m_autoLock); if (m_costs.pfBenched) return; }
+    // once per card; once more for a card measured before the flow-once rebuild was (PushFlow above 4x needs its cost)
+    { std::lock_guard<std::mutex> lk(m_autoLock); if (m_costs.pfBenched && (m_costs.pfRebuildBenched || pm::PushFlowCeiling() <= pm::kPushFlowOnceAbove)) return; }
     struct Ctx { std::wstring root, gpu; uint64_t luid; UINT w, h; HMODULE self; };
     auto* ctx = new Ctx{ m_rt.root, m_gpuName, m_gpuLuid, std::max<UINT>(w, 640), std::max<UINT>(h, 360), nullptr };
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Log), &ctx->self);
@@ -4517,8 +4524,9 @@ void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
             const int64_t q0 = Qpc();
             Log(std::format("PushFlow speed test on {} at {}x{} (once per card)", Narrow(c->gpu), b.width, b.height));
             const int r = SehBench(c->luid, c->root.c_str(), &b);
-            Log(std::format("PushFlow speed test {} in {:.0f} ms: first/next p95 Fast {:.2f}/{:.2f}, Balanced {:.2f}/{:.2f}, Quality {:.2f}/{:.2f} ms; {}",
-                r == PUSHCORE_OK ? "done" : "FAILED", QpcMs(Qpc() - q0), b.firstMsP95[0], b.nextMsP95[0], b.firstMsP95[1], b.nextMsP95[1], b.firstMsP95[2], b.nextMsP95[2], b.note));
+            Log(std::format("PushFlow speed test {} in {:.0f} ms: first/next/rebuild p95 Fast {:.2f}/{:.2f}/{:.2f}, Balanced {:.2f}/{:.2f}/{:.2f}, Quality {:.2f}/{:.2f}/{:.2f} ms; {}",
+                r == PUSHCORE_OK ? "done" : "FAILED", QpcMs(Qpc() - q0), b.firstMsP95[0], b.nextMsP95[0], b.rebuildMsP95[0], b.firstMsP95[1], b.nextMsP95[1], b.rebuildMsP95[1],
+                b.firstMsP95[2], b.nextMsP95[2], b.rebuildMsP95[2], b.note));
             if (r == PUSHCORE_OK && b.firstMsP95[1] > 0) {
                 const double pix = double(b.width) * b.height / (3840.0 * 2160.0), size = 0.6 + 0.4 * pix;   // to 4K as FgPrior scales it
                 HKEY k = nullptr;
@@ -4533,7 +4541,11 @@ void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
                         const double next = b.nextMsP95[t] > 0 ? b.nextMsP95[t] : b.nextMsP95[1] * ratio[t];
                         str(std::format(L"PfFirst{}", t), std::format(L"{:.3f}", first / size));
                         str(std::format(L"PfNext{}", t), std::format(L"{:.3f}", next / size));
+                        // flow once: a measured tier's rebuild, else Balanced's (the same pass at every tier), else the prior
+                        const double rb = b.rebuildMsP95[t] > 0 ? b.rebuildMsP95[t] : b.rebuildMsP95[1] > 0 ? b.rebuildMsP95[1] : -1;
+                        if (rb > 0) str(std::format(L"PfRebuild{}", t), std::format(L"{:.3f}", rb / size));
                     }
+                    if (b.rebuildMsP95[1] > 0) str(L"PfBenchVersion", L"2");   // the rebuild was measured (PushFlow above 4x)
                     str(L"PfBenchNote", Widen(b.note));
                     RegCloseKey(k);
                 }

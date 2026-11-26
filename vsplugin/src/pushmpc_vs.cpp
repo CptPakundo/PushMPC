@@ -378,6 +378,9 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     std::string err;
     std::lock_guard<std::mutex> lk(h.Lock());
     if (!h.Load(paths, err) || !h.EnsureDevice(0, warp ? AdapterPick::Warp : AdapterPick::Auto, err)) { a->freeNode(node); delete d; return fail(err); }
+    // the multipliers the loaded core makes: VFG above 8x and PushFlow above 4x only with a core that has them
+    pm::VfgCeiling() = (h.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
+    pm::PushFlowCeiling() = (h.Features() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;
 
     // the colour to open with: the arguments, else what the last instance of this stream saw, else a guess
     const uint32_t w = uint32_t(vi->width), hh = uint32_t(vi->height);

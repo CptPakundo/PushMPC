@@ -149,7 +149,7 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
 #define PUSHCORE_FG_VFG 0u         /* NVIDIA Video Effects frame generation (RTX 40/50; RTX 30 through VfgAmpereCompat) */
 #define PUSHCORE_FG_DLSSG 1u       /* NVIDIA DLSS frame generation, FidelityFX optical flow (RTX 40/50; RTX 30 unlocked) */
-#define PUSHCORE_FG_PUSHFLOW 2u    /* PushFlow (RIFE on DirectML), any DirectX 12 GPU, up to 4x */
+#define PUSHCORE_FG_PUSHFLOW 2u    /* PushFlow (RIFE on DirectML), any DirectX 12 GPU, up to 4x (PUSHCORE_MAX_MULTIPLIER with PUSHCORE_FEATURE_PUSHFLOW16) */
 #define PUSHCORE_FG_FSR 3u         /* AMD FSR 3.1 frame generation (any DirectX 12 GPU; FSR 4 ML on RX 9000), 2x */
 #define PUSHCORE_FG_AMDFRC 4u      /* AMD AMF frame rate conversion (AMD driver), 2x */
 #define PUSHCORE_FG_NVOF 5u        /* PUSHCORE_FEATURE_NVOF_FG: NVIDIA's optical-flow hardware (NVOFA: Turing except TU117, and
@@ -313,6 +313,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
 #define PUSHCORE_MAX_MULTIPLIER 16u
+#define PUSHCORE_FEATURE_PUSHFLOW16 16384u /* PushFlow up to PUSHCORE_MAX_MULTIPLIER (flow once above 4x: one network run per pair, every subframe rebuilt from its grids); older cores stop at 4x */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
@@ -377,6 +378,10 @@ typedef struct PushCoreFlowBench {
     double initMs[3];
     char adapter[128];         /* out */
     char note[256];            /* out: model / precision per tier, or why it failed */
+    /* Appended (PUSHCORE_FEATURE_PUSHFLOW16; written only when structSize covers it): per tier the GPU time of a frame
+       rebuilt from the grids alone, as flow once makes every frame of a pair above 4x but the first; < 0 = not measured
+       (the model has no grids, or the tier did not run) */
+    double rebuildMsP50[3], rebuildMsP95[3];
 } PushCoreFlowBench;
 PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreFlowBench* io);
 typedef int (*PushCoreCapabilitiesFn)(uint64_t, const wchar_t*, PushCoreCaps*);

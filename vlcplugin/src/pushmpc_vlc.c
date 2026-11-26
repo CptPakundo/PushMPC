@@ -291,7 +291,7 @@ vlc_module_begin()
     set_subcategory(SUBCAT_VIDEO_VFILTER)
     add_integer(CFG "smoother", 0, "Smoother (frame generation)",
                 "Auto picks the multiplier from the display refresh rate and what this computer can generate in time; "
-                "Off passes frames through; x2..x16 force a multiplier (above x8 with NVIDIA VFG only).", false)
+                "Off passes frames through; x2..x16 force a multiplier.", false)
         change_integer_list(smoother_values, smoother_texts)
         change_safe()
     add_integer(CFG "quality", 1, "Motion search quality", "Fast searches on a quarter-size picture, Balanced on a "
@@ -1087,7 +1087,7 @@ static int Open(vlc_object_t *obj)
 #endif
     /* Linux VA-API / VDPAU pictures: kept as they are on both sides (pm_hw.h); the converter route is the fallback */
     if (!sys->zc && pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
-        sys->hw = pm_hw_new(obj, v, 8);
+        sys->hw = pm_hw_new(obj, v, 18);   /* up to 16x: 15 generated frames of a source frame in flight, plus 3 */
     if (sys->hw) {
         msg_Dbg(f, "PushMPC: %4.4s kept as it is (generated frames go into PushMPC's own surfaces)", (const char *)&v->i_chroma);
     } else if (!sys->zc && !Supported(v->i_chroma, &bits)) {

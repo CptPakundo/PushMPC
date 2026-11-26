@@ -268,11 +268,27 @@ int main()
             Settings f16; f16.smoother = 16; Settings f12; f12.smoother = 12;
             check(Decide(f16, clipA, w240, {}, {}).multiplier == 16, L"VFG16: Smoother 16x is honoured with VFG");
             Settings pf16 = f16; pf16.fgMethod = FgMethod::PushFlow;
-            check(Decide(pf16, clipA, w240, {}, {}).multiplier == 4, L"VFG16: Smoother 16x with PushFlow stops at its 4x");
+            check(Decide(pf16, clipA, w240, {}, {}).multiplier == 16, L"PushFlow16: Smoother 16x with PushFlow is honoured (flow once above 4x)");
+            PushFlowCeiling() = 4;   // an older core (no PUSHCORE_FEATURE_PUSHFLOW16)
+            const int pfOld = Decide(pf16, clipA, w240, {}, {}).multiplier;
+            PushFlowCeiling() = 16;
+            check(pfOld == 4, L"PushFlow16: a core without it: Smoother 16x with PushFlow stops at 4x", std::format(L"{}x", pfOld));
             check(ParseChoice(L"16", 2, kMaxSmoother, kAuto) == 16 && ParseChoice(L"17", 2, kMaxSmoother, kAuto) == kAuto, L"VFG16: the Smoother setting reads 2..16");
             const Costs c0{};
             check(FgPrior(c0, FgMethod::Vfg, 1, 16, 1.0) > FgPrior(c0, FgMethod::Vfg, 1, 10, 1.0) && FgPrior(c0, FgMethod::Vfg, 1, 10, 1.0) > FgPrior(c0, FgMethod::Vfg, 1, 8, 1.0),
                   L"VFG16: the cost grows with the multiplier above 8x");
+            // PushFlow above 4x: flow once, one network run per pair and a rebuild per further frame
+            check(FgPrior(c0, FgMethod::PushFlow, 1, 5, 1.0) < FgPrior(c0, FgMethod::PushFlow, 1, 4, 1.0)
+                  && FgPrior(c0, FgMethod::PushFlow, 1, 16, 1.0) > FgPrior(c0, FgMethod::PushFlow, 1, 10, 1.0)
+                  && std::fabs(FgPrior(c0, FgMethod::PushFlow, 1, 10, 1.0) - (c0.pfFirst[1] + 8 * c0.pfRebuild[1]) * c0.card) < 1e-9,
+                  L"PushFlow16: above 4x the cost is the first frame plus a rebuild per further frame");
+            Costs pfMeasured = c0; pfMeasured.pfBenched = pfMeasured.pfRebuildBenched = true; pfMeasured.pfRebuild[1] = 0.5;
+            Costs pfOldBench = pfMeasured; pfOldBench.pfRebuildBenched = false; pfOldBench.card = 2.0;
+            check(std::fabs(FgPrior(pfOldBench, FgMethod::PushFlow, 1, 6, 1.0) - (c0.pfFirst[1] + 4 * 0.5 * 2.0)) < 1e-9,
+                  L"PushFlow16: a speed test without the rebuild scales the rebuild prior by the card");
+            const Choice rx = Decide({}, clipA, w240, pfMeasured, Family(kRdna3, L"AMD Radeon RX 7900 XTX"));
+            check(rx.fgMethod == FgMethod::PushFlow && rx.multiplier > 4 && rx.predictedMs <= rx.budgetMs,
+                  L"PushFlow16: Radeon, clip A on 240 Hz: PushFlow above 4x (flow once)", rx.smootherNote + L" | " + rx.stoppedAt);
             VfgCeiling() = 8;   // an older core (no PUSHCORE_FEATURE_VFG16)
             const Choice o1 = Decide({}, clipA, w240, {}, {}), o2 = Decide({}, clipA, vrr240, {}, {}), o3 = Decide(f12, clipA, w240, {}, {});
             VfgCeiling() = 16;

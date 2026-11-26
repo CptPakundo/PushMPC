@@ -229,6 +229,7 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     std::string e;
     if (!host.Load(paths, e)) { SetErr(err, errsize, e); return nullptr; }
     pm::VfgCeiling() = (host.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;   // VFG above 8x only with a core that has it
+    pm::PushFlowCeiling() = (host.Features() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;   // PushFlow above 4x (flow once) the same
     if (device ? !host.AdoptDevice(device, e) : !host.EnsureDevice(0, cfg->warp ? AdapterPick::Warp : AdapterPick::Auto, e)) {
         SetErr(err, errsize, e); return nullptr;
     }
