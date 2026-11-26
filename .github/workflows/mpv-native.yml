@@ -103,6 +103,8 @@ jobs:
           cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
           cmake --build build-engine --parallel
           ./build-engine/out/engine_test
+          # the portable Vulkan engine with frames in host memory on Mesa's lavapipe (Dedup's lookahead, real frames exact)
+          if command -v vulkaninfo >/dev/null 2>&1 || ls /usr/share/vulkan/icd.d/lvp_icd*.json >/dev/null 2>&1; then PUSHMPC_TEST_VULKAN=1 ./build-engine/out/engine_test; fi
       - name: Public clip (pinned)
         run: |
           url=$(python3 -c "import json;print(json.load(open('mpvnative/pins.json'))['clip']['url'])")

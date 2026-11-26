@@ -10,6 +10,7 @@
 // instead of moving in one step and stopping. Dedup=0 (setting) or dedup=no (option) turns it off.
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,7 +92,11 @@ public:
         if (src.mem != PMENG_MEM_CPU || src.fmt != m_fmt) { err = "Vulkan engine: unexpected input memory / format"; return PMENG_ERROR; }
         const int64_t s = int64_t(m_seq++);
         const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_last == s - 1;
-        if (!contiguous) ReleaseAll();
+        if (!contiguous) {
+            if (!FlushLookahead()) return PMENG_ERROR;
+            ReleaseAll();
+            m_cadence.Configure(m_k, m_dedup ? kDedupLookahead : 0, 0);   // Finish set the stream's end: a new stream from here
+        }
         m_last = s;
         Planes& pl = m_src[s];
         for (int i = 0; i < 3; ++i) pl.p[i].resize(i ? m_sc * m_ch : m_sy * size_t(m_h));
@@ -138,34 +143,11 @@ public:
         const Item it = m_q.front();
         m_q.pop_front();
         if (dst.mem != PMENG_MEM_CPU || dst.fmt != m_fmt) { err = "Vulkan engine: unexpected output memory / format"; return PMENG_ERROR; }
-        const Shot& sh = it.shot;
-        auto real = [&](int64_t f) -> int {
-            if (m_repair.Repaired(f) && m_slotOf.count(f)) {   // the held-drawing repair changed it on the GPU
-                int o = -1; uint64_t tk = 0;
-                if (!m_eng.Real(m_slotOf[f], o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
-                YuvOut yo;
-                for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
-                m_eng.Read(o, yo);
-                FromPlanar(m_gen, dst); ++m_written;
-                return PMENG_OK;
-            }
-            auto p = m_src.find(f);
-            if (p == m_src.end()) { err = "Vulkan engine: no picture for frame " + std::to_string(f); return PMENG_ERROR; }
-            FromPlanar(p->second.p, dst); ++m_written;
-            return PMENG_OK;
-        };
-        if (sh.kind != Shot::Generated) return real(sh.src);
-        auto pi = m_pairs.find({ sh.d0, sh.d1 });
-        if (pi == m_pairs.end() && m_repair.on && StartPair(sh.d0, sh.d1)) pi = m_pairs.find({ sh.d0, sh.d1 });   // repair: started when due
-        if (pi == m_pairs.end()) { err = "Vulkan engine: the pair is gone"; return PMENG_ERROR; }
-        if (pi->second.cut) return real(sh.t < 0.5f ? sh.d0 : sh.d1);   // never morph a cut
-        int o = -1; uint64_t tk = 0;
-        if (!m_eng.Generate(pi->second.id, sh.t, 0, o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
-        YuvOut yo;
-        for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
-        m_eng.Read(o, yo);
-        FromPlanar(m_gen, dst);
-        ++m_generated; ++m_written;
+        if (it.pre) { FromPlanar(it.pre->p, dst); ++m_written; return PMENG_OK; }   // made ahead (a discontinuity, Submit)
+        const std::vector<uint8_t>* planes = nullptr;
+        if (Produce(it.shot, planes) != PMENG_OK) return PMENG_ERROR;
+        FromPlanar(*reinterpret_cast<const std::vector<uint8_t>(*)[3]>(planes), dst);
+        ++m_written;
         return PMENG_OK;
     }
     int Skip() override { if (!m_q.empty()) m_q.pop_front(); return PMENG_OK; }
@@ -186,7 +168,55 @@ private:
     static constexpr int kDedupLookahead = 3;   // twos, threes and fours (HeldFrames.h kLookahead)
     struct Planes { std::vector<uint8_t> p[3]; };
     struct PairInfo { int id = -1; bool cut = false; };
-    struct Item { pmeng_out_info info; Shot shot; };
+    struct Item { pmeng_out_info info; Shot shot; std::shared_ptr<Planes> pre; };   // pre: the picture made ahead
+    // The picture of one output in the engine's planar layout: planes points at a source picture (m_src) or at m_gen
+    // (generated, or a real frame the held-drawing repair changed); valid until the next call
+    int Produce(const Shot& sh, const std::vector<uint8_t>*& planes)
+    {
+        auto real = [&](int64_t f) -> int {
+            if (m_repair.Repaired(f) && m_slotOf.count(f)) {   // the held-drawing repair changed it on the GPU
+                int o = -1; uint64_t tk = 0;
+                if (!m_eng.Real(m_slotOf[f], o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
+                YuvOut yo;
+                for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
+                m_eng.Read(o, yo);
+                planes = m_gen;
+                return PMENG_OK;
+            }
+            auto p = m_src.find(f);
+            if (p == m_src.end()) { err = "Vulkan engine: no picture for frame " + std::to_string(f); return PMENG_ERROR; }
+            planes = p->second.p;
+            return PMENG_OK;
+        };
+        if (sh.kind != Shot::Generated) return real(sh.src);
+        auto pi = m_pairs.find({ sh.d0, sh.d1 });
+        if (pi == m_pairs.end() && m_repair.on && StartPair(sh.d0, sh.d1)) pi = m_pairs.find({ sh.d0, sh.d1 });   // repair: started when due
+        if (pi == m_pairs.end()) { err = "Vulkan engine: the pair is gone"; return PMENG_ERROR; }
+        if (pi->second.cut) return real(sh.t < 0.5f ? sh.d0 : sh.d1);   // never morph a cut
+        int o = -1; uint64_t tk = 0;
+        if (!m_eng.Generate(pi->second.id, sh.t, 0, o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
+        YuvOut yo;
+        for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
+        m_eng.Read(o, yo);
+        planes = m_gen;
+        ++m_generated;
+        return PMENG_OK;
+    }
+    // A discontinuity (a gap or a seek): the outputs Dedup's lookahead still held back for the frames before it are made
+    // now, as they stand (no next frame to wait for), so none is lost; then the state starts over
+    bool FlushLookahead()
+    {
+        m_cadence.Finish();
+        Settle();
+        for (Item& it : m_q) {
+            const std::vector<uint8_t>* planes = nullptr;
+            if (Produce(it.shot, planes) != PMENG_OK) return false;
+            auto pre = std::make_shared<Planes>();
+            for (int i = 0; i < 3; ++i) pre->p[i] = planes[i];
+            it.pre = std::move(pre);
+        }
+        return true;
+    }
     void ReleaseAll()
     {
         for (auto& [key, p] : m_pairs) m_eng.ReleasePair(p.id);

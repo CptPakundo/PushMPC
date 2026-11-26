@@ -4,6 +4,12 @@
 //   makes no blend (every generated frame equals a real one); a discontinuity makes no pair; NV12 / P010 / 10-bit
 //   planar round trips.
 //   Spacing, every OS: a 32 px box moving 4 px a frame at x4 and x8: even steps, no repeated positions.
+//   Both run the CPU engine by name (backend=portable-cpu): they must not test whatever Auto picks on the machine.
+//   The GPU is never used unless asked: without PUSHMPC_TEST_GPU=1 this test hides every Vulkan driver from the process
+//   (VK_DRIVER_FILES / VK_ICD_FILENAMES), so Auto's portable-vulkan cannot pick a real GPU on a developer's PC.
+//   Portable Vulkan, frames in host memory (PUSHMPC_TEST_GPU=1, or PUSHMPC_TEST_VULKAN=1 for a CPU Vulkan device such
+//   as lavapipe in CI): the same moving box with Dedup's lookahead, so outputs may come up to that many source frames
+//   late; every output is checked against the source it names (real frames byte-identical, the box in place).
 //   D3D11, Windows: WARP device, NV12 textures, the stub pushcore (CPU blend) -> BGRA textures with the right pixels,
 //   x2 order, pending() drains to 0.
 //   Fast start (Windows, WARP + stub): quick graph, full graph on the worker, handover with no frame lost or doubled, a
@@ -86,10 +92,11 @@ static void TestCpu(const pmeng_api* api, uint32_t fmt, const char* name)
     pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = fmt; st.fps_num = 24000; st.fps_den = 1001;
     pmeng_output out{}; out.struct_size = sizeof(out);
     char err[512] = {};
-    void* h = api->open(&dev, &st, "smoother=4\nportable_threads=2\n", &out, err, sizeof(err));
+    void* h = api->open(&dev, &st, "smoother=4\nportable_threads=2\nbackend=portable-cpu\n", &out, err, sizeof(err));
     CHECK(h, "%s: open: %s", name, err);
     if (!h) return;
     std::printf("%s: %s | %s\n", name, out.engine, out.description);
+    CHECK(std::strcmp(out.engine, "portable-cpu") == 0, "%s: the CPU test runs on %s, not the CPU engine", name, out.engine);
     CHECK(out.multiplier == 4 && out.mem == PMENG_MEM_CPU && out.fmt == fmt && out.width == uint32_t(W), "%s: output x%u mem %u fmt %u", name, out.multiplier, out.mem, out.fmt);
 
     int outputs = 0, gens = 0, orderErr = 0, cutBlend = 0, motionErr = 0;
@@ -158,7 +165,7 @@ static void TestSpacing(const pmeng_api* api, int k)
     pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = PMENG_FMT_YUV420P; st.fps_num = 24; st.fps_den = 1;
     pmeng_output out{}; out.struct_size = sizeof(out);
     char err[512] = {};
-    const std::string opts = "smoother=" + std::to_string(k) + "\nportable_threads=2\n";
+    const std::string opts = "smoother=" + std::to_string(k) + "\nportable_threads=2\nbackend=portable-cpu\n";
     void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
     CHECK(h, "spacing x%d: open: %s", k, err);
     if (!h) return;
@@ -202,6 +209,78 @@ static void TestSpacing(const pmeng_api* api, int k)
         CHECK(repeats == 0 && bad == 0, "spacing x%d (%s): %d repeats, %d steps outside %.2f..%.2f px", k, m ? "threshold" : "weighted",
               repeats, bad, 0.5 * ideal, 1.6 * ideal);
     }
+    api->close(h);
+}
+
+// Portable Vulkan with frames in host memory (vulkan_host_backend.cpp): Dedup's lookahead delays outputs by up to
+// kDedupLookahead source frames, so outputs are drained after every submit and at finish(), and each is checked
+// against the source picture it names. allowCpu: a CPU Vulkan device (lavapipe) is fine (CI).
+static void TestVulkanHost(const pmeng_api* api, uint32_t fmt, const char* name, bool allowCpu)
+{
+    const int W = 320, H = 180;
+    pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = fmt; st.fps_num = 24000; st.fps_den = 1001;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = std::string("smoother=4\nbackend=portable-vulkan\n") + (allowCpu ? "vulkan_allow_cpu=1\n" : "");
+    void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
+    if (!h || std::strcmp(out.engine, "portable-vulkan") != 0) {
+        std::printf("%s (vulkan host): not run: %s\n", name, h ? out.engine : err);
+        if (h) api->close(h);
+        return;
+    }
+    std::printf("%s (vulkan host): %s | %s\n", name, out.engine, out.description);
+    const int N = 48, cutAt = 30, discAt = 40;
+    std::vector<Pic> srcs;
+    int outputs = 0, gens = 0, orderErr = 0, realErr = 0, cutBlend = 0, motionErr = 0;
+    uint64_t lastSrc = 0; uint32_t lastSub = 0; bool first = true;
+    auto drain = [&]() {
+        pmeng_out_info oi{};
+        while (api->peek(h, &oi, 0) == 1) {
+            Pic dst(W, H, fmt);
+            pmeng_image di = dst.Img();
+            CHECK(api->write(h, &di) == PMENG_OK, "%s (vulkan host): write: %s", name, api->last_error(h));
+            ++outputs;
+            // pushcore order: per source, generated 1..k-1, then the real frame (0); sources ascending
+            const bool inOrder = first || oi.source > lastSrc || (oi.source == lastSrc && lastSub != 0 && (oi.subframe == 0 || oi.subframe > lastSub));
+            if (!inOrder || oi.source >= srcs.size()) ++orderErr;
+            first = false; lastSrc = oi.source; lastSub = oi.subframe;
+            if (oi.source >= srcs.size()) continue;
+            const int s = int(oi.source);
+            if (oi.subframe == 0) {
+                bool same = true;
+                for (int i = 0; i < 3; ++i) if (srcs[s].p[i] != dst.p[i]) same = false;
+                if (!same && realErr++ < 6) std::printf("%s (vulkan host): real frame %d differs from its source\n", name, s);
+            } else {
+                ++gens;
+                if (s == cutAt) { const int bgv = dst.Y(2, 2); if (bgv != 40 && bgv != 230) ++cutBlend; }
+                else if (s < cutAt) {
+                    const int want = 4 * (s - 1) + int(oi.subframe), bx = BoxX(dst);
+                    if (bx < 0 || std::abs(bx - want) > 2) { if (motionErr++ < 6) std::printf("%s (vulkan host): pair %d phase %u: box at %d, expected %d\n", name, s, oi.subframe, bx, want); }
+                }
+            }
+        }
+    };
+    for (int s = 0; s < N; ++s) {
+        srcs.emplace_back(W, H, fmt);
+        Pic& src = srcs.back();
+        if (s >= cutAt && s < discAt) Box(src, 4 * s, 230); else Box(src, 4 * s);
+        pmeng_image im = src.Img();
+        const int r = api->submit(h, &im, int64_t(s) * 41708, s == discAt ? PMENG_SUBMIT_DISCONTINUITY : 0u);
+        CHECK(r == PMENG_OK, "%s (vulkan host): submit %d -> %d %s", name, s, r, api->last_error(h));
+        drain();
+    }
+    if (api->struct_size >= sizeof(pmeng_api) && api->finish) CHECK(api->finish(h) == PMENG_OK, "%s (vulkan host): finish", name);
+    drain();
+    CHECK(api->pending(h) == 0, "%s (vulkan host): pending %u", name, api->pending(h));
+    const int expect = 1 + (N - 1) * 4 - 3;   // minus the discontinuity's group
+    CHECK(outputs == expect, "%s (vulkan host): %d outputs, expected %d", name, outputs, expect);
+    CHECK(orderErr == 0, "%s (vulkan host): %d outputs out of order", name, orderErr);
+    CHECK(realErr == 0, "%s (vulkan host): %d real frames differ from their source", name, realErr);
+    CHECK(cutBlend == 0, "%s (vulkan host): %d generated frames blended across the cut", name, cutBlend);
+    CHECK(motionErr == 0, "%s (vulkan host): %d generated frames with the box in the wrong place", name, motionErr);
+    char sbuf[512]; api->stats(h, sbuf, sizeof(sbuf));
+    std::printf("%s (vulkan host): %d outputs, %d generated; %s\n", name, outputs, gens, sbuf);
     api->close(h);
 }
 
@@ -491,8 +570,26 @@ static void TestD3D11Quick(const pmeng_api* api)
 }
 #endif
 
+static bool EnvOn(const char* n) { const char* v = std::getenv(n); return v && *v == '1'; }
+static void SetEnv(const char* n, const char* v)
+{
+#ifdef _WIN32
+    _putenv_s(n, v);
+#else
+    setenv(n, v, 1);
+#endif
+}
+
 int main()
 {
+    // CPU / WARP test runs never pick a GPU on their own: every Vulkan driver hidden unless PUSHMPC_TEST_GPU=1 or
+    // PUSHMPC_TEST_VULKAN=1 (before the module loads the Vulkan loader)
+    const bool gpuAsked = EnvOn("PUSHMPC_TEST_GPU"), vulkanAsked = EnvOn("PUSHMPC_TEST_VULKAN");
+    if (!gpuAsked && !vulkanAsked) {
+        SetEnv("VK_DRIVER_FILES", "pushmpc-engine-test-no-driver.json");
+        SetEnv("VK_ICD_FILENAMES", "pushmpc-engine-test-no-driver.json");
+        std::printf("Vulkan drivers hidden (PUSHMPC_TEST_GPU=1 runs the GPU cases)\n");
+    }
     const pmeng_api* api = pmeng_get_api(PMENG_ABI_VERSION);
     CHECK(api && api->abi_version == PMENG_ABI_VERSION, "pmeng_get_api");
     if (!api) return 1;
@@ -504,6 +601,12 @@ int main()
     TestCpu(api, PMENG_FMT_P010, "p010");
     TestSpacing(api, 4);
     TestSpacing(api, 8);
+    if (gpuAsked || vulkanAsked) {
+        TestVulkanHost(api, PMENG_FMT_YUV420P, "yuv420p", vulkanAsked);
+        TestVulkanHost(api, PMENG_FMT_YUV420P10, "yuv420p10", vulkanAsked);
+        TestVulkanHost(api, PMENG_FMT_NV12, "nv12", vulkanAsked);
+        TestVulkanHost(api, PMENG_FMT_P010, "p010", vulkanAsked);
+    }
     {   // a Vulkan open without a device must fail with a reason (the filter then takes the copy fallback)
         pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_VULKAN;
         pmeng_stream st{}; st.struct_size = sizeof(st); st.width = 64; st.height = 64; st.fmt = PMENG_FMT_NV12;
