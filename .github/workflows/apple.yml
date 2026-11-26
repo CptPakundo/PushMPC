@@ -316,7 +316,7 @@ jobs:
     if: inputs.jobs == 'all' || contains(inputs.jobs, 'homebrew')
     runs-on: macos-15
     # a green run takes about 4 min (bottles 1.5, the formula's own build 1, tests 1); 25 leaves room for a cold cache
-    timeout-minutes: 60
+    timeout-minutes: 100
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -356,11 +356,13 @@ jobs:
           "$(brew --prefix vapoursynth)/bin/vspipe" --version
 
       - name: Plex for Mac bundle (the formula's plex-mac resource, a release asset), built as mpv-native.yml does
-        timeout-minutes: 25
+        timeout-minutes: 45
         shell: bash
         run: |
           set -euo pipefail
           bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac" > "$RUNNER_TEMP/plexmac-build.log" 2>&1 || { tail -40 "$RUNNER_TEMP/plexmac-build.log"; exit 1; }
+          bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac" > "$RUNNER_TEMP/macextras-build.log" 2>&1 || { tail -40 "$RUNNER_TEMP/macextras-build.log"; exit 1; }
+          grep -E "^vlc/|iinaplgz" "$RUNNER_TEMP/macextras-build.log"
           grep -E "^master@|^proxy|minimum macOS|libMoltenVK" "$RUNNER_TEMP/plexmac-build.log"
           tar -czf "$RUNNER_TEMP/plexmac-ci.tar.gz" -C "$RUNNER_TEMP/plexmac" .
 
@@ -509,6 +511,48 @@ jobs:
           [ ! -e "$HOME/.local/share/pushmpc/plex-mac" ] || { echo "::error::the unpacked Plex bundle is left behind"; fails=$((fails + 1)); }
           [ "$fails" = 0 ] || exit 1
 
+      - name: IINA and VLC through pushmpc-setup (official apps; self-tests with frames generated; uninstall bit-exact)
+        timeout-minutes: 20
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          fails=0
+          # the official apps: IINA's release DMG (github.com/iina/iina), VLC.app through Homebrew's cask (VideoLAN's DMG)
+          mkdir -p "$RUNNER_TEMP/iina-dmg"
+          gh release download --repo iina/iina --pattern '*.dmg' --dir "$RUNNER_TEMP/iina-dmg"
+          dmg=$(ls "$RUNNER_TEMP"/iina-dmg/*.dmg | head -1); echo "IINA DMG: ${dmg##*/}"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/iina-mnt" "$dmg" > /dev/null
+          ditto "$RUNNER_TEMP/iina-mnt/IINA.app" /Applications/IINA.app; hdiutil detach "$RUNNER_TEMP/iina-mnt" > /dev/null
+          [ -d /Applications/VLC.app ] || brew install --cask vlc > /dev/null
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/IINA.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/VLC.app/Contents/Info.plist
+          snap() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256); }
+          iina0=$(snap /Applications/IINA.app); vlc0=$(snap /Applications/VLC.app)
+          enabled0=$(defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina 2>&1 || true)
+          export HOME="$RUNNER_TEMP/home-players"; mkdir -p "$HOME"
+          PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-players.txt" | sed -n '/IINA and VLC:/,$p' | cut -c1-400
+          iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
+          vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
+          echo "::notice title=IINA::$iina"; echo "::notice title=VLC::$vlc"
+          echo "$iina" | grep -qE '[0-9]+ frames in, [0-9]+ out \(engine: ' || { echo "::error::IINA: no frames generated through the bridge"; tail -20 "$HOME/Library/Logs/PushMPC/iina-bridge.log" 2>/dev/null; fails=$((fails + 1)); }
+          echo "$vlc" | grep -qE 'generated [0-9]+ frames' || { echo "::error::VLC: no frames generated"; tail -30 "$HOME/Library/Application Support/PushMPC/vlc/pushmpc-selftest.log" 2>/dev/null | grep -i pushmpc; fails=$((fails + 1)); }
+          plug="$HOME/Library/Application Support/com.colliderli.iina/plugins/com.pushmpc.iina.iinaplugin"
+          [ -f "$plug/Info.json" ] && [ "$(defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina)" = 1 ] || { echo "::error::the IINA plugin is not installed and on"; fails=$((fails + 1)); }
+          rc="$HOME/Library/Preferences/org.videolan.vlc/vlcrc"
+          grep -E '^(video-filter|vout|pushmpc-smoother)=' "$rc" || { echo "::error::vlcrc has no PushMPC settings"; fails=$((fails + 1)); }
+          ls "$HOME/Library/Application Support/PushMPC/vlc"
+          pushmpc-setup uninstall 2>&1 | sed -n '/IINA and VLC:/,$p' | cut -c1-300
+          [ "$(snap /Applications/IINA.app)" = "$iina0" ] && echo "IINA.app bit for bit as installed" || { echo "::error::IINA.app changed"; fails=$((fails + 1)); }
+          [ "$(snap /Applications/VLC.app)" = "$vlc0" ] && echo "VLC.app bit for bit as installed" || { echo "::error::VLC.app changed"; fails=$((fails + 1)); }
+          [ ! -e "$plug" ] || { echo "::error::the IINA plugin is left behind"; fails=$((fails + 1)); }
+          [ "$(defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina 2>&1 || true)" = "$enabled0" ] && echo "IINA's settings as they were" || { echo "::error::IINA's PluginEnabled setting not restored"; fails=$((fails + 1)); }
+          [ ! -e "$rc" ] && [ ! -e "$HOME/Library/LaunchAgents/io.github.pushmpc.vlc-env.plist" ] && [ ! -e "$HOME/Library/Application Support/PushMPC/vlc" ] \
+            && echo "VLC: vlcrc, the LaunchAgent and the plugin folder gone (none was there before)" || { echo "::error::VLC: something is left behind"; ls -la "$(dirname "$rc")" 2>/dev/null; fails=$((fails + 1)); }
+          [ -z "$(launchctl getenv VLC_PLUGIN_PATH)" ] || { echo "::error::VLC_PLUGIN_PATH is still set"; fails=$((fails + 1)); }
+          [ "$fails" = 0 ] || exit 1
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -517,3 +561,5 @@ jobs:
             ${{ runner.temp }}/brewlogs
             ${{ runner.temp }}/brewlogs-ml
             ${{ runner.temp }}/home/Library/Logs/PushMPC
+            ${{ runner.temp }}/home-players/Library/Logs/PushMPC
+            ${{ runner.temp }}/home-players/Library/Application Support/PushMPC/vlc/pushmpc-selftest.log

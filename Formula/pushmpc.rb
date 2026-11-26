@@ -195,6 +195,9 @@ class Pushmpc < Formula
       #   Plex       on macOS, install also puts PushMPC into Plex for Mac / Plex HTPC when they are in /Applications
       #              (pushmpc-plex-mac.sh: Plex's original library backed up, a self-test with Plex's own player, a
       #              LaunchAgent that re-applies it after Plex updates); uninstall gives Plex back exactly
+      #   IINA, VLC  on macOS, install also sets up IINA (the PushMPC plugin and the bridge into IINA's own player) and VLC
+      #              (frame generation and FSR upscaling) when they are installed, each with a self-test; neither app
+      #              is modified, and uninstall takes both out again
       #   PushFlow   install also sets up PushFlow (RIFE) for the ml backend in ~/.local/share/pushmpc/pmml: Homebrew's ONNX
       #              Runtime (CoreML), the graphs, and PushFlow's models from PushFPS's release (pinned, about 130 MB the
       #              first time); --no-pmml skips it, uninstall removes it
@@ -221,22 +224,37 @@ class Pushmpc < Formula
       if [ "$action" = uninstall ] && [ -f "$pm/.pushmpc-setup" ]; then
         rm -rf "$pm"; rmdir "$data/pushmpc" "$data" 2>/dev/null || true; echo "PushFlow for the ml backend removed"
       fi
-      # Plex for Mac / Plex HTPC: vf_pushmpc inside Plex's own player (the proxy libavfilter in the app; pushmpc-plex-mac.sh,
-      # unpacked into $data/pushmpc/plex-mac), with a LaunchAgent that puts it back after a Plex update
+      # The Mac bundle (resource plex-mac, unpacked into $data/pushmpc/plex-mac): Plex for Mac / Plex HTPC (the proxy
+      # libavfilter in the app, pushmpc-plex-mac.sh, with a LaunchAgent that puts it back after a Plex update), and IINA and
+      # VLC (pushmpc-mac-players.sh: the IINA plugin and bridge, the VLC module with FSR; neither app is modified)
       plextgz="#{opt_pkgshare}/plex-mac/pushmpc-plex-mac.tar.gz"; plexdir="$data/pushmpc/plex-mac"
+      bridge="#{opt_lib}/pushmpc/pushmpc-iina.so"
+      has_plex() { [ -d /Applications/Plex.app ] || [ -d "/Applications/Plex HTPC.app" ]; }
+      has_players() { [ -d /Applications/IINA.app ] || [ -d "$HOME/Applications/IINA.app" ] || [ -d /Applications/VLC.app ] || [ -d "$HOME/Applications/VLC.app" ]; }
       if [ "$(uname -s)" = Darwin ]; then
         case $action in
           install)
-            if [ -f "$plextgz" ] && { [ -d /Applications/Plex.app ] || [ -d "/Applications/Plex HTPC.app" ]; }; then
-              echo "Plex for Mac:"
+            if [ -f "$plextgz" ] && { has_plex || has_players; }; then
               if rm -rf "$plexdir.new" && mkdir -p "$plexdir.new" && tar -xzf "$plextgz" -C "$plexdir.new" && rm -rf "$plexdir" && mv "$plexdir.new" "$plexdir"; then
-                /bin/sh "$plexdir/pushmpc-plex-mac.sh" install --from "$plexdir" --agent || echo "  Plex: not set up (see above); the rest of PushMPC is"
+                if has_plex; then
+                  echo "Plex for Mac:"
+                  /bin/sh "$plexdir/pushmpc-plex-mac.sh" install --from "$plexdir" --agent || echo "  Plex: not set up (see above); the rest of PushMPC is"
+                fi
+                if has_players && [ -f "$plexdir/pushmpc-mac-players.sh" ]; then
+                  echo "IINA and VLC:"
+                  /bin/sh "$plexdir/pushmpc-mac-players.sh" install --from "$plexdir" --bridge "$bridge" | sed 's/^/  /'
+                fi
               fi
             fi ;;
           uninstall)
-            if [ -f "$plexdir/pushmpc-plex-mac.sh" ]; then echo "Plex for Mac:"; /bin/sh "$plexdir/pushmpc-plex-mac.sh" uninstall; rm -rf "$plexdir"; rmdir "$data/pushmpc" 2>/dev/null; fi ;;
+            if [ -f "$plexdir/pushmpc-plex-mac.sh" ]; then
+              if has_plex || [ -d "$HOME/Library/Application Support/PushMPC/plex-native" ]; then echo "Plex for Mac:"; /bin/sh "$plexdir/pushmpc-plex-mac.sh" uninstall; fi
+              if [ -f "$plexdir/pushmpc-mac-players.sh" ]; then echo "IINA and VLC:"; /bin/sh "$plexdir/pushmpc-mac-players.sh" uninstall --from "$plexdir" | sed 's/^/  /'; fi
+              rm -rf "$plexdir"; rmdir "$data/pushmpc" 2>/dev/null
+            fi ;;
           status)
-            [ ! -f "$plexdir/pushmpc-plex-mac.sh" ] || /bin/sh "$plexdir/pushmpc-plex-mac.sh" status --from "$plexdir" ;;
+            [ ! -f "$plexdir/pushmpc-plex-mac.sh" ] || /bin/sh "$plexdir/pushmpc-plex-mac.sh" status --from "$plexdir"
+            [ ! -f "$plexdir/pushmpc-mac-players.sh" ] || /bin/sh "$plexdir/pushmpc-mac-players.sh" status --from "$plexdir" ;;
         esac
       fi
       script_dir="#{HOMEBREW_PREFIX}/etc/mpv/scripts"

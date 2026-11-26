@@ -82,6 +82,7 @@ int main(int argc, char **argv)
         snprintf(log, sizeof(log), "/tmp/libmpv-host-%d-%d.log", (int)getpid(), f);
         ctx = create();
         set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v"); set(ctx, "input-media-keys", "no");
+        if (getenv("PUSHMPC_HOST_SCRIPTS")) set(ctx, "scripts", getenv("PUSHMPC_HOST_SCRIPTS"));   /* a C plugin (the IINA bridge) */
         vfrc = set(ctx, "vf", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc=smoother=2");   /* CI: a forced backend */
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
@@ -99,7 +100,8 @@ int main(int argc, char **argv)
             if (strstr(line, "frames") && strstr(line, " -> ") && strstr(line, ", x2;")) { seen = 1; printf("host: %s", line); }
         printf("host: %s: vf %s; end of file reason %d (0 = eof)\n", strrchr(files[f], '/') ? strrchr(files[f], '/') + 1 : files[f],
                vfrc >= 0 ? "accepted" : (errstr ? errstr(vfrc) : "refused"), reason);
-        ok = vfrc >= 0 && seen && reason == 0;
+        /* PUSHMPC_HOST_ACCEPT_EOF: the filter reports elsewhere (the IINA bridge: its own log), played to the end is enough */
+        ok = vfrc >= 0 && reason == 0 && (seen || getenv("PUSHMPC_HOST_ACCEPT_EOF"));
         if (lf && !ok) {
             rewind(lf);
             while (fgets(line, sizeof(line), lf) && shown < 6)

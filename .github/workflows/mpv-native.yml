@@ -616,11 +616,15 @@ jobs:
       matrix:
         runner: [macos-15, macos-26]   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Build the Mac pieces (8.29.100 filter build, proxy, engine, self-test host)
         run: bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac"
+      # IINA and VLC (the plugin, the VLC module with FSR) into the same Mac bundle: the release's copy comes from this runner
+      - name: The IINA plugin and the VLC module (universal) into the Mac bundle
+        if: matrix.runner == 'macos-15'
+        run: bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac"
       - name: Plex for Mac and Plex HTPC for Mac (plex.tv downloads)
         run: |
           mkdir -p "$RUNNER_TEMP/apps"

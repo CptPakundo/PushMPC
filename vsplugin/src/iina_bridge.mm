@@ -11,9 +11,12 @@
 //   av_buffersink_get_frame_flags marked: our real and generated frames, in order; EAGAIN / EOF
 //   av_buffersink_get_frame_rate  marked: the source rate x k
 // Every other graph, and a marked one whose engine cannot run, passes straight through to libavfilter.
-// Engines: the apple backend on CVPixelBuffers (VideoToolbox-decoded frames, zero copy: AV_PIX_FMT_VIDEOTOOLBOX in and
-// out, our own AVHWFramesContext when super resolution changes the size); the portable backend (CPU) for software
-// yuv420p / yuv420p10 frames when VideoToolbox cannot run (a VM, an Intel Mac).
+// Engines, best first (the same order as Plex for Mac): the apple backend on CVPixelBuffers (VideoToolbox-decoded
+// frames, zero copy: AV_PIX_FMT_VIDEOTOOLBOX in and out, our own AVHWFramesContext when super resolution changes the
+// size); else PushMPC's engine module (libpushmpc_engine.dylib: apple on software frames, then portable-vulkan on
+// MoltenVK, then portable-cpu; VideoToolbox frames are downloaded for it) from the Mac engine bundle pushmpc-setup
+// unpacks (~/.local/share/pushmpc/plex-mac, or PUSHMPC_ENGINE); else the built-in portable engine (CPU) for software
+// yuv420p / yuv420p10. The log names the engine that ran ("engine: <name>").
 // ABI exposure: only public FFmpeg API (function names, AVFrame / AVHWFramesContext layout per major version); the
 // majors are checked against the headers this was built with before anything is patched. arm64e (pointer
 // authentication on GOT slots) is detected and refused.
@@ -47,6 +50,7 @@ extern "C" {
 #include <mpv/client.h>
 }
 #include "apple_engine.h"
+#include "pmeng.h"
 #include "portable_engine.h"
 
 using namespace pmvs;
@@ -89,6 +93,7 @@ struct Av {
     AVBufferRef* (*hwframe_ctx_alloc)(AVBufferRef*) = nullptr;
     int (*hwframe_ctx_init)(AVBufferRef*) = nullptr;
     int (*hwdevice_ctx_create)(AVBufferRef**, enum AVHWDeviceType, const char*, AVDictionary*, int) = nullptr;
+    int (*hwframe_transfer_data)(AVFrame*, const AVFrame*, int) = nullptr;
     bool Load()
     {
         auto sym = [](const char* n) { return dlsym(RTLD_DEFAULT, n); };
@@ -98,6 +103,7 @@ struct Av {
         PM_SYM(frame_move_ref, "av_frame_move_ref") PM_SYM(frame_unref, "av_frame_unref") PM_SYM(buffer_create, "av_buffer_create")
         PM_SYM(buffer_ref, "av_buffer_ref") PM_SYM(buffer_unref, "av_buffer_unref") PM_SYM(hwframe_ctx_alloc, "av_hwframe_ctx_alloc")
         PM_SYM(hwframe_ctx_init, "av_hwframe_ctx_init") PM_SYM(hwdevice_ctx_create, "av_hwdevice_ctx_create")
+        PM_SYM(hwframe_transfer_data, "av_hwframe_transfer_data")
 #undef PM_SYM
         return true;
     }
@@ -138,9 +144,13 @@ apple::Colour ColourOf(const AVFrame* f)
 }
 
 struct Bridge {
-    enum class Mode { Unset, Apple, Portable, Pass } mode = Mode::Unset;
+    enum class Mode { Unset, Apple, Module, Portable, Pass } mode = Mode::Unset;
     std::unique_ptr<apple::Engine> apple;
     std::unique_ptr<portable::Engine> port;
+    const pmeng_api* api = nullptr;         // the engine module (Mode::Module)
+    void* eng = nullptr;
+    uint32_t engFmt = PMENG_FMT_NONE;
+    bool engDownload = false;               // VideoToolbox frames are downloaded for it
     std::deque<AVFrame*> out;
     bool eofIn = false;
     int k = 1;
@@ -156,6 +166,7 @@ struct Bridge {
         if (prevFrame) g_av.frame_free(&prevFrame);
         if (outFrames) g_av.buffer_unref(&outFrames);
         if (device) g_av.buffer_unref(&device);
+        if (api && eng) { char st[512] = {}; api->stats(eng, st, sizeof(st)); Log("engine stats: %s", st); api->close(eng); }
     }
 };
 std::mutex g_lock;
@@ -251,6 +262,86 @@ bool ConfigurePortable(Bridge& b, const AVFrame* f)
     return true;
 }
 
+// ------------------------------------------------------------------------------------------------ the engine module
+// libpushmpc_engine.dylib (pmeng.h): PUSHMPC_ENGINE, next to this plugin, or the Mac engine bundle pushmpc-setup unpacked
+const pmeng_api* EngineModule()
+{
+    static const pmeng_api* api = nullptr;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::vector<std::string> paths;
+        if (const char* e = getenv("PUSHMPC_ENGINE"); e && *e) paths.push_back(e);
+        Dl_info di;
+        if (dladdr(reinterpret_cast<void*>(&EngineModule), &di) && di.dli_fname) {
+            std::string d = di.dli_fname; d = d.substr(0, d.rfind('/') + 1);
+            paths.push_back(d + "libpushmpc_engine.dylib");
+        }
+        const char* xdg = getenv("XDG_DATA_HOME"); const char* home = getenv("HOME");
+        const std::string data = xdg && *xdg ? std::string(xdg) : std::string(home ? home : "") + "/.local/share";
+        paths.push_back(data + "/pushmpc/plex-mac/libpushmpc_engine.dylib");
+        for (const std::string& p : paths) {
+            void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!h) continue;
+            auto get = reinterpret_cast<pmeng_get_api_fn>(dlsym(h, "pmeng_get_api"));
+            if (get && (api = get(PMENG_ABI_VERSION))) { Log("engine module: %s (%s)", p.c_str(), api->version()); return; }
+        }
+        Log("engine module: none found (pushmpc-setup install unpacks it); the built-in engines only");
+    });
+    return api;
+}
+
+uint32_t PmFormat(int f)
+{
+    switch (f) {
+    case AV_PIX_FMT_YUV420P: return PMENG_FMT_YUV420P;
+    case AV_PIX_FMT_YUV420P10: return PMENG_FMT_YUV420P10;
+    case AV_PIX_FMT_NV12: return PMENG_FMT_NV12;
+    case AV_PIX_FMT_P010: return PMENG_FMT_P010;
+    default: return PMENG_FMT_NONE;
+    }
+}
+
+// software frames (or VideoToolbox frames, downloaded) through the engine module: Auto picks apple, then
+// portable-vulkan (MoltenVK), then portable-cpu
+bool ConfigureModule(Bridge& b, const AVFrame* f)
+{
+    const pmeng_api* api = EngineModule();
+    if (!api) { b.why += "; no engine module"; return false; }
+    int sw = f->format;
+    const bool vt = f->format == AV_PIX_FMT_VIDEOTOOLBOX;
+    if (vt) sw = f->data[3] ? SwFormatOf(CVPixelBufferGetPixelFormatType(reinterpret_cast<CVPixelBufferRef>(f->data[3]))) : AV_PIX_FMT_NONE;
+    const uint32_t fmt = PmFormat(sw);
+    if (fmt == PMENG_FMT_NONE) { b.why += "; engine module: format " + std::to_string(sw) + " not supported"; return false; }
+    pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = uint32_t(f->width); st.height = uint32_t(f->height); st.fmt = fmt;
+    const double fps = MpvDouble("container-fps");
+    if (fps > 0) { st.fps_num = int32_t(std::lround(fps * 1000)); st.fps_den = 1000; }
+    st.range = f->color_range; st.matrix = f->colorspace; st.primaries = f->color_primaries; st.transfer = f->color_trc;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    std::string opts = "smoother=" + std::to_string(b.k) + "
+";
+    if (const char* be = getenv("PUSHMPC_IINA_BACKEND"); be && *be) opts += std::string("backend=") + be + "
+";
+    char err[512] = {};
+    void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
+    if (!h) { b.why += std::string("; engine module: ") + err; return false; }
+    if (out.mem != PMENG_MEM_CPU || out.fmt != fmt || out.width != st.width || out.height != st.height) {
+        api->close(h); b.why += "; engine module: unexpected output"; return false;
+    }
+    b.api = api; b.eng = h; b.engFmt = fmt; b.engDownload = vt; b.k = std::max(1, int(out.multiplier));
+    Log("engine: %s: %s", out.engine, out.description);
+    return true;
+}
+
+pmeng_image ImageOf(const AVFrame* f, uint32_t fmt)
+{
+    pmeng_image im{};
+    im.mem = PMENG_MEM_CPU; im.fmt = fmt; im.width = uint32_t(f->width); im.height = uint32_t(f->height);
+    im.range = f->color_range; im.matrix = f->colorspace; im.primaries = f->color_primaries; im.transfer = f->color_trc;
+    for (int i = 0; i < 4; ++i) { im.data[i] = f->data[i]; im.linesize[i] = f->linesize[i]; }
+    return im;
+}
+
 AVFrame* NewSoftFrame(const AVFrame* tmpl, int64_t pts, int64_t duration)
 {
     AVFrame* o = g_av.frame_alloc();
@@ -268,8 +359,9 @@ bool Feed(Bridge& b, AVFrame* f)
     ++b.in;
     if (b.mode == Bridge::Mode::Unset) {
         b.k = DecideK(MpvDouble("container-fps"));
-        if (f->format == AV_PIX_FMT_VIDEOTOOLBOX && f->data[3] && ConfigureApple(b, f, reinterpret_cast<CVPixelBufferRef>(f->data[3]))) b.mode = Bridge::Mode::Apple;
-        else if (ConfigurePortable(b, f)) b.mode = Bridge::Mode::Portable;
+        if (f->format == AV_PIX_FMT_VIDEOTOOLBOX && f->data[3] && ConfigureApple(b, f, reinterpret_cast<CVPixelBufferRef>(f->data[3]))) { b.mode = Bridge::Mode::Apple; Log("engine: apple (VideoToolbox, zero copy)"); }
+        else if (b.k >= 2 && ConfigureModule(b, f)) b.mode = Bridge::Mode::Module;
+        else if (ConfigurePortable(b, f)) { b.mode = Bridge::Mode::Portable; Log("engine: portable-cpu (built in)"); }
         else { b.mode = Bridge::Mode::Pass; Log("pass-through: %s", b.why.c_str()); return false; }
     }
     if (b.mode == Bridge::Mode::Pass) return false;
@@ -294,6 +386,39 @@ bool Feed(Bridge& b, AVFrame* f)
             if (o) b.out.push_back(o);
         }
         if (AVFrame* o = WrapPixelBuffer(b, f, static_cast<CVPixelBufferRef>(cur), f->pts, havePair ? dur : f->duration)) b.out.push_back(o);
+    } else if (b.mode == Bridge::Mode::Module) {
+        AVFrame* src = f;
+        AVFrame* dl = nullptr;
+        if (b.engDownload) {
+            if (f->format != AV_PIX_FMT_VIDEOTOOLBOX) { Log("the stream left VideoToolbox decoding: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
+            dl = g_av.frame_alloc();
+            if (!dl || g_av.hwframe_transfer_data(dl, f, 0) < 0) { if (dl) g_av.frame_free(&dl); Log("download failed: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
+            g_av.frame_copy_props(dl, f);
+            src = dl;
+        } else if (PmFormat(f->format) != b.engFmt) { Log("the format changed: pass-through"); b.mode = Bridge::Mode::Pass; return false; }
+        const pmeng_image im = ImageOf(src, b.engFmt);
+        const uint32_t flags = contiguous ? 0u : PMENG_SUBMIT_DISCONTINUITY;
+        if (b.api->submit(b.eng, &im, f->pts == AV_NOPTS_VALUE ? int64_t(b.in) : f->pts, flags) != PMENG_OK) {
+            Log("engine module: %s: pass-through from here", b.api->last_error(b.eng));
+            if (dl) g_av.frame_free(&dl);
+            b.mode = Bridge::Mode::Pass;
+            return false;
+        }
+        const int64_t dur = step > 0 ? step / b.k : f->duration / std::max(1, b.k);
+        pmeng_out_info oi{};
+        bool generated = false;
+        while (b.api->peek(b.eng, &oi, 0) == 1) {
+            if (oi.subframe == 0 || step <= 0) { b.api->skip(b.eng); continue; }   // the real frame: the source itself, below
+            AVFrame* o = NewSoftFrame(src, b.lastPts + step * int64_t(oi.subframe) / std::max(1, int(oi.multiplier)), dur);
+            if (!o) { b.api->skip(b.eng); continue; }
+            const pmeng_image di = ImageOf(o, b.engFmt);
+            if (b.api->write(b.eng, &di) != PMENG_OK) { g_av.frame_free(&o); continue; }
+            b.out.push_back(o);
+            generated = true;
+        }
+        AVFrame* o = g_av.frame_alloc();
+        if (o) { g_av.frame_copy_props(o, src); g_av.frame_move_ref(o, src); o->duration = generated ? dur : o->duration; b.out.push_back(o); }
+        if (dl) g_av.frame_free(&dl);
     } else {
         portable::YuvView v; v.width = f->width; v.height = f->height; v.bits = f->format == AV_PIX_FMT_YUV420P10 ? 10 : 8;
         for (int i = 0; i < 3; ++i) { v.data[i] = f->data[i]; v.stride[i] = f->linesize[i]; }

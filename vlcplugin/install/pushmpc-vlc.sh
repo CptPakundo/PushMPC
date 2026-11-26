@@ -19,6 +19,11 @@
 #        [core]     video-filter gains postproc:pushmpc_out (the static-chain slot, then the output stage)
 #        [avcodec]  avcodec-hw=none on Linux to start with (software decoding always keeps PushMPC on)
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
+#   macOS: also PushMPC's OpenGL output with FSR 1 upscaling (libpushmpc_macosx_plugin.dylib, [core] vout=pushmpc_macosx,any)
+#      and MoltenVK (libMoltenVK.dylib, the GPU engine's Vulkan driver) from next to the plugin, then a self-test: VLC.app
+#      plays a generated 2 s clip headless with PushMPC at x2; the log line names the engine and the generated frames.
+#   vlcrc: uninstall puts the file back byte for byte (or removes it when install created it) as long as nothing else
+#      changed it since; otherwise only PushMPC's own settings are taken out.
 #   4. Linux: the hardware self-test. PushMPC keeps VA-API / VDPAU pictures on the GPU (its own surfaces on the
 #      decoder's device, after a round-trip check of the driver). The installer plays a 2 s clip (pushmpc-selftest.mkv,
 #      next to this script) with PushMPC on: with a display, through VLC's OpenGL output and its VA-API / VDPAU interop
@@ -108,6 +113,12 @@ install_one() {
   mkdir -p "$DIR"
   cp -f "$plug" "$DIR/"
   [ "$OS" = Darwin ] && xattr -d com.apple.quarantine "$DIR/$(basename "$plug")" 2>/dev/null || true
+  if [ "$tgt" = macos ]; then   # the FSR output and MoltenVK, when they ship next to the plugin
+    for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib; do
+      [ -f "$(dirname "$plug")/$x" ] || continue
+      cp -f "$(dirname "$plug")/$x" "$DIR/"; xattr -d com.apple.quarantine "$DIR/$x" 2>/dev/null || true
+    done
+  fi
   case "$tgt" in
     native)
       mkdir -p "$HOME/.config/environment.d"
@@ -146,16 +157,43 @@ install_one() {
 EOF
       launchctl setenv VLC_PLUGIN_PATH "$DIR" 2>/dev/null || true ;;
   esac
-  [ -f "$RC" ] && [ ! -f "$RC.pushmpc-backup" ] && cp "$RC" "$RC.pushmpc-backup"
+  if [ ! -f "$RC.pushmpc-backup" ] && [ ! -f "$RC.pushmpc-absent" ]; then
+    if [ -f "$RC" ]; then cp "$RC" "$RC.pushmpc-backup"; else mkdir -p "$(dirname "$RC")"; : > "$RC.pushmpc-absent"; fi
+  fi
   vlcrc_set "$RC" core video-filter "$(filters_add "$(vlcrc_get "$RC" core video-filter)")"
   vlcrc_set "$RC" pushmpc pushmpc-smoother 0
   [ "$tgt" != macos ] && vlcrc_set "$RC" avcodec avcodec-hw none
+  [ "$tgt" = macos ] && [ -f "$DIR/libpushmpc_macosx_plugin.dylib" ] && vlcrc_set "$RC" core vout "pushmpc_macosx,any"
   if [ "$tgt" = snap ]; then
     intfs="$(vlcrc_get "$RC" core extraintf)"
     case ":$intfs:" in *:luaintf:*) ;; *) vlcrc_set "$RC" core extraintf "${intfs:+$intfs:}luaintf" ;; esac
     vlcrc_set "$RC" core lua-intf pushmpc_boot
   fi
+  sha_of "$RC" > "$RC.pushmpc-installed"
   say "PushMPC for VLC installed ($tgt): plugin in $DIR, settings in $RC"
+}
+
+sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+
+# selftest_mac: VLC.app plays a generated clip (Y4M, 320x180, 2 s) headless with PushMPC at x2. Never fails the install.
+selftest_mac() {
+  paths_for macos
+  vlc=/Applications/VLC.app/Contents/MacOS/VLC; [ -x "$vlc" ] || vlc="$HOME/Applications/VLC.app/Contents/MacOS/VLC"
+  [ -x "$vlc" ] || { say "self-test: VLC.app not found"; return 0; }
+  clip="$DIR/pushmpc-selftest.y4m"; log="$DIR/pushmpc-selftest.log"
+  perl -e 'open(my $f, ">", $ARGV[0]) or die; binmode $f; print $f "YUV4MPEG2 W320 H180 F24:1 Ip A1:1 C420jpeg
+";
+           for my $n (0..47) { print $f "FRAME
+"; for my $y (0..179) { print $f pack("C*", map { ($_ + int($y / 2) + 4 * $n) & 255 } 0..319); }
+                               print $f chr(128) x (160 * 90 * 2); }' "$clip"
+  rm -f "$log"
+  env VLC_PLUGIN_PATH="$DIR" perl -e 'alarm 60; exec @ARGV' "$vlc" -I dummy --vout=dummy --no-audio --play-and-exit \
+    --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 --file-logging --logfile="$log" --log-verbose=2 "$clip" >/dev/null 2>&1 || true
+  gen="$(sed -n 's/.*PushMPC: close, in=[0-9]* out=[0-9]* generated=\([0-9]*\).*/\1/p' "$log" 2>/dev/null | tail -1)"
+  eng="$(grep -o 'PushMPC [0-9][^:]*: .*-> x[0-9]* ([^;)]*' "$log" 2>/dev/null | head -1 | sed 's/.*(//')"
+  if [ "${gen:-0}" -gt 0 ]; then say "self-test (macos): PushMPC generated $gen frames at x2 (engine: ${eng:-unknown})"
+  else say "self-test (macos): no generated frames ($(grep -o 'PushMPC[^\r]*' "$log" 2>/dev/null | tail -2 | tr '\n' ' '))"; fi
+  rm -f "$clip"
 }
 
 # st_run <hw> <interop 0|1>: one self-test playback; 0 = PushMPC's hardware path worked and generated frames. Sets
@@ -255,7 +293,8 @@ selftest_hw() {
 
 uninstall_one() {
   tgt="$1"; paths_for "$tgt"
-  rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log"
+  rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log" \
+        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/pushmpc-selftest.y4m"
   rmdir "$DIR" 2>/dev/null || true
   case "$tgt" in
     native)
@@ -272,7 +311,17 @@ uninstall_one() {
       fi ;;
     macos)   rm -f "$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; launchctl unsetenv VLC_PLUGIN_PATH 2>/dev/null || true ;;
   esac
+  # nothing changed vlcrc since install: the file as it was, byte for byte (or no file, when install created it)
+  if [ -f "$RC" ] && [ -f "$RC.pushmpc-installed" ] && [ "$(sha_of "$RC")" = "$(cat "$RC.pushmpc-installed")" ]; then
+    if [ -f "$RC.pushmpc-absent" ]; then rm -f "$RC"; elif [ -f "$RC.pushmpc-backup" ]; then mv -f "$RC.pushmpc-backup" "$RC"; fi
+    rm -f "$RC.pushmpc-installed" "$RC.pushmpc-absent" "$RC.pushmpc-backup"
+    rmdir "$(dirname "$RC")" 2>/dev/null || true
+    say "PushMPC for VLC removed ($tgt); $RC as it was"
+    return 0
+  fi
+  rm -f "$RC.pushmpc-installed" "$RC.pushmpc-absent"
   if [ -f "$RC" ]; then
+    [ "$tgt" = macos ] && [ "$(vlcrc_get "$RC" core vout)" = "pushmpc_macosx,any" ] && vlcrc_del "$RC" core vout
     rest="$(filters_del "$(vlcrc_get "$RC" core video-filter)")"
     if [ -n "$rest" ]; then vlcrc_set "$RC" core video-filter "$rest"; else vlcrc_del "$RC" core video-filter; fi
     vlcrc_del "$RC" pushmpc pushmpc-smoother
@@ -290,6 +339,7 @@ case "$ACTION" in
              for t in $TARGETS; do
                install_one "$t"
                if [ "$HWTEST" = 1 ] && [ "$OS" != Darwin ]; then selftest_hw "$t"; fi
+               if [ "$HWTEST" = 1 ] && [ "$t" = macos ]; then selftest_mac; fi
              done ;;
   selftest-hw) for t in $TARGETS; do selftest_hw "$t"; done ;;
   uninstall) for t in ${TARGETS:-native flatpak macos}; do uninstall_one "$t"; done ;;
