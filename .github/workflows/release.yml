@@ -387,10 +387,17 @@ jobs:
           ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
           git config --global --add safe.directory "$PWD"
           st=''; [ "${{ matrix.arch }}" = x86_64 ] && st=vsplugin/bin/pushmpc-nvvfx-selftest
+          # the image model's helper for plain mpv (pushmpc-content, next to pushmpc.lua in vsplugin/), with its unit test
+          # and the no-model check
+          cmake -S integrations/mpv/content-helper -B build-content -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+          cmake --build build-content --target pushmpc-content content_helper_test --parallel
+          (cd build-content && ctest -R content_helper --output-on-failure)
+          export PUSHMPC_CONTENT_HELPER=$PWD/build-content/pushmpc-content
           sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist ${{ matrix.arch }} "$ver" $st
           tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | tee /tmp/tarball.txt
           # what this release must carry: the GPU engine's plugin, the NVIDIA backend's self-test, pmml_cli; the hook's sidecars
           need="/pmml/pmml_cli"; [ "${{ matrix.arch }}" = x86_64 ] && need="$need /vsplugin/pushmpc-nvvfx-selftest"
+          need="$need /vsplugin/pushmpc-content"
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then need="$need /mpvnative/libpushmpc_engine_ml.so"; [ "${{ matrix.arch }}" = x86_64 ] && need="$need /mpvnative/libpushmpc_engine_nvl.so /mpvnative/pushmpc-nvvfx-selftest"; fi
           for n in $need; do grep -q "$n\$" /tmp/tarball.txt || { echo "::error::the tarball lacks $n"; exit 1; }; done
           if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep -q '/plex/pushmpc_preload.so$'; fi
@@ -402,15 +409,24 @@ jobs:
   # Plex for Mac / Plex HTPC: pushmpc-plex-mac-<version>.tar.gz, the bundle mpv-native.yml built and tested on macOS
   # (universal proxy libavfilter.8.dylib, the vf_pushmpc builds, the engines: VideoToolbox, Vulkan on MoltenVK, CPU;
   # the self-test and pushmpc-plex-mac.sh). The Homebrew formula's plex-mac resource; pushmpc-setup installs it into
-  # the Plex apps. A failure there leaves it out of the release, nothing else.
+  # the Plex apps. A failure there leaves it out of the release, nothing else. The bundle also carries setup.sh with
+  # pmml/ (fetch_runtime.py, ml-runtime-pin.json, content-model-pin.json): "sh setup.sh pmml" installs the content model
+  # and the ONNX Runtime for this Mac (Apple silicon or Intel) that IINA's bridge runs it with; the pins are fetched and
+  # checked here first.
   macos:
     needs: [mpvnative-extra, kodi-extra]
     if: ${{ !cancelled() && format('{0}', inputs.components) != 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with: { sparse-checkout: filter/src, persist-credentials: false }
+        with:
+          sparse-checkout: |
+            filter/src
+            integrations/linux
+            pmml/scripts
+            scripts
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { name: plexmac, path: plexmac }
@@ -426,6 +442,35 @@ jobs:
           mkdir -p dist
           if [ -f plexmac/pushmpc-plex-mac.sh ] && [ -f plexmac/libavfilter.8.dylib ]; then
             chmod +x plexmac/pushmpc-plex-selftest plexmac/pushmpc-plex-mac.sh   # artifacts drop the exec bits
+            # the content model's runtime for the Mac (setup.sh pmml): the pinned ONNX Runtime for both architectures
+            # and the content model, fetched and checked against their pins here (SHA-256, or the SHA-512 nuget.org
+            # publishes), so a release never carries a pin that no longer resolves
+            ok=1
+            for plat in osx-arm64 osx-x64; do
+              if python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform "$plat" --out "$RUNNER_TEMP/macrt-$plat" --cache "$RUNNER_TEMP/macrt-dl" --flavors core; then
+                f=$(ls "$RUNNER_TEMP/macrt-$plat/ort/core/"libonnxruntime*.dylib | head -1); file "$f"; sha256sum "$f"
+              else ok=0; fi
+            done
+            python3 -I - scripts/content-model-pin.json <<'PY' || ok=0
+          import hashlib, json, sys, urllib.request
+          for f in json.load(open(sys.argv[1], encoding="utf-8"))["files"]:
+              h, n = hashlib.sha256(), 0
+              with urllib.request.urlopen(urllib.request.Request(f["url"], headers={"User-Agent": "PushMPC-CI"}), timeout=300) as r:
+                  for chunk in iter(lambda: r.read(1 << 20), b""):
+                      h.update(chunk); n += len(chunk)
+              print(f"{f['name']}: {n} bytes, sha256 {h.hexdigest()}")
+              if n != f["size"] or h.hexdigest() != f["sha256"]:
+                  sys.exit(f"{f['name']}: differs from content-model-pin.json ({f['size']} bytes, {f['sha256']})")
+          PY
+            if [ "$ok" = 1 ]; then
+              mkdir -p plexmac/pmml
+              install -m 755 integrations/linux/setup.sh plexmac/setup.sh
+              install -m 644 pmml/scripts/fetch_runtime.py scripts/ml-runtime-pin.json scripts/content-model-pin.json plexmac/pmml/
+            else
+              echo "::warning title=Mac content model::a macOS ONNX Runtime or content model pin did not resolve: the Mac bundle has no setup.sh / pmml/"
+              [ "$STRICT" != true ] || { echo "::error title=Mac content model::a release needs the Mac content model's pins to resolve"; exit 1; }
+            fi
+            rm -rf "$RUNNER_TEMP"/macrt-*
             tar -czf "dist/pushmpc-plex-mac-$ver.tar.gz" -C plexmac .
             # the IINA plugin on its own too (IINA can install it by double-click), from the same bundle
             for g in plexmac/iina/*.iinaplgz; do [ -f "$g" ] && cp "$g" "dist/PushMPC-$ver.iinaplgz"; done
@@ -470,10 +515,21 @@ jobs:
         with: { name: plugin-macos, path: x/vlc-macos }
       - uses: actions/download-artifact@v4
         continue-on-error: true
+        with: { name: content-macos, path: x/vlc-macos }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
         with: { name: mpvnative-appimage, path: x/appimage }
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { pattern: 'addon-*-kodi*', path: x/kodi }
+      # PushMPC's content library goes into the macOS VLC zip next to the module (the next step adds the module to the same
+      # zip; pushmpc-vlc.sh copies the library from next to the plugin); without it the module runs on the hand-built path
+      - name: The macOS VLC zip starts with the content library
+        run: |
+          ver=$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)
+          mkdir -p dist
+          if [ -f x/vlc-macos/libpushmpc_content.dylib ]; then (cd x/vlc-macos && zip -q "../../dist/pushmpc-vlc-macos-$ver.zip" libpushmpc_content.dylib)
+          else echo "::warning title=VLC for macOS::no content-macos artifact: the module measures nothing (it runs as before)"; fi
       - name: The assets, and the components check
         env:
           STRICT: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}

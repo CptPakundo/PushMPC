@@ -47,6 +47,7 @@
 #include "pm_engine.h"
 #include "engine_pushcore.h"
 #include "pm_hw.h"
+#include "pm_content.h"   /* what the picture is: PushMPC's content library, loaded at run time */
 #ifdef __APPLE__
 #include "pm_cvpx.h"   /* VideoToolbox pictures zero copy into the apple engine and back (guarded, see pm_cvpx.h) */
 #define PM_CVPX_ON(s) ((s)->cvpx != NULL)
@@ -321,6 +322,9 @@ vlc_module_begin()
     add_bool(CFG "dedup", true, "Held frames (animation)", "Animation drawn on twos, threes or fours: a repeated frame "
              "waits for the next drawing, and the generated frames move evenly over the whole held span (portable "
              "engines).", true)
+    add_bool(CFG "content", true, "Measure what the picture is", "Drawn animation or not (rendered 3D CG or hand-drawn), "
+             "measured per shot from the decoded frames by PushMPC's content library next to the module, with PushMPC's "
+             "image model when it is installed (else the hand-built cues); shown in VLC's log. Off: not measured.", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
     add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
@@ -400,6 +404,13 @@ struct filter_sys_t {
     int held;
     mtime_t held_last;
     uint64_t repeats, stills;
+    /* what the picture is (ContentMeasure): the content library's context, the last state seen, the frame dates */
+    pm_content *content;
+    bool content_tried, content_disc;
+    mtime_t content_last;
+    uint32_t content_serial;
+    pmc_state content_state;
+    uint64_t content_gpu;       /* frames not measured: zero-copy GPU pictures (no CPU planes) */
 };
 
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
@@ -947,6 +958,52 @@ static bool HeldStep(struct filter_sys_t *sys, picture_t *cur, picture_t *work, 
     return false;
 }
 
+/* ---- what the picture is: ContentDetect through PushMPC's content library (pm_content.h), on the frames the engine
+ * reads (CPU planes; zero-copy GPU pictures are not read back for it), from the first such frame on (nothing is loaded
+ * for a pass-through or a zero-copy stream). The class and Auto's drawn-animation policy
+ * (pushmpc/content_detect.h PolicyFor) come from the picture only. In this module the held-frame step runs for every
+ * class (as pushcore's re-timing does: held frames are re-timed whatever the picture is), so the policy changes nothing
+ * here yet; it is logged with the class. */
+static void ContentLog(void *user, const char *line) { msg_Info((filter_t *)user, "PushMPC: %s", line); }
+static void ContentOpen(filter_t *f, struct filter_sys_t *sys)
+{
+    if (!OptInt(f, CFG "content", 1)) { msg_Info(f, "PushMPC: content not measured (pushmpc-content off)"); return; }
+    char why[320], where[640];
+    sys->content = pm_content_open(ContentLog, f, 0, why, sizeof(why), where, sizeof(where));
+    if (sys->content) msg_Info(f, "PushMPC: content measured in the picture by %s", where);
+    else msg_Info(f, "PushMPC: content not measured (%s); everything else runs as before", why);
+}
+static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_t *cur, const picture_t *work)
+{
+    if (sys->zc || sys->zc_hw || PM_CVPX_ON(sys)) {
+        if (!sys->content_gpu++) msg_Info(f, "PushMPC: content not measured on zero-copy GPU pictures (no CPU copy is made for it)");
+        return;
+    }
+    if (!sys->content_tried) { sys->content_tried = true; ContentOpen(f, sys); }   /* at the first frame it can read */
+    if (!sys->content) return;
+    const video_format_t *wf = &sys->wfmt;
+    pm_yuv y;
+    PlanesIn(work, wf, sys->bps_w, &y);
+    const bool yv12 = wf->i_chroma == VLC_CODEC_YV12;   /* V before U */
+    const int limited = !(wf->b_color_range_full || wf->i_chroma == VLC_CODEC_J420);
+    const int disc = sys->content_disc || sys->content_last <= 0 || cur->date <= sys->content_last || cur->date - sys->content_last > CLOCK_FREQ;
+    sys->content_disc = false;
+    sys->content_last = cur->date;
+    pm_content_push(sys->content, y.data[0], y.stride[0], y.data[yv12 ? 2 : 1], y.data[yv12 ? 1 : 2], y.stride[1],
+                    (int)wf->i_visible_width, (int)wf->i_visible_height, sys->bits, limited, (double)cur->date / CLOCK_FREQ, disc);
+    pmc_state st;
+    if (pm_content_state(sys->content, &st) != 0 || st.serial == sys->content_serial) return;
+    sys->content_serial = st.serial;
+    if (st.cls != sys->content_state.cls || st.cg != sys->content_state.cg) {
+        char pol[200];
+        pm_content_policy_text(st.policy, pol, sizeof(pol));
+        msg_Info(f, "PushMPC: content %s%s (%.0f %%, %s); Auto's drawn-animation policy: %s", pm_content_class_name(sys->content, st.cls),
+                 st.cls == PMC_CLASS_DRAWN ? (st.cg ? ", rendered 3D CG" : ", hand-drawn") : "", 100.0 * st.confidence,
+                 st.image_evidence ? "with the image model" : "hand-built cues", pol);
+    }
+    sys->content_state = st;
+}
+
 static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
@@ -1011,6 +1068,8 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             return p;
         }
     }
+
+    ContentMeasure(f, sys, cur, work);   /* before the held-frame step: repeats are part of what is measured */
 
     const bool async = sys->worker_on && OutStages() > 0 && !sys->zc;
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
@@ -1145,6 +1204,7 @@ static void Flush(filter_t *f)
     WorkerIdle(sys, true);
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     sys->held = 0; sys->still = false;   /* held frames: the repeats waiting are dropped */
+    sys->content_disc = true;            /* the detector's window starts over (its decision stays) */
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
     if (sys->download) filter_chain_VideoFlush(sys->download);
@@ -1430,6 +1490,19 @@ static void Close(vlc_object_t *obj)
              st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
     if (sys->eng && sys->dedup_set)
         msg_Info(f, "PushMPC: held frames: %" PRIu64 " repeats waited for the next drawing, %" PRIu64 " stills", sys->repeats, sys->stills);
+    if (sys->content) {
+        pmc_state st;
+        if (pm_content_state(sys->content, &st) == 0) {
+            static const char *const model[] = { "not in this build", "off", "starting", "used", "not available" };
+            msg_Info(f, "PushMPC: content %s%s; %" PRIu64 " frames measured (%" PRIu64 " dropped: the detector fell behind; %" PRIu64
+                     " zero-copy frames not read), class changes %u; image model %s%s; per frame %.2f ms on VLC's video thread, "
+                     "%.2f ms (max %.2f) on the detector's thread", pm_content_class_name(sys->content, st.cls),
+                     st.cls == PMC_CLASS_DRAWN ? (st.cg ? ", rendered 3D CG" : ", hand-drawn") : "", st.processed, st.dropped,
+                     sys->content_gpu, st.changes, model[st.model >= 0 && st.model <= 4 ? st.model : 4],
+                     st.model == PMC_MODEL_RUNNING ? "" : " (the hand-built cues decided)", st.caller_ms, st.detect_ms, st.detect_ms_max);
+        }
+        pm_content_close(sys->content);   /* its threads end here, with their last log line */
+    }
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->pc) {
         msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64

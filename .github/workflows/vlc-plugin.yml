@@ -7,7 +7,7 @@ name: vlc-plugin
 on:
   push:
     branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4', 'track/vlc-hwfmt', 'track/vlc-hwfix', 'track/vlcship']
-    paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
+    paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml', 'pushmpc/content-shim/**', 'pushmpc/include/pushmpc/content_detect.h', 'pushmpc/include/pushmpc/content_model.h', 'pushmpc/include/pushmpc/content_prompts.inc']
   # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
   workflow_call:
     inputs:
@@ -110,6 +110,18 @@ jobs:
             ./build/pm_engine_test"
           mkdir -p out/linux
           cp build/libpushmpc_plugin.so build/libpushdump_plugin.so build/libpushmpc_gl_plugin.so out/linux/
+      - name: PushMPC's content library (libpushmpc_content.so; ContentDetect + the image model through pmml) in manylinux2014, its CPU test
+        timeout-minutes: 15
+        run: |
+          set -eux
+          # the ONNX Runtime C API headers (pinned, SHA-256 checked; headers only: ONNX Runtime itself is loaded at run time
+          # from the user's pmml runtime, and without it the hand-built cues decide)
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-x64 --out ortrt --cache ~/ort-dl --flavors core --headers > /dev/null
+          docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_${{ matrix.arch }} bash -euxc "
+            cmake -S pushmpc/content-shim -B build-content -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/w/ortrt/ort/core/include
+            cmake --build build-content -j4
+            ./build-content/pushmpc_content_test"
+          cp build-content/libpushmpc_content.so out/linux/
       - name: GLIBC gate (newest symbol version <= 2.27, so Debian 11+, Ubuntu 18.04+ and a core18 snap load it)
         run: |
           set -eu
@@ -190,6 +202,11 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: ContentDetect in VLC (libpushmpc_content.so next to the module in the cases above)
+        run: |
+          grep -h "PushMPC: content" res/linux/x2.log | sed 's/^[^:]*: //' | head -8
+          grep -q "PushMPC: content measured in the picture by" res/linux/x2.log && grep -q "frames measured" res/linux/x2.log \
+            || { echo "::error::the module did not measure the content with libpushmpc_content.so"; exit 1; }
       - name: The OpenGL output fork (vout=pushmpc_gl, FSR 1) against VLC's gl on screen (Xvfb, llvmpipe)
         run: |
           set -u
@@ -552,6 +569,15 @@ jobs:
           set -u
           t=$(find bb -name pm_pc_zc_test.exe | head -1)
           timeout 120 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)"
+      - name: PushMPC's content library (pushmpc_content.dll, MSVC; ContentDetect + the image model through pmml) and its CPU test
+        shell: bash
+        run: |
+          set -eux
+          python -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform win-x64 --out ortrt --cache "$RUNNER_TEMP/ort-dl" --flavors core --headers > /dev/null
+          cmake -S pushmpc/content-shim -B bcs -A x64 -DPMML_ORT_INCLUDE="$(cygpath -m "$PWD/ortrt/ort/core/include")"
+          cmake --build bcs --config Release
+          "$(find bcs -name pushmpc_content_test.exe | head -1)"
+          cp "$(find bcs -name pushmpc_content.dll | head -1)" out/
       - uses: actions/upload-artifact@v4
         with: { name: bridge-win64, path: out, retention-days: 7 }
 
@@ -587,6 +613,20 @@ jobs:
                  CLIP10=art/clips/clip10.mkv CLIP720=art/clips/clip720.mkv OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
                  PY=python DISPLAYS="direct3d11 direct3d9" NORC=1 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64"
           bash vlcplugin/tests/run-module.sh
+      - name: ContentDetect in VLC (pushmpc_content.dll next to the module; without it the module runs as before)
+        run: |
+          set -u
+          # the module cases above ran without the library: they said so and ran as before
+          grep -h "PushMPC: content not measured" res/windows/x2.log | head -1 | grep -q "pushmpc_content.dll is not next to the module" \
+            || { echo "::error::without pushmpc_content.dll the module did not say so"; grep -h "PushMPC" res/windows/x2.log | head; exit 1; }
+          d="$LOCALAPPDATA/PushMPC/vlc"; cp art/bridge-win64/pushmpc_content.dll "$d/"
+          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clips/clip.mkv OUT=res/windows-content \
+                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') PY=python NORC=1 CASES="x2" LABEL="Windows, with the content library"
+          bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC: content" res/windows-content/x2.log | sed 's/^[^:]*: //' | head -8
+          grep -q "PushMPC: content measured in the picture by" res/windows-content/x2.log && grep -q "frames measured" res/windows-content/x2.log \
+            || { echo "::error::the module did not measure the content with pushmpc_content.dll"; exit 1; }
+          rm -f "$d/pushmpc_content.dll"
       - name: The Direct3D 11 output fork in VLC (vout=pushmpc_d3d11 on WARP; software decoding keeps VLC's quad there)
         run: |
           set +e -u +o pipefail
@@ -728,6 +768,18 @@ jobs:
             -DMODULE_STRING='"pushdump"' -I"$inc" vlcplugin/spike/pushspike.c -o out/mac/libpushdump_plugin.dylib
           codesign -s - -f out/mac/*.dylib
           lipo -info out/mac/libpushmpc_plugin.dylib
+      - name: PushMPC's content library (libpushmpc_content.dylib, universal; ContentDetect + the image model through pmml) and its CPU test
+        run: |
+          set -eux
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform osx-arm64 --out ortrt --cache "$RUNNER_TEMP/ort-dl" --flavors core --headers > /dev/null
+          cmake -S pushmpc/content-shim -B build-content -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DPMML_ORT_INCLUDE="$PWD/ortrt/ort/core/include"
+          cmake --build build-content
+          ./build-content/pushmpc_content_test
+          cp build-content/libpushmpc_content.dylib out/mac/ && codesign -s - -f out/mac/libpushmpc_content.dylib
+          lipo -info out/mac/libpushmpc_content.dylib
+      - uses: actions/upload-artifact@v4
+        with: { name: content-macos, path: out/mac/libpushmpc_content.dylib, if-no-files-found: error, retention-days: 7 }
       # the release asset (release.yml publishes it as pushmpc-vlc-macos-<version>.zip)
       - uses: actions/upload-artifact@v4
         with: { name: plugin-macos, path: out/mac/libpushmpc_plugin.dylib, if-no-files-found: error, retention-days: 7 }
@@ -740,6 +792,12 @@ jobs:
                  HWARGS="--codec=avcodec,none --avcodec-hw=none"
           # (no real-display case: VLC's macosx vout needs the macosx interface, which needs a logged-in GUI session)
           bash vlcplugin/tests/run-module.sh
+      - name: ContentDetect in VLC (libpushmpc_content.dylib next to the module in the cases above)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}
+        run: |
+          grep -h "PushMPC: content" res/macos/x2.log | sed 's/^[^:]*: //' | head -8
+          grep -q "PushMPC: content measured in the picture by" res/macos/x2.log && grep -q "frames measured" res/macos/x2.log \
+            || { echo "::error::the module did not measure the content with libpushmpc_content.dylib"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-macos, path: res, retention-days: 7 }

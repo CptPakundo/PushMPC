@@ -45,6 +45,7 @@
 #include <vector>
 #include "PushMpcSettings.h"
 #include "PushMpcAnimeSr.h"   // anime upscalers: models, costs, PickAnimeSr
+#include "../../pushmpc/include/pushmpc/content_detect.h"   // DrawnPolicy: what drawn / drawn CG get
 
 namespace pm {
 
@@ -72,6 +73,7 @@ struct Source {
     int contentClass = 0;     // ContentDetect's class of the picture now (pushmpc/content_detect.h: 0 measuring, 1 hand-drawn
                               // animation, 2 3D CG animation, 3 live action, 4 game footage), measured per shot with hysteresis
     float contentConf = 0;    // its smoothed probability
+    bool contentCg = false;   // drawn, and rendered 3D CG (cel-shaded / toon-rendered) rather than hand-drawn (ContentDetect)
     int showChoice = -1;      // the user's own mode for this show (0 Full, 1 Camera only, 2 Off; -1 none): a preference, not detection
 };
 // Animation (cartoons, anime) is found in the picture, never from a file or folder name: ContentDetect's class (held cels
@@ -238,6 +240,8 @@ struct Choice {               // resolved values for pushcore and the filter
     int fgQuality = 1;        // VFG model 0..2, or PushFlow tier 0..2
     bool deband = false; int debandStrength = 1;
     bool animation = false;   // treated as animation (Settings.animation On, or Auto: measured as hand-drawn animation)
+    bool drawnCg = false;     // Auto: drawn, measured as rendered 3D CG (kPolicyDrawnCg: no sign hold, line art, anime deband, _DS)
+    pushmpc::content::DrawnPolicy policy = pushmpc::content::kPolicyNotDrawn;   // what the drawn treatment includes
     std::wstring animNote;
     int animMode = 0;         // PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off
     uint32_t holdFlags = 0;   // PUSHCORE_HOLD_* bits (pushcore_abi.h)
@@ -562,6 +566,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // --- animation: held drawings are re-timed by pushcore whenever frame generation runs (unless Off)
     if (s.animation == kOff) { r.animation = false; r.animNote = L"off (held drawings are not re-timed)"; }
     else if (s.animation != kAuto) { r.animation = true; r.animNote = L"on"; }
+    else if (src.contentClass == 1 && src.contentCg) {
+        r.animation = true; r.drawnCg = true;
+        r.animNote = std::format(L"on, drawn animation measured in the picture ({:.0f} %), rendered 3D CG: held drawings re-timed, no sign hold, line art, anime deband or _DS upscaler", 100.0 * src.contentConf);
+    }
     else if (src.contentClass == 1) { r.animation = true; r.animNote = std::format(L"on, hand-drawn animation measured in the picture ({:.0f} %)", 100.0 * src.contentConf); }
     else if (src.contentClass > 1) {
         static const wchar_t* kWhat[5] = { L"", L"", L"3D CG animation", L"live action", L"game footage" };
@@ -571,6 +579,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // frames are still re-timed by pushcore's own partial-hold gate). The whole-frame held share alone called 4K live
     // action "animation" on 62 % of its run time in the round-2 corpus, so it is no longer a decision input.
     else { r.animation = false; r.animNote = L"Auto, measuring (off until the picture is measured as drawn animation)"; }
+    // what the drawn treatment includes (content_detect.h DrawnPolicy): the user's Animation On is hand-drawn's
+    r.policy = !r.animation ? pushmpc::content::kPolicyNotDrawn : r.drawnCg ? pushmpc::content::kPolicyDrawnCg : pushmpc::content::kPolicyHandDrawn;
     // --- the animation mode (round 5): the setting, else the user's own choice for this show, else Auto's default
     {
         static const wchar_t* kModeName[3] = { L"Full", L"Camera only", L"Off" };
@@ -578,8 +588,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         else if (src.showChoice >= 0 && src.showChoice <= 2) { r.animMode = src.showChoice; r.animModeNote = std::wstring(kModeName[r.animMode]) + L", this show's choice"; }
         else { r.animMode = kAnimModeAuto; r.animModeNote = std::wstring(kModeName[r.animMode]) + L" (Auto)"; }
         const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
-        const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation) : true;
-        const bool signs = kSignsAuto && r.animation && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)
+        const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation && r.policy.lineArt) : true;
+        const bool signs = kSignsAuto && r.animation && r.policy.signHold && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)
         r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (signs ? 4u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
     }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
@@ -640,10 +650,12 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // the best fitting one where RTX VSR is not available (and before RTX VSR once the verdict sets kAnimeSrBeforeRtxVsr)
     r.animeModel = -1;
     c.animeSrMs = 0;
-    if (g.has(kCapAnimeSr) && r.animation && !atOutput && src.h <= 1080) {
+    if (g.has(kCapAnimeSr) && r.animation && r.policy.animeUpscaler && !atOutput && src.h <= 1080) {
         const bool asked = s.upscaler == Upscaler::Anime;
         const bool autoWants = s.upscaler == Upscaler::Auto && (!g.has(kCapRtxVsr) || kAnimeSrBeforeRtxVsr);
-        const AnimeSrPick pick = PickAnimeSr(src.w, src.h, upW, upH, src.fps, lowBitrate, c.card, c.animeSrLearned, asked ? AnimeSrModelIndex(s.animeModel) : -1);
+        // the _DS (denoise + sharpen) variants only where the policy allows them (hand-drawn): on rendered CG they are
+        // further from the master than the default scaler (measured), so the plain model even at a low bitrate
+        const AnimeSrPick pick = PickAnimeSr(src.w, src.h, upW, upH, src.fps, lowBitrate && r.policy.animeUpscalerDs, c.card, c.animeSrLearned, asked ? AnimeSrModelIndex(s.animeModel) : -1);
         r.animeSrNote = pick.note;
         if ((asked || autoWants) && pick.model >= 0) { method = Upscaler::Anime; r.animeModel = pick.model; c.animeSrMs = pick.ms; }
         else if (!asked && !autoWants && pick.model >= 0) r.animeSrNote = L"candidate " + pick.note + L"; RTX VSR stays first until the verdict";
@@ -724,7 +736,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if (s.deband == kOff) r.debandNote = L"off";
     else if (!debandEligible) r.debandNote = src.hdr ? L"off, HDR source (banding is rare there)" : L"off, 10-bit source (banding is rare there)";
     else if (s.deband != kAuto) { deband = true; r.debandNote = L"on"; }
-    else if (r.animation && kDebandAnimationAuto) {
+    else if (r.animation && kDebandAnimationAuto && r.policy.animeDeband) {
         // anime round 5: flat cel fills band in any 8-bit encode, so animation gets the pass whatever the bitrate, with
         // the anime preset (wider radius, less grain; grain seeded per drawing in pushcore); Blu-ray class keeps Low
         deband = true;
@@ -733,7 +745,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (debandRate) { deband = true; r.debandNote = std::format(L"on, 8-bit source at {:.2f} bits per pixel", src.bppEq); }
     else r.debandNote = L"off, " + rateNote;
     r.debandStrength = int(s.debandStrength);
-    if (deband && s.deband == kAuto && r.animation && kDebandAnimationAuto) r.debandStrength = src.bppEq >= kDebandAnimeLowBpp ? 0 : 3;
+    if (deband && s.deband == kAuto && r.animation && kDebandAnimationAuto && r.policy.animeDeband) r.debandStrength = src.bppEq >= kDebandAnimeLowBpp ? 0 : 3;
     double debandMs = deband ? DebandCost(c, r.debandStrength, src.w, src.h) : 0.0;
 
     // NR cost by family until measured (heavy on RTX 30 and on the RX 7000 worker)

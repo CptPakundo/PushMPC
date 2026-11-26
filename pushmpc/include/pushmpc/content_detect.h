@@ -35,6 +35,25 @@ inline const char* ClassName(int c)
     return c >= 0 && c <= 4 ? n[c] : n[0];
 }
 
+// What Auto's drawn-animation treatment does, per measured kind (every route uses this; the user's explicit settings win).
+// Drawn + rendered CG (cel-shaded / toon-rendered 3D, measured offline against high-resolution masters): the held-drawing
+// repair helps (the CG is animated on twos like drawn cels) and the anime upscalers' plain models come closest to the
+// master (+3 to +5 dB against the default scaler), but their denoise-and-sharpen variant (_DS) is worse than the default
+// scaler on every class measured, the sign hold finds false holds on rendered surfaces, the anime deband preset leaves
+// more steps than Medium, and the line-art protection makes no measurable difference. Realistic CG is not drawn.
+struct DrawnPolicy {
+    bool holdRepair;      // pushcore's held-drawing repair in Animation (drawn) mode
+    bool animeUpscaler;   // the anime upscalers (plain models)
+    bool animeUpscalerDs; // Auto may pick an upscaler's _DS (denoise + sharpen) variant (low bitrate)
+    bool signHold;        // typeset signs / credits held over a pan
+    bool lineArt;         // line-art protection
+    bool animeDeband;     // the anime deband preset (else the normal Auto deband rule)
+};
+inline constexpr DrawnPolicy kPolicyHandDrawn{ true, true, true, true, true, true };
+inline constexpr DrawnPolicy kPolicyDrawnCg{ true, true, false, false, false, false };
+inline constexpr DrawnPolicy kPolicyNotDrawn{ false, false, false, false, false, false };
+inline const DrawnPolicy& PolicyFor(int cls, bool cg) { return cls == kDrawn ? (cg ? kPolicyDrawnCg : kPolicyHandDrawn) : kPolicyNotDrawn; }
+
 // ------------------------------------------------------------------------------------------------ cell grid
 // Cell means of one frame: luma in full-range 8-bit codes (0..255), Cb / Cr centred on 0 (8-bit codes).
 struct Cells {
@@ -60,15 +79,20 @@ inline Cells CellsFromYuv(const T* y, ptrdiff_t yStride, const T* u, const T* v,
     std::vector<int> x0(c.w + 1), y0(c.h + 1);
     for (int i = 0; i <= c.w; ++i) x0[i] = int(std::lround(double(i) * w / c.w));
     for (int j = 0; j <= c.h; ++j) y0[j] = int(std::lround(double(j) * h / c.h));
-    // luma: the mean of every second row and column of the cell (a 4x4 cell reads 4 pixels; the mean of a cell barely
-    // moves, and this keeps the cost near 0.5 ms at 1080p)
+    // luma: the full mean of the cell, every row and column. (Reading every second row saw one field of telecined
+    // pictures, so field repeats looked held, and it raised the noise floor of clean CG: measured against the offline
+    // reference on real windows, held share 0.42 vs 0.13 on a telecined 29.97 title.) 1.5-2.1 ms at 1080p, one thread (measured).
+    std::vector<uint32_t> bandSum(static_cast<size_t>(w));   // a band of rows summed per column (integer, exact), then cut into cells
     for (int j = 0; j < c.h; ++j) {
+        const int ysr = y0[j], ye = std::max(y0[j + 1], ysr + 1);
+        std::fill(bandSum.begin(), bandSum.end(), 0u);
+        for (int yy = ysr; yy < ye; ++yy) { const T* r = y + ptrdiff_t(yy) * yStride; for (int xx = 0; xx < w; ++xx) bandSum[size_t(xx)] += uint32_t(r[xx]); }
         for (int i = 0; i < c.w; ++i) {
-            double s = 0; int n = 0;
-            const int xs = x0[i], xe = std::max(x0[i + 1], xs + 1), ysr = y0[j], ye = std::max(y0[j + 1], ysr + 1);
-            const int st = (xe - xs) >= 4 ? 2 : 1, sr = (ye - ysr) >= 4 ? 2 : 1;
-            for (int yy = ysr; yy < ye; yy += sr) { const T* r = y + ptrdiff_t(yy) * yStride; for (int xx = xs; xx < xe; xx += st) { s += r[xx]; ++n; } }
-            float m = float(s / std::max(1, n)) * scale;
+            const int xs = x0[i], xe = std::max(x0[i + 1], xs + 1);
+            uint64_t s = 0;
+            for (int xx = xs; xx < xe; ++xx) s += bandSum[size_t(xx)];
+            const int n = (xe - xs) * (ye - ysr);
+            float m = float(double(s) / std::max(1, n)) * scale;
             if (limited) m = (m - 16.f) * ys;
             c.y[size_t(j) * c.w + i] = std::clamp(m, 0.f, 255.f);
             if (u) {
@@ -188,6 +212,10 @@ struct State {
     float drawnShare = 0.f;        // the last window's probability of drawn animation
     float logOdds = 0.f;           // the evidence integrator (> kOn: drawn, < -kOff: not drawn)
     bool imageEvidence = false;    // the last decision had the image model's evidence
+    bool cg = false;               // drawn, and the drawn look is rendered 3D CG (cel-shaded / toon-rendered), not hand
+                                   // drawn: from the image model (CgPolicy below); false while not drawn or without it
+    float cgShare = 0.f;           // the image model's latest probability of CG among the drawn looks (-1: none yet)
+    float cgLogOdds = 0.f;         // the CG integrator
     float feat[kFeatureCount] = {};// the last window's raw features (log, tests)
 };
 
@@ -201,12 +229,15 @@ public:
     // with the image model's evidence (stronger, so the integrator is slower and needs more of it)
     static constexpr float kImgDecay = 0.99f, kImgCutDecay = 0.85f, kImgOn = 12.0f, kImgOff = 6.0f;
     static constexpr float kDecay = 0.97f, kCutDecay = 0.6f, kOn = 6.0f, kOff = 4.0f, kClip = 3.0f;   // TRACKER
+    // drawn -> rendered 3D CG: one image-model keyframe a second; on after ~4 s of clear CG evidence, off after ~3 s
+    static constexpr float kCgDecay = 0.9f, kCgCutDecay = 0.7f, kCgOn = 4.0f, kCgOff = 3.0f;   // CG TRACKER
 
     void Reset() { *this = ContentDetector(); }
     // A discontinuity (seek, flush): the window and the previous frame are dropped, the decision stays (same title).
     // The image model's evidence (optional): the probability that the picture is drawn animation, from the CLIP image
     // embedding of a 224x224 thumbnail (ClipInput) about once a second (ImageDrawnProbability), stamped with the frame's pts.
-    void SetImageEvidence(double pDrawn, double pts) { m_img = pDrawn; m_imgT = pts; }
+    // pCg (optional): the probability that a drawn look is rendered 3D CG rather than hand-drawn (ImageCgProbability)
+    void SetImageEvidence(double pDrawn, double pts, double pCg = -1.0) { m_img = pDrawn; m_imgT = pts; if (pCg >= 0 && pts != m_cgT) { m_imgCg = pCg; m_cgT = pts; m_cgNew = true; } }
     void Discontinuity() { m_frames.clear(); m_prev = Cells(); m_nextEval = -1; m_cutPending = true; }
     const State& Current() const { return m_state; }
 
@@ -272,6 +303,16 @@ public:
             s.cls = next;
         }
         s.drawnShare = float(pd); s.logOdds = float(m_L); s.imageEvidence = img;
+        // drawn: rendered 3D CG or hand-drawn, from the image model only (one new keyframe a step at most), with its own
+        // integrator (hysteresis); reset with the drawn decision so a new drawn stretch starts undecided (hand-drawn)
+        if (s.cls != kDrawn) { m_Lcg = 0; s.cg = false; }
+        else if (img && m_cgNew) {
+            const double c = std::clamp(m_imgCg, 1e-4, 1.0 - 1e-4);
+            m_Lcg = (isCut ? kCgCutDecay : kCgDecay) * m_Lcg + std::clamp(std::log(c / (1.0 - c)), -double(kClip), double(kClip));
+            if (m_Lcg > kCgOn) s.cg = true; else if (m_Lcg < -kCgOff) s.cg = false;
+        }
+        m_cgNew = false;
+        s.cgShare = m_cgT > -1e17 ? float(m_imgCg) : -1.f; s.cgLogOdds = float(m_Lcg);
         s.prob[kDrawn] = float(pd); s.prob[kOther] = float(1.0 - pd);
         s.confidence = s.cls == kDrawn ? float(pd) : s.cls == kOther ? float(1.0 - pd) : 0.f;
     }
@@ -569,7 +610,8 @@ private:
     detail::FftPlan m_fftRows, m_fftCols;
     std::vector<float> m_specRe, m_specIm;   // the previous frame's spectrum (PhaseShift)
     bool m_specValid = false;   // m_specRe/Im hold m_prev's spectrum
-    double m_nextEval = -1, m_t0 = -1, m_L = 0, m_img = 0.5, m_imgT = -1e18;
+    double m_nextEval = -1, m_t0 = -1, m_L = 0, m_img = 0.5, m_imgT = -1e18, m_Lcg = 0, m_imgCg = 0.5, m_cgT = -1e18;
+    bool m_cgNew = false;
     bool m_cutPending = true;
     int m_run = 0;
     State m_state;
@@ -1330,6 +1372,24 @@ inline double ImageDrawnProbability(const float* emb)
     for (int k = 0; k < clip::kPromptsDrawn + clip::kPromptsOther; ++k) { const double e = std::exp(z[k] - m); sa += e; if (k < clip::kPromptsDrawn) sd += e; }
     return sd / sa;
 }
+// Rendered 3D CG among drawn looks (State.cg): zero-shot hand-drawn vs rendered prompts (kCgPrompt), the rendered
+// share. Offline, leave-one-group-out over the prompt sets (19 groups): the cel-shaded / stylised / realistic CG groups
+// are flagged for 70 % of their drawn-look time on average (33-98 % per group), hand-drawn groups 10 % (below 3 % on 12
+// of 15 groups; western digitally coloured TV and features 26-79 %). Only Auto's extras differ (DrawnPolicy).
+inline double ImageCgProbability(const float* emb)
+{
+    constexpr int n = clip::kCgPromptsHand + clip::kCgPromptsRender;
+    double nn = 0; for (int i = 0; i < 512; ++i) nn += double(emb[i]) * emb[i];
+    nn = nn > 0 ? 1.0 / std::sqrt(nn) : 0.0;
+    double z[n], m = -1e30;
+    for (int k = 0; k < n; ++k) {
+        double d = 0; for (int i = 0; i < 512; ++i) d += double(emb[i]) * clip::kCgPrompt[k][i];
+        z[k] = 100.0 * d * nn; m = std::max(m, z[k]);
+    }
+    double sr = 0, sa = 0;
+    for (int k = 0; k < n; ++k) { const double e = std::exp(z[k] - m); sa += e; if (k >= clip::kCgPromptsHand) sr += e; }
+    return sr / sa;
+}
 // The model's input from YUV 4:2:0 planes (as CellsFromYuv): the centre square, bilinear to 224 x 224, RGB (BT.709
 // for HD, BT.601 below 720 lines), CLIP's mean / std, planar NCHW float.
 template <class T>
@@ -1358,6 +1418,94 @@ inline std::vector<float> ClipInput(const T* y, ptrdiff_t yStride, const T* u, c
             for (int c = 0; c < 3; ++c) out[size_t(c) * 224 * 224 + size_t(j) * 224 + i] = (std::clamp(rgb[c], 0.f, 255.f) / 255.f - mean[c]) / sd[c];
         }
     return out;
+}
+
+// ------------------------------------------------------------------------------------------------ GPU taps
+// Routes whose frames stay on the GPU (the engine module's D3D11 and Vulkan zero-copy paths) compute the cell grid and the
+// model's thumbnail in a compute pass and read back only those: one 32-bit word per cell / thumbnail pixel,
+//   bits  0-15  luma, in 8-bit code units x 256 (the cell's mean, or the bilinear sample), before the range expansion
+//   bits 16-23  Cb, 8-bit code (the top 8 bits of a deeper sample), the same point sample CellsFromYuv takes
+//   bits 24-31  Cr, likewise
+// 480 x CellsHeight words for the cells (~0.5 MB at 16:9), 224 x 224 for the thumbnail (196 KB, about once a second).
+// The cells' geometry and sample positions are those of CellsFromYuv / ClipInput (the shaders mirror them).
+inline int CellsHeight(int w, int h) { return std::max(1, int(std::lround(double(kCellsW) * h / w))); }
+inline uint32_t PackYcc(float y8, float cb8, float cr8)
+{
+    return uint32_t(std::clamp(int(std::lround(y8 * 256.f)), 0, 65535)) | (uint32_t(std::clamp(int(std::lround(cb8)), 0, 255)) << 16) |
+           (uint32_t(std::clamp(int(std::lround(cr8)), 0, 255)) << 24);
+}
+inline Cells CellsFromPacked(const uint32_t* words, ptrdiff_t strideWords, int cw, int ch, bool limited)
+{
+    Cells c;
+    if (!words || cw != kCellsW || ch < 1) return c;
+    c.w = cw; c.h = ch;
+    c.y.resize(size_t(cw) * ch); c.cb.resize(c.y.size()); c.cr.resize(c.y.size());
+    const float ys = limited ? 255.f / 219.f : 1.f, cs = limited ? 255.f / 224.f : 1.f;
+    for (int j = 0; j < ch; ++j)
+        for (int i = 0; i < cw; ++i) {
+            const uint32_t v = words[ptrdiff_t(j) * strideWords + i];
+            float m = float(v & 0xffffu) / 256.f;
+            if (limited) m = (m - 16.f) * ys;
+            const size_t k = size_t(j) * cw + i;
+            c.y[k] = std::clamp(m, 0.f, 255.f);
+            c.cb[k] = (float((v >> 16) & 0xffu) - 128.f) * cs; c.cr[k] = (float(v >> 24) - 128.f) * cs;
+        }
+    return c;
+}
+// the model's input from a 224 x 224 packed thumbnail (hd: BT.709, else BT.601, as ClipInput decides by the source height)
+inline std::vector<float> ClipInputFromPacked(const uint32_t* words, ptrdiff_t strideWords, bool hd, bool limited)
+{
+    std::vector<float> out(3 * 224 * 224);
+    if (!words) return {};
+    const float ys = limited ? 255.f / 219.f : 1.f, cs = limited ? 255.f / 224.f : 1.f;
+    const float kr = hd ? 1.5748f : 1.402f, kgb = hd ? 0.1873f : 0.344f, kgr = hd ? 0.4681f : 0.714f, kb = hd ? 1.8556f : 1.772f;
+    static const float mean[3] = { 0.48145466f, 0.4578275f, 0.40821073f }, sd[3] = { 0.26862954f, 0.26130258f, 0.27577711f };
+    for (int j = 0; j < 224; ++j)
+        for (int i = 0; i < 224; ++i) {
+            const uint32_t v = words[ptrdiff_t(j) * strideWords + i];
+            float Y = float(v & 0xffffu) / 256.f; if (limited) Y = (Y - 16.f) * ys;
+            const float Cb = (float((v >> 16) & 0xffu) - 128.f) * cs, Cr = (float(v >> 24) - 128.f) * cs;
+            const float rgb[3] = { Y + kr * Cr, Y - kgb * Cb - kgr * Cr, Y + kb * Cb };
+            for (int c = 0; c < 3; ++c) out[size_t(c) * 224 * 224 + size_t(j) * 224 + i] = (std::clamp(rgb[c], 0.f, 255.f) / 255.f - mean[c]) / sd[c];
+        }
+    return out;
+}
+// CPU reference of the shaders (tests): the packed words CellsFromYuv / ClipInput would see, from 4:2:0 planes
+template <class T>
+inline std::vector<uint32_t> PackedCellsRef(const T* y, ptrdiff_t yStride, const T* u, const T* v, ptrdiff_t cStride, int w, int h, int bits)
+{
+    const int cw = kCellsW, ch = CellsHeight(w, h);
+    std::vector<uint32_t> o(size_t(cw) * ch);
+    const float sc = 255.f / float((1 << bits) - 1);
+    for (int j = 0; j < ch; ++j)
+        for (int i = 0; i < cw; ++i) {
+            const int xs = int(std::lround(double(i) * w / cw)), xe = std::max(int(std::lround(double(i + 1) * w / cw)), xs + 1);
+            const int ysr = int(std::lround(double(j) * h / ch)), ye = std::max(int(std::lround(double(j + 1) * h / ch)), ysr + 1);
+            double s = 0; int n = 0;
+            for (int yy = ysr; yy < ye; ++yy) for (int xx = xs; xx < xe; ++xx) { s += y[ptrdiff_t(yy) * yStride + xx]; ++n; }
+            const int cx = std::min((xs + xe) / 4, w / 2 - 1), cy = std::min((ysr + ye) / 4, h / 2 - 1);
+            const float cb = float(v ? u[ptrdiff_t(cy) * cStride + cx] : u[ptrdiff_t(cy) * cStride + 2 * cx]), cr = float(v ? v[ptrdiff_t(cy) * cStride + cx] : u[ptrdiff_t(cy) * cStride + 2 * cx + 1]);
+            o[size_t(j) * cw + i] = PackYcc(float(s / n) * sc, cb * sc, cr * sc);
+        }
+    return o;
+}
+template <class T>
+inline std::vector<uint32_t> PackedClipRef(const T* y, ptrdiff_t yStride, const T* u, const T* v, ptrdiff_t cStride, int w, int h, int bits)
+{
+    std::vector<uint32_t> o(224 * 224);
+    const int side = std::min(w, h), x0 = (w - side) / 2, y0 = (h - side) / 2;
+    const float sc = 255.f / float((1 << bits) - 1);
+    auto luma = [&](int xx, int yy) { return float(y[ptrdiff_t(std::clamp(yy, 0, h - 1)) * yStride + std::clamp(xx, 0, w - 1)]); };
+    for (int j = 0; j < 224; ++j)
+        for (int i = 0; i < 224; ++i) {
+            const float fx = x0 + (i + 0.5f) * side / 224.f - 0.5f, fy = y0 + (j + 0.5f) * side / 224.f - 0.5f;
+            const int ix = int(std::floor(fx)), iy = int(std::floor(fy)); const float ax = fx - ix, ay = fy - iy;
+            const float l = (luma(ix, iy) * (1 - ax) + luma(ix + 1, iy) * ax) * (1 - ay) + (luma(ix, iy + 1) * (1 - ax) + luma(ix + 1, iy + 1) * ax) * ay;
+            const int cx = std::clamp(int(fx) / 2, 0, w / 2 - 1), cy = std::clamp(int(fy) / 2, 0, h / 2 - 1);
+            const float cb = float(v ? u[ptrdiff_t(cy) * cStride + cx] : u[ptrdiff_t(cy) * cStride + 2 * cx]), cr = float(v ? v[ptrdiff_t(cy) * cStride + cx] : u[ptrdiff_t(cy) * cStride + 2 * cx + 1]);
+            o[size_t(j) * 224 + i] = PackYcc(l * sc, cb * sc, cr * sc);
+        }
+    return o;
 }
 
 // ------------------------------------------------------------------------------------------------ interlacing

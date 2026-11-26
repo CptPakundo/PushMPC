@@ -2076,7 +2076,7 @@ public:
             m_typeIlFlags = il;
             m_inInterlaced = m_typeInterlaced && (il & AMINTERLACE_1FieldPerSample) != 0;
             m_ilDecided = false; m_ilSeen = m_ilCount = 0; m_comb.Reset();   // interlacing: measured in the picture (CheckInterlace)
-            StopContent(); m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentLogged = -1;
+            StopContent(); m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentCg = false; m_contentLogged = -1;
             m_baseStepMs = 0; m_ptsStepMs = 0; m_tracker = pm::StepTracker{}; m_trackReset = false; m_openFps = 0; m_reopenForRate = false; m_openDeferred = false;   // a new stream: measured again
             m_inArX = ax; m_inArY = ay;
             DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;
@@ -2887,6 +2887,7 @@ private:
     std::atomic<int> m_contentClass = 0;
     std::atomic<bool> m_contentDisc = false;
     std::atomic<float> m_contentConf = 0.f;
+    std::atomic<bool> m_contentCg = false;   // drawn and rendered 3D CG (DrawnPolicy kPolicyDrawnCg)
     int m_contentLogged = -1;
     void MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc);
     // ContentDetect runs on its own thread (~8 ms a 1080p frame, up to ~27 ms when a window is evaluated, measured): the
@@ -4749,7 +4750,7 @@ pm::Source CPushMpcFilter::SourceInfo()
     // bits per pixel per frame at the measured frame rate (a "29.97" tag on a 24p body would make it 25 % low)
     s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, step > 1.0 ? 1000.0 / m_baseStepMs.load() : 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
     s.heldShare = m_heldShare.load();
-    s.contentClass = m_contentClass.load(); s.contentConf = m_contentConf.load();
+    s.contentClass = m_contentClass.load(); s.contentConf = m_contentConf.load(); s.contentCg = m_contentCg.load();
     // the page may set this show's choice while it plays (Shows\<key>\Choice)
     if (!m_showKey.empty()) m_showChoice = pm::ReadShow(m_showKey).choice;
     s.showChoice = m_showChoice.load();
@@ -5284,16 +5285,17 @@ void CPushMpcFilter::ContentLoop()
         if (job.disc) m_content.Discontinuity();
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
         double p, pt;
-        if (m_contentModel && m_contentModel->Take(p, pt)) m_content.SetImageEvidence(p, pt);
+        double pc; if (m_contentModel && m_contentModel->Take(p, pt, pc)) m_content.SetImageEvidence(p, pt, pc);
 #endif
         if (!m_content.Push(job.cells, job.t)) continue;
         const State& st = m_content.Current();
         m_contentConf = st.confidence;
         if (st.cls != m_contentClass.load()) m_contentClass = st.cls;   // the Auto thread re-decides on its next tick (<= 1 s)
-        if (st.cls != m_contentLogged) {
-            m_contentLogged = st.cls;
-            Log(std::format("content: {} ({:.0f} %), measured in the picture at {:.1f} s; drawn probability {:.2f}, evidence {:.1f}{}; class changes so far {}",
-                            ClassName(st.cls), 100.0 * st.confidence, job.t, st.drawnShare, st.logOdds, st.imageEvidence ? " (with the image model)" : " (hand-built cues only)", st.changes));
+        m_contentCg = st.cg;
+        if (st.cls * 2 + (st.cg ? 1 : 0) != m_contentLogged) {
+            m_contentLogged = st.cls * 2 + (st.cg ? 1 : 0);
+            Log(std::format("content: {}{} ({:.0f} %), measured in the picture at {:.1f} s; drawn probability {:.2f}, evidence {:.1f}{}; class changes so far {}",
+                            ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "", 100.0 * st.confidence, job.t, st.drawnShare, st.logOdds, st.imageEvidence ? " (with the image model)" : " (hand-built cues only)", st.changes));
         }
     }
 }

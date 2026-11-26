@@ -367,6 +367,8 @@ copy_files() {
     for l in "$src/vsplugin/pushmpc.lua" "$src/pushmpc.lua" "$src/integrations/mpv/pushmpc.lua"; do [ -f "$l" ] && { run cp "$l" "$plugdir/pushmpc.lua"; break; }; done
     # the ArtCNN upscaling shaders pushmpc.lua falls back to
     [ -d "$src/vsplugin/shaders" ] && { run mkdir -p "$plugdir/shaders"; run cp "$src"/vsplugin/shaders/* "$plugdir/shaders/"; }
+    # the image model's helper pushmpc.lua starts when no PushMPC engine runs (next to pushmpc.lua)
+    [ -f "$src/vsplugin/pushmpc-content" ] && { run cp "$src/vsplugin/pushmpc-content" "$plugdir/"; run chmod 755 "$plugdir/pushmpc-content"; }
     [ -f "$src/LICENSE" ] && run cp "$src/LICENSE" "$pm/"
     # the Linux NVIDIA backend (when this build has it): its self-test next to the plugin, its runtime fetcher in $pm
     [ -f "$src/vsplugin/pushmpc-nvvfx-selftest" ] && { run cp "$src/vsplugin/pushmpc-nvvfx-selftest" "$plugdir/"; run chmod 755 "$plugdir/pushmpc-nvvfx-selftest"; }

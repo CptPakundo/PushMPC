@@ -418,7 +418,7 @@ bool Feed(Bridge& b, AVFrame* f)
             const double t = double(f->pts) / 1e6;
             if (!model) model = std::make_unique<ContentModel>([](const std::string& m) { Log("%s", m.c_str()); });
             double p, pt;
-            if (model->Take(p, pt)) g_content.SetImageEvidence(p, pt);
+            double pc; if (model->Take(p, pt, pc)) g_content.SetImageEvidence(p, pt, pc);
             if (!model->Failed() && !g_vtThumb.empty()) { model->Offer(std::move(g_vtThumb), t); g_vtThumb.clear(); }
             else if (!model->Failed() && (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUV420P10) && (next < 0 || t >= next || t < next - 5.0)) {
                 next = t + 1.0;

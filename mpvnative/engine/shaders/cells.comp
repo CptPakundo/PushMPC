@@ -1,0 +1,47 @@
+#version 450
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PushMPC engine module: ContentDetect's GPU tap (pushmpc/content_detect.h, "GPU taps") on the slot's planes.
+// mode 0: one invocation a cell of the 480-wide grid: the mean of every luma sample of the cell, the chroma point sample
+//         CellsFromYuv takes; mode 1: one a pixel of the image model's 224 x 224 thumbnail (ClipInput's centre square,
+//         bilinear luma, chroma point). Packed: luma in 8-bit code units x 256 (bits 0-15), Cb, Cr 8-bit codes (16-31).
+// Cell edges in integers: floor(i * w / cw + 0.5) as (2 i w + cw) / (2 cw), exactly CellsFromYuv's lround.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D srcY;   // the slot's planes (R8 / R16 UNORM holding code / kRaw)
+layout(binding = 1) uniform sampler2D srcU;
+layout(binding = 2) uniform sampler2D srcV;
+layout(std430, binding = 3) writeonly buffer Out { uint words[]; } dst;
+layout(push_constant) uniform PC { uint w, h, cw, ch, mode, base, side, x0, y0; float kRaw, maxCode; } pc;
+
+uint Pack(float y8, float cb8, float cr8)
+{
+    return min(uint(y8 * 256.0 + 0.5), 65535u) | (min(uint(cb8 + 0.5), 255u) << 16) | (min(uint(cr8 + 0.5), 255u) << 24);
+}
+float L(int x, int y) { return texelFetch(srcY, ivec2(clamp(x, 0, int(pc.w) - 1), clamp(y, 0, int(pc.h) - 1)), 0).r * pc.kRaw; }
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    const float s8 = 255.0 / pc.maxCode;
+    if (pc.mode == 0u) {
+        if (id >= pc.cw * pc.ch) return;
+        const uint i = id % pc.cw, j = id / pc.cw;
+        const uint xs = (2u * i * pc.w + pc.cw) / (2u * pc.cw), ys = (2u * j * pc.h + pc.ch) / (2u * pc.ch);
+        const uint xe = max((2u * (i + 1u) * pc.w + pc.cw) / (2u * pc.cw), xs + 1u), ye = max((2u * (j + 1u) * pc.h + pc.ch) / (2u * pc.ch), ys + 1u);
+        uint sum = 0u;
+        for (uint yy = ys; yy < ye; ++yy)
+            for (uint xx = xs; xx < xe; ++xx) sum += uint(texelFetch(srcY, ivec2(xx, yy), 0).r * pc.kRaw + 0.5);
+        const float m = float(sum) / float((xe - xs) * (ye - ys));
+        const ivec2 c = ivec2(min((xs + xe) / 4u, pc.w / 2u - 1u), min((ys + ye) / 4u, pc.h / 2u - 1u));
+        const float cb = round(texelFetch(srcU, c, 0).r * pc.kRaw), cr = round(texelFetch(srcV, c, 0).r * pc.kRaw);
+        dst.words[pc.base + id] = Pack(m * s8, cb * s8, cr * s8);
+    } else {
+        if (id >= 224u * 224u) return;
+        const uint i = id % 224u, j = id / 224u;
+        const float fx = float(pc.x0) + (float(i) + 0.5) * float(pc.side) / 224.0 - 0.5, fy = float(pc.y0) + (float(j) + 0.5) * float(pc.side) / 224.0 - 0.5;
+        const int ix = int(floor(fx)), iy = int(floor(fy));
+        const float ax = fx - float(ix), ay = fy - float(iy);
+        const float l = (L(ix, iy) * (1.0 - ax) + L(ix + 1, iy) * ax) * (1.0 - ay) + (L(ix, iy + 1) * (1.0 - ax) + L(ix + 1, iy + 1) * ax) * ay;
+        const ivec2 c = ivec2(clamp(int(fx) / 2, 0, int(pc.w / 2u) - 1), clamp(int(fy) / 2, 0, int(pc.h / 2u) - 1));
+        const float cb = round(texelFetch(srcU, c, 0).r * pc.kRaw), cr = round(texelFetch(srcV, c, 0).r * pc.kRaw);
+        dst.words[pc.base + id] = Pack(l * s8, cb * s8, cr * s8);
+    }
+}

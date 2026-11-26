@@ -10,6 +10,11 @@
 #                        effects, else the portable fallback, which must still give the right output).
 #   iina-bridge (macos-15) IINA's release DMG on the runner: architectures, entitlements, libmpv's libavfilter imports;
 #                        pushmpc-iina.so inside IINA's unmodified libmpv, headless, output rate x2.
+#   mac-runtime (macos-15, macos-15-intel)
+#                        the content model's runtime as setup.sh installs it on a Mac (sh setup.sh pmml in a fresh
+#                        HOME: the pinned ONNX Runtime for this architecture and the content model, each hash-checked,
+#                        into ~/Library/Application Support/PushMPC/pmml), then pmml_cli loads that ONNX Runtime from
+#                        there (CPU and CoreML listed), and setup.sh's uninstall removes it again.
 #   artcnn    (ubuntu)   ArtCNN: the pinned ONNX files converted (.pmnn, fragment GLSL), onnxruntime against PushMPC's
 #                        float reference, the fragment shaders in mpv's OpenGL renderer against the same reference.
 #   homebrew  (macos-15) the tap route (this repository as the tap, Formula/pushmpc.rb) with the checkout's archives:
@@ -21,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       jobs:
-        description: 'jobs to run: all | iina | vt | homebrew | artcnn | iina-bridge | vt,homebrew ...'
+        description: 'jobs to run: all | iina | vt | homebrew | artcnn | iina-bridge | mac-runtime | vt,homebrew ...'
         required: false
         default: 'all'
 
@@ -123,6 +128,73 @@ jobs:
           path: |
             build/pushmpc-iina.so
             ~/Library/Logs/PushMPC/iina-bridge.log
+
+  mac-runtime:
+    # what IINA's bridge (pushmpc/content_model.h) looks for on a Mac: <rt>/ort/core/libonnxruntime.dylib and
+    # <rt>/content-model/vision_model_fp16.onnx under ~/Library/Application Support/PushMPC/pmml, installed by setup.sh's
+    # own step from the files the Mac bundle carries (setup.sh, pmml/fetch_runtime.py and the two pins). Apple silicon
+    # takes the core ONNX Runtime (osx-arm64), Intel the last x86_64 build (osx-x64, ml-runtime-pin.json's macosNote).
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'mac-runtime')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: setup.sh pmml in a fresh HOME (the Mac's ONNX Runtime and the content model)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=$RUNNER_TEMP/bundle; h=$RUNNER_TEMP/home; mkdir -p "$t/pmml" "$h"
+          cp integrations/linux/setup.sh "$t/"
+          cp pmml/scripts/fetch_runtime.py scripts/ml-runtime-pin.json scripts/content-model-pin.json "$t/pmml/"
+          HOME=$h XDG_DATA_HOME='' PUSHMPC_NO_AUTOBENCH=1 sh "$t/setup.sh" pmml | tee "$RUNNER_TEMP/setup.txt"
+          rt="$h/Library/Application Support/PushMPC/pmml"
+          echo "RT=$rt" >> "$GITHUB_ENV"
+          ls -la "$rt" "$rt/ort/core" "$rt/content-model"
+          lib="$rt/ort/core/libonnxruntime.dylib"
+          test -f "$lib" || { echo "::error::setup.sh left no $lib"; exit 1; }
+          test -f "$rt/content-model/vision_model_fp16.onnx" || { echo "::error::setup.sh left no content model"; exit 1; }
+          want=$(uname -m); archs=$(lipo -archs "$lib")
+          echo "$archs" | grep -qw "$want" || { echo "::error::$lib is $archs, this Mac is $want"; exit 1; }
+          codesign -dv "$lib" 2>&1 | grep -E 'Authority|TeamIdentifier|Signature' || true
+          cat "$rt/fetched.json"
+          echo "::notice title=Mac runtime ($want)::$(jq -r '.platform + " ONNX Runtime " + .ort.core.version' "$rt/fetched.json"), content model $(stat -f %z "$rt/content-model/vision_model_fp16.onnx") bytes"
+          # a second run keeps what is there (no second download)
+          HOME=$h XDG_DATA_HOME='' PUSHMPC_NO_AUTOBENCH=1 sh "$t/setup.sh" pmml | tee "$RUNNER_TEMP/setup2.txt"
+          grep -q 'already installed' "$RUNNER_TEMP/setup2.txt" || { echo "::error::the second run fetched ONNX Runtime again"; exit 1; }
+      - name: pmml loads that ONNX Runtime (CPU, CoreML)
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          # the C API headers of the core version (what the plugins are built with), then pmml_cli
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform osx-arm64 --out "$RUNNER_TEMP/hdr" --cache "$RUNNER_TEMP/hdr-dl" --flavors core --headers > /dev/null
+          cmake -S pmml -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE="$RUNNER_TEMP/hdr/ort/core/include"
+          cmake --build build --target pmml_cli --parallel
+          build/pmml_cli list --runtime "$RT" --flavor core 2>&1 | tee "$RUNNER_TEMP/list.txt"
+          grep -q 'ONNX Runtime CPU' "$RUNNER_TEMP/list.txt" || { echo "::error::pmml did not load ONNX Runtime from $RT"; exit 1; }
+          grep -q 'CoreML' "$RUNNER_TEMP/list.txt" || { echo "::error::no CoreML device listed"; exit 1; }
+      - name: setup.sh uninstall removes it
+        shell: bash
+        run: |
+          set -euo pipefail
+          h=$RUNNER_TEMP/home
+          HOME=$h XDG_DATA_HOME='' sh "$RUNNER_TEMP/bundle/setup.sh" uninstall | tee "$RUNNER_TEMP/uninstall.txt"
+          [ ! -e "$RT" ] || { echo "::error::$RT is still there after uninstall"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-runtime-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/setup.txt
+            ${{ runner.temp }}/setup2.txt
+            ${{ runner.temp }}/list.txt
+            ${{ runner.temp }}/uninstall.txt
 
   artcnn:
     # ArtCNN independent of the OS: the converter against onnxruntime (float reference), and the generated fragment
@@ -365,6 +437,7 @@ jobs:
         run: |
           set -euo pipefail
           bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac" > "$RUNNER_TEMP/plexmac-build.log" 2>&1 || { tail -40 "$RUNNER_TEMP/plexmac-build.log"; exit 1; }
+          python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform osx-arm64 --out "$RUNNER_TEMP/ortpin" --cache "$RUNNER_TEMP/ort-dl" --flavors core --headers >/dev/null 2>&1 && [ -f "$RUNNER_TEMP/ortpin/ort/core/include/onnxruntime_c_api.h" ] && export PUSHMPC_ORT_INCLUDE="$RUNNER_TEMP/ortpin/ort/core/include" || echo "::warning::ONNX Runtime headers not fetched: the VLC content library builds without the image model"
           bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac" > "$RUNNER_TEMP/macextras-build.log" 2>&1 || { tail -40 "$RUNNER_TEMP/macextras-build.log"; exit 1; }
           grep -E "^vlc/|iinaplgz" "$RUNNER_TEMP/macextras-build.log"
           grep -E "^master@|^proxy|minimum macOS|libMoltenVK" "$RUNNER_TEMP/plexmac-build.log"

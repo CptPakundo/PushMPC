@@ -1,0 +1,66 @@
+# pushmpc_content: ContentDetect (pushmpc/content_detect.h) and its image model (pushmpc/content_model.h) as a shared
+# library with a C interface (include/pushmpc_content.h), for the VLC module (C, MinGW on Windows), which loads it at
+# run time from its own folder: pushmpc_content.dll / libpushmpc_content.so / libpushmpc_content.dylib.
+#   -DPMML_ORT_INCLUDE=<dirs>  ONNX Runtime C API headers (pmml/scripts/fetch_runtime.py --headers): the image model
+#                              through pmml (DirectML on Windows, CoreML on macOS, ONNX Runtime CPU elsewhere; ONNX Runtime
+#                              itself is loaded at run time from the pmml runtime). Without them: the hand-built cues only.
+# The C++ runtime is linked statically (MSVC /MT; GCC -static-libstdc++), so the library only needs the C library.
+cmake_minimum_required(VERSION 3.20)
+project(pushmpc_content C CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")   # static CRT, pmml included: one self-contained DLL
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+set(PMML_ORT_INCLUDE "" CACHE STRING "ONNX Runtime C API headers for pmml (the image model)")
+find_package(Threads REQUIRED)
+
+add_library(pushmpc_content SHARED src/pushmpc_content.cpp include/pushmpc_content.h)
+set_target_properties(pushmpc_content PROPERTIES OUTPUT_NAME "pushmpc_content")
+if(WIN32)
+  set_target_properties(pushmpc_content PROPERTIES PREFIX "")   # pushmpc_content.dll (MinGW would add "lib")
+endif()
+target_include_directories(pushmpc_content PUBLIC include PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_link_libraries(pushmpc_content PRIVATE Threads::Threads)
+if(MSVC)
+  target_compile_options(pushmpc_content PRIVATE /W3 /EHsc /O2 /utf-8)
+  target_compile_definitions(pushmpc_content PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+  target_compile_options(pushmpc_content PRIVATE -O2 -Wall)
+  if(APPLE)
+    target_link_options(pushmpc_content PRIVATE -Wl,-dead_strip)
+  elseif(WIN32)
+    target_link_options(pushmpc_content PRIVATE -static -static-libgcc -static-libstdc++)
+  else()
+    target_link_options(pushmpc_content PRIVATE -static-libstdc++ -static-libgcc -Wl,--no-undefined)
+  endif()
+endif()
+if(PMML_ORT_INCLUDE)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../pmml" pmml EXCLUDE_FROM_ALL)
+  target_link_libraries(pushmpc_content PRIVATE pmml)
+  target_compile_definitions(pushmpc_content PRIVATE PUSHMPC_CONTENT_MODEL=1)
+  message(STATUS "pushmpc_content: + the image model (pmml)")
+else()
+  message(STATUS "pushmpc_content: no PMML_ORT_INCLUDE: the hand-built cues only")
+endif()
+
+# a CPU-only check through the C interface, loaded the way the VLC module loads it (vlcplugin/src/pm_content.c):
+# synthetic frames, state transitions, the policy, every input layout, no model -> the hand-built path
+add_executable(pushmpc_content_test tests/pushmpc_content_test.c "${CMAKE_CURRENT_SOURCE_DIR}/../../vlcplugin/src/pm_content.c")
+target_include_directories(pushmpc_content_test PRIVATE include "${CMAKE_CURRENT_SOURCE_DIR}/../../vlcplugin/src")
+target_link_libraries(pushmpc_content_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+if(MSVC)
+  target_compile_options(pushmpc_content_test PRIVATE /W3 /O2 /utf-8)
+  target_compile_definitions(pushmpc_content_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+  target_link_libraries(pushmpc_content_test PRIVATE m)
+endif()
+add_dependencies(pushmpc_content_test pushmpc_content)
+enable_testing()
+add_test(NAME pushmpc_content_test COMMAND pushmpc_content_test)

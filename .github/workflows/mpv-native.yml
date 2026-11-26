@@ -100,7 +100,9 @@ jobs:
           key: mpvnative-linux-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-built
       - name: Engine module and engine_test
         run: |
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
+          # ContentDetect's image model: pmml with the pinned ONNX Runtime C API headers (ONNX Runtime itself loads at run time)
+          ort=""; python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform linux-x64 --out /tmp/cd-ort --cache ~/pmml-dl --flavors core --headers >/dev/null 2>&1 && ort="-DPME_CONTENT_ORT_INCLUDE=/tmp/cd-ort/ort/core/include" || echo "::warning::ONNX Runtime headers not fetched: the engine builds without the image model"
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON $ort
           cmake --build build-engine --parallel
           ./build-engine/out/engine_test
           # the portable Vulkan engine with frames in host memory on Mesa's lavapipe (Dedup's lookahead, real frames exact)
@@ -180,11 +182,17 @@ jobs:
           if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pins.glslang.windows.sha256.ToUpperInvariant()) { throw 'glslang SHA-256 mismatch' }
           Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'glslang') -Force
           $g = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'glslang') -Recurse -Filter glslang*.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1).FullName
-          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g"
+          # ContentDetect's image model: pmml with the pinned ONNX Runtime C API headers (ONNX Runtime itself loads at run time)
+          $ort = @()
+          python -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform win-x64 --out "$env:RUNNER_TEMP\cd-ort" --cache "$env:RUNNER_TEMP\cd-ort-dl" --flavors core --headers | Out-Null
+          if (Test-Path "$env:RUNNER_TEMP\cd-ort\ort\core\include\onnxruntime_c_api.h") { $ort = @("-DPME_CONTENT_ORT_INCLUDE=$($env:RUNNER_TEMP.Replace('\','/'))/cd-ort/ort/core/include") } else { Write-Warning 'ONNX Runtime headers not fetched: the engine builds without the image model' }
+          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g" @ort
           if ($LASTEXITCODE) { throw 'configure' }
           cmake --build build-engine --config Release --parallel
           if ($LASTEXITCODE) { throw 'build' }
           ./build-engine/out/engine_test.exe
+          ./build-engine/out/content_gpu_test.exe   # ContentDetect's D3D11 GPU tap = the CPU reference (WARP)
+          if ($LASTEXITCODE) { throw 'content_gpu_test' }
           if ($LASTEXITCODE) { throw 'engine_test failed' }
           # the libmpv forwarder for players with their own libmpv (scripts/pushmpc-libmpv.ps1)
           cmake -S mpvnative/libmpv-swap -B build-fwd -A x64
@@ -338,7 +346,8 @@ jobs:
       - name: Engine and checks
         timeout-minutes: 15
         run: |
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON && cmake --build build-engine --parallel
+          ort=""; python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform osx-arm64 --out "$RUNNER_TEMP/cd-ort" --cache "$RUNNER_TEMP/cd-ort-dl" --flavors core --headers >/dev/null 2>&1 && ort="-DPME_CONTENT_ORT_INCLUDE=$RUNNER_TEMP/cd-ort/ort/core/include" || echo "::warning::ONNX Runtime headers not fetched: the engine builds without the image model"
+          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON $ort && cmake --build build-engine --parallel
           ./build-engine/out/engine_test
           export PUSHMPC_ENGINE="$PWD/build-engine/out/libpushmpc_engine.dylib" DYLD_LIBRARY_PATH="$PREFIX/lib"
           bash mpvnative/tests/run-tests.sh "$PREFIX" "$RUNNER_TEMP/t" macos
@@ -986,7 +995,10 @@ jobs:
           [ "${{ inputs.fresh }}" = true ] || export FFB_CACHE="$RUNNER_TEMP/ffb"
           bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac"
           # IINA and VLC (the plugin, the VLC module with FSR) into the same Mac bundle: the release's copy comes from macos-15
-          if [ "${{ matrix.runner }}" = macos-15 ]; then bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac"; fi
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            python3 -I pmml/scripts/fetch_runtime.py --pin scripts/ml-runtime-pin.json --platform osx-arm64 --out "$RUNNER_TEMP/ortpin" --cache "$RUNNER_TEMP/ort-dl" --flavors core --headers >/dev/null 2>&1 && [ -f "$RUNNER_TEMP/ortpin/ort/core/include/onnxruntime_c_api.h" ] && export PUSHMPC_ORT_INCLUDE="$RUNNER_TEMP/ortpin/ort/core/include" || echo "::warning::ONNX Runtime headers not fetched: the VLC content library builds without the image model"
+            bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac"
+          fi
           rm -rf plexmac-out && cp -R "$RUNNER_TEMP/plexmac" plexmac-out
       - uses: actions/cache/save@v4
         if: ${{ !inputs.fresh && steps.trees.outputs.cache-hit != 'true' && matrix.runner == 'macos-15' }}

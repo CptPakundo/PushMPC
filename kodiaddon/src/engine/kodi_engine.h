@@ -30,8 +30,8 @@ struct EngineCfg {
     bool fullRange = false, hdr = false;
     int fullscreen = -1;               // Kodi's window covers its screen: 1 / 0 / -1 unknown (Auto: the window composition per shown frame)
     std::string animeModel;            // the anime upscaler before the engine (pmml model id; "" none; builds with pmml only)
-    std::string animeAutoModel;        // Auto: the anime model to switch to once the picture is MEASURED as hand-drawn animation
-                                       // (ContentDetect in the decoder; never from the path); "" = not applicable
+    std::string animeAutoModel;        // Auto: the anime model (plain) to switch to once the picture is MEASURED as drawn animation
+                                       // (ContentDetect and its DrawnPolicy in the decoder; never from the path); "" = not applicable
     int animeAutoOutW = 0, animeAutoOutH = 0;   // the output size with it (NIS to the screen after the upscaler)
     std::string pmmlRuntime;           // pmml's runtime folder (ort/, eps/, graphs/ with anime-sr/)
     std::string pmmlBackend;           // e.g. ort:directml:dml:0, ort:core:trt-rtx:0 ("" = the first GPU EP the runtime has)

@@ -1828,7 +1828,8 @@ function Stage-Vlc([string]$version) {
     $sign = @((Join-Path $v 'libpushmpc_plugin.dll'))
     # pushcore for VLC (VFG, DLSS-G, PushFlow, FSR FG, zero copy) and PushMPC's Direct3D 11 output (driver SR, else NIS)
     $d3 = if ($VlcD3d11) { $VlcD3d11 } else { Join-Path (Split-Path -Parent $VlcPlugin) 'libpushmpc_d3d11_plugin.dll' }
-    foreach ($x in @(@($VlcBridge, 'pm_pushcore.dll', 'VLC gets the portable engine only'), @($d3, 'libpushmpc_d3d11_plugin.dll', 'VLC keeps its own output'))) {
+    $cd = if ($VlcBridge) { Join-Path (Split-Path -Parent $VlcBridge) 'pushmpc_content.dll' } else { '' }   # ContentDetect + the image model (vlc-plugin.yml's bridge-win64)
+    foreach ($x in @(@($VlcBridge, 'pm_pushcore.dll', 'VLC gets the portable engine only'), @($d3, 'libpushmpc_d3d11_plugin.dll', 'VLC keeps its own output'), @($cd, 'pushmpc_content.dll', 'VLC measures no content'))) {
         if ($x[0] -and (Test-Path -LiteralPath $x[0])) { Copy-Item -LiteralPath $x[0] (Join-Path $v $x[1]); $sign += (Join-Path $v $x[1]) }
         else { Warn "vlc: no $($x[1]) staged ($($x[2]))" }
     }
@@ -1858,7 +1859,13 @@ function Stage-VsPlugin([string]$version) {
         & $py.Source @pyArgs $gen (Join-Path $v 'shaders') | ForEach-Object { Info $_ }
         if ($LASTEXITCODE -ne 0) { Warn 'ArtCNN shaders not generated (make-shaders.py failed): the vsplugin component goes without them'; Remove-Item (Join-Path $v 'shaders') -Recurse -Force -ErrorAction SilentlyContinue }
     } else { Warn 'ArtCNN shaders not generated (no Python 3): the vsplugin component goes without them' }
-    Invoke-CodeSign @((Join-Path $v 'pushmpc_vs.dll'))
+    # the image model's helper for plain mpv (pushmpc-content.exe, integrations\mpv\content-helper), next to pushmpc.lua,
+    # built with pushmpc_vs.dll (core-out\vsplugin-bin)
+    $sign = @((Join-Path $v 'pushmpc_vs.dll'))
+    $ch = Join-Path (Split-Path -Parent $dll) 'pushmpc-content.exe'
+    if (Test-Path -LiteralPath $ch -PathType Leaf) { Copy-Item -LiteralPath $ch $v; $sign += (Join-Path $v 'pushmpc-content.exe') }
+    else { Warn "vsplugin: no pushmpc-content.exe next to $(Split-Path -Leaf $dll): plain mpv measures animation with its fallback only" }
+    Invoke-CodeSign $sign
     Write-Manifest $v @{ component = 'vsplugin'; version = $version; 'vapoursynth-api' = '4'; preview = 'yes' }
 }
 

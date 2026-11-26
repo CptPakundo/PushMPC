@@ -9,7 +9,8 @@
     2. copies the plugin to %LOCALAPPDATA%\PushMPC\vlc (VLC's own folder stays untouched, so VLC updates keep it),
        with what ships next to it: pm_pushcore.dll (the bridge to PushMPC's pushcore: NVIDIA VFG, DLSS-G, PushFlow,
        FSR FG, zero copy on VLC's D3D11 device) and libpushmpc_d3d11_plugin.dll (PushMPC's Direct3D 11 output: the
-       GPU's own Super Resolution where the driver has it, else NVIDIA Image Scaling on any GPU);
+       GPU's own Super Resolution where the driver has it, else NVIDIA Image Scaling on any GPU) and pushmpc_content.dll
+       (PushMPC's content library: what the picture is, drawn animation or not, measured in the frames);
     3. adds that folder to the user environment variable VLC_PLUGIN_PATH (HKCU\Environment; VLC 3 scans it after its
        own plugins; no plugins cache to rebuild) and broadcasts the change, so VLC started afterwards sees it;
     4. edits %APPDATA%\vlc\vlcrc (backup vlcrc.pushmpc-backup, and the values it replaces in pushmpc-vlc.state.json):
@@ -67,7 +68,7 @@ function Find-Vlc {
 }
 
 # the files that ship next to the plugin (optional: an older build has only the plugin)
-$Extras = @('pm_pushcore.dll', 'libpushmpc_d3d11_plugin.dll')
+$Extras = @('pm_pushcore.dll', 'libpushmpc_d3d11_plugin.dll', 'pushmpc_content.dll')
 function Copy-IfOther([string]$from, [string]$to) {
     # a repair that runs from the installed folder must not copy a file onto itself
     if ([IO.Path]::GetFullPath($from).TrimEnd('\') -ieq [IO.Path]::GetFullPath($to).TrimEnd('\')) { return }

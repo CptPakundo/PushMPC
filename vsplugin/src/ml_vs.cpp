@@ -377,7 +377,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     auto* d = new MInst();
     d->node = node;
     d->inVi = *vi;
-    d->content.Init(cdKey, *vi, cdMemo.cls);
+    d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = k;
     d->vi = *vi;
     if (up) { d->vi.width = up->outWidth(); d->vi.height = up->outHeight(); d->up = std::move(up); }

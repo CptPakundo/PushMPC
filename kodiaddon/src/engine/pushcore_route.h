@@ -45,6 +45,10 @@ public:
     int K() const { return m_k; }
     const std::string& Describe() const { return m_desc; }
     bool TenBit() const { return m_bits > 8; }
+    // pushcore's own upscaler at a fixed output size with its SR method switchable mid-stream (Auto's anime upscaler
+    // next to Video Super Resolution, win_anime_route.h): not through this bridge, which keeps the source size
+    // (pm_pushcore.cpp turns the upscaler off and refuses an output size other than the source's)
+    bool Upscales() const { return false; }
     // the FFmpeg D3D11VA device on our device (a new reference), so decoded frames are already on pushcore's device
     AVBufferRef* HwDevice() const;
 

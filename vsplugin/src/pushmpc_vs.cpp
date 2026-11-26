@@ -380,7 +380,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     auto* d = new Enhance();
     d->node = node;
     d->inVi = *vi;
-    d->content.Init(cdKey, *vi, cdMemo.cls);
+    d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->settings = s;
     d->waitMs = uint32_t(std::clamp<int64_t>(ArgInt(in, a, "wait_ms", 10000), 100, 120000));
     CoreHost& h = CoreHost::Get();
@@ -414,7 +414,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
 
     d->src.w = UINT(w); d->src.h = UINT(hh);
     d->src.fps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
-    d->src.contentClass = cdMemo.cls; d->src.contentConf = cdMemo.cls ? 0.9f : 0.f;   // measured on this stream (earlier instance)
+    d->src.contentClass = cdMemo.cls; d->src.contentConf = cdMemo.cls ? 0.9f : 0.f; d->src.contentCg = cdMemo.cg;   // measured on this stream (earlier instance)
     d->src.hdr = IsHdrTransfer(col.transfer); d->src.tenBit = f.bitsPerSample > 8; d->src.bppEq = -1;
     const HWND wnd = MpvWindow();
     d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg, int(ArgInt(in, a, "display_fs", -1)));

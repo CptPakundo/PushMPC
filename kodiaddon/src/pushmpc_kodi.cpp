@@ -35,13 +35,14 @@ extern "C" {
 #include "kodi_engine.h"
 #include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: models, costs, Auto's pick
 #include "kodi_platform.h"
-#if defined(_WIN32)
-#include <kodi/gui/General.h>   // GetHWContext: Kodi's own D3D11 device (logged next to pushcore's)
-#include "pushcore_route.h"
 #include "../../pushmpc/include/pushmpc/content_detect.h"   // what the picture is, interlacing: measured, never from names or flags
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
 #include "pushmpc/content_model.h"   // the image model behind it (pmml)
 #endif
+#include "win_anime_route.h"   // Auto's anime upscaler: the measured class through its DrawnPolicy; the Windows plan
+#if defined(_WIN32)
+#include <kodi/gui/General.h>   // GetHWContext: Kodi's own D3D11 device (logged next to pushcore's)
+#include "pushcore_route.h"
 #endif
 
 #include <algorithm>
@@ -572,7 +573,7 @@ private:
         const AVCodecParameters* p = st->codecpar;
         int mode = m_settings.upscale;   // 0 Auto, 1 Kodi's scaler, 2 x2 (test), 3 NIS, 4 FSR1, 5 anime upscaler
         // the anime upscaler (pmml: ArtCNN / CuNNy / AnimeSR, Setup's anime models): asked for (5), or Auto once the decoder
-        // MEASURES hand-drawn animation (ContentDetect; prepared here as animeAutoModel, switched on by the decoder) when the
+        // MEASURES drawn animation (ContentDetect and its DrawnPolicy; prepared here as animeAutoModel, switched by the decoder) when the
         // picture is enlarged; the engine then runs at its output size (anime_sr_engine.h)
         const bool autoAnime = mode == 0;
         if (mode == 5 || autoAnime) {
@@ -583,16 +584,20 @@ private:
                 const auto pick = pm::PickAnimeSr(unsigned(q->width), unsigned(q->height), unsigned(std::max(m_screenW, q->width)), unsigned(std::max(m_screenH, q->height)),
                                                   m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
 #if defined(_WIN32)
-                // Windows: Auto keeps Kodi's own scaler (RTX / Intel Video Super Resolution in Kodi's renderer): a measured
-                // switch to the anime upscaler would need the add-on to upscale to the screen itself (NIS), a loss on RTX.
-                // The anime upscaler stays a setting there (Upscaling: anime upscaler).
-                if (pick.model >= 0 && autoAnime) { why = "upscaling: Kodi's video scaler (Video Super Resolution); the anime upscaler is a setting on Windows"; mode = 0; }
-                else
+                // Windows: in the add-on, the anime upscaler would turn Kodi's Video Super Resolution off for the whole
+                // stream (win_anime_route.h); this route (no pushcore) keeps Kodi's scaler, the anime upscaler is a setting
+                if (pick.model >= 0 && autoAnime) {
+                    pmk::WinAnimeIn wi;
+                    wi.srcW = q->width; wi.srcH = q->height; wi.screenW = m_screenW; wi.screenH = m_screenH;
+                    wi.autoModel = AnimeModelId(pick.model);
+                    why = pmk::PlanWindowsAnime(wi).why;
+                    mode = 0;
+                } else
 #endif
                 if (pick.model >= 0 && autoAnime) {
-                    // Auto: prepared only; the plain route below runs until the picture is measured as drawn
-                    const std::wstring id = pm::AnimeSrModel(pick.model).id;
-                    c.animeAutoModel.assign(id.begin(), id.end());
+                    // Auto: prepared only; the plain route below runs until the picture is measured as drawn (always a
+                    // plain model here: the decoder's AnimeAutoSwitch picks a variant only where the DrawnPolicy allows it)
+                    c.animeAutoModel = pmk::AnimeModelPlain(AnimeModelId(pick.model));
                     c.pmmlRuntime = rt;
                     const AVRational sar0 = st->sample_aspect_ratio.num ? st->sample_aspect_ratio : q->sample_aspect_ratio;
                     const double dar0 = double(q->width) / q->height * (sar0.num > 0 && sar0.den > 0 ? av_q2d(sar0) : 1.0);
@@ -617,7 +622,7 @@ private:
             if (mode == 5) mode = 0;
         }
 #if defined(_WIN32)
-        if (mode == 0) { why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)"; return; }
+        if (mode == 0) { if (why.empty()) why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)"; return; }
 #endif
         if (mode == 0) mode = 3;
         if (mode == 1 || mode == 2) { why = mode == 1 ? "upscaling: Kodi's video scaler (your setting)" : "upscaling: x2 in the add-on (test)"; return; }
@@ -633,6 +638,13 @@ private:
         c.outWidth = ow; c.outHeight = oh;
         why = std::string("upscaling: ") + (mode == 4 ? "FSR1" : "NIS") + " to " + std::to_string(ow) + "x" + std::to_string(oh) +
               (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
+    }
+
+    // pmml's model id of an anime upscaler (PushMpcAnimeSr.h's table)
+    static std::string AnimeModelId(int model)
+    {
+        const std::wstring id = pm::AnimeSrModel(model).id;
+        return std::string(id.begin(), id.end());
     }
 
     // pmml's runtime with the anime models: PMML_RUNTIME, else PushMPC's per-user folder
@@ -980,7 +992,17 @@ private:
         Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz, screen %dx%d", avcodec_get_name(p->codec_id), p->width,
             p->height, bits, m_fps, hz, m_screenW, m_screenH);
         Log(ADDON_LOG_INFO, "engine: pushcore: %s", m_pc->Describe().c_str());
-        Log(ADDON_LOG_INFO, "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi); output %dx%d", m_outW, m_outH);
+        // Auto's anime upscaler on this route: only through pushcore's own upscaler at a fixed size (win_anime_route.h)
+        pmk::WinAnimeIn wi;
+        wi.srcW = p->width; wi.srcH = p->height; wi.screenW = m_screenW; wi.screenH = m_screenH; wi.upscale = up;
+        if (up == 0 && m_screenW > 0 && p->height <= 1080 && (m_screenW > p->width * 11 / 10 || m_screenH > p->height * 11 / 10) && !PmmlRuntime().empty()) {
+            const auto pick = pm::PickAnimeSr(unsigned(p->width), unsigned(p->height), unsigned(std::max(m_screenW, p->width)), unsigned(std::max(m_screenH, p->height)),
+                                              m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
+            if (pick.model >= 0) wi.autoModel = AnimeModelId(pick.model);
+        }
+        wi.pushcore = true; wi.pushcoreSr = m_pc->Upscales();
+        const std::string upWhy = up == 1 ? std::string("upscaling: Kodi's video scaler (your setting)") : pmk::PlanWindowsAnime(wi).why;
+        Log(ADDON_LOG_INFO, "%s; output %dx%d", upWhy.c_str(), m_outW, m_outH);
         Log(ADDON_LOG_INFO, "multiplier: x%d (pushcore, PushMPC's Auto and settings)", m_k);
         return true;
     }
@@ -1032,6 +1054,7 @@ public:
         if (!m_in->Playback()) { Log(ADDON_LOG_INFO, "a probe asked for the add-on's decoder: declined"); return false; }
         m_force8 = m_in->Force8Bit();
         m_cfg = m_in->EngineConfig();
+        m_animeAuto.Arm(m_cfg.animeAutoModel);   // "" (nothing prepared): disarmed
         m_engine = m_in->TakeEngine();
 #if defined(_WIN32)
         m_pc = m_in->TakePushcore();
@@ -1369,8 +1392,9 @@ private:
     }
 
     // ContentDetect on the decoded planes (the cell grid costs ~0.5 ms at 1080p); Auto's anime upscaler follows the measured
-    // class: on once the picture is hand-drawn animation, off again when a later shot is measured as something else
-    // (the class itself needs 2 s of margin to change; the engine is reopened at most once per 30 s)
+    // class through its DrawnPolicy (win_anime_route.h AnimeAutoSwitch): on once the picture is drawn animation (rendered
+    // 3D CG too, never a denoise + sharpen model there), off again when a later shot is measured as something else (the
+    // class itself needs 2 s of margin to change; the engine is reopened at most once per 30 s)
     void MeasureContent(const Planes& pl, int64_t ptsUs, bool disc)
     {
         using namespace pushmpc::content;
@@ -1386,7 +1410,7 @@ private:
             const double t = double(ptsUs) / 1e6;
             if (!m_contentModel) m_contentModel = std::make_unique<ContentModel>([](const std::string& m) { Log(ADDON_LOG_INFO, "%s", m.c_str()); });
             double p, pt;
-            if (m_contentModel->Take(p, pt)) m_content.SetImageEvidence(p, pt);
+            double pc; if (m_contentModel->Take(p, pt, pc)) m_content.SetImageEvidence(p, pt, pc);
             if (!m_contentModel->Failed() && (m_contentModelNext < 0 || t >= m_contentModelNext || t < m_contentModelNext - 5.0)) {
                 m_contentModelNext = t + 1.0;
                 auto in = m_bits > 8
@@ -1400,28 +1424,32 @@ private:
 #endif
         if (!m_content.Push(c, double(ptsUs) / 1e6)) return;
         const State& st = m_content.Current();
-        if (st.cls == m_contentCls) return;
-        m_contentCls = st.cls;
-        Log(ADDON_LOG_INFO, "content: %s (%.0f %%), measured in the picture at %.1f s", ClassName(st.cls), 100.0 * st.confidence, double(ptsUs) / 1e6);
-        if (m_cfg.animeAutoModel.empty() || Pc() || m_cfg.external) return;
-        const bool want = st.cls == kDrawn;
-        const auto now = std::chrono::steady_clock::now();
-        if (want == !m_cfg.animeModel.empty() || (m_animeSwitched && now - m_animeSwitchAt < std::chrono::seconds(30))) return;
-        const pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, want);
+        if (st.cls != m_contentCls || st.cg != m_contentCg) {
+            m_contentCls = st.cls; m_contentCg = st.cg;
+            Log(ADDON_LOG_INFO, "content: %s%s (%.0f %%), measured in the picture at %.1f s", ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "",
+                100.0 * st.confidence, double(ptsUs) / 1e6);
+        }
+        // every measured state goes to the switch (a change held back by its 30 s limit is made by a later one)
+        if (!m_animeAuto.Armed() || Pc() || m_cfg.external || !m_engine) return;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!m_animeAuto.Update(st.cls, st.cg, now)) return;
+        pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, !m_animeAuto.Next().empty());
+        c2.animeModel = m_animeAuto.Next();
         std::string why;
         auto e = pmk::OpenEngine(c2, why);
-        if (!e) { Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: %s", why.c_str()); m_cfg.animeAutoModel.clear(); return; }
+        if (!e) { Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: %s", why.c_str()); m_animeAuto.Disarm(); return; }
         if (e->OutWidth() != m_engine->OutWidth() || e->OutHeight() != m_engine->OutHeight()) {   // never resize mid-stream
             Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: output %dx%d would replace %dx%d", e->OutWidth(), e->OutHeight(), m_engine->OutWidth(), m_engine->OutHeight());
-            m_cfg.animeAutoModel.clear(); return;
+            m_animeAuto.Disarm(); return;
         }
         m_engine = std::move(e); m_cfg = c2;
-        m_animeSwitched = true; m_animeSwitchAt = now;
+        m_animeAuto.Commit(now);
+        const bool want = !c2.animeModel.empty();
         m_upscaled = m_engine->OutWidth() != m_w || m_engine->OutHeight() != m_h;
         m_outW = (m_upscaled ? m_engine->OutWidth() : m_w) * (m_test2x ? 2 : 1);
         m_outH = (m_upscaled ? m_engine->OutHeight() : m_h) * (m_test2x ? 2 : 1);
         m_havePrev = false;
-        Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls));
+        Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s%s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "");
     }
 
     void Setup(int w, int h, int bits)
@@ -1917,8 +1945,8 @@ private:
     double m_contentModelNext = -1;
 #endif
     int m_contentCls = 0;
-    bool m_animeSwitched = false;
-    std::chrono::steady_clock::time_point m_animeSwitchAt{};
+    bool m_contentCg = false;
+    pmk::AnimeAutoSwitch m_animeAuto;   // Auto's anime upscaler: follows the measured class and its DrawnPolicy
     AVCodecContext* m_ctx = nullptr;
     AVFrame* m_frame = nullptr;
     AVFrame* m_sw = nullptr;

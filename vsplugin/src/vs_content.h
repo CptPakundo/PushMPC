@@ -27,7 +27,7 @@
 
 namespace pmvs {
 
-struct StreamMemo { double fps = 0; int cls = 0; };
+struct StreamMemo { double fps = 0; int cls = 0; bool cg = false; };   // cg: drawn, rendered 3D CG
 inline std::mutex& MemoLock() { static std::mutex m; return m; }
 inline std::map<std::string, StreamMemo>& Memo() { static std::map<std::string, StreamMemo> m; return m; }
 inline std::string StreamKey(const VSVideoInfo& vi)
@@ -58,8 +58,9 @@ inline std::string ApplyMeasuredRate(VSVideoInfo& vi, std::string* note = nullpt
 
 class VsContent {
 public:
-    void Init(const std::string& key, const VSVideoInfo& declared, int createdClass)
+    void Init(const std::string& key, const VSVideoInfo& declared, int createdClass, bool createdCg = false)
     {
+        m_createdCg = createdCg;
         m_key = key; m_declared = declared.fpsNum > 0 && declared.fpsDen > 0 ? double(declared.fpsNum) / double(declared.fpsDen) : 0.0;
         m_createdClass = createdClass; m_det.Reset(); m_iv.Reset(); m_t = 0; m_last = -2;
     }
@@ -87,7 +88,7 @@ public:
             {   // the image model: a thumbnail about once a second on its own thread, the latest result into the detector
                 if (!m_model) m_model = std::make_unique<ContentModel>([](const std::string&) {});
                 double p, pt;
-                if (m_model->Take(p, pt)) m_det.SetImageEvidence(p, pt);
+                double pc; if (m_model->Take(p, pt, pc)) m_det.SetImageEvidence(p, pt, pc);
                 if (!m_model->Failed() && (m_modelNext < 0 || m_t >= m_modelNext || m_t < m_modelNext - 5.0)) {
                     m_modelNext = m_t + 1.0;
                     auto in = vf->bytesPerSample == 1
@@ -98,17 +99,18 @@ public:
                 }
             }
 #endif
-            if (m_det.Push(c, m_t) && m_det.Current().cls != m_cls) { m_cls = m_det.Current().cls; changed = true; }
+            if (m_det.Push(c, m_t) && (m_det.Current().cls != m_cls || m_det.Current().cg != m_cg)) { m_cls = m_det.Current().cls; m_cg = m_det.Current().cg; changed = true; }
         }
         m_t += dur;
         if (changed) Publish();
     }
     int Class() const { return m_cls; }
+    bool Cg() const { return m_cg; }
     double Fps() const { return m_iv.fps(); }
 private:
     void Publish()
     {
-        StreamMemo m; m.fps = m_iv.fps(); m.cls = m_cls;
+        StreamMemo m; m.fps = m_iv.fps(); m.cls = m_cls; m.cg = m_cg;
         { std::lock_guard<std::mutex> lk(MemoLock()); Memo()[m_key] = m; }
 #if defined(_WIN32)
         char tmp[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tmp);
@@ -120,8 +122,9 @@ private:
         if (FILE* f = std::fopen(path.c_str(), "w")) {
             // reload = 1 when the running instance was created with another rate or class (pushmpc.lua re-adds the filter)
             const bool rate = m.fps > 1.0 && m_declared > 0 && std::fabs(m.fps - m_declared) / m.fps > 0.05;
-            const bool cls = m.cls != 0 && (m.cls == pushmpc::content::kDrawn) != (m_createdClass == pushmpc::content::kDrawn);   // only what changes Auto
-            std::fprintf(f, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\nreload=%d\n", m.fps, m_declared, m.cls, pushmpc::content::ClassName(m.cls), (rate || cls) ? 1 : 0);
+            const bool cls = m.cls != 0 && ((m.cls == pushmpc::content::kDrawn) != (m_createdClass == pushmpc::content::kDrawn) ||
+                                            (m.cls == pushmpc::content::kDrawn && m.cg != m_createdCg));   // only what changes Auto
+            std::fprintf(f, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=%d\n", m.fps, m_declared, m.cls, pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, (rate || cls) ? 1 : 0);
             std::fclose(f);
         }
     }
@@ -131,6 +134,7 @@ private:
     double m_declared = 0, m_t = 0;
     int64_t m_last = -2;
     int m_cls = 0, m_createdClass = 0;
+    bool m_cg = false, m_createdCg = false;
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
     std::unique_ptr<pushmpc::content::ContentModel> m_model;
     double m_modelNext = -1;

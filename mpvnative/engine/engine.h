@@ -29,9 +29,16 @@ std::string Opt(const Options& o, const char* key, const std::string& def = std:
 
 void Log(const std::string& line);   // PUSHMPC_ENGINE_LOG (a file) when set, else nothing
 
+class ContentTap;   // content_tap.h
+
 class Backend {
 public:
     virtual ~Backend() = default;
+    // ContentDetect (content_tap.h): set by the module before the first Submit (null: not measured). Backends with frames
+    // on the GPU record its cells themselves; frames in host memory are measured by the module. OnContent: the measured
+    // class changed (Submit's thread, before the next Submit).
+    ContentTap* content = nullptr;
+    virtual void OnContent(int cls, bool cg, float conf) { (void)cls; (void)cg; (void)conf; }
     virtual int Submit(const pmeng_image& src, int64_t ptsUs, uint32_t flags) = 0;
     virtual int Peek(pmeng_out_info& info, uint32_t timeoutMs) = 0;
     virtual int Write(const pmeng_image& dst) = 0;

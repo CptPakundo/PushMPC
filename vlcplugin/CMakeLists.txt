@@ -119,9 +119,9 @@ if(TARGET pm_engine_gpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 message(STATUS "PushMPC VLC: zero copy (VA-API dmabuf -> GPU engine) ${PM_ZEROCOPY}")
 
-add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c src/pm_hw.c)
+add_library(pushmpc_plugin SHARED src/pushmpc_vlc.c src/display_hz.c src/engine_pushcore.c src/pm_snap_boot.c src/pm_hw.c src/pm_content.c)
 set_target_properties(pushmpc_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_plugin")
-target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src)
+target_include_directories(pushmpc_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" src "${CMAKE_CURRENT_SOURCE_DIR}/../pushmpc/content-shim/include")
 target_compile_definitions(pushmpc_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc" _FILE_OFFSET_BITS=64 _REENTRANT _THREAD_SAFE)
 if(PM_ALT_ENTRY)
   target_compile_definitions(pushmpc_plugin PRIVATE PM_ALT_ENTRY=${PM_ALT_ENTRY})
@@ -147,6 +147,14 @@ else()
   # without VLC_CORE_LIB (the manylinux2014 release build) libvlccore's symbols stay undefined and resolve from the
   # VLC process at load, as on macOS, so one binary fits every distro's VLC 3.0.x (glibc >= 2.17)
   target_link_libraries(pushmpc_plugin PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# PushMPC's content library (../pushmpc/content-shim: what the picture is; the module loads it at run time from its own
+# folder and runs without it): built here on Linux and macOS (with -DPMML_ORT_INCLUDE=<ONNX Runtime C API headers>: with
+# the image model); on Windows it is built with MSVC next to pm_pushcore.dll (vlc-plugin.yml build-bridge)
+option(PM_CONTENT_LIB "build libpushmpc_content with the module (not on Windows)" ON)
+if(PM_CONTENT_LIB AND NOT WIN32)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pushmpc/content-shim" content-shim)
 endif()
 
 # the zero-copy path without VLC: udmabuf surfaces through the GPU engine, compared with the copy path (CI: lavapipe)

@@ -8,6 +8,7 @@
 #     vsplugin/pushmpc.vpy       the script mpv runs (vsplugin/scripts/pushmpc.vpy)
 #     vsplugin/pushmpc.lua       adds the filter at run time (integrations/mpv/pushmpc.lua)
 #     vsplugin/shaders/          ArtCNN C4F16 / C4F32 fragment shaders (integrations/mpv/make-shaders.py)
+#     vsplugin/pushmpc-content   the image model's helper for plain mpv (PUSHMPC_CONTENT_HELPER, optional)
 #     capture/                   capture mode: pushmpc-capture and pushmpc-capture.sh (PUSHMPC_CAPTURE_BIN, optional)
 #     LICENSE, README.txt
 #   make-tarball.sh <pushmpc_vs.so> <out dir> <arch> <version> [<pushmpc-nvvfx-selftest>]   (run from the repository root)
@@ -29,6 +30,8 @@ if [ -n "${PUSHMPC_VLC_PLUGIN:-}" ] && [ -f "$PUSHMPC_VLC_PLUGIN" ]; then
     # PushMPC's OpenGL output with FSR 1 upscaling (vout=pushmpc_gl), from the same build; the installer sets it up
     glf="$(dirname "$PUSHMPC_VLC_PLUGIN")/libpushmpc_gl_plugin.so"
     if [ -f "$glf" ]; then install -m 755 "$glf" "$d/vlc/libpushmpc_gl_plugin.so"; else echo "make-tarball.sh: no libpushmpc_gl_plugin.so next to the VLC module: VLC keeps its own output" >&2; fi
+    cdl="$(dirname "$PUSHMPC_VLC_PLUGIN")/libpushmpc_content.so"   # ContentDetect + the image model for the VLC module
+    if [ -f "$cdl" ]; then install -m 755 "$cdl" "$d/vlc/libpushmpc_content.so"; else echo "make-tarball.sh: no libpushmpc_content.so next to the VLC module: VLC measures no content" >&2; fi
     if [ -n "${PUSHMPC_VLC_SELFTEST_CLIP:-}" ] && [ -f "$PUSHMPC_VLC_SELFTEST_CLIP" ]; then install -m 644 "$PUSHMPC_VLC_SELFTEST_CLIP" "$d/vlc/pushmpc-selftest.mkv"
     else echo "make-tarball.sh: no PUSHMPC_VLC_SELFTEST_CLIP: VLC's hardware-decoding self-test will be skipped on install" >&2; fi
 fi
@@ -74,6 +77,9 @@ install -m 755 integrations/mpv/mpv-integration.sh "$d/mpv-integration.sh"
 install -m 755 "$so" "$d/vsplugin/pushmpc_vs.so"
 install -m 644 vsplugin/scripts/pushmpc.vpy "$d/vsplugin/pushmpc.vpy"
 install -m 644 integrations/mpv/pushmpc.lua "$d/vsplugin/pushmpc.lua"
+# optional: the image model's helper pushmpc.lua starts for plain mpv (PUSHMPC_CONTENT_HELPER = the pushmpc-content binary,
+# integrations/mpv/content-helper), next to it
+if [ -n "${PUSHMPC_CONTENT_HELPER:-}" ] && [ -f "$PUSHMPC_CONTENT_HELPER" ]; then install -m 755 "$PUSHMPC_CONTENT_HELPER" "$d/vsplugin/pushmpc-content"; fi
 # the ArtCNN upscaling shaders (generated from the pinned ONNX weights; Python 3, stdlib only)
 python3 integrations/mpv/make-shaders.py "$d/vsplugin/shaders"
 install -m 644 LICENSE "$d/LICENSE"

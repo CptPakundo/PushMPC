@@ -19,6 +19,8 @@
 #        [core]     video-filter gains postproc:pushmpc_out (the static-chain slot, then the output stage)
 #        [avcodec]  avcodec-hw=none on Linux to start with (software decoding always keeps PushMPC on)
 #        [pushmpc]  pushmpc-smoother=0 (Auto)
+#   PushMPC's content library (libpushmpc_content.so / .dylib: what the picture is, drawn animation or not, measured in
+#      the frames) is copied next to the plugin when it ships with it (every target; the module runs without it).
 #   macOS: also PushMPC's OpenGL output with FSR 1 upscaling (libpushmpc_macosx_plugin.dylib, [core] vout=pushmpc_macosx,any)
 #      MoltenVK (libMoltenVK.dylib, the GPU engine's Vulkan driver) and the apple engine (libpushmpc_engine_apple.dylib:
 #      VideoToolbox interpolation, tried first) from next to the plugin, then a self-test: VLC.app
@@ -139,6 +141,12 @@ install_one() {
   mkdir -p "$DIR"
   cp -f "$plug" "$DIR/"
   [ "$OS" = Darwin ] && xattr -d com.apple.quarantine "$DIR/$(basename "$plug")" 2>/dev/null || true
+  for x in libpushmpc_content.so libpushmpc_content.dylib; do   # the content library, every target (else no stale copy)
+    if [ -f "$(dirname "$plug")/$x" ]; then
+      [ "$(cd "$(dirname "$plug")" && pwd)" = "$(cd "$DIR" && pwd)" ] || cp -f "$(dirname "$plug")/$x" "$DIR/"
+      [ "$OS" = Darwin ] && xattr -d com.apple.quarantine "$DIR/$x" 2>/dev/null || true
+    else rm -f "$DIR/$x"; fi
+  done
   if [ "$tgt" = macos ]; then   # the FSR output and MoltenVK, when they ship next to the plugin
     for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib libpushmpc_engine_apple.dylib; do
       [ -f "$(dirname "$plug")/$x" ] || continue
@@ -322,7 +330,8 @@ selftest_hw() {
 uninstall_one() {
   tgt="$1"; paths_for "$tgt"
   rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log" \
-        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/libpushmpc_engine_apple.dylib" "$DIR/pushmpc-selftest.y4m"
+        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/libpushmpc_engine_apple.dylib" "$DIR/pushmpc-selftest.y4m" \
+        "$DIR/libpushmpc_content.so" "$DIR/libpushmpc_content.dylib"
   rmdir "$DIR" 2>/dev/null || true
   case "$tgt" in
     native)

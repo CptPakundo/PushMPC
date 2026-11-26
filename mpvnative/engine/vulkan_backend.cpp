@@ -28,6 +28,8 @@
 #include "pme_import.h"
 #include "pme_export.h"
 #include "pme_thumb.h"
+#include "pme_cells.h"
+#include "content_tap.h"
 #include "transitions.h"
 
 namespace pme {
@@ -55,7 +57,8 @@ public:
         for (auto& kv : m_views) vkDestroyImageView(d, kv.second, nullptr);
         for (auto& dp : m_pools) if (dp.pool) vkDestroyDescriptorPool(d, dp.pool, nullptr);
         for (auto& tb : m_thumbRing) m_ctx->Destroy(tb.buf);
-        for (Pipe* p : { &m_import, &m_export }) {
+        for (auto& cb : m_cellRing) m_ctx->Destroy(cb.buf);
+        for (Pipe* p : { &m_import, &m_export, &m_cellPipe }) {
             if (p->p) vkDestroyPipeline(d, p->p, nullptr);
             if (p->pl) vkDestroyPipelineLayout(d, p->pl, nullptr);
             if (p->dsl) vkDestroyDescriptorSetLayout(d, p->dsl, nullptr);
@@ -70,6 +73,7 @@ public:
         }
         if (!dev.vk_device || !dev.vk_get_instance_proc_addr) { why = "no Vulkan device"; return false; }
         m_fmt = st.fmt; m_w = int(st.width); m_h = int(st.height); m_bits = Ten(st.fmt) ? 10 : 8;
+        m_limited = st.range != 2;
         ExternalDevice ext;
         ext.instance = static_cast<VkInstance>(dev.vk_instance);
         ext.phys = static_cast<VkPhysicalDevice>(dev.vk_physical_device);
@@ -153,9 +157,10 @@ public:
         return true;
     }
 
-    int Submit(const pmeng_image& src, int64_t, uint32_t flags) override
+    int Submit(const pmeng_image& src, int64_t ptsUs, uint32_t flags) override
     {
         if (!m_q.empty()) return PMENG_BUSY;
+        CollectCells(false);
         if (src.mem != PMENG_MEM_VULKAN || src.fmt != m_fmt) { err = "Vulkan engine: unexpected input memory / format"; return PMENG_ERROR; }
         const bool two = TwoPlane(m_fmt);
         const uint32_t np = two ? 2 : 3;
@@ -167,6 +172,11 @@ public:
             if (!(in[p] = View(src.vk[p], PlaneFormat(p, two), VK_IMAGE_USAGE_SAMPLED_BIT))) return PMENG_ERROR;
         ThumbBuf* thumb = m_transitions ? NextThumb() : nullptr;
         if (m_transitions && !thumb) return PMENG_ERROR;
+        // ContentDetect: the cell grid of this frame (+ the image model's thumbnail about once a second), read back a few
+        // frames later (~0.5 MB a frame at 16:9); never the frame
+        const double tSec = double(ptsUs) / 1e6;
+        CellBuf* cells = content ? NextCells() : nullptr;
+        const bool clip = cells && content->WantClip(tSec);
         VkDescriptorSet set = VK_NULL_HANDLE;
         Pool* pool = NextPool();
         if (!pool) return PMENG_ERROR;
@@ -190,6 +200,7 @@ public:
             vkCmdPushConstants(cb, m_import.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
             vkCmdDispatch(cb, uint32_t((t.w + 15) / 16), uint32_t((t.h + 7) / 8), 1);
             if (thumb && !RecordThumb(cb, *pool, t, *thumb, e)) return false;
+            if (cells && !RecordCells(cb, *pool, t, *cells, clip, e)) return false;
             return true;
         };
         uint64_t itk = 0;
@@ -197,6 +208,7 @@ public:
         if (slot < 0) return PMENG_ERROR;
         pool->ticket = itk;
         if (thumb) { thumb->src = int64_t(m_seq); thumb->ticket = itk; }
+        if (cells) { cells->ticket = itk; cells->t = tSec; cells->clip = clip; cells->disc = (flags & PMENG_SUBMIT_DISCONTINUITY) != 0; cells->seq = m_cellSeq++; cells->busy = true; }
         m_lastTicket = itk;
         if (m_hostSync && !m_eng.Wait(itk, err)) return PMENG_ERROR;   // diagnostics: PUSHMPC_VK_SYNC=1
 
@@ -322,6 +334,69 @@ private:
     struct ThumbBuf { Buffer buf; int64_t src = -1; uint64_t ticket = 0; int tw = 0, th = 0, rowWords = 0; };
 
     struct PairInfo { int id = -1; int cut = 0; bool pending = false; };
+    struct CellBuf { Buffer buf; uint64_t ticket = 0, seq = 0; double t = 0; bool busy = false, clip = false, disc = false; };
+
+    // ContentDetect's readback ring: the oldest finished entries go to the tap in recording order
+    bool CollectOne(bool wait)
+    {
+        CellBuf* o = nullptr;
+        for (auto& c : m_cellRing) if (c.busy && (!o || c.seq < o->seq)) o = &c;
+        if (!o) return false;
+        if (!wait && !m_eng.Done(o->ticket)) return false;
+        std::string e;
+        o->busy = false;
+        if (!m_eng.Wait(o->ticket, e)) { content->Discontinuity(); return true; }
+        const auto* words = static_cast<const uint32_t*>(o->buf.map);
+        const int ch = pushmpc::content::CellsHeight(m_w, m_h), cn = pushmpc::content::kCellsW * ch;
+        if (o->clip) content->OfferClip(pushmpc::content::ClipInputFromPacked(words + cn, 224, m_h >= 720, m_limited), o->t);
+        if (o->disc) content->Discontinuity();
+        content->Push(pushmpc::content::CellsFromPacked(words, pushmpc::content::kCellsW, pushmpc::content::kCellsW, ch, m_limited), o->t, false);
+        return true;
+    }
+    void CollectCells(bool wait) { if (content) while (CollectOne(wait)) {} }
+    CellBuf* NextCells()
+    {
+        CellBuf& c = m_cellRing[m_nextCell];
+        while (c.busy && CollectOne(true)) {}   // the ring is full: read the oldest now (long finished)
+        m_nextCell = (m_nextCell + 1) % m_cellRing.size();
+        if (!c.buf.buf) {
+            const VkDeviceSize words = VkDeviceSize(pushmpc::content::kCellsW) * VkDeviceSize(pushmpc::content::CellsHeight(m_w, m_h)) + 224 * 224;
+            std::string e;
+            if (!m_ctx->CreateBuffer(words * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, c.buf, e)) { Log("vulkan: content not measured (" + e + ")"); content = nullptr; return nullptr; }
+        }
+        return &c;
+    }
+    bool RecordCells(VkCommandBuffer cb, Pool& pool, const SlotTarget& t, const CellBuf& c, bool clip, std::string& e)
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (!Alloc(pool, m_cellPipe, set, e)) return false;
+        VkDescriptorImageInfo ii[3] = { { m_sampler, t.yv, VK_IMAGE_LAYOUT_GENERAL }, { m_sampler, t.uv, VK_IMAGE_LAYOUT_GENERAL }, { m_sampler, t.vv, VK_IMAGE_LAYOUT_GENERAL } };
+        VkDescriptorBufferInfo bi{ c.buf.buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w[4] = {};
+        for (int i = 0; i < 4; ++i) { w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = set; w[i].dstBinding = uint32_t(i); w[i].descriptorCount = 1; }
+        for (int i = 0; i < 3; ++i) { w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[i].pImageInfo = &ii[i]; }
+        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[3].pBufferInfo = &bi;
+        vkUpdateDescriptorSets(m_ctx->Dev(), 4, w, 0, nullptr);
+        const uint32_t cw = uint32_t(pushmpc::content::kCellsW), ch = uint32_t(pushmpc::content::CellsHeight(m_w, m_h)), side = uint32_t(std::min(m_w, m_h));
+        struct { uint32_t w, h, cw, ch, mode, base, side, x0, y0; float kRaw, maxCode; } pc{ uint32_t(m_w), uint32_t(m_h), cw, ch, 0u, 0u, side,
+            uint32_t((m_w - int(side)) / 2), uint32_t((m_h - int(side)) / 2), m_bits > 8 ? 65535.f : 255.f, float((1 << m_bits) - 1) };
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_cellPipe.p);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_cellPipe.pl, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, m_cellPipe.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cb, (cw * ch + 63) / 64, 1, 1);
+        if (clip) {
+            pc.mode = 1; pc.base = cw * ch;
+            vkCmdPushConstants(cb, m_cellPipe.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cb, (224 * 224 + 63) / 64, 1, 1);
+        }
+        VkMemoryBarrier hb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
+        return true;
+    }
 
     // the next thumbnail buffer of the ring (its last use finished; sized at the first use)
     ThumbBuf* NextThumb()
@@ -635,15 +710,16 @@ private:
         if (!MakePipe(m_import, kSpv_pme_import, sizeof(kSpv_pme_import), { CIS, CIS, CIS, SI, SI, SI }, 32, e)) return false;
         if (!MakePipe(m_export, kSpv_pme_export, sizeof(kSpv_pme_export), { SB, SI, SI, SI }, 52, e)) return false;
         if (!MakePipe(m_thumbPipe, kSpv_pme_thumb, sizeof(kSpv_pme_thumb), { CIS, SB }, 20, e)) return false;
+        if (!MakePipe(m_cellPipe, kSpv_pme_cells, sizeof(kSpv_pme_cells), { CIS, CIS, CIS, SB }, 44, e)) return false;
         VkSamplerCreateInfo s{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         s.magFilter = s.minFilter = VK_FILTER_NEAREST; s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         s.addressModeU = s.addressModeV = s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         if (vkCreateSampler(m_ctx->Dev(), &s, nullptr, &m_sampler) != VK_SUCCESS) { e = "vkCreateSampler failed"; return false; }
         m_pools.resize(24);
         for (auto& p : m_pools) {
-            const VkDescriptorPoolSize sizes[] = { { CIS, 6 }, { SI, 6 }, { SB, 2 } };
+            const VkDescriptorPoolSize sizes[] = { { CIS, 9 }, { SI, 6 }, { SB, 3 } };   // + ContentDetect's cells pass
             VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-            dpi.maxSets = 2; dpi.poolSizeCount = 3; dpi.pPoolSizes = sizes;
+            dpi.maxSets = 3; dpi.poolSizeCount = 3; dpi.pPoolSizes = sizes;
             if (vkCreateDescriptorPool(m_ctx->Dev(), &dpi, nullptr, &p.pool) != VK_SUCCESS) { e = "vkCreateDescriptorPool failed"; return false; }
         }
         return true;
@@ -694,7 +770,12 @@ private:
     std::map<int64_t, Thumb> m_thumbs;
     uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_lastTicket = 0;
     std::deque<Item> m_q;
-    Pipe m_import, m_export, m_thumbPipe;
+    Pipe m_import, m_export, m_thumbPipe, m_cellPipe;
+    // ContentDetect's GPU tap (content_tap.h): the cells (+ thumbnail) of each imported frame, read back later
+    std::array<CellBuf, 6> m_cellRing;
+    size_t m_nextCell = 0;
+    uint64_t m_cellSeq = 0;
+    bool m_limited = true;
     VkSampler m_sampler = VK_NULL_HANDLE;
     std::vector<Pool> m_pools;
     size_t m_nextPool = 0;

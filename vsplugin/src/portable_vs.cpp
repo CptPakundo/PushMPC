@@ -363,7 +363,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     }
     d->node = node;
     d->inVi = *vi;
-    d->content.Init(cdKey, *vi, cdMemo.cls);
+    d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = std::max(1, pk.k);
     d->vi = *vi;
     d->vi.width = d->be.engine.OutWidth(); d->vi.height = d->be.engine.OutHeight();
@@ -451,7 +451,7 @@ void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, V
     auto* d = new PInst();
     d->node = node;
     d->inVi = *vi;
-    d->content.Init(cdKey, *vi, cdMemo.cls);
+    d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = pk.k;
     d->vi = *vi;
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, d->k);

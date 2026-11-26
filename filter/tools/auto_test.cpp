@@ -475,6 +475,21 @@ int main()
             Source lowRate = bd; lowRate.bppEq = 0.02;
             const Choice l = Decide({}, lowRate, d, {}, rdna3);
             check(l.animeModel == 1 || l.animeModel == 4, L"anime SR: a low-bitrate source gets the denoise + sharpen variant", l.animeSrNote);
+            {   // drawn + rendered 3D CG (ContentDetect's cg flag): the plain anime model even at a low bitrate, hold repair on,
+                // sign hold / line art / the anime deband preset off (DrawnPolicy kPolicyDrawnCg)
+                Source cg = lowRate; cg.contentCg = true;
+                const Choice q = Decide({}, cg, d, {}, rdna3);
+                check(q.srMethod == Upscaler::Anime && (q.animeModel == 0 || q.animeModel == 3), L"drawn CG: the plain anime model at a low bitrate (never _DS)", q.animeSrNote);
+                check(q.animation && q.drawnCg && (q.holdFlags & 6u) == 0, L"drawn CG: held drawings re-timed, no line art, no sign hold", q.animNote);
+                Source cg8 = cg; cg8.bppEq = 0.3; cg8.tenBit = false; cg8.hdr = false;
+                Source hd8 = cg8; hd8.contentCg = false;
+                const Choice r1 = Decide({}, cg8, d, {}, rdna3), r2 = Decide({}, hd8, d, {}, rdna3);
+                check(r1.debandStrength != 3 && r2.debandStrength == 3, L"drawn CG: the normal deband rule, hand-drawn the anime preset", r1.debandNote + L" | " + r2.debandNote);
+                check((r2.holdFlags & 6u) == 6u && !r2.drawnCg, L"hand-drawn: line art and sign hold on", r2.animNote);
+                Source liveCg = live; liveCg.contentCg = true;   // a stale flag on non-drawn content changes nothing
+                const Choice r3 = Decide({}, liveCg, d, {}, rdna3);
+                check(!r3.animation && r3.srMethod != Upscaler::Anime && (r3.holdFlags & 6u) == 0, L"not drawn: no drawn treatment whatever the CG flag");
+            }
             Costs learned; learned.animeSrLearned[3] = 40.0; learned.animeSrLearned[0] = 40.0;   // measured slow on this card
             const Choice m = Decide({}, bd, d, learned, rdna3);
             check(m.animeModel != 3 && m.animeModel != 0, L"anime SR: this card's measurement replaces the prior", m.animeSrNote);

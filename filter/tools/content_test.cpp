@@ -106,6 +106,43 @@ int main()
         Check(d.Current().cls == kDrawn && d.Current().imageEvidence, "a steady drawn image evidence decides drawn", std::to_string(d.Current().logOdds));
         ContentDetector e; for (int i = 0; i < 20; ++i) { const double t = 1.0 + 0.5 * i; e.SetImageEvidence(0.01, t); e.Classify(x, t, 0); }
         Check(e.Current().cls == kOther, "a steady not-drawn image evidence decides not drawn", std::to_string(e.Current().logOdds));
+        // 2c. rendered 3D CG among the drawn looks: the prompts' own embeddings, the CG tracker, the policy
+        const double ch = ImageCgProbability(clip::kCgPrompt[0]), cr = ImageCgProbability(clip::kCgPrompt[clip::kCgPromptsHand]);
+        Check(ch < 0.4 && cr > 0.6, "image model: a hand-drawn prompt's embedding reads as hand-drawn, a rendered prompt's as rendered CG", std::to_string(ch) + " / " + std::to_string(cr));
+        ContentDetector g; double t = 1.0;
+        for (int i = 0; i < 40; ++i, t += 0.5) { g.SetImageEvidence(0.995, t, 0.95); g.Classify(x, t, 0); }
+        Check(g.Current().cls == kDrawn && g.Current().cg, "drawn with steady rendered-CG evidence: drawn, CG flag on", std::to_string(g.Current().cgLogOdds));
+        const DrawnPolicy& pc = PolicyFor(g.Current().cls, g.Current().cg);
+        Check(pc.holdRepair && pc.animeUpscaler && !pc.animeUpscalerDs && !pc.signHold && !pc.lineArt && !pc.animeDeband,
+              "drawn CG policy: hold repair and the plain anime upscaler on; _DS, sign hold, line art and the anime deband preset off");
+        for (int i = 0; i < 40; ++i, t += 0.5) { g.SetImageEvidence(0.995, t, 0.05); g.Classify(x, t, 0); }
+        Check(g.Current().cls == kDrawn && !g.Current().cg, "the CG flag turns off with steady hand-drawn evidence", std::to_string(g.Current().cgLogOdds));
+        const DrawnPolicy& ph = PolicyFor(kDrawn, false);
+        Check(ph.holdRepair && ph.animeUpscaler && ph.animeUpscalerDs && ph.signHold && ph.lineArt && ph.animeDeband, "hand-drawn policy: everything on");
+        ContentDetector k; for (int i = 0; i < 30; ++i, t += 0.5) { k.SetImageEvidence(0.995, t, i < 26 ? 0.3 : 0.9); k.Classify(x, t, 0); }
+        const float before = k.Current().cgLogOdds; const double kt = t - 0.5;   // one keyframe repeated (the model runs about once a second)
+        for (int i = 0; i < 4; ++i, t += 0.5) { k.SetImageEvidence(0.995, kt, 0.9); k.Classify(x, t, 0); }
+        Check(k.Current().cls == kDrawn && std::fabs(k.Current().cgLogOdds - before) < 1e-6f, "a repeated keyframe adds no new CG evidence", std::to_string(before) + " -> " + std::to_string(k.Current().cgLogOdds));
+        for (int i = 0; i < 150; ++i, t += 0.5) { g.SetImageEvidence(0.01, t, 0.95); g.Classify(x, t, 0); }
+        Check(g.Current().cls == kOther && !g.Current().cg && !PolicyFor(g.Current().cls, true).holdRepair, "not drawn: no CG flag, nothing of the drawn treatment (realistic CG stays not drawn)", std::to_string(g.Current().cls) + " " + std::to_string(g.Current().logOdds));
+        // the GPU taps' packed words give the same cells and thumbnail as the planes (P010-like 16-bit and 8-bit)
+        {
+            const int w = 1280, h = 720;
+            std::mt19937 rng(5);
+            std::vector<uint8_t> y8(size_t(w) * h), uv8(size_t(w) * h / 2);
+            for (auto& v : y8) v = uint8_t(16 + rng() % 220); for (auto& v : uv8) v = uint8_t(16 + rng() % 225);
+            const Cells a = CellsFromYuv(y8.data(), w, uv8.data(), static_cast<const uint8_t*>(nullptr), w, w, h, 8, true);
+            const auto pw = PackedCellsRef(y8.data(), w, uv8.data(), static_cast<const uint8_t*>(nullptr), w, w, h, 8);
+            const Cells b = CellsFromPacked(pw.data(), kCellsW, kCellsW, CellsHeight(w, h), true);
+            double dy = 0, dc = 0;
+            for (size_t i = 0; i < a.y.size(); ++i) { dy = std::max(dy, double(std::fabs(a.y[i] - b.y[i]))); dc = std::max(dc, double(std::fabs(a.cb[i] - b.cb[i]) + std::fabs(a.cr[i] - b.cr[i]))); }
+            Check(a.ok() && b.ok() && a.h == b.h && dy < 0.01 && dc < 1e-3, "GPU tap: packed cells = CellsFromYuv (8-bit)", std::to_string(dy) + " / " + std::to_string(dc));
+            const auto ci = ClipInput(y8.data(), w, uv8.data(), static_cast<const uint8_t*>(nullptr), w, w, h, 8, true);
+            const auto pc2 = PackedClipRef(y8.data(), w, uv8.data(), static_cast<const uint8_t*>(nullptr), w, w, h, 8);
+            const auto cj = ClipInputFromPacked(pc2.data(), 224, h >= 720, true);
+            double dm = 0; for (size_t i = 0; i < ci.size(); ++i) dm = std::max(dm, double(std::fabs(ci[i] - cj[i])));
+            Check(cj.size() == ci.size() && dm < 0.01, "GPU tap: packed thumbnail = ClipInput", std::to_string(dm));
+        }
     }
     {   // 3. interlacing and frame interval
         const int w = 720, h = 480;

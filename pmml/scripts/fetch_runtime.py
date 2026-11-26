@@ -155,7 +155,7 @@ def soname_links(dest: Path, files: list[str]) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pin", required=True)
-    ap.add_argument("--platform", required=True, help="win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64")
+    ap.add_argument("--platform", required=True, help="win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64, osx-x64")
     ap.add_argument("--out", required=True)
     ap.add_argument("--cache")
     ap.add_argument("--flavors", default="core")
@@ -183,8 +183,15 @@ def main() -> int:
             print(f"skip    ort/{flavor}: no {plat} build")
             continue
         dest = out / "ort" / flavor
+        version, alg = entry["version"], "sha256"
         if isinstance(spec, dict):
-            arc, digest = download(spec["url"], spec.get("sha256"), cache, a.allow_unpinned)
+            # a platform with its own package: its own version (osx-x64: the last x86_64 macOS build), its own hash
+            # (sha512 when that is what nuget.org publishes for the package) and size
+            version = spec.get("version", version)
+            alg = "sha512" if spec.get("sha512") else "sha256"
+            arc, digest = download(spec["url"], spec.get(alg), cache, a.allow_unpinned, alg)
+            if spec.get("size") and arc.stat().st_size != spec["size"]:
+                raise SystemExit(f"::error::{arc.name}: {arc.stat().st_size} bytes, the pin says {spec['size']}")
             pattern = [spec["extract"]]
         else:
             arc, digest = download(entry["url"], entry.get("sha256"), cache, a.allow_unpinned)
@@ -213,8 +220,8 @@ def main() -> int:
             licence_files(rarc, dest)
             if a.headers:
                 extract(rarc, ["include/*.h"], dest / "include")
-        record["ort"][flavor] = {"version": entry["version"], "sha256": digest, "files": files}
-        print(f"ok      ort/{flavor} {entry['version']}: {', '.join(files)}")
+        record["ort"][flavor] = {"version": version, alg: digest, "files": files}
+        print(f"ok      ort/{flavor} {version}: {', '.join(files)}")
 
     for ep in [e for e in a.eps.split(",") if e]:
         entry = pin["eps"].get(ep)

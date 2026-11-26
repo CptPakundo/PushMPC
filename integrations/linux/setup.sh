@@ -17,7 +17,8 @@
 #                     fetch_runtime.py and ml-runtime-pin.json (official sources, SHA-256 checked), PushFlow's models from
 #                     PushFPS's release (pinned), pmml's graphs from this download, into .../pushmpc/pmml (default on;
 #                     --no-pmml declines it; needs python3)
-#   macOS             Homebrew's pushmpc-setup (mpv, IINA) and the VLC module
+#   macOS             Homebrew's pushmpc-setup (mpv, IINA) and the VLC module; the content model for IINA's bridge with
+#                     its ONNX Runtime (Apple silicon or Intel, pinned), into ~/Library/Application Support/PushMPC/pmml
 #   capture/          capture mode (pushmpc-capture) for players with no other route here: Flathub Celluloid, Stremio,
 #                     Totem, Clapper, Dragon, Snap Plex (menu entries "<Player> with PushMPC"); browsers on request
 #                     (sh ~/.local/share/pushmpc/capture/pushmpc-capture.sh enable firefox)
@@ -26,14 +27,15 @@
 #   sh setup.sh uninstall  [--keep-flatpak-mpv]
 #   sh setup.sh plan       the engine Auto starts with, per player route (no change)
 #   sh setup.sh status
-#   sh setup.sh pmml       only the PushFlow runtime (the same step as in install; uninstall removes it)
+#   sh setup.sh pmml       only the PushFlow runtime (the same step as in install; uninstall removes it); on macOS the
+#                          content model with its ONNX Runtime
 # Nothing is asked unless a download needs your yes: the Flathub mpv (Ubuntu / Debian mpv cannot run VapourSynth) and
 # NVIDIA's Video Effects (NVIDIA's licence). Both are offered once in a terminal; --yes accepts both ahead, --flatpak /
 # --nvidia-vfx answer each one. Without a terminal neither is downloaded.
 # What it changes is recorded in ${XDG_DATA_HOME:-~/.local/share}/pushmpc (setup-state, auto-plan.txt) and undone by
 # uninstall. Tests: PUSHMPC_TEST_GPU="<vendor hex>:<device hex>:<name>" stands in for the graphics card, PUSHMPC_TEST_VULKAN
 # for the Vulkan device name (empty: none), PUSHMPC_TEST_NVIDIA_DRIVER=1 for the proprietary driver;
-# PUSHMPC_TEST_UNAME=Darwin|Linux for the OS.
+# PUSHMPC_TEST_UNAME=Darwin|Linux for the OS, PUSHMPC_TEST_MAC_ARCH=arm64|x86_64 for the Mac's architecture.
 set -u
 
 action=install
@@ -321,7 +323,13 @@ do_content_model() {
     dest=$pm/pmml/content-model
     if [ "$dry" = 1 ]; then say "  would: fetch the pinned content model (CLIP image encoder, MIT) into $dest"; return 0; fi
     mkdir -p "$dest"
-    "$py" -I - "$here/pmml/content-model-pin.json" "$dest" <<'PY' | sed 's/^/  /'
+    fetch_content_model "$py" "$dest"
+    say "content model (animation detection): files in $dest"
+}
+# the content model's files by content-model-pin.json into $2 (python3 $1), each checked by size and SHA-256; a file
+# already there with the right hash is kept
+fetch_content_model() {
+    "$1" -I - "$here/pmml/content-model-pin.json" "$2" <<'PY' | sed 's/^/  /'
 import hashlib, json, os, sys, urllib.request
 pin, dest = sys.argv[1], sys.argv[2]
 bad = 0
@@ -340,7 +348,55 @@ for f in json.load(open(pin, encoding="utf-8"))["files"]:
     print(f"ok {f['name']} ({f['licence']})")
 sys.exit(1 if bad else 0)
 PY
-    say "content model (animation detection): files in $dest"
+}
+# macOS: the content model for IINA and the other in-process routes (pushmpc/content_model.h: CoreML, then the CPU),
+# with the ONNX Runtime pmml loads it through (ml-runtime-pin.json: osx-arm64 on Apple silicon, osx-x64 on Intel), into
+# ~/Library/Application Support/PushMPC/pmml: ort/core/libonnxruntime.dylib and content-model/. Without them the
+# hand-built cues decide alone. The download carries fetch_runtime.py and both pins in pmml/.
+macrt="$HOME/Library/Application Support/PushMPC/pmml"
+mac_python() {   # a python3 that runs without asking: /usr/bin/python3 is only a stub until the Command Line Tools are in
+    for p in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+        c=$(command -v "$p" 2>/dev/null) || continue
+        if [ "$c" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+        echo "$c"; return 0
+    done
+    return 1
+}
+do_mac_ml() {
+    [ "$os" = Darwin ] || return 0
+    for need in pmml/fetch_runtime.py pmml/ml-runtime-pin.json pmml/content-model-pin.json; do
+        [ -f "$here/$need" ] || { say "image model (animation detection): this download has no $need: not installed (the hand-built cues decide)"; return 0; }
+    done
+    # the Mac's own architecture, also when this shell runs under Rosetta (IINA runs natively)
+    march=${PUSHMPC_TEST_MAC_ARCH:-$(uname -m)}
+    [ -z "${PUSHMPC_TEST_MAC_ARCH:-}" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] && march=arm64
+    case $march in
+        arm64) plat=osx-arm64 ;;
+        x86_64) plat=osx-x64 ;;
+        *) say "image model (animation detection): no ONNX Runtime for $march: not installed"; return 0 ;;
+    esac
+    say "image model (animation detection) for IINA: ONNX Runtime ($plat) and the content model (downloads of about 300 MB, checked by their pinned hashes)"
+    if [ "$dry" = 1 ]; then say "  would: python3 fetch_runtime.py --platform $plat --flavors core --out $macrt, and the content model into $macrt/content-model"; return 0; fi
+    py=$(mac_python) || { say "  needs python3 for the checked fetch (Homebrew's, or Apple's after xcode-select --install): not installed"; return 0; }
+    mkdir -p "$macrt/content-model" || return 0
+    fetch_content_model "$py" "$macrt/content-model"
+    if [ ! -f "$macrt/content-model/vision_model_fp16.onnx" ]; then say "  the content model was not installed: the hand-built cues decide"; return 0; fi
+    record mac-ml
+    # ONNX Runtime: kept when the installed one is the pinned version for this Mac
+    have_rt=$("$py" -I -c 'import json, sys; f = json.load(open(sys.argv[1])); print(f["platform"], f["ort"]["core"]["version"])' "$macrt/fetched.json" 2>/dev/null)
+    want_rt=$("$py" -I -c 'import json, sys; c = json.load(open(sys.argv[1]))["onnxruntime"]["core"]; s = c["platforms"].get(sys.argv[2]); print(sys.argv[2], s.get("version", c["version"]) if isinstance(s, dict) else c["version"])' "$here/pmml/ml-runtime-pin.json" "$plat" 2>/dev/null)
+    if [ -n "$have_rt" ] && [ "$have_rt" = "$want_rt" ] && [ -f "$macrt/ort/core/libonnxruntime.dylib" ]; then
+        say "  ONNX Runtime $want_rt is already installed; files in $macrt"; return 0
+    fi
+    dl="$macrt.download"; rm -rf "$macrt.part"
+    out=$("$py" -I "$here/pmml/fetch_runtime.py" --pin "$here/pmml/ml-runtime-pin.json" --platform "$plat" --out "$macrt.part" --cache "$dl" --flavors core 2>&1); rc=$?
+    printf '%s\n' "$out" | grep -E '^(ok|skip|::error)' | sed 's/^/  /'
+    if [ "$rc" != 0 ] || [ ! -f "$macrt.part/ort/core/libonnxruntime.dylib" ]; then
+        say "  ONNX Runtime was not installed: the hand-built cues decide"; rm -rf "$macrt.part" "$dl"; return 0
+    fi
+    rm -rf "$macrt/ort"; mv "$macrt.part/ort" "$macrt/ort"; mv "$macrt.part/fetched.json" "$macrt/fetched.json"
+    rm -rf "$macrt.part" "$dl"
+    say "  installed in $macrt (IINA's bridge finds it there)"
 }
 do_pmml() {
     [ "$os" = Darwin ] && return 0
@@ -404,6 +460,8 @@ PY
     [ -f "$here/pmml/pmml_cli" ] && install -m 755 "$here/pmml/pmml_cli" "$pm/pmml.part/pmml_cli"
     # keep the anime upscalers' files (do_anime) across a runtime refresh
     [ -d "$pm/pmml/graphs/anime-sr" ] && { mkdir -p "$pm/pmml.part/graphs/anime-sr"; cp -R "$pm/pmml/graphs/anime-sr/." "$pm/pmml.part/graphs/anime-sr/"; }
+    # and the content model (do_content_model, which runs before this step)
+    [ -d "$pm/pmml/content-model" ] && cp -R "$pm/pmml/content-model" "$pm/pmml.part/content-model"
     rm -rf "$pm/pmml" "$dl"; mv "$pm/pmml.part" "$pm/pmml"
     record pmml
     say "  PushFlow runtime installed in $pm/pmml (the mpv route's ml backend finds it there)"
@@ -539,7 +597,7 @@ do_mac() {
 # ------------------------------------------------------------------------------------------------ actions
 case $action in
     plan) make_plan; show_plan; list_players ;;
-    pmml) make_plan; do_pmml; [ "$dry" = 1 ] || { mkdir -p "$pm"; [ "$here/setup.sh" = "$pm/setup.sh" ] || cp "$here/setup.sh" "$pm/setup.sh"; } ;;
+    pmml) make_plan; do_pmml; do_mac_ml; [ "$dry" = 1 ] || { mkdir -p "$pm"; [ "$here/setup.sh" = "$pm/setup.sh" ] || cp "$here/setup.sh" "$pm/setup.sh"; } ;;
     status)
         make_plan; show_plan; list_players
         [ -f "$sstate" ] && { say "Setup's changes ($sstate):"; sed 's/^/  /' "$sstate"; }
@@ -548,7 +606,7 @@ case $action in
     install)
         say "PushMPC Setup ($os)"
         make_plan; show_plan; list_players; say ''
-        if [ "$os" = Darwin ]; then do_mac
+        if [ "$os" = Darwin ]; then do_mac; do_mac_ml
         else
             [ -f "$here/install.sh" ] || { echo "setup.sh: install.sh is missing (run setup.sh from the unpacked PushMPC folder)" >&2; exit 1; }
             do_native
@@ -584,6 +642,10 @@ case $action in
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
+        if [ "$dry" = 0 ] && recorded mac-ml; then
+            rm -rf "$macrt" "$macrt.part" "$macrt.download"; rmdir "$HOME/Library/Application Support/PushMPC" 2>/dev/null
+            say "Content model and its ONNX Runtime removed"
+        fi
         if [ "$dry" = 0 ] && recorded capture; then
             [ -f "$pm/capture/pushmpc-capture.sh" ] && sh "$pm/capture/pushmpc-capture.sh" stop >/dev/null 2>&1
             [ -f "$pm/capture/pushmpc-capture.sh" ] && sh "$pm/capture/pushmpc-capture.sh" disable --all >/dev/null 2>&1

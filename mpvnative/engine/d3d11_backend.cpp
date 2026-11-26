@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <tuple>
 #include <format>
@@ -26,6 +27,7 @@
 #include "autopick.h"
 #include "engine.h"
 #include "pushmpc/pushcore_abi.h"
+#include "d3d11_content.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -301,7 +303,8 @@ public:
         const int displayHdr = Opt(o, "display_hdr").empty() ? -1 : std::atoi(Opt(o, "display_hdr").c_str());
         m_disp = pmvs::ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdr);
         m_choice = pm::Decide(pmvs::WithToneMapBy(s, true), m_src, m_disp, costs, g);   // pushcore tone-maps for an SDR display (displayHdr 0)
-        m_settings = s;
+        m_settings = s; m_costs = costs; m_gpu = g;
+        m_limited = col[0] != 2;
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);
         // tests: a fixed multiplier whatever Auto says
@@ -329,11 +332,31 @@ public:
         return true;
     }
 
+    // ContentDetect's class (measured on the frames, content_tap.h): Auto decides again with it at the next submit
+    void OnContent(int cls, bool cg, float conf) override { m_cdCls = cls; m_cdCg = cg; m_cdConf = conf; m_cdPending = true; }
+
     int Submit(const pmeng_image& src, int64_t ptsUs, uint32_t flags) override
     {
         Warm& w = W();
         std::lock_guard<std::mutex> lk(w.lock);
         if (src.mem != PMENG_MEM_D3D11 || !src.d3d11_texture) { err = "pushcore: expected a D3D11 texture"; return PMENG_ERROR; }
+        if (m_cdPending && m_pending.empty() && (m_cdApplied == 0 || GetTickCount64() - m_cdApplied >= kRedecideMs)) {
+            // a measured class change: Auto again with it; a different core setting (animation, its extras, the anime
+            // upscaler) is applied warm (setSettings + reload), at most once per kRedecideMs, never with outputs out
+            m_cdPending = false;
+            m_src.contentClass = m_cdCls; m_src.contentConf = m_cdConf; m_src.contentCg = m_cdCg;
+            const pm::Choice c = pm::Decide(pmvs::WithToneMapBy(m_settings, true), m_src, m_disp, m_costs, m_gpu);
+            PushCoreSettings ps = pmvs::ToCore(m_settings, c, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, nullptr);
+            if (m_forceK) ps.multiplier = uint32_t(m_forceK);
+            if (std::memcmp(&ps, &m_ps, sizeof(ps)) != 0 && c.outW == m_choice.outW && c.outH == m_choice.outH) {
+                const PushCoreSettings old = m_ps; const pm::Choice oldC = m_choice;
+                m_ps = ps; m_choice = c; m_cdApplied = GetTickCount64();
+                std::string why;
+                if (Acquire(W().dllPath.substr(0, W().dllPath.find_last_of(L'\\')), why))
+                    Log(std::format("d3d11: content {} -> Auto again: animation {}, x{}", m_cdCls, c.animation ? (c.drawnCg ? "on (rendered CG)" : "on") : "off", c.multiplier));
+                else { Log("d3d11: content change not applied (" + why + "): keeping the open settings"); m_ps = old; m_choice = oldC; if (!Acquire(W().dllPath.substr(0, W().dllPath.find_last_of(L'\\')), why)) { err = why; return PMENG_ERROR; } }
+            }
+        }
         // the frame's own colour: reopen once if the guess was wrong (format of the pool stays; tags follow the core)
         const std::array<int32_t, 4> fc = { src.range ? src.range : m_col[0], src.matrix != 2 && src.matrix ? src.matrix : m_col[1],
                                             src.primaries != 2 && src.primaries ? src.primaries : m_col[2], src.transfer != 2 && src.transfer ? src.transfer : m_col[3] };
@@ -359,6 +382,15 @@ public:
         const int r = w.api->submit2(w.core, static_cast<ID3D11Texture2D*>(src.d3d11_texture), src.d3d11_slice, ptsUs * 10,
                                      disc ? PUSHCORE_SUBMIT_DISCONTINUITY : 0u, &t);
         if (r == PUSHCORE_OK && w.quick) Handover(w, src, ptsUs * 10);
+        if (r == PUSHCORE_OK && content && m_cdState >= 0) {
+            // ContentDetect: the cell grid (+ the thumbnail about once a second) of this decoder texture on the GPU
+            if (m_cdState == 0) {
+                std::string why;
+                m_cdState = m_cd.Init(m_dev.Get(), m_st.width, m_st.height, m_st.fmt == PMENG_FMT_P010, m_limited, why) ? 1 : -1;
+                if (m_cdState < 0) Log("d3d11: content not measured on the GPU: " + why);
+            }
+            if (m_cdState > 0) m_cd.Record(m_ctx.Get(), static_cast<ID3D11Texture2D*>(src.d3d11_texture), src.d3d11_slice, double(ptsUs) / 1e6, disc, *content);
+        }
         Unlock();
         if (r == PUSHCORE_BUSY) return PMENG_BUSY;
         if (r != PUSHCORE_OK) { err = std::format("pushcore_submit2 -> {}: {}", r, w.api->lastError(w.core)); return r == PUSHCORE_DEVICE_LOST ? PMENG_DEVICE_LOST : PMENG_ERROR; }
@@ -733,6 +765,15 @@ private:
     pm::Source m_src;
     pm::Display m_disp;
     pm::Choice m_choice;
+    pm::Costs m_costs;
+    pm::Gpu m_gpu;
+    bool m_limited = true;
+    // ContentDetect: the GPU pass (d3d11_content.h) and the measured class waiting for the next submit
+    D3D11ContentTap m_cd;
+    int m_cdState = 0;   // 0 not set up, 1 running, -1 failed (logged once)
+    int m_cdCls = 0; bool m_cdCg = false, m_cdPending = false; float m_cdConf = 0.f;
+    ULONGLONG m_cdApplied = 0;
+    static constexpr ULONGLONG kRedecideMs = 10000;
     PushCoreSettings m_ps{};
     int m_forceK = 0;
     std::deque<Item> m_pending;

@@ -35,13 +35,14 @@ public:
         m_in = std::move(input); m_inPts = pts; m_busy = true;
         m_cv.notify_all();
     }
-    // streaming thread: the newest result (true once per result)
-    bool Take(double& pDrawn, double& pts)
+    // streaming thread: the newest result (true once per result); pCg: rendered 3D CG among the drawn looks
+    bool Take(double& pDrawn, double& pts, double& pCg)
     {
         std::lock_guard<std::mutex> lk(m_mx);
         if (!m_have) return false;
-        m_have = false; pDrawn = m_p; pts = m_pPts; return true;
+        m_have = false; pDrawn = m_p; pts = m_pPts; pCg = m_pCg; return true;
     }
+    bool Take(double& pDrawn, double& pts) { double c; return Take(pDrawn, pts, c); }
     bool Failed() const { std::lock_guard<std::mutex> lk(m_mx); return m_failed; }
     double LastMs() const { return m_ms.load(); }
 
@@ -108,7 +109,7 @@ private:
             std::lock_guard<std::mutex> lk(m_mx);
             m_busy = false;
             if (!ok) { m_failed = true; m_log("content: image model failed (" + err + "): the hand-built cues decide"); return; }
-            m_p = ImageDrawnProbability(emb.data()); m_pPts = pts; m_have = true;
+            m_p = ImageDrawnProbability(emb.data()); m_pCg = ImageCgProbability(emb.data()); m_pPts = pts; m_have = true;
         }
     }
     Log m_log;
@@ -116,7 +117,7 @@ private:
     std::condition_variable m_cv;
     std::thread m_thread;
     std::vector<float> m_in;
-    double m_inPts = 0, m_p = 0.5, m_pPts = 0;
+    double m_inPts = 0, m_p = 0.5, m_pPts = 0, m_pCg = 0.5;
     bool m_busy = false, m_have = false, m_failed = false, m_stop = false;
     std::atomic<double> m_ms{ -1.0 };
 };

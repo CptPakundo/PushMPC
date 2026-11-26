@@ -4,6 +4,9 @@
 //   CUDA frames   -> NVIDIA's engine (libpushmpc_engine_nvl.so) device to device (Linux, hwdec=nvdec).
 // The filter retries a failed hardware open with mem = CPU (its copy fallback), so a reason here is enough.
 #include "engine.h"
+#ifndef PME_SIDECAR
+#include "content_tap.h"
+#endif
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -12,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #ifndef _WIN32
@@ -58,6 +62,11 @@ namespace {
 struct Instance {
     pme::Backend* b = nullptr;
     std::string err;
+#ifndef PME_SIDECAR
+    // ContentDetect on this stream's frames (a sidecar module's frames are measured by the module that loaded it)
+    std::unique_ptr<pme::ContentTap> tap;
+    uint32_t tapSeen = 0;
+#endif
 };
 
 const char* Version() { return "pushmpc-engine 1 (" __DATE__ ")"; }
@@ -351,6 +360,10 @@ void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* opti
         pme::Log(std::string("open: ") + out->engine + ": " + out->description);
         auto* inst = new Instance();
         inst->b = b;
+#ifndef PME_SIDECAR
+        // ContentDetect: what the picture is, measured on the frames (option content=off: not measured)
+        if (pme::Opt(o, "content", "auto") != "off") { inst->tap = std::make_unique<pme::ContentTap>(); b->content = inst->tap.get(); }
+#endif
         return inst;
     } catch (const std::exception& e) {
         return fail(std::string("exception: ") + e.what());
@@ -365,7 +378,18 @@ int Submit(void* h, const pmeng_image* src, int64_t pts, uint32_t flags)
 {
     auto* in = static_cast<Instance*>(h);
     if (!in || !src) return PMENG_ERROR;
-    GUARD(in->b->Submit(*src, pts, flags))
+    try {
+        const int r = in->b->Submit(*src, pts, flags);
+#ifndef PME_SIDECAR
+        if (in->tap) {
+            // frames in host memory: measured here, after the engine took the frame (a BUSY frame comes again)
+            if (r == PMENG_OK && src->mem == PMENG_MEM_CPU) pme::TapCpuFrame(*in->tap, *src, double(pts) / 1e6, (flags & PMENG_SUBMIT_DISCONTINUITY) != 0);
+            const pme::ContentTap::Snapshot s = in->tap->Poll();
+            if (s.serial != in->tapSeen) { in->tapSeen = s.serial; in->b->OnContent(s.cls, s.cg, s.conf); }
+        }
+#endif
+        return r;
+    } catch (const std::exception& e) { in->err = e.what(); return PMENG_ERROR; } catch (...) { in->err = "unknown exception"; return PMENG_ERROR; }
 }
 int Peek(void* h, pmeng_out_info* info, uint32_t timeoutMs)
 {
@@ -400,7 +424,13 @@ void Close(void* h)
 {
     auto* in = static_cast<Instance*>(h);
     if (!in) return;
-    try { pme::Log("close: " + in->b->Stats()); delete in->b; } catch (...) {}
+    try {
+        pme::Log("close: " + in->b->Stats());
+#ifndef PME_SIDECAR
+        if (in->tap) pme::Log("close: " + in->tap->Describe());
+#endif
+        delete in->b;
+    } catch (...) {}
     delete in;
 }
 const char* LastError(void* h)

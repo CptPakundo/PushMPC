@@ -520,6 +520,23 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Get-Item repo/vsplugin/bin/pushmpc_vs.dll | Format-List Name, Length
 
+    # the image model's helper for plain mpv (pushmpc.lua without PushMPC's engine), shipped next to pushmpc.lua, with
+    # its model-free unit test and the no-model check
+    - name: Content helper for plain mpv (pushmpc-content.exe)
+      shell: pwsh
+      env:
+        CFLAGS: /Brepro
+        CXXFLAGS: /Brepro
+        LDFLAGS: /Brepro
+      run: |
+        cmake -S repo/integrations/mpv/content-helper -B "$env:RUNNER_TEMP\content-helper-build" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:SCCACHE_EXE" "-DPMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cmake --build "$env:RUNNER_TEMP\content-helper-build" --target pushmpc-content content_helper_test --parallel
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        ctest --test-dir "$env:RUNNER_TEMP\content-helper-build" -R content_helper --output-on-failure
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Get-Item "$env:RUNNER_TEMP\content-helper-build\pushmpc-content.exe" | Format-List Name, Length
+
     - name: Compiler cache statistics
       id: sccache-stats
       if: always() && env.SCCACHE_EXE != ''
@@ -551,6 +568,7 @@ runs:
         Copy-Item repo/filter/bin/* "$o\filter-bin" -Recurse
         Copy-Item repo/updater/bin/PushMpcUpdater.exe "$o\updater-bin"
         Copy-Item repo/vsplugin/bin/pushmpc_vs.dll "$o\vsplugin-bin"
+        Copy-Item "$env:RUNNER_TEMP\content-helper-build\pushmpc-content.exe" "$o\vsplugin-bin"   # staged next to pushmpc.lua (Stage-VsPlugin)
         Copy-Item "$env:BUILD\pushmpc\pushcore.dll" "$o\build\pushmpc"
         if (Test-Path "$env:BUILD\pushmpc\pushcore_hip_preflight.exe") { Copy-Item "$env:BUILD\pushmpc\pushcore_hip_preflight.exe" "$o\build\pushmpc" }
         foreach ($x in 'pushcore_zluda_vsr_worker.exe', 'pmml_winml_ep.exe') { if (Test-Path "$env:BUILD\pushmpc\$x") { Copy-Item "$env:BUILD\pushmpc\$x" "$o\build\pushmpc" } }   # G11 (staged into core\)

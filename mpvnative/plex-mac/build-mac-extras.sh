@@ -43,8 +43,8 @@ for rev in 20 21 22 23 24; do
     echo "VLC $tag: the CVPX picture layout matches pm_cvpx.c"
 done
 cmake -S "$root/vlcplugin" -B "$work/vlc" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=$min -DVLC_PLUGIN_INCLUDE="$inc" -DPM_FETCH_GPU_DEPS=ON > "$work/vlc.log" 2>&1 \
-    && cmake --build "$work/vlc" --target pushmpc_plugin pushmpc_macosx_plugin >> "$work/vlc.log" 2>&1 || { tail -40 "$work/vlc.log"; exit 1; }
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=$min -DVLC_PLUGIN_INCLUDE="$inc" -DPM_FETCH_GPU_DEPS=ON -DPM_CONTENT_LIB=ON ${PUSHMPC_ORT_INCLUDE:+-DPMML_ORT_INCLUDE=$PUSHMPC_ORT_INCLUDE} > "$work/vlc.log" 2>&1 \
+    && cmake --build "$work/vlc" --target pushmpc_plugin pushmpc_macosx_plugin pushmpc_content >> "$work/vlc.log" 2>&1 || { tail -40 "$work/vlc.log"; exit 1; }
 grep -E "GPU engine|no GPU engine|Vulkan" "$work/vlc.log" | head -3 || true
 for p in libpushmpc_plugin.dylib libpushmpc_macosx_plugin.dylib; do
     cp "$work/vlc/$p" "$out/vlc/"; codesign -f -s - "$out/vlc/$p"
@@ -53,6 +53,9 @@ done
 cp "$out/libMoltenVK.dylib" "$out/vlc/"   # the GPU engine finds it next to the plugin
 cp "$out/libpushmpc_engine_apple.dylib" "$out/vlc/"   # VideoToolbox interpolation, tried first (engine_portable.cpp)
 cp "$root/vlcplugin/install/pushmpc-vlc.sh" "$out/vlc/"
+# ContentDetect for the VLC module (the image model with PUSHMPC_ORT_INCLUDE set: the ONNX Runtime C API headers)
+cdl=$(find "$work/vlc" -name libpushmpc_content.dylib | head -n 1)
+if [ -n "$cdl" ]; then cp "$cdl" "$out/vlc/"; codesign -f -s - "$out/vlc/libpushmpc_content.dylib"; else echo "::warning::no libpushmpc_content.dylib: VLC measures no content"; fi
 
 # the IINA plugin (pinned shaders, fetched and hash-checked)
 python3 -I "$root/integrations/iina/build.py" build --cache "$work/iina-cache" --out "$out/iina" > "$work/iina.log" 2>&1 || { tail -30 "$work/iina.log"; exit 1; }

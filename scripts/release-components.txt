@@ -17,3 +17,5 @@ vlcmac      extra    pushmpc-vlc-macos-*.zip
 appimage    extra    PushMPC-mpv-linux-x86_64-*.AppImage
 kodiandroid extra    inputstream.pushmpc-*-android-arm64-kodi21.zip
 kodiandroid extra    inputstream.pushmpc-*-android-arm64-kodi22.zip
+contenthelper stage    vsplugin/pushmpc-content.exe
+vlc         stage    vlc/pushmpc_content.dll

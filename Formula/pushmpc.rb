@@ -133,6 +133,10 @@ class Pushmpc < Formula
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
+    # the image model's helper for plain mpv (pushmpc.lua starts it when no PushMPC engine runs), with its unit test
+    system "cmake", "-S", "integrations/mpv/content-helper", "-B", "build-content", "-DPMML_ORT_INCLUDE=#{ort}", *std_cmake_args
+    system "cmake", "--build", "build-content", "--target", "pushmpc-content", "content_helper_test", "--parallel"
+    system "build-content/content_helper_test"
 
     # capture mode (macOS): pushmpc-capture inside an app bundle, because macOS gives the Screen Recording permission to
     # an app ("PushMPC Capture" in System Settings > Privacy & Security). Its own build folder with the GPU engine.
@@ -181,6 +185,7 @@ class Pushmpc < Formula
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
     # pushmpc.lua adds the filter at run time (the mpv.conf block names it, next to pushmpc.vpy)
     pkgshare.install "integrations/mpv/pushmpc.lua"
+    pkgshare.install "build-content/pushmpc-content"   # next to pushmpc.lua (it looks there)
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
     (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
