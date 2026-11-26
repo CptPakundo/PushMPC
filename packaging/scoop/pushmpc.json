@@ -1,12 +1,12 @@
 {
     "##": "Scoop manifest (dry run: integrations.yml installs it on a hosted runner from the CI release artifact; for a bucket only on the maintainer's go, after the repository is public). The zip is the release's PushMPC-<version>.zip (filter, core, the installer script); the installer script downloads Veyra's runtime package like Setup does. Uninstall puts every player setting back.",
-    "version": "0.6.0",
+    "version": "1.0.0",
     "description": "PushFPS video enhancement in media players: frame generation, RTX Video Super Resolution, scene-cut guard (MPC-HC, MPC-BE, PotPlayer, mpv family).",
     "homepage": "https://github.com/CptPakundo/PushMPC",
     "license": "GPL-3.0-only",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/PushMPC-0.6.0.zip",
+            "url": "https://github.com/CptPakundo/PushMPC/releases/download/v1.0.0/PushMPC-1.0.0.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },
