@@ -74,7 +74,7 @@ if ! done_ mpv mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ]; }; t
     extra=()
     case $OS in
         linux) extra+=(-Dc_link_args="-Wl,-rpath,\$ORIGIN/../lib") ;;
-        macos) extra+=(-Dswift-build=disabled -Dmacos-cocoa-cb=disabled) ;;
+        macos) ;;   # mpv 0.42 builds its macOS player with Swift (Xcode's): cplayer needs it
     esac
     CC="$CC" meson setup "$S/mpv/b" "$S/mpv" --prefix="$P" --libdir=lib --buildtype=release -Dlibmpv=true -Dcplayer=true \
         -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled "${extra[@]}" > "$S/mpv-setup.log" 2>&1 \
