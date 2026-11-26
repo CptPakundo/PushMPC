@@ -4067,6 +4067,12 @@ void CPushMpcFilter::DelivererLoop()
             Log(std::format("delivering a media type change: {} -> {}", m_deliveredFmt.Str(), it.sample->fmt.Str()));
         }
         REFERENCE_TIME st = it.start, sp = it.stop;
+        {
+            // the sample lasts until the next one (held-frame re-timing spaces outputs 2-4 grid steps apart in a held span)
+            std::lock_guard<std::mutex> lk(m_readyLock);
+            if (!m_ready.empty() && m_ready.front().gen == it.gen && m_ready.front().kind != 3 && m_ready.front().start > st && m_ready.front().start - st < 10000000)
+                sp = m_ready.front().start;
+        }
         it.sample->SetTime(&st, &sp);
         it.sample->SetSyncPoint(TRUE);
         it.sample->SetDiscontinuity(m_discNext.exchange(false) ? TRUE : FALSE);

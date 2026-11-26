@@ -249,6 +249,18 @@ int main()
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;
         }
+        {   // Animation: the path hint, the held-frame share, Off / On, and DLSS-G behind PushFlow for animation
+            check(AnimationHint(L"d:\\videos\\anime\\show - 01.mkv") && AnimationHint(L"D:\\Cartoons\\ep1.mkv") && AnimationHint(L"x:\\animated films\\a.mkv")
+                  && !AnimationHint(L"d:\\videos\\animal planet\\a.mkv") && !AnimationHint(L"d:\\animes2\\x.mkv") && !AnimationHint(L"d:\\movies\\film.mkv"),
+                  L"Animation hint: whole words anime / cartoons / animated only");
+            Source s; s.fps = 23.976; Display d; d.refreshHz = 240; Gpu g = Family(kRtx40, L"NVIDIA GeForce RTX 4090"); g.available &= ~(1u << kCapVfg);
+            Source held = s; held.heldShare = 0.4; Source hint = s; hint.animHint = true; Source live = s; live.heldShare = 0.01;
+            Settings off; off.animation = kOff; Settings on; on.animation = 1;
+            const Choice a = Decide({}, held, d, {}, g), b = Decide({}, live, d, {}, g), c2 = Decide({}, hint, d, {}, g), e = Decide(off, held, d, {}, g), f = Decide(on, live, d, {}, g);
+            check(a.animation && !b.animation && c2.animation && !e.animation && f.animation, L"Animation Auto: held share >= 20 % or the path; Off / On fixed", a.animNote + L" | " + b.animNote);
+            check(a.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
+                  std::wstring(FgMethodLabel(a.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
+        }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;
             check(SubtitleHoldValue(a, true, true) == 2 && SubtitleHoldValue(a, false, true) == 0 && SubtitleHoldValue(a, true, false) == 0

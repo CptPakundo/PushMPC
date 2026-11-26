@@ -489,6 +489,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (s.smoother == kOff) { p.mult = 1; p.stop = L"off"; return p; }
         std::vector<FgMethod> order = FgOrder(g, c);
         std::wstring notes;
+        // animation: DLSS-G after PushFlow. On a big jump between two drawings (a fast pan on twos, RTX 5090, 2026-11-26)
+        // DLSS-G with FidelityFX flow doubled and smeared the line art, while VFG and PushFlow kept the lines whole; VFG
+        // stays first (as clean as PushFlow there, and up to the engine's full multiplier for the re-timed spans)
+        if (r.animation) {
+            const auto dl = std::find(order.begin(), order.end(), FgMethod::Dlssg), pf = std::find(order.begin(), order.end(), FgMethod::PushFlow);
+            if (dl != order.end() && pf != order.end() && dl < pf) { order.erase(dl); order.insert(std::find(order.begin(), order.end(), FgMethod::PushFlow) + 1, FgMethod::Dlssg); }
+        }
         if (IsWeakGpu(g.family, g.name) && !c.pfBenched && s.fgMethod == FgMethod::Auto) notes = L"cold start: FSR FG first until PushFlow's speed test has measured this GPU; ";
         if (s.fgMethod != FgMethod::Auto) {
             if (g.has(CapOf(s.fgMethod))) order.insert(order.begin(), s.fgMethod);

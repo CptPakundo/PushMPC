@@ -502,8 +502,8 @@ struct PushCore {
     struct ReadyGraph { uint64_t seq; uint32_t multiplier, gap; };
     std::deque<ReadyGraph> readyGraph;     // to the graph, in order, when it has a slot
     static constexpr size_t kMaxQueued = pushmpc::held::kLookahead + 3;   // waiting held frames + tested + new
-    int prevIngestSlot = -1;
-    int pumpError = PUSHCORE_OK;           // a graph failure while canSubmit fed the graph: the next submit returns it               // the ingress slot of the source frame before (the test's reference)
+    int prevIngestSlot = -1;              // the ingress slot of the source frame before (the test's reference)
+    int pumpError = PUSHCORE_OK;           // a graph failure while canSubmit fed the graph: the next submit returns it
     uint64_t ingestSeq = 0;
     Clock::time_point lastIngest{};
     bool heldLogged = false;
@@ -937,7 +937,7 @@ struct PushCore {
             gd.hdrInput, gd.hdrOutput, stream.displayHdr, options.settings.forceSdrPreview, int(gd.hdrOutputMode), hdrHint, hdrCurveOn,
             gd.videoHdr.enabled, stream.masteringPeakNits, stream.maxCllNits, stream.maxFallNits));
         gd.enableFg = fg;
-        gd.fgMultiplier = fg ? multiplier : gd.fgMultiplier;
+        gd.fgMultiplier = fg ? graphMultiplier : gd.fgMultiplier;   // the built multiplier (re-timed spans ask for up to it)
 
         if (!cache) {
             // first graph of this instance: take the process-wide warm cache when nobody else holds it
