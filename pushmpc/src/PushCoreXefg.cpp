@@ -195,7 +195,7 @@ struct CaptureSink {
 };
 std::mutex gSinkMx;
 CaptureSink* gSink = nullptr;      // the one running stage (one XeFG instance per process)
-ComPtr<IDXGIAdapter> gAdapter;      // for the virtual output's GetParent
+ComPtr<IDXGIAdapter>& gAdapter = *new ComPtr<IDXGIAdapter>();   // for the virtual output's GetParent (never destroyed: see gShimFactory)
 
 // ------------------------------------------------------------------------------------------- ShimSwapChain
 class ShimSwapChain final : public IDXGISwapChain4 {
@@ -430,7 +430,9 @@ private:
     ComPtr<IDXGIFactory7> real_;
     HWND assoc_ = nullptr;
 };
-ComPtr<ShimFactory> gShimFactory;
+// Process lifetime, never destroyed: at process exit DXGI and libxess_fg.dll may already be detached when pushcore's static
+// destructors run, and a Release into them then ended the process with a non-zero code (seen on WARP: exit 2170)
+ComPtr<ShimFactory>& gShimFactory = *new ComPtr<ShimFactory>();
 
 // ------------------------------------------------------------------------------------------- import hooks (libxess_fg.dll)
 int hookIat(HMODULE mod, const char* func, void* repl, void** orig) {
@@ -621,6 +623,8 @@ bool loadApi(std::string& why) {
     if (!o_EnumDisplaySettingsA) o_EnumDisplaySettingsA = &EnumDisplaySettingsA;
     if (!o_GetProcAddress) o_GetProcAddress = &GetProcAddress;
     info("runtime " + a.version + "; hooks" + hooked);
+    // libxess_fg.dll now calls into pushcore through the hooks: pushcore stays loaded for the rest of the process
+    { HMODULE self = nullptr; GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&h_GetProcAddress), &self); }
     gApi = a;
     gApiLoaded = true;
     return true;

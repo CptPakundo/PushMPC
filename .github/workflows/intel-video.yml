@@ -251,7 +251,7 @@ jobs:
           $vp = Test-Path repo/pushmpc/src/PushCoreVplFi.cpp; $xs = Test-Path repo/pushmpc/src/PushCoreXefg.cpp
           if ($vp) {
             if ($j.bridge -notmatch 'PASS$') { Write-Host "::error::bridge round trip: $($j.bridge)"; $fail++ }
-            if ($j.ivsr -notmatch '^fail: ' -or $j.ivsr -notmatch 'VPE|extension') { Write-Host "::error::Intel VSR on WARP must be refused by the extension: $($j.ivsr)"; $fail++ }
+            if ($j.ivsr -notmatch '^fail: ' -or $j.ivsr -notmatch 'VPE|extension|no video processor') { Write-Host "::error::Intel VSR on WARP must be refused cleanly (no video processor / no VPE extension): $($j.ivsr)"; $fail++ }
             if ($j.vplfi -notmatch '^(fail|unavailable): ') { Write-Host "::error::VPL on a runner must refuse cleanly: $($j.vplfi)"; $fail++ }
             if ($j.'vplfi.built' -ne 'true') { Write-Host "::error::this pushcore was built without libvpl"; $fail++ }
           }
