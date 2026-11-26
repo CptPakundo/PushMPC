@@ -5036,6 +5036,20 @@ public:
     }
     void UpdateScroll()
     {
+        RECT vr; GetClientRect(m_Dlg, &vr);
+        if (!m_themeChecked && IsWindowVisible(m_Dlg) && ContentBottom() > vr.bottom) {
+            // MPC-HC's dark theme colours the page's controls but not the page's own scroll bar: when the bar is first
+            // needed, look at the page's painted background (top-left corner) and use Windows' dark scroll bar on a
+            // dark one
+            m_themeChecked = true;
+            HDC dc = GetDC(m_Dlg);
+            const COLORREF px = GetPixel(dc, 2, 2);
+            ReleaseDC(m_Dlg, dc);
+            if (px != CLR_INVALID && GetRValue(px) * 299 + GetGValue(px) * 587 + GetBValue(px) * 114 < 96000) {
+                if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+                    if (auto set = reinterpret_cast<HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR)>(GetProcAddress(ux, "SetWindowTheme"))) set(m_Dlg, L"DarkMode_Explorer", nullptr);
+            }
+        }
         RECT cr; GetClientRect(m_Dlg, &cr);
         const int h = cr.bottom - cr.top, content = ContentBottom();
         SCROLLINFO si = { sizeof(si) };
@@ -5110,6 +5124,7 @@ public:
 private:
     bool m_advanced = false, m_loading = true;
     int m_scrollY = 0;   // pixels the page is scrolled down (F-UI1)
+    bool m_themeChecked = false;
     std::wstring m_pushFpsData;
     void Dirty() { m_bDirty = TRUE; if (m_pPageSite) m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY); }
     // Frame generation method and upscaler: every choice is listed; one this GPU cannot run says so in its text, the note
