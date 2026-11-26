@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { path: repo }
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756   # v1, pinned by commit
         with: { arch: x64 }
       - name: auto_test (Auto rules + vendor paths)
         timeout-minutes: 5

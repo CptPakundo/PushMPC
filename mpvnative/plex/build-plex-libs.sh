@@ -11,22 +11,30 @@ mkdir -p "$out"
 cc=gcc; command -v ccache >/dev/null && cc="ccache gcc"
 pins="$here/../pins.json"
 . "$here/../ci/fetch-commit.sh"
+# FFB_CACHE (optional): each tag's built tree is kept between runs, so a filter change only recompiles vf_pushmpc.o and
+# relinks (configure, slow under MSYS2, runs only for a new commit or new options)
+. "$here/../ci/ffbuild-cache.sh"
+cfgv="$(cksum < "$0" | cut -d' ' -f1) $cc"
 ref=''
 
-build_tree() {   # build_tree <label>: the tree in $src is checked out
-    local label=$1
+build_tree() {   # build_tree <label> <commit>: the tree in $src is checked out
+    local label=$1 commit=$2 configured=0
+    ffb_restore "$src" "plex-$label" "${FFB_CACHE:-}" "$commit $cfgv" && configured=1
     sh "$here/../ffmpeg/add-to-ffmpeg.sh" "$src" >/dev/null
     (
         cd "$src"
-        rm -f config.h config_components.h
-        ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
-            --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
-            --disable-postproc --disable-asm --enable-d3d11va --extra-ldflags=-static-libgcc > configure.out 2>&1 \
-            || { tail -30 configure.out; exit 1; }
+        if [ "$configured" = 0 ]; then
+            rm -f config.h config_components.h
+            ./configure --cc="$cc" --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
+                --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
+                --disable-postproc --disable-asm --enable-d3d11va --extra-ldflags=-static-libgcc > configure.out 2>&1 \
+                || { tail -30 configure.out; exit 1; }
+        fi
         grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h
         grep -q 'CONFIG_D3D11VA 1' config.h || echo "::warning::$label: D3D11VA is not enabled (no D3D11 frames for pushmpc)"
         make -j"$(nproc)" >/dev/null
     )
+    ffb_store "$src" "plex-$label" "${FFB_CACHE:-}" "$commit $cfgv"
     local vdir="$src/libavfilter/" maj min mic name
     maj=$( (cat "${vdir}version_major.h" "${vdir}version.h" 2>/dev/null || true) | sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
     min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' "${vdir}version.h" | head -1)
@@ -42,12 +50,12 @@ tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.loa
 for tag in $tags; do
     commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$pins" "$tag")
     fetch_commit "$src" "$commit" https://git.ffmpeg.org/ffmpeg.git "$tag" || exit 1   # by commit (the pin), never by tag name alone
-    build_tree "$tag"
+    build_tree "$tag" "$commit"
 done
 # master snapshots (by commit, from the GitHub mirror, which serves single commits)
 for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in json.load(open(sys.argv[1])).get('snapshotCommits', [])))" "$pins"); do
     fetch_commit "$src" "$commit" https://github.com/FFmpeg/FFmpeg.git || exit 1
-    build_tree "master@${commit:0:12}"
+    build_tree "master@${commit:0:12}" "$commit"
 done
 # the proxy: libavfilter 8's exports, forwarded
 sh "$here/make-def.sh" "$ref" "$out/avfilter_proxy.def"

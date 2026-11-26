@@ -2,8 +2,10 @@
 rem Builds PushMPC targets in PushFPS's build tree: pushcore_dll (pushcore.dll, C ABI), pushcore_gpu_harness,
 rem pushcore_session_edit, pushcore, pushcore_harness, the shader targets.
 rem   build-pushmpc.cmd <targets...>      for example: build-pushmpc.cmd pushcore_dll pushcore_gpu_harness
-rem   build-pushmpc.cmd release           what a release ships (as release.yml): every shader target, pushcore_dll,
-rem                                       pushcore_hip_preflight, plus pushcore_gpu_harness
+rem   build-pushmpc.cmd release           what a release ships (as release.yml): the target pushmpc_release = every
+rem                                       shader target, pushcore_dll, pushcore_hip_preflight, pushcore_gpu_harness
+rem Fastest layout for several checkouts (ccache hits across them): <base>\pushfps (PUSHMPC_PUSHFPS_SRC) and
+rem <base>\build (PUSHMPC_BUILD_DIR) side by side, one <base> per checkout.
 rem A new build tree is configured for pushcore only, as release.yml does (no PushFPS app, Qt or streaming clients), so
 rem build-pushfps.cmd is not needed first; a tree that build-pushfps.cmd made works too. Incremental: CMake runs only
 rem on a new tree or changed options; a compiler cache is used when one is installed (scripts\build-env.cmd).
@@ -47,13 +49,11 @@ set PUSHMPC_CFG_NEW=-DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=%FFMPEG%" ^
   %DOVI% %PMML% %PUSHMPC_PUSHFPS_CMAKE_ARGS%
 :configure
 call "%~dp0cmake-configure.cmd" "%PUSHMPC_PUSHFPS_SRC%" "%PUSHMPC_BUILD_DIR%" || exit /b 1
-if /i not "%~1"=="release" goto :targets
-rem the shader target list is too long for a cmd line: PowerShell reads it from the tree and starts the build
-powershell -NoProfile -NonInteractive -Command ^
-  "$t = @(cmake --build $env:PUSHMPC_BUILD_DIR --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique);" ^
-  "cmake --build $env:PUSHMPC_BUILD_DIR --target @t pushcore_dll pushcore_hip_preflight pushcore_gpu_harness @(-split $env:PUSHMPC_PARALLEL); exit $LASTEXITCODE" || exit /b 1
-goto :copy
-:targets
-cmake --build "%PUSHMPC_BUILD_DIR%" --target %* %PUSHMPC_PARALLEL% || exit /b 1
-:copy
+rem ccache: paths under the folder that holds the build tree are hashed relative to it, so checkouts laid out alike
+rem (<base>\pushfps and <base>\build) share their hits
+if not defined PUSHMPC_CCACHE_BASEDIR for %%i in ("%PUSHMPC_BUILD_DIR%\..") do set "CCACHE_BASEDIR=%%~fi"
+rem "release": pushmpc_release (pushmpc\CMakeLists.txt), every shader target plus the core and its helpers
+set "TARGETS=%*"
+if /i "%~1"=="release" set TARGETS=pushmpc_release
+cmake --build "%PUSHMPC_BUILD_DIR%" --target %TARGETS% %PUSHMPC_PARALLEL% || exit /b 1
 if defined PUSHMPC_TEST_COPY if exist "%PUSHMPC_BUILD_DIR%\pushmpc\pushcore.dll" xcopy /d /y "%PUSHMPC_BUILD_DIR%\pushmpc\pushcore.dll" "%PUSHMPC_TEST_COPY%\" >nul

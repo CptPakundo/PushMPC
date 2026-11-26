@@ -1,0 +1,143 @@
+# Packaging, shared by core.yml's single-job mode (dev-build) and release.yml's build job: the version, the optional
+# code signing, the components' artifacts of this run (each optional), "pushmpc-install.ps1 stage" and "package"
+# (Setup, component zips, the signed release.json), the G13 component check, and the pushmpc-release artifact.
+# Expects: the repository at <workspace>\repo and the core build's outputs at <workspace>\core-out.
+# Other tracks: a new component's download and its stage parameter go here.
+name: pushmpc-package
+description: Stage and package a PushMPC release from core-out and this run's component artifacts
+inputs:
+  release_tag: { description: 'publish as this tag (empty: build only)', default: '' }
+  beta: { description: 'v<filter version>-beta.<run number>', default: 'false' }
+  dry_run: { description: 'dry run: never published, no NVOF requirement', default: 'false' }
+  signing_key: { description: 'the PUSHMPC_SIGNING_KEY secret', default: '' }
+  codesign_pfx: { description: 'the CODESIGN_PFX_BASE64 secret', default: '' }
+  codesign_password: { description: 'the CODESIGN_PFX_PASSWORD secret', default: '' }
+outputs:
+  tag: { description: 'the release tag (empty: none)', value: '${{ steps.version.outputs.tag }}' }
+  prerelease: { description: 'true for a pre-release', value: '${{ steps.version.outputs.prerelease }}' }
+  version: { description: 'the version', value: '${{ steps.version.outputs.version }}' }
+  sha: { description: 'the built commit', value: '${{ steps.version.outputs.sha }}' }
+runs:
+  using: composite
+  steps:
+    - name: Version
+      shell: pwsh
+      id: version
+      env:
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        $h = Get-Content repo/filter/src/version.h -Raw
+        $fv = [regex]::Match($h, 'PUSHMPC_VERSION_STR "([^"]+)"').Groups[1].Value
+        $tag = $env:RELEASE_TAG
+        if ('${{ inputs.beta }}' -eq 'true') { $tag = "v$fv-beta.$env:GITHUB_RUN_NUMBER" }
+        if (-not $tag -and $env:GITHUB_REF -like 'refs/tags/v*' -and '${{ github.event_name }}' -eq 'push') { $tag = $env:GITHUB_REF_NAME }
+        if ($tag) {
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)(-beta\.\d+)?$') { throw "tag must look like v0.6.0 or v0.6.0-beta.3: $tag" }
+          if ($Matches[1] -ne $fv) { throw "tag $tag does not match filter/src/version.h ($fv)" }
+          $v = $tag.TrimStart('v')
+        } else { $v = "$fv-ci.$env:GITHUB_RUN_NUMBER" }
+        $pre = if ($v -match '-') { 'true' } else { 'false' }
+        "tag=$tag" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        "version=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        "prerelease=$pre" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        "sha=$(git -C repo rev-parse HEAD)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        Write-Host "PushMPC $v (tag '$tag', prerelease $pre)"
+
+    - name: Code-signing certificate (optional)
+      shell: pwsh
+      env:
+        PFX: ${{ inputs.codesign_pfx }}
+        PFX_PASSWORD: ${{ inputs.codesign_password }}
+      run: |
+        if (-not $env:PFX) { Write-Host 'No CODESIGN_PFX_BASE64 secret: the exes stay unsigned (SmartScreen warns on first run)'; exit 0 }
+        $pfx = "$env:RUNNER_TEMP\codesign.pfx"
+        [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX))
+        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object FullName -match '\\x64\\' | Sort-Object FullName | Select-Object -Last 1
+        "PUSHMPC_CODESIGN=`"$($signtool.FullName)`" sign /f `"$pfx`" /p `"$env:PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `"{file}`"" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+    # the VLC module (vlc-plugin.yml, this run): staged as the optional vlc component, so Setup installs it when VLC is
+    # found
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with: { name: plugin-win64, path: '${{ runner.temp }}/vlc-win64' }
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with: { name: mpvnative-windows, path: '${{ runner.temp }}/mpv-windows' }
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with: { name: pushmpc-kodi-Windows, path: '${{ runner.temp }}/kodi-windows' }
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with: { name: plexnative, path: '${{ runner.temp }}/plexnative' }
+    - name: Stage and package (Setup, component zips, release.json + signature)
+      shell: pwsh
+      env:
+        PUSHMPC_SIGNING_KEY: ${{ inputs.signing_key }}
+        PUSHMPC_BUILD_DIR: ${{ github.workspace }}/core-out/build
+      run: |
+        $rel = "$env:RUNNER_TEMP\release"
+        $pre = @{}; if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @{ Prerelease = $true } }
+        # RC2 F1: a core without NVIDIA optical flow is never packaged silently: stage refuses it (-RequireNvof) unless dry run
+        $nvofReq = @{}; if ('${{ inputs.dry_run }}' -ne 'true') { $nvofReq = @{ RequireNvof = $true } }
+        $vlc = @{}; $vd = "$env:RUNNER_TEMP\vlc-win64\libpushmpc_plugin.dll"
+        if (Test-Path $vd) { $vlc = @{ VlcPlugin = $vd } } else { Write-Host '::warning title=VLC module::no plugin-win64 artifact: the release has no VLC component' }
+        # PushMPC's own mpv build for Windows (mpv-native.yml): a release asset; Setup offers it (off by default)
+        $mpvb = @{}
+        if (Test-Path "$env:RUNNER_TEMP\mpv-windows\*") {
+          $mz = "$env:RUNNER_TEMP\PushMPC-mpv-windows-${{ steps.version.outputs.version }}.zip"
+          Compress-Archive -Path "$env:RUNNER_TEMP\mpv-windows\*" -DestinationPath $mz -Force
+          $tag = if ('${{ steps.version.outputs.tag }}') { '${{ steps.version.outputs.tag }}' } else { 'v${{ steps.version.outputs.version }}' }
+          $mpvb = @{ MpvBuildZip = $mz; MpvBuildUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$(Split-Path $mz -Leaf)" }
+        } else { Write-Host '::warning title=mpv build::no mpvnative-windows artifact: the release has no PushMPC mpv build' }
+        # the Kodi add-on (kodi-addon.yml): kodi21\, kodi22\ and its installer, staged as the optional kodi component
+        $kodi = @{}; if (Test-Path "$env:RUNNER_TEMP\kodi-windows\kodi21") { $kodi = @{ KodiPackage = "$env:RUNNER_TEMP\kodi-windows" } } else { Write-Host '::warning title=Kodi add-on::no pushmpc-kodi-Windows artifact: the release has no Kodi component' }
+        # the Plex proxy (mpv-native.yml): avfilter-8.dll, the pushmpc-avfilter-8.*.dll builds and the engine, staged as the
+        # optional plexnative component (Setup prefers it for Plex; the libmpv swap stays the fallback)
+        $plexn = @{}; if (Test-Path "$env:RUNNER_TEMP\plexnative\avfilter-8.dll") { $plexn = @{ PlexNative = "$env:RUNNER_TEMP\plexnative" } } else { Write-Host '::warning title=Plex proxy::no plexnative artifact: Setup gives Plex the libmpv swap' }
+        ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\core-out\filter-bin" -UpdaterExe "$env:GITHUB_WORKSPACE\core-out\updater-bin\PushMpcUpdater.exe" -VsPluginDll "$env:GITHUB_WORKSPACE\core-out\vsplugin-bin\pushmpc_vs.dll" @nvofReq @vlc @mpvb @kodi @plexn
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
+        if ($nvof -ne '1') {
+          Write-Host '::warning::The staged core has NO NVIDIA optical flow (core manifest nvof=0): NVIDIA VFG cannot start with it.'
+          @('## :warning: Staged core without NVIDIA optical flow', '', 'The core `manifest.txt` says `nvof=0`: this artifact must not be released (a release run refuses it).') -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        } else {
+          Write-Host 'Staged core: NVIDIA optical flow built in (nvof=1)'
+          'Staged core: NVIDIA optical flow built in (`nvof=1`).' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        }
+        ./repo/scripts/pushmpc-install.ps1 package -ReleaseDir $rel -ReleaseVersion '${{ steps.version.outputs.version }}' @pre
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ('${{ steps.version.outputs.tag }}' -and '${{ inputs.dry_run }}' -ne 'true' -and -not (Test-Path "$rel\release.json.sig")) { Write-Host '::error::release.json is not signed (secret PUSHMPC_SIGNING_KEY missing): not publishing'; exit 1 }
+
+        Get-ChildItem $rel -File | Format-Table Name, Length
+
+    # G13: every component in scripts/release-components.txt must be in the release; a release (tag, not a dry run)
+    # fails without one, a dry run warns
+    - name: Expected components (scripts/release-components.txt)
+      shell: pwsh
+      env:
+        STRICT: ${{ steps.version.outputs.tag != '' && inputs.dry_run != 'true' }}
+      run: |
+        $stage = 'repo/stage/PushMPC'; $rel = "$env:RUNNER_TEMP\release"; $missing = @()
+        foreach ($line in Get-Content repo/scripts/release-components.txt) {
+          $l = ($line -replace '#.*$', '').Trim(); if (-not $l) { continue }
+          $name, $where, $path = $l -split '\s+', 3
+          if ($where -eq 'extra') { continue }   # release.yml's extras job checks those
+          $base = switch ($where) { 'stage' { $stage } 'release' { $rel } default { throw "release-components.txt: unknown place '$where' ($l)" } }
+          if (Test-Path (Join-Path $base $path)) { Write-Host "ok       $name ($where $path)" }
+          else { Write-Host "MISSING  $name ($where $path)"; $missing += "$name ($where $path)" }
+        }
+        if (-not $missing) { 'All expected components are in the release.' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY; exit 0 }
+        $msg = "Missing release components: $($missing -join ', ')"
+        "## :warning: $msg" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        if ($env:STRICT -eq 'true') { Write-Host "::error title=Release components::$msg (not publishing)"; exit 1 }
+        Write-Host "::warning title=Release components::$msg (dry run: not fatal)"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pushmpc-release
+        path: |
+          ${{ runner.temp }}/release/*.exe
+          ${{ runner.temp }}/release/*.zip
+          ${{ runner.temp }}/release/release.json
+          ${{ runner.temp }}/release/release.json.sig
+        if-no-files-found: error

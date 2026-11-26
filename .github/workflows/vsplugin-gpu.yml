@@ -256,7 +256,7 @@ jobs:
           mkdir -p "$d/glslang" && (cd "$d/glslang" && unzip -qo "$f")
           g=$(find "$d/glslang" -name glslangValidator.exe | head -1); [ -n "$g" ] || g=$(find "$d/glslang" -name glslang.exe | head -1)
           echo "VKH=$(cygpath -m "$d/vulkanHeaders")" >> "$GITHUB_ENV"; echo "VOLK=$(cygpath -m "$d/volk")" >> "$GITHUB_ENV"; echo "GLSLANG=$(cygpath -m "$g")" >> "$GITHUB_ENV"
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756   # v1, pinned by commit
       - name: Build
         timeout-minutes: 20
         shell: bash

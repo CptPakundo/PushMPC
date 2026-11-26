@@ -7,16 +7,23 @@ rem     the shell already is an x64 Visual Studio prompt.
 rem   - CMake and Ninja from Visual Studio on PATH.
 rem   - A compiler cache when one is installed (ccache, or sccache). PUSHMPC_LAUNCHER then holds the CMake options for it
 rem     (an empty launcher without one, so a tree configured with a cache before still builds when it is gone).
-rem   - PUSHMPC_PARALLEL: "--parallel [N]" for cmake --build (N = PUSHMPC_JOBS when set, else all cores).
+rem   - PUSHMPC_PARALLEL: "--parallel N -- [ninja options]" for cmake --build (N = PUSHMPC_JOBS when set, else the
+rem     number of logical processors; ninja's load limit -l PUSHMPC_LOAD when set). It ends with "--": a script may
+rem     add more ninja options after it.
 rem Options (environment):
 rem   PUSHMPC_VS              Visual Studio folder (default: the newest with C++, found by vswhere)
 rem   PUSHMPC_COMPILER_CACHE  path of ccache.exe or sccache.exe, or "off" (default: ccache, then sccache, from PATH,
 rem                           then PUSHMPC_DEPS\ccache-*\ccache.exe)
 rem   PUSHMPC_JOBS            parallel compile jobs
+rem   PUSHMPC_LOAD            ninja starts no new job while the system load is above this (two builds at once
+rem                           throttle each other instead of overloading the machine)
 rem   PUSHMPC_BUILD_ENV       a .cmd with your own settings, called first (default: pushmpc-build-env.cmd next to the
 rem                           repository folder or inside it, when there is one; it is never committed)
-rem   CCACHE_DIR, CCACHE_MAXSIZE, CCACHE_BASEDIR   ccache's own settings; CCACHE_BASEDIR defaults to the folder that
-rem                           holds the repository, so several checkouts side by side share cache hits
+rem   PUSHMPC_CCACHE_BASEDIR  ccache's base_dir for every build (default: the repository for the filter, updater,
+rem                           installer and plugin; the folder holding the build tree for build-pushmpc.cmd), so
+rem                           checkouts with the same layout share cache hits
+rem   CCACHE_DIR, CCACHE_MAXSIZE  ccache's own settings (CCACHE_HASHDIR defaults to false here: the debug info's
+rem                           build folder does not split the cache between checkouts)
 for %%i in ("%~dp0..") do set "PUSHMPC_REPO=%%~fi"
 for %%i in ("%PUSHMPC_REPO%\..") do set "PUSHMPC_REPO_PARENT=%%~fi"
 if defined PUSHMPC_BUILD_ENV (call "%PUSHMPC_BUILD_ENV%" || exit /b 1) else (
@@ -66,9 +73,12 @@ if not defined PUSHMPC_COMPILER_CACHE for /d %%d in ("%PUSHMPC_DEPS%\ccache-*") 
 if not defined PUSHMPC_COMPILER_CACHE goto :jobs
 if not exist "%PUSHMPC_COMPILER_CACHE%" (echo build-env: PUSHMPC_COMPILER_CACHE=%PUSHMPC_COMPILER_CACHE% does not exist: building without a compiler cache & set PUSHMPC_COMPILER_CACHE=& goto :jobs)
 set "PUSHMPC_LAUNCHER=-DCMAKE_C_COMPILER_LAUNCHER=%PUSHMPC_COMPILER_CACHE:\=/% -DCMAKE_CXX_COMPILER_LAUNCHER=%PUSHMPC_COMPILER_CACHE:\=/%"
-if not defined CCACHE_BASEDIR set "CCACHE_BASEDIR=%PUSHMPC_REPO_PARENT%"
+if defined PUSHMPC_CCACHE_BASEDIR (set "CCACHE_BASEDIR=%PUSHMPC_CCACHE_BASEDIR%") else set "CCACHE_BASEDIR=%PUSHMPC_REPO%"
+if not defined CCACHE_HASHDIR set CCACHE_HASHDIR=false
 :jobs
-set "PUSHMPC_PARALLEL=--parallel %PUSHMPC_JOBS%"
+set "PUSHMPC_PARALLEL=--parallel %NUMBER_OF_PROCESSORS% --"
+if defined PUSHMPC_JOBS set "PUSHMPC_PARALLEL=--parallel %PUSHMPC_JOBS% --"
+if defined PUSHMPC_LOAD set "PUSHMPC_PARALLEL=%PUSHMPC_PARALLEL% -l %PUSHMPC_LOAD%"
 exit /b 0
 
 rem the saved environment is usable when it names this Visual Studio and its default toolset is still installed

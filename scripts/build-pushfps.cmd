@@ -40,5 +40,5 @@ set PUSHMPC_CFG_NEW=-DCMAKE_BUILD_TYPE=Release ^
   -DVEYRA_ENABLE_LIBDOVI=ON "-DVEYRA_LIBDOVI_ROOT=%DEPS%\libdovi"
 set "PUSHMPC_CFG="-DVEYRA_DISPLAY_VERSION=%PUSHFPS_DISPLAY_VERSION%""
 call "%~dp0cmake-configure.cmd" "%REPO%" "%BUILD%" || exit /b 1
-cmake --build "%BUILD%" --target veyra_qml_ui %PUSHMPC_PARALLEL% -- -k 0 || exit /b 1
+cmake --build "%BUILD%" --target veyra_qml_ui %PUSHMPC_PARALLEL% -k 0 || exit /b 1
 dir "%BUILD%\PushFPS.exe"

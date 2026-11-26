@@ -76,3 +76,23 @@ target_compile_features(pushcore_hip_preflight PRIVATE cxx_std_20)
 target_compile_options(pushcore_hip_preflight PRIVATE /utf-8)
 target_include_directories(pushcore_hip_preflight PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_libraries(pushcore_hip_preflight PRIVATE veyra_engine ${FFMPEG_LIBRARIES} shell32)
+
+# pushmpc_release: everything a release takes from this tree (every PushFPS shader target, pushcore.dll, the HIP
+# preflight child, the GPU harness), one target for "scripts\build-pushmpc.cmd release". The shader targets are
+# collected once PushFPS's own CMakeLists.txt is done (a deferred call), so the list follows PushFPS without a patch hunk.
+function(pushmpc_collect_shader_targets dir out)
+  get_property(_t DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+  list(FILTER _t INCLUDE REGEX "^veyra_shader_[A-Za-z0-9_]+$")
+  get_property(_subs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+  foreach(_s IN LISTS _subs)
+    pushmpc_collect_shader_targets("${_s}" _st)
+    list(APPEND _t ${_st})
+  endforeach()
+  set(${out} ${_t} PARENT_SCOPE)
+endfunction()
+function(pushmpc_add_release_target)
+  pushmpc_collect_shader_targets("${CMAKE_SOURCE_DIR}" _shaders)
+  add_custom_target(pushmpc_release)
+  add_dependencies(pushmpc_release ${_shaders} pushcore_dll pushcore_hip_preflight pushcore_gpu_harness)
+endfunction()
+cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL pushmpc_add_release_target)

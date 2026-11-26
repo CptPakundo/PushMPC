@@ -1,0 +1,143 @@
+# The Windows core build (pushcore, the filter, the updater, the VapourSynth plugin), called by release.yml and
+# dev-build.yml. The build steps are the pushmpc-core action (.github/actions/pushmpc-core), the packaging the
+# pushmpc-package action, so both shapes run the same steps:
+#   release.yml  core-cache (Linux) looks the output up under a hash of its inputs (.github/actions/pushmpc-core/key.sh);
+#                on a hit the core job is skipped and release.yml's build job restores core-out from the cache;
+#                otherwise the core job builds it and hands it on as the core-build artifact.
+#   dev-build    package: true: ONE Windows job looks the output up, builds it on a miss and packages Setup itself
+#                (no Linux hop, no second runner, no artifact round trip).
+# A tag build (fresh) never takes core-out or compiler output from a cache.
+name: core
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: 'Branch or commit of this repository to build'
+        type: string
+        required: true
+      dry_run:
+        description: 'Dry run: no NVOF requirement, never published'
+        type: boolean
+        default: false
+      fresh:
+        description: 'A tag build: no cached core output, the compiler cache rewritten'
+        type: boolean
+        default: false
+      package:
+        description: 'dev-build: one job that also packages Setup (artifact pushmpc-release)'
+        type: boolean
+        default: false
+    outputs:
+      key:
+        description: 'the core-out cache key'
+        value: ${{ jobs.core-cache.outputs.key }}
+      built:
+        description: 'true when the core job built core-out (artifact core-build); else restore it from the cache by key'
+        value: ${{ jobs.core.outputs.built }}
+    secrets:
+      NVOF_SDK_HEADERS:
+        required: false
+      PUSHMPC_SIGNING_KEY:
+        required: false
+      CODESIGN_PFX_BASE64:
+        required: false
+      CODESIGN_PFX_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  core-cache:
+    if: ${{ !inputs.package }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      hit: ${{ steps.lookup.outputs.cache-hit == 'true' && !inputs.fresh }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: repo
+          persist-credentials: false
+      - name: Key
+        id: key
+        env:
+          NVOF: ${{ secrets.NVOF_SDK_HEADERS != '' }}
+        run: echo "key=$(sh repo/.github/actions/pushmpc-core/key.sh repo "$NVOF")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: ${{ !inputs.fresh }}
+        id: lookup
+        with: { path: core-out, key: '${{ steps.key.outputs.key }}', lookup-only: true, enableCrossOsArchive: true }
+
+  core:
+    needs: core-cache
+    if: ${{ !cancelled() && (inputs.package || (needs.core-cache.result == 'success' && needs.core-cache.outputs.hit != 'true')) }}
+    runs-on: windows-latest
+    timeout-minutes: 100
+    outputs:
+      built: ${{ steps.lookup.outputs.cache-hit != 'true' }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GIT_TERMINAL_PROMPT: 0
+      GCM_INTERACTIVE: never
+      SCCACHE_DIR: ${{ github.workspace }}\sccache
+      SCCACHE_CACHE_SIZE: 3G
+      SCCACHE_IDLE_TIMEOUT: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: repo
+          persist-credentials: false
+
+      # one job (dev-build): the lookup happens here; release.yml's core-cache did it already
+      - name: Key
+        id: key
+        shell: bash
+        env:
+          NVOF: ${{ secrets.NVOF_SDK_HEADERS != '' }}
+        run: echo "key=$(sh repo/.github/actions/pushmpc-core/key.sh repo "$NVOF")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: ${{ inputs.package && !inputs.fresh }}
+        id: lookup
+        with: { path: core-out, key: '${{ steps.key.outputs.key }}', enableCrossOsArchive: true }
+
+      - uses: ./repo/.github/actions/pushmpc-core
+        if: steps.lookup.outputs.cache-hit != 'true'
+        with:
+          dry_run: ${{ inputs.dry_run }}
+          fresh: ${{ inputs.fresh }}
+          nvof_headers: ${{ secrets.NVOF_SDK_HEADERS }}
+
+      # the same outputs for core-cache: a later run with the same inputs skips the build
+      - uses: actions/cache/save@v4
+        if: steps.lookup.outputs.cache-hit != 'true'
+        with: { path: core-out, key: '${{ steps.key.outputs.key }}', enableCrossOsArchive: true }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.package }}
+        with:
+          name: core-build
+          path: ${{ github.workspace }}/core-out/
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pushmpc-gpu-harness
+          path: ${{ github.workspace }}/core-out/harness/pushcore_gpu_harness.exe
+          if-no-files-found: error
+
+      - uses: ./repo/.github/actions/pushmpc-package
+        if: ${{ inputs.package }}
+        with:
+          dry_run: ${{ inputs.dry_run }}
+          signing_key: ${{ secrets.PUSHMPC_SIGNING_KEY }}
+          codesign_pfx: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          codesign_password: ${{ secrets.CODESIGN_PFX_PASSWORD }}

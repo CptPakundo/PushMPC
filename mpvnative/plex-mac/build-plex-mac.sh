@@ -13,6 +13,10 @@ pins="$here/../pins.json"
 min=11.0
 work=$(mktemp -d)
 stub=''
+# FFB_CACHE (optional): each snapshot's build folders are kept between runs (ffbuild-cache.sh): a filter change
+# recompiles vf_pushmpc.o and relinks; configure runs only for a new commit or new options
+. "$here/../ci/ffbuild-cache.sh"
+cfgv=$(cksum < "$0" | cut -d' ' -f1)
 
 for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in json.load(open(sys.argv[1])).get('snapshotCommits', [])))" "$pins"); do
     [ -d "$src/.git" ] || git init -q "$src"
@@ -22,16 +26,24 @@ for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in
     libs=()
     for arch in arm64 x86_64; do
         (
-            b="$work/build-$arch"; rm -rf "$b"; mkdir -p "$b"; cd "$b"   # out of tree: one build folder per architecture
-            cross=''; [ "$arch" = "$(uname -m)" ] || cross='--enable-cross-compile'
-            "$src/configure" --cc="clang -arch $arch" --arch="$arch" --target-os=darwin $cross \
-                --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
-                --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
-                --disable-postproc --disable-asm --disable-autodetect --install-name-dir='@rpath' \
-                --extra-cflags="-mmacosx-version-min=$min" --extra-ldflags="-arch $arch -mmacosx-version-min=$min" \
-                > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
+            b="$work/build-$arch"   # out of tree: one build folder per architecture
+            if ffb_restore_dir "$b" "mac-$arch-$commit" "${FFB_CACHE:-}" "$commit $arch $cfgv"; then
+                # the filter sources were copied in before the restore: newer again, so make recompiles them
+                touch "$src/libavfilter/vf_pushmpc.c" "$src/libavfilter/pmeng.h" "$src/libavfilter/allfilters.c"
+                cd "$b"
+            else
+                cd "$b"
+                cross=''; [ "$arch" = "$(uname -m)" ] || cross='--enable-cross-compile'
+                "$src/configure" --cc="clang -arch $arch" --arch="$arch" --target-os=darwin $cross \
+                    --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
+                    --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
+                    --disable-postproc --disable-asm --disable-autodetect --install-name-dir='@rpath' \
+                    --extra-cflags="-mmacosx-version-min=$min" --extra-ldflags="-arch $arch -mmacosx-version-min=$min" \
+                    > configure.out 2>&1 || { tail -30 configure.out; exit 1; }
+            fi
             grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h
             make -j"$(sysctl -n hw.ncpu)" >/dev/null
+            ffb_store_dir "$b" "mac-$arch-$commit" "${FFB_CACHE:-}" "$commit $arch $cfgv"
         )
         cp "$work/build-$arch/libavfilter/libavfilter.8.dylib" "$work/avfilter-$arch.dylib"
         libs+=("$work/avfilter-$arch.dylib")

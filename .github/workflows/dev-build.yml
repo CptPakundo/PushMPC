@@ -1,10 +1,10 @@
 # A quick Windows test build: PushFPS's pushcore, the filter, the updater, the VapourSynth plugin and
-# PushMPC-Setup.exe, exactly as release.yml builds them (it runs release.yml's core and build jobs), without the VLC,
-# mpv, Plex, Kodi and Linux pieces. Artifact pushmpc-release (Setup, component zips, release.json) as in a release dry
-# run. Never publishes. About 11 minutes with a cold compiler cache, a few minutes with a warm one.
+# PushMPC-Setup.exe, with exactly the steps release.yml uses (core.yml with the pushmpc-core and pushmpc-package
+# actions), in ONE Windows job, without the VLC, mpv, Plex, Kodi and Linux pieces. Artifact pushmpc-release (Setup,
+# component zips, release.json) as in a release dry run. Never publishes.
 #
 # Runs on a push to a track/** branch that touches the Windows build, and by hand ("Run workflow"). When nothing that
-# goes into the core changed since a run that built it, the core comes from the cache and the run takes 2-3 minutes.
+# goes into the core changed since a run that built it, the core comes from the cache and only the packaging runs.
 # The dependency caches come from main (deps.yml).
 name: dev-build
 
@@ -18,13 +18,16 @@ on:
       - 'installer/**'
       - 'patches/**'
       - 'pmml/scripts/**'
+      - 'pmml/src/**'
+      - 'pmml/include/**'
       - 'scripts/pushmpc-install.ps1'
       - 'scripts/pushfps-pin.json'
       - 'scripts/ml-runtime-pin.json'
       - 'vsplugin/src/**'
       - 'vsplugin/CMakeLists.txt'
       - '.github/workflows/dev-build.yml'
-      - '.github/workflows/release.yml'
+      - '.github/workflows/core.yml'
+      - '.github/actions/**'
   workflow_dispatch:
 
 concurrency:
@@ -32,13 +35,13 @@ concurrency:
   cancel-in-progress: true   # the caches are saved right after each build step, so a cancel keeps them
 
 permissions:
-  contents: write   # what release.yml declares (a dev build never publishes)
+  contents: read
 
 jobs:
   windows:
-    uses: ./.github/workflows/release.yml
+    uses: ./.github/workflows/core.yml
     with:
       source_ref: ${{ github.sha }}
       dry_run: true
-      components: false
+      package: true
     secrets: inherit

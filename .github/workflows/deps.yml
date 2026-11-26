@@ -4,7 +4,8 @@
 # makes and saves every one of these caches, each right after its build); never published.
 #
 # Caches made on main are the ones every branch can restore (a branch's own caches are its own). Runs when a pin or a
-# dependency build script changes on main, weekly (caches unused for 7 days are dropped), and by hand.
+# dependency build script changes on main, and by hand: after a merge to main (merges use [skip ci], so dispatch it).
+# No schedule: release and dev-build runs keep the caches in use (unused entries expire after 7 days).
 name: deps
 
 on:
@@ -26,8 +27,6 @@ on:
       - 'vlcplugin/display/vlc3/fetch-vlc-sources.sh'
       - 'vsplugin/engines/gpu/gpu-pins.json'
       - '.github/workflows/deps.yml'
-  schedule:
-    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 concurrency:
