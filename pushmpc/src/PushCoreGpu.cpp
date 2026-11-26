@@ -35,6 +35,7 @@
 #include "veyra/gfx/AmfFrcBackend.h"
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
+#include "PushCoreZludaVsr.h"               // G11: RTX VSR on AMD RX 7000 / 9000 through ZLUDA (worker process)
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -321,9 +322,23 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         veyra::log::info("pushcore", std::format("unlock {}", why));
         const bool off = pmu::ReadUnlockMode(pmu::Unlock::Gtx16Vsr) == pmu::UnlockMode::Off;
         set(PUSHCORE_CAP_RTX_VSR, !off, vsrFiles && u.on, why.c_str(), vsrFiles ? why.c_str() : "nvngx_vsr.dll is not installed");
+    } else if (amd && pmu::ZludaEligibleFamily(fam)) {
+        // G11: RTX VSR on RX 7000 / 9000 through ZLUDA (unlock ZludaVsr): hardware = the family (unless switched off);
+        // available = HIP + ZLUDA + nvngx_vsr.dll + the worker, and its self-test passed (or forced on). The RTX VSR
+        // bit follows it, so the filter's "RTX VSR" choice and Auto pick it like on NVIDIA (pushcore runs it through
+        // ZLUDA, PUSHCORE_SR_METHOD_ZLUDA_VSR); PUSHCORE_CAP_ZLUDA_VSR says which route it is.
+        const auto z = pushmpc::zludaVsrState(d, fam, driverVersionOf(d.AdapterLuid), runtimeDir, moduleDirectory());
+        const std::string why = narrow(z.decision.why);
+        veyra::log::info("pushcore", std::format("unlock {}", why));
+        const bool off = z.mode == pmu::UnlockMode::Off;
+        const char* filesWhy = !z.elig.files ? z.elig.why.c_str() : why.c_str();
+        set(PUSHCORE_CAP_ZLUDA_VSR, !off, z.elig.files && z.decision.on, off ? why.c_str() : z.elig.why.c_str(), filesWhy);
+        set(PUSHCORE_CAP_RTX_VSR, !off, z.elig.files && z.decision.on, off ? why.c_str() : "RTX VSR on AMD runs through ZLUDA (RX 7000 / 9000)", filesWhy);
     } else {
         set(PUSHCORE_CAP_RTX_VSR, nvidia && rtx, vsrFiles, "needs an NVIDIA RTX card (GTX 16: unlock Gtx16Vsr after its self-test)", "nvngx_vsr.dll is not installed");
     }
+    if (!(amd && pmu::ZludaEligibleFamily(fam)))
+        set(PUSHCORE_CAP_ZLUDA_VSR, false, false, "RTX VSR through ZLUDA needs an AMD RX 7000 or RX 9000", "");
     set(PUSHCORE_CAP_VSR_FAMILIES, nvidia && rtx, veyra::pipeline::VfxSrBackend::runtimeAvailable(rt), "needs an NVIDIA RTX card",
         "the Video Effects VideoSuperRes files are not installed");
     set(PUSHCORE_CAP_FSR_SR, true, fsrLoader && fileExists(fsr / L"amd_fidelityfx_upscaler_dx12.dll"), "",
@@ -401,6 +416,11 @@ struct PushCore {
     uint32_t subOnRun = 0, subOffRun = 0;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
+    // G11: RTX VSR through ZLUDA on RX 7000 / 9000 (decided at open; zludaFailed = it did not start or stopped in this
+    // instance: FSR from then on)
+    std::optional<pushmpc::ZludaVsrState> zvsr;
+    bool zludaFailed = false;
+    std::shared_ptr<pushmpc::ZludaVsrSr> zludaSr;
 
     // ---- D3D11 side (borrowed device, our objects) ----
     ComPtr<ID3D11Device> d11;
@@ -603,8 +623,15 @@ struct PushCore {
         if (settings.srQuality >= 1 && settings.srQuality <= 4) s.videoSrQuality = settings.srQuality;
         // the upscaler: RTX VSR, or AMD FSR / NVIDIA Image Scaling (any GPU; on a non-NVIDIA GPU RTX VSR becomes FSR)
         runSr = settings.srMethod;
-        if (!nvidia && runSr == PUSHCORE_SR_METHOD_RTX) runSr = PUSHCORE_SR_METHOD_FSR;
-        if (runSr == PUSHCORE_SR_METHOD_FSR) {
+        // G11: on an RX 7000 / 9000 "RTX VSR" (or ZLUDA VSR asked for by name) runs through ZLUDA when the unlock is on
+        // (its self-test passed, or forced on) and it has not failed in this instance; else FSR, as on any non-NVIDIA GPU
+        if (!nvidia && (runSr == PUSHCORE_SR_METHOD_RTX || runSr == PUSHCORE_SR_METHOD_ZLUDA_VSR))
+            runSr = zvsr && zvsr->elig.files && zvsr->decision.on && !zludaFailed ? PUSHCORE_SR_METHOD_ZLUDA_VSR : PUSHCORE_SR_METHOD_FSR;
+        if (nvidia && runSr == PUSHCORE_SR_METHOD_ZLUDA_VSR) runSr = PUSHCORE_SR_METHOD_RTX;   // NVIDIA runs RTX VSR natively
+        if (runSr == PUSHCORE_SR_METHOD_ZLUDA_VSR) {
+            // the standard RTX VSR family at the asked tier (videoSrQuality 1..4); the graph hands the pass to the worker
+            if (!veyra::engine::ngxVideoSr(s.videoSrQuality)) s.videoSrQuality = 4;
+        } else if (runSr == PUSHCORE_SR_METHOD_FSR) {
             s.videoSrQuality = kVideoSrFsr;   // FidelityFX picks FSR 4.1 (ML / INT8) where the driver offers it
             s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;   // FSR is temporal: its motion from FidelityFX flow
         } else if (runSr == PUSHCORE_SR_METHOD_NIS) {
@@ -685,6 +712,20 @@ struct PushCore {
         // FSR FG and AMD FRC, and the AMD NR runtimes (the graph skips the NGX core for them)
         family = familyOf(ad.VendorId, ad.Description);
         veyra::log::info("pushcore", std::format("adapter vendor 0x{:04X} device 0x{:04X} family {} ({})", ad.VendorId, ad.DeviceId, family, narrow(ad.Description)));
+        // G11: RTX VSR through ZLUDA (RX 7000 / 9000): the unlock's decision, and its self-test in the background when this
+        // adapter + driver has no result yet (only while a player has PushMPC open; FSR until it has passed)
+        if (ad.VendorId == 0x1002 && pmu::ZludaEligibleFamily(family)) {
+            DXGI_ADAPTER_DESC1 d1{};
+            if (findAdapter(luid, d1)) {
+                zvsr = pushmpc::zludaVsrState(d1, family, driverVersionOf(d1.AdapterLuid), std::filesystem::path(runtimeDir), moduleDirectory());
+                veyra::log::info("pushcore", "unlock " + narrow(zvsr->decision.why) + (zvsr->elig.why.empty() ? std::string() : " [" + zvsr->elig.why + "]"));
+                if (zvsr->decision.runSelfTest) {
+                    std::string why;
+                    const uint32_t scale = std::clamp<uint32_t>(stream.height ? (2160u + stream.height - 1) / stream.height : 2u, 1u, 4u);
+                    if (!pushmpc::zludaVsrStartSelfTest(*zvsr, stream.width, stream.height, scale, why)) veyra::log::info("pushcore", "ZludaVsr self-test not started: " + why);
+                }
+            }
+        }
         {
             wchar_t v[64]{};
             if (GetEnvironmentVariableW(L"CUDA_CACHE_DISABLE", v, 64) && wcscmp(v, L"0") != 0)
@@ -834,6 +875,10 @@ struct PushCore {
         r.width = stream.width; r.height = stream.height;
         r.stillImage = false; r.exportJob = false; r.liveSource = false; r.uncompressedSource = false;
         r.nvidiaAdapter = ctx.adapter().isNvidia; r.amdNr = ctx.adapter().vendorId == 0x1002;   // AMD: NR on the AMD runtimes
+        // G11: RTX VSR through ZLUDA: the RTX VSR stage is described as on NVIDIA (describeStages keeps RTX VSR qualities
+        // only for an NVIDIA adapter); every NVIDIA-only FG / HDR choice was already taken out in buildFromPushMpc
+        const bool zludaRun = haveSettings && runSr == PUSHCORE_SR_METHOD_ZLUDA_VSR && options.sr && zvsr;
+        if (zludaRun) r.nvidiaAdapter = true;
         r.nodeOrder = options.nodeOrder ? &*options.nodeOrder : nullptr;
         // PushFPS Crosshair Hold / Subtitle Hold: process-wide switches PushFPS's UI sets (PushOverlay.h), read by
         // describeStages. Crosshair Hold is never for video; Subtitle Hold follows PushMPC's setting, set right before each
@@ -900,10 +945,20 @@ struct PushCore {
                 cache = &ownCache;
             }
         }
+        // G11: the worker takes the graph's RTX VSR pass (patch pushfps-4.5.4-zluda-externalsr.patch: EnhanceGraphDesc::externalSr)
+        zludaSr.reset();
+        if (zludaRun) { zludaSr = std::make_shared<pushmpc::ZludaVsrSr>(*zvsr); gd.externalSr = zludaSr; }
         graph = std::make_unique<pipeline::EnhanceGraph>(ctx, ring, cache);
         const auto t = Clock::now();
         if (!graph->initialize(gd) || !graph->createViews()) {
             lastFailed = graph->failedBackend();
+            if (zludaRun && lastFailed == engine::FailedBackend::Sr) {
+                // RTX VSR through ZLUDA did not start (worker refused / missing / timed out): FSR in its place, for this instance
+                veyra::log::warn("pushcore", "RTX VSR through ZLUDA did not start (" + zludaSr->error() + "): FSR upscaling instead");
+                zludaFailed = true;
+                graph->shutdown(); graph.reset(); zludaSr.reset();
+                return buildGraphOnce();
+            }
             return fail(std::format("enhancement graph did not start (failed backend {})", int(graph->failedBackend())));
         }
         graph->recordGpuTimings();
@@ -921,6 +976,7 @@ struct PushCore {
             engine::frameGenerationBackendName(options.settings.frameGenerationBackend), multiplier, gd.vfgQuality,
             gd.vfgAsyncSubmission ? 1 : 0, fg ? (cutGuardOn ? "on" : "off") : "-", graph->nrEnabled() ? "on" : "off",
             gd.shareableOutputs ? "direct (shared graph pool)" : "copy ring", family);
+        if (zludaRun) description += std::format("; upscaler RTX VSR through ZLUDA ({})", graph->externalSrActive() ? "worker running" : "not active");
         veyra::log::info("pushcore", std::format("graph ready in {:.0f} ms: {}", msSince(t), description));
         return buildEgress();
     }
@@ -1077,6 +1133,12 @@ struct PushCore {
 
     void collectTimings() {
         if (!graph) return;
+        if (zludaSr && !zludaFailed && graph->externalSrLost()) {
+            // G11: the ZLUDA worker stopped mid-stream: the graph resizes plainly from that frame on (never a black frame);
+            // the next rebuild (any settings change, applySettingsLive below) runs FSR
+            zludaFailed = true;
+            veyra::log::warn("pushcore", "RTX VSR through ZLUDA stopped (" + zludaSr->error() + "): FSR from the next graph rebuild");
+        }
         cutsSeen.store(cutBase + graph->cutGuardCuts(), std::memory_order_relaxed);
         for (const auto& t : graph->takeGpuTimings()) {
             using veyra::diagnostics::GpuStage;
@@ -1421,6 +1483,7 @@ struct PushCore {
             veyra::log::info("pushcore", "frame generation method, upscaler, cut guard or Subtitle Hold changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
+        if (zludaSr && zludaFailed) { veyra::log::info("pushcore", "RTX VSR through ZLUDA stopped: graph rebuild (FSR)"); return PUSHCORE_NEEDS_REBUILD; }
         engine::EnhancementSettings s;
         std::optional<engine::ChainRuntimeOrder> order;
         if (!loadSettings(s, order)) return PUSHCORE_NEEDS_REBUILD;
@@ -1561,7 +1624,8 @@ extern "C" {
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG
+                                    | PUSHCORE_FEATURE_ZLUDA_VSR | PUSHCORE_FEATURE_AMDGPU_EP; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

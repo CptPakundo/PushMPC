@@ -3,7 +3,7 @@
   fetches it (same pin file, same layout, same checks), for Setup on PCs without Python.
 
     pmml-fetch.ps1 -Pin <ml-runtime-pin.json> -Out <dir> [-Platform win-x64] [-Flavors core] [-Eps trt-rtx,openvino,qnn]
-                   [-Cache <dir>] [-DryRun]
+                   [-Cache <dir>] [-WinMl] [-DryRun]
 
   Everything comes from its official source (nuget.org, pypi.org wheels used as archives) and is checked against the pinned
   SHA-256 before anything is extracted; an entry pinned as TODO is refused. Only the native libraries, the side-by-side
@@ -11,6 +11,8 @@
   Layout: <Out>\ort\<flavor>\ (onnxruntime.dll), <Out>\eps\<ep>\ (the plugin EP and ep.json {name, epName, library,
   version}), <Out>\licenses\, <Out>\fetched.json. Exit 0 = done, 1 = a download or a check failed (nothing half-written
   is left in <Out>: the result is built in <Out>.part and moved into place).
+  -WinMl: Windows ML (the winmlCatalog pin) into <Out>\winml, for pmml_winml_ep.exe, which asks Windows ML's EP catalog
+  for the EPs that exist only there (AMD's AMDGPUExecutionProvider); Setup runs that tool after this script.
   Works with Windows PowerShell 5.1 and PowerShell 7.
 #>
 [CmdletBinding()]
@@ -21,6 +23,7 @@ param(
     [string[]]$Flavors = @('core'),
     [string[]]$Eps = @(),
     [string]$Cache = '',
+    [switch]$WinMl,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -119,6 +122,21 @@ foreach ($ep in $Eps) {
     [ordered]@{ name = $ep; epName = $entry.epName; library = $lib; version = $entry.version } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dest 'ep.json') -Encoding ASCII
     $record.eps[$ep] = [ordered]@{ version = $entry.version; library = $lib; files = $files.Count }
     Write-Host "ok      eps/$ep $($entry.version): library $lib; $($files.Count) files"
+}
+if ($WinMl) {
+    # Windows ML's EP catalog C API (pmml_winml_ep.exe): AMD's AMDGPUExecutionProvider exists only through it
+    $wm = $pinData.winmlCatalog
+    $spec = if ($wm) { $wm.platforms.$Platform } else { $null }
+    if (-not $spec) { Write-Host "skip    winml: no $Platform package" }
+    else {
+        $arc = Get-Pinned $wm.url $wm.sha256
+        if (-not $DryRun) {
+            $files = @(Expand-Pinned $arc @($spec) (Join-Path $part 'winml') (Join-Path $part 'licenses'))
+            if (-not $files.Count) { Fail "winml: nothing matched $spec" }
+            $record['winml'] = [ordered]@{ version = $wm.version; files = $files }
+            Write-Host "ok      winml $($wm.version): $($files -join ', ')"
+        }
+    }
 }
 if ($DryRun) { exit 0 }
 $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $part 'fetched.json') -Encoding ASCII

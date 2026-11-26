@@ -51,6 +51,17 @@
       }
     }
   },
+  "winmlCatalog": {
+    "what": "Windows ML (Microsoft.Windows.AI.MachineLearning, standalone, unpackaged; reg-free WinRT, no Windows App SDK runtime) for its ExecutionProviderCatalog flat C API (WinMLEpCatalog*), which pmml_winml_ep.exe uses to get the EPs that exist only through the catalog (eps with \"version\": \"catalog\": AMD's AMDGPUExecutionProvider, min. 2.5.96). Extracted into <Out>\\winml only when such an EP is asked for; ONNX Runtime from this package is NOT used by pmml (ort/core is). MIT.",
+    "version": "2.5.96",
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.5.96/microsoft.windows.ai.machinelearning.2.5.96.nupkg",
+    "sha256": "TODO",
+    "platforms": {
+      "win-x64": "runtimes/win-x64/native/*",
+      "win-arm64": "runtimes/win-arm64/native/*"
+    },
+    "note": "Phase 2 / CI: fill sha256 from the first pinned fetch (fetch_runtime.py prints it with --allow-unpinned) and confirm the runtimes/<rid>/native layout with --list; Setup refuses TODO, so until then the AMD GPU EP is simply not installed (DirectML stays)."
+  },
   "eps": {
     "trt-rtx": {
       "what": "NVIDIA TensorRT for RTX as an ONNX Runtime plugin EP (NVIDIA/TensorRT-RTX-EP-ABI 0.5.0; bundles the TensorRT-RTX 1.7 runtime). RTX GPUs; JIT engine build on the user's GPU, cached. Host: ort/core.",

@@ -162,6 +162,7 @@ def main() -> int:
     ap.add_argument("--ncnn", action="store_true")
     ap.add_argument("--ncnn-models", action="store_true", help="the RIFE ncnn models of the ncnn backend")
     ap.add_argument("--headers", action="store_true")
+    ap.add_argument("--winml", action="store_true", help="Windows ML (winmlCatalog pin) into DIR/winml, for pmml_winml_ep (catalog-only EPs)")
     ap.add_argument("--list", action="store_true", help="print the native files of every archive")
     ap.add_argument("--allow-unpinned", action="store_true")
     a = ap.parse_args()
@@ -237,6 +238,20 @@ def main() -> int:
         print(f"ok      eps/{ep} {entry['version']}: library {lib}; {len(files)} files")
         if not lib:
             print(f"::warning::eps/{ep}: no file matched {entry['library']}")
+
+    if a.winml:
+        # Windows ML's EP catalog (pmml_winml_ep.exe): AMD's AMDGPUExecutionProvider exists only through it
+        wm = pin.get("winmlCatalog")
+        spec = wm and wm["platforms"].get(plat)
+        if not spec:
+            print(f"skip    winml: no {plat} package")
+        else:
+            arc, digest = download(wm["url"], wm["sha256"], cache, a.allow_unpinned)
+            if a.list:
+                list_archive(arc)
+            files = extract(arc, [spec], out / "winml")
+            record["winml"] = {"version": wm["version"], "sha256": digest, "files": files}
+            print(f"ok      winml {wm['version']}: {', '.join(files)}")
 
     if a.ncnn:
         key = "osx" if plat.startswith("osx") else plat

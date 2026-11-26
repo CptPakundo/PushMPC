@@ -159,6 +159,9 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
 #define PUSHCORE_SR_METHOD_NIS 2u  /* NVIDIA Image Scaling (shaders, any GPU) */
+#define PUSHCORE_SR_METHOD_ZLUDA_VSR 5u /* PUSHCORE_FEATURE_ZLUDA_VSR: RTX VSR on AMD RX 7000 / 9000 through ZLUDA (a worker process;
+                                      unlock ZludaVsr, self-tested). On those cards PUSHCORE_SR_METHOD_RTX runs it too when
+                                      PUSHCORE_CAP_ZLUDA_VSR is available; elsewhere it is FSR (AMD) or RTX VSR (NVIDIA) */
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
@@ -312,6 +315,9 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
+#define PUSHCORE_FEATURE_ZLUDA_VSR (1u << 24) /* PUSHCORE_SR_METHOD_ZLUDA_VSR, PUSHCORE_CAP_ZLUDA_VSR, PUSHCORE_SELFTEST_ZLUDA_VSR (Vendor-AMD, G11) */
+#define PUSHCORE_FEATURE_AMDGPU_EP (1u << 25) /* PushFlow on pmml takes AMD's AMDGPUExecutionProvider from Windows ML's EP catalog
+                                                 (eps\amdgpu\ep.json written by Setup's pmml_winml_ep.exe; Vendor-AMD, G11) */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */
 PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in older builds (= 0) */
@@ -345,7 +351,11 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
-#define PUSHCORE_CAP_COUNT 14u
+#define PUSHCORE_CAP_ZLUDA_VSR 18u   /* PUSHCORE_SR_METHOD_ZLUDA_VSR: AMD RX 7000 / 9000, HIP + ZLUDA + nvngx_vsr.dll + the worker, self-test passed */
+#define PUSHCORE_CAP_COUNT 19u       /* highest index + 1 in this branch; the orchestrator sets the merged value */
+/* Self-test id (one global bit space with the pushcore_selfTest export of PUSHCORE_FEATURE_XEFG / XESS_SR; the export's
+   case for this id is added at merge and calls pushmpc::zludaVsrSelfTestNow): the ZludaVsr self-test, synchronously */
+#define PUSHCORE_SELFTEST_ZLUDA_VSR 32u
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;

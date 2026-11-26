@@ -377,10 +377,18 @@ jobs:
         run: |
           $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
           Write-Host "$($shaders.Count) shader targets"
-          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_hip_preflight pushcore_gpu_harness pushflow_pmml_check --parallel
+          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_hip_preflight pushcore_gpu_harness pushflow_pmml_check pushcore_zluda_vsr_worker zluda_vsr_stub_worker zluda_vsr_test pmml_winml_ep --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "$((Get-ChildItem "$env:BUILD\shaders" -Recurse -Filter *.dxil).Count) .dxil files"
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length, VersionInfo
+
+      # G11: RTX VSR on AMD through ZLUDA without an AMD GPU: parameter packing, the worker protocol, the cubin -> PTX index,
+      # the picture check, the refusals and the whole worker round trip with the stub worker on WARP (exit = failed checks)
+      - name: ZLUDA VSR worker checks (WARP, stub worker)
+        timeout-minutes: 10
+        run: |
+          & "$env:BUILD\pushmpc\zluda_vsr_test.exe" --stub "$env:BUILD\pushmpc\zluda_vsr_stub_worker.exe" --real "$env:BUILD\pushmpc\pushcore_zluda_vsr_worker.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::zluda_vsr_test: $LASTEXITCODE failed checks"; exit 1 }
 
       # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
       # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
