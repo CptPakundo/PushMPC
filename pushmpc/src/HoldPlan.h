@@ -40,9 +40,12 @@ struct BlockMotion {
     std::vector<int8_t> sx, sy;           // best shift in cells on top of the camera
     std::vector<float> res, zero;         // residual at the best shift / at the camera shift (codes)
     std::vector<uint16_t> nch;            // changed cells in the block (0: not searched)
+    std::vector<uint8_t> camOk;           // the camera's residual is small against the block's contrast (interpolation only)
     std::vector<uint8_t> state;           // 0 not searched, 1 explained by one shift, 2 explained by two motions, 3 unexplained,
                                           // 4 explained by the camera within a cell (its estimate a fraction off there)
     uint64_t searched = 0, coarse = 0;    // counters (blocks searched, blocks that needed the wide search)
+    bool rigid = false;                   // a moving camera explains nearly all the textured picture (a pan, a credit roll)
+    float camFixX = 0, camFixY = 0;       // quarter-cell correction of the camera estimate (cells), applied to every shift here
 };
 
 // prev resampled at the camera-compensated position of every cell of cur (bilinear once, so integer shifts on top are
@@ -57,6 +60,8 @@ inline void WarpPrev(const CellGrid& prev, const RegionFrame& r, std::vector<flo
             out[size_t(y) * W + x] = prev.sample(cx + (float(x) - cx - r.dx) / sc, cy + (float(y) - cy - r.dy) / sc);
 }
 
+inline constexpr float kRigidShare = 0.15f;    // camera residual / edge contrast of the whole picture for a rigid move
+inline constexpr float kInterpShare = 0.25f;   // camera residual / block contrast below which it is interpolation, not change
 inline BlockMotion MatchBlocks(const CellGrid& prev, const CellGrid& cur, const RegionFrame& r, float thr, int fine = 8, int wide = 40)
 {
     BlockMotion m;
@@ -65,8 +70,35 @@ inline BlockMotion MatchBlocks(const CellGrid& prev, const CellGrid& cur, const 
     const int W = int(cur.w), H = int(cur.h), BW = W / B, BH = H / B;
     m.w = cur.w; m.h = cur.h; m.bw = uint32_t(BW); m.bh = uint32_t(BH);
     const size_t nb = size_t(BW) * BH;
-    m.sx.assign(nb, 0); m.sy.assign(nb, 0); m.res.assign(nb, 0.f); m.zero.assign(nb, 0.f); m.nch.assign(nb, 0); m.state.assign(nb, 0);
-    const RegionFrame& rc = r;
+    m.sx.assign(nb, 0); m.sy.assign(nb, 0); m.res.assign(nb, 0.f); m.zero.assign(nb, 0.f); m.nch.assign(nb, 0); m.state.assign(nb, 0); m.camOk.assign(nb, 0);
+    // the camera refined to a quarter cell over the whole textured picture (not only the changed cells: those would pull
+    // it towards a moving character). CompareRegions' estimate can be a fraction off on a slow roll (credits on black:
+    // 3 px a frame at 2160p is 0.375 cell), which leaves every glyph edge "changed"; the refined camera explains them.
+    RegionFrame rc = r;
+    {
+        std::vector<uint32_t> probe;
+        for (int y = 2; y + 2 < H; y += 2)
+            for (int x = 2; x + 2 < W; x += 2) {
+                const size_t c = size_t(y) * W + x;
+                if (std::fabs(cur.v[c + 1] - cur.v[c - 1]) + std::fabs(cur.v[c + W] - cur.v[c - W]) >= 8.f) probe.push_back(uint32_t(c));
+            }
+        if (probe.size() >= 64) {
+            const float cx = 0.5f * float(W - 1), cy = 0.5f * float(H - 1), sc = r.scale > 0.f ? r.scale : 1.f;
+            auto err = [&](float dx, float dy) {
+                double e = 0;
+                for (uint32_t c : probe) { const float x = float(c % uint32_t(W)), y = float(c / uint32_t(W)); e += std::min(32.f, std::fabs(cur.v[c] - prev.sample(cx + (x - cx - dx) / sc, cy + (y - cy - dy) / sc))); }
+                return e;
+            };
+            double best = err(r.dx, r.dy); float fx = 0.f, fy = 0.f;
+            for (int j = -2; j <= 2; ++j)
+                for (int i = -2; i <= 2; ++i) { if (!i && !j) continue; const double e = err(r.dx + 0.25f * float(i), r.dy + 0.25f * float(j)); if (e < 0.97 * best) { best = e; fx = 0.25f * float(i); fy = 0.25f * float(j); } }
+            rc.dx += fx; rc.dy += fy; m.camFixX = fx; m.camFixY = fy;
+            // how well the camera alone explains the textured picture: residual against the edges' own contrast
+            double grad = 0;
+            for (uint32_t c : probe) grad += std::fabs(cur.v[c + 1] - cur.v[c - 1]) + std::fabs(cur.v[c + W] - cur.v[c - W]);
+            m.rigid = grad > 0 && (std::fabs(rc.dx) + std::fabs(rc.dy) >= 0.25f) && best / grad <= kRigidShare;
+        }
+    }
     std::vector<float> pw;
     WarpPrev(prev, rc, pw);
     auto P = [&](int x, int y) { x = std::clamp(x, 0, W - 1); y = std::clamp(y, 0, H - 1); return pw[size_t(y) * W + x]; };
@@ -128,6 +160,18 @@ inline BlockMotion MatchBlocks(const CellGrid& prev, const CellGrid& cur, const 
             m.sx[bi] = int8_t(std::clamp(bdx, -127, 127)); m.sy[bi] = int8_t(std::clamp(bdy, -127, 127));
             m.res[bi] = best; m.zero[bi] = zero;
             m.state[bi] = best > accept ? 3 : (bdx || bdy) ? 1 : 4;   // 4: the camera explains it after all (a cell's change was a fraction of the camera)
+            {
+                // sharp detail moved by the camera (glyphs of a credit roll, hair lines): the cell grid's interpolation
+                // leaves a residual over the threshold that no shift lowers, but it is small against the block's own
+                // contrast. A redrawn or appearing object differs by about its contrast.
+                double mean = 0, dev = 0;
+                for (int j = 0; j < B; ++j) for (int i = 0; i < B; ++i) mean += cur.v[size_t(by * B + j) * W + bx * B + i];
+                mean /= B * B;
+                for (int j = 0; j < B; ++j) for (int i = 0; i < B; ++i) dev += std::fabs(cur.v[size_t(by * B + j) * W + bx * B + i] - mean);
+                dev /= B * B;
+                m.camOk[bi] = zero <= kInterpShare * float(dev);
+                if (m.state[bi] == 3 && m.camOk[bi] && best >= 0.8f * zero) m.state[bi] = 4;
+            }
         }
     // pass 2: a block with two motions (an occlusion edge, a window over a scrolling background) is explained when every
     // cell matches the camera or one of its neighbour blocks' shifts
@@ -286,12 +330,13 @@ inline std::vector<ObjectClass> ClassifyObjects(const RegionFrame& r, const Bloc
         o.cells = uint32_t(o.idx.size());
         if (o.cells < kMinObjectCells) continue;
         o.edge = o.x0 == 0 || o.y0 == 0 || o.x1 == W - 1 || o.y1 == H - 1;
-        uint32_t searched = 0, unexpl = 0, slidN = 0;
+        uint32_t searched = 0, unexpl = 0, slidN = 0, camOkN = 0;
         std::vector<std::pair<int32_t, uint32_t>> hist;
         for (uint32_t c : o.idx) {
             const int b = blockOf(c);
             if (b < 0 || !m.state[size_t(b)]) continue;
             ++searched;
+            camOkN += m.camOk[size_t(b)];
             if (m.state[size_t(b)] == 3) { ++unexpl; continue; }
             if (key[c]) {
                 ++slidN;
@@ -308,6 +353,11 @@ inline std::vector<ObjectClass> ClassifyObjects(const RegionFrame& r, const Bloc
         // a sparse change (most of its cells in blocks with under a quarter changed: thin lines a fraction off, grain):
         // nothing was redrawn there, the generator's output stays
         if (searched * 4 < o.cells) o.kind = ObjectClass::Slid;
+        // its blocks match the camera up to interpolation (detail carried by the camera: a credit roll's glyphs)
+        if (searched && camOkN * 5 >= searched * 3 && o.kind == ObjectClass::Redrawn) o.kind = ObjectClass::Slid;
+        // on a rigid camera move small bits that no shift explains are the cell grid's interpolation of fine detail
+        // (glyphs of a credit roll), not drawings: a held patch smaller than kMinUnexplainedCells would only be a seam
+        if (m.rigid && o.cells < kMinUnexplainedCells && o.unexplShare >= kUnexplainedShare) o.kind = ObjectClass::Slid;
         // the strip a pan reveals at the picture edge (no earlier frame has it): the generator's output, never a hold
         const int rx = int(std::ceil(std::fabs(r.dx))) + 2, ry = int(std::ceil(std::fabs(r.dy))) + 2;
         if ((o.x0 == 0 && o.x1 < rx) || (o.x1 == W - 1 && o.x0 > W - 1 - rx) || (o.y0 == 0 && o.y1 < ry) || (o.y1 == H - 1 && o.y0 > H - 1 - ry))
