@@ -4,6 +4,9 @@
  * files it tries a Y4M it writes itself (rawvideo: no decoder download needed). Prints whether the filter was
  * accepted, the filter's own log line, the end-of-file reason and, on failure, the log's error lines. Exit 0:
  * accepted, the x2 filter line seen, played to the end; 2: libmpv not usable; 3: otherwise. Self-tests only.
+ * PUSHMPC_HOST_SCRIPT=<pushmpc_hook.so>: the C-plugin route instead of the preload: the host loads the hook as an mpv
+ * script (script-opts pushmpc-vf=smoother=2) and sets no vf itself; the hook appends the filter (Snap Plex).
+ * PUSHMPC_HOST_TMP=<dir>: where the Y4M and the logs go (default /tmp; a Snap's /tmp is private anyway).
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -74,15 +77,20 @@ int main(int argc, char **argv)
     errstr = (const char *(*)(int))dlsym(h, "mpv_error_string");
     if (!create || !init || !set || !cmd || !wait || !destroy) { printf("host: %s lacks the client API\n", argv[1]); return 2; }
     for (f = 2; f < argc && nf < 63; f++) files[nf++] = argv[f];
-    snprintf(y4m, sizeof(y4m), "/tmp/libmpv-host-%d.y4m", (int)getpid());
+    const char *tmp = getenv("PUSHMPC_HOST_TMP") && *getenv("PUSHMPC_HOST_TMP") ? getenv("PUSHMPC_HOST_TMP") : "/tmp";
+    snprintf(y4m, sizeof(y4m), "%s/libmpv-host-%d.y4m", tmp, (int)getpid());
     if (write_y4m(y4m) == 0) files[nf++] = y4m;
     for (f = 0; f < nf && !ok; f++) {
         int vfrc, reason = -1, i, seen = 0, shown = 0;
         FILE *lf;
-        snprintf(log, sizeof(log), "/tmp/libmpv-host-%d-%d.log", (int)getpid(), f);
+        snprintf(log, sizeof(log), "%s/libmpv-host-%d-%d.log", tmp, (int)getpid(), f);
         ctx = create();
         set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v"); set(ctx, "input-media-keys", "no");
-        vfrc = set(ctx, "vf", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc=smoother=2");   /* CI: a forced backend */
+        if (getenv("PUSHMPC_HOST_SCRIPT") && *getenv("PUSHMPC_HOST_SCRIPT")) {   /* the hook appends the filter itself */
+            vfrc = set(ctx, "scripts", getenv("PUSHMPC_HOST_SCRIPT"));
+            set(ctx, "script-opts", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc-vf=smoother=2");
+        } else
+            vfrc = set(ctx, "vf", getenv("PUSHMPC_HOST_VF") ? getenv("PUSHMPC_HOST_VF") : "pushmpc=smoother=2");   /* CI: a forced backend */
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
             const char *args[] = { "loadfile", files[f], NULL };

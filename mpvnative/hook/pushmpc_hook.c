@@ -272,6 +272,89 @@ __attribute__((visibility("default"))) const void *avfilter_get_by_name(const ch
     pthread_once(&g_once, preload_init);
     return hook_get_by_name(name);
 }
+
+/* PUSHMPC_PRELOAD_VF=auto|<vf_pushmpc options>: for libmpv programs that read no mpv.conf (Stremio, Jellyfin Desktop
+ * Flatpaks): mpv_initialize is interposed too; after the real one the filter is appended ("vf append"), and a client of
+ * the program's own mpv core puts it back whenever the program replaces the vf list (Stremio does on display changes).
+ * Programs that dlopen libmpv privately and call it through dlsym on that handle bypass this (they use mpv.conf). */
+typedef struct { int event_id; int error; uint64_t reply_userdata; void *data; } pm_event;
+typedef int (*pm_init_fn)(void *);
+typedef int (*pm_cmd_fn)(void *, const char **);
+typedef void *(*pm_client_fn)(void *, const char *);
+typedef int (*pm_observe_fn)(void *, uint64_t, const char *, int);
+typedef pm_event *(*pm_wait_fn)(void *, double);
+typedef char *(*pm_getstr_fn)(void *, const char *);
+typedef void (*pm_free_fn)(void *);
+static pm_cmd_fn pm_cmd;
+static pm_getstr_fn pm_getstr;
+static pm_free_fn pm_free, pm_destroy;
+static pm_wait_fn pm_wait;
+static char g_vfarg[1024];
+
+static int vf_has_ours(void *h)
+{
+    char *v = pm_getstr(h, "vf");
+    const int has = v && strstr(v, "pushmpc") != NULL;
+    if (v) pm_free(v);
+    return has;
+}
+static void vf_add(void *h, const char *why)
+{
+    const char *args[] = { "vf", "append", g_vfarg, NULL };
+    const int r = pm_cmd(h, args);
+    fprintf(stderr, "[pushmpc_preload] vf append %s (%s) -> %d\n", g_vfarg, why, r);
+}
+static void *vf_watch(void *client)
+{
+    int again = 0;
+    for (;;) {
+        pm_event *ev = pm_wait(client, -1);
+        if (ev->event_id == 1)   /* MPV_EVENT_SHUTDOWN */
+            break;
+        if (ev->event_id == 22 && !vf_has_ours(client) && again++ < 200)   /* MPV_EVENT_PROPERTY_CHANGE "vf" */
+            vf_add(client, "the program replaced the filter list");
+    }
+    pm_destroy(client);
+    return NULL;
+}
+__attribute__((visibility("default"))) int mpv_initialize(void *h)
+{
+    static pm_init_fn real;
+    const char *opt = getenv("PUSHMPC_PRELOAD_VF");
+    int r;
+    if (!real)
+        real = (pm_init_fn)dlsym(RTLD_NEXT, "mpv_initialize");
+    if (!real)
+        return -1;
+    r = real(h);
+    if (r < 0 || !opt || !*opt || !strcmp(opt, "no"))
+        return r;
+    pthread_once(&g_once, preload_init);
+    pm_cmd = (pm_cmd_fn)dlsym(RTLD_NEXT, "mpv_command");
+    pm_getstr = (pm_getstr_fn)dlsym(RTLD_NEXT, "mpv_get_property_string");
+    pm_free = (pm_free_fn)dlsym(RTLD_NEXT, "mpv_free");
+    pm_destroy = (pm_free_fn)dlsym(RTLD_NEXT, "mpv_destroy");
+    pm_wait = (pm_wait_fn)dlsym(RTLD_NEXT, "mpv_wait_event");
+    if (!g_filter || !pm_cmd || !pm_getstr || !pm_free || !pm_destroy || !pm_wait)
+        return r;
+    if (!strcmp(opt, "auto") || !strcmp(opt, "yes"))
+        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc");
+    else
+        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc=%s", opt);
+    if (!vf_has_ours(h))
+        vf_add(h, "after mpv_initialize");
+    {
+        pm_client_fn mk = (pm_client_fn)dlsym(RTLD_NEXT, "mpv_create_client");
+        pm_observe_fn obs = (pm_observe_fn)dlsym(RTLD_NEXT, "mpv_observe_property");
+        void *c = mk ? mk(h, "pushmpc") : NULL;
+        pthread_t t;
+        if (c && obs && obs(c, 1, "vf", 0) >= 0 && pthread_create(&t, NULL, vf_watch, c) == 0)
+            pthread_detach(t);
+        else if (c)
+            pm_destroy(c);
+    }
+    return r;
+}
 #else
 int mpv_open_cplugin(mpv_handle *h)
 {
