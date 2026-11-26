@@ -901,6 +901,57 @@ private:
     uint64_t m_spans = 0, m_heldSeen = 0;
 };
 
+// ---- a lazy VFG Low span stream for the parts the budget would drop ----
+// Over the budget the repair admits one new span per frame (the largest part first) and drops the rest. A VFG Low call
+// costs about 0.84-1.09 ms at 1080p against 2.2-2.8 ms for Medium (5090 priors), so such a part can often still be
+// repaired, a little softer. The Low stream is a third VFG effect (~265 MB at 1080p): it is made only after the budget
+// has dropped spans several times recently, only with at least 1 GB of video memory free, and released again once it
+// has had nothing to do for a while. Decisions stay per span (a span never switches stream half way).
+inline constexpr uint64_t kLowMinFreeBytes = 1ull << 30;   // free local video memory (budget - usage) to make it
+inline constexpr double kLowCostShare = 0.4;                // prior: Low call / main call (until measured)
+inline constexpr uint32_t kLowWindow = 240;                 // source frames: the drop history
+inline constexpr uint32_t kLowWantDrops = 3;                // budget drops in that window before it is made
+inline constexpr uint32_t kLowIdleFrames = 600;             // source frames without a Low span: released
+enum class SpanRoute : uint8_t { Drop = 0, Main = 1, Low = 2 };
+class LowSpanPolicy {
+public:
+    // once per source frame that goes through the repair
+    void Frame()
+    {
+        m_drops.push_back(0);
+        if (m_drops.size() > kLowWindow) { m_dropSum -= m_drops.front(); m_drops.pop_front(); }
+        ++m_idle;
+    }
+    // A new span the budget would drop (one new span was admitted this frame already and graph + repair is over the
+    // budget): Low when the Low stream runs, none went to it this frame yet, and the graph leaves room for one Low call
+    // (lowMs measured, else the prior share of the main stream's p95). Otherwise it is dropped and counted.
+    SpanRoute RouteOverBudget(bool lowReady, double graphP95, double mainRepP95, double lowMs, double budgetMs, bool lowAdmittedThisFrame)
+    {
+        const double est = lowMs > 0 ? lowMs : (mainRepP95 > 0 ? kLowCostShare * mainRepP95 : 1.0);
+        if (lowReady && !lowAdmittedThisFrame && graphP95 + est <= budgetMs) { m_idle = 0; ++m_lowSpans; return SpanRoute::Low; }
+        if (!m_drops.empty()) { ++m_drops.back(); ++m_dropSum; }
+        ++m_dropped;
+        return SpanRoute::Drop;
+    }
+    // make it now? (the main stream above Low, enough recent drops, enough free memory, not made, not failed before)
+    bool WantCreate(bool mainAboveLow, bool exists, bool failed, uint64_t freeBytes) const
+    {
+        return mainAboveLow && !exists && !failed && m_dropSum >= kLowWantDrops && freeBytes >= kLowMinFreeBytes;
+    }
+    void Created() { m_idle = 0; }
+    // release it now? (made, and no Low span for kLowIdleFrames frames: the budget has room again, or the graph alone
+    // leaves no room even for Low)
+    bool WantRelease(bool exists) const { return exists && m_idle >= kLowIdleFrames; }
+    void Reset() { m_drops.clear(); m_dropSum = 0; m_idle = 0; }
+    uint32_t RecentDrops() const { return m_dropSum; }
+    uint64_t LowSpans() const { return m_lowSpans; }
+    uint64_t Dropped() const { return m_dropped; }
+private:
+    std::deque<uint32_t> m_drops;
+    uint32_t m_dropSum = 0, m_idle = 0;
+    uint64_t m_lowSpans = 0, m_dropped = 0;
+};
+
 // Share of held frames over the last `window` source frames (animation detection: TV anime on twos holds 30-60 %,
 // live action and 3D CG at 24 distinct ~0).
 class HeldRatio {

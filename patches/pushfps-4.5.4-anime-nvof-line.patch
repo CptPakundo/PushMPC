@@ -1,17 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 5051a347..7e9953e1 100644
+index 0d7dc49..c12da66 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -377,6 +377,8 @@ veyra_add_compute_shader(veyra_shader_push_hud_still PushHudStill)
+@@ -377,6 +377,9 @@ veyra_add_compute_shader(veyra_shader_push_hud_still PushHudStill)
  veyra_add_compute_shader(veyra_shader_push_overlay PushOverlay)
  veyra_add_compute_shader(veyra_shader_push_overlay_fill PushOverlayFill)
  veyra_add_compute_shader(veyra_shader_push_overlay_compose PushOverlayCompose)
-+# PushMPC (anime round 5): NVOF FG line-art protection (pipeline/PushMpcLinePass.h)
++# PushMPC (anime round 5): NVOF FG line art (pipeline/PushMpcLinePass.h): the doubled-line fallback and the line depth
 +veyra_add_compute_shader(veyra_shader_pushmpc_line PushMpcLine)
++veyra_add_compute_shader(veyra_shader_pushmpc_line_depth PushMpcLineDepth)
  # PushFPS comparison clip, side-by-side layout (engine/RecordingCompare.cpp).
  veyra_add_compute_shader(veyra_shader_push_compare_sbs PushCompareSideBySide)
  veyra_add_compute_shader(veyra_shader_push_compare_vertical PushCompareVertical)
-@@ -488,6 +490,7 @@ add_library(veyra_pipeline STATIC
+@@ -488,6 +491,7 @@ add_library(veyra_pipeline STATIC
    src/pipeline/NisPass.cpp
    src/pipeline/PushHudLock.cpp
    src/pipeline/PushOverlayPass.cpp
@@ -19,17 +20,17 @@ index 5051a347..7e9953e1 100644
    src/pipeline/PushAmbientPass.cpp
    src/pushflow/PushFlowBackend.cpp
    src/pipeline/SmaaLookupTables.cpp
-@@ -867,7 +870,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
+@@ -867,7 +871,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
  
    # veyra_sources: product input sources (Playbook R3/R7). MediaFileSource
    # composes veyra_media; no second decode implementation exists.
 -  add_dependencies(veyra_pipeline veyra_shader_push_overlay veyra_shader_push_overlay_fill veyra_shader_push_overlay_compose veyra_shader_push_hud_lock_update veyra_shader_push_hud_lock_compose veyra_shader_push_hud_still veyra_shader_push_compare_sbs veyra_shader_push_compare_vertical veyra_shader_push_compare_raw veyra_shader_push_compare_overlay veyra_shader_push_layer_blend veyra_shader_push_canvas_convert veyra_shader_push_ambient_down veyra_shader_push_ambient_blur veyra_shader_effect_exclusion veyra_shader_sr_resolve veyra_shader_nr_downsample veyra_shader_nr_residual veyra_shader_nr_temporal veyra_shader_nr_hold veyra_shader_nr_reuse_compose veyra_shader_nr_reuse_warp veyra_shader_flow_adapt veyra_shader_flow_refine veyra_shader_flow_fill veyra_shader_flow_claim veyra_shader_vfg_shot_change veyra_shader_vfg_fourier_mellin)
-+  add_dependencies(veyra_pipeline veyra_shader_push_overlay veyra_shader_push_overlay_fill veyra_shader_push_overlay_compose veyra_shader_pushmpc_line veyra_shader_push_hud_lock_update veyra_shader_push_hud_lock_compose veyra_shader_push_hud_still veyra_shader_push_compare_sbs veyra_shader_push_compare_vertical veyra_shader_push_compare_raw veyra_shader_push_compare_overlay veyra_shader_push_layer_blend veyra_shader_push_canvas_convert veyra_shader_push_ambient_down veyra_shader_push_ambient_blur veyra_shader_effect_exclusion veyra_shader_sr_resolve veyra_shader_nr_downsample veyra_shader_nr_residual veyra_shader_nr_temporal veyra_shader_nr_hold veyra_shader_nr_reuse_compose veyra_shader_nr_reuse_warp veyra_shader_flow_adapt veyra_shader_flow_refine veyra_shader_flow_fill veyra_shader_flow_claim veyra_shader_vfg_shot_change veyra_shader_vfg_fourier_mellin)
++  add_dependencies(veyra_pipeline veyra_shader_push_overlay veyra_shader_push_overlay_fill veyra_shader_push_overlay_compose veyra_shader_pushmpc_line veyra_shader_pushmpc_line_depth veyra_shader_push_hud_lock_update veyra_shader_push_hud_lock_compose veyra_shader_push_hud_still veyra_shader_push_compare_sbs veyra_shader_push_compare_vertical veyra_shader_push_compare_raw veyra_shader_push_compare_overlay veyra_shader_push_layer_blend veyra_shader_push_canvas_convert veyra_shader_push_ambient_down veyra_shader_push_ambient_blur veyra_shader_effect_exclusion veyra_shader_sr_resolve veyra_shader_nr_downsample veyra_shader_nr_residual veyra_shader_nr_temporal veyra_shader_nr_hold veyra_shader_nr_reuse_compose veyra_shader_nr_reuse_warp veyra_shader_flow_adapt veyra_shader_flow_refine veyra_shader_flow_fill veyra_shader_flow_claim veyra_shader_vfg_shot_change veyra_shader_vfg_fourier_mellin)
    add_library(veyra_sources STATIC
      src/source/NativeCaptureSink.cpp
      src/source/MediaFileSource.cpp
 diff --git a/include/veyra/pipeline/EnhanceGraph.h b/include/veyra/pipeline/EnhanceGraph.h
-index 2f77591b..691f4972 100644
+index 1f63b59..9f80364 100644
 --- a/include/veyra/pipeline/EnhanceGraph.h
 +++ b/include/veyra/pipeline/EnhanceGraph.h
 @@ -8,6 +8,7 @@
@@ -40,18 +41,20 @@ index 2f77591b..691f4972 100644
  #include "veyra/pipeline/BeautyPass.h"
  #include "veyra/beauty/FaceTracker.h"
  #include "veyra/pipeline/NrInstance.h"
-@@ -868,6 +869,10 @@ public:
+@@ -868,6 +869,12 @@ public:
      // PushMPC: Subtitle Hold under Auto composes only while burned-in text is found. Detection (the pass's update and
      // maskedPixels) always runs; with compose off frame generation gets the real frame and nothing is laid back.
      void setSubtitleCompose(bool on) { subtitleCompose_=on; }
-+    // PushMPC (anime round 5): NVOF FG line-art protection (PushMpcLinePass), made when lineart::wanted(); composes while on
++    // PushMPC (anime round 5): NVOF FG line art (PushMpcLinePass), made when lineart::wanted(); while on, FidelityFX gets the
++    // line depth instead of the constant one and the doubled-line fallback runs before the overlays
 +    void setLineCompose(bool on) { nvofLineCompose_=on; }
++    uint64_t lineDepthWritten() const { return nvofLine_?nvofLine_->depthWritten():0; }
 +    bool lineActive() const { return nvofLine_!=nullptr; }
 +    uint64_t lineComposed() const { return nvofLine_?nvofLine_->composed():0; }
      bool subtitleCompose() const { return subtitleCompose_; }
      int hudStillState() const { if(!desc_.hudStill)return 0; if(hudLock_&&hudLock_->stillActive())return 1; if(!fgEnabled_||presentSinkFg())return 3; return 2; }
      // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
-@@ -1302,6 +1307,8 @@ private:
+@@ -1302,6 +1309,8 @@ private:
      std::unique_ptr<PushOverlayPass> overlay_;  // PushFPS: Crosshair Hold
      bool subtitleCompose_=true;   // PushMPC: Subtitle Hold Auto gate (setSubtitleCompose)
      std::unique_ptr<PushOverlayPass> subtitles_; // PushFPS: Subtitle Hold (fills overlay_'s input when both run)
@@ -62,16 +65,21 @@ index 2f77591b..691f4972 100644
      // PushFPS Crosshair Hold: the frame a method is given for real frame `parity` (the real frame itself without the pass).
 diff --git a/include/veyra/pipeline/PushMpcLinePass.h b/include/veyra/pipeline/PushMpcLinePass.h
 new file mode 100644
-index 00000000..d73115c5
+index 0000000..3063916
 --- /dev/null
 +++ b/include/veyra/pipeline/PushMpcLinePass.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,62 @@
 +#pragma once
 +// SPDX-License-Identifier: GPL-3.0-or-later
-+// PushMPC (anime round 5): line-art protection for NVOF frame generation (shaders/PushMpcLine.hlsl says the rule).
-+// One dispatch per generated frame, in place, after FidelityFX made it: doubled lines become one line from the nearer
-+// real frame. Created by the graph only for NVOF FG (FSR frame interpolation fed with the graph's NVOF motion) and only
-+// while lineArtWanted(); compose runs while setLineCompose(true) (pushcore: animation, budget).
++// PushMPC (anime round 5): line art for NVOF frame generation (FidelityFX frame interpolation fed with the graph's NVOF
++// motion), created by the graph only for NVOF FG and only while lineart::wanted(); it works while setLineCompose(true)
++// (pushcore: animation, budget). Two parts:
++//  - depth (shaders/PushMpcLineDepth.hlsl): the current real frame's drawn lines "near", the rest "far", given to
++//    FidelityFX instead of the graph's constant depth, so its nearest-depth vector dilation and scatter priority carry
++//    the line vectors (the cause);
++//  - fallback (shaders/PushMpcLine.hlsl): after the frame was made and before the overlays, per 16x16 tile a doubled
++//    line (the 50/50 blend of two disagreeing warps) becomes one line from one frame (the older one, A).
++// composePair runs the fallback on one pair outside the graph (pushcore's FSR midpoint stream; no motion there).
 +#include "veyra/pipeline/GpuPassUtils.h"
 +#include <string>
 +
@@ -81,150 +89,233 @@ index 00000000..d73115c5
 +inline void setWanted(bool on) { wantedStore() = on; }
 +inline bool wanted() { return wantedStore(); }
 +}
-+#define PUSHMPC_NVOF_LINE_PASS 1
++#define PUSHMPC_NVOF_LINE_PASS 2
 +
 +class PushMpcLinePass {
 +public:
 +    static constexpr UINT kConstants = 8;
 +    static constexpr UINT kMaxGenerated = 32;
-+    static constexpr UINT kStride = 5;   // per (slot, parity): t0 copy, t1 older real, t2 newer real, t3 flow, u0 generated
-+    bool initialize(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format, unsigned outputMode);
++    static constexpr UINT kStride = 5;    // per view set: t0 copy, t1 older real, t2 newer real, t3 flow, u0 generated
++    static constexpr UINT kPairSets = 32; // composePair: rotating view sets (a set is rewritten 32 calls later)
++    static constexpr float kNearDepth = 0.2f, kFarDepth = 0.9f, kDepthTau = 0.05f;   // not inverted: smaller = nearer
++    // withDepth: also the depth pre-pass and its R32 texture (the graph; not pushcore's midpoint stream)
++    bool initialize(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format, unsigned outputMode, bool withDepth);
 +    void createViews(ID3D12Device* device, DescriptorStager& stager, ID3D12Resource* const real[2], ID3D12Resource* flow,
 +                     ID3D12Resource* const* generated, unsigned generatedCount);
++    // the depth of real frame `parity` (the current one of the pair) into depth(); leaves it NON_PIXEL_SHADER_RESOURCE
++    bool writeDepth(ID3D12GraphicsCommandList* list, StateTracker& tracker, unsigned parity);
++    ID3D12Resource* depth() const { return depth_.Get(); }
++    bool depthReady() const { return depth_ && depthViews_; }
 +    // generated[slot] lies `t` of the way from real[1 - parity] to real[parity]
 +    bool compose(ID3D12GraphicsCommandList* list, StateTracker& tracker, unsigned slot, unsigned parity, float t);
++    // one pair outside the graph: a, b, out (and flow, may be null) in COMMON before and after; out has the pass's size
++    // and format and allows UAV
++    bool composePair(ID3D12Device* device, DescriptorStager& stager, ID3D12GraphicsCommandList* list,
++                     ID3D12Resource* a, ID3D12Resource* b, ID3D12Resource* flow, ID3D12Resource* out, float t);
 +    bool composes(unsigned slot) const { return slot < generatedCount_ && writable_[slot] && flow_; }
 +    uint64_t composed() const { return composed_; }
++    uint64_t depthWritten() const { return depthWritten_; }
 +private:
++    void dispatchLine(ID3D12GraphicsCommandList* list, UINT base, bool hasFlow, float t);
 +    uint32_t width_ = 0, height_ = 0;
 +    unsigned outputMode_ = 0, generatedCount_ = 0;
 +    DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
-+    ComputePass pass_;
-+    ComPtr<ID3D12Resource> copy_;
++    ComputePass pass_, depthPass_;
++    ComPtr<ID3D12Resource> copy_, depth_;
 +    ID3D12Resource* real_[2]{};
 +    ID3D12Resource* flow_ = nullptr;
 +    ID3D12Resource* generated_[kMaxGenerated]{};
 +    bool writable_[kMaxGenerated]{};
-+    uint64_t composed_ = 0;
++    bool depthViews_ = false;
++    UINT pairNext_ = 0;
++    uint64_t composed_ = 0, depthWritten_ = 0;
 +};
 +}
 diff --git a/shaders/PushMpcLine.hlsl b/shaders/PushMpcLine.hlsl
 new file mode 100644
-index 00000000..fc3f2aa3
+index 0000000..61454a1
 --- /dev/null
 +++ b/shaders/PushMpcLine.hlsl
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,98 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
-+// PushMPC (anime round 5): line-art protection for NVOF frame generation. NVOF FG is NVIDIA's optical flow feeding
-+// FidelityFX frame interpolation; the blend itself is inside AMD's provider, so a doubled line (two faint copies of one
-+// drawn line, measured on a big jump between two drawings) is repaired after it, with the flow the graph gave it:
-+//   wA = A sampled at x + s * t * f(x), wB = B sampled at x - s * (1 - t) * f(x)   (f: the graph's FG motion, pixels)
-+// On a line pixel (3x3 black top-hat of luma above kLineTau in wA or wB) where wA and wB disagree (luma > kLineDelta)
-+// and the generated pixel G is the blend of the two (within half their difference of lerp(wB, wA, 1 - t): the doubled-
-+// line signature), G becomes lerp(wB, wA, smoothstep(0.35, 0.65, 1 - t)): one sharp line from the nearer frame.
-+// The flow's sign convention is taken per pixel from the two hypotheses (s = +1 / -1), the one whose blend explains G
-+// better over 3x3; where neither does, G stays. Same rule and constants as pmml's synth_line (make_graphs.py).
++// PushMPC (anime round 5): line-art fallback for NVOF frame generation on hard jumps (and for pushcore's FSR midpoint
++// stream). FidelityFX frame interpolation blends two warps 50/50 at the midpoint; where its vector on a thin drawn line
++// is wrong (a hard jump between two drawings, block flow) the result shows two half-contrast lines. The depth pre-pass
++// (PushMpcLineDepth.hlsl) helps FidelityFX carry line vectors; this pass catches what is left, after the frame was made
++// and BEFORE the overlays are laid back (a held subtitle is never touched).
++// Per 16x16 tile, in group-shared memory:
++//   wA = A at p + t f, wB = B at p - (1 - t) f, f = the FG motion (current -> previous, pixels) read half a step back
++//   (at p - (1 - t) f(p): where the object passing p at time t sits in B); no motion (hasFlow 0): wA = A(p), wB = B(p).
++//   line pixel: 3x3 black top-hat (closing of the dilation) of luma above kLineTau in wA or wB;
++//   candidate:  a line pixel where wA and wB disagree (luma > kLineDelta) and G lies within kBlendBand of their
++//               difference around their midpoint (the 50/50 blend FidelityFX makes): a correct single line from either
++//               frame is far from the midpoint and is left alone;
++//   guards:     fewer than kMinCandidates candidates, more blended fill pixels than blended line pixels (a dissolve or a
++//               semi-transparent layer fades its fills too), or the zero-motion blend explaining G clearly better than
++//               the warped one (a cross-fade) -> the tile is left as it is;
++//   winner:     one frame for the whole tile, never depending on t: the older frame A (the drawing holds until the new
++//               one). Never B: a tile that holds only B's half of the pair (the two halves of a hard jump often fall in
++//               different tiles) would otherwise bring B's line back at full strength next to A's;
++//   write:      candidates become A's warped colour (A's line at full strength, B's ghost replaced by A's picture).
 +Texture2D<float4> genTex : register(t0);   // the generated frame as it was made (a copy)
 +Texture2D<float4> realA : register(t1);    // the older real frame
 +Texture2D<float4> realB : register(t2);    // the newer
-+Texture2D<float2> flow : register(t3);     // the FG motion at the picture's size, pixels
-+SamplerState linearClamp : register(s1);   // ComputePass: s0 point, s1 linear (clamp)
++Texture2D<float2> flow : register(t3);     // the FG motion at the picture's size, pixels (unused when hasFlow is 0)
++SamplerState pointClamp : register(s0);
++SamplerState linearClamp : register(s1);
 +RWTexture2D<float4> outTex : register(u0); // the generated frame
 +cbuffer Constants : register(b0) {
-+    uint width, height, outputMode, pad0;
++    uint width, height, outputMode, hasFlow;
 +    float t, pad1, pad2, pad3;
 +};
-+static const float kLineTau = 0.05, kLineDelta = 0.04;
++static const float kLineTau = 0.05, kLineDelta = 0.04, kBlendBand = 0.25, kZeroWins = 0.8;
++static const uint kMinCandidates = 4;
++#define TILE 16
++#define SIDE 20          // TILE + 2 * 2 (closing of a dilation: radius 2)
++#define DSIDE 18         // TILE + 2 * 1
++
++groupshared float sA[SIDE * SIDE], sB[SIDE * SIDE];
++groupshared float dA[DSIDE * DSIDE], dB[DSIDE * DSIDE];
++groupshared uint nCand, nFill, errWarp, errZero;
 +
 +float perceptual1(float v) { return outputMode == 1 ? sqrt(max(v, 0) / 2.5) : v; }
 +float lumaOf(float3 c) { return 0.2126 * perceptual1(c.r) + 0.7152 * perceptual1(c.g) + 0.0722 * perceptual1(c.b); }
-+float3 warp(Texture2D<float4> tex, float2 p, float2 d) { return tex.SampleLevel(linearClamp, (p + 0.5 + d) / float2(width, height), 0).rgb; }
-+
-+// luma of both warps at p + o, for one sign hypothesis
-+void warps(int2 p, float s, out float3 a, out float3 b) {
-+    const float2 f = flow[clamp(p, int2(0, 0), int2(width - 1, height - 1))];
-+    a = warp(realA, float2(p), s * t * f);
-+    b = warp(realB, float2(p), -s * (1.0 - t) * f);
-+}
-+float topHat(int2 p, float s, bool useA) {
-+    float closing = 1e30;
-+    [unroll] for (int j = -1; j <= 1; ++j)
-+        [unroll] for (int i = -1; i <= 1; ++i) {
-+            float dil = -1e30;
-+            [unroll] for (int v = -1; v <= 1; ++v)
-+                [unroll] for (int u = -1; u <= 1; ++u) {
-+                    float3 a, b; warps(p + int2(i + u, j + v), s, a, b);
-+                    dil = max(dil, lumaOf(useA ? a : b));
-+                }
-+            closing = min(closing, dil);
-+        }
-+    float3 a, b; warps(p, s, a, b);
-+    return closing - lumaOf(useA ? a : b);
-+}
-+// how far G is from the blend of the two warps over 3x3 (luma)
-+float blendError(int2 p, float s) {
-+    float e = 0;
-+    [unroll] for (int j = -1; j <= 1; ++j)
-+        [unroll] for (int i = -1; i <= 1; ++i) {
-+            const int2 q = clamp(p + int2(i, j), int2(0, 0), int2(width - 1, height - 1));
-+            float3 a, b; warps(q, s, a, b);
-+            e += abs(lumaOf(genTex[q].rgb) - lumaOf(lerp(b, a, 1.0 - t)));
-+        }
-+    return e / 9.0;
++float2 uvOf(float2 p) { return (p + 0.5) / float2(width, height); }
++float2 motionAt(float2 p) { return flow.SampleLevel(pointClamp, uvOf(p), 0); }
++void warpsAt(float2 p, out float3 a, out float3 b) {
++    float2 f = 0;
++    if (hasFlow != 0) { const float2 f0 = motionAt(p); f = motionAt(p - (1.0 - t) * f0); }
++    a = realA.SampleLevel(linearClamp, uvOf(p + t * f), 0).rgb;
++    b = realB.SampleLevel(linearClamp, uvOf(p - (1.0 - t) * f), 0).rgb;
 +}
 +
-+[numthreads(8, 8, 1)]
-+void main(uint3 id : SV_DispatchThreadID) {
-+    if (id.x >= width || id.y >= height) return;
-+    const int2 p = int2(id.xy);
-+    float3 a, b;
-+    warps(p, 1.0, a, b);
-+    float3 a2, b2;
-+    warps(p, -1.0, a2, b2);
-+    // cheap first test: the two warps disagree here under either sign (most pixels stop here)
-+    if (abs(lumaOf(a) - lumaOf(b)) <= kLineDelta && abs(lumaOf(a2) - lumaOf(b2)) <= kLineDelta) return;
-+    const float ep = blendError(p, 1.0), em = blendError(p, -1.0);
-+    const float s = ep <= em ? 1.0 : -1.0;
-+    if (s < 0) { a = a2; b = b2; }
-+    const float la = lumaOf(a), lb = lumaOf(b);
-+    if (abs(la - lb) <= kLineDelta) return;
-+    if (!(topHat(p, s, true) > kLineTau || topHat(p, s, false) > kLineTau)) return;
-+    const float3 g = genTex[p].rgb;
-+    if (abs(lumaOf(g) - lumaOf(lerp(b, a, 1.0 - t))) > 0.5 * abs(la - lb)) return;   // not a blend of the two: leave it
-+    const float q = saturate(((1.0 - t) - 0.35) / 0.3);
-+    const float m = q * q * (3.0 - 2.0 * q);
-+    outTex[p] = float4(lerp(b, a, m), genTex[p].a);
++[numthreads(TILE, TILE, 1)]
++void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
++    const int2 origin = int2(gid.xy) * TILE - 2;
++    if (gi == 0) { nCand = 0; nFill = 0; errWarp = 0; errZero = 0; }
++    for (uint i = gi; i < SIDE * SIDE; i += TILE * TILE) {
++        const int2 q = clamp(origin + int2(i % SIDE, i / SIDE), int2(0, 0), int2(width - 1, height - 1));
++        float3 a, b; warpsAt(float2(q), a, b);
++        sA[i] = lumaOf(a); sB[i] = lumaOf(b);
++    }
++    GroupMemoryBarrierWithGroupSync();
++    for (uint k = gi; k < DSIDE * DSIDE; k += TILE * TILE) {
++        const uint x = k % DSIDE + 1, y = k / DSIDE + 1;
++        float ma = -1e30, mb = -1e30;
++        [unroll] for (int v = -1; v <= 1; ++v)
++            [unroll] for (int u = -1; u <= 1; ++u) { const uint j = (y + v) * SIDE + x + u; ma = max(ma, sA[j]); mb = max(mb, sB[j]); }
++        dA[k] = ma; dB[k] = mb;
++    }
++    GroupMemoryBarrierWithGroupSync();
++    const int2 p = int2(gid.xy) * TILE + int2(tid.xy);
++    const bool inside = p.x < int(width) && p.y < int(height);
++    bool cand = false;
++    if (inside) {
++        float ca = 1e30, cb = 1e30;
++        [unroll] for (int v = -1; v <= 1; ++v)
++            [unroll] for (int u = -1; u <= 1; ++u) { const uint j = (tid.y + 1 + v) * DSIDE + tid.x + 1 + u; ca = min(ca, dA[j]); cb = min(cb, dB[j]); }
++        const uint c = (tid.y + 2) * SIDE + tid.x + 2;
++        const float la = sA[c], lb = sB[c], d = abs(la - lb);
++        const bool lineA = ca - la > kLineTau, lineB = cb - lb > kLineTau;
++        if (d > kLineDelta) {
++            const float lg = lumaOf(genTex[p].rgb);
++            if (abs(lg - 0.5 * (la + lb)) <= kBlendBand * d) {
++                if (lineA || lineB) { cand = true; InterlockedAdd(nCand, 1u); }
++                else InterlockedAdd(nFill, 1u);
++            }
++            const float za = lumaOf(realA[p].rgb), zb = lumaOf(realB[p].rgb);
++            InterlockedAdd(errWarp, uint(min(abs(lg - 0.5 * (la + lb)), 1.0) * 1024.0));
++            InterlockedAdd(errZero, uint(min(abs(lg - 0.5 * (za + zb)), 1.0) * 1024.0));
++        }
++    }
++    GroupMemoryBarrierWithGroupSync();
++    if (!cand) return;
++    if (nCand < kMinCandidates || nFill > nCand) return;
++    if (hasFlow != 0 && float(errZero) < kZeroWins * float(errWarp)) return;
++    float3 a, b; warpsAt(float2(p), a, b);
++    outTex[p] = float4(a, genTex[p].a);
++}
+diff --git a/shaders/PushMpcLineDepth.hlsl b/shaders/PushMpcLineDepth.hlsl
+new file mode 100644
+index 0000000..3930b06
+--- /dev/null
++++ b/shaders/PushMpcLineDepth.hlsl
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// PushMPC (anime round 5): per-frame depth for NVOF frame generation on animation. PushFPS gives FidelityFX frame
++// interpolation a constant depth (0.9), which turns off its nearest-depth vector dilation (3x3), its scatter priority and
++// its disocclusion. Drawn lines of the current real frame (3x3 black top-hat of luma above kLineTau) are written "near",
++// everything else "far": FidelityFX then takes the line's own vector around a line and lets it win scatter collisions.
++// Depth is not inverted for this context (smaller = nearer). One read per pixel, group-shared 16x16 tiles.
++Texture2D<float4> colour : register(t0);   // the current real frame
++RWTexture2D<float> depthOut : register(u0);
++cbuffer Constants : register(b0) {
++    uint width, height, outputMode, pad0;
++    float nearDepth, farDepth, tau, pad1;
++};
++#define TILE 16
++#define SIDE 20
++#define DSIDE 18
++groupshared float s[SIDE * SIDE];
++groupshared float dl[DSIDE * DSIDE];
++
++float perceptual1(float v) { return outputMode == 1 ? sqrt(max(v, 0) / 2.5) : v; }
++float lumaOf(float3 c) { return 0.2126 * perceptual1(c.r) + 0.7152 * perceptual1(c.g) + 0.0722 * perceptual1(c.b); }
++
++[numthreads(TILE, TILE, 1)]
++void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
++    const int2 origin = int2(gid.xy) * TILE - 2;
++    for (uint i = gi; i < SIDE * SIDE; i += TILE * TILE) {
++        const int2 q = clamp(origin + int2(i % SIDE, i / SIDE), int2(0, 0), int2(width - 1, height - 1));
++        s[i] = lumaOf(colour[q].rgb);
++    }
++    GroupMemoryBarrierWithGroupSync();
++    for (uint k = gi; k < DSIDE * DSIDE; k += TILE * TILE) {
++        const uint x = k % DSIDE + 1, y = k / DSIDE + 1;
++        float m = -1e30;
++        [unroll] for (int v = -1; v <= 1; ++v)
++            [unroll] for (int u = -1; u <= 1; ++u) m = max(m, s[(y + v) * SIDE + x + u]);
++        dl[k] = m;
++    }
++    GroupMemoryBarrierWithGroupSync();
++    const int2 p = int2(gid.xy) * TILE + int2(tid.xy);
++    if (p.x >= int(width) || p.y >= int(height)) return;
++    float c = 1e30;
++    [unroll] for (int v = -1; v <= 1; ++v)
++        [unroll] for (int u = -1; u <= 1; ++u) c = min(c, dl[(tid.y + 1 + v) * DSIDE + tid.x + 1 + u]);
++    depthOut[p] = c - s[(tid.y + 2) * SIDE + tid.x + 2] > tau ? nearDepth : farDepth;
 +}
 diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
-index 12ef2d42..211610ee 100644
+index 0707673..8bd45d0 100644
 --- a/src/pipeline/EnhanceGraph.cpp
 +++ b/src/pipeline/EnhanceGraph.cpp
-@@ -1622,6 +1622,14 @@ bool EnhanceGraph::initHudLock() {
+@@ -1622,6 +1622,15 @@ bool EnhanceGraph::initHudLock() {
  bool EnhanceGraph::initOverlay() {
      subtitles_.reset();
      overlay_.reset();
-+    // PushMPC (anime round 5): NVOF FG line-art protection, after FidelityFX's interpolation with the graph's NVOF motion
++    // PushMPC (anime round 5): NVOF FG line art: line depth for FidelityFX's interpolation with the graph's NVOF motion, and
++    // the doubled-line fallback after it
 +    nvofLine_.reset();
 +    if(lineart::wanted()&&fgEnabled_&&!presentSinkFg()&&engine::fsrFrameGeneration(desc_.frameGenerationBackend)&&desc_.fgUsesFlow()&&
 +       desc_.opticalFlowBackend==engine::OpticalFlowBackend::Nvidia){
 +        auto line=std::make_unique<PushMpcLinePass>();
-+        if(line->initialize(context_.device(),workW_,workH_,outputFormat(),hdr10Output()?2u:desc_.hdrOutput?1u:0u))nvofLine_=std::move(line);
++        if(line->initialize(context_.device(),workW_,workH_,outputFormat(),hdr10Output()?2u:desc_.hdrOutput?1u:0u,true))nvofLine_=std::move(line);
 +        else veyra::log::error("nvof-line",std::format("unavailable at {}x{}; NVOF frame generation runs without it",workW_,workH_));
 +    }
      initCrosshairPass();
      // PushFPS Subtitle Hold: its own pass in the subtitle band. With Crosshair Hold running it fills the same
      // copy of the frame (the two zones do not overlap), so frame generation is still given one frame.
-@@ -1668,6 +1676,9 @@ void EnhanceGraph::composeOverlay(ID3D12GraphicsCommandList* list,unsigned gener
-         veyra::log::warn("crosshair-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
-     if(subtitles_&&subtitleCompose_&&subtitles_->composes(generatedSlot)&&!subtitles_->compose(list,tracker_,generatedSlot,parity,t))
-         veyra::log::warn("subtitle-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
-+    // PushMPC: NVOF FG line-art protection last (the overlays were laid back from the real frames already)
+@@ -1664,6 +1673,9 @@ ID3D12Resource* EnhanceGraph::fgInput(unsigned parity) const {
+     return overlay_?overlay_->input(parity):subtitles_&&subtitleCompose_?subtitles_->input(parity):videoFrame_[parity].Get();
+ }
+ void EnhanceGraph::composeOverlay(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned parity,float t){
++    // PushMPC: NVOF FG doubled-line fallback first, so Crosshair / Subtitle Hold lay their real pixels back over it
 +    if(nvofLine_&&nvofLineCompose_&&frameFlowValid_&&nvofLine_->composes(generatedSlot)&&!nvofLine_->compose(list,tracker_,generatedSlot,parity,t))
 +        veyra::log::warn("nvof-line",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
- }
- void EnhanceGraph::composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity){
-     if(hudLock_&&!hudLock_->compose(list,tracker_,generatedSlot,heldParity))
-@@ -2500,6 +2511,12 @@ bool EnhanceGraph::createViews()
+     if(overlay_&&overlay_->composes(generatedSlot)&&!overlay_->compose(list,tracker_,generatedSlot,parity,t))
+         veyra::log::warn("crosshair-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
+     if(subtitles_&&subtitleCompose_&&subtitles_->composes(generatedSlot)&&!subtitles_->compose(list,tracker_,generatedSlot,parity,t))
+@@ -2500,6 +2512,12 @@ bool EnhanceGraph::createViews()
          for(size_t i=0;i<kGeneratedPoolSlots;++i)generated[i]=genFrame_[i].Get();
          subtitles_->createViews(context_.device(),stager_,real,generated.data(),unsigned(generated.size()));
      }
@@ -237,7 +328,54 @@ index 12ef2d42..211610ee 100644
      // Descriptor initialization is DEFAULT ON since the RAW-upload-SRV removal
      // (2026-09-06): texture SRV/UAV views keep the device alive and NVOF
      // executing (r33b-tu: 599/599 executes, real motion/confidence, 0
-@@ -5358,7 +5375,7 @@ void EnhanceGraph::shutdown()
+@@ -4768,10 +4786,14 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         // is then what it always was). The motion and depth they are given are still worked out from the real
+         // frames: where the overlay stood they say "still", in a patch the overlay is laid back over.
+         auto* const colour=fgInput(parity);
++        // PushMPC (anime round 5): NVOF FG on animation: FidelityFX gets the current frame's line depth (lines near) instead of
++        // the constant far depth, so its nearest-depth dilation and scatter priority carry the line vectors
++        ID3D12Resource* fgDepth=depthTex_.Get();
++        if(fsrFgBackend_&&nvofLine_&&nvofLineCompose_&&frameFlowValid_&&!resetFg&&nvofLine_->depthReady()&&nvofLine_->writeDepth(flist,tracker_,parity))fgDepth=nvofLine_->depth();
+         tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+         tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+         if(!desc_.fgMotionProbe)tracker_.transition(flist,motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++        tracker_.transition(flist,fgDepth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+         tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         if(!fsrFgBackend_){
+         // One status resource for the whole input-frame pair, just like the
+@@ -4783,7 +4805,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         tracker_.transition(flist,fgDisable_[parity].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         }
+         ngx::DlssFgBackend::EvalDesc fe{};
+-        fe.hdr=hdr10Output();fe.backbuffer=colour; fe.depth=depthTex_.Get(); fe.mvecs=motion;
++        fe.hdr=hdr10Output();fe.backbuffer=colour; fe.depth=fgDepth; fe.mvecs=motion;
+         fe.outputInterpolated=genFrame_[generatedSlot].Get(); fe.reset=resetFg;
+         fe.outputDisableInterpolation=fgDisable_[parity].Get();
+         fe.multiFrameCount=fgCalls;fe.multiFrameIndex=sub;
+@@ -4802,10 +4824,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+             tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+             tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_COMMON);
+             tracker_.transition(flist,motion,D3D12_RESOURCE_STATE_COMMON);
+-            tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_COMMON);
++            tracker_.transition(flist,fgDepth,D3D12_RESOURCE_STATE_COMMON);
+             tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
+             const float interval=prevValid_&&ptsMs>prevPtsMs_?float(ptsMs-prevPtsMs_):16.6667f;
+-            if(!fsrFgBackend_->generate(flist,colour,motion,depthTex_.Get(),
++            if(!fsrFgBackend_->generate(flist,colour,motion,fgDepth,
+                     genFrame_[generatedSlot].Get(),resetFg,interval)){
+                 failedBackend_=engine::FailedBackend::Fg;return false;
+             }
+@@ -4838,7 +4860,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+         tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+         tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_COMMON);
+         tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
+-        tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_COMMON);
++        tracker_.transition(flist,fgDepth,D3D12_RESOURCE_STATE_COMMON);
+         if(sub==fgCalls)gpuTimer_.resolve(flist);
+         if(!submitGraph(slot))return false;
+         if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
+@@ -5358,7 +5380,7 @@ void EnhanceGraph::shutdown()
      proxyTex_.Reset();
      exclusionPass_={};exclusionScratch_.Reset();
      hudLock_.reset();
@@ -248,13 +386,15 @@ index 12ef2d42..211610ee 100644
      for(auto& r:exclusionUi_)r.Reset();
 diff --git a/src/pipeline/PushMpcLinePass.cpp b/src/pipeline/PushMpcLinePass.cpp
 new file mode 100644
-index 00000000..c726707d
+index 0000000..e731251
 --- /dev/null
 +++ b/src/pipeline/PushMpcLinePass.cpp
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,140 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
-+// PushMPC (anime round 5): line-art protection for NVOF frame generation (PushMpcLinePass.h, shaders/PushMpcLine.hlsl).
++// PushMPC (anime round 5): line art for NVOF frame generation (PushMpcLinePass.h, shaders/PushMpcLine.hlsl,
++// shaders/PushMpcLineDepth.hlsl).
 +#include "veyra/pipeline/PushMpcLinePass.h"
++#include <algorithm>
 +#include <bit>
 +#include <format>
 +
@@ -262,16 +402,26 @@ index 00000000..c726707d
 +namespace {
 +constexpr D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 +constexpr D3D12_RESOURCE_STATES kWrite = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++constexpr UINT kTile = 16;
 +}
 +
-+bool PushMpcLinePass::initialize(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format, unsigned outputMode) {
++bool PushMpcLinePass::initialize(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format, unsigned outputMode, bool withDepth) {
 +    if (!device || !width || !height || format == DXGI_FORMAT_UNKNOWN) return false;
 +    width_ = width; height_ = height; format_ = format; outputMode_ = outputMode;
 +    copy_ = makeTexture(device, width_, height_, format_, false);
 +    if (!copy_) return false;
 +    std::vector<uint8_t> cs;
-+    if (!pass_.loadShader("PushMpcLine.dxil", cs) || !pass_.create(device, cs, kMaxGenerated * 2 * kStride, 4, 1, kConstants)) return false;
-+    veyra::log::info("nvof-line", std::format("created {}x{} mode={}", width_, height_, outputMode_));
++    // s0 point / s1 linear clamp samplers (the warps sample between pixels)
++    if (!pass_.loadShader("PushMpcLine.dxil", cs) || !pass_.create(device, cs, (kMaxGenerated * 2 + kPairSets) * kStride, 4, 1, kConstants, 0, true)) return false;
++    if (withDepth) {
++        std::vector<uint8_t> ds;
++        depth_ = makeTexture(device, width_, height_, DXGI_FORMAT_R32_FLOAT, true);
++        if (!depth_ || !depthPass_.loadShader("PushMpcLineDepth.dxil", ds) || !depthPass_.create(device, ds, 4, 1, 1, kConstants)) {
++            depth_.Reset();
++            veyra::log::warn("nvof-line", "line depth unavailable; frame generation keeps the constant depth");
++        }
++    }
++    veyra::log::info("nvof-line", std::format("created {}x{} mode={} depth={}", width_, height_, outputMode_, depth_ ? 1 : 0));
 +    return true;
 +}
 +
@@ -280,6 +430,14 @@ index 00000000..c726707d
 +    real_[0] = real[0]; real_[1] = real[1]; flow_ = flow;
 +    generatedCount_ = std::min<unsigned>(generatedCount, kMaxGenerated);
 +    for (unsigned slot = 0; slot < kMaxGenerated; ++slot) writable_[slot] = false;
++    depthViews_ = false;
++    if (depth_ && real_[0] && real_[1]) {
++        for (unsigned parity = 0; parity < 2; ++parity) {
++            stager.stageSrv(real_[parity], nullptr, depthPass_.heap.Get(), parity * 2);
++            makeUav(device, depth_.Get(), DXGI_FORMAT_R32_FLOAT, cpuHandleOf(depthPass_, parity * 2 + 1));
++        }
++        depthViews_ = true;
++    }
 +    if (!flow_) return;
 +    for (unsigned slot = 0; slot < generatedCount_; ++slot) {
 +        generated_[slot] = generated[slot];
@@ -298,6 +456,30 @@ index 00000000..c726707d
 +    }
 +}
 +
++bool PushMpcLinePass::writeDepth(ID3D12GraphicsCommandList* list, StateTracker& tracker, unsigned parity) {
++    if (!list || parity > 1 || !depthReady()) return false;
++    tracker.transition(list, real_[parity], kRead);
++    tracker.transition(list, depth_.Get(), kWrite);
++    float c[kConstants]{};
++    c[0] = std::bit_cast<float>(width_); c[1] = std::bit_cast<float>(height_); c[2] = std::bit_cast<float>(uint32_t(outputMode_));
++    c[4] = kNearDepth; c[5] = kFarDepth; c[6] = kDepthTau;
++    depthPass_.bind(list, c, gpuHandleOf(depthPass_, parity * 2).ptr, gpuHandleOf(depthPass_, parity * 2 + 1).ptr);
++    list->Dispatch((width_ + kTile - 1) / kTile, (height_ + kTile - 1) / kTile, 1);
++    tracker.uavBarrier(list, depth_.Get());
++    tracker.transition(list, depth_.Get(), kRead);   // the real frame stays readable: the FG dispatch reads it next
++    ++depthWritten_;
++    return true;
++}
++
++void PushMpcLinePass::dispatchLine(ID3D12GraphicsCommandList* list, UINT base, bool hasFlow, float t) {
++    float c[kConstants]{};
++    c[0] = std::bit_cast<float>(width_); c[1] = std::bit_cast<float>(height_); c[2] = std::bit_cast<float>(uint32_t(outputMode_));
++    c[3] = std::bit_cast<float>(uint32_t(hasFlow ? 1u : 0u));
++    c[4] = std::clamp(t, 0.0f, 1.0f);
++    pass_.bind(list, c, gpuHandleOf(pass_, base).ptr, gpuHandleOf(pass_, base + 4).ptr);
++    list->Dispatch((width_ + kTile - 1) / kTile, (height_ + kTile - 1) / kTile, 1);
++}
++
 +bool PushMpcLinePass::compose(ID3D12GraphicsCommandList* list, StateTracker& tracker, unsigned slot, unsigned parity, float t) {
 +    if (!list || parity > 1 || !composes(slot) || !real_[0] || !real_[1]) return false;
 +    auto* generated = generated_[slot];
@@ -307,15 +489,43 @@ index 00000000..c726707d
 +    ID3D12Resource* const reads[] = {copy_.Get(), real_[0], real_[1], flow_};
 +    for (ID3D12Resource* r : reads) tracker.transition(list, r, kRead);
 +    tracker.transition(list, generated, kWrite);
-+    float c[kConstants]{};
-+    c[0] = std::bit_cast<float>(width_); c[1] = std::bit_cast<float>(height_); c[2] = std::bit_cast<float>(uint32_t(outputMode_));
-+    c[4] = std::clamp(t, 0.0f, 1.0f);
-+    const UINT base = (slot * 2 + parity) * kStride;
-+    pass_.bind(list, c, gpuHandleOf(pass_, base).ptr, gpuHandleOf(pass_, base + 4).ptr);
-+    list->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
++    dispatchLine(list, (slot * 2 + parity) * kStride, true, t);
 +    tracker.uavBarrier(list, generated);
 +    tracker.transition(list, generated, D3D12_RESOURCE_STATE_COMMON);
 +    for (ID3D12Resource* r : reads) tracker.transition(list, r, D3D12_RESOURCE_STATE_COMMON);
++    ++composed_;
++    return true;
++}
++
++bool PushMpcLinePass::composePair(ID3D12Device* device, DescriptorStager& stager, ID3D12GraphicsCommandList* list,
++                                  ID3D12Resource* a, ID3D12Resource* b, ID3D12Resource* flow, ID3D12Resource* out, float t) {
++    if (!device || !list || !a || !b || !out || !copy_) return false;
++    const auto od = out->GetDesc();
++    if (!(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) || od.Format != format_ || od.Width != width_ || od.Height != height_) return false;
++    const UINT base = (kMaxGenerated * 2 + pairNext_) * kStride;
++    pairNext_ = (pairNext_ + 1) % kPairSets;
++    stager.stageSrv(copy_.Get(), nullptr, pass_.heap.Get(), base);
++    stager.stageSrv(a, nullptr, pass_.heap.Get(), base + 1);
++    stager.stageSrv(b, nullptr, pass_.heap.Get(), base + 2);
++    if (flow) stager.stageSrv(flow, nullptr, pass_.heap.Get(), base + 3);
++    else {
++        D3D12_SHADER_RESOURCE_VIEW_DESC nd{};   // a null view (the shader does not read it without motion)
++        nd.Format = DXGI_FORMAT_R16G16_FLOAT; nd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++        nd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; nd.Texture2D.MipLevels = 1;
++        stager.stageSrv(nullptr, &nd, pass_.heap.Get(), base + 3);
++    }
++    makeUav(device, out, format_, cpuHandleOf(pass_, base + 4));
++    StateTracker tr;
++    ID3D12Resource* const all[] = {copy_.Get(), a, b, flow, out};
++    for (ID3D12Resource* r : all) if (r) tr.set(r, D3D12_RESOURCE_STATE_COMMON);
++    tr.transition(list, out, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    tr.transition(list, copy_.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
++    list->CopyResource(copy_.Get(), out);
++    for (ID3D12Resource* r : {copy_.Get(), a, b, flow}) if (r) tr.transition(list, r, kRead);
++    tr.transition(list, out, kWrite);
++    dispatchLine(list, base, flow != nullptr, t);
++    tr.uavBarrier(list, out);
++    for (ID3D12Resource* r : all) if (r) tr.transition(list, r, D3D12_RESOURCE_STATE_COMMON);
 +    ++composed_;
 +    return true;
 +}

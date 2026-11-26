@@ -775,6 +775,33 @@ static void TestFilmTime()
         for (int n = 1; n < 120; ++n) { a.Push(uint64_t(n), true, false, i30); b.Push(uint64_t(n), n % 2 == 0, false, i24); ever = ever || a.Engaged() || b.Engaged(); }
         Check(!ever, "P9: 30p motion and a 23.976 VFR body are left alone");
     }
+    // the replay fixes (r5c): millisecond timestamps (33 / 34 ms) still engage; a 1/24 s body never does; the switch time
+    // matches the 24p model within 0.125 of a frame for every film origin; a single-pair candidate never engages
+    {
+        FilmTimeDetector d; bool on = false;
+        const int holds[4] = { 4, 4, 4, 3 }; int next = 1, k = 0;
+        for (int n = 1; n < 90; ++n) { const bool ch = n == next; if (ch) { next += holds[k % 4]; ++k; } d.Push(uint64_t(n), ch, false, (n % 3) ? 33.0 : 34.0); on = on || d.Engaged(); }
+        FilmTimeDetector v; bool vOn = false;
+        next = 1; k = 0;
+        for (int n = 1; n < 120; ++n) { const bool ch = n == next; if (ch) { next += holds[k % 4]; ++k; } v.Push(uint64_t(n), ch, false, (n % 2) ? 42.0 : 41.0); vOn = vOn || v.Engaged(); }
+        Check(on && !vOn, "P9: millisecond timestamps (33 / 34 ms) engage, a 1/24 s body (41 / 42 ms) never does");
+        double maxErr = 0; int engagedOrigins = 0;
+        for (int oi = 0; oi < 100; ++oi) {
+            const double o = oi / 100.0; FilmTimeDetector e; bool any = false;
+            for (int m = 1; m < 200; ++m) {
+                const int kc = int(std::floor(0.8 * m - o)), kp = int(std::floor(0.8 * (m - 1) - o));
+                const bool ch = kc / 3 != kp / 3;   // 24p threes
+                e.Push(uint64_t(m), ch, false, i30);
+                if (ch && e.Engaged()) { any = true; const double tt = std::clamp(((kc / 3) * 3 + o) * 1.25 - (m - 1), 0.0, 1.0); maxErr = std::max(maxErr, std::fabs(double(e.SwitchT(uint64_t(m))) - tt)); }
+            }
+            engagedOrigins += any;
+        }
+        Check(engagedOrigins == 100 && maxErr <= 0.126, "P9: switch time within 0.125 frame of the film time for all 100 film origins (max " + std::to_string(maxErr) + ")");
+        // the candidate must hold kConfirm pairs in a row before it engages (one-pair blips at camera moves stay off)
+        FilmTimeDetector c2; int firstOn = -1; next = 1; k = 0;
+        for (int n = 1; n < 60; ++n) { const bool ch = n == next; if (ch) { next += holds[k % 4]; ++k; } c2.Push(uint64_t(n), ch, false, i30); if (c2.Engaged() && firstOn < 0) firstOn = n; }
+        Check(firstOn >= FilmTimeDetector::kMinFrames + FilmTimeDetector::kConfirm - 1, "P9: engages only after the 24p candidate held " + std::to_string(FilmTimeDetector::kConfirm) + " pairs (from frame " + std::to_string(firstOn) + ")");
+    }
     // a cut disengages at once
     {
         FilmTimeDetector d; const int holds[4] = { 4, 4, 4, 3 }; int next = 1, k = 0;
@@ -782,6 +809,42 @@ static void TestFilmTime()
         const bool before = d.Engaged(); d.Push(60, true, true, i30);
         Check(before && !d.Engaged(), "P9: a cut disengages film time at once");
     }
+}
+
+// P10: the lazy VFG Low span stream (HeldFrames.h LowSpanPolicy): made only after budget drops and with 1 GB free,
+// spans over the budget go to it while the graph leaves room, released after it has idled
+static void TestLowSpan()
+{
+    using namespace pushmpc::held;
+    const uint64_t gb = 1ull << 30;
+    LowSpanPolicy p;
+    for (int i = 0; i < 300; ++i) p.Frame();
+    Check(!p.WantCreate(true, false, false, 8 * gb), "P10: no budget drops, no Low stream");
+    int dropped = 0;
+    for (int i = 0; i < 3; ++i) { p.Frame(); dropped += p.RouteOverBudget(false, 30.0, 6.0, 0.0, 35.4, false) == SpanRoute::Drop; }
+    Check(dropped == 3 && p.RecentDrops() == 3, "P10: spans over the budget are dropped while no Low stream runs");
+    Check(p.WantCreate(true, false, false, 2 * gb) && !p.WantCreate(true, false, false, gb - 1) && !p.WantCreate(false, false, false, 2 * gb)
+          && !p.WantCreate(true, true, false, 2 * gb) && !p.WantCreate(true, false, true, 2 * gb),
+          "P10: made after 3 drops only with >= 1 GB free, a main stream above Low, not made or failed before");
+    p.Created();
+    p.Frame();
+    const SpanRoute r1 = p.RouteOverBudget(true, 30.0, 6.0, 0.0, 35.4, false);   // 30 + 0.4 x 6 <= 35.4
+    const SpanRoute r2 = p.RouteOverBudget(true, 30.0, 6.0, 0.0, 35.4, true);    // a second one this frame
+    const SpanRoute r3 = p.RouteOverBudget(true, 34.0, 6.0, 0.0, 35.4, false);   // 34 + 2.4 > 35.4: no room
+    Check(r1 == SpanRoute::Low && r2 == SpanRoute::Drop && r3 == SpanRoute::Drop && p.LowSpans() == 1,
+          "P10: over the budget one span a frame goes to Low while the graph leaves room, the rest stay dropped");
+    LowSpanPolicy q;
+    for (int i = 0; i < 3; ++i) { q.Frame(); q.RouteOverBudget(false, 30.0, 6.0, 0.0, 35.4, false); }
+    for (uint32_t i = 0; i < kLowWindow; ++i) q.Frame();
+    Check(!q.WantCreate(true, false, false, 8 * gb), "P10: drops older than the window do not make it");
+    bool early = false;
+    for (uint32_t i = 0; i + 1 < kLowIdleFrames; ++i) { p.Frame(); early = early || p.WantRelease(true); }
+    p.Frame();
+    const bool released = p.WantRelease(true);
+    p.Created(); p.Frame(); p.RouteOverBudget(true, 20.0, 6.0, 0.0, 35.4, false);
+    for (uint32_t i = 0; i + 2 < kLowIdleFrames; ++i) p.Frame();
+    Check(!early && released && !p.WantRelease(true) && !p.WantRelease(false),
+          "P10: released after " + std::to_string(kLowIdleFrames) + " frames without a Low span, kept while used");
 }
 
 int main()
@@ -794,6 +857,7 @@ int main()
     TestRound5Plans();
     TestRound5Compose();
     TestFilmTime();
+    TestLowSpan();
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }

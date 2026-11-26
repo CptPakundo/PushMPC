@@ -518,18 +518,23 @@ inline HoldPlan PlanHolds(AnimMode mode, uint32_t flags, bool animation, const R
 
 // ---- P9 film time: is the drawn layer of this shot on a 24p grid inside 29.97 video (internal cadence report) ----
 // Fed once per pair (n-1, n) with whether the DRAWN layer changed (redrawn / unexplained objects; camera and slid
-// effects excluded), the pair's cut flag and the source interval. Over the last 30 frames of the shot:
+// effects excluded), the pair's cut flag and the pair's own interval (from the frames' timestamps). Over the last 30
+// frames of the shot:
 //   a run of >= 6 consecutive drawn changes            -> 30p motion (not engaged);
-//   one phase of every 5 never changes, others do      -> 24p grid (engaged; that phase is the repeated one);
+//   one phase of every 5 never changes, others do      -> 24p grid (engaged after it held for kConfirm pairs in a row;
+//                                                         that phase is the repeated one);
 //   all 5 phases change                                 -> native 30p (not engaged);
 //   gaps of exactly 3, three times in a row (3,3,3)    -> native 30p on threes: disengaged at once;
 //   a cut, or an interval that is not 1/29.97 (a VFR file's 23.976 body: its timestamps already time it) -> reset.
+// Intervals: 32.5-34.6 ms pass (containers with millisecond timestamps give 33 / 34 ms); 1/24 s (41-42 ms) resets.
+// Drawings on twos of a 24p grid leave three phases empty and are not engaged (the repeated phase is ambiguous).
 class FilmTimeDetector {
 public:
-    static constexpr int kWindow = 30, kMinFrames = 20, kRun30p = 6;
-    void Reset() { hist_.clear(); dup_ = -1; lastChange_ = -1; gaps_ = 0; }
+    static constexpr int kWindow = 30, kMinFrames = 20, kRun30p = 6, kConfirm = 5;
+    static bool Interval30(double ms) { return ms > 32.5 && ms < 34.6; }
+    void Reset() { hist_.clear(); dup_ = -1; cand_ = -1; candRun_ = 0; lastChange_ = -1; gaps_ = 0; }
     void Push(uint64_t n, bool drawnChanged, bool cut, double intervalMs) {
-        if (cut || !(intervalMs > 33.0 && intervalMs < 34.1)) { Reset(); return; }
+        if (cut || !Interval30(intervalMs)) { Reset(); return; }
         hist_.push_back({ n, drawnChanged });
         while (hist_.size() > size_t(kWindow)) hist_.erase(hist_.begin());
         if (drawnChanged) {
@@ -537,32 +542,48 @@ public:
             gaps_ = gap == 3 ? gaps_ + 1 : 0;
             lastChange_ = int64_t(n);
         }
-        dup_ = -1;
-        if (gaps_ >= 3 || hist_.size() < size_t(kMinFrames)) return;
-        int run = 0, total = 0, perPhase[5] = {};
-        for (const auto& h : hist_) { run = h.changed ? run + 1 : 0; if (run >= kRun30p) return; if (h.changed) { ++total; ++perPhase[h.n % 5]; } }
-        int zero = -1, zeros = 0;
-        for (int k = 0; k < 5; ++k) if (!perPhase[k]) { zero = k; ++zeros; }
-        if (zeros == 1 && total >= 4) dup_ = zero;
+        const int c = Candidate();
+        if (c < 0) { dup_ = -1; cand_ = -1; candRun_ = 0; return; }
+        candRun_ = c == cand_ ? candRun_ + 1 : 1;
+        cand_ = c;
+        dup_ = candRun_ >= kConfirm || dup_ == c ? c : -1;
     }
     bool Engaged() const { return dup_ >= 0; }
-    // a drawn change landing at frame n: the t inside the pair (n-1, n) where its film time lies (1 = at n itself)
+    // a drawn change landing at frame n: the t inside the pair (n-1, n) where its film time lies (1 = at n itself).
+    // Model: 24p film frames k start at (k + o) * 1.25 frames of 29.97 and each 29.97 frame shows the latest one, so
+    // frame n shows film frame floor(0.8 n - o) and the repeated phase fixes o to an interval of 0.2: its centre is used
+    // (error <= 0.125 of a 29.97 frame).
     float SwitchT(uint64_t n) const {
         if (dup_ < 0) return 1.f;
-        auto film = [&](uint64_t m) {   // film frames before m: 4 a cycle of 5, the repeated phase not counted
-            const uint64_t cyc = m / 5, ph = m % 5;
-            uint64_t f = cyc * 4;
-            for (uint64_t k = 0; k < ph; ++k) f += k != uint64_t(dup_) ? 1 : 0;
-            return double(f) * 1.25;   // in 29.97 frames (30 / 24)
-        };
-        // the grid's origin: film(m) is measured from a cycle start; the offset of the cycle start is the same for every m
-        return std::clamp(float(film(n) - (double(n) - 1.0)), 0.f, 1.f);
+        const double o = Origin(dup_);
+        const double k = std::floor(0.8 * double(n) - o);
+        return std::clamp(float((k + o) * 1.25 - (double(n) - 1.0)), 0.f, 1.f);
     }
     int DupPhase() const { return dup_; }
+    // the film origin (in film frames, [0, 1)) that gives repeated phase r: centre of the o for which frame 5q + r shows
+    // the same film frame as the frame before it
+    static double Origin(int r) {
+        double sx = 0, sy = 0;
+        for (int i = 0; i < 1000; ++i) {
+            const double o = (i + 0.5) / 1000.0;
+            if (std::floor(0.8 * r - o) != std::floor(0.8 * (r - 1) - o)) continue;
+            sx += std::cos(6.283185307179586 * o); sy += std::sin(6.283185307179586 * o);   // circular mean (the range may wrap)
+        }
+        double m = std::atan2(sy, sx) / 6.283185307179586;
+        return m < 0 ? m + 1.0 : m;
+    }
 private:
+    int Candidate() const {
+        if (gaps_ >= 3 || hist_.size() < size_t(kMinFrames)) return -1;
+        int run = 0, total = 0, perPhase[5] = {};
+        for (const auto& h : hist_) { run = h.changed ? run + 1 : 0; if (run >= kRun30p) return -1; if (h.changed) { ++total; ++perPhase[h.n % 5]; } }
+        int zero = -1, zeros = 0;
+        for (int k = 0; k < 5; ++k) if (!perPhase[k]) { zero = k; ++zeros; }
+        return zeros == 1 && total >= 4 ? zero : -1;
+    }
     struct H { uint64_t n; bool changed; };
     std::vector<H> hist_;
-    int dup_ = -1, gaps_ = 0;
+    int dup_ = -1, cand_ = -1, candRun_ = 0, gaps_ = 0;
     int64_t lastChange_ = -1;
 };
 
