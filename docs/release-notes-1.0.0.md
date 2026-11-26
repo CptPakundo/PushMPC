@@ -1,0 +1,41 @@
+The first release of **PushMPC**: smoother, sharper video in the player you already use. PushMPC brings PushFPS's frame
+generation and upscaling to MPC-HC, MPC-BE, PotPlayer, mpv, VLC, Kodi, Plex, Jellyfin, Stremio and more, and sets
+itself up for your graphics card and display.
+
+## Highlights
+
+- **Up to 8x smoother motion**, so a 24 fps film fills a 120 Hz or 240 Hz screen. On a GeForce RTX 5090, MPC-HC played
+  a 1080p film at 8x (192 fps) on a 4K screen without dropping a frame.
+- **Clean scene cuts:** a new shot starts on its own frame, never a smeared blend.
+- **A sharper picture** with RTX Video Super Resolution, FSR or NIS.
+- **HDR done right:** HDR10, HDR10+, HLG and Dolby Vision play untouched, and SDR can be shown as HDR.
+- **Auto** picks everything for your card and screen, including G-SYNC and FreeSync, and keeps adjusting while you
+  watch.
+- **Every player at once:** Setup finds your players and sets up each one. Uninstalling puts them back as they were.
+
+## What to download
+
+| Your computer | Download |
+|---|---|
+| Windows 10 or 11 | **PushMPC-Setup.exe**: run it and click through |
+| Linux, 64-bit PC | **pushmpc-linux-x86_64-1.0.0.tar.gz**: unpack it and run `sh setup.sh` |
+| Linux, ARM | **pushmpc-linux-aarch64-1.0.0.tar.gz**: the same (without VLC and the Kodi add-on) |
+| Mac | coming soon |
+
+The other files are parts that Setup and the updater download by themselves: you don't need them.
+
+Windows may say "Windows protected your PC" because Setup isn't code-signed yet. Click **More info**, then
+**Run anyway**. Once installed, PushMPC keeps itself up to date.
+
+## Known limits
+
+- MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware; the other players and cards are checked
+  automatically on every build.
+- Interlaced video plays without PushMPC.
+- Capture mode (for players PushMPC can't plug into) is a little behind the sound and can't show copy-protected video.
+- Mac support is coming soon.
+
+How to use it, settings and troubleshooting: see the
+[README](https://github.com/CptPakundo/PushMPC#readme) and the
+[user guide](https://github.com/CptPakundo/PushMPC/blob/main/docs/user-guide.md). What's inside:
+[changelog](https://github.com/CptPakundo/PushMPC/blob/main/CHANGELOG.md).

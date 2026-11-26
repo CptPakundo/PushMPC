@@ -1,5 +1,40 @@
 # Building PushMPC
 
+This page is for developers: how PushMPC is put together, how to build it, how Setup and the updater work, and how
+releases are made. For using PushMPC, see the [README](../README.md) and the [user guide](user-guide.md).
+
+- [Architecture](#architecture)
+- [Building on Windows](#building-on-windows)
+- [The signing key](#the-signing-key)
+- [GitHub Actions](#github-actions)
+- [How Setup works](#how-setup-works)
+- [Setup and script options](#setup-and-script-options)
+- [What Setup changes in each player](#what-setup-changes-in-each-player)
+- [The updater](#the-updater)
+- [Linux and macOS](#linux-and-macos)
+
+## Architecture
+
+| Folder | What |
+|---|---|
+| `pushmpc/` | **pushcore**: PushFPS's engine behind a C interface, built inside PushFPS's CMake tree (`patches/` holds the small patch set on the pinned PushFPS tag, `scripts/pushfps-pin.json`) |
+| `filter/` | the DirectShow filter for MPC-HC, MPC-BE and PotPlayer (settings page, on-screen status, Auto) |
+| `vsplugin/` | `pushmpc.Enhance`, the VapourSynth filter for the mpv family, with its backends: pushcore (Windows), NVIDIA Video Effects (Linux), the portable CPU and Vulkan engines, the ML backend (pmml), Apple VideoToolbox |
+| `mpvnative/` | the native mpv route: `vf_pushmpc` in PushMPC's own mpv build (Windows) and a runtime hook for distro mpv and Plex's libmpv (Linux, Windows proxy, macOS) |
+| `vlcplugin/` | the VLC 3 module (Windows, Linux, macOS) |
+| `kodiaddon/` | `inputstream.pushmpc`, the Kodi 21/22 add-on |
+| `pmml/` | the ML runtime layer for PushFlow (ONNX Runtime with the best execution provider per GPU, or ncnn on Vulkan) |
+| `installer/`, `updater/`, `scripts/` | Setup (`PushMPC-Setup.exe`), `PushMpcUpdater.exe`, the PowerShell installer and helpers |
+| `integrations/` | Linux `setup.sh` / `install.sh`, mpv configuration writers, the IINA bridge |
+| `packaging/` | the Linux tarball, the Homebrew formula, AUR, Scoop and winget manifests |
+| `tests/` | cross-component tests |
+
+Auto's rules (multiplier from the GPU's measured 95th-percentile cost and the display cadence or VRR, then quality,
+upscaling and clean-up with the time left) are the same on every route;
+`filter\build\auto_test.exe` prints Auto's decisions for sample sources and displays without a GPU.
+
+## Building on Windows
+
 Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools break on spaces). Layout:
 
     <repo>\PushFPS            PushFPS 4.5.4 source (tag v4.5.4) with patches\pushfps-4.5.4-pushmpc.patch applied
@@ -44,7 +79,7 @@ with a release signed by the old key that ships the new public key.
 
 ## GitHub Actions
 
-`.github/workflows/release.yml` builds a release on `windows-latest` from a tag (`v0.6.1`, or `v0.6.1-beta.1` for the
+`.github/workflows/release.yml` builds a release on `windows-latest` from a tag (`v1.0.1`, or `v1.0.1-beta.1` for the
 Beta channel) and publishes it; `pushfps-watch.yml` follows PushFPS's releases daily (see
 [release model](release-model.md#build-pipeline-github-actions)). Repository settings they use:
 
@@ -58,6 +93,24 @@ Beta channel) and publishes it; `pushfps-watch.yml` follows PushFPS's releases d
 
 Workflow permissions (Settings > Actions > General): "Read and write permissions" and "Allow GitHub Actions to create
 and approve pull requests", for the watch's branch and pull request.
+
+### Workflows
+
+| Workflow | What it checks or builds |
+|---|---|
+| `release.yml` | the release: Windows build, Setup, component zips, signed manifest, Linux tarballs; calls the VLC, mpv-native and Kodi workflows |
+| `release-ux.yml` | Setup on Windows and `setup.sh` on Linux with real players, including a clean uninstall |
+| `integrations.yml`, `players-layout.yml` | the player configuration writers, MPC-BE and PotPlayer settings layouts |
+| `vsplugin*.yml` | the VapourSynth route: the pushcore, portable CPU, Vulkan and Linux NVIDIA backends |
+| `mpv-native.yml` | PushMPC's own mpv build, the distro-mpv hook for every FFmpeg 6.0-9.1 release, the Plex proxies |
+| `vlc-plugin.yml`, `kodi-addon.yml` | the VLC module and the Kodi add-on, built and played headless |
+| `pmml.yml`, `nvidia-vfx.yml`, `vendor-paths.yml` | the PushFlow runtime layer, NVIDIA Video Effects on Linux, the vendor routes |
+| `apple.yml`, `apple-metal.yml` | the Homebrew formula, IINA bridge and Apple backends on macOS |
+| `pins.yml`, `runtime-pins.yml` | the pinned downloads (VapourSynth, Veyra's packages) against their official sources |
+| `pushfps-watch.yml` | follows PushFPS's releases and tries the patch on each new one |
+
+Hosted runners have no GPU, so these run on synthetic clips, stand-in GPUs or software Vulkan (lavapipe); the real-GPU
+checks run on a self-hosted runner (below) or by hand.
 
 ### GPU runner
 
@@ -91,7 +144,7 @@ the Auto decisions for a few sources and displays (no GPU needed).
 Before publishing anything: `scripts\check-public.ps1` (needs a local `scripts\check-public.patterns.local`, never
 published) scans the files listed in `scripts\public-files.txt` for personal data.
 
-## How Setup works (for developers)
+## How Setup works
 
 Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its payload; on Linux `setup.sh` runs
 `install.sh` and the other installers. What they do besides the player settings:
@@ -134,3 +187,89 @@ Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its 
   opens the player's window directly (`screen:0:<hwnd>:0:0:2:0:0:0:0`) on tested PushFPS versions. `-Capture On|Off`.
 - **CI:** `.github/workflows/release-ux.yml` runs Setup headless on windows-2025 and `setup.sh` in Arch with players from
   their packages, and checks that uninstall leaves nothing behind.
+- **Community unlocks:** the unlocks and ports in Veyra's package (the SF AI enhancement build for RTX 20-50, the DLSS-G
+  unlocks for RTX 30/40, the AMD AI enhancement runtimes) are installed by default; `-ExperimentalExtras No` leaves them
+  out.
+
+## Setup and script options
+
+Setup runs the same steps as the script install, which also works from a release zip: `Install-PushMPC.cmd`, or
+`powershell -ExecutionPolicy Bypass -File pushmpc-install.ps1 install`.
+
+`PushMPC-Setup.exe` options for scripted installs: `--quiet` (no window), `--install-dir <folder>`,
+`--package-cache <folder>` (a folder that already holds Veyra's zip), `--no-existing` (never reuse an installed PushFPS
+or Veyra), `--repair`, `--uninstall`, `--dry-run`, `--mpv-build`.
+
+The installer picks Veyra's runtime package for the GPU (`-Gpu Auto|NVIDIA|AMD`; Auto: NVIDIA when an NVIDIA card is
+present, else the AMD package, which also serves Intel), and takes the runtime files, in this order, from:
+
+1. an installed PushFPS or Veyra with exactly the pinned files (every file's SHA-256 is checked; copied, or hard-linked
+   with `-LinkExisting`; `-NoExisting` skips this);
+2. the package zip in `-RuntimePackage <zip>`, `-PackageCache <folder>` or its own download folder;
+3. a download from Veyra's GitHub release (about 750 MB, resumable), checked against the pinned SHA-256.
+
+PushFlow is not in Veyra's packages: it comes from an installed PushFPS, a PushFPS release zip in `-PackageCache`, or
+PushFPS's GitHub release, every file checked. See [release model](release-model.md).
+
+Install layout, all under `%LOCALAPPDATA%\PushMPC`:
+
+| Folder | What |
+|---|---|
+| `filter` | `PushMpcFilter.ax`, `PushMpcExit.dll`, the installer script and helpers |
+| (top level) | `PushMpcUpdater.exe`, `PushMpcSetup.exe` (repair, update, uninstall from Windows Apps), `auto-plan.json` |
+| `core` | `pushcore.dll`, its shaders, `pushcore_hip_preflight.exe` (AMD) |
+| `runtime` | FFmpeg, the NVIDIA or AMD components and PushFlow |
+| `pmml` | the PushFlow runtime for the GPU (when chosen) |
+| `vsplugin`, `vapoursynth` | the VapourSynth filter and its runtime (only when an mpv-family player was found) |
+| `vlc`, `mpv-native`, `plex`, `capture` | the VLC module, PushMPC's own mpv, Plex backups, capture mode's own PushFPS |
+| `previous` | the version before the last update (rollback) |
+| `logs` | logs (kept on uninstall; the last 20 playbacks, at most 50 MB) |
+
+Other script actions: `status [-Verify]`, `update -ReleaseManifest release.json`, `uninstall [-KeepSettings]`,
+`rollback -Component filter|core|runtime`, `plan`, `autoplan [-Apply]`.
+
+## What Setup changes in each player
+
+- **MPC-HC:** "PushMPC Filter" in External Filters (Prefer). MPC Video Renderer's HDR options (local tone mapping on,
+  type Spline, display nits = the display's peak), with the previous values kept in `MpcVrBackup` and restored on
+  uninstall; `ManageMpcVr` = 0 (DWORD) under `HKCU\Software\PushMPC` stops PushMPC from managing them. SVP's VapourSynth
+  filter is disabled while PushMPC is installed (its interpolation would stack) and enabled again on uninstall.
+- **MPC-BE:** `HKCU\Software\MPC-BE\ExternalFilters\NNN` "PushMPC Filter" (Prefer, NV12 and P010 inputs), and MPC Video
+  Decoder's `HwDecoder` = 2 (D3D11 copy-back; D3D11 native leaves no room for a filter) under
+  `HKCU\Software\MPC-BE\Filters\MPC Video Decoder`, previous value restored on uninstall unless changed since. INI mode
+  (`mpc-be64.ini`) is detected and left alone. MPC-HC and MPC-BE share one MPC Video Renderer registration.
+- **PotPlayer:** "PushMPC Filter" in `HKCU\Software\DAUM\PotPlayerMini64\Override` (Prefer) in front of the list's end
+  marker, plus LAV Video Decoder after it when LAV Filters is installed (it passes HDR mastering data and MaxCLL on).
+  Uninstall restores the list exactly. INI mode (`PotPlayerMini64.ini`) is left alone. PushMPC cannot ask PotPlayer to
+  reopen a file, and the G-SYNC button covers MPC-HC and MPC-BE only.
+- **mpv family:** see [mpv and mpv-based players](players-mpv.md).
+- **NVIDIA profile:** the settings page's G-SYNC button changes only MPC-HC's driver profile, with a backup restored on
+  uninstall.
+
+## The updater
+
+`PushMpcUpdater.exe` reads the release list of this repository, checks `release.json` against `release.json.sig` with
+the public key built into it, and downloads only the components whose version changed (and Veyra's package when a
+release pins a new one), each checked by SHA-256 and resumable. It installs at once when no player has PushMPC loaded;
+otherwise the task `\PushMPC\Apply pending update` (current user only) installs it when the player is closed or at the
+next sign-in. A new filter is registered and loaded once as a test; if that fails, the previous version in `previous\`
+is put back and that release is not tried again.
+
+    PushMpcUpdater.exe --check | --download | --apply | --status
+
+Settings and status under `HKCU\Software\PushMPC\Update`: `Enabled` (DWORD, 0 = off), `Status`, `Message`,
+`AvailableVersion`, `LastCheck`; log `%LOCALAPPDATA%\PushMPC\logs\updater.log`.
+
+## Linux and macOS
+
+- **Linux tarball:** `packaging/linux/make-tarball.sh` (built by release.yml in manylinux_2_28 for x86_64 and aarch64).
+  `setup.sh --help` lists its actions; `PUSHMPC_TEST_GPU`, `PUSHMPC_TEST_VULKAN`, `PUSHMPC_TEST_NVIDIA_DRIVER` and
+  `PUSHMPC_TEST_UNAME` stand in for the hardware in tests (`integrations/linux/tests/setup.tests.sh`).
+- **VLC on Linux, hardware decoding:** the installer tests VLC's hardware decoding with PushMPC and writes the result to
+  `hw-selftest.txt` in the plugin folder (`pushmpc-vlc.sh selftest-hw` runs it again). Zero-copy VA-API display needs
+  Mesa 25.1 or newer, or an X server with DRI3; otherwise the installer sets `avcodec-hw=vaapi_drm`; if no hardware path
+  passes, software decoding stays on.
+- **macOS (Homebrew, not published yet):** `packaging/homebrew/pushmpc.rb` builds the VapourSynth plugin with the
+  VideoToolbox and ML backends, the mpv helper, the IINA bridge and `pushmpc-setup`. To try it from source, put the
+  formula into a local tap and install it with `--build-from-source`, as `.github/workflows/apple.yml` (job
+  `homebrew`) does; see [packaging/homebrew/README.md](../packaging/homebrew/README.md).
