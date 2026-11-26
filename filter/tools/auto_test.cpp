@@ -288,6 +288,30 @@ int main()
             const Choice w = Decide(capped, clipA, d4k, {}, {}), v = Decide(capped, clipA, d4kVrr, {}, {});
             check(w.multiplier == 5 && v.multiplier == 9 && v.stoppedAt.find(L"delivery measured") != std::wstring::npos,
                   L"delivery check: capped at 9x -> 5x windowed (even), 9x VRR (said so)", std::format(L"{}x / {}x: {}", w.multiplier, v.multiplier, v.stoppedAt));
+            DeliveryCap dc;
+            const bool c1 = dc.Update(true, 10, 10000) && dc.cap == 9;
+            int opened = 0; for (int i = 0; i < 6; ++i) opened += dc.Update(false, 9, 10000) ? 1 : 0;   // 60 s clean
+            const bool c2 = opened == 1 && dc.cap == 10;
+            const bool c3 = dc.Update(true, 10, 10000) && dc.cap == 9;                                  // 10x fails again
+            int n = 0; while (!dc.Update(false, 9, 10000) && n < 100) ++n;                              // now 120 s
+            const bool c4 = n == 11 && dc.cap == 10;
+            const bool c5 = DeliveryCap{}.Update(true, 2, 10000) == false;                              // nothing below 2x
+            check(c1 && c2 && c3 && c4 && c5, L"delivery check: one step down, back up after 60 s clean, 120 s after a second failure",
+                  std::format(L"{} {} {} {} {} (n {})", c1, c2, c3, c4, c5, n));
+        }
+        {   // bits per pixel at 1080p quality, and clean-up Auto only inside the budget
+            const DWORD hvc1 = DWORD('H' | ('V' << 8) | ('C' << 16) | ('1' << 24)), h264 = DWORD('H' | ('2' << 8) | ('6' << 16) | ('4' << 24));
+            const double web4k = BitsPerPixel(16.55e6, 3840, 2160, 24.0, hvc1), web1080 = BitsPerPixel(6e6, 1920, 1080, 23.976, h264), uhdbd = BitsPerPixel(60e6, 3840, 2160, 23.976, hvc1);
+            check(web4k > kLowBitrateBpp && web1080 <= kLowBitrateBpp && uhdbd >= kHighBitrateBpp,
+                  L"bits per pixel at 1080p quality: 4K HEVC 16.5 Mbit/s not low, 1080p H.264 6 Mbit/s low, UHD Blu-ray high",
+                  std::format(L"{:.3f} / {:.3f} / {:.3f}", web4k, web1080, uhdbd));
+            Settings f10; f10.smoother = 12;
+            const Source low4k{ 3840, 2160, 24.0, true, 0.10, true };
+            const Choice ch = Decide(f10, low4k, d4k, {}, {});
+            check(!ch.nr && ch.cleanNote.find(L"would not fit") != std::wstring::npos, L"clean-up Auto stays off when the plan with it (Smoother 12x, 4K) would not fit", ch.cleanNote);
+            const Choice ca = Decide({}, low4k, d4k, {}, {});
+            check(ca.predictedMs <= ca.budgetMs, L"Auto's own plan for a low-bitrate 4K HDR source fits its budget",
+                  std::format(L"{}x nr {} {:.1f} of {:.1f} ms", ca.multiplier, int(ca.nr), ca.predictedMs, ca.budgetMs));
         }
         wprintf(L"  vendor paths: %d failed\n", fails);
     }

@@ -409,6 +409,7 @@ static Config ReadConfig()
     RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k);
     { std::wstring e; if (EnvStr(L"Enable", e)) c.enable = _wtoi(e.c_str()) != 0; }
     // HdrPushFpsToneMap (retired 2026-11-23): PushFPS's SDR tone map encoded piecewise sRGB; MPC-VR's is the route
+    ReadB(k, L"HdrPushFpsToneMap", c.hdrPushFps);   // debug (A/B): PushFPS tone-maps HDR to SDR at ingress instead
     ReadDw(k, L"LeadUs", c.leadUs);
     ReadB(k, L"Admission", c.admission);
     ReadB(k, L"WatchSettings", c.watch);
@@ -2599,7 +2600,7 @@ private:
     int64_t m_openQpc = 0, m_activeQpc = 0, m_flushStartQpc = 0, m_lastSubmitQpc = 0;
     std::atomic<int64_t> m_lastCoreOutQpc = 0;   // the last pushcore frame copied for delivery (the no-output guard)
     int m_submitsSinceOut = 0; int64_t m_seenOutQpc = 0;
-    int m_autoCap = 0; int64_t m_capWinQpc = 0; uint64_t m_capLate = 0, m_capGen = 0;   // the delivery check (Auto loop)
+    pm::DeliveryCap m_capState; int m_autoCap = 0; int64_t m_capWinQpc = 0; uint64_t m_capLate = 0, m_capGen = 0;   // the delivery check (Auto loop)
     REFERENCE_TIME m_lastSubmitPts = INT64_MIN;
     std::atomic<double> m_ptsStepMs = 0;
     double m_uploadMs = 0, m_submitMs = 0;
@@ -4806,11 +4807,15 @@ void CPushMpcFilter::AutoLoop()
             if (!m_capWinQpc || settle) { m_capWinQpc = nq; m_capLate = late; m_capGen = gen; }
             else if (QpcMs(nq - m_capWinQpc) >= 10000.0) {
                 const uint64_t dl = late - m_capLate, dg = gen - m_capGen;
-                if (pm::DeliveryOverloaded(dl, dg) && ap.multiplier > 2 && (!m_autoCap || int(ap.multiplier) <= m_autoCap)) {
-                    m_autoCap = int(ap.multiplier) - 1;
-                    Log(std::format("Auto: {} of {} generated frames came late or were dropped in 10 s at {}x although the GPU timings fit: at most {}x for this file",
-                        dl, dg, ap.multiplier, m_autoCap));
+                const bool lateNow = pm::DeliveryOverloaded(dl, dg);
+                const bool over = lateNow && ap.multiplier > 2 && (!m_capState.cap || int(ap.multiplier) <= m_capState.cap);
+                const int was = m_capState.cap;
+                if (lateNow && !over) m_capState.cleanMs = 0;   // late, but nothing to lower: not a clean stretch either
+                else if (m_capState.Update(over, int(ap.multiplier), QpcMs(nq - m_capWinQpc))) {
+                    if (over) Log(std::format("Auto: {} of {} generated frames came late or were dropped in 10 s at {}x although the GPU timings fit: at most {}x for now", dl, dg, ap.multiplier, m_capState.cap));
+                    else Log(std::format("Auto: delivery clean for a while at most {}x: {}", was, m_capState.cap ? std::format("up to {}x again", m_capState.cap) : std::string("no cap")));
                 }
+                m_autoCap = m_capState.cap;
                 m_capWinQpc = nq; m_capLate = late; m_capGen = gen;
             }
         }

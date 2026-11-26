@@ -178,10 +178,11 @@ inline constexpr double kCadenceTolerance = 0.02; // refresh / output fps within
 inline constexpr double kHighSpareMs = 3.0;       // High (PushFlow Quality) only with this much p95 to spare
 // Clean up Auto: H.264-equivalent bits per pixel per frame at or below this is "streaming level". Blu-ray 1080p H.264
 // at 25-35 Mbit/s is 0.5-0.7; a web stream 1080p24 at 6 Mbit/s H.264 is 0.12, YouTube AV1 at 2.5 Mbit/s ~0.09
-// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.48 equivalent. Codec factors in CodecEfficiency.
+// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.68 equivalent, a 4K HEVC web stream at 16.5 Mbit/s 0.19 (at
+// 1080p quality, BitsPerPixel). Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
 inline constexpr double kDebandBpp8Bit = 0.25;
-// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.48): high bitrate
+// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.68): high bitrate
 inline constexpr double kHighBitrateBpp = 0.40;
 
 inline bool CadenceEven(double refresh, double outFps)
@@ -252,11 +253,36 @@ inline bool CoreOutputStalled(double msSinceOutput, int submitsSinceOutput, bool
 }
 // The delivery check (the filter, every 10 s of playback): this many generated frames dropped or shown late in the window
 // means the multiplier does not hold here even when the GPU timings fit (the renderer's own per-frame work, for one, is
-// not in them): Auto caps the multiplier one step lower for the rest of the file
+// not in them): Auto caps the multiplier one step lower (DeliveryCap below)
 inline bool DeliveryOverloaded(uint64_t lateFrames, uint64_t generatedFrames)
 {
     return lateFrames >= 10 && lateFrames * 100 >= generatedFrames;
 }
+// The cap the delivery check keeps for one file: a multiplier that came late caps Auto one step below it; after a clean
+// stretch (60 s, doubled for each time that multiplier failed, at most 16 min) the cap opens one step again, so Auto
+// can go back up. Within the cap Auto's usual rules pick (VRR: the largest that fits; a fixed refresh: the shortest hold,
+// a tie going to the even cadence).
+struct DeliveryCap {
+    int cap = 0;                 // 0 = none
+    int fails[kMaxSmoother + 2] = {};
+    double cleanMs = 0;          // clean playback since the last change
+    // one 10-s window at the applied multiplier; true when the cap changed
+    bool Update(bool overloaded, int applied, double windowMs)
+    {
+        if (overloaded && applied > 2) {
+            ++fails[std::min(applied, kMaxSmoother + 1)];
+            cap = applied - 1; cleanMs = 0;
+            return true;
+        }
+        if (overloaded) { cleanMs = 0; return false; }
+        if (!cap) return false;
+        cleanMs += windowMs;
+        const int n = std::max(1, fails[std::min(cap + 1, kMaxSmoother + 1)]);
+        if (cleanMs < std::min(60000.0 * double(1 << std::min(n - 1, 4)), 960000.0)) return false;
+        cap = cap + 1 >= kMaxSmoother ? 0 : cap + 1; cleanMs = 0;
+        return true;
+    }
+};
 inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
@@ -525,9 +551,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (s.cleanUp != kAuto) { nr = true; r.cleanNote = L"on"; }
     else if (!lowBitrate) { r.cleanNote = L"off, " + rateNote; }
     else {
-        const int mNr = chooseFg(baseCost(true)).mult;
+        const Pick withNr = chooseFg(baseCost(true));
+        const int mNr = withNr.mult;
+        // the whole plan with clean-up must fit: frame generation at the multiplier it then gets (a fixed Smoother does not
+        // step down for it), the upscaler at its lowest level
+        const double planNr = baseCost(true) + vsr(level) + (mNr >= 2 ? FgCost(c, withNr.m, withNr.q, mNr, pixFg) : 0.0);
         if (mNoNr >= 2 && mNr < 2) r.cleanNote = L"off, " + rateNote + L" but it would cost frame generation";
-        else if (baseCost(true) + vsr(level) > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget", nrPrior);
+        else if (planNr > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget (the plan with it: {:.1f} of {:.1f} ms)", nrPrior, planNr, r.budgetMs);
         else { nr = true; r.cleanNote = L"on, " + rateNote; }
     }
     r.nr = nr;
@@ -669,7 +699,10 @@ inline double CodecEfficiency(DWORD fourcc)
 inline double BitsPerPixel(double bitsPerSecond, UINT w, UINT h, double fps, DWORD fourcc)
 {
     if (bitsPerSecond <= 0 || !w || !h || fps <= 0) return -1;
-    return bitsPerSecond * CodecEfficiency(fourcc) / (double(w) * h * fps);
+    // normalised to 1080p: a larger picture needs fewer bits per pixel for the same quality (bitrate ~ pixels^0.75, so
+    // 4K needs about 2.8x the bits of 1080p, not 4x); the thresholds below are set at 1080p
+    const double pix = double(w) * h;
+    return bitsPerSecond * CodecEfficiency(fourcc) / (pix * fps) * std::pow(pix / (1920.0 * 1080.0), 0.25);
 }
 
 // ------------------------------------------------------------------------------------------------ VRR (G-SYNC)
