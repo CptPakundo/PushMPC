@@ -1,0 +1,44 @@
+# Builds the dependencies once per pin change, on main, so every branch restores them instead of building them:
+# vcpkg's FFmpeg, PushFPS/pushcore's compiler cache, the PushFlow inputs, libdovi, ncnn, the FFmpeg 5 builds for Plex,
+# the hook's libavfilter for every FFmpeg tag, PushMPC's mpv and FFmpeg prefixes. It is a release dry run (release.yml
+# makes and saves every one of these caches, each right after its build); never published.
+#
+# Caches made on main are the ones every branch can restore (a branch's own caches are its own). Runs when a pin or a
+# dependency build script changes on main, weekly (caches unused for 7 days are dropped), and by hand.
+name: deps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/*pin*.json'
+      - 'scripts/build-ncnn-static.sh'
+      - 'patches/**'
+      - 'mpvnative/pins.json'
+      - 'mpvnative/ci/**'
+      - 'mpvnative/plex/**'
+      - 'mpvnative/plex-mac/**'
+      - 'mpvnative/hook/build-hook*.sh'
+      - 'mpvnative/ffmpeg/**'
+      - 'kodiaddon/ci/**'
+      - 'vlcplugin/display/vlc3/fetch-vlc-sources.sh'
+      - 'vsplugin/engines/gpu/gpu-pins.json'
+      - '.github/workflows/deps.yml'
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: deps-${{ github.ref }}
+  cancel-in-progress: false   # it fills the caches: never cancelled midway
+
+permissions:
+  contents: write   # what release.yml declares (a dry run never publishes)
+
+jobs:
+  caches:
+    uses: ./.github/workflows/release.yml
+    with:
+      source_ref: ${{ github.sha }}
+      dry_run: true
+    secrets: inherit

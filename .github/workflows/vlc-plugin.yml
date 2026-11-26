@@ -460,7 +460,6 @@ jobs:
 
   # pm_pushcore.dll (MSVC: vsplugin's pushcore host + the filter's Auto) and the stub pushcore.dll for the tests
   build-bridge:
-    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only (test-windows uses it)
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -597,7 +596,6 @@ jobs:
   macos:
     # public repository: standard macOS runners are free, so macOS runs on every push
     needs: [clips]
-    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -630,6 +628,7 @@ jobs:
           codesign -s - -f out/mac/*.dylib
           lipo -info out/mac/libpushmpc_plugin.dylib
       - name: Module cases and the macosx display (VLC_PLUGIN_PATH, plugin outside the signed bundle)
+        if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
         run: |
           d=~/Library/Application\ Support/PushMPC/vlc; mkdir -p "$d" && cp out/mac/*.dylib "$d/"
           export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP10=art/clips/clip10.mkv \

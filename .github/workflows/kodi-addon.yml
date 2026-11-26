@@ -337,7 +337,6 @@ jobs:
   build-android:
     # Android TV / Fire TV / Shield (arm64-v8a): build and package only. Kodi has no headless Android test path on a
     # hosted runner yet; the engine is the GPU one (Vulkan, loaded at run time) with the CPU fallback.
-    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: off (the release ships no Android build)
     strategy:
       fail-fast: false
       matrix:

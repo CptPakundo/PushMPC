@@ -49,7 +49,6 @@ concurrency:
 # the same inputs restores the previous output and skips the build; each cache is saved right after its build.
 jobs:
   linux:
-    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml takes nothing from it
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -106,6 +105,7 @@ jobs:
           [ "$got" = "$(echo "$sha" | tr a-f A-F)" ] || { echo "::error::clip SHA-256 mismatch: $got"; exit 1; }
           cp "$RUNNER_TEMP/clip.mp4" "$RUNNER_TEMP/t/public.mp4"
       - name: Headless checks
+        if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build + the AppImage smoke test
         timeout-minutes: 15
         run: |
           ls /usr/share/vulkan/icd.d/ || true
@@ -130,6 +130,8 @@ jobs:
         run: |
           bash mpvnative/ci/make-appimage.sh "$PREFIX" build-engine/out/libpushmpc_engine.so "$SRC" "$RUNNER_TEMP/appimage"
           t="$RUNNER_TEMP/t"
+          # the synthetic clip of the headless checks (made here when they did not run)
+          [ -f "$t/clip.mkv" ] || { mkdir -p "$t"; LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/ffmpeg" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=4" -pix_fmt yuv420p -c:v ffv1 "$t/clip.mkv"; }
           n=$(LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv")
           env -u LD_LIBRARY_PATH -u PUSHMPC_ENGINE APPIMAGE_EXTRACT_AND_RUN=1 "$RUNNER_TEMP/appimage/PushMPC-mpv-x86_64.AppImage" --no-config "$t/clip.mkv" \
             --vf=pushmpc=smoother=2 --o="$t/appimage.mkv" --of=matroska --ovc=ffv1 --no-audio > "$t/appimage.log" 2>&1 || { tail -20 "$t/appimage.log"; exit 1; }
@@ -481,6 +483,7 @@ jobs:
           key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
           restore-keys: mpvnative-plexlibs-
       - name: FFmpeg 5.0 / 5.1 builds (every pinned tag) and the proxy avfilter-8.dll
+        id: plexbuild
         if: steps.out-cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
         timeout-minutes: 50
@@ -493,11 +496,13 @@ jobs:
       - uses: actions/cache/save@v4
         if: steps.out-cache.outputs.cache-hit != 'true'
         with: { path: '${{ runner.temp }}/plexlibs', key: '${{ env.PLEXLIBS_KEY }}' }
+      # the compiler cache even when the build fails or is cancelled (a partial one under its own key: the next run's
+      # restore-keys pick it up, and a finished build still saves the full one)
       - uses: actions/cache/save@v4
-        if: steps.out-cache.outputs.cache-hit != 'true' && steps.ccache.outputs.cache-hit != 'true'
+        if: always() && steps.out-cache.outputs.cache-hit != 'true' && steps.ccache.outputs.cache-hit != 'true' && steps.plexbuild.outcome != 'skipped'
         with:
           path: ${{ runner.temp }}/pm-ccache-plex
-          key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
+          key: ${{ steps.plexbuild.outcome == 'success' && format('mpvnative-plexlibs-{0}', hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json')) || format('mpvnative-plexlibs-partial-{0}', github.run_id) }}
       - uses: actions/upload-artifact@v4
         with:
           name: plexlibs

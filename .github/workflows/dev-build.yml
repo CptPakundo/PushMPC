@@ -1,10 +1,11 @@
 # A quick Windows test build: PushFPS's pushcore, the filter, the updater, the VapourSynth plugin and
 # PushMPC-Setup.exe, exactly as release.yml builds them (it runs release.yml's core and build jobs), without the VLC,
 # mpv, Plex, Kodi and Linux pieces. Artifact pushmpc-release (Setup, component zips, release.json) as in a release dry
-# run. Never publishes. About 10 minutes on a warm cache.
+# run. Never publishes. About 11 minutes with a cold compiler cache, a few minutes with a warm one.
 #
-# Runs on a push to a track/** branch that touches the Windows build, by hand ("Run workflow"), and weekly on main
-# (caches unused for 7 days are dropped; main's caches are the ones every branch can restore).
+# Runs on a push to a track/** branch that touches the Windows build, and by hand ("Run workflow"). When nothing that
+# goes into the core changed since a run that built it, the core comes from the cache and the run takes 2-3 minutes.
+# The dependency caches come from main (deps.yml).
 name: dev-build
 
 on:
@@ -25,8 +26,6 @@ on:
       - '.github/workflows/dev-build.yml'
       - '.github/workflows/release.yml'
   workflow_dispatch:
-  schedule:
-    - cron: '17 4 * * 1'
 
 concurrency:
   group: dev-build-${{ github.ref }}

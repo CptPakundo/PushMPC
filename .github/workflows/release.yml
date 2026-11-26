@@ -105,7 +105,35 @@ jobs:
   # PushFPS's pushcore, the filter, the updater and the VapourSynth plugin; handed to the build job as the core-build
   # artifact. Its dependencies are cached by their pins (vcpkg binaries, PushFlow inputs, libdovi) and the compiler
   # output by sccache, each saved right after the step that makes it.
+  # Skips the core build when nothing that goes into it changed since a run that built it: the core-build output is
+  # cached under a hash of its inputs (sources, pins, this workflow, whether the NVOF headers were there). A release
+  # (tag or beta, not a dry run) always builds it fresh.
+  core-cache:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      hit: ${{ steps.lookup.outputs.cache-hit == 'true' && steps.key.outputs.fresh != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          persist-credentials: false
+      - name: Key
+        id: key
+        env:
+          NVOF: ${{ secrets.NVOF_SDK_HEADERS != '' }}
+          FRESH: ${{ (inputs.release_tag != '' || inputs.beta == true || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.dry_run != true }}
+        run: |
+          echo "key=pushmpc-core-out-v1-nvof$NVOF-${{ hashFiles('filter/**', 'pushmpc/**', 'updater/**', 'vsplugin/**', 'patches/**', 'pmml/**', 'scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'scripts/vapoursynth-pin.json', '.github/workflows/release.yml') }}" >> "$GITHUB_OUTPUT"
+          echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: lookup
+        with: { path: core-out, key: '${{ steps.key.outputs.key }}', lookup-only: true, enableCrossOsArchive: true }
+
   core:
+    needs: core-cache
+    if: ${{ needs.core-cache.outputs.hit != 'true' }}
     runs-on: windows-latest
     timeout-minutes: 100
     defaults:
@@ -423,6 +451,7 @@ jobs:
       # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and
       # the GPU harness; nothing of the PushFPS app
       - name: Build PushFPS's shaders, pushcore.dll, the HIP preflight child and the GPU harness
+        id: corebuild
         timeout-minutes: 45
         run: |
           $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
@@ -435,11 +464,12 @@ jobs:
           & $env:SCCACHE_EXE --stop-server | Out-Null
 
       - name: Save the compiler cache
-        if: always() && steps.sccache-cache.outputs.cache-hit != 'true'
+        # a failed or cancelled build saves what it has under a partial key (picked up by the restore-keys)
+        if: always() && steps.sccache-cache.outputs.cache-hit != 'true' && steps.corebuild.outcome != 'skipped' && env.SCCACHE_EXE != ''
         uses: actions/cache/save@v4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: pushmpc-sccache-core-${{ env.PUSHFPS_COMMIT }}-${{ hashFiles('repo/pushmpc/**', 'repo/patches/**', 'repo/scripts/pushfps-pin.json') }}
+          key: ${{ steps.corebuild.outcome == 'success' && format('pushmpc-sccache-core-{0}-{1}', env.PUSHFPS_COMMIT, hashFiles('repo/pushmpc/**', 'repo/patches/**', 'repo/scripts/pushfps-pin.json')) || format('pushmpc-sccache-core-{0}-partial-{1}', env.PUSHFPS_COMMIT, github.run_id) }}
 
       # PushFlow inside pushcore's engine with the network on pmml, on Windows' software GPU (WARP: a full D3D12 device
       # that DirectML runs on): the same two frames through PushFlow's own DirectML session and through pmml's CPU EP
@@ -516,7 +546,7 @@ jobs:
       - name: Core build outputs
         timeout-minutes: 5
         run: |
-          $o = "$env:RUNNER_TEMP\core-out"
+          $o = "$env:GITHUB_WORKSPACE\core-out"
           New-Item -ItemType Directory -Force "$o\filter-bin", "$o\updater-bin", "$o\vsplugin-bin", "$o\build\pushmpc" | Out-Null
           Copy-Item repo/filter/bin/* "$o\filter-bin" -Recurse
           Copy-Item repo/updater/bin/PushMpcUpdater.exe "$o\updater-bin"
@@ -524,12 +554,14 @@ jobs:
           Copy-Item "$env:BUILD\pushmpc\pushcore.dll" "$o\build\pushmpc"
           if (Test-Path "$env:BUILD\pushmpc\pushcore_hip_preflight.exe") { Copy-Item "$env:BUILD\pushmpc\pushcore_hip_preflight.exe" "$o\build\pushmpc" }
           Copy-Item "$env:BUILD\shaders" "$o\build\shaders" -Recurse
+          New-Item -ItemType Directory -Force "$o\harness" | Out-Null
+          Copy-Item "$env:BUILD\pushmpc\pushcore_gpu_harness.exe" "$o\harness"
           Get-ChildItem $o -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "{0} files, {1:N1} MB" -f $_.Count, ($_.Sum / 1MB) }
 
       - uses: actions/upload-artifact@v4
         with:
           name: core-build
-          path: ${{ runner.temp }}/core-out/
+          path: ${{ github.workspace }}/core-out/
           if-no-files-found: error
           retention-days: 3
 
@@ -539,10 +571,14 @@ jobs:
           path: ${{ env.BUILD }}/pushmpc/pushcore_gpu_harness.exe
           if-no-files-found: error
 
+      # the same outputs for core-cache: a later run with the same inputs skips this job
+      - uses: actions/cache/save@v4
+        with: { path: core-out, key: '${{ needs.core-cache.outputs.key }}', enableCrossOsArchive: true }
+
   # Setup, the component zips and the signed release.json from the core build and the components' artifacts
   build:
-    needs: [core, vlc, mpvnative, kodi]
-    if: ${{ !cancelled() && needs.core.result == 'success' }}
+    needs: [core-cache, core, vlc, mpvnative, kodi]
+    if: ${{ !cancelled() && (needs.core.result == 'success' || (needs.core.result == 'skipped' && needs.core-cache.outputs.hit == 'true')) }}
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
@@ -588,7 +624,15 @@ jobs:
           Write-Host "PushMPC $v (tag '$tag', prerelease $pre)"
 
       - uses: actions/download-artifact@v4
-        with: { name: core-build, path: '${{ runner.temp }}/core-out' }
+        if: needs.core.result == 'success'
+        with: { name: core-build, path: '${{ github.workspace }}/core-out' }
+      # core skipped (nothing in it changed): the outputs of the run that built it, and its GPU harness for gpu-smoke
+      - uses: actions/cache/restore@v4
+        if: needs.core.result != 'success'
+        with: { path: core-out, key: '${{ needs.core-cache.outputs.key }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/upload-artifact@v4
+        if: needs.core.result != 'success'
+        with: { name: pushmpc-gpu-harness, path: '${{ github.workspace }}/core-out/harness/pushcore_gpu_harness.exe', if-no-files-found: error }
 
       - name: Code-signing certificate (optional)
         timeout-minutes: 5
@@ -620,7 +664,7 @@ jobs:
         timeout-minutes: 20
         env:
           PUSHMPC_SIGNING_KEY: ${{ secrets.PUSHMPC_SIGNING_KEY }}
-          PUSHMPC_BUILD_DIR: ${{ runner.temp }}/core-out/build
+          PUSHMPC_BUILD_DIR: ${{ github.workspace }}/core-out/build
         run: |
           $rel = "$env:RUNNER_TEMP\release"
           $pre = @{}; if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $pre = @{ Prerelease = $true } }
@@ -641,7 +685,7 @@ jobs:
           # the Plex proxy (mpv-native.yml): avfilter-8.dll, the pushmpc-avfilter-8.*.dll builds and the engine, staged as the
           # optional plexnative component (Setup prefers it for Plex; the libmpv swap stays the fallback)
           $plexn = @{}; if (Test-Path "$env:RUNNER_TEMP\plexnative\avfilter-8.dll") { $plexn = @{ PlexNative = "$env:RUNNER_TEMP\plexnative" } } else { Write-Host '::warning title=Plex proxy::no plexnative artifact: Setup gives Plex the libmpv swap' }
-          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:RUNNER_TEMP\core-out\filter-bin" -UpdaterExe "$env:RUNNER_TEMP\core-out\updater-bin\PushMpcUpdater.exe" -VsPluginDll "$env:RUNNER_TEMP\core-out\vsplugin-bin\pushmpc_vs.dll" @nvofReq @vlc @mpvb @kodi @plexn
+          ./repo/scripts/pushmpc-install.ps1 stage -FilterBin "$env:GITHUB_WORKSPACE\core-out\filter-bin" -UpdaterExe "$env:GITHUB_WORKSPACE\core-out\updater-bin\PushMpcUpdater.exe" -VsPluginDll "$env:GITHUB_WORKSPACE\core-out\vsplugin-bin\pushmpc_vs.dll" @nvofReq @vlc @mpvb @kodi @plexn
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nvof = (Get-Content repo/stage/PushMPC/core/manifest.txt | Where-Object { $_ -like 'nvof=*' }) -replace '^nvof=', ''
           if ($nvof -ne '1') {
