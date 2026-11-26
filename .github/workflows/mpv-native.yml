@@ -22,6 +22,10 @@ on:
         description: 'also run the macOS job'
         type: boolean
         default: false
+      plex_linux:
+        description: 'also run the Plex on Linux job (unfinished)'
+        type: boolean
+        default: false
 
 concurrency:
   group: mpv-native-${{ github.ref }}
@@ -284,7 +288,7 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         # every pinned tag of the branch (point releases can bump the micro version: 7.1 is 10.4.100, 7.1.5 is 10.5.100)
-        branch: [n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
+        branch: [n5.0, n5.1, snapshots, n6.0, n6.1, n7.0, n7.1, n8.0, n8.1, n9.0, n9.1]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -341,9 +345,11 @@ jobs:
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$RUNNER_TEMP/hook/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
           cp mpvnative/ci/SOURCES.txt "$RUNNER_TEMP/hook/"
           ls -la "$RUNNER_TEMP/hook"
-          cmake -S mpvnative/engine -B build-engine -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPME_FETCH_GPU_DEPS=ON
-          cmake --build build-engine --parallel --target pushmpc_engine
-          cp build-engine/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+          # the engine for distro mpv is built on Debian 12 (glibc 2.36, the oldest system the hook targets), so it loads
+          # on every distro from there on (a build on the runner's glibc 2.39 does not load on Debian 12)
+          docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
+          cp build-engine-bookworm/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
+          objdump -T "$RUNNER_TEMP/hook/libpushmpc_engine.so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/^/engine needs at most /'
       - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
         run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
       - name: Setup's entry point (pushmpc-native.sh) in a fake HOME
@@ -352,6 +358,11 @@ jobs:
         timeout-minutes: 15
         run: |
           docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:trixie sh -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
+      - name: Debian 12's mpv (FFmpeg 5.1, libavfilter 8)
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/hook:/hook" debian:bookworm sh -c \
             'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends mpv ffmpeg python3 >/dev/null && sh /w/mpvnative/hook/test-hook.sh /hook /hook/libpushmpc_engine.so /tmp/t'
       - name: Arch's mpv (current FFmpeg)
         if: matrix.runner == 'ubuntu-24.04'
@@ -367,3 +378,218 @@ jobs:
             ${{ runner.temp }}/hook
             ${{ runner.temp }}/t-*/*.log
           retention-days: 7
+
+  # Plex HTPC / Plex for Windows: their libmpv-2.dll imports FFmpeg 5.x DLLs (avfilter-8.dll ...). A proxy avfilter-8.dll
+  # (exports forwarded to the renamed original) adds vf_pushmpc from a matching FFmpeg 5.x build; no libmpv swap.
+  plex-libs:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: >-
+            make git diffutils mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-tools-git
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pm-ccache-plex
+          key: mpvnative-plexlibs-${{ hashFiles('mpvnative/ffmpeg/vf_pushmpc.c', 'mpvnative/plex/*', 'mpvnative/pins.json') }}
+          restore-keys: mpvnative-plexlibs-
+      - name: FFmpeg 5.0 / 5.1 builds (every pinned tag) and the proxy avfilter-8.dll
+        shell: msys2 {0}
+        timeout-minutes: 50
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pm-ccache-plex
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          bash mpvnative/plex/build-plex-libs.sh "$R/ffmpeg5" "$R/plexlibs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexlibs
+          path: ${{ runner.temp }}/plexlibs/*.dll
+          retention-days: 7
+
+  # self-test clips for players whose FFmpeg is their own (Plex: no libavdevice, a reduced decoder set). Shipped next
+  # to the Plex installers as pushmpc-selftest-*.
+  selftest-clips:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg >/dev/null
+          mkdir clips; src="testsrc2=size=320x180:rate=24:duration=2"
+          ffmpeg -v error -f lavfi -i $src -c:v libx264 -profile:v main -pix_fmt yuv420p -movflags +faststart clips/pushmpc-selftest-h264.mp4
+          ffmpeg -v error -f lavfi -i $src -c:v libx265 -pix_fmt yuv420p -x265-params log-level=error clips/pushmpc-selftest-hevc.mkv
+          ffmpeg -v error -f lavfi -i $src -c:v libvpx-vp9 -b:v 200k clips/pushmpc-selftest-vp9.webm
+          ls -la clips
+      - uses: actions/upload-artifact@v4
+        with: { name: selftest-clips, path: clips/, retention-days: 7 }
+
+  plex:
+    needs: [plex-libs, selftest-clips]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: plexlibs, path: '${{ runner.temp }}/plexlibs' }
+      - uses: actions/download-artifact@v4
+        with: { name: selftest-clips, path: '${{ runner.temp }}/plexlibs' }
+      - name: Engine module (MSVC) next to the proxy
+        run: |
+          cmake -S mpvnative/engine -B build-engine -A x64 -DPME_VULKAN=OFF
+          if ($LASTEXITCODE) { throw 'configure' }
+          cmake --build build-engine --config Release --target pushmpc_engine --parallel
+          if ($LASTEXITCODE) { throw 'build' }
+          $p = "$env:RUNNER_TEMP\plexlibs"
+          Copy-Item build-engine/out/pushmpc_engine.dll, mpvnative/install/pushmpc-plex-native.ps1, mpvnative/ci/SOURCES.txt $p
+          Get-ChildItem $p | ForEach-Object { "{0,10:N0}  {1}" -f $_.Length, $_.Name }
+      - name: Plex HTPC and Plex for Windows (winget)
+        timeout-minutes: 20
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -Force -Scope CurrentUser | Out-Null
+            Install-Module Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery
+            Repair-WinGetPackageManager -AllUsers -Latest
+          }
+          foreach ($id in 'Plex.PlexHTPC', 'Plex.Plex') {
+            winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 2
+            "winget $id`: exit $LASTEXITCODE"
+          }
+          Start-Sleep -Seconds 5
+          Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Add-Type -TypeDefinition @'
+          using System; using System.Runtime.InteropServices;
+          public static class FF {
+            [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetDllDirectory(string p);
+            [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibrary(string p);
+            [DllImport("kernel32", CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr m, string n);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate uint U();
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate IntPtr S();
+          }
+          '@
+          foreach ($d in "$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") {
+            if (-not (Test-Path "$d\avfilter-8.dll")) { "$d`: no avfilter-8.dll"; continue }
+            $exe = Get-ChildItem $d -Filter 'Plex*.exe' | Select-Object -First 1
+            [FF]::SetDllDirectory($d) | Out-Null
+            $m = [FF]::LoadLibrary("$d\avfilter-8.dll")
+            $v = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer([FF]::GetProcAddress($m, 'avfilter_version'), [FF+U]).Invoke()
+            $cfg = [Runtime.InteropServices.Marshal]::PtrToStringAnsi([Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer([FF]::GetProcAddress($m, 'avfilter_configuration'), [FF+S]).Invoke())
+            "== $d ($($exe.Name) $($exe.VersionInfo.ProductVersion)): libavfilter $($v -shr 16).$(($v -shr 8) -band 255).$($v -band 255); configure: $($cfg.Substring(0, [Math]::Min(300, $cfg.Length)))"
+          }
+          exit 0
+      - name: Proxy install, self-test through Plex's own libmpv, uninstall bit-exact
+        timeout-minutes: 15
+        run: |
+          $p = "$env:RUNNER_TEMP\plexlibs"
+          $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\libmpv-2.dll" }
+          if (-not $dirs) { Write-Host '::error::no Plex app installed on the runner'; exit 1 }
+          $confs = "$env:LOCALAPPDATA\Plex HTPC\mpv.conf", "$env:LOCALAPPDATA\Plex\mpv.conf"
+          function Snap { foreach ($d in $dirs) { Get-ChildItem $d -Recurse -File | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash) $($_.FullName)" } }; foreach ($c in $confs) { "$c $(if (Test-Path $c) { (Get-FileHash $c).Hash } else { 'absent' })" } }
+          $before = Snap
+          $env:PUSHMPC_PROXY_LOG = "$env:RUNNER_TEMP\proxy.log"
+          $out = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" install -From $p -Opts 'smoother=2' -Json; $rc = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host "install: $_" }
+          if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 6 | ForEach-Object { Write-Host "  $_" } }
+          $st = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" status -From $p -Json; $st | ForEach-Object { Write-Host "status: $_" }
+          $un = pwsh -NoProfile -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json; $un | ForEach-Object { Write-Host "uninstall: $_" }
+          $after = Snap
+          $diff = Compare-Object $before $after
+          if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host '::error::uninstall did not restore the Plex folders and configs bit for bit'; exit 1 }
+          Write-Host 'uninstall: Plex folders and mpv.conf files restored bit for bit'
+          $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' }).Count
+          if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; exit 1 }
+
+  # Plex desktop / HTPC on Linux (Flathub): Plex bundles libmpv + FFmpeg 5.x (libavfilter.so.8); pushmpc_preload.so via
+  # `flatpak override --env=LD_PRELOAD` adds vf_pushmpc. Self-test inside the sandbox with Plex's own libmpv.
+  plex-linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.plex_linux
+    needs: [hook-libs, selftest-clips]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hooklib-x64-*
+          path: ${{ runner.temp }}/hooklibs
+      - uses: actions/download-artifact@v4
+        with: { name: selftest-clips, path: '${{ runner.temp }}/clips' }
+      - name: The preload, the engine (Debian 12 build), the self-test host
+        run: |
+          d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
+          for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
+          cc -O2 -Wall mpvnative/plex/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
+          docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
+          cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
+          ls "$d" | tr '\n' ' '
+      - name: Flathub Plex (tv.plex.PlexDesktop, tv.plex.PlexHTPC)
+        timeout-minutes: 25
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends flatpak xvfb xauth >/dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
+            flatpak install --user -y --noninteractive flathub "$id" > /dev/null 2>&1 && echo "$id: installed $(flatpak info --user "$id" | sed -n 's/^ *Version: //p')" || echo "$id: not installed"
+          done
+          for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
+            flatpak info --user "$id" >/dev/null 2>&1 || continue
+            echo "== $id: libmpv / libav* in the app"
+            flatpak run --user --command=sh "$id" -c 'find /app -name "libmpv*.so*" -o -name "libavfilter*.so*" -o -name "libavutil*.so*" 2>/dev/null | head -8' || true
+            echo "== $id: a 25 s start under Xvfb, then the data folders it made (where mpv.conf goes)"
+            timeout 25 xvfb-run -a flatpak run --user "$id" > /dev/null 2>&1 || true
+            flatpak kill "$id" 2>/dev/null || true
+            (cd "$HOME/.var/app/$id" && find . -maxdepth 3 -type d | grep -v '/cache' | sort | head -30)
+          done
+      - name: Install (self-test through Plex's libmpv in its sandbox), status, uninstall bit-exact
+        timeout-minutes: 15
+        run: |
+          set +e; d="$RUNNER_TEMP/plexlin"; fails=0; tested=0
+          cp "$RUNNER_TEMP"/clips/pushmpc-selftest-* "$d/"
+          for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
+            flatpak info --user "$id" >/dev/null 2>&1 || continue
+            tested=$((tested + 1))
+            n=$( [ "$id" = tv.plex.PlexDesktop ] && echo desktop || echo htpc )
+            snap() { (cd "$HOME/.var/app" && find "$id" \( -path '*/cache' -o -path '*/Plex Media Server' -o -path '*/Logs' -o -path '*/.local/state' \) -prune -o -type f -print0 | sort -z | xargs -0r sha256sum | sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
+            before=$(snap)
+            out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" --json); rc=$?; echo "install: $out"
+            echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \
+              && echo "$id: vf_pushmpc active through Plex's libmpv" || { echo "::error::$id: install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
+            flatpak override --user --show "$id"
+            echo "status: $(sh mpvnative/install/pushmpc-plex-linux.sh status --target "$n" --json)"
+            echo "uninstall: $(sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target "$n" --json)"
+            [ "$(snap)" = "$before" ] && echo "$id: uninstall restored the files and overrides exactly" || { echo "::error::$id: files or overrides differ after uninstall"; fails=$((fails + 1)); }
+          done
+          [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak installed"; exit 1; }
+          [ "$fails" = 0 ] && echo "plex-linux: all checks passed" || exit 1
+
+  # Plex for Mac: what the bundle holds (signature, entitlements, libmpv / FFmpeg dylibs). Dispatch only (macOS minutes).
+  plex-macos:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Plex for Mac, inspected
+        run: |
+          j=$(curl -fsSL 'https://plex.tv/api/downloads/6.json')
+          url=$(echo "$j" | python3 -c "import json,sys; r=json.load(sys.stdin)['computer']['MacOS']; print(r['releases'][0]['url']); print(r['version'], file=sys.stderr)")
+          echo "Plex for Mac: $url"
+          curl -fsSL -o /tmp/plex.pkg "$url"
+          mkdir -p /tmp/plexx
+          case $url in
+            *.zip) ditto -x -k /tmp/plex.pkg /tmp/plexx ;;
+            *.dmg) hdiutil attach -nobrowse -mountpoint /tmp/plexdmg /tmp/plex.pkg >/dev/null && cp -R /tmp/plexdmg/*.app /tmp/plexx/ ;;
+          esac
+          app=$(find /tmp/plexx -maxdepth 2 -name '*.app' | head -1); echo "bundle: $app"
+          codesign -dvv "$app" 2>&1 | grep -E "Authority|TeamIdentifier|flags|Runtime" || true
+          echo "-- entitlements"; codesign -d --entitlements - "$app" 2>/dev/null | grep -oE "com\.apple\.security\.[a-z.-]+" | sort -u
+          echo "-- Frameworks"; ls "$app/Contents/Frameworks" | head -60
+          m=$(find "$app" -name 'libmpv*.dylib' | head -1); echo "-- libmpv: $m"
+          [ -n "$m" ] && otool -L "$m" | head -40
+          f=$(find "$app" -name 'libavfilter*.dylib' | head -1); echo "-- libavfilter: $f"
+          [ -n "$f" ] && { otool -L "$f" | head -10; codesign -dvv "$f" 2>&1 | grep -E "Authority|flags" || true; }
