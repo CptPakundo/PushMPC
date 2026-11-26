@@ -1,0 +1,6 @@
+{
+  "note": "Kodi for Android APKs the kodi-android job (kodi-addon.yml) installs in the emulator, pinned by SHA-256 (from mirrors.kodi.tv <file>?sha256). Kodi publishes no x86_64 APK; Kodi 22 x86 exists only as a Piers nightly (the mirror prunes old nightlies: move the pin to a newer one, or to the 22.0 release, when it is gone).",
+  "21-x86":   { "url": "https://mirrors.kodi.tv/releases/android/x86/kodi-21.3-Omega-x86.apk", "sha256": "cf53a43522743f937ec0644991c625da0796d5705fb2081bd005430927fe7755" },
+  "22-x86":   { "url": "https://mirrors.kodi.tv/nightlies/android/x86/Piers/kodi-20261124-386d85f0-Piers-x86.apk", "sha256": "dcf35774ed450460d90a1e2312983090f5c0793098cf1f133e007e18c2f0accb" },
+  "21-arm64": { "url": "https://mirrors.kodi.tv/releases/android/arm64-v8a/kodi-21.3-Omega-arm64-v8a.apk", "sha256": "34e7526705a038fa12f70161d0c1cc38f10deb0fee305b46fbd46ff015d05b44" }
+}

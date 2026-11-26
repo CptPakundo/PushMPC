@@ -7,7 +7,7 @@ pkg=org.xbmc.kodi
 max=${PM_KODI_MAX:-120}
 adb forward tcp:9090 tcp:9090 >/dev/null
 if [ -n "${1:-}" ]; then
-    case $1 in *.mkv) t=video/x-matroska ;; *.mp4) t=video/mp4 ;; *.ts) t=video/mp2t ;; *) t=video/* ;; esac
+    case $1 in *.mkv) t=video/x-matroska ;; *.mp4) t=video/mp4 ;; *.ts) t=video/mp2t ;; *) t='video/*' ;; esac
     adb shell am start -W -a android.intent.action.VIEW -d "file://$1" -t "$t" -n "$pkg/.Splash" >/dev/null
 else
     adb shell am start -W -n "$pkg/.Splash" >/dev/null

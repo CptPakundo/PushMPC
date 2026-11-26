@@ -511,16 +511,14 @@ jobs:
             out-pc
 
   build-android:
-    # Android TV / Shield / Fire TV: arm64-v8a, armeabi-v7a (32-bit Kodi, most Fire TV sticks) and x86 (Kodi publishes
-    # x86 builds for 21 only; the emulator test runs it). The engine is the GPU one (Vulkan, loaded at run time) with
+    # Android TV / Shield / Fire TV: arm64-v8a, armeabi-v7a (32-bit Kodi, most Fire TV sticks) and x86 (Android x86
+    # devices; Kodi 21.3 release and Kodi 22 nightlies; the emulator test runs it). The engine is the GPU one (Vulkan, loaded at run time) with
     # the CPU fallback; MediaCodec decodes into hardware buffers the GPU engine imports.
     strategy:
       fail-fast: false
       matrix:
         kodi: [21, 22]
         abi: [arm64-v8a, armeabi-v7a, x86]
-        exclude:
-          - { kodi: 22, abi: x86 }
         include:
           - { abi: arm64-v8a, name: arm64 }
           - { abi: armeabi-v7a, name: armv7 }
@@ -574,24 +572,36 @@ jobs:
           path: build/addon
 
   kodi-android:
-    # Kodi 21.3 (x86) in the hosted Android emulator (KVM, x86_64 system image, software GLES): the add-on goes into
-    # Kodi's home as a zip install puts it, the clips into Kodi's app folder, the cases are driven over adb + JSON-RPC
+    # Kodi in the hosted Android emulator (KVM, x86_64 system image, software GLES): the add-on goes into Kodi's home as
+    # a zip install puts it, the clips into Kodi's app folder, the cases are driven over adb + JSON-RPC. x86 Kodi 21.3
+    # and a pinned Kodi 22 x86 nightly natively; the arm64 Kodi 21.3 with the arm64 add-on through the image's ARM
+    # translation (informational: skipped where the image has none). APKs pinned in kodiaddon/ci/kodi-apk-pins.json
     needs: build-android
     if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { kodi: 21, abi: x86, art: x86, info: false }
+          - { kodi: 22, abi: x86, art: x86, info: false }
+          - { kodi: 21, abi: arm64-v8a, art: arm64, info: true }
+    continue-on-error: ${{ matrix.info }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: addon-Android-x86-kodi21, path: addon }
-      - name: KVM, ffmpeg, clips, Kodi's APK
+        with: { name: 'addon-Android-${{ matrix.art }}-kodi${{ matrix.kodi }}', path: addon }
+      - name: KVM, ffmpeg, clips, Kodi's APK (pinned)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
           python3 kodiaddon/ci/gen_clips.py ffmpeg "$RUNNER_TEMP/clips"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.apk" https://mirrors.kodi.tv/releases/android/x86/kodi-21.3-Omega-x86.apk
-          sha256sum "$RUNNER_TEMP/kodi.apk"
+          j() { python3 -c "import json,sys; print(json.load(open('kodiaddon/ci/kodi-apk-pins.json'))[sys.argv[1]][sys.argv[2]])" "$@"; }
+          key="${{ matrix.kodi }}-${{ matrix.art }}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/kodi.apk" "$(j "$key" url)"
+          echo "$(j "$key" sha256)  $RUNNER_TEMP/kodi.apk" | sha256sum -c - || { sha256sum "$RUNNER_TEMP/kodi.apk"; exit 1; }
       - name: Play the cases in Kodi on the emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -600,14 +610,14 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -memory 4096
-          script: bash kodiaddon/ci/android-test.sh "$RUNNER_TEMP/kodi.apk" addon/inputstream.pushmpc "$RUNNER_TEMP/clips" out 21 "${{ inputs.cases || 'h264_x2,h264_x4,auto,cpu_engine,off,hevc_x2,mpeg2_x2,seek,disabled' }}"
+          script: bash kodiaddon/ci/android-test.sh "$RUNNER_TEMP/kodi.apk" addon/inputstream.pushmpc "$RUNNER_TEMP/clips" out ${{ matrix.kodi }} ${{ matrix.abi }} "${{ inputs.cases || 'h264_x2,h264_x4,auto,cpu_engine,off,hevc_x2,mpeg2_x2,seek,disabled' }}"
       - name: Summary
         if: always()
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kodi-android-logs
+          name: kodi-android-${{ matrix.kodi }}-${{ matrix.art }}-logs
           path: out
 
   build-macos:
