@@ -143,7 +143,7 @@ Bunny, 10 s) and runs `pushcore_gpu_harness` at 2x and 4x; a release is publishe
 
     updater\build.cmd                          (PushMpcUpdater.exe; it goes into the filter component)
     pushmpc-install.ps1 stage                  (filter + core from the build outputs)
-    pushmpc-install.ps1 package [-ReleaseDir <folder>] [-ReleaseVersion 0.6.1] [-Prerelease] [-SigningKey <xml>]
+    pushmpc-install.ps1 package [-ReleaseDir <folder>] [-ReleaseVersion 1.0.1] [-Prerelease] [-SigningKey <xml>]
 
 `package` writes the component zips, `release.json` and its signature, and builds `PushMPC-Setup.exe` with the
 components inside (`installer\build.cmd <payload>`). It refuses to finish if any file in the release folder carries

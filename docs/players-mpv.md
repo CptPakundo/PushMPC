@@ -4,9 +4,8 @@ PushMPC's engine also runs outside MPC-HC, as a VapourSynth filter (`pushmpc.Enh
 the same engine as in MPC-HC (RTX Video Super Resolution, NVIDIA frame generation and the other frame generation
 methods, the scene-cut guard, the colour chain), with the same settings and the same Auto rules.
 
-> Status: **preview** in PushMPC 0.6.0, an optional component of Setup. Built and tested in CI (VapourSynth's vspipe
-> and mpv, 8 and 10 bit, warm reloads) against a stand-in core; the first test pass with real players and a real GPU is
-> still to come. The updater does not update this component yet: run a newer Setup.
+Setup sets this up by itself for every mpv-based player it finds. This page explains what it does and how to fine-tune
+it; you don't need any of it to get started.
 
 ## Supported players
 
@@ -127,13 +126,11 @@ link into mpv).
 
 ### Plex for Windows and Plex HTPC
 
-Plex's libmpv has no VapourSynth, so PushMPC's frame generation cannot run inside it (Plex-MPV-Shim plays Plex through
-a full mpv instead). What works is upscaling: the installer adds `pushmpc.lua` to `%LOCALAPPDATA%\Plex\mpv.conf`
-(`%LOCALAPPDATA%\Plex HTPC\mpv.conf`), which applies RTX Video Super Resolution (on NVIDIA RTX) or Intel's video super
-resolution through mpv's `d3d11vpp`, scaled from the video to your display and set again when either changes. Keep
-hardware decoding on in Plex's settings (`d3d11vpp` needs it). It is set up only when Plex's libmpv is new enough
-(mpv 0.38 or later, with Lua) and the GPU is NVIDIA or Intel. Otherwise, and whenever `d3d11vpp` cannot start, it uses
-PushMPC's ArtCNN upscaling shaders instead (Plex's libmpv only needs Lua for that).
+Plex gets smoother motion and upscaling inside its own player: Setup adds PushMPC's filter to Plex's player and checks
+it with a test picture, or, if that fails on your Plex version, swaps in a player library with VapourSynth. Both are
+undone on uninstall. See the [user guide](user-guide.md#plex). When neither works, the installer still adds RTX Video
+Super Resolution (NVIDIA RTX) or Intel's video super resolution to Plex's `mpv.conf` through mpv's `d3d11vpp` (keep
+hardware decoding on in Plex), or PushMPC's ArtCNN upscaling shaders.
 
 ### Upscaling shaders (fallback)
 
@@ -188,10 +185,7 @@ rules as in MPC-HC.
 the output format and the bandwidth decision, the warm-core reuse on each seek, and frame counts. The engine's own log
 is `pushcore-engine-vsplugin.log` in the same folder.
 
-## Other GPUs, Linux and macOS (preview, untested on real hardware)
-
-> Status: preview. Built and unit-tested on synthetic frames on Windows; the Linux and macOS builds and the players
-> below have not run on real hardware yet.
+## Other GPUs, Linux and macOS
 
 Without an NVIDIA RTX GPU, `pushmpc.Enhance` still generates frames, with one of two other engines. `pushmpc.vpy` picks
 one for you:
@@ -264,7 +258,7 @@ sh ~/.local/share/pushmpc/setup.sh uninstall # puts every changed file back
 
 `setup.sh` sets up every player it finds and picks the best settings for your graphics card. For your distribution's
 mpv it uses PushMPC's own connection when that works with your mpv, and the VapourSynth filter otherwise. On NVIDIA RTX,
-Intel and (with ROCm) AMD graphics cards it also downloads a faster version of PushFlow, PushMPC's AI frame generation
+Intel and AMD graphics cards it also downloads a faster version of PushFlow, PushMPC's AI frame generation
 (about 300 MB; `--no-pmml` skips it). It only asks before downloads that need your yes: mpv from Flathub, and
 NVIDIA's video effects (their licence). `--yes` says yes to both.
 
@@ -303,7 +297,7 @@ What the installer sets up, each with a backup:
 
 ### macOS
 
-The same as Linux, with `pushmpc_vs.dylib` and `pushmpc.vpy` in `~/Library/Application Support/PushMPC/vsplugin/`
+The Mac version is coming soon, through Homebrew. Once it is out, it works the same as Linux, with `pushmpc_vs.dylib` and `pushmpc.vpy` in `~/Library/Application Support/PushMPC/vsplugin/`
 (check that your mpv lists `vapoursynth` in `mpv --vf=help`).
 
 - **mpv:** `~/.config/mpv/mpv.conf`, set up with `mpv-integration.sh`.

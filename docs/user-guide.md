@@ -1,319 +1,325 @@
 # PushMPC user guide
 
-## Install
+This guide goes a step further than the [README](../README.md): what Setup does, how each player is set up, what every
+setting means, and what to do when something doesn't look right.
 
-Download **PushMPC-Setup.exe** from the [releases](https://github.com/CptPakundo/PushMPC/releases) and run it. It installs
-for your Windows account only, without administrator rights: welcome, licence and credits, then the installation with a
-progress bar. The welcome page lists the supported players and the ones it found on this PC. If MPC-HC, MPC-BE or
-PotPlayer is running, setup offers to close it (they save their settings when they close).
+- [Installing on Windows](#installing-on-windows)
+- [Installing on Linux](#installing-on-linux)
+- [Players](#players)
+- [Capture mode](#capture-mode)
+- [Graphics cards](#graphics-cards)
+- [Settings](#settings)
+- [HDR, scene cuts and G-SYNC](#hdr-scene-cuts-and-g-sync)
+- [Updates](#updates)
+- [Repair and uninstall](#repair-and-uninstall)
+- [Troubleshooting](#troubleshooting)
 
-Setup asks nothing else. It:
-- sets up every player it finds (see the table below);
-- picks the best settings for your graphics card (Auto keeps adjusting them while you watch);
-- downloads a faster version of PushFlow, PushMPC's AI frame generation, for NVIDIA RTX and Intel graphics cards
-  (about 220-255 MB; you can untick it on the first page);
-- downloads AMD's newest FSR upscaling for Radeon RX 6000, 7000 and 9000 cards (you can untick it too);
-- gives Plex smoother motion if you have Plex (see [Plex](#plex));
-- turns on [capture mode](#capture-mode-fallback) only if you have a player PushMPC can't plug into.
-Setup is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC" the first time: click
-**More info**, then **Run anyway**. The download of Veyra's runtime package (about 750 MB) shows its progress, can be
-cancelled, and continues where it stopped when you run setup again; it is checked against its pinned SHA-256.
+## Installing on Windows
 
-Setup runs the same steps as the script install below, which still works for a release zip:
-`Install-PushMPC.cmd` (or `powershell -ExecutionPolicy Bypass -File pushmpc-install.ps1 install`). Setup options for
-scripted installs: `PushMPC-Setup.exe --quiet` (no window), `--install-dir <folder>`, `--package-cache <folder>` (a
-folder that already holds Veyra's zip), `--no-existing` (never reuse an installed PushFPS or Veyra).
+Download **PushMPC-Setup.exe** from the [latest release](https://github.com/CptPakundo/PushMPC/releases/latest) and run
+it. It installs for your Windows account only, without administrator rights.
 
-The installer picks Veyra's runtime package for your graphics card (`-Gpu Auto|NVIDIA|AMD`; Auto: NVIDIA when an NVIDIA
-card is present, else the AMD package, which also serves Intel). It takes the runtime files, in this order, from:
+Setup isn't code-signed yet, so Windows may show "Windows protected your PC" the first time: click **More info**, then
+**Run anyway**.
 
-1. an installed PushFPS or Veyra with exactly the pinned files (every file's SHA-256 is checked; copied, or hard-linked
-   with `-LinkExisting`; `-NoExisting` skips this);
-2. the package zip in `-RuntimePackage <zip>`, `-PackageCache <folder>` or its own download folder;
-3. a download from Veyra's GitHub release (about 750 MB), checked against the pinned SHA-256.
+The first page lists the players Setup found and how it will handle each one. A few boxes let you choose, depending on
+your PC:
 
-PushFlow (PushFPS's own frame generation) is not in Veyra's packages: it comes from an installed PushFPS, a PushFPS
-release zip in `-PackageCache`, or PushFPS's GitHub release, every file checked. See [release model](release-model.md).
+| Box | When you see it | What it does |
+|---|---|---|
+| Download faster AI frame generation | NVIDIA RTX, GTX 16 and Intel cards | a faster version of PushFlow for your card (about 220-255 MB) |
+| Download AMD's newest FSR upscaling | Radeon RX 6000, 7000 and 9000 | FSR 4.1 from AMD |
+| Give Plex smoother motion | Plex is installed | sets up Plex (see [Plex](#plex)); Windows asks for permission once |
+| Also install PushMPC's own mpv player | always (off by default) | a ready-made mpv with PushMPC built in; Start menu: **PushMPC mpv** |
+| Check for updates automatically | always | at most once a day, in the background |
 
-Everything goes into `%LOCALAPPDATA%\PushMPC`, per user, without administrator rights:
+Then Setup downloads what your graphics card needs (about 750 MB the first time). The download shows its progress, can
+be cancelled, and picks up where it stopped when you run Setup again. If PushFPS is already installed, Setup reuses its
+files instead.
 
-| Folder | What |
-|---|---|
-| `filter` | `PushMpcFilter.ax`, `PushMpcExit.dll`, the installer script, the updater |
-| (top level) | `PushMpcUpdater.exe` (updates), `PushMpcSetup.exe` (repair, update, uninstall from Windows Apps) |
-| `core` | `pushcore.dll`, its shaders, `pushcore_hip_preflight.exe` (AMD) |
-| `runtime` | FFmpeg, the NVIDIA or AMD components and PushFlow |
-| `vsplugin`, `vapoursynth` | the mpv preview: the VapourSynth filter and its runtime (only when mpv or SMPlayer was found) |
-| `previous` | the version before the last update (rollback) |
-| `logs` | logs |
+If MPC-HC, MPC-BE or PotPlayer is open, Setup offers to close it first, because they save their settings when they
+close. MPC-HC must have been started and closed once before, so it has settings PushMPC can be added to.
 
-The installer registers the filter for your user, adds "PushMPC Filter" to MPC-HC's External Filters (Prefer) and
-disables SVP's VapourSynth filter if it is enabled (SVP's interpolation and PushMPC's frame generation would stack;
-uninstall enables it again). Community unlocks and ports in the package (the SF AI enhancement build for RTX 20-50,
-the DLSS-G unlocks for RTX 30/40, the AMD AI enhancement runtimes) are installed by default (`-ExperimentalExtras No`
-leaves them out).
+**Installed a new player later?** Run Setup again (or Settings > Apps > PushMPC > Modify > Repair) and it sets that one
+up too. Repair keeps the choices you made the first time.
+
+## Installing on Linux
+
+Download `pushmpc-linux-x86_64-<version>.tar.gz` (or `aarch64`) from the
+[latest release](https://github.com/CptPakundo/PushMPC/releases/latest), unpack it and run:
+
+```sh
+sh setup.sh
+```
+
+Setup installs for your user only, never touches anything outside your home folder and doesn't need `sudo`. It finds
+your graphics card and your players and sets each one up. It only asks when a download needs your yes:
+
+- **mpv from Flathub**, when your distribution's mpv can't run PushMPC (Ubuntu and Debian);
+- **NVIDIA's video effects**, on NVIDIA cards, because NVIDIA's licence has to be accepted.
+
+`sh setup.sh --yes` answers yes to both ahead of time. Other options: `--no-pmml` skips the PushFlow download, `plan`
+shows what Setup would choose without changing anything, and `status` shows what is set up.
+
+What Setup sets up:
+
+- mpv (your distribution's or Flathub's), Celluloid, Haruna, SMPlayer, MPC-QT, Jellyfin Desktop and the Jellyfin and
+  Plex MPV Shims;
+- VLC 3 (also from Flathub or Snap) and the Kodi add-on, in the x86_64 download;
+- Plex and Plex HTPC from Flathub (the Snap version of Plex can't be set up and is left alone);
+- PushFlow for your card: NVIDIA RTX, Intel, and AMD (with or without ROCm).
+
+To remove everything: `sh ~/.local/share/pushmpc/setup.sh uninstall`. To update: download the new release and run
+`sh setup.sh` again.
+
+PushMPC's settings on Linux live in `~/.config/pushmpc/settings.ini`, with the same names as the [settings](#settings)
+below, for example `Smoother=Auto` (or `Off`, or `2` to `8`).
 
 ## Players
 
-| Player | Support | What setup does |
-|---|---|---|
-| MPC-HC (x64) | full, tested | adds "PushMPC Filter" to External Filters (Prefer); MPC Video Renderer HDR options |
-| MPC-BE (x64) | automatic; setup's changes checked against MPC-BE 1.9.3 in CI, playback not yet tested in MPC-BE | the same, plus MPC Video Decoder set to D3D11 copy-back |
-| PotPlayer (x64) | automatic; checked in CI with a real PotPlayer (it loads the filter), playback with a GPU not yet tested | adds "PushMPC Filter" to its filter priority list (Prefer); renderer and decoder are your choice (see below) |
-| mpv, mpv.net, SMPlayer, MPC-QT | **preview**, optional component; not yet tested with a real GPU | when found: the VapourSynth filter in their settings, plus a VapourSynth runtime; see [mpv and mpv-based players](players-mpv.md) |
-| Jellyfin Desktop | preview | the VapourSynth filter in each profile's `mpv.conf` |
-| Kodi, Jellyfin MPV Shim, Plex-MPV-Shim | preview, when mpv is installed | they play through mpv (Kodi's external player; the shims' external mpv) |
-| Stremio 5.0.28 and newer | automatic | its "mpv config file" setting; [details](players-mpv.md#stremio) |
-| Plex for Windows, Plex HTPC | preview | smoother motion on tested Plex versions ([details](#plex)); other versions: capture mode |
-| VLC 3 | preview | adds PushMPC to VLC |
-| KMPlayer, GOM Player, Emby Theater, other players | fallback | [capture mode](#capture-mode-fallback) |
-| Zoom Player | by hand, untested | nothing ([steps](#zoom-player-by-hand)) |
-| SVP's own mpv | | left alone (SVP manages it) |
+PushMPC needs nothing from you in most players: Setup sets them up and Auto does the rest.
 
-PushMPC needs MPC Video Renderer in D3D11 mode after it, and a decoder before it that delivers its frames in system
-memory (copy-back). With another renderer, or a decoder in native hardware mode, the player still plays, without
-PushMPC.
+| Player | Windows | Linux | Notes |
+|---|:-:|:-:|---|
+| MPC-HC, MPC-BE | ✅ | – | the most complete: settings page and on-screen info |
+| PotPlayer | ✅ | – | needs MPC Video Renderer, see [below](#potplayer) |
+| mpv, mpv.net, SMPlayer, MPC-QT | ✅ | ✅ | see [mpv and mpv-based players](players-mpv.md) for details |
+| PushMPC's own mpv | ✅ | – | optional box in Setup; on Linux, your distribution's mpv gets the same built-in route |
+| Celluloid, Haruna | – | ✅ | |
+| VLC 3 | ✅ | ✅ | see [VLC](#vlc) |
+| Kodi 21 and 22 | ✅ | ✅ | see [Kodi](#kodi) |
+| Plex for Windows, Plex HTPC | ✅ | ✅ | on Linux from Flathub; see [Plex](#plex) |
+| Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | the shims play through mpv |
+| Stremio 5.0.28 and newer | ✅ | – | older versions: [capture mode](#capture-mode) |
+| KMPlayer, GOM Player, Emby Theater, other players | ✅ | – | [capture mode](#capture-mode) |
+| Zoom Player | by hand | – | see [below](#zoom-player-by-hand) |
+| SVP's own mpv | – | – | left alone: SVP manages it |
 
-### MPC-BE
+### MPC-HC and MPC-BE
 
-Setup finds MPC-BE x64 (its registry install path, its uninstall entry, or `Program Files\MPC-BE x64`). When it is
-there and keeps its settings in the registry, setup:
+Setup adds PushMPC to the player and sets up MPC Video Renderer's HDR options; in MPC-BE it also switches the video
+decoder to **D3D11 copy-back**, which PushMPC needs. Everything is put back when you uninstall.
 
-- adds `HKCU\Software\MPC-BE\ExternalFilters\NNN` "PushMPC Filter" (Prefer, NV12 and P010 inputs);
-- sets MPC Video Decoder's hardware decoding to **D3D11 copy-back** (`HKCU\Software\MPC-BE\Filters\MPC Video Decoder`,
-  `HwDecoder` = 2). Its default, D3D11 native, cannot feed a filter between the decoder and the renderer (MPC-BE would
-  then decode in software). The previous value is kept and put back on uninstall, unless you changed it since;
-- disables SVP's VapourSynth entry in MPC-BE if it is enabled (enabled again on uninstall).
+PushMPC works with MPC Video Renderer (the default in both players). With another renderer, the video plays as
+before, without PushMPC.
 
-Without MPC-BE nothing is written for it. MPC-BE's default renderer is MPC Video Renderer, which PushMPC needs. If
-MPC-BE keeps its settings in `mpc-be64.ini` (INI mode), setup changes nothing and says so; add the filter by hand:
-Options > External Filters > Add Filter > "PushMPC Filter", Prefer; and Options > Internal Filters > MPC Video Decoder
-> hardware decoding: D3D11 copy-back. 32-bit MPC-BE cannot load the 64-bit filter. MPC-HC's and MPC-BE's MPC Video
-Renderer share one registration and one settings key: the copy installed last is the one both players use.
+If MPC-BE keeps its settings in an INI file instead of the registry, Setup leaves it alone and says so. Add PushMPC by
+hand: Options > External Filters > Add Filter > **PushMPC Filter**, set to Prefer; and Options > Internal Filters > MPC
+Video Decoder > hardware decoding: **D3D11 copy-back**. 32-bit MPC-BE can't load PushMPC.
 
 ### PotPlayer
 
-Setup finds PotPlayer x64 (`Program Files\DAUM\PotPlayer`) and adds "PushMPC Filter" to its filter priority list
-(`HKCU\Software\DAUM\PotPlayerMini64\Override`, Prefer, NV12 and P010 inputs), in front of the list's end marker. A
-real PotPlayer on a CI runner loads the filter from that entry. SVP's VapourSynth entry, if enabled, is disabled (and
-enabled again on uninstall). Uninstalling removes the entry and leaves the list exactly as it was. Close PotPlayer
-before setup: it saves its settings when it closes. If PotPlayer keeps its settings in `PotPlayerMini64.ini` (INI mode),
-setup changes nothing and says so: add the filter by hand (step 1 below).
+Setup adds PushMPC to PotPlayer's filter list. If LAV Filters is installed, it also adds LAV Video Decoder, which passes
+HDR information on to PushMPC. Close PotPlayer before running Setup.
 
-When LAV Filters is installed, setup also adds **LAV Video Decoder** to the same list (Prefer, after PushMPC), so
-PotPlayer decodes with LAV, which passes HDR mastering data and MaxCLL on to PushMPC (PotPlayer's built-in decoder
-does not; PushMPC still sees PQ/HLG and BT.2020 from the stream itself). A LAV entry of your own is left as it is.
-Without LAV Filters, setup says so; install it from github.com/Nevcairiel/LAVFilters and run setup again.
+Three choices stay yours, because they change how PotPlayer plays everything:
 
-The renderer stays your choice, because it changes how PotPlayer plays everything else too:
+1. **Renderer.** Preferences (F5) > Video > Video Renderer: **MPC Video Renderer**. PotPlayer doesn't include it:
+   install it (for example the copy that comes with MPC-HC). With PotPlayer's own renderers or madVR, PushMPC stays out
+   of the way.
+2. **Decoder.** Preferences > Filter Control > Video Decoder: the built-in decoder with **D3D11 (or DXVA2) copy-back**,
+   or LAV Video in a copy-back mode.
+3. **PotPlayer's own frame interpolation:** turn it off, so the two don't stack.
 
-1. **Filter (INI mode only).** Preferences (F5) > Filter Control > Filter Priority (Overall) > Add external filter,
-   pick `%LOCALAPPDATA%\PushMPC\filter\PushMpcFilter.ax`, and set it to **Prefer**.
-2. **Renderer.** Preferences > Video > Video Renderer: **MPC Video Renderer**. PotPlayer does not bundle it: install
-   MPC Video Renderer (for example the copy that comes with MPC-HC or MPC-BE) and select it. With PotPlayer's built-in
-   Direct3D 11 renderer, EVR or madVR, PushMPC passes the video through unchanged.
-3. **Decoder.** Preferences > Filter Control > Video Decoder: the built-in decoder with **D3D11 (or DXVA2) copy-back**,
-   or LAV Video in a copy-back hardware mode. Native DXVA / D3D11 decoding leaves no room for a filter between the
-   decoder and the renderer.
-4. Turn off PotPlayer's own frame interpolation, which would stack with PushMPC's frame generation.
+If PotPlayer keeps its settings in an INI file, add PushMPC yourself: Preferences > Filter Control > Filter Priority
+(Overall) > Add external filter, pick `%LOCALAPPDATA%\PushMPC\filter\PushMpcFilter.ax`, set to **Prefer**.
 
-Known limits: PushMPC cannot ask PotPlayer to reopen a file (an interlaced file or a lost graphics device then shows
-the source frames unprocessed); whether PotPlayer's built-in decoder passes HDR10 metadata on to a filter is unknown;
-the G-SYNC button covers MPC-HC and MPC-BE only.
+### VLC
 
-### Zoom Player (by hand)
+Setup adds PushMPC to VLC 3 and checks that it loads. Its settings are under **Tools > Preferences**, *Show settings:
+All*, **Video > Filters > PushMPC**. On Linux, Setup also tests VLC's hardware decoding with PushMPC and keeps the
+fastest setting that works.
 
-**Untested.** Zoom Player (MAX or Free, 64-bit) is a DirectShow player like MPC-HC, so the same filter works when MPC
-Video Renderer draws the video and the decoder copies back:
+### Kodi
 
-1. Install PushMPC with setup (it registers the filter for your user).
-2. Options (Ctrl+O) > Advanced Options > Playback > Filter Control: add "PushMPC Filter" as a custom (preferred) video
-   filter.
-3. Video renderer: MPC Video Renderer (install it, for example the copy that comes with MPC-HC). With other renderers
-   PushMPC passes the video through.
-4. Decoder: LAV Video or Zoom Player's decoder in a copy-back hardware mode (or software).
-
-Remove the filter there again when you uninstall PushMPC.
+On Windows and Linux, Setup installs the **PushMPC** add-on into Kodi 21 or 22 and switches it on. It plays your local
+video files with smoother motion, while audio, subtitles, chapters and seeking stay Kodi's. Its settings are in Kodi
+under Add-ons > My add-ons > VideoPlayer InputStream > PushMPC. Without the add-on, Kodi can still use mpv as its external player, and Setup sets
+that up when mpv is installed.
 
 ### Plex
 
-Plex for Windows and Plex HTPC get smoother motion too. Setup adds PushMPC's filter to Plex's own player, then plays a
-short test picture through Plex to check that it works. Plex's own files are backed up first and put back exactly as
-they were when you uninstall PushMPC. Because Plex is installed for all users, Windows asks for administrator
-permission once.
+Plex for Windows and Plex HTPC get smoother motion too. Setup adds PushMPC to Plex's own player and plays a short test
+picture through Plex to check that it works. Plex's files are backed up first and put back exactly as they were when
+you uninstall. Because Plex is installed for all users, Windows asks for permission once.
 
-- If that test fails, Setup takes its files out again and uses its second way instead: it swaps in a player library
-  that PushMPC can work with (only on Plex versions we have tested). It never does both. On any other Plex version you
-  can use [capture mode](#capture-mode-fallback).
-- When Plex updates itself, PushMPC sets it up again at your next sign-in (if Plex is open then, at the one after).
+- If the test fails, Setup takes its files out again and tries a second way: it swaps in a player library that PushMPC
+  can work with (on Plex versions it knows). It never does both.
+- When Plex updates itself, PushMPC sets it up again at your next sign-in.
 - Don't want this? Untick the Plex box on Setup's first page.
-- **On Linux**, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex,
-  and checks it with a test picture there too. The Snap version of Plex can't be set up this way and is left as it is.
+- On Linux, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex.
 
-### Capture mode (fallback)
+### Stremio, Jellyfin and the MPV Shims
+
+Stremio 5.0.28 and newer reads an mpv settings file, which Setup fills in. Jellyfin Desktop is set up the same way. The
+Jellyfin and Plex MPV Shims play through your installed mpv, so they need mpv (Setup tells you if it's missing).
+
+### Zoom Player (by hand)
+
+Not tested. Zoom Player works like MPC-HC, so the same filter can work:
+
+1. Install PushMPC with Setup.
+2. Options (Ctrl+O) > Advanced Options > Playback > Filter Control: add **PushMPC Filter** as a preferred video filter.
+3. Use MPC Video Renderer, and LAV Video or Zoom Player's decoder in a copy-back mode.
+
+Remove the filter there again when you uninstall PushMPC.
+
+## Capture mode
 
 Capture mode is for players PushMPC can't plug into, such as KMPlayer, GOM Player or Emby Theater. Setup turns it on
-only if you have one of those players.
+only if you have one of those players, and adds **PushMPC Capture** to the Start menu.
 
 1. Start your player and play a video.
 2. Open **PushMPC Capture** from the Start menu.
 3. A second window shows the video with smoother motion. Put it fullscreen.
 
 Good to know:
+
 - The first time, PushMPC Capture asks to download PushFPS (about 130 MB), which does the capturing. It goes into
-  PushMPC's own folder; if you already have PushFPS, yours is not touched.
-- The picture comes about 1/20 of a second later than the player's sound. If the sound seems early, set your player's
-  audio delay to about +80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). For Plex,
-  PushMPC does this for you while capture mode runs.
+  PushMPC's own folder; a PushFPS you already have isn't touched.
+- The picture comes about 1/20 of a second after the player's sound. If the sound seems early, set your player's audio
+  delay to about +80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). For Plex, PushMPC does
+  this for you.
 - Copy-protected video (Netflix and similar) stays black.
-- A player PushMPC plugs into directly (MPC-HC, mpv, VLC, Kodi, ...) always looks better than capture mode.
-### Capture on Linux and macOS (workaround)
+- A player PushMPC plugs into directly always looks better than capture mode.
 
-On Linux and Mac, PushFPS can't capture a window, but it can show a camera. OBS Studio can turn your player's window into
-a virtual camera. The picture is a bit simpler than on Windows; a built-in way is planned.
+### Capture mode on Linux and Mac
 
-1. Install OBS Studio. Linux: also `v4l2loopback` (OBS's virtual camera needs it; your distribution's package, e.g.
-   `v4l2loopback-dkms`). macOS 13 and newer: allow OBS's camera extension when OBS asks.
-2. In OBS, add a source for the player: *Window Capture (PipeWire)* or *Screen Capture (PipeWire)* on Linux, *macOS
-   Screen Capture* (window) on macOS. Set the canvas to the video's size and frame rate.
+A built-in capture mode for Linux and Mac is planned. Until then, OBS Studio can turn your player's window into a
+virtual camera that PushFPS can show:
+
+1. Install OBS Studio. On Linux also install `v4l2loopback` (for example your distribution's `v4l2loopback-dkms`). On a
+   Mac, allow OBS's camera extension when OBS asks.
+2. In OBS, add a source for the player: *Window Capture (PipeWire)* on Linux, *macOS Screen Capture* on a Mac. Set the
+   canvas to the video's size and frame rate.
 3. Click *Start Virtual Camera*.
-4. Install PushFPS (github.com/DosukaSOL/PushFPS), choose *OBS Virtual Camera* as the capture card, and turn on frame
-   generation.
+4. Install [PushFPS](https://github.com/DosukaSOL/PushFPS), choose *OBS Virtual Camera* as the capture card, and turn on
+   frame generation.
 
-## GPUs
+## Graphics cards
 
-| GPU | Frame generation (Auto's order) | Upscaling | Clean up | SDR to HDR |
-|---|---|---|---|---|
-| RTX 50 / 40 | NVIDIA VFG, then DLSS-G, PushFlow, FSR | RTX VSR | yes | PushMPC's curve (RTX Video HDR selectable) |
-| RTX 30 | NVIDIA VFG (RTX 30 port), then DLSS-G (unlocked), PushFlow, FSR | RTX VSR | when the GPU time fits | PushMPC's curve (RTX Video HDR selectable) |
-| RTX 20 | DLSS-G, then PushFlow, NVIDIA optical flow, FSR | RTX VSR | when it fits | PushMPC's curve (RTX Video HDR selectable) |
-| GTX 16 / 10 | PushFlow, then NVIDIA optical flow (GTX 16), FSR | RTX VSR on GTX 16 (unlock, after its self-test), else NIS | - | PushMPC's curve |
-| Intel | PushFlow, then FSR | NIS | - | PushMPC's curve |
-| Radeon RX 9000 | PushFlow, then FSR 4, AMD FRC | FSR | yes (lmxxf runtime) | PushMPC's curve |
-| Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD FRC | FSR | RX 7000 (worker process), when it fits | PushMPC's curve |
+Auto tries the methods in this order and uses the best one your card keeps up with:
+
+| Graphics card | Smoother motion | Sharper picture | Clean-up |
+|---|---|---|---|
+| GeForce RTX 50 / 40 | NVIDIA frame generation, then DLSS frame generation, PushFlow, FSR | RTX Video Super Resolution | yes |
+| GeForce RTX 30 | NVIDIA frame generation, then DLSS frame generation, PushFlow, FSR | RTX Video Super Resolution | when there's time |
+| GeForce RTX 20 | DLSS frame generation, then PushFlow, NVIDIA optical flow, FSR | RTX Video Super Resolution | when there's time |
+| GeForce GTX 16 / 10 | PushFlow, then NVIDIA optical flow (GTX 16), FSR | RTX Video Super Resolution on GTX 16, else NIS | – |
+| Intel | PushFlow, then FSR | NIS | – |
+| Radeon RX 9000 | PushFlow, then FSR 4, AMD Fluid Motion | FSR | yes |
+| Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD Fluid Motion | FSR | RX 7000, when there's time |
+
+SDR to HDR works on every card with PushMPC's own curve; RTX cards can also use RTX Video HDR.
+
+On Linux, NVIDIA RTX cards use NVIDIA's frame generation and Super Resolution (with NVIDIA's own driver), and other
+cards use PushFlow or PushMPC's own engine with NIS or FSR upscaling.
 
 ## Settings
 
-MPC-HC: Play > Filters > PushMPC Filter (or Options > External Filters > PushMPC Filter > Properties).
+In MPC-HC and MPC-BE: **Play > Filters > PushMPC Filter**. The "Now:" lines show what Auto chose and why it stopped
+where it did. Changes apply within a couple of seconds, without restarting the video. On Windows, mpv-based players use the same settings.
 
-| Setting | Choices | Auto does |
+| Setting | Choices | What Auto does |
 |---|---|---|
 | Enable PushMPC | on / off | |
-| Smoother | Auto, Off, 2x-8x | frame generation: the highest multiplier your GPU keeps up with (at p95) and your display can show; on a fixed-refresh display an even cadence wins a tie, but never at the cost of a much lower multiplier (any multiplier with G-SYNC / VRR active) |
-| Sharper | Auto, Off, level 1-4 | the upscaler to your screen size, with the GPU time left over |
-| Clean up | Auto, Off, On | AI picture enhancement for low-bitrate video, where the GPU has a runtime for it and time to spare |
-| SDR to HDR | Auto, Off, On | when Windows HDR is on for the display and the video is SDR: shown as HDR10 with PushMPC's curve (every GPU) |
-| HDR boost | Auto, Off, Low, Medium, High | how far SDR highlights are expanded. Off: SDR exactly as it is, at 203 cd/m2 white. Low / Medium / High: highlights up to 2x / 3.2x / 5x of SDR white, never above the display's reported peak; shadows and mid-tones stay where SDR has them. Auto: High for clean sources, Medium for typical web video, Low for low-bitrate video. A slow limiter keeps large bright areas within what the display can hold. |
+| Smoother | Auto, Off, 2x-8x | the highest multiplier your card keeps up with and your display can show. On a fixed-refresh display, an even rhythm wins a tie |
+| Sharper | Auto, Off, level 1-4 | upscales to your screen size with the time left over |
+| Clean up | Auto, Off, On | AI clean-up for low-quality video, when your card has time for it |
+| SDR to HDR | Auto, Off, On | when Windows HDR is on and the video is SDR, shows it as HDR |
+| HDR boost | Auto, Off, Low, Medium, High | how bright SDR highlights get. Off keeps SDR exactly as it is; Low, Medium and High lift highlights up to 2x, 3.2x or 5x, never above what your display can show. Auto: High for clean sources, Medium for web video, Low for low-quality video |
 
-Advanced:
+**Advanced** (tick *Show advanced settings*):
 
 | Setting | Choices | What it does |
 |---|---|---|
-| FG quality | Auto, Low, Medium, High | Auto: Medium for the multiplier, High only where it fits at the same multiplier with 3 ms to spare. For PushFlow Low / Medium / High are Fast / Balanced / Quality. |
-| FG method | Auto, NVIDIA VFG, DLSS-G, PushFlow, FSR, AMD FRC | the frame generation method; a method this GPU cannot run is marked and the note says why |
-| Refresh (VRR) | Auto, Assume VRR, Assume fixed | Auto predicts G-SYNC / VRR for MPC-HC's window from the NVIDIA driver profile (G-SYNC selected for the player and its windowed / fullscreen mode); the driver's display-wide "running" flag only confirms it. On AMD it reads FreeSync from the AMD driver: FreeSync switched on in AMD Software and the player fullscreen counts as VRR. Without an answer it assumes a fixed refresh and says so |
-| Upscaler | Auto, RTX VSR, FSR, NIS | Auto: RTX VSR on NVIDIA RTX, else FSR |
-| HDR method | Auto (PushMPC curve), RTX Video HDR | the SDR to HDR method; RTX Video HDR needs NVIDIA RTX, and HDR boost then sets its peak (500 / 700 / 1000 cd/m2) |
-| Limit brightness on bright scenes | on / off | on (default): when a scene is bright over large areas, the highlight expansion is reduced slowly so the frame average stays within what the display holds over its full area (with RTX Video HDR, the light above paper white of its output is scaled the same way); off: the full expansion always |
-| Display peak | Auto, 400, 600, 1000, or type a number (cd/m2) | the peak brightness of your display. Auto uses what Windows reports. Some OLED monitors offer a bright mode (for example "Console HDR", about 1000 cd/m2 on small areas) and a "True Black 400" mode (about 450) but report the same peak in both: in the True Black mode choose 400. Used by SDR to HDR, the bright-scene limiter, the HDR metadata and MPC Video Renderer's tone mapping. |
+| FG quality | Auto, Low, Medium, High | frame generation quality. Auto uses High only where it fits with time to spare |
+| FG method | Auto, NVIDIA VFG, DLSS-G, PushFlow, FSR, AMD FRC | the frame generation method; methods your card can't run are marked |
+| Refresh (VRR) | Auto, Assume VRR, Assume fixed | whether your display runs G-SYNC or FreeSync for the player. Auto reads it from the driver |
+| Upscaler | Auto, RTX VSR, FSR, NIS | Auto: RTX VSR on NVIDIA RTX, otherwise FSR |
+| HDR method | Auto (PushMPC curve), RTX Video HDR | how SDR becomes HDR; RTX Video HDR needs an RTX card |
+| Limit brightness on bright scenes | on / off | on (default): very bright scenes are calmed slowly so your display can hold them |
+| Display peak | Auto, 400, 600, 1000, or a number | your display's peak brightness. Auto uses what Windows reports. On OLED monitors in "True Black 400" mode, choose 400 |
 | Upscale to | Screen, 1440p, 4K, 5K | the target size |
-| Upscale style | Auto, Standard, Keep detail, Clean hard | the RTX VSR model family; Auto picks it by the video's bitrate (Clean hard for web video, Keep detail for Blu-ray-class bitrates, else Standard) |
-| Clean-up strength | Subtle, Balanced, Strong | the AI enhancement look |
-| Deband | Auto, Off, On | PushMPC's own deband pass on 8-bit video, before the upscaler |
-| Deband strength | Low, Medium, High | how wide and how strong the smoothing is |
-| Subtitle hold | Auto (on text), Off, On | PushFPS's Subtitle Hold for subtitles burned into the picture: text that stands still near the bottom while the picture moves is kept out of frame generation and laid back over the generated frames, so it does not warp or ghost. Only for burned-in text; subtitles the player draws (soft subtitles) are added after PushMPC and never need it. Under Auto it watches for burned-in text and holds it only while text is found (about 0.5 ms per frame at 4K) |
+| Upscale style | Auto, Standard, Keep detail, Clean hard | the look of RTX Video Super Resolution; Auto picks by the video's quality |
+| Clean-up strength | Subtle, Balanced, Strong | how strong the clean-up is |
+| Deband | Auto, Off, On | smooths banding in skies and gradients |
+| Deband strength | Low, Medium, High | how strong the smoothing is |
+| Subtitle hold | Auto (on text), Off, On | keeps subtitles that are burned into the picture steady, so they don't warp. Normal subtitles never need it |
+| On-screen status | Brief at start, Always, Off | the info line in the top-left corner: for 3 seconds at the start, always, or never |
+| On battery | Light, Same as plugged in | on a laptop's battery, Light uses less power: up to 2x, lighter upscaling, no clean-up |
 
-| On-screen status | Brief at start, Always, Off | shows what PushMPC is doing (for example "5x Medium · VSR 4 · 120 fps") in the top-left corner. Brief at start (default): for 3 seconds when playback starts or settings change; Always: kept on; Off: hidden. While it is visible it also appears in MPC-HC's Save Image screenshots. |
-| On battery | Light, Same as plugged in | Light (default) uses a lighter profile on laptop battery: frame generation up to 2x, VSR up to level 2, clean up and deband off, SDR to HDR boost Low. Same as plugged in keeps the full profile. |
+Also on the page: **Turn on G-SYNC for MPC-HC** (see below), **Import my PushFPS settings** when PushFPS is installed,
+and **Write a frame log** (only turn it on when asked for one in a bug report).
 
-Also "Write a frame log" (off by default; turn it on only when you are asked for one to troubleshoot), and "Import my
-PushFPS settings" when PushFPS is installed. PushMPC keeps the logs of the last 20 playbacks (at most 50 MB) and deletes older
-ones.
+## HDR, scene cuts and G-SYNC
 
-**G-SYNC.** If your NVIDIA display supports G-SYNC but MPC-HC's driver profile does not have it turned on, Advanced
-offers "Turn on G-SYNC for MPC-HC" (for windowed and full screen playback). It changes only MPC-HC's own profile in the NVIDIA
-driver, keeps a backup, and the uninstaller puts your previous setting back.
+**HDR video on an HDR display.** HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) pass through untouched. Setup
+sets MPC Video Renderer so that only content brighter than your display is toned down, and puts your old settings back
+when you uninstall.
 
-**HDR video on an HDR display.** PushMPC passes HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) to MPC Video
-Renderer as HDR10. The installer, and PushMPC on its first HDR playback, set MPC Video Renderer's HDR options so that only
-content brighter than your display is tone mapped: local tone mapping on, type Spline, and "display nits" = your display's
-peak (Display peak above). The previous values are kept and the uninstaller restores them. To manage them yourself, set
-`ManageMpcVr` = 0 (DWORD) under `HKCU\Software\PushMPC`. HLG video is converted to HDR10 with the BT.2100 reference
-(1000 cd/m2), also for the first frames while PushMPC starts.
+**HDR video on an SDR display.** MPC Video Renderer converts it to fit your screen. With HDR10+ and Dolby Vision, it
+follows each scene's brightness.
 
-**HDR video on an SDR display.** MPC Video Renderer tone maps it. With HDR10+ or Dolby Vision, PushMPC passes each
-scene's peak brightness as the frame's metadata, so MPC Video Renderer's "Metadata" tone mapping follows the scenes.
+**SDR to HDR.** With Windows HDR on, SDR video can be shown as HDR. PushMPC keeps shadows and mid-tones where they are
+and only lifts the highlights, as far as your display allows.
 
-**Scene cuts.** At a hard cut between two shots, frame generation would blend them. PushMPC detects cuts on the GPU, for
-every frame generation method, and shows the last frame of the old shot in the generated slots instead, so the new
-shot starts exactly at its own frame. It looks only at the picture (letterbox and pillarbox bars are found and left
-out), handles dark scenes, and catches cuts inside fast motion. Fast pans, zooms, flashes and fades are not treated as
-cuts. Known limit: large non-rigid effects (fire, energy beams) can still look torn or ghosted with every method, and
-a cut in the middle of a fast zoom of hand-drawn animation can be missed. Besides the brightness measures it
-compares the frames after the best zoom and shift between them, their colours, the directions of their edges and how
-well blocks of the new frame match the old one, so a zoom or a creature crossing the frame is not taken for a cut.
-On NVIDIA RTX cards it also uses the GPU's optical flow engine (when the GPU has time for it, about 1 ms per
-source frame): where the motion field is consistent in both directions, as in a flash or an effect over a moving scene,
-the pair is not treated as a cut.
+**Scene cuts.** At a hard cut, frame generation would blend two shots into a smear. PushMPC spots cuts and lets the new
+shot start exactly on its own frame. Fast pans, zooms, flashes and fades are left alone. When a film switches between
+two picture shapes (for example a taller picture in some scenes), that change is treated like a cut too. Large effects
+like fire or energy beams can still look a little torn with every method.
 
-**Letterbox and aspect-ratio changes.** The bars are measured on every frame. When the picture switches between two
-aspect ratios at once (for example films that open up to a taller ratio for some scenes), the pair is held like a cut,
-because every frame generation method otherwise smears the bar into the picture. A letterbox that opens slowly is
-followed frame by frame, a change during a black frame needs nothing, and an inserted picture (picture-in-picture, a
-logo or subtitles in the bar) does not count as a change.
+**G-SYNC and FreeSync.** Auto reads whether variable refresh is on for the player and picks the frame rate to match. If
+your NVIDIA display supports G-SYNC but it's off for MPC-HC, the settings page offers **Turn on G-SYNC for MPC-HC**. It
+only changes MPC-HC's own profile in the NVIDIA driver, keeps a backup, and uninstalling puts it back. On AMD, FreeSync
+switched on in AMD Software with the player fullscreen counts as variable refresh.
 
-**SDR to HDR details.** SDR video is decoded with a 2.2 power (as SDR displays show it), white at 203 cd/m2 (the HDR
-reference white; lower on dim displays), BT.709 colours kept. The display's peak and full-frame brightness come from
-Windows. The output carries HDR10 metadata that matches the curve, and the final 10-bit step is dithered.
-
-The status shows the frame rate, the GPU time per source frame, the frame generation method and quality in use, whether
-the cut guard runs, the display with its VRR state, and where Auto stopped. Auto learns your GPU's costs while you
-watch; on first use of PushFlow it measures PushFlow's speed on your card once.
+**Picture and sound stay in sync.** Every frame, real or generated, keeps its own timestamp. After a seek, the first
+generated frame appears in about 1/20 of a second.
 
 ## Updates
 
-**About > Updates** in the property page shows the update status. "Check for updates" checks now; "Automatic updates"
-lets PushMPC check in the background at most once a day, during playback (it never delays the start of a video); and
-"Channel" picks Stable or Beta (Beta also gets pre-releases, such as builds for a new PushFPS version).
+On Windows, the **About** tab of the settings page shows the update status. **Check for updates** checks now;
+**Automatic updates** lets PushMPC check at most once a day during playback (it never delays the start of a video);
+**Channel** picks Stable or Beta.
 
-How it works: `PushMpcUpdater.exe` reads the release list of github.com/CptPakundo/PushMPC, checks the release's
-signature, and downloads only the components whose version changed (and Veyra's package when a release pins a new
-one), each checked by SHA-256. A download that stops continues where it stopped. The update is installed at once when
-no player has PushMPC loaded; otherwise it waits and is installed when MPC-HC is closed, at the latest at your next
-sign-in (the task "\PushMPC\Apply pending update" in Task Scheduler, which runs only for your account). The version
-before an update stays in `previous\`. A new filter is registered and loaded once as a test; if that fails, the
-previous version is put back at once and that release is not tried again.
+Updates download only what changed, are checked against the release's signature, and install when your player is
+closed (at the latest at your next sign-in). The previous version is kept: if a new one fails to load, PushMPC goes back
+to it by itself.
 
-Turn automatic updates off on the About tab or in setup, or set `Enabled` = 0 (DWORD) under
-`HKCU\Software\PushMPC\Update`. The status values there (`Status`, `Message`, `AvailableVersion`, `LastCheck`) and
-`%LOCALAPPDATA%\PushMPC\logs\updater.log` say what happened. By hand:
+You can also update by running a newer PushMPC-Setup.exe, or with Settings > Apps > PushMPC > Modify > Update. On
+Linux, download the new release and run `sh setup.sh` again.
 
-    PushMpcUpdater.exe --check | --download | --apply | --status
+## Repair and uninstall
 
-To update without the updater: run a newer PushMPC-Setup.exe (it offers Update), or Windows Settings > Apps >
-Installed apps > PushMPC > Modify > Update.
-
-## Repair, roll back, uninstall
-
-- **Repair or uninstall:** Windows Settings > Apps > Installed apps > PushMPC > Modify (Repair / Update / Uninstall) or
-  Uninstall. Uninstall removes the filter, the core, the runtime, the updater and its task, PushMPC's settings and the
-  MPC-HC entry, and puts back what PushMPC changed: MPC Video Renderer's HDR settings, SVP's VapourSynth entry (if
-  PushMPC had disabled it) and MPC-HC's NVIDIA profile (G-SYNC). Your logs stay in `%LOCALAPPDATA%\PushMPC\logs`.
-- **Roll back** one component to the version before the last update: `pushmpc-install.ps1 rollback -Component filter|core|runtime`.
-- Script equivalents: `pushmpc-install.ps1 status [-Verify]`, `update -ReleaseManifest release.json`, `uninstall [-KeepSettings]`.
+- **Repair, update or uninstall on Windows:** Settings > Apps > Installed apps > PushMPC > Modify, or Uninstall.
+  Uninstalling removes PushMPC and puts back what it changed: the players' settings, MPC Video Renderer's HDR settings,
+  SVP's filter (if PushMPC had switched it off), MPC-HC's G-SYNC setting, and Plex's files. Your logs stay in
+  `%LOCALAPPDATA%\PushMPC\logs`.
+- **Uninstall on Linux:** `sh ~/.local/share/pushmpc/setup.sh uninstall`.
 
 ## Troubleshooting
 
-**Copy diagnostics.** About > Copy diagnostics copies a report (versions, GPU, displays, settings, recent log) to the
-clipboard and saves it in the logs folder. Your user name, folders and video file names are removed. Paste it into a
-bug report.
+**The video plays, but nothing changes.** The settings page's "Now:" lines and status say why PushMPC is resting. The
+usual reasons:
 
-The About tab names the installed versions and opens the log folder. If PushMPC cannot run (no DirectX 12 GPU, a
-missing or mismatched component, an interlaced video, another renderer), the video plays unchanged and the status says
-why. If a frame generation method does not start on your GPU, PushMPC falls back to the next one and says so.
+- another video renderer than MPC Video Renderer is in use;
+- the decoder is in a "native" hardware mode: choose a copy-back mode;
+- the video is interlaced (MPC Video Renderer handles it; PushMPC steps aside);
+- the player was installed after PushMPC: run Setup again.
 
-**VLC on Linux: hardware-decoded video.** The installer tests VLC's hardware decoding with PushMPC on and writes what
-it found to `hw-selftest.txt` in the plugin folder (run `pushmpc-vlc.sh selftest-hw` to test again, for example after a
-driver update). Zero-copy VA-API display (VLC's OpenGL output importing the decoder's surfaces) needs Mesa 25.1 or newer,
-or an X server with DRI3. Without either, the installer sets `avcodec-hw=vaapi_drm`: hardware decoding stays, and VLC
-copies the frames for the display. If no hardware path passes, software decoding stays on, with PushMPC still working.
+If a frame generation method doesn't start on your card, PushMPC moves on to the next one and says so.
+
+**Copy diagnostics.** About > Copy diagnostics puts a report (versions, graphics card, displays, settings, recent log)
+on the clipboard and saves it in the logs folder. Your user name, folders and video file names are removed. Paste it
+into a [bug report](https://github.com/CptPakundo/PushMPC/issues).
+
+**Logs.** Windows: `%LOCALAPPDATA%\PushMPC\logs` (Setup's log is `setup.log` there). Linux: `~/.local/state/pushmpc/logs`, and Setup's notes in
+`~/.local/share/pushmpc`.
+
+**Stuttering.** Check that your display runs at its full refresh rate, and close other heavy GPU programs. Auto steps
+down when your card can't keep up, so a lower multiplier than you expected usually means it's working as intended.
+The "Now:" line says where it stopped.
+
+**SmartScreen.** "Windows protected your PC" appears because Setup isn't code-signed yet. Click **More info**, then
+**Run anyway**.
