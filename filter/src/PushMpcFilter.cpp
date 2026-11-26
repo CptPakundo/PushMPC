@@ -367,6 +367,7 @@ struct Config {
     std::wstring folder;       // PushFpsFolder (developer): run on a PushFPS folder as the runtime root (its own shaders)
     std::wstring dataDir;      // DataDir (developer): use a PushFPS chain session instead of PushMPC's settings
     int simulateLostSec = 0, simulateLostMode = 1;
+    bool simulateNoOutput = false; // debug SimulateNoOutput: pushcore's frames are returned unshown (tests the no-output guard)
     std::wstring forceFallback; // debug: pass-through with this reason
     bool forceP010 = false;     // debug ForceP010: skip Y416/Y410 (tests the P010 HDR output)
     bool skipY416 = false;      // debug SkipY416: no Y416 at all
@@ -420,6 +421,7 @@ static Config ReadConfig()
     ReadS(k, L"PushFpsFolder", c.folder);
     ReadS(k, L"DataDir", c.dataDir);
     ReadDw(k, L"SimulateDeviceLost", c.simulateLostSec);
+    ReadB(k, L"SimulateNoOutput", c.simulateNoOutput);
     ReadDw(k, L"SimulateDeviceLostMode", c.simulateLostMode);
     ReadS(k, L"ForceFallback", c.forceFallback);
     ReadB(k, L"ForceP010", c.forceP010);
@@ -650,6 +652,7 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     if (!api || api->structSize < sizeof(PushCoreApi) || !api->submit2 || !api->setSettings || !api->importChainSession) { err = L"pushcore ABI mismatch in " + rt.corePath + L" (the filter and the core must be the same release)"; return nullptr; }
     g_api = api; g_libRoot = rt.root;
     if (auto feat = reinterpret_cast<uint32_t(*)(void)>(GetProcAddress(h, "pushcore_features"))) g_coreFeatures = feat();
+    pm::VfgCeiling() = (g_coreFeatures & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
     g_capsFn = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     g_benchFn = reinterpret_cast<PushCoreFlowBenchFn>(GetProcAddress(h, "pushcore_pushFlowBench"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
@@ -2140,7 +2143,36 @@ public:
         m_stopReq = false;
         WakeAll();
         Log(std::format("Pause (from {})", was == State_Stopped ? "stopped" : was == State_Running ? "running" : "paused"));
+        if (was == State_Stopped && !m_graphLogged) { m_graphLogged = true; LogGraph(); }
         return hr;
+    }
+    // the playback graph once per connection (filters, their CLSIDs and pin connections): what really sits upstream
+    bool m_graphLogged = false;
+    void LogGraph()
+    {
+        if (!m_pGraph) return;
+        ComPtr<IEnumFilters> ef;
+        if (FAILED(m_pGraph->EnumFilters(&ef))) return;
+        ComPtr<IBaseFilter> f;
+        while (ef->Next(1, &f, nullptr) == S_OK) {
+            FILTER_INFO fi = {}; f->QueryFilterInfo(&fi); if (fi.pGraph) fi.pGraph->Release();
+            CLSID cls = {}; f->GetClassID(&cls); wchar_t g[64] = {}; StringFromGUID2(cls, g, 64);
+            std::wstring line = std::wstring(L"graph: ") + fi.achName + L" " + g;
+            ComPtr<IEnumPins> ep;
+            if (SUCCEEDED(f->EnumPins(&ep))) {
+                ComPtr<IPin> p;
+                while (ep->Next(1, &p, nullptr) == S_OK) {
+                    PIN_DIRECTION d = PINDIR_INPUT; p->QueryDirection(&d);
+                    ComPtr<IPin> peer; p->ConnectedTo(&peer);
+                    PIN_INFO pi = {}; FILTER_INFO pf = {};
+                    if (peer && SUCCEEDED(peer->QueryPinInfo(&pi)) && pi.pFilter) { pi.pFilter->QueryFilterInfo(&pf); if (pf.pGraph) pf.pGraph->Release(); pi.pFilter->Release(); }
+                    line += std::wstring(d == PINDIR_INPUT ? L" | in<-" : L" | out->") + (peer ? pf.achName : L"(none)");
+                    p.Reset();
+                }
+            }
+            LogW(line);
+            f.Reset();
+        }
     }
     STDMETHODIMP Run(REFERENCE_TIME t) override
     {
@@ -2539,6 +2571,8 @@ private:
     bool m_coreDisc = true, m_firstAfterFlush = false;
     std::atomic<uint32_t> m_mult = 4;
     int64_t m_openQpc = 0, m_activeQpc = 0, m_flushStartQpc = 0, m_lastSubmitQpc = 0;
+    std::atomic<int64_t> m_lastCoreOutQpc = 0;   // the last pushcore frame copied for delivery (the no-output guard)
+    int m_submitsSinceOut = 0; int64_t m_seenOutQpc = 0;
     REFERENCE_TIME m_lastSubmitPts = INT64_MIN;
     std::atomic<double> m_ptsStepMs = 0;
     double m_uploadMs = 0, m_submitMs = 0;
@@ -3746,6 +3780,16 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
             }
             m_lastSubmitQpc = Qpc();
             SetEvent(m_hSubmit);
+            {   // the no-output guard: source frames go in, nothing comes out -> the source frames are shown instead
+                const int64_t out = m_lastCoreOutQpc.load();
+                if (out != m_seenOutQpc) { m_seenOutQpc = out; m_submitsSinceOut = 0; } else ++m_submitsSinceOut;
+                const int64_t since = std::max({ out, m_activeQpc, m_flushStartQpc });
+                if (pm::CoreOutputStalled(QpcMs(Qpc() - since), m_submitsSinceOut, m_State == State_Running && !m_reloading)) {
+                    Log(std::format("no-output guard: {} source frames went into pushcore and none came out for {:.0f} ms", m_submitsSinceOut, QpcMs(Qpc() - since)));
+                    m_faulted = true; m_submitsSinceOut = 0;
+                    Fallback(L"pushcore gave no frames (the source frames are shown instead)");
+                }
+            }
             }
         }
         if (submitErr != PUSHCORE_OK) {
@@ -3841,6 +3885,7 @@ void CPushMpcFilter::CopierLoop()
             std::lock_guard<std::mutex> lk(m_coreLock);
             if (!m_core) { if (s) s->Release(); break; }
             if (!s) { m_api->presented(m_core, fr[i].lease, nullptr); continue; }
+            if (m_cfg.simulateNoOutput) { s->Release(); m_api->presented(m_core, fr[i].lease, nullptr); continue; }   // debug: nothing reaches the screen
             m_ctx4->Wait(fr[i].readyFence, fr[i].readyValue);
             const bool hdrIn = fr[i].texture && [&] { D3D11_TEXTURE2D_DESC d; fr[i].texture->GetDesc(&d); return d.Format == DXGI_FORMAT_R10G10B10A2_UNORM; }();
             if (s->fmt.fmt == Fmt::Y410 || s->fmt.fmt == Fmt::Y416) {
@@ -3880,6 +3925,7 @@ void CPushMpcFilter::CopierLoop()
             ReadyItem it{ s, fr[i].pts100ns, fr[i].pts100ns + srcStep / mult, fr[i].kind == PUSHCORE_FRAME_REAL ? 0 : 1, fr[i].sourceIndex, m_flushGen.load(), Qpc() };
             PushReady(it);
             copied++;
+            m_lastCoreOutQpc = Qpc();
         }
         if (n == 0) {
             if (m_eos) {
@@ -4305,7 +4351,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
     if (c.artifactReduction) t = m_visH > 2160 || m_visW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4; // never a downscale
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
-    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, 8));
+    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::VfgCeiling()));
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
@@ -4962,7 +5008,7 @@ static void FillCombo(HWND dlg, int id, std::initializer_list<const wchar_t*> it
 }
 static int ComboSel(HWND dlg, int id) { return int(SendDlgItemMessageW(dlg, id, CB_GETCURSEL, 0, 0)); }
 static void ComboSet(HWND dlg, int id, int i) { SendDlgItemMessageW(dlg, id, CB_SETCURSEL, WPARAM(i), 0); }
-// combo index <-> value: Smoother Auto 0, Off 1, n = n (2..8); Sharper Auto 0, Off 1, level n = n + 1; on/off Auto 0, Off 1, On 2
+// combo index <-> value: Smoother Auto 0, Off 1, n = n (2..16); Sharper Auto 0, Off 1, level n = n + 1; on/off Auto 0, Off 1, On 2
 static int SmoothIdx(int v) { return v == pm::kAuto ? 0 : v == pm::kOff ? 1 : v; }
 static int SmoothVal(int i) { return i <= 0 ? pm::kAuto : i == 1 ? pm::kOff : i; }
 static int SharpIdx(int v) { return v == pm::kAuto ? 0 : v == pm::kOff ? 1 : v + 1; }
@@ -4995,7 +5041,7 @@ public:
     HRESULT OnApplyChanges() override { return Guarded("PushMPC page Apply", E_FAIL, [&] { return ApplyImpl(); }); }
     HRESULT ActivateImpl()
     {
-        FillCombo(m_Dlg, IDC_PM_SMOOTH, { L"Auto", L"Off", L"2x", L"3x", L"4x", L"5x", L"6x", L"7x", L"8x" });
+        FillCombo(m_Dlg, IDC_PM_SMOOTH, { L"Auto", L"Off", L"2x", L"3x", L"4x", L"5x", L"6x", L"7x", L"8x", L"9x", L"10x", L"11x", L"12x", L"13x", L"14x", L"15x", L"16x" });
         FillCombo(m_Dlg, IDC_PM_SHARP, { L"Auto", L"Off", L"Level 1", L"Level 2", L"Level 3", L"Level 4" });
         FillCombo(m_Dlg, IDC_PM_CLEAN, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_HDR, { L"Auto", L"Off", L"On" });
@@ -5334,7 +5380,7 @@ private:
             return;
         }
         pm::Settings s = Read();
-        s.smoother = in.multiplier >= 2 ? int(std::min(in.multiplier, 8u)) : pm::kOff;
+        s.smoother = in.multiplier >= 2 ? std::min(int(in.multiplier), pm::kMaxSmoother) : pm::kOff;
         s.sharper = !in.sr ? pm::kOff : in.srQuality >= 1 && in.srQuality <= 4 ? int(in.srQuality) : pm::kAuto;
         s.cleanUp = in.nr ? 1 : pm::kOff;
         s.sdrToHdr = in.videoHdr ? 1 : pm::kOff;

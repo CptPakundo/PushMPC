@@ -22,7 +22,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
 {
     auto is = [&](const wchar_t* w) { return _wcsicmp(v.c_str(), w) == 0; };
     if (key == L"enable") { s.enable = !(is(L"0") || is(L"off") || is(L"false")); return true; }
-    if (key == L"smoother") { s.smoother = pm::ParseChoice(v, 2, 8, s.smoother); if (is(L"1")) s.smoother = pm::kOff; return true; }
+    if (key == L"smoother") { s.smoother = pm::ParseChoice(v, 2, pm::kMaxSmoother, s.smoother); if (is(L"1")) s.smoother = pm::kOff; return true; }
     if (key == L"sharper") { s.sharper = pm::ParseChoice(v, 1, 4, s.sharper); return true; }
     if (key == L"cleanup") { s.cleanUp = pm::ParseOnOff(v, s.cleanUp); return true; }
     if (key == L"sdr_to_hdr") { s.sdrToHdr = pm::ParseOnOff(v, s.sdrToHdr); return true; }
@@ -123,7 +123,7 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, d);
     if (c.artifactReduction) t = srcH > 2160 || srcW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4;
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
-    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, 8));
+    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::VfgCeiling()));
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;

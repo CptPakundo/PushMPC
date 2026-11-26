@@ -18,7 +18,7 @@ sets itself up for your graphics card and display.
 
 ### Picture
 
-- Frame generation up to 8x: NVIDIA frame generation, DLSS frame generation, PushFlow (PushFPS's AI frame generation),
+- Frame generation up to 16x: NVIDIA frame generation, DLSS frame generation, PushFlow (PushFPS's AI frame generation),
   FSR and AMD Fluid Motion, whichever your card runs best.
 - A scene-cut guard for every method, so a new shot starts on its own frame. Sudden changes of the picture's shape are
   handled like cuts.

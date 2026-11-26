@@ -288,7 +288,7 @@ What the installer sets up, each with a backup:
 
   ```ini
   [PushMPC]
-  Smoother=Auto        ; Auto, Off or 2..8
+  Smoother=Auto        ; Auto, Off or 2..16
   Backend=auto         ; auto, portable, rife
   PortableQuality=balanced   ; or fast
   PortableThreads=0    ; 0 = all

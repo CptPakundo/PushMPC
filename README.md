@@ -22,7 +22,7 @@ and sets itself up for your graphics card and display.
 
 ## What you get
 
-- **Smoother motion.** Up to 8 frames for every frame of the video, so a 24 fps film fills a 120 Hz or 240 Hz screen.
+- **Smoother motion.** Up to 16 frames for every frame of the video, so a 24 fps film fills a 120 Hz or 240 Hz screen.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
 - **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
   clean-up for low-quality streams.
@@ -67,7 +67,7 @@ PushMPC works on any graphics card that runs DirectX 12 (Windows) or Vulkan (Lin
 
 | Graphics card | Smoother motion | Sharper picture |
 |---|---|---|
-| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 8x | RTX Video Super Resolution, RTX Video HDR |
+| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 16x | RTX Video Super Resolution, RTX Video HDR |
 | **GeForce RTX 30 / 20** | NVIDIA frame generation (RTX 30), DLSS frame generation, PushFlow | RTX Video Super Resolution, RTX Video HDR |
 | **GeForce GTX 16 / 10** | PushFlow, FSR | RTX Video Super Resolution (GTX 16) or NIS |
 | **Radeon RX 6000 / 7000 / 9000** | PushFlow, FSR, AMD Fluid Motion | FSR |

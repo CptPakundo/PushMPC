@@ -11,7 +11,7 @@ BEGIN
     AUTOCHECKBOX    "Enable PushMPC", IDC_PM_ENABLE, 7, 7, 200, 10
     LTEXT           "", -1, 285, 0, 15, 8   // keeps the page 300 units wide: room for its scroll bar (hosts size the page to its controls)
     LTEXT           "Smoother", -1, 7, 26, 52, 8
-    COMBOBOX        IDC_PM_SMOOTH, 62, 24, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    COMBOBOX        IDC_PM_SMOOTH, 62, 24, 74, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_PM_SMOOTH_NOW, 142, 26, 143, 8, SS_ENDELLIPSIS
     LTEXT           "Sharper", -1, 7, 42, 52, 8
     COMBOBOX        IDC_PM_SHARP, 62, 40, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP

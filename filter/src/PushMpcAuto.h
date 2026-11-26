@@ -111,10 +111,12 @@ enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFas
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
 struct Costs {
-    // FG batch p95 per multiplier M = 2..8 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
-    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's.
-    double vfgMedium[7] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51 };
-    double vfgHigh[7]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91 };
+    // FG batch p95 per multiplier M = 2..16 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
+    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's. 10x, 12x and 16x Medium: measured 2026-11-26
+    // the same way (RTX 5090, clip A 1080p -> 3840x2080 VSR 4, two runs; batch p95 26.6 / 31.9 / 42.3 ms, 8x 20.3 in the
+    // same runs: about 2.6 ms per generated frame); 9x, 11x, 13x-15x interpolated. High above 8x: 8x plus 9.4 ms per frame (not measured).
+    double vfgMedium[15] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51, 25.09, 27.66, 30.38, 33.09, 35.80, 38.51, 41.22, 43.93 };
+    double vfgHigh[15]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91, 72.32, 81.73, 91.14, 100.55, 109.96, 119.37, 128.78, 138.19 };
     double vfgLowShare = 0.40;                      // VFG Low ~0.35-0.4 x Medium (1080p quality runs)
     // DLSS-G with FidelityFX flow: flow + refine per source frame, then per generated frame (2x 1.47, 4x 3.87 p95)
     double dlssgFlow = 1.8, dlssgPerFrame = 1.2;
@@ -236,7 +238,18 @@ inline int FgKeyOf(FgMethod m, int quality)
     default: return kKeyVfgMed;
     }
 }
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? 8 : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
+// NVIDIA VFG: up to 16x (8x in the SDK multiplier mode, above in its timestep mode); a pushcore without
+// PUSHCORE_FEATURE_VFG16 stops at 8x (the filter lowers VfgCeiling() when it loads one).
+inline int& VfgCeiling() { static int v = 16; return v; }
+// The no-output guard (the filter): source frames keep going into pushcore while none has come out for this long (and for
+// this many submits) -> the filter shows the source frames itself, so a stuck engine never leaves a black picture
+inline constexpr double kNoOutputMs = 1500.0;
+inline constexpr int kNoOutputSubmits = 24;
+inline bool CoreOutputStalled(double msSinceOutput, int submitsSinceOutput, bool running)
+{
+    return running && submitsSinceOutput >= kNoOutputSubmits && msSinceOutput >= kNoOutputMs;
+}
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -245,7 +258,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     const double sizeVfg = 0.75 + 0.25 * pix;
     switch (method) {
     case FgMethod::Vfg: {
-        const double med = c.vfgMedium[std::min(m, 8) - 2], high = c.vfgHigh[std::min(m, 8) - 2];
+        const double med = c.vfgMedium[std::clamp(m, 2, 16) - 2], high = c.vfgHigh[std::clamp(m, 2, 16) - 2];
         const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
         return v * sizeVfg * c.card;
     }

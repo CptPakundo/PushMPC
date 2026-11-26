@@ -222,7 +222,7 @@ bool OpenFor(Enhance* d, CoreHost& h, bool declared, std::string& err)
     d->token = h.Acquire(key, si, d->ps, how, ms, err);
     if (!d->token) return false;
     const PushCoreOutputInfo& oi = h.OutInfo();
-    const int k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : d->ps.multiplier, 1, 8));
+    const int k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : d->ps.multiplier, 1, PUSHCORE_MAX_MULTIPLIER));
     Log(std::format("core for matrix {} transfer {} primaries {} range {}: {} in {:.0f} ms on {}; {}", si.matrix, si.transfer, si.primaries, si.range, ReuseName(how), ms, h.DeviceName(), oi.description));
     if (declared && (k != d->k || int(oi.width) != d->vi.width || int(oi.height) != d->vi.height)) {
         err = std::format("the reopened core gives x{} {}x{}, the clip was declared x{} {}x{}", k, oi.width, oi.height, d->k, d->vi.width, d->vi.height);

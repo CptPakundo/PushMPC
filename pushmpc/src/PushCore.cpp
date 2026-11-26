@@ -81,7 +81,7 @@ struct Core::Impl {
         options = engine::PlayerOptions::from(s, order);
         if (cfg.sr >= 0) options.sr = cfg.sr != 0;
         if (cfg.fg >= 0) options.fg = cfg.fg != 0;
-        if (cfg.multiplier >= 2) options.fgMultiplier = uint32_t(std::clamp(cfg.multiplier, 2, 8));
+        if (cfg.multiplier >= 2) options.fgMultiplier = uint32_t(std::clamp(cfg.multiplier, 2, int(veyra::pipeline::FrameBatch::Capacity)));
         if (cfg.vfgQuality >= 0) options.settings.vfgQuality = uint32_t(cfg.vfgQuality);
         if (!nvidia) return fail("pushcore M1 expects an NVIDIA adapter");
 
