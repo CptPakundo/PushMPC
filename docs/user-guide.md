@@ -5,6 +5,7 @@ setting means, and what to do when something doesn't look right.
 
 - [Installing on Windows](#installing-on-windows)
 - [Installing on Linux](#installing-on-linux)
+- [Installing on a Mac](#installing-on-a-mac)
 - [Players](#players)
 - [Capture mode](#capture-mode)
 - [Graphics cards](#graphics-cards)
@@ -75,25 +76,50 @@ To remove everything: `sh ~/.local/share/pushmpc/setup.sh uninstall`. To update:
 PushMPC's settings on Linux live in `~/.config/pushmpc/settings.ini`, with the same names as the [settings](#settings)
 below, for example `Smoother=Auto` (or `Off`, or `2` to `8`).
 
+## Installing on a Mac
+
+PushMPC on the Mac is a preview. It works in mpv and in Plex (Plex for Mac and Plex HTPC). You need
+[Homebrew](https://brew.sh). Open Terminal and run:
+
+```sh
+brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
+brew install CptPakundo/pushmpc/pushmpc
+pushmpc-setup install
+```
+
+`pushmpc-setup install` adds PushMPC to mpv. If Plex for Mac or Plex HTPC is in your Applications folder, it adds
+PushMPC to Plex's own player too, checks with a short test picture that it works, and keeps a copy of what it changed.
+When Plex updates itself, PushMPC sets itself up again by itself.
+
+- If macOS says Terminal isn't allowed to change Plex, open **System Settings > Privacy & Security > App Management**,
+  turn Terminal on, and run `pushmpc-setup install` again.
+- On a Mac with macOS 15.4 or newer, PushMPC uses Apple's own frame interpolation when your Mac can run it. Otherwise
+  it uses the graphics chip, and if that isn't possible, the processor.
+- To remove everything: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. Plex and your mpv settings go back
+  exactly as they were.
+- To update: `brew upgrade pushmpc`, then `pushmpc-setup install` again.
+
+IINA and VLC on the Mac are coming later.
+
 ## Players
 
 PushMPC needs nothing from you in most players: Setup sets them up and Auto does the rest.
 
-| Player | Windows | Linux | Notes |
-|---|:-:|:-:|---|
-| MPC-HC, MPC-BE | ✅ | – | the most complete: settings page and on-screen info |
-| PotPlayer | ✅ | – | needs MPC Video Renderer, see [below](#potplayer) |
-| mpv, mpv.net, SMPlayer, MPC-QT | ✅ | ✅ | see [mpv and mpv-based players](players-mpv.md) for details |
-| PushMPC's own mpv | ✅ | – | optional box in Setup; on Linux, your distribution's mpv gets the same built-in route |
-| Celluloid, Haruna | – | ✅ | |
-| VLC 3 | ✅ | ✅ | see [VLC](#vlc) |
-| Kodi 21 and 22 | ✅ | ✅ | see [Kodi](#kodi) |
-| Plex for Windows, Plex HTPC | ✅ | ✅ | on Linux from Flathub; see [Plex](#plex) |
-| Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | the shims play through mpv |
-| Stremio 5.0.28 and newer | ✅ | – | older versions: [capture mode](#capture-mode) |
-| KMPlayer, GOM Player, Emby Theater, other players | ✅ | – | [capture mode](#capture-mode) |
-| Zoom Player | by hand | – | see [below](#zoom-player-by-hand) |
-| SVP's own mpv | – | – | left alone: SVP manages it |
+| Player | Windows | Linux | Mac | Notes |
+|---|:-:|:-:|:-:|---|
+| MPC-HC, MPC-BE | ✅ | – | – | the most complete: settings page and on-screen info |
+| PotPlayer | ✅ | – | – | needs MPC Video Renderer, see [below](#potplayer) |
+| mpv, mpv.net, SMPlayer, MPC-QT | ✅ | ✅ | 🧪 mpv | see [mpv and mpv-based players](players-mpv.md) for details |
+| PushMPC's own mpv | ✅ | – | – | optional box in Setup; on Linux, your distribution's mpv gets the same built-in route |
+| Celluloid, Haruna | – | ✅ | – | |
+| VLC 3 | ✅ | ✅ | 🔜 | see [VLC](#vlc) |
+| Kodi 21 and 22 | ✅ | ✅ | – | see [Kodi](#kodi) |
+| Plex for Windows, Plex HTPC, Plex for Mac | ✅ | ✅ | 🧪 | on Linux from Flathub; see [Plex](#plex) |
+| Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – | the shims play through mpv |
+| Stremio 5.0.28 and newer | ✅ | – | – | older versions: [capture mode](#capture-mode) |
+| KMPlayer, GOM Player, Emby Theater, other players | ✅ | – | – | [capture mode](#capture-mode) |
+| Zoom Player | by hand | – | – | see [below](#zoom-player-by-hand) |
+| SVP's own mpv | – | – | – | left alone: SVP manages it |
 
 ### MPC-HC and MPC-BE
 
@@ -148,6 +174,8 @@ you uninstall. Because Plex is installed for all users, Windows asks for permiss
 - When Plex updates itself, PushMPC sets it up again at your next sign-in.
 - Don't want this? Untick the Plex box on Setup's first page.
 - On Linux, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex.
+- On a Mac, `pushmpc-setup install` does the same for Plex for Mac and Plex HTPC (preview), see
+  [Installing on a Mac](#installing-on-a-mac).
 
 ### Stremio, Jellyfin and the MPV Shims
 

@@ -12,7 +12,7 @@
 #                        pushmpc-iina.so inside IINA's unmodified libmpv, headless, output rate x2.
 #   artcnn    (ubuntu)   ArtCNN: the pinned ONNX files converted (.pmnn, fragment GLSL), onnxruntime against PushMPC's
 #                        float reference, the fragment shaders in mpv's OpenGL renderer against the same reference.
-#   homebrew  (macos-15) the formula (packaging/homebrew/pushmpc.rb) from a local tap with the checkout's tarball:
+#   homebrew  (macos-15) the tap route (this repository as the tap, Formula/pushmpc.rb) with the checkout's archives:
 #                        brew install --build-from-source, brew test, then Homebrew's mpv in encode mode through the
 #                        installed filter on a short public clip (frame count x2), and pushmpc-setup's exact undo.
 name: apple
@@ -338,7 +338,7 @@ jobs:
             ~/Library/Caches/Homebrew/downloads
             ~/Library/Caches/Homebrew/api
             ${{ runner.temp }}/clip
-          key: brew-mpv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/homebrew/pushmpc.rb') }}
+          key: brew-mpv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Formula/pushmpc.rb') }}
           restore-keys: brew-mpv-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Homebrew mpv (bottles) and its VapourSynth
@@ -364,39 +364,35 @@ jobs:
           grep -E "^master@|^proxy|minimum macOS|libMoltenVK" "$RUNNER_TEMP/plexmac-build.log"
           tar -czf "$RUNNER_TEMP/plexmac-ci.tar.gz" -C "$RUNNER_TEMP/plexmac" .
 
-      - name: The formula from a local tap, built from the checkout's tarball
-        timeout-minutes: 10
+      - name: The tap route (this repository as the tap, as the README says), built from the checkout's archives
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
-          tgz="$RUNNER_TEMP/pushmpc-ci.tar.gz"
+          # the release's three archives, made here from the checkout: the source tarball, pmml's graphs, Plex for Mac
+          tgz="$RUNNER_TEMP/pushmpc-ci-src.tar.gz"
           git archive --format=tar.gz --prefix=PushMPC-ci/ HEAD > "$tgz"
-          sha=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
-          # pmml's graphs, generated here as release.yml does (the formula's pmml-graphs resource is a release asset)
           python3 -m venv "$RUNNER_TEMP/g" && "$RUNNER_TEMP/g/bin/python" -m pip install --disable-pip-version-check -q onnx numpy
           "$RUNNER_TEMP/g/bin/python" -I pmml/scripts/make_graphs.py --out "$RUNNER_TEMP/pmml-graphs" >/dev/null
           gtgz="$RUNNER_TEMP/pmml-graphs-ci.tar.gz"; tar -czf "$gtgz" -C "$RUNNER_TEMP/pmml-graphs" .
-          gsha=$(shasum -a 256 "$gtgz" | cut -d' ' -f1)
-          brew tap-new --no-git pushmpc/local
-          tap=$(brew --repository pushmpc/local)
-          ptgz="$RUNNER_TEMP/plexmac-ci.tar.gz"; psha=$(shasum -a 256 "$ptgz" | cut -d' ' -f1)
-          python3 - "$tgz" "$sha" "$tap/Formula/pushmpc.rb" "$gtgz" "$gsha" "$ptgz" "$psha" <<'PY'
-          import re, sys
-          tgz, sha, out, gtgz, gsha, ptgz, psha = sys.argv[1:8]
-          f = open("packaging/homebrew/pushmpc.rb").read()
-          f = re.sub(r'^  url ".*"$', f'  url "file://{tgz}"\n  version "0.6.0-ci"', f, count=1, flags=re.M)
-          f = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', f, count=1, flags=re.M)
-          f = re.sub(r'(resource "pmml-graphs" do\n    url )".*"(\n    sha256 )".*"', lambda m: f'{m.group(1)}"file://{gtgz}"{m.group(2)}"{gsha}"', f, count=1)
-          f = re.sub(r'(resource "plex-mac" do\n      url )".*"(\n      sha256 )".*"', lambda m: f'{m.group(1)}"file://{ptgz}"{m.group(2)}"{psha}"', f, count=1)
-          open(out, "w").write(f)
-          PY
-          grep -n -A2 'resource "pmml-graphs"' "$tap/Formula/pushmpc.rb"
-          grep -n -A2 'resource "plex-mac"' "$tap/Formula/pushmpc.rb"; grep -q "file://$ptgz" "$tap/Formula/pushmpc.rb"
-          grep -n -E '^  (url|version|sha256) ' "$tap/Formula/pushmpc.rb"
-          brew install --build-from-source --verbose pushmpc/local/pushmpc
-          brew test --verbose pushmpc/local/pushmpc
-          brew audit --formula pushmpc/local/pushmpc || echo "::warning::brew audit reported issues (see log)"
-          brew list --verbose pushmpc/local/pushmpc
+          ptgz="$RUNNER_TEMP/plexmac-ci.tar.gz"
+          # a clone of this repository, with Formula/pushmpc.rb pointed at them by the release's own script
+          git clone -q "$GITHUB_WORKSPACE" "$RUNNER_TEMP/tap-src"
+          python3 -I scripts/update-formula.py "$RUNNER_TEMP/tap-src/Formula/pushmpc.rb" --version 0.6.0-ci \
+            --src "$tgz" --src-url "file://$tgz" --pmml "$gtgz" --pmml-url "file://$gtgz" --plex "$ptgz" --plex-url "file://$ptgz"
+          git -C "$RUNNER_TEMP/tap-src" -c user.name=ci -c user.email=ci@localhost commit -q -am "formula for CI"
+          grep -n -E '^  (url|version|sha256) |resource "' "$RUNNER_TEMP/tap-src/Formula/pushmpc.rb"
+          # the README's commands, with the clone in place of the GitHub URL
+          brew tap CptPakundo/pushmpc "$RUNNER_TEMP/tap-src"
+          brew install --build-from-source --verbose CptPakundo/pushmpc/pushmpc   # the full name: Homebrew 6 trusts this formula
+          brew info CptPakundo/pushmpc/pushmpc | sed -n 1,3p
+          brew test --verbose CptPakundo/pushmpc/pushmpc
+          brew audit --formula cptpakundo/pushmpc/pushmpc || echo "::warning::brew audit reported issues (see log)"
+          brew list --verbose CptPakundo/pushmpc/pushmpc | sed -n 1,30p
+          # without the Plex for Mac archive the script leaves the resource out (a release whose macOS asset is missing)
+          cp Formula/pushmpc.rb "$RUNNER_TEMP/noplex.rb"
+          python3 -I scripts/update-formula.py "$RUNNER_TEMP/noplex.rb" --version 0.6.0-ci --src "$tgz" --src-url "file://$tgz" --pmml "$gtgz" --pmml-url "file://$gtgz"
+          ! grep -q 'resource "plex-mac"' "$RUNNER_TEMP/noplex.rb" && ruby -c "$RUNNER_TEMP/noplex.rb"
 
       - name: VapourSynth autoloads the plugin; the apple backend through Homebrew's vspipe
         timeout-minutes: 5

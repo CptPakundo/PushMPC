@@ -32,8 +32,8 @@ PushMPC filter (`pushmpc.Enhance`). Two tiers:
 - **HDR is left alone.** IINA's own EDR handling stays in charge.
 
 For real frame generation on a Mac (Apple's VideoToolbox interpolation and super resolution, or PushFPS's motion
-interpolation), use mpv with the PushMPC filter: `brew install pushmpc`, then `pushmpc-setup install`. See
-`packaging/homebrew`.
+interpolation), use mpv with the PushMPC filter: `brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC`,
+`brew install CptPakundo/pushmpc/pushmpc`, then `pushmpc-setup install`. See `packaging/homebrew`.
 
 ## Install
 

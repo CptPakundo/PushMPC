@@ -269,7 +269,7 @@ Settings and status under `HKCU\Software\PushMPC\Update`: `Enabled` (DWORD, 0 = 
   `hw-selftest.txt` in the plugin folder (`pushmpc-vlc.sh selftest-hw` runs it again). Zero-copy VA-API display needs
   Mesa 25.1 or newer, or an X server with DRI3; otherwise the installer sets `avcodec-hw=vaapi_drm`; if no hardware path
   passes, software decoding stays on.
-- **macOS (Homebrew, not published yet):** `packaging/homebrew/pushmpc.rb` builds the VapourSynth plugin with the
-  VideoToolbox and ML backends, the mpv helper, the IINA bridge and `pushmpc-setup`. To try it from source, put the
-  formula into a local tap and install it with `--build-from-source`, as `.github/workflows/apple.yml` (job
-  `homebrew`) does; see [packaging/homebrew/README.md](../packaging/homebrew/README.md).
+- **macOS (Homebrew):** this repository is the tap; `Formula/pushmpc.rb` builds the VapourSynth plugin with the
+  VideoToolbox and ML backends, the mpv helper, the IINA bridge and `pushmpc-setup`, and carries the Plex for Mac
+  archive. The release fills in its asset URLs (`scripts/update-formula.py`); `.github/workflows/apple.yml` (job
+  `homebrew`) tests the tap route from the checkout; see [packaging/homebrew/README.md](../packaging/homebrew/README.md).
