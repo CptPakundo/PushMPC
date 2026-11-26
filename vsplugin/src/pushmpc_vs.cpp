@@ -35,6 +35,7 @@
 #ifdef _WIN32
 #include "autopick.h"
 #include "corehost.h"
+static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable ceiling follows PUSHCORE_MAX_MULTIPLIER (backend.h)");
 #endif
 #include "schedule.h"
 #include "vslog.h"
@@ -377,6 +378,9 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     std::string err;
     std::lock_guard<std::mutex> lk(h.Lock());
     if (!h.Load(paths, err) || !h.EnsureDevice(0, warp ? AdapterPick::Warp : AdapterPick::Auto, err)) { a->freeNode(node); delete d; return fail(err); }
+    // the multipliers the loaded core makes: VFG above 8x and PushFlow above 4x only with a core that has them
+    pm::VfgCeiling() = (h.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
+    pm::PushFlowCeiling() = (h.Features() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;
 
     // the colour to open with: the arguments, else what the last instance of this stream saw, else a guess
     const uint32_t w = uint32_t(vi->width), hh = uint32_t(vi->height);
@@ -404,6 +408,16 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     const HWND wnd = MpvWindow();
     d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg, int(ArgInt(in, a, "display_fs", -1)));
     d->choice = pm::Decide(WithToneMapBy(s, true), d->src, d->disp, costs, g);   // pushcore tone-maps for an SDR display (displayHdr 0)
+    // this route reads every output frame back to the CPU: Auto stops at the readback the route sustains (schedule.h)
+    if (s.smoother == pm::kAuto && d->choice.multiplier > 1) {
+        const bool ten = f.bitsPerSample > 8 || d->src.hdr;
+        const int maxK = ReadbackMaxK(uint32_t(d->choice.outW ? d->choice.outW : w), uint32_t(d->choice.outH ? d->choice.outH : hh), ten, d->src.fps);
+        if (d->choice.multiplier > maxK) {
+            Log(std::format("Auto: x{} lowered to x{}: the CPU readback of this route sustains {:.1f} GB/s ({}x{} {}-bit 4:2:0; PushMPC's own mpv and players with PushMPC's libmpv keep the picture on the GPU)",
+                d->choice.multiplier, maxK, kReadbackLimitGBs, d->choice.outW, d->choice.outH, ten ? 10 : 8));
+            d->choice.multiplier = maxK;
+        }
+    }
     const pm::Choice& c = d->choice;
 
     Log(std::format("script instance: {}x{} {}-bit, {}/{} fps, {} frames; colour {} (matrix {} transfer {} primaries {} range {}); settings from the registry{}",

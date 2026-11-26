@@ -124,6 +124,7 @@ bool LoadCore(const Options& o, std::wstring& coreDir, std::string& why)
     // VFG above 8x only with a core that has it (PUSHCORE_FEATURE_VFG16)
     const auto feat = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(h, "pushcore_features"));
     pm::VfgCeiling() = feat && (feat() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
+    pm::PushFlowCeiling() = feat && (feat() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;   // PushFlow above 4x (flow once) the same
     w.caps = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     if (auto feat = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(h, "pushcore_features"))) w.features = feat();
     return true;
@@ -303,7 +304,7 @@ public:
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);
         // tests: a fixed multiplier whatever Auto says
-        m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, pm::VfgCeiling());
+        m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, pm::CoreCeiling());
         if (m_forceK) m_ps.multiplier = uint32_t(m_forceK);
         Log(std::format("d3d11: {}x{} {}, colour {}/{}/{}/{}; display {:.3f} Hz HDR {}; GPU {} ({}); Auto x{} SR {} -> {}x{}{}{}",
             st.width, st.height, ten ? "P010" : "NV12", col[0], col[1], col[2], col[3], m_disp.refreshHz, m_disp.hdr ? "on" : "off", Narrow(g.name),

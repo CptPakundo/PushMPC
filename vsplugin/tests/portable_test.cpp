@@ -192,8 +192,8 @@ static void TestSelect()
 
 static void TestBudget()
 {
-    // 1080p23.976 on 240 Hz: display x10 -> capped at 8; cost 8 + 7 x 3 = 29 <= 25? no; x6 fits (8 + 15 = 23 <= 25.0), but at a
-    // fixed 240 Hz x6 holds frames as long as x5 (2 refreshes) and is uneven: x5, the even cadence
+    // 1080p23.976 on 240 Hz: display x10; cost 8 + (k - 1) x 3: x6 fits (8 + 15 = 23 <= 25.0), x7 does not; at a fixed 240 Hz
+    // x6 holds frames as long as x5 (2 refreshes) and is uneven: x5, the even cadence
     auto r = DecidePortableK(0, 23.976, 240, 1080, 8, 3);
     CHECK(r.k == 5 && r.why.find("even cadence") != std::string::npos, "k %d: %s", r.k, r.why.c_str());
     // one new frame per refresh needs 1 ms spare: 30 fps x2 on 60 Hz costs 10 + 9.5 = 19.5 of 20.0 ms, + 1 does not fit -> x1
@@ -208,7 +208,7 @@ static void TestBudget()
     r = DecidePortableK(1, 23.976, 240, 1080, 1, 1); CHECK(r.k == 1, "off");
     r = DecidePortableK(0, 29.97, 120, 720, 2, 1); CHECK(r.k == 4, "720p30 on 120 Hz -> x4: %d", r.k);
     r = DecidePortableK(0, 23.976, 240, 1080, 8, 3, false, -1, 1); CHECK(r.k == 6, "VRR running (vrr_probe): the largest that fits, x6: %d", r.k);
-    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 0.0); CHECK(r.k == 5 && r.costMs < 7.5, "GPU, player full screen: no composition share (%.1f ms)", r.costMs);
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 0.0); CHECK(r.k == 10 && r.costMs < 12.0, "GPU, player full screen: no composition share, x10 (%d, %.1f ms)", r.k, r.costMs);
     {   // the DRM VRR probe runs without crashing anywhere (CI runners: no /dev/dri -> unknown); its answer is a tri-state
         const int v = LinuxVrrActive(), w = VrrActive(-1), x = VrrActive(1);
         CHECK(v >= -1 && v <= 1 && w >= -1 && w <= 1 && x >= -1 && x <= 1, "VRR probes: DRM %d, all (unknown / full screen) %d / %d", v, w, x);
@@ -216,6 +216,14 @@ static void TestBudget()
     }
     CHECK(CadenceK(8, 23.976, 240) == 5 && CadenceK(6, 23.976, 240) == 5 && CadenceK(4, 23.976, 240) == 4 && CadenceK(2, 23.976, 60) == 2 && CadenceK(8, 23.976, 0) == 8,
           "CadenceK: the even cadence at a fixed refresh");
+    // up to kPortableMaxK (16, PUSHCORE_MAX_MULTIPLIER): the display's multiple when it fits the budget
+    r = DecidePortableK(0, 23.976, 240, 1080, 1, 1, true); CHECK(r.k == 10, "GPU 24p on 240 Hz -> x10: %d %s", r.k, r.why.c_str());
+    r = DecidePortableK(0, 23.976, 360, 1080, 1, 1, true); CHECK(r.k == 15, "GPU 24p on 360 Hz -> x15: %d", r.k);
+    r = DecidePortableK(0, 23.976, 480, 1080, 1, 1, true); CHECK(r.k == 10, "GPU 24p on a fixed 480 Hz -> x10, the even cadence (x16 holds as long, uneven): %d", r.k);
+    r = DecidePortableK(0, 23.976, 480, 1080, 1, 1, true, -1, 1); CHECK(r.k == kPortableMaxK, "GPU 24p on 480 Hz with VRR -> x16: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 2160, 1, 1); CHECK(r.k == 2, "CPU 4K still x2: %d", r.k);
+    r = DecidePortableK(12, 23.976, 240, 1080, 1, 1); CHECK(r.k == 12, "fixed x12: %d", r.k);
+    r = DecidePortableK(20, 23.976, 240, 1080, 1, 1); CHECK(r.k == kPortableMaxK, "fixed above the ceiling -> x16: %d", r.k);
 }
 
 static void TestPlatform()
@@ -225,7 +233,7 @@ static void TestPlatform()
     auto get = [&](const char* n) { auto it = m.find(LowerAscii(n)); return it == m.end() ? std::string() : it->second; };
     PortableSettings s = LoadPortableSettings(get);
     CHECK(!s.enable && s.smoother == 3 && s.quality == 0 && s.threads == 0, "settings");
-    CHECK(ParseSmoother("Auto", 5) == 0 && ParseSmoother("Off", 0) == 1 && ParseSmoother("x4", 0) == 4 && ParseSmoother("9", 0) == 0 && ParseSmoother("", 7) == 7, "smoother words");
+    CHECK(ParseSmoother("Auto", 5) == 0 && ParseSmoother("Off", 0) == 1 && ParseSmoother("x4", 0) == 4 && ParseSmoother("9", 0) == 9 && ParseSmoother("x16", 0) == 16 && ParseSmoother("17", 0) == 0 && ParseSmoother("", 7) == 7, "smoother words");
     CHECK(ResolveSettingsIni("", "/home/u") == "/home/u/.config/pushmpc/settings.ini", "ini home");
     CHECK(ResolveSettingsIni("/x/cfg", "/home/u") == "/x/cfg/pushmpc/settings.ini", "ini xdg");
     CHECK(ResolveSettingsIni("relative", "/home/u") == "/home/u/.config/pushmpc/settings.ini", "relative XDG ignored (spec)");
@@ -381,11 +389,18 @@ static void TestCadence()
     m = RunCadence(2, 2, 4, { false, false, false, false });
     CHECK(m.count(6) && m[6].kind == Shot::Real && m[6].src == 3, "end: all settled");
     // the GPU's K rule has no 1080p cap; the upscale decision
-    // 4K: 2 + (k - 1) + k x 1.0 (the player's share per shown frame) fits up to x8, but at a fixed 240 Hz x5 is the even cadence
+    // 4K: 2 + (k - 1) + k x 1.0 (the player's share per shown frame) + 1 spare fits up to x11; x10 holds each frame one refresh, the even cadence
     auto r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true);
-    CHECK(r.k == 5, "GPU at 4K: x5, the even cadence, when x8 fits (%d)", r.k);
+    CHECK(r.k == 10, "GPU at 4K: the display multiple x10 when it fits with the player's share and the spare (%d)", r.k);
     r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 3.0);   // a heavy player share: x5 costs 2 + 4 + 15 = 21 ms, x7 29 (over)
     CHECK(r.k == 5 && r.costMs > 20, "GPU: the player's share counts (%d, %.1f ms)", r.k, r.costMs);
+    // windowed vs full screen at a fixed 240 Hz: x10 needs 2 + 13.5 + 10 + 1 spare = 26.5 ms windowed (over), 16.5 ms full screen
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1.5, true);
+    CHECK(r.k == 5, "GPU at 4K windowed, x10 over the budget: x5, the even cadence (%d: %s)", r.k, r.why.c_str());
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1.5, true, 0.0);
+    CHECK(r.k == 10, "GPU at 4K full screen: x10 (%d: %s)", r.k, r.why.c_str());
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1.5, true, -1, 1);
+    CHECK(r.k == 9, "GPU at 4K windowed with VRR: the largest that fits, x9 (%d: %s)", r.k, r.why.c_str());
     auto u = DecideUpscale("auto", "screen", 3840, 2160, 1920, 1080);
     CHECK(u.kind == kAutoUpscaler && u.w == 3840 && u.h == 2160, "upscale to the screen: %s", u.why.c_str());
     u = DecideUpscale("nis", "screen", 0, 0, 1920, 1080); CHECK(u.kind == GpuUpscaler::None, "unknown screen: none");

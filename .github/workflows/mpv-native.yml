@@ -184,6 +184,10 @@ jobs:
           if ($LASTEXITCODE) { throw 'build' }
           ./build-engine/out/engine_test.exe
           if ($LASTEXITCODE) { throw 'engine_test failed' }
+          # the libmpv forwarder for players with their own libmpv (scripts/pushmpc-libmpv.ps1)
+          cmake -S mpvnative/libmpv-swap -B build-fwd -A x64
+          cmake --build build-fwd --config Release
+          if ($LASTEXITCODE) { throw 'libmpv forwarder build' }
       - uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c   # v2, pinned by commit
         with:
           msystem: UCRT64
@@ -234,6 +238,8 @@ jobs:
           cp $R/pm-prefix/bin/mpv.exe $R/pm-prefix/bin/mpv.com $R/pm-prefix/bin/ffmpeg.exe $R/pm-prefix/bin/ffprobe.exe $R/pm-prefix/bin/*.dll "$d/"
           for f in "$d"/*.exe "$d"/*.dll; do ldd "$f" | awk '/\/ucrt64\// {print $3}'; done | sort -u | while read -r dll; do cp -n "$dll" "$d/"; done
           cp build-engine/out/pushmpc_engine.dll "$d/"
+          # players with their own libmpv: the forwarder and pushmpc.lua (scripts/pushmpc-libmpv.ps1)
+          cp build-fwd/out/pushmpc-libmpv-forward.dll integrations/mpv/pushmpc.lua "$d/"
           cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
           ls "$d" | head -100; du -sh "$d"
       - name: Headless checks
@@ -867,3 +873,106 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: matrix.runner == 'macos-15'
         with: { name: plexmac, path: '${{ runner.temp }}/plexmac/', if-no-files-found: error, retention-days: 7 }
+
+  # Players with their own libmpv (mpv.net, MPC-QT, Jellyfin Desktop, Stremio): scripts/pushmpc-libmpv.ps1 swaps in
+  # PushMPC's libmpv (the forwarder in the player's folder, PushMPC's mpv build behind it), self-tests it there, and
+  # restores each player bit-exact. Each player's own release; mpv.net is started for real on WARP, the others (OpenGL
+  # players: no OpenGL on hosted runners) through their own folder's libmpv in a host.
+  libmpv-players:
+    needs: windows
+    if: ${{ inputs.part != 'extra' && format('{0}', inputs.tests) != 'false' }}
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults: { run: { shell: pwsh } }
+    env: { GH_TOKEN: '${{ github.token }}' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: mpvnative-windows, path: '${{ runner.temp }}/mpvwin' }
+      - name: PushMPC's mpv where Setup puts it, and the players (their own releases)
+        timeout-minutes: 15
+        run: |
+          $pm = "$env:LOCALAPPDATA\PushMPC"; New-Item -ItemType Directory "$pm\mpv-native" -Force | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\mpvwin\PushMPC-mpv-windows\*" "$pm\mpv-native" -Recurse
+          foreach ($f in 'libmpv-2.dll', 'pushmpc-libmpv-forward.dll', 'pushmpc.lua') { if (-not (Test-Path "$pm\mpv-native\$f")) { throw "$f missing from the mpv build" } }
+          $log = "$env:RUNNER_TEMP\players.txt"; $dl = "$env:RUNNER_TEMP\dl"; New-Item -ItemType Directory $dl -Force | Out-Null
+          function Get-Zip([string]$repo, [string]$rx, [string]$dest, [string]$exe) {
+            try {
+              $rel = gh api "repos/$repo/releases/latest" | ConvertFrom-Json
+              $a = $rel.assets | Where-Object { $_.name -match $rx } | Select-Object -First 1
+              $f = Join-Path $dl $a.name; Invoke-WebRequest $a.browser_download_url -OutFile $f
+              7z x $f "-o$dest" -y | Out-Null
+              $e = Get-ChildItem $dest -Recurse -Filter $exe | Select-Object -First 1
+              if ($e.DirectoryName -ne $dest) { Get-ChildItem $e.DirectoryName | Move-Item -Destination $dest -Force }
+              "$repo $($rel.tag_name) $($a.name)" | Tee-Object -Append $log
+            } catch { "${repo}: not installed ($_)" | Tee-Object -Append $log }
+          }
+          Get-Zip 'mpvnet-player/mpv.net' 'portable.*x64.*\.zip$|x64.*portable.*\.zip$' "$env:LOCALAPPDATA\Programs\mpv.net" 'mpvnet.exe'
+          Get-Zip 'mpc-qt/mpc-qt' 'win-x64.*\.zip$' "$env:LOCALAPPDATA\Programs\mpc-qt" 'mpc-qt.exe'
+          Remove-Item "$env:LOCALAPPDATA\Programs\mpc-qt\portable.txt" -ErrorAction SilentlyContinue
+          # Jellyfin Desktop: its Inno Setup installer, per user
+          try {
+            $rel = gh api repos/jellyfin/jellyfin-desktop/releases/latest | ConvertFrom-Json
+            $a = $rel.assets | Where-Object { $_.name -match 'windows-x64\.exe$' } | Select-Object -First 1
+            Invoke-WebRequest $a.browser_download_url -OutFile "$dl\$($a.name)"
+            $p = Start-Process "$dl\$($a.name)" -ArgumentList '/VERYSILENT', '/CURRENTUSER', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru; $p.WaitForExit(300000) | Out-Null
+            "Jellyfin Desktop $($rel.tag_name) $($a.name), installer exit $($p.ExitCode)" | Tee-Object -Append $log
+          } catch { "Jellyfin Desktop: not installed ($_)" | Tee-Object -Append $log }
+          # Stremio: its official installer, per user
+          try {
+            $v = (gh api repos/Stremio/stremio-shell-ng/releases/latest | ConvertFrom-Json).tag_name.TrimStart('v')
+            $file = "StremioSetup-v${v}_x64.exe"; $got = $null
+            foreach ($u in @("https://dl.strem.io/stremio-shell-ng/v$v/$file", "https://dl.strem.io/shell-win/v$v/$file", "https://github.com/Stremio/stremio-shell-ng/releases/download/v$v/$file")) {
+              try { Invoke-WebRequest $u -OutFile "$dl\$file"; $got = $u; break } catch { }
+            }
+            if ($got) { $p = Start-Process "$dl\$file" -ArgumentList '/VERYSILENT', '/CURRENTUSER', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru; $p.WaitForExit(300000) | Out-Null; "Stremio $v, installer exit $($p.ExitCode)" | Tee-Object -Append $log }
+            else { "Stremio ${v}: installer not found" | Tee-Object -Append $log }
+          } catch { "Stremio: not installed ($_)" | Tee-Object -Append $log }
+          Get-Process 'Jellyfin Desktop', 'stremio-shell-ng', 'stremio-runtime' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+      - name: Swap (self-test in each player's folder), play through it, restore bit-exact (Windows PowerShell 5.1 and PowerShell 7)
+        timeout-minutes: 20
+        run: |
+          $pm = "$env:LOCALAPPDATA\PushMPC"; $fails = 0
+          $dirs = [ordered]@{ 'mpv.net' = "$env:LOCALAPPDATA\Programs\mpv.net"; 'MPC-QT' = "$env:LOCALAPPDATA\Programs\mpc-qt"
+                              'Jellyfin Desktop' = "$env:LOCALAPPDATA\Programs\Jellyfin Desktop"; 'Stremio' = "$env:LOCALAPPDATA\Programs\Stremio" }
+          $have = [ordered]@{}
+          foreach ($k in $dirs.Keys) { $d = $dirs[$k]; $dll = @('libmpv-2.dll', 'mpv-2.dll') | Where-Object { Test-Path "$d\$_" } | Select-Object -First 1; if ($dll) { $have[$k] = "$d\$dll" } }
+          $have.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" }
+          foreach ($need in 'mpv.net', 'MPC-QT') { if (-not $have[$need]) { Write-Host "::error::$need was not installed"; $fails++ } }
+          $snap = { foreach ($v in $have.Values) { Get-ChildItem (Split-Path $v) -File | Where-Object { $_.Name -match 'mpv|pushmpc' } | ForEach-Object { "$($_.FullName)=$((Get-FileHash $_.FullName).Hash)" } } }
+          $before = @(& $snap)
+          $clip = "$env:RUNNER_TEMP\clip.mkv"
+          & "$pm\mpv-native\ffmpeg.exe" -v error -y -f lavfi -i 'testsrc2=size=640x360:rate=24000/1001:duration=6' -pix_fmt yuv420p -c:v ffv1 $clip
+          foreach ($sh in 'powershell', 'pwsh') {
+            Write-Host "== $sh"
+            & $sh -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-libmpv.ps1 apply -NoTask 2>&1 | ForEach-Object { "  $_" }
+            & $sh -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-libmpv.ps1 status 2>&1 | ForEach-Object { "  $_" }
+            foreach ($k in $have.Keys) {
+              $d = Split-Path $have[$k]
+              if (-not (Test-Path "$d\pushmpc-libmpv.txt")) { Write-Host "::error::$k was not swapped"; $fails++; continue }
+              # the player's own folder in a host, with the block the forwarder loads (pushmpc.lua: the native filter)
+              $hl = "$env:RUNNER_TEMP\host-$($k -replace '\W', '')-$sh.log"
+              $out = & pwsh -NoProfile -File integrations/mpv/tests/libmpv-host.ps1 -Dll $have[$k] -Seconds 3 -Log $hl 2>&1 | Out-String
+              $t = Get-Content $hl -Raw -ErrorAction SilentlyContinue
+              $okNative = $t -match "PushMPC's native filter added" -and $t -match 'filter: [^\r\n]*x\d'
+              Write-Host "$k host: $(($out -split "`n")[0]); native filter $(if ($okNative) { 'ran' } else { 'NOT seen' })"
+              if (-not $okNative) { ($t -split "`n" | Select-String 'pushmpc|filter:|\]\[e\]' | Select-Object -First 12) | ForEach-Object { "    $_" }; Write-Host "::error::$k : PushMPC's libmpv did not run the native filter"; $fails++ }
+            }
+            # mpv.net itself on WARP: its own window, PushMPC's libmpv behind its libmpv-2.dll
+            $ml = "$env:RUNNER_TEMP\mpvnet-$sh.log"
+            $p = Start-Process "$($dirs['mpv.net'])\mpvnet.exe" -ArgumentList '--ao=null', '--d3d11-warp=yes', "--log-file=$ml", '--end=4', '--keep-open=no', "`"$clip`"" -PassThru
+            if (-not $p.WaitForExit(60000)) { $p | Stop-Process -Force }
+            Get-Process mpvnet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 2
+            $t = Get-Content $ml -Raw -ErrorAction SilentlyContinue
+            $line = ($t -split "`n" | Where-Object { $_ -match "native filter added|filter: .*x\d|hwdec" } | Select-Object -First 4) -join ' | '
+            Write-Host "::notice title=mpv.net with PushMPC's libmpv ($sh)::$line"
+            if ($t -notmatch "PushMPC's native filter added") { Write-Host "::error::mpv.net did not run PushMPC's native filter"; $fails++ }
+            & $sh -NoProfile -ExecutionPolicy Bypass -File scripts/pushmpc-libmpv.ps1 restore 2>&1 | ForEach-Object { "  $_" }
+            $diff = Compare-Object $before @(& $snap)
+            if ($diff) { $diff | Format-Table -AutoSize | Out-String -Width 300; Write-Host "::error::restore is not bit-exact ($sh)"; $fails++ }
+            if (Test-Path "$pm\libmpv-swap") { Write-Host "::error::the state folder was left behind ($sh)"; $fails++ }
+          }
+          exit $fails
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: libmpv-players-logs, path: "${{ runner.temp }}/*.log\n${{ runner.temp }}/players.txt", retention-days: 7 }

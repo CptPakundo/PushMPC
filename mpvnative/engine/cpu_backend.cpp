@@ -13,6 +13,8 @@
 #include <tuple>
 #include <vector>
 #include "backend.h"
+#include "pushmpc/pushcore_abi.h"
+static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable ceiling follows PUSHCORE_MAX_MULTIPLIER");
 #include "engine.h"
 #include "platform.h"
 #include "portable_engine.h"
@@ -61,7 +63,7 @@ public:
         const portable::Calibration cal = CalibrateCached(m_w, m_h, m_bits, s.threads, s.quality);
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.meMs, cal.genMs, false, -1, VrrActive(Opt(o, "display_fs").empty() ? -1 : std::atoi(Opt(o, "display_fs").c_str())))   // vrr_probe.h
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
-        m_k = std::clamp(pk.k, 1, 8);
+        m_k = std::clamp(pk.k, 1, kPortableMaxK);
         portable::Config c; c.width = m_w; c.height = m_h; c.bits = m_bits; c.threads = s.threads; c.quality = s.quality;
         if (!m_eng.Configure(c, why)) return false;
         if (IsSemi(m_fmt)) {

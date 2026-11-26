@@ -172,13 +172,19 @@ static void TestReuse()
 
 static void TestChroma()
 {
-    // 4K HDR 4:4:4 (49.8 MB) at 240 = 11.9 GB/s -> 4:2:0; at 120 = 5.97 -> 4:4:4
+    // 4K HDR 4:4:4 (49.8 MB) at 240 = 11.9 GB/s -> 4:2:0; the measured budget is 1.6 GB/s
     ChromaDecision d = DecideChroma(Chroma::Auto, 3840, 2160, true, 240);
     CHECK(d.use420 && d.gbs444 > 11.8 && d.gbs444 < 12.0 && d.gbs420 < 6.0);
-    d = DecideChroma(Chroma::Auto, 3840, 2160, true, 120); CHECK(!d.use420);
-    d = DecideChroma(Chroma::Auto, 3840, 2160, true, 144); CHECK(d.use420);
-    d = DecideChroma(Chroma::Auto, 3840, 2160, false, 240); CHECK(!d.use420);   // 8-bit 4K 240 = 5.97 GB/s
-    d = DecideChroma(Chroma::Auto, 1920, 1080, true, 480); CHECK(!d.use420);
+    d = DecideChroma(Chroma::Auto, 3840, 2160, false, 47.952); CHECK(!d.use420);   // 4K RGB24 x2: 1.19 GB/s, played clean
+    d = DecideChroma(Chroma::Auto, 3840, 2160, false, 95.904); CHECK(d.use420);    // x4: 2.39 GB/s dropped frames as RGB
+    d = DecideChroma(Chroma::Auto, 3840, 2160, true, 120); CHECK(d.use420);
+    d = DecideChroma(Chroma::Auto, 1920, 1080, false, 239.76); CHECK(!d.use420);   // 1080p x10: 1.49 GB/s
+    d = DecideChroma(Chroma::Auto, 1920, 1080, true, 480); CHECK(d.use420);
+    // Auto's multiplier at the budget: 4K 8-bit 23.976 fps 4:2:0 = 0.30 GB/s per x -> x5; 10-bit -> x2; 1080p: no cap
+    CHECK(ReadbackMaxK(3840, 2160, false, 23.976) == 5);
+    CHECK(ReadbackMaxK(3840, 2160, true, 23.976) == 2);
+    CHECK(ReadbackMaxK(1920, 1080, false, 23.976) >= 16);
+    CHECK(ReadbackMaxK(7680, 4320, true, 60) == 1);
     d = DecideChroma(Chroma::C444, 3840, 2160, true, 240); CHECK(!d.use420);
     d = DecideChroma(Chroma::C420, 1920, 1080, false, 48); CHECK(d.use420);
 }

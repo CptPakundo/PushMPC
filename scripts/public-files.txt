@@ -6,6 +6,7 @@ filter/CMakeLists.txt
 filter/build.cmd
 filter/src/**
 filter/tools/auto_test.cpp
+filter/tools/dshow_graph_test.cpp
 pushmpc/CMakeLists.txt
 pushmpc/include/**
 pushmpc/src/**
@@ -67,6 +68,7 @@ scripts/pushmpc-capture.ps1
 scripts/test-autoplan.ps1
 scripts/pmml-fetch.ps1
 scripts/pushmpc-plex.ps1
+scripts/pushmpc-libmpv.ps1
 scripts/build-ncnn-static.sh
 vlcplugin/**
 pmml/CMakeLists.txt

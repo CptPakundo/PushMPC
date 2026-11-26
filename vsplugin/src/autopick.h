@@ -134,7 +134,7 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, d);
     if (c.artifactReduction) t = srcH > 2160 || srcW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4;
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
-    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::VfgCeiling()));
+    p.multiplier = uint32_t(std::clamp(c.multiplier, 1, pm::CoreCeiling()));
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;

@@ -132,7 +132,12 @@ struct Costs {
     // PushFlow (4K p95, gpu-best 4b): first generated frame of a pair, each further one; Fast, Balanced, Quality
     double pfFirst[3] = { 4.49, 5.68, 11.96 }, pfNext[3] = { 3.15, 3.93, 11.40 };
     bool pfBenched = false;                         // replaced by PushFlowBench on this card (already absolute)
-    double fsrFg = 4.2;                             // FSR 3.1 FG 2x incl. FidelityFX flow
+    // PushFlow above 4x (flow once, PUSHCORE_FEATURE_PUSHFLOW16): each frame of a pair after the first is a rebuild from
+    // the grids alone (one full-size pass, no network). Prior: not measured yet (an estimate for a 4K rebuild on the
+    // RTX 5090); the speed test measures it per tier (PfRebuild*, pfRebuildBenched) and fgScale learns the rest
+    double pfRebuild[3] = { 0.8, 0.8, 0.8 };
+    bool pfRebuildBenched = false;
+    double fsrFg = 4.2;                            // FSR 3.1 FG 2x incl. FidelityFX flow
     // NVOF FG 2x: NVIDIA's optical-flow engine (fixed time per source frame, off the shaders; Turing's NVOFA about half
     // the speed of Ampere+'s) + FSR 3.1's interpolation without its own flow (~60 % of fsrFg). RTX 5090, clip A 1080p ->
     // 4K NIS, 2x: graph span 4.9-5.0 ms against FSR FG's 3.0 ms (T5b, 2026-11-25)
@@ -267,6 +272,14 @@ inline int FgKeyOf(FgMethod m, int quality)
 // NVIDIA VFG: up to 16x (8x in the SDK multiplier mode, above in its timestep mode); a pushcore without
 // PUSHCORE_FEATURE_VFG16 stops at 8x (the filter lowers VfgCeiling() when it loads one).
 inline int& VfgCeiling() { static int v = 16; return v; }
+// PushFlow: up to 16x with a pushcore that has PUSHCORE_FEATURE_PUSHFLOW16 (above 4x "flow once": one network run per
+// pair at the half-way time, every frame rebuilt from its grids at its own time); an older core stops at 4x (the callers
+// lower PushFlowCeiling() when they load one). kPushFlowOnceAbove: from where pushcore uses flow once (PushFPS patch
+// pushflow16, EnhanceGraph).
+inline int& PushFlowCeiling() { static int v = 16; return v; }
+inline constexpr int kPushFlowOnceAbove = 4;
+// the largest multiplier any method of the loaded core makes (the clamp on what goes to pushcore)
+inline int CoreCeiling() { return std::max(VfgCeiling(), PushFlowCeiling()); }
 // The no-output guard (the filter): source frames keep going into pushcore while none has come out for this long (and for
 // this many submits) -> the filter shows the source frames itself, so a stuck engine never leaves a black picture
 inline constexpr double kNoOutputMs = 1500.0;
@@ -307,7 +320,7 @@ struct DeliveryCap {
         return true;
     }
 };
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? PushFlowCeiling() : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -323,7 +336,11 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     case FgMethod::Dlssg: return (c.dlssgFlow * pix + c.dlssgPerFrame * (m - 1) * sizeVfg) * c.card;
     case FgMethod::PushFlow: {
         const int t = std::clamp(quality, 0, 2);
-        const double v = c.pfFirst[t] + c.pfNext[t] * (m - 2);
+        // up to 4x a network run per frame; above, flow once: the first frame of the pair (pack + network + rebuild), then
+        // a rebuild per further frame
+        // (a speed test from before the rebuild was measured: the rebuild prior scaled by the measured card)
+        const double rebuild = c.pfRebuild[t] * (c.pfBenched && !c.pfRebuildBenched ? c.card : 1.0);
+        const double v = m <= kPushFlowOnceAbove ? c.pfFirst[t] + c.pfNext[t] * (m - 2) : c.pfFirst[t] + rebuild * (m - 2);
         return v * (0.6 + 0.4 * pix) * (c.pfBenched ? 1.0 : c.card);
     }
     case FgMethod::Fsr: return c.fsrFg * pix * c.card;

@@ -1019,3 +1019,144 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'setup-graph-logs-${{ matrix.os }}', path: "${{ runner.temp }}/*.txt\n${{ runner.temp }}/pushmpc-logs" }
+
+  # G19: the filter in DirectShow graphs other than MPC-HC's. dshow_graph_test builds the graph the way KMPlayer, GOM
+  # Player and Zoom Player do (the system's decoder by Intelligent Connect, the filter, then EVR / VMR-9 / madVR / MPC
+  # Video Renderer / Null) on WARP; MPC-BE plays the clip with the entry Setup wrote. KMPlayer (64X and 32-bit), GOM and Zoom
+  # Player are installed, PushMPC Filter is added through each one's own dialog (tests/dshow-players-dump.py) and the
+  # settings diff is kept (artifact dshow-players-logs): the format for Setup's entry. Gating: the filter plays with EVR and MPC VR,
+  # and MPC-BE creates it.
+  dshow-players:
+    needs: release-artifact
+    if: needs.release-artifact.outputs.run != ''
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults: { run: { shell: pwsh } }
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OUT: ${{ runner.temp }}\dshow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with: { arch: x64 }
+      - uses: actions/download-artifact@v4
+        with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ needs.release-artifact.outputs.run }}', github-token: '${{ github.token }}' }
+      - name: Graph test tool, LAV Filters, MPC Video Renderer, madVR, the clip
+        timeout-minutes: 10
+        run: |
+          New-Item -ItemType Directory $env:OUT -Force | Out-Null
+          cl /nologo /std:c++20 /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX filter\tools\dshow_graph_test.cpp /Fe:"$env:RUNNER_TEMP\dshow_graph_test.exe" /link strmiids.lib ole32.lib oleaut32.lib user32.lib uuid.lib mfuuid.lib
+          if ($LASTEXITCODE -ne 0) { throw 'dshow_graph_test did not build' }
+          # LAV Filters: the system decoder the graph's Intelligent Connect finds (as in KMPlayer / GOM setups)
+          $rel = gh api repos/Nevcairiel/LAVFilters/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match 'Installer\.exe$' } | Select-Object -First 1
+          $f = "$env:RUNNER_TEMP\$($a.name)"; Invoke-WebRequest $a.browser_download_url -OutFile $f
+          $p = Start-Process $f -ArgumentList '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES' -PassThru; $p.WaitForExit(300000) | Out-Null
+          "LAV Filters $($rel.tag_name): installer exit $($p.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt"
+          $vr = gh api repos/Aleksoid1978/VideoRenderer/releases/latest | ConvertFrom-Json
+          $va = $vr.assets | Where-Object { $_.name -match '\.zip$' } | Select-Object -First 1
+          $vz = "$env:RUNNER_TEMP\$($va.name)"; Invoke-WebRequest $va.browser_download_url -OutFile $vz
+          $vd = "$env:ProgramFiles\MpcVideoRenderer"; New-Item -ItemType Directory $vd -Force | Out-Null; Expand-Archive $vz $vd -Force
+          $vax = Get-ChildItem $vd -Recurse -Filter 'MpcVideoRenderer64.ax' | Select-Object -First 1
+          $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$($vax.FullName)`"" -Wait -PassThru
+          "MPC Video Renderer $($vr.tag_name): regsvr32 exit $($r.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt"
+          try {
+            Invoke-WebRequest 'https://www.madshi.net/madVR.zip' -OutFile "$env:RUNNER_TEMP\madVR.zip"
+            Expand-Archive "$env:RUNNER_TEMP\madVR.zip" "$env:ProgramFiles\madVR" -Force
+            $mx = Get-ChildItem "$env:ProgramFiles\madVR" -Recurse -Filter 'madVR64.ax' | Select-Object -First 1
+            $r = Start-Process "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList '/s', "`"$($mx.FullName)`"" -Wait -PassThru
+            "madVR: regsvr32 exit $($r.ExitCode)" | Tee-Object -Append "$env:OUT\run.txt"
+          } catch { "madVR: not installed ($_)" | Tee-Object -Append "$env:OUT\run.txt" }
+          Invoke-WebRequest $env:CLIP_URL -OutFile "$env:RUNNER_TEMP\clip.mp4"
+      - name: MPC-BE (portable, official release), before Setup so Setup writes its External Filters entry
+        timeout-minutes: 5
+        run: |
+          $rel = gh api repos/Aleksoid1978/MPC-BE/releases/latest | ConvertFrom-Json
+          $a = $rel.assets | Where-Object { $_.name -match 'x64\.(zip|7z)$' -and $_.name -notmatch 'installer|pdb' } | Select-Object -First 1
+          $f = "$env:RUNNER_TEMP\$($a.name)"; Invoke-WebRequest $a.browser_download_url -OutFile $f
+          $d = "$env:RUNNER_TEMP\mpcbe"; 7z x $f "-o$d" -y | Out-Null
+          $exe = (Get-ChildItem $d -Recurse -Filter mpc-be64.exe | Select-Object -First 1).FullName
+          if (-not $exe) { throw 'mpc-be64.exe not found' }
+          "MPCBE_EXE=$exe" >> $env:GITHUB_ENV
+          $m = Start-Process $exe -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          # Setup finds MPC-BE by its ExePath (Find-MpcBeExe)
+          New-Item 'HKCU:\Software\MPC-BE' -Force | Out-Null; Set-ItemProperty 'HKCU:\Software\MPC-BE' -Name ExePath -Value $exe
+          "MPC-BE $($rel.tag_name) at $exe" | Tee-Object -Append "$env:OUT\run.txt"
+      - name: PushMPC-Setup.exe /S
+        timeout-minutes: 20
+        run: |
+          Remove-Item Env:PSModulePath
+          $p = Start-Process "$env:RUNNER_TEMP\release\PushMPC-Setup.exe" -ArgumentList '/S' -PassThru -RedirectStandardOutput "$env:OUT\setup-out.txt"; if (-not $p.WaitForExit(1100000)) { $p.Kill(); throw 'Setup timed out' }
+          "Setup exit $($p.ExitCode); filter registered: $(Test-Path 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}\InprocServer32')" | Tee-Object -Append "$env:OUT\run.txt"
+          Get-Content "$env:OUT\setup-out.txt" | Select-String -Pattern 'MPC-BE|Capture|capture' | ForEach-Object { $_.Line } | Tee-Object -Append "$env:OUT\run.txt"
+      - name: Graph test (the filter between the system decoder and each renderer, WARP)
+        timeout-minutes: 8
+        run: |
+          $logs = "$env:LOCALAPPDATA\PushMPC\logs"
+          $gate = @{}
+          foreach ($r in 'evr', 'mpcvr', 'vmr9', 'madvr', 'null') {
+            Remove-Item "$logs\filter-*.log" -ErrorAction SilentlyContinue
+            $line = & "$env:RUNNER_TEMP\dshow_graph_test.exe" "$env:RUNNER_TEMP\clip.mp4" $r 8 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            $f = @(Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue)
+            $key = if ($f.Count) { (Get-Content $f[0].FullName | Select-String -Pattern 'input type|output type|status:|pass-through|multiplier|renderer|downstream' | Select-Object -First 6 | ForEach-Object { ($_.Line -replace '^\S+ \[\d+\] qpc [\d.]+ ', '') }) -join ' / ' } else { 'no filter log' }
+            "$r (exit $code): $($line.Trim()) | filter: $key" | Tee-Object -Append "$env:OUT\run.txt"
+            Write-Host "::notice title=graph + $r::exit $code $($line.Trim())"
+            $gate[$r] = $code -eq 0
+            if ($f.Count) { Copy-Item $f[0].FullName "$env:OUT\filter-graph-$r.log" }
+          }
+          "GRAPH_EVR=$($gate['evr'])" >> $env:GITHUB_ENV
+          "GRAPH_MPCVR=$($gate['mpcvr'])" >> $env:GITHUB_ENV
+      - name: MPC-BE plays the clip with Setup's entry; the filter must be created
+        timeout-minutes: 5
+        run: |
+          $logs = "$env:LOCALAPPDATA\PushMPC\logs"
+          Get-ChildItem 'HKCU:\Software\MPC-BE\External Filters' -ErrorAction SilentlyContinue | ForEach-Object { $q = Get-ItemProperty $_.PSPath; "MPC-BE entry $($_.PSChildName): $($q.Name) enabled $($q.Enabled) load type $($q.LoadType)" } | Tee-Object -Append "$env:OUT\run.txt"
+          Remove-Item "$logs\filter-*.log" -ErrorAction SilentlyContinue
+          $m = Start-Process $env:MPCBE_EXE -ArgumentList "`"$env:RUNNER_TEMP\clip.mp4`"", '/play' -PassThru; Start-Sleep 20
+          if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          Start-Sleep 2
+          $f = @(Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue)
+          "MPC-BE: filter log $(if ($f.Count) { $f[0].Name } else { 'none' })" | Tee-Object -Append "$env:OUT\run.txt"
+          if ($f.Count) { Copy-Item $f[0].FullName "$env:OUT\filter-mpcbe.log"; Get-Content $f[0].FullName | Select-Object -First 30 | Tee-Object -Append "$env:OUT\run.txt" }
+          "MPCBE_FILTER=$($f.Count -gt 0)" >> $env:GITHUB_ENV
+      - name: KMPlayer, GOM Player, Zoom Player (installed; each one's "add external filter" dialog driven, settings diffed; informational)
+        timeout-minutes: 25
+        continue-on-error: true
+        run: |
+          # the critic's route (claim 4): their filter-list formats are not documented, so learn them here: snapshot
+          # HKCU\Software and the players' files, add PushMPC Filter through each player's own dialog (pywinauto),
+          # close it, snapshot again, keep the differences (artifact dshow-players-logs, folder dump\<player>)
+          python -m pip install --quiet pywinauto pillow 2>&1 | Select-Object -Last 2
+          $players = @(
+            @{ id = 'kmplayer64x'; choco = @('kmplayer64x', 'kmplayer-64x'); exe = @('KMPlayer 64X\KMPlayer64.exe') },
+            @{ id = 'kmplayer'; choco = @('kmplayer'); exe = @('KMPlayer\KMPlayer.exe', 'The KMPlayer\KMPlayer.exe') },
+            @{ id = 'gom'; choco = @('gom-player', 'gomplayer'); exe = @('GRETECH\GomPlayer\GOM.exe', 'GRETECH\GOMPlayer\GOM.exe', 'GOM\GOMPlayer\GOM.exe') },
+            @{ id = 'zoom'; choco = @('zoomplayer', 'zoom-player'); exe = @('Zoom Player\zplayer.exe', 'Zoom Player MAX\zplayer.exe') })
+          foreach ($pkg in $players) {
+            $find = { @(foreach ($rel in $pkg.exe) { foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) { $c = Join-Path $root $rel; if (Test-Path $c) { $c } } })[0] }
+            $exe = & $find
+            foreach ($id in $pkg.choco) { if ($exe) { break }; choco install $id -y --no-progress 2>&1 | Select-Object -Last 2 | Tee-Object -Append "$env:OUT\run.txt"; $exe = & $find }
+            if (-not $exe) { "$($pkg.id): not installed (choco $($pkg.choco -join ' / '))" | Tee-Object -Append "$env:OUT\run.txt"; continue }
+            # a first start writes the defaults, so the dump shows only what adding the filter changed
+            $m = Start-Process $exe -PassThru; Start-Sleep 12
+            if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+            python tests\dshow-players-dump.py "$env:OUT\dump" $pkg.id $exe 2>&1 | Tee-Object -Append "$env:OUT\run.txt"
+            Get-Content "$env:OUT\dump\$($pkg.id)\found.txt" -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { "  $($pkg.id): $_" } | Tee-Object -Append "$env:OUT\run.txt"
+            # what Setup's check (Test-DshowPlayerEntry) concludes from the same settings
+            $t = [System.Management.Automation.Language.Parser]::ParseFile("$PWD\scripts\pushmpc-install.ps1", [ref]$null, [ref]$null)
+            $fn = $t.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Test-DshowPlayerEntry' }, $true) | Select-Object -First 1
+            . ([scriptblock]::Create($fn.Extent.Text))
+            $name = @{ kmplayer64x = 'KMPlayer 64X'; kmplayer = 'KMPlayer'; gom = 'GOM Player'; zoom = 'Zoom Player' }[$pkg.id]
+            "  $($pkg.id): Setup's check sees the entry: $(Test-DshowPlayerEntry $name $exe)" | Tee-Object -Append "$env:OUT\run.txt"
+          }
+      - name: Summary and gate
+        if: always()
+        run: |
+          @('## dshow-players', '', '```') + (Get-Content "$env:OUT\run.txt" -ErrorAction SilentlyContinue) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          if ($env:GRAPH_EVR -ne 'True') { Write-Host '::error::the filter did not play in front of EVR (KMPlayer / GOM / Zoom Player route)'; exit 1 }
+          if ($env:GRAPH_MPCVR -ne 'True') { Write-Host '::error::the filter did not play in front of MPC Video Renderer in a plain graph'; exit 1 }
+          if ($env:MPCBE_FILTER -ne 'True') { Write-Host '::error::MPC-BE did not create the filter'; exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: dshow-players-logs, path: "${{ runner.temp }}/dshow" }

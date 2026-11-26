@@ -602,7 +602,7 @@ struct PushCore {
             break;
         case PUSHCORE_FG_PUSHFLOW:
             s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
-            cap = 4;
+            cap = PUSHCORE_MAX_MULTIPLIER;   // flow once above 4x (patches/pushfps-4.5.4-pushflow16.patch)
             break;
         case PUSHCORE_FG_NVOF:
             // NVIDIA's optical-flow hardware as the motion, FSR 3.1's interpolation and warp (T5b, unlock NvofWarp): the
@@ -802,12 +802,12 @@ struct PushCore {
             c.push_back({b, cap});
         };
         switch (settings.fgBackend) {
-        case PUSHCORE_FG_DLSSG: add(PUSHCORE_FG_DLSSG, 8); if (m > 4) add(PUSHCORE_FG_DLSSG, 4); if (m > 2) add(PUSHCORE_FG_DLSSG, 2); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); break;
-        case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
-        case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
-        case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
-        case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, 4); break;
-        default: add(PUSHCORE_FG_VFG, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, 4); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        case PUSHCORE_FG_DLSSG: add(PUSHCORE_FG_DLSSG, 8); if (m > 4) add(PUSHCORE_FG_DLSSG, 4); if (m > 2) add(PUSHCORE_FG_DLSSG, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_FSR, 2); break;
+        case PUSHCORE_FG_PUSHFLOW: add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        case PUSHCORE_FG_FSR: add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
+        case PUSHCORE_FG_AMDFRC: add(PUSHCORE_FG_AMDFRC, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); break;
+        case PUSHCORE_FG_NVOF: add(PUSHCORE_FG_NVOF, 2); add(PUSHCORE_FG_FSR, 2); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); break;
+        default: add(PUSHCORE_FG_VFG, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_DLSSG, 6); add(PUSHCORE_FG_PUSHFLOW, PUSHCORE_MAX_MULTIPLIER); add(PUSHCORE_FG_FSR, 2); if (amd) add(PUSHCORE_FG_AMDFRC, 2); break;
         }
         c.push_back({PUSHCORE_FG_NONE, 1});
         return c;
@@ -1792,7 +1792,7 @@ int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* sett
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16; }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_PUSHFLOW16; }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -2021,8 +2021,11 @@ int pushcore_capabilities(uint64_t adapterLuid, const wchar_t* rootDir, PushCore
 // inference), synthetic textured frames shifted by 8 px, warm-up, then per pair the first generated frame (full pack)
 // and one further frame (time-only pack), each bracketed by D3D12 timestamps around pack, network and rebuild.
 int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreFlowBench* io) {
-    if (!io || io->structSize < sizeof(PushCoreFlowBench)) return PUSHCORE_ERROR;
+    if (!io || io->structSize < offsetof(PushCoreFlowBench, rebuildMsP50)) return PUSHCORE_ERROR;
+    // the appended rebuild timings (PUSHCORE_FEATURE_PUSHFLOW16) only for a caller whose struct has them
+    const bool wantRebuild = io->structSize >= sizeof(PushCoreFlowBench);
     for (int t = 0; t < 3; ++t) io->firstMsP50[t] = io->firstMsP95[t] = io->nextMsP50[t] = io->nextMsP95[t] = io->initMs[t] = -1;
+    if (wantRebuild) for (int t = 0; t < 3; ++t) io->rebuildMsP50[t] = io->rebuildMsP95[t] = -1;
     io->adapter[0] = 0; io->note[0] = 0;
     std::string note;
     auto finish = [&](int r) { std::snprintf(io->note, sizeof(io->note), "%s", note.c_str()); return r; };
@@ -2134,6 +2137,26 @@ int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCor
             auto pct = [](std::vector<double> v, double p) { std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, size_t(p * double(v.size() - 1) + 0.5))]; };
             io->firstMsP50[tier] = pct(first, 0.5); io->firstMsP95[tier] = pct(first, 0.95);
             io->nextMsP50[tier] = pct(next, 0.5); io->nextMsP95[tier] = pct(next, 0.95);
+            // flow once (PUSHCORE_FEATURE_PUSHFLOW16): a frame rebuilt from the last run's grids, no network
+            if (wantRebuild && flow.status().grids) {
+                std::vector<double> rebuild;
+                for (int i = 0; i < pairs && good; ++i) {
+                    good = begin();
+                    if (!good) break;
+                    list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+                    good = flow.resolveAt(list.Get(), a.Get(), b.Get(), output.Get(), float(i % 7 + 1) / 8.0f, 0.5f);
+                    list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+                    list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback.Get(), 0);
+                    good = submit() && wait() && good;
+                    if (!good) break;
+                    uint64_t* ts = nullptr;
+                    readback->Map(0, nullptr, reinterpret_cast<void**>(&ts));
+                    rebuild.push_back(double(ts[1] - ts[0]) * 1000.0 / double(frequency));
+                    const D3D12_RANGE none{0, 0}; readback->Unmap(0, &none);
+                }
+                if (!rebuild.empty()) { io->rebuildMsP50[tier] = pct(rebuild, 0.5); io->rebuildMsP95[tier] = pct(rebuild, 0.95); }
+                good = true;   // a failed rebuild run leaves the first/next results of this tier standing
+            }
             note += std::format("{}: {} {}; ", tierName[tier], flow.status().model, flow.status().precision);
             any = true;
         }

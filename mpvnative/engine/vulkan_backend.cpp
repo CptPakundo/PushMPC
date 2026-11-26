@@ -110,13 +110,25 @@ public:
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true,
                                                        Opt(o, "display_fs") == "1" ? 0.0 : -1.0, VrrActive(Opt(o, "display_fs").empty() ? -1 : std::atoi(Opt(o, "display_fs").c_str())))   // pushmpc-native.lua; vrr_probe.h
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
-        m_k = std::clamp(pk.k, 1, 8);
+        m_k = std::clamp(pk.k, 1, kPortableMaxK);
         m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
         m_holdOn = m_k > 1 && ParseBool(Opt(o, "subtitle_hold", ReadSetting("SubtitleHold")), false);
         m_transitions = m_k > 1 && ParseBool(Opt(o, "transitions", ReadSetting("TransitionRules")), true);
         const int look = m_dedup ? 2 : 0;
+        std::string slotNote;
         if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots) {   // a settle can release (lookahead + 1) x k outputs
-            c.outSlots = std::min(needOuts, 28);
+            // the output slots share one device buffer: up to 16x (50 slots with Dedup's lookahead) while they stay within
+            // 1.5 GB (4K 10-bit 4:2:0: ~25 MB a slot); past that the multiplier steps down to what the slots hold
+            const double slotBytes = double(m_eng.OutWidth()) * double(m_eng.OutHeight()) * (m_bits > 8 ? 2.0 : 1.0) * 1.5;
+            const int maxSlots = std::max(28, int(1.5e9 / std::max(1.0, slotBytes)));
+            if (needOuts > maxSlots) {
+                const int k = std::max(1, (maxSlots - 2) / (look + 1));
+                char b[160];
+                std::snprintf(b, sizeof(b), "; x%d needs %d output slots of %.0f MB, %d fit: x%d", m_k, needOuts, slotBytes / 1e6, maxSlots, k);
+                slotNote = b;
+                m_k = k;
+            }
+            c.outSlots = (look + 1) * m_k + 2;
             if (!m_eng.Configure(c, m_ctx, why) || !MakePipesOnce(why)) return false;
         }
         m_cadence.Configure(m_k, look, 0);
@@ -129,7 +141,7 @@ public:
         out.keep_dynamic_hdr = 1;
         std::snprintf(out.engine, sizeof(out.engine), "portable-vulkan");
         std::snprintf(out.description, sizeof(out.description), "PushFPS portable engine on %s (the decoder's device), %dx%d %d-bit -> %dx%d (%s); %s",
-                      m_ctx->Info().Describe().c_str(), m_w, m_h, m_bits, m_eng.OutWidth(), m_eng.OutHeight(), UpscalerName(c.upscaler), pk.why.c_str());
+                      m_ctx->Info().Describe().c_str(), m_w, m_h, m_bits, m_eng.OutWidth(), m_eng.OutHeight(), UpscalerName(c.upscaler), (pk.why + slotNote).c_str());
         std::snprintf(out.description + std::strlen(out.description), sizeof(out.description) - std::strlen(out.description), "; Dedup %s, Subtitle Hold %s",
                       m_dedup ? "on" : "off", m_holdOn ? "on" : "off");
         return true;

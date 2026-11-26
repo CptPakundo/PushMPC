@@ -21,7 +21,7 @@ local options = require 'mp.options'
 -- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
 local opts = { vpy = "", buffered = "4", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
-               shaders = "", ["shaders-when"] = "fallback" }
+               shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "" }
 options.read_options(opts, "pushmpc")
 
 local shaders_on = false
@@ -64,7 +64,36 @@ if opts.mode == "vsr" then
     return
 end
 
-if opts.vpy == "" then
+-- One copy of this script per player: a libmpv that PushMPC swapped in loads the block itself (pushmpc-libmpv.ps1),
+-- and the player's own config may name the script too
+do
+    local owner = mp.get_property("user-data/pushmpc/script", "")
+    if owner ~= "" and owner ~= mp.get_script_name() then
+        msg.verbose("already running as " .. owner .. ": this copy does nothing")
+        return
+    end
+    mp.set_property("user-data/pushmpc/script", mp.get_script_name())
+end
+
+-- native (pushmpc-native=auto | no): PushMPC's own libmpv has the "pushmpc" filter itself (vf_pushmpc: decoder textures
+-- straight into PushMPC's engine, no copy to the CPU and back). Then it is used instead of VapourSynth, with D3D11
+-- decoding (hwdec=d3d11va when the block's auto-copy or libmpv's default is in effect; software frames get an upload
+-- to the GPU in front of the filter). Any other libmpv refuses the name and the VapourSynth route below runs as before.
+-- (PushMPC's builds carry PUSHMPC_BUILD in mpv-configuration: other libmpvs are not probed, so they log no error)
+local native = false
+if opts.native == "yes" or (opts.native ~= "no" and mp.get_property("mpv-configuration", ""):find("PUSHMPC_BUILD", 1, true)) then
+    local ok = mp.commandv("vf", "add", "@pushmpc-probe:pushmpc")
+    if ok then
+        mp.commandv("vf", "remove", "@pushmpc-probe")
+        native = true
+        local hw = mp.get_property("options/hwdec", "")
+        -- (libmpv starts with "no": a player that sets nothing gets D3D11 decoding, the zero-copy input)
+        if hw == "auto-copy" or hw == "" or hw == "no" then mp.set_property("options/hwdec", "d3d11va,auto") end
+        msg.info("PushMPC's own libmpv: the native filter (vf_pushmpc) is used")
+    end
+end
+
+if not native and opts.vpy == "" then
     msg.warn("no pushmpc-vpy in script-opts: nothing to do")
     return
 end
@@ -78,8 +107,30 @@ end
 local spec = "@pushmpc:vapoursynth=file=" .. quote(opts.vpy) .. ":buffered-frames=" .. opts.buffered ..
              ":concurrent-frames=" .. opts.concurrent
 
+-- the native filter's list: vf_pushmpc with the display rate when mpv knows it, and on software frames an upload to
+-- the player's D3D11 device first
+local function native_specs()
+    local o = {}
+    local disp = mp.get_property_number("display-fps", 0)
+    if disp and disp > 0 then o[#o + 1] = string.format("display_fps=%.3f", disp) end
+    if opts["native-opts"] ~= "" then o[#o + 1] = opts["native-opts"] end
+    local s = "@pushmpc:pushmpc" .. (#o > 0 and ("=" .. table.concat(o, ":")) or "")
+    if mp.get_property("hwdec-current", "no") == "d3d11va" then return { s } end
+    local vp = mp.get_property_native("video-params") or {}
+    local fmt = tostring(vp.pixelformat or ""):match("10") and "p010" or "nv12"
+    return { "@pushmpc-fmt:format=" .. fmt, "@pushmpc-up:hwupload", s }
+end
+local native_last = nil
+local native_up_failed = nil   -- the file on which the upload could not start: vf_pushmpc on CPU frames then
+
 local failed_for = nil   -- the file the filter failed on: no retry until the next file
 local busy = false
+
+local function remove_native()
+    for _, f in ipairs(mp.get_property_native("vf") or {}) do
+        if f.label == "pushmpc" or f.label == "pushmpc-fmt" or f.label == "pushmpc-up" then mp.commandv("vf", "remove", "@" .. f.label) end
+    end
+end
 
 local function ensure()
     if busy then return end
@@ -90,7 +141,35 @@ local function ensure()
     local ours = false
     for _, f in ipairs(vf) do if f.label == "pushmpc" then ours = true end end
     busy = true
-    if not ours then
+    if native then
+        local list = native_specs()
+        if native_up_failed == path then list = { list[#list] } end
+        local want = table.concat(list, ",")
+        if not ours or want ~= native_last then
+            if ours then remove_native() end
+            local ok, err = true, nil
+            for _, s in ipairs(list) do
+                ok, err = mp.commandv("vf", "append", s)
+                if not ok then break end
+            end
+            if not ok and #list > 1 then
+                -- no D3D11 device to upload to (a player without one): vf_pushmpc on the CPU frames
+                remove_native(); native_up_failed = path
+                list = { list[#list] }; want = list[1]
+                ok, err = mp.commandv("vf", "append", want)
+            end
+            if not ok then
+                remove_native()
+                failed_for = path; native_last = nil
+                msg.warn("PushMPC's native filter could not start (" .. tostring(err) .. "): playing without it")
+                shaders("PushMPC's filter unavailable")
+                busy = false
+                return
+            end
+            native_last = want
+            msg.info("PushMPC's native filter added: " .. want)
+        end
+    elseif not ours then
         local ok, err = mp.commandv("vf", "append", spec)
         if not ok then
             failed_for = path
