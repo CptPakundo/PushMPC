@@ -81,6 +81,7 @@ jobs:
   # tarballs; a failure there leaves the add-on out (Kodi then plays through mpv), nothing else
   kodi:
     uses: ./.github/workflows/kodi-addon.yml
+    with: { wayland: false }   # the Wayland playback test builds nothing for the release
 
   build:
     needs: [vlc, mpvnative, kodi]

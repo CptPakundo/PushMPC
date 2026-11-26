@@ -12,6 +12,11 @@ on:
     paths: ['kodiaddon/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', '.github/workflows/kodi-addon.yml']
   # release.yml builds the release's Kodi add-on through this workflow (artifacts pushmpc-kodi-Windows / -Linux)
   workflow_call:
+    inputs:
+      wayland:
+        description: 'also run the Kodi-on-Wayland test job (it builds no artifact)'
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       macos:
@@ -24,7 +29,7 @@ on:
         default: ''
 
 concurrency:
-  group: kodi-addon-${{ github.ref }}
+  group: kodi-addon-${{ github.workflow }}-${{ github.ref }}   # called from release.yml: its own group (github.workflow is the caller's)
   cancel-in-progress: true
 
 env:
@@ -159,7 +164,8 @@ jobs:
     # add-on hands out dma-bufs where the renderer shows them (zero copy: the GPU engine writes into them in place).
     # The _noalloc cases take the allocator away: Kodi's thumbnail and stream-detail probes must keep working
     needs: build
-    if: ${{ !cancelled() }}
+    # push and dispatch always; a caller (release.yml) may turn it off with wayland: false
+    if: ${{ !cancelled() && format('{0}', inputs.wayland) != 'false' }}   # inputs.wayland is empty on push and dispatch
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -168,17 +174,29 @@ jobs:
         with: { name: addon-Linux-kodi22, path: addon }
       - uses: LABSN/sound-ci-helpers@v1
       - name: Flatpak, Weston, ffmpeg, udmabuf
+        id: udmabuf
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak weston ffmpeg dbus-x11 > /dev/null
-          # udev sets the node's mode after modprobe returns (root:kvm 0660): a rule, then wait for udev, then check
+          # udmabuf is built into some runner kernels (the node exists, modprobe finds no module: azure 6.x has it as
+          # a module, aws 7.x builds it in) and missing from others' base modules (linux-modules-extra has it)
+          echo "kernel $(uname -r)"
           echo 'KERNEL=="udmabuf", MODE="0666"' | sudo tee /etc/udev/rules.d/99-pushmpc-udmabuf.rules > /dev/null
           sudo udevadm control --reload || true
-          sudo modprobe udmabuf || echo "::warning::no udmabuf"
+          if [ ! -e /dev/udmabuf ]; then
+            sudo modprobe udmabuf 2>/dev/null || {
+              echo "udmabuf: no module in the base set, trying linux-modules-extra-$(uname -r)"
+              sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" > /dev/null 2>&1 && sudo modprobe udmabuf || true
+            }
+          else
+            echo "udmabuf: present (built in or loaded)"
+          fi
+          # udev sets the node's mode after it appears (root:kvm 0660): wait for udev, then make it writable
           sudo udevadm settle || true
-          sudo chmod 666 /dev/udmabuf || true
+          sudo chmod 666 /dev/udmabuf 2>/dev/null || true
           ls -l /dev/udmabuf /dev/dma_heap 2>&1 || true
-          test -w /dev/udmabuf && echo "udmabuf writable" || echo "::warning::udmabuf not writable"
+          if [ -w /dev/udmabuf ]; then echo "have=1" >> "$GITHUB_OUTPUT"; echo "udmabuf writable"
+          else echo "have=0" >> "$GITHUB_OUTPUT"; echo "::notice title=kodi-wayland::skipped: no udmabuf on this runner (kernel $(uname -r)); the dma-buf cases do not run"; fi
           flatpak remote-add --user --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
       - name: Kodi 22 from Flathub beta
@@ -193,11 +211,17 @@ jobs:
           sleep 3; cat "$RUNNER_TEMP/weston.log" | tail -5
           export WAYLAND_DISPLAY=wayland-pm
           home="$HOME/.var/app/tv.kodi.Kodi/data"; mkdir -p "$home"
+          # without udmabuf the dma-buf cases are skipped (reported in the summary); the rest still runs
+          cases="zerocopy,zerocopy10,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
+          if [ "${{ steps.udmabuf.outputs.have }}" != 1 ]; then
+            cases="h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
+            mkdir -p out; printf '**skipped: no udmabuf** on this runner (kernel %s): zerocopy, zerocopy10\n\n' "$(uname -r)" > out/summary.md
+          fi
           dbus-run-session -- python3 kodiaddon/ci/run_cases.py \
             --kodi "flatpak run --user --branch=beta --device=all --env=PUSHMPC_VK_ALLOW_CPU=1 --filesystem=$RUNNER_TEMP/clips:ro tv.kodi.Kodi --windowing=wayland" --gpu --prime \
             --alloc-off "sudo chmod 600 /dev/udmabuf" --alloc-on "sudo chmod 666 /dev/udmabuf" \
             --kill "flatpak kill tv.kodi.Kodi" --home "$home" --addon addon/inputstream.pushmpc \
-            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "zerocopy,zerocopy10,h264_x2,hdr10_x2,hdr10_kodi,hdr10_noalloc,browse_noalloc"
+            --clips "$RUNNER_TEMP/clips" --major 22 --out out --cases "$cases"
       - name: Summary
         if: always()
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
