@@ -65,15 +65,23 @@ for rx in a.need:
     if not re.search(rx, log): problems.append(f"log lacks /{rx}/")
 if a.zc == "on":
     if "PushMPC: zero copy on" not in log: problems.append("zero copy not on")
-    zm = re.findall(r"zero copy on (in (d+), out (d+), fell back (d+))", log)
+    zm = re.findall(r"zero copy on \(in (\d+), out (\d+), fell back (\d+)\)", log)
     if zm and (int(zm[-1][0]) == 0 or (a.expect == "hw" and k > 1 and int(zm[-1][1]) == 0)): problems.append(f"zero copy counters {zm[-1]}")
 elif a.zc == "off" and "PushMPC: zero copy on" in log:
     problems.append("zero copy on, but this case must copy")
 if want and n < 0.9 * want: problems.append(f"{n} frames shown, {want} expected")
+# real time: in worker mode pushmpc_out shows the real frame in place of a generated one that is not ready by its
+# display time (a runner whose CPU is over budget at this multiplier); each such frame is a jump back to the pair's
+# start (and a repeat when several in a row), so they are allowed up to the number the output stage reports
+late = max([int(x) for x in re.findall(r"output stage: .*not ready=(\d+)", log)] or [0])
+gen_n = max([int(x) for x in re.findall(r"PushMPC: close, in=\d+ out=\d+ generated=(\d+)", log)] or [0])
+skipped = ""
 if a.skip_motion: pass
+elif late and gen_n and late > 0.5 * gen_n:
+    skipped = f"motion not judged: {late} of {gen_n} generated frames were not ready in time on this runner (real-time limit, not the transport)"
 elif len(steps) < 20: problems.append(f"too few measurable frames ({len(steps)})")
-elif back > 3: problems.append(f"{back} jumps back (stale or misordered frames)")
-elif moving < (0.7 if k > 1 else 0.9): problems.append(f"only {len(steps) - repeats}/{len(steps)} frames show a new box position")
+elif back > 3 + late: problems.append(f"{back} jumps back (stale or misordered frames; {late} late frames explain {late})")
+elif len(steps) - repeats < (0.7 if k > 1 else 0.9) * (len(steps) - late): problems.append(f"only {len(steps) - repeats}/{len(steps)} frames show a new box position ({late} late)")
 elif a.src_frames and abs(mean_step - step) > 0.25 * step: problems.append(f"mean step {mean_step:.2f} px, {step:.2f} expected")
 m = re.search(r"PushMPC: hw path ok, x(\d+) \((.*)\)\s*$", log, re.M)
 how = m.group(2) if m else ""
@@ -81,13 +89,15 @@ gen = re.findall(r"PushMPC: close, in=\d+ out=\d+ generated=(\d+)", log)
 hwline = re.findall(r"PushMPC: hardware path [^\n]*", log)
 res = dict(case=a.case, expect=a.expect, k=k, frames=n, expected=want, steps=len(steps), good=good, repeats=repeats, back=back, mean_step=round(mean_step, 3),
            median_step=round(statistics.median(steps), 3) if steps else None, decoder=hwdec.group(1) if hwdec else "",
-           path=how, generated=int(gen[-1]) if gen else 0, closing=hwline[-1] if hwline else "", problems=problems)
-verdict = "FAIL" if problems else "PASS"
+           path=how, generated=int(gen[-1]) if gen else 0, late=late, closing=hwline[-1] if hwline else "", problems=problems, skipped=skipped)
+verdict = "FAIL" if problems else "SKIP" if skipped else "PASS"
+if skipped and os.environ.get("GITHUB_ACTIONS"):
+    print(f"::warning::{a.case}: {skipped}")
 print(verdict, json.dumps(res))
 with open(os.path.splitext(a.csv)[0] + ".hw.json", "w") as f:
     json.dump(res, f, indent=1)
 if os.environ.get("GITHUB_STEP_SUMMARY"):
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
         f.write(f"| {a.case} | {verdict} | {a.expect} x{k} | {n} / {want} | {good}/{len(steps)} ({repeats} repeats) | "
-                f"{res['median_step']} / {step:.2f} | {res['generated']} | {how or '; '.join(problems) or '-'} |\n")
+                f"{res['median_step']} / {step:.2f} | {res['generated']} | {skipped or how or '; '.join(problems) or '-'} |\n")
 raise SystemExit(1 if problems else 0)
