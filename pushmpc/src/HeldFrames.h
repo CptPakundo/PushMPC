@@ -122,13 +122,15 @@ struct RegionFrame {
     uint32_t changedCells = 0, cells = 0;
     bool cut = false;                   // most of the picture changed and no shift explains it
     float gain = 0;                     // median signed change of the cells (codes): a fade, a flash, a light change
-    bool zoom = false;                  // opposite parts of the picture moved apart or together: a zoom
+    bool zoom = false;                  // a zoom faster than kZoomGate per frame (the similarity model below does not hold)
+    float scale = 1.f;                  // camera scale against the previous frame about the picture centre (push-ins, pull-outs)
     double changedShare() const { return cells ? double(changedCells) / cells : 0.0; }
 };
 inline constexpr float kCellChangeCodes = 8.0f;    // the change threshold until NoiseFloor has seen the clip
 inline constexpr float kChromaChangeCodes = 6.0f;  // |dCb| + |dCr| of a cell mean
 inline constexpr double kCutShare = 0.5;
 inline constexpr float kFadeGain = 1.5f;           // codes of median change: the whole picture brightens or darkens
+inline constexpr float kZoomGate = 0.02f;          // scale change per frame beyond which a zoom gates the repair
 
 // The clip's noise floor: the 99th percentile of the cell changes on wholly held frames (grain, dither and compression
 // noise of a repeated drawing), smoothed. The change threshold follows it: clean digital anime (p99 about 1 code) gets
@@ -204,20 +206,21 @@ inline RegionFrame CompareRegions(const CellGrid& prev, const CellGrid& cur, flo
     const int W = int(cur.w), H = int(cur.h);
     // zoom: the left and right thirds move apart in x while the top and bottom thirds move apart in y (both the same way:
     // in or out). A multi-plane pan moves bands at different speeds along one axis only, so it is not a zoom.
-    {
-        int lx, ly, rx, ry, tx, ty, ux, uy;
-        SearchShift(P2, C2, 1, bx, by, lx, ly, 0.f, 0.33f, 0.f, 1.f);
-        SearchShift(P2, C2, 1, bx, by, rx, ry, 0.67f, 1.f, 0.f, 1.f);
-        SearchShift(P2, C2, 1, bx, by, tx, ty, 0.f, 1.f, 0.f, 0.33f);
-        SearchShift(P2, C2, 1, bx, by, ux, uy, 0.f, 1.f, 0.67f, 1.f);
-        const int sx = rx - lx, sy = uy - ty;
-        r.zoom = sx != 0 && sy != 0 && (sx > 0) == (sy > 0);
-    }
     const int mg = std::max(std::abs(bx), std::abs(by)) + 3;
-    auto err = [&](float dx, float dy) {
+    // the shift over a part of the picture [x0, x1) x [y0, y1) (cells), sub-cell
+    auto errIn = [&](float dx, float dy, int x0, int x1, int y0, int y1) {
         double e = 0; int n = 0;
-        for (int y = mg; y < H - mg; y += 3) for (int x = mg; x < W - mg; x += 3) { e += std::fabs(cur.at(x, y) - prev.sample(x - dx, y - dy)); ++n; }
+        for (int y = std::max(mg, y0); y < std::min(H - mg, y1); y += 3) for (int x = std::max(mg, x0); x < std::min(W - mg, x1); x += 3) { e += std::fabs(cur.at(x, y) - prev.sample(x - dx, y - dy)); ++n; }
         return n ? e / n : 1e30;
+    };
+    auto err = [&](float dx, float dy) { return errIn(dx, dy, 0, W, 0, H); };
+    auto subShift = [&](int x0, int x1, int y0, int y1, float cx, float cy, float& ox, float& oy) {
+        double be = 1e30; ox = cx; oy = cy;
+        for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) { const double e = errIn(cx + i, cy + j, x0, x1, y0, y1); if (e < be) { be = e; ox = cx + i; oy = cy + j; } }
+        const double ex0 = errIn(ox - 1, oy, x0, x1, y0, y1), ex1 = errIn(ox + 1, oy, x0, x1, y0, y1), ey0 = errIn(ox, oy - 1, x0, x1, y0, y1), ey1 = errIn(ox, oy + 1, x0, x1, y0, y1);
+        const double dxx = ex0 - 2 * be + ex1, dyy = ey0 - 2 * be + ey1;
+        if (dxx > 1e-9) ox += float(std::clamp(0.5 * (ex0 - ex1) / dxx, -0.5, 0.5));
+        if (dyy > 1e-9) oy += float(std::clamp(0.5 * (ey0 - ey1) / dyy, -0.5, 0.5));
     };
     float fx = float(bx), fy = float(by);
     {
@@ -228,7 +231,23 @@ inline RegionFrame CompareRegions(const CellGrid& prev, const CellGrid& cur, flo
         if (dxx > 1e-9) fx += float(std::clamp(0.5 * (ex0 - ex1) / dxx, -0.5, 0.5));
         if (dyy > 1e-9) fy += float(std::clamp(0.5 * (ey0 - ey1) / dyy, -0.5, 0.5));
     }
-    const bool slid = std::fabs(fx) + std::fabs(fy) >= 0.25f;
+    // the scale (research P7: a similarity camera, so push-ins get repair instead of a gate): the left and right thirds'
+    // x shifts and the top and bottom thirds' y shifts spread apart by (scale - 1) x their distance (2/3 of the picture)
+    {
+        float lx, ly, rx, ry, tx, ty, ux, uy;
+        subShift(0, W / 3, 0, H, fx, fy, lx, ly); subShift(2 * W / 3, W, 0, H, fx, fy, rx, ry);
+        subShift(0, W, 0, H / 3, fx, fy, tx, ty); subShift(0, W, 2 * H / 3, H, fx, fy, ux, uy);
+        const float sx = (rx - lx) / (2.f * W / 3.f), sy = (uy - ty) / (2.f * H / 3.f);
+        // a zoom moves both spreads the same way; a multi-plane pan moves one axis only (no scale)
+        if (sx * sy > 0.f) {
+            r.scale = 1.f + 0.5f * (sx + sy);
+            fx = 0.5f * (lx + rx); fy = 0.5f * (ty + uy);   // the shift at the centre
+        }
+        r.zoom = std::fabs(r.scale - 1.f) > kZoomGate;
+    }
+    const bool scaled = std::fabs(r.scale - 1.f) > 0.001f;
+    const bool slid = std::fabs(fx) + std::fabs(fy) >= 0.25f || scaled;
+    const float cxm = 0.5f * float(W - 1), cym = 0.5f * float(H - 1);
     r.dx = fx; r.dy = fy; r.cells = uint32_t(W) * H; r.changed.assign(r.cells, 0);
     // gain: the median signed change (every third cell)
     {
@@ -250,12 +269,14 @@ inline RegionFrame CompareRegions(const CellGrid& prev, const CellGrid& cur, flo
             bool unmovedOk = d0 <= thr && (!sub || cur.sub[i] <= thr);
             if (unmovedOk && chroma) unmovedOk = std::fabs(cur.cb[i] - prev.cb[i]) + std::fabs(cur.cr[i] - prev.cr[i]) <= kChromaChangeCodes;
             bool slidOk = false;
-            // cells the shift brings in from outside the picture cannot be compared: unchanged unless they differ plainly
-            const bool inside = x - fx >= 0 && x - fx <= W - 1 && y - fy >= 0 && y - fy <= H - 1;
+            // where this cell was in the previous frame (the camera: scale about the centre, then the shift)
+            const float px = cxm + (float(x) - cxm - fx) / r.scale, py = cym + (float(y) - cym - fy) / r.scale;
+            // cells the camera brings in from outside the picture cannot be compared: unchanged unless they differ plainly
+            const bool inside = px >= 0 && px <= W - 1 && py >= 0 && py <= H - 1;
             if (!unmovedOk && slid && inside) {
-                slidOk = std::fabs(c - prev.sample(x - fx, y - fy)) <= thr;
+                slidOk = std::fabs(c - prev.sample(px, py)) <= thr;
                 if (slidOk && chroma)
-                    slidOk = std::fabs(cur.cb[i] - SampleOf(prev.cb, prev.w, prev.h, x - fx, y - fy)) + std::fabs(cur.cr[i] - SampleOf(prev.cr, prev.w, prev.h, x - fx, y - fy)) <= kChromaChangeCodes;
+                    slidOk = std::fabs(cur.cb[i] - SampleOf(prev.cb, prev.w, prev.h, px, py)) + std::fabs(cur.cr[i] - SampleOf(prev.cr, prev.w, prev.h, px, py)) <= kChromaChangeCodes;
             }
             const bool ch = !unmovedOk && !slidOk;
             raw[i] = ch; rawChanged += ch;
@@ -338,9 +359,65 @@ inline constexpr uint32_t kLayerCells = 300;      // cells: a key this large ins
 #define PUSHMPC_HELD_MAX_GROUPS 3
 #endif
 inline constexpr size_t kMaxGroups = PUSHMPC_HELD_MAX_GROUPS, kMaxPairs = 2;
+// Cadence history per cell (research P2): its last four change frames, so a part's cadence (ones, twos, threes, an
+// irregular 2-2-3) is measured over the last 24 frames, not guessed from one span. Fed with every classified frame.
+class CellCadence {
+public:
+    void Reset() { m_last.clear(); }
+    void Push(uint64_t seq, const RegionFrame& r)
+    {
+        if (!r.valid) return;
+        if (m_last.size() != r.changed.size() * 4) m_last.assign(r.changed.size() * 4, 0);
+        for (size_t i = 0; i < r.changed.size(); ++i)
+            if (r.changed[i]) { uint64_t* l = &m_last[i * 4]; l[3] = l[2]; l[2] = l[1]; l[1] = l[0]; l[0] = seq + 1; }   // 0 = none
+    }
+    // the cell's cadence around frame s: the median of its last change intervals within 24 frames (0: not known)
+    float At(size_t i, uint64_t s) const
+    {
+        if (i * 4 + 3 >= m_last.size()) return 0.f;
+        const uint64_t* l = &m_last[i * 4];
+        float iv[3]; int n = 0;
+        for (int k = 0; k < 3; ++k) if (l[k] && l[k + 1] && s + 25 > l[k + 1]) iv[n++] = float(l[k] - l[k + 1]);
+        if (!n) return 0.f;
+        std::sort(iv, iv + n);
+        return iv[n / 2];
+    }
+    // the median cadence of a set of cells (every step-th), 0 when none is known
+    template <class Pred> float Median(uint64_t s, size_t n, Pred in, size_t step = 1) const
+    {
+        std::vector<float> v;
+        for (size_t i = 0; i < n; i += step) if (in(i)) { const float c = At(i, s); if (c > 0.f) v.push_back(c); }
+        if (v.empty()) return 0.f;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    }
+private:
+    std::vector<uint64_t> m_last;
+};
+
+// Ownership (research P3 / P8): every cell belongs to at most one part. Parts on the shorter span come first (a limb on
+// threes over a body on twos: the nested, faster-changing part wins where they overlap), so the masks are disjoint and
+// one composite pass lays them all in, order-independent.
+inline void AssignOwners(std::vector<RepairGroup>& groups)
+{
+    if (groups.size() < 2) return;
+    std::vector<size_t> order(groups.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        const uint64_t la = groups[a].d1 - groups[a].d0, lb = groups[b].d1 - groups[b].d0;
+        return la != lb ? la < lb : groups[a].cells < groups[b].cells;
+    });
+    std::vector<uint8_t> taken(groups[0].mask.size(), 0);
+    for (size_t o : order) {
+        auto& m = groups[o].mask;
+        if (m.size() != taken.size()) continue;
+        for (size_t i = 0; i < m.size(); ++i) { if (!m[i]) continue; if (taken[i]) m[i] = 0; else taken[i] = 1; }
+    }
+}
+
 template <class FrameAt, class GridAt>
 inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt gridAt, int lookahead, PhaseShape shape = PhaseShape::Linear,
-                                            float thr = kCellChangeCodes)
+                                            float thr = kCellChangeCodes, const CellCadence* hist = nullptr)
 {
     std::vector<RepairGroup> out;
     const RegionFrame* fs = frameAt(s);
@@ -416,6 +493,22 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
             for (uint32_t c : members) { bool f = false; for (auto& v : votes) if (v.first == k2[c]) { ++v.second; f = true; break; } if (!f) votes.push_back({k2[c], 1u}); }
             auto major = std::max_element(votes.begin(), votes.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first;
             const uint32_t keepApart = std::max<uint32_t>(kLayerCells, uint32_t(members.size() / 4));
+            // with the cadence history a second layer is kept apart only when its own cadence differs (two characters in
+            // contact on twos and threes); the same cadence is the same object split by threshold flicker
+            float majorCad = 0.f;
+            if (hist) {
+                std::vector<float> v;
+                for (size_t q = 0; q < members.size(); q += std::max<size_t>(1, members.size() / 400)) if (k2[members[q]] == major) { const float c = hist->At(members[q], s); if (c > 0) v.push_back(c); }
+                if (!v.empty()) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); majorCad = v[v.size() / 2]; }
+            }
+            for (auto& v : votes) {
+                if (v.first == major || v.second < keepApart) continue;
+                if (hist && majorCad > 0.f) {
+                    std::vector<float> c;
+                    for (size_t q = 0; q < members.size(); q += std::max<size_t>(1, members.size() / 400)) if (k2[members[q]] == v.first) { const float cc = hist->At(members[q], s); if (cc > 0) c.push_back(cc); }
+                    if (!c.empty()) { std::nth_element(c.begin(), c.begin() + c.size() / 2, c.end()); if (std::fabs(c[c.size() / 2] - majorCad) < 0.75f) v.second = 0; }
+                }
+            }
             for (uint32_t c : members) {
                 uint32_t mine = 0; for (auto& v : votes) if (v.first == k2[c]) mine = v.second;
                 key[c] = mine >= keepApart ? k2[c] : major;
@@ -440,8 +533,15 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
         RepairGroup r;
         r.d0 = s - uint64_t(k0); r.d1 = s + uint64_t(k1);
         const uint32_t span = uint32_t(k0 + k1);
-        // a span longer than the cadence cap is a hold: only its last kCadenceCap frames move (d0 moves to d1 - cap)
-        if (span > kCadenceCap) { if (uint64_t(k1) >= kCadenceCap) continue; r.d0 = r.d1 - kCadenceCap; }
+        // a span longer than the part's cadence (measured, research P2: its median interval + 1 for 2-2-3 timing; else
+        // kCadenceCap) is a hold: only its last `cap` frames move (d0 moves to d1 - cap)
+        uint32_t cap = kCadenceCap;
+        if (hist) {
+            const auto gk = g.first;
+            const float c = hist->Median(s, n, [&](size_t i) { return key[i] == gk; }, 3);
+            if (c >= 1.5f) cap = std::clamp<uint32_t>(uint32_t(std::lround(c)) + 1, 2u, kCadenceCap);
+        }
+        if (span > cap) { if (uint64_t(k1) >= cap) continue; r.d0 = r.d1 - cap; }
         // gates over (d0, d1]
         bool ok = true;
         for (uint64_t j = r.d0 + 1; j <= r.d1 && ok; ++j) { const RegionFrame* f = rfAt(j); ok = f && !bad(f); }
@@ -450,12 +550,13 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
         if (!(r.t > 0.f && r.t < 1.f)) continue;
         r.w = W; r.h = H;
         // the camera from d0: c(s) and c(d1) (sums of the per-frame shifts)
-        float csx = 0, csy = 0, c1x = 0, c1y = 0;
-        for (uint64_t j = r.d0 + 1; j <= r.d1; ++j) { const RegionFrame* f = rfAt(j); if (j <= s) { csx += f->dx; csy += f->dy; } c1x += f->dx; c1y += f->dy; }
+        float csx = 0, csy = 0, c1x = 0, c1y = 0, cS = 1.f;   // cS: the camera's scale from d0 to s (push-ins)
+        for (uint64_t j = r.d0 + 1; j <= r.d1; ++j) { const RegionFrame* f = rfAt(j); if (j <= s) { csx += f->dx; csy += f->dy; cS *= f->scale; } c1x += f->dx; c1y += f->dy; }
+        const float cxm = 0.5f * float(W - 1), cym = 0.5f * float(H - 1);
         const CellGrid* g0 = gridAt(r.d0); const CellGrid* g1 = gridAt(r.d1);
         if (!g0 || !g1 || !g0->ok() || !g1->ok() || g0->w != W || g1->w != W || g0->h != H || g1->h != H) continue;
         // the group's cells, with the anchor test against d0 (unmoved or with the camera since d0)
-        const bool camMoved = std::fabs(csx) + std::fabs(csy) >= 0.25f;
+        const bool camMoved = std::fabs(csx) + std::fabs(csy) >= 0.25f || std::fabs(cS - 1.f) > 0.001f;
         std::vector<uint8_t> cells(n, 0);
         int x0 = int(W), y0 = int(H), x1 = -1, y1 = -1;
         double resSum = 0;
@@ -463,7 +564,7 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
             if (key[i] != g.first) continue;
             const int x = int(i % W), y = int(i / W);
             float e = std::fabs(gs->v[i] - g0->v[i]);
-            if (camMoved) e = std::min(e, std::fabs(gs->v[i] - g0->sample(x - csx, y - csy)));
+            if (camMoved) e = std::min(e, std::fabs(gs->v[i] - g0->sample(cxm + (float(x) - cxm - csx) / cS, cym + (float(y) - cym - csy) / cS)));
             if (e > thr) continue;
             cells[i] = 1; ++r.cells; resSum += e;
             x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
@@ -537,7 +638,7 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
                     if (nc == 1 && m <= s) { subCand.push_back(uint32_t(c)); subM.push_back(m); }   // a redraw inside the part (decided below)
                     continue;
                 }
-                const float moved = std::fabs(gs->v[c] - g0->sample(x - csx, y - csy));
+                const float moved = std::fabs(gs->v[c] - g0->sample(cxm + (float(x) - cxm - csx) / cS, cym + (float(y) - cym - csy) / cS));
                 if (moved <= thr) { r.mask[c] = 255; continue; }
                 ++r.carved;
             }
@@ -605,6 +706,7 @@ inline std::vector<RepairGroup> PlanRepairs(uint64_t s, FrameAt frameAt, GridAt 
             }
         }
     }
+    AssignOwners(out);
     return out;
 }
 
