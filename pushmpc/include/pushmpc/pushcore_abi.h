@@ -377,6 +377,12 @@ typedef struct PushCoreFlowBench {
     char note[256];            /* out: model / precision per tier, or why it failed */
 } PushCoreFlowBench;
 PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreFlowBench* io);
+/* Fast start (PushMPC 1.0, additive export, found with GetProcAddress): prepares, on a background thread, what every open on
+   this adapter needs first and the first open in a process pays for: the D3D12 device and, on NVIDIA, CUDA with the
+   device's primary context (VFG). Returns at once. The references are dropped when the next pushcore_open succeeds, or
+   after 30 s. adapterLuid 0 = the first hardware adapter in DXGI's high-performance order. */
+PUSHCORE_API int pushcore_prewarm(uint64_t adapterLuid);
+typedef int (*PushCorePrewarmFn)(uint64_t);
 typedef int (*PushCoreCapabilitiesFn)(uint64_t, const wchar_t*, PushCoreCaps*);
 typedef int (*PushCoreFlowBenchFn)(uint64_t, const wchar_t*, PushCoreFlowBench*);
 PUSHCORE_API int pushcore_submit2(PushCore* core, ID3D11Texture2D* texture, uint32_t arraySlice,

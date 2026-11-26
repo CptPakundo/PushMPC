@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>
+#include <mutex>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -782,6 +783,22 @@ inline void DrsRead(NvQuery q, const std::wstring& exe, int& mode, int& request)
     }
     destroy(session);
 }
+// DrsRead kept for 10 s (fast start): loading the driver's profile database takes 100-250 ms, and a connection asks for
+// the display three times within a second; a change in the NVIDIA Control Panel shows within 10 s
+inline void DrsReadCached(NvQuery q, const std::wstring& exe, int& mode, int& request)
+{
+    static std::mutex lock;
+    static ULONGLONG at = 0;
+    static int cachedMode = -1, cachedRequest = -1;
+    static std::wstring cachedExe;
+    std::lock_guard<std::mutex> lk(lock);
+    const ULONGLONG now = GetTickCount64();
+    if (!at || now - at >= 10000 || cachedExe != exe) {
+        DrsRead(q, exe, cachedMode, cachedRequest);
+        at = GetTickCount64(); cachedExe = exe;
+    }
+    mode = cachedMode; request = cachedRequest;
+}
 // AMD Display Library, as PushFPS's PushAmdAdl.h: structure layouts and entry points from AMD's public ADL interface
 // (GPUOpen display-library adl_structures.h / adl_defines.h, MIT; no SDK file shipped). System32 copy only, pinned,
 // one context; read only. PUSHMPC_NO_AMD_ADL=1 (or PushFPS's VEYRA_NO_AMD_ADL=1) skips it.
@@ -908,7 +925,7 @@ inline VrrProbe ProbeVrr(HWND wnd, const MONITORINFOEXW& mi, bool nvidia)
     if (getCaps) { Caps c{}; c.version = uint32_t(sizeof(Caps)) | (1u << 16); c.size = uint16_t(sizeof(Caps)); c.infoType = 0x1002;
                    if (getCaps(id, &c) == 0 && (c.valid & 1u)) p.caps = (c.data[0] & 1u) && (c.data[0] & 16u); }
     wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    detail::DrsRead(q, exe, p.mode, p.request);
+    detail::DrsReadCached(q, exe, p.mode, p.request);
     RECT wr{}; bool fullscreen = false;
     if (wnd && GetWindowRect(wnd, &wr)) fullscreen = wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
     // the prediction for OUR window (the monitor can do VRR in its mode, and the profile's scope covers the window). The

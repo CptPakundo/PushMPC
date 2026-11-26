@@ -60,6 +60,7 @@
 #include <shellapi.h>
 #include <fstream>
 #include "PushMpcExtras.h"
+#include "PushMpcFastStart.h"
 #include <VersionHelpers.h>
 #include <IVideoRenderer.h>   // MPC Video Renderer's settings interface (live HDR settings)
 #include <sstream>
@@ -372,6 +373,9 @@ struct Config {
     bool skipY416 = false;      // debug SkipY416: no Y416 at all
     bool skipManifest = false;  // debug SkipManifestCheck: do not check the runtime manifest
     bool itmBypass = false;     // debug ItmBypass: SDR to HDR by the plain 203 cd/m2 mapping (A/B timing of the curve)
+    bool prewarm = true;        // Prewarm 0: no pushcore_prewarm at the input connection (fast start)
+    bool quickStart = true;     // QuickStart 0: no quick-start graph while the full one opens (fast start)
+    bool paceWarmup = true;     // PaceWarmup 0: the source frames shown during the open are taken as fast as the decoder sends them
 };
 static bool EnvStr(const wchar_t* name, std::wstring& out)
 {
@@ -415,6 +419,9 @@ static Config ReadConfig()
     ReadB(k, L"PrerollLead", c.preroll);
     ReadB(k, L"ReopenOnDeviceLost", c.reopenOnLost);
     ReadB(k, L"WarmCache", c.warmCache);
+    ReadB(k, L"Prewarm", c.prewarm);
+    ReadB(k, L"QuickStart", c.quickStart);
+    ReadB(k, L"PaceWarmup", c.paceWarmup);
     ReadS(k, L"RuntimeRoot", c.runtimeRoot);
     ReadS(k, L"CoreFolder", c.coreFolder);
     ReadS(k, L"PushFpsFolder", c.folder);
@@ -633,6 +640,7 @@ static uint32_t g_coreFeatures = 0; // pushcore_features() of the loaded pushcor
 static std::wstring g_libRoot;
 static PushCoreCapabilitiesFn g_capsFn = nullptr;   // pushcore_capabilities (PUSHCORE_FEATURE_FG_METHODS)
 static PushCoreFlowBenchFn g_benchFn = nullptr;     // pushcore_pushFlowBench
+static PushCorePrewarmFn g_prewarmFn = nullptr;     // pushcore_prewarm (fast start; absent in older cores)
 static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
 {
     std::lock_guard<std::mutex> lk(g_libLock);
@@ -652,6 +660,7 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     if (auto feat = reinterpret_cast<uint32_t(*)(void)>(GetProcAddress(h, "pushcore_features"))) g_coreFeatures = feat();
     g_capsFn = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     g_benchFn = reinterpret_cast<PushCoreFlowBenchFn>(GetProcAddress(h, "pushcore_pushFlowBench"));
+    g_prewarmFn = reinterpret_cast<PushCorePrewarmFn>(GetProcAddress(h, "pushcore_prewarm"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
     return api;
 }
@@ -1129,10 +1138,21 @@ groupshared uint gsA, gsB, gsM, gsN;
 
 static HRESULT Compile(const char* entry, const char* target, ComPtr<ID3DBlob>& out)
 {
+    if (fs::Shaders().Get(entry, target, out)) return S_OK;   // fast start: compiled at the input connection or read from the cache
     ComPtr<ID3DBlob> err;
     HRESULT hr = D3DCompile(kHlsl, strlen(kHlsl), "pushmpcfilter", nullptr, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &out, &err);
     if (FAILED(hr) && err) Log(std::string("shader compile: ") + (const char*)err->GetBufferPointer());
     return hr;
+}
+// fast start: every entry point the filter compiles, compiled in parallel once per process and kept in a cache file
+static void StartShaderCache()
+{
+    static const std::vector<fs::ShaderCache::Entry> entries = {
+        { "VS", "vs_5_0" }, { "PS_RGB", "ps_5_0" }, { "PS_YUV", "ps_5_0" }, { "CS_RGB2Y410", "cs_5_0" }, { "CS_P0102Y410", "cs_5_0" },
+        { "CS_RGB2Y416", "cs_5_0" }, { "CS_P0102Y416", "cs_5_0" }, { "CS_RGB2P010_Y", "cs_5_0" }, { "CS_RGB2P010_UV", "cs_5_0" },
+        { "CS_P0102P010_Y", "cs_5_0" }, { "CS_P0102P010_UV", "cs_5_0" }, { "CS_ItmStats", "cs_5_0" } };
+    const std::wstring base = LocalAppData();
+    fs::Shaders().Start(kHlsl, entries, base.empty() ? std::wstring() : base + L"\\PushMPC\\cache", PUSHMPC_VERSION_STR, &Log);
 }
 // ------------------------------------------------------------------------------------------------ output formats
 // NV12/P010 = the source format (pass-through); Y416/Y410/P010H = processed HDR10 output (in that order of preference)
@@ -1896,6 +1916,7 @@ public:
         if (!HasHardwareAdapter()) return L"no DirectX 12 hardware adapter";
         m_rt = ResolveRuntime(m_cfg);
         if (!m_rt.error.empty()) return m_rt.error;
+        Prewarm();
         if (const int dv = UpstreamDvProfile(); dv == 5 || dv == 4) {
             // IPT-PQ-C2 base layer: converted per frame from its RPU, as PushFPS's own player does (pushcore's
             // Dolby Vision profile 5 path), then processed as HDR10. Without that pushcore feature: MPC-VR's own Dolby
@@ -1923,7 +1944,8 @@ public:
             // SDR to HDR (RTX Video HDR) needs an HDR10 output: decided now, from the window's display (the format
             // cannot change while playing)
             EnsureGpu(0);
-            m_display = pm::QueryDisplay(pm::PlayerWindow(), m_cfg.user.vrr, m_gpu.nvidia());
+            // only Windows HDR matters here: no VRR probe (NVAPI and the driver profile take ~200 ms; the open asks again)
+            m_display = pm::QueryDisplay(pm::PlayerWindow(), pm::VrrMode::Off, m_gpu.nvidia());
             const pm::Choice c = DecideNow(m_cfg.user, m_display);
             sdrToHdr = c.hdr;
             SetItm(c, c.hdr);
@@ -1945,7 +1967,9 @@ public:
         if (!m_pInput->IsConnected()) return E_UNEXPECTED;
         if (pos < 0) return E_INVALIDARG;
         if (pos == 0) {
+            const int64_t q0 = Qpc();
             const std::wstring why = Eligibility(m_offered);
+            Log(std::format("connect: output types decided in {:.0f} ms", QpcMs(Qpc() - q0)));
             if (why != m_passWhy) { m_passWhy = why; if (!why.empty()) LogW(L"pass-through offered: " + why); }
             if (!why.empty()) m_offered.clear();
             m_offeredP010H.InitMediaType();
@@ -1996,6 +2020,7 @@ public:
             // AVI: RC1 F6). The samples' AM_VIDEO_FLAG_WEAVE / field flags decide (CheckInterlace); only one field
             // per sample is refused here.
             m_typeInterlaced = (il & AMINTERLACE_IsInterlaced) != 0;
+            FastStartKick();
             m_typeIlFlags = il;
             m_inInterlaced = m_typeInterlaced && (il & AMINTERLACE_1FieldPerSample) != 0;
             m_ilDecided = !m_typeInterlaced; m_ilSeen = m_ilCount = 0;
@@ -2530,9 +2555,69 @@ private:
         PushCore* core = nullptr;
         std::string err;
         double ms = 0;
+        // fast start: core is the quick-start graph and the full graph follows on the same thread (next*)
+        bool quick = false, nextDone = false;
+        PushCore* next = nullptr;
+        std::string nextErr;
+        double nextMs = 0;
     };
     std::shared_ptr<OpenJob> m_job;
+    // fast start, quick-start handover: the quick graph (oldCore) delivers up to and including the real frame at handoverPts,
+    // the full graph (m_core) got that same source frame as its first one, and its outputs up to it are dropped
+    PushCore* m_oldCore = nullptr;
+    REFERENCE_TIME m_handoverPts = 0, m_discardUpTo = INT64_MIN;
+    std::atomic<bool> m_quickPhase = false;   // the quick graph runs (Auto and reloads wait until the full graph took over)
+    int64_t m_quickQpc = 0;
+    bool m_sizeAfterHandover = false;          // the full graph's output size differs (Receive asks downstream for it)
+    bool QuickStartWanted(const PushCoreSettings& ps, std::string& why);
+    void TryHandover(REFERENCE_TIME pts, const PushCoreSubmitTiming& t);   // under m_coreLock
+    void RetireOld(const char* why);                                       // under m_coreLock
+    static void CloseAsync(const PushCoreApi* api, PushCore* core, const char* what, DWORD delayMs = 0)
+    {
+        if (!api || !core) return;
+        fs::Detach([api, core, what, delayMs] { if (delayMs) Sleep(delayMs); const int64_t q0 = Qpc(); SehClose(api, core); Log(std::format("{} closed in {:.0f} ms (on its own thread)", what, QpcMs(Qpc() - q0))); });
+    }
     bool m_openStarted = false;
+    // fast start (PushMpcFastStart.h): work that every connection needs, started at the input connection on other threads
+    bool m_prewarmed = false;
+    // our D3D11 device, created at the input connection on the first hardware adapter; CreateDevice takes it when MPC-VR
+    // asks for that same adapter (~70 ms less at the output connection)
+    struct SpecDevice { std::mutex lock; std::condition_variable cv; bool done = false; ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx; LUID luid = {}; double ms = 0; };
+    std::shared_ptr<SpecDevice> m_spec;
+    void FastStartKick()
+    {
+        StartShaderCache();
+        if (!m_spec && !m_device) {
+            auto spec = std::make_shared<SpecDevice>();
+            m_spec = spec;
+            fs::Detach([spec] {
+                const int64_t q0 = Qpc();
+                ComPtr<IDXGIFactory1> f; ComPtr<IDXGIAdapter1> a; DXGI_ADAPTER_DESC1 d = {};
+                ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
+                if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&f)))) {
+                    for (UINT i = 0; SUCCEEDED(f->EnumAdapters1(i, &a)); i++, a.Reset())
+                        if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.VendorId != 0x1414) break;
+                    const D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+                    if (a && FAILED(D3D11CreateDevice(a.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                                      fl, 2, D3D11_SDK_VERSION, &dev, nullptr, &ctx))) { dev.Reset(); ctx.Reset(); }
+                }
+                std::lock_guard<std::mutex> lk(spec->lock);
+                spec->dev = dev; spec->ctx = ctx; spec->luid = d.AdapterLuid; spec->ms = QpcMs(Qpc() - q0); spec->done = true;
+                spec->cv.notify_all();
+            });
+        }
+        // the window's display (NVAPI start, the driver profile read): ready, and cached, before the connection asks for it
+        fs::Detach([] { const int64_t q0 = Qpc(); const pm::Display d = pm::QueryDisplay(pm::PlayerWindow(), pm::VrrMode::Auto, true);
+                        Log(std::format("fast start: display probed in {:.0f} ms ({} {:.3f} Hz)", QpcMs(Qpc() - q0), Narrow(d.name), d.refreshHz)); });
+    }
+    void Prewarm()
+    {
+        if (m_prewarmed || LegacyMode() || !m_cfg.prewarm) return;
+        m_prewarmed = true;
+        std::wstring err;
+        if (!LoadApi(m_rt, err)) return;
+        if (g_prewarmFn) { const int r = g_prewarmFn(0); Log(std::format("fast start: pushcore prewarm started -> {}", r)); }
+    }
     std::atomic<bool> m_reloading = false, m_faulted = false, m_deviceLostSeen = false;
     std::string m_openError;
     bool OpenFinished(); // takes the opened instance from the job
@@ -2668,10 +2753,21 @@ HRESULT CPushMpcFilter::CreateDevice(UINT preferredIndex)
     m_gpuName = d.Description;
     EnsureGpu((uint64_t(uint32_t(d.AdapterLuid.HighPart)) << 32) | d.AdapterLuid.LowPart);
     const D3D_FEATURE_LEVEL fl[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    const int64_t qDev = Qpc();
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
-    hr = D3D11CreateDevice(pick.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    if (auto spec = std::move(m_spec)) {
+        // fast start: the device made at the input connection, when it is on the adapter MPC-VR presents on
+        std::unique_lock<std::mutex> lk(spec->lock);
+        spec->cv.wait_for(lk, std::chrono::milliseconds(500), [&] { return spec->done; });
+        if (spec->done && spec->dev && spec->luid.LowPart == d.AdapterLuid.LowPart && spec->luid.HighPart == d.AdapterLuid.HighPart) {
+            dev = spec->dev; ctx = spec->ctx;
+            Log(std::format("fast start: the D3D11 device made at the input connection is used ({:.0f} ms there)", spec->ms));
+        }
+    }
+    hr = dev ? S_OK : D3D11CreateDevice(pick.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         fl, 2, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
     if (FAILED(hr)) { Log(std::format("D3D11CreateDevice failed 0x{:08X}", uint32_t(hr))); return hr; }
+    const int64_t qShaders = Qpc();
     ComPtr<ID3D10Multithread> mt;
     ctx.As(&mt);
     if (mt) mt->SetMultithreadProtected(TRUE);
@@ -2727,6 +2823,7 @@ HRESULT CPushMpcFilter::CreateDevice(UINT preferredIndex)
     dev->CreateBuffer(&bd, nullptr, &m_cb);
     UINT y410 = 0;
     dev->CheckFormatSupport(DXGI_FORMAT_Y410, &y410);
+    Log(std::format("device setup timing: D3D11CreateDevice {:.0f} ms, shaders and the rest {:.0f} ms", QpcMs(qShaders - qDev), QpcMs(Qpc() - qShaders)));
     LUID l = d.AdapterLuid;
     Log(std::format("own D3D11 device on {} (vendor {:04X}, LUID {:08X}:{:08X}), MPC-VR preferred adapter index {}; Y410 support 0x{:08X} (render target {})",
         Narrow(d.Description), d.VendorId, uint32_t(l.HighPart), l.LowPart, preferredIndex, y410, (y410 & D3D11_FORMAT_SUPPORT_RENDER_TARGET) ? "yes" : "no"));
@@ -3276,8 +3373,15 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
         PublishNotes(m_cfg.user, c);
         LogChoice("open", c);
     }
-    struct Ctx { std::shared_ptr<OpenJob> job; PushCoreStreamInfo si; ComPtr<ID3D11Device> dev; Config cfg; Runtime rt; HMODULE self; int64_t q0; PushCoreSettings ps; bool legacy; };
-    auto* ctx = new Ctx{ std::make_shared<OpenJob>(), si, m_device, m_cfg, m_rt, nullptr, m_openQpc, ps, legacy };
+    // fast start: a quick-start graph first when the full one waits for slow NGX work (RTX VSR), see QuickStartWanted
+    std::string quickWhy;
+    const bool quick = !legacy && QuickStartWanted(ps, quickWhy);
+    PushCoreSettings psQuick = ps;
+    if (quick) { psQuick.srMethod = PUSHCORE_SR_METHOD_NIS; psQuick.nr = 0; }
+    if (!legacy) Log(quick ? "quick start: a quick graph (NVIDIA Image Scaling instead of RTX VSR, the same frame generation) opens first; the full graph follows and takes over"
+                           : "quick start: not used (" + quickWhy + ")");
+    struct Ctx { std::shared_ptr<OpenJob> job; PushCoreStreamInfo si; ComPtr<ID3D11Device> dev; Config cfg; Runtime rt; HMODULE self; int64_t q0; PushCoreSettings ps; bool legacy; bool quick; PushCoreSettings psQuick; };
+    auto* ctx = new Ctx{ std::make_shared<OpenJob>(), si, m_device, m_cfg, m_rt, nullptr, m_openQpc, ps, legacy, quick, psQuick };
     m_job = ctx->job;
     // a reference on this DLL for the thread's lifetime: an abandoned open may outlive the filter
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Log), &ctx->self);
@@ -3289,34 +3393,71 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
             CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             std::wstring err;
             const PushCoreApi* api = LoadApi(c->rt, err);
-            PushCore* core = nullptr;
-            std::string openErr;
-            if (api) {
-                const std::wstring logFile = LogDir() + L"\\pushcore-engine-filter.log";
+            const std::wstring logFile = LogDir() + L"\\pushcore-engine-filter.log";
+            auto openOne = [&](const PushCoreSettings* settings, uint32_t flags, std::string& openErr) -> PushCore* {
+                if (!api) { openErr = Narrow(err); return nullptr; }
                 PushCoreConfig pc = {};
                 pc.structSize = sizeof(pc); pc.abiVersion = PUSHCORE_ABI_VERSION;
                 pc.pushfpsDir = c->rt.root.c_str(); pc.logFile = logFile.c_str();
                 pc.dataDir = c->legacy ? c->rt.dataDir.c_str() : L"";
                 pc.shaderDir = c->rt.shaderDir.empty() ? nullptr : c->rt.shaderDir.c_str();
-                pc.settings = c->legacy ? nullptr : &c->ps;
+                pc.settings = c->legacy ? nullptr : settings;
                 pc.sr = pc.fg = pc.multiplier = pc.vfgQuality = -1;
-                pc.flags = c->cfg.warmCache ? 0 : PUSHCORE_FLAG_NO_WARM_CACHE;
+                pc.flags = flags | (c->cfg.warmCache ? 0 : PUSHCORE_FLAG_NO_WARM_CACHE);
                 char eb[1024] = {};
-                core = SehOpen(api, &pc, &c->si, c->dev.Get(), eb, sizeof(eb));
+                PushCore* core = SehOpen(api, &pc, &c->si, c->dev.Get(), eb, sizeof(eb));
                 if (!core) openErr = eb[0] ? eb : "pushcore_open failed";
-            } else openErr = Narrow(err);
-            const double ms = QpcMs(Qpc() - c->q0);
-            bool abandoned = false;
-            {
-                std::lock_guard<std::mutex> lk(c->job->lock);
-                abandoned = c->job->abandoned;
-                if (!abandoned) { c->job->api = api; c->job->core = core; c->job->err = openErr; c->job->ms = ms; }
-                c->job->done = true;
+                return core;
+            };
+            // the quick graph (no warm NGX cache: it has no NGX stage, and the full graph keeps the process-wide one)
+            PushCore* core = nullptr;
+            std::string openErr;
+            bool published = false;
+            if (c->quick) {
+                core = openOne(&c->psQuick, PUSHCORE_FLAG_NO_WARM_CACHE, openErr);
+                const double ms = QpcMs(Qpc() - c->q0);
+                bool abandoned = false;
+                if (core) {
+                    std::lock_guard<std::mutex> lk(c->job->lock);
+                    abandoned = c->job->abandoned;
+                    if (!abandoned) { c->job->api = api; c->job->core = core; c->job->ms = ms; c->job->quick = true; published = true; }
+                    c->job->done = !abandoned;
+                }
+                if (abandoned) { SehClose(api, core); core = nullptr; }
+                Log(std::format("quick start: quick graph open {} after {:.0f} ms{}", published ? "OK" : "FAILED", ms,
+                    published ? "" : abandoned ? " (abandoned: the filter closed meanwhile)" : ": " + openErr + "; the full graph opens next"));
+                if (abandoned) {
+                    std::lock_guard<std::mutex> lk(c->job->lock);
+                    c->job->done = true;
+                }
+                core = nullptr;
             }
-            if (abandoned && core) SehClose(api, core);
+            bool stop = false;   // the filter closed meanwhile: the full graph is not opened at all
+            { std::lock_guard<std::mutex> lk(c->job->lock); stop = c->job->abandoned; }
+            if (!stop) {
+                openErr.clear();
+                core = openOne(&c->ps, 0, openErr);
+                const double ms = QpcMs(Qpc() - c->q0);
+                bool abandoned = false;
+                {
+                    std::lock_guard<std::mutex> lk(c->job->lock);
+                    abandoned = c->job->abandoned;
+                    if (published) {
+                        if (!abandoned) { c->job->next = core; c->job->nextErr = openErr; c->job->nextMs = ms; }
+                        c->job->nextDone = true;
+                    } else {
+                        if (!abandoned) { c->job->api = api; c->job->core = core; c->job->err = openErr; c->job->ms = ms; }
+                        c->job->done = true;
+                    }
+                }
+                if (abandoned && core) SehClose(api, core);
+                Log(std::format("pushcore open {} after {:.0f} ms{}{}{}", core ? "OK" : "FAILED", ms, published ? " (the full graph)" : "", openErr.empty() ? "" : ": " + openErr,
+                    abandoned ? " (abandoned: the filter closed meanwhile; this instance was closed by the open thread)" : ""));
+            } else {
+                std::lock_guard<std::mutex> lk(c->job->lock);
+                c->job->done = c->job->nextDone = true;
+            }
             if (api) ArmExitHelper(); // pushcore_open loads the NGX/CUDA DLLs (also when abandoned or failed); the helper must be initialised after them
-            Log(std::format("pushcore open {} after {:.0f} ms{}{}", core ? "OK" : "FAILED", ms, openErr.empty() ? "" : ": " + openErr,
-                abandoned ? " (abandoned: the filter closed meanwhile; this instance was closed by the open thread)" : ""));
             c->dev.Reset();
             CoUninitialize();
         }
@@ -3335,11 +3476,100 @@ bool CPushMpcFilter::OpenFinished()
     std::lock_guard<std::mutex> l2(m_coreLock);
     m_api = m_job->api; m_core = m_job->core; m_openError = m_job->err;
     m_job->core = nullptr;
+    m_quickPhase = m_core && m_job->quick;   // the full graph follows (TryHandover); it may be ready already
+    if (m_quickPhase) m_quickQpc = Qpc();
     return true;
+}
+// Fast start: a quick-start graph is worth it when the full open is slow because of NGX (RTX VSR / AI clean-up start the
+// NGX core: ~2 s, measured 1.8-2.3 s on an RTX 5090, most of it NGX loading and checking every feature it knows) and the
+// frame generation itself starts fast without NGX (NVIDIA VFG ~0.4 s, FSR / NVOF). The quick graph is the same graph with
+// NVIDIA Image Scaling in place of RTX VSR (same output size, same frame generation and cut guard), so the motion is
+// smooth from the first frames; the full graph opens right after it on the same thread and takes over seamlessly.
+bool CPushMpcFilter::QuickStartWanted(const PushCoreSettings& ps, std::string& why)
+{
+    if (!m_cfg.quickStart) { why = "switched off (QuickStart 0)"; return false; }
+    if (!(g_coreFeatures & PUSHCORE_FEATURE_FG_METHODS)) { why = "this pushcore.dll has no upscaler choice"; return false; }
+    if (!m_gpu.nvidia()) { why = "not an NVIDIA GPU: the graph has no NGX stage"; return false; }
+    if (ps.multiplier < 2) { why = "no frame generation"; return false; }
+    if (ps.fgBackend != PUSHCORE_FG_VFG && ps.fgBackend != PUSHCORE_FG_NVOF && ps.fgBackend != PUSHCORE_FG_FSR) { why = "the frame generation method needs NGX or starts slowly itself"; return false; }
+    if (ps.videoHdr) { why = "RTX Video HDR sets the output signal"; return false; }
+    const bool ngx = (ps.sr && ps.srMethod == PUSHCORE_SR_METHOD_RTX) || ps.nr;
+    if (!ngx) { why = "the full graph has no NGX stage: it opens fast"; return false; }
+    if (m_cfg.warmCache) {
+        std::lock_guard<std::mutex> lk(g_ngxLock);
+        if (g_haveNgx && g_lastNgx == NgxKeyOf(ps)) { why = "the NGX core of the last file is still warm: the full graph opens fast"; return false; }
+    }
+    // two graphs live for a moment: room for both on the GPU (estimate: the graph's pools at the output size plus the
+    // frame generation buffers and the SDK contexts; 1.7 GB + 0.5 GB + ~0.4 GB at 3840x2080 8x, measured)
+    ComPtr<IDXGIDevice> dd; ComPtr<IDXGIAdapter> a; ComPtr<IDXGIAdapter3> a3;
+    DXGI_QUERY_VIDEO_MEMORY_INFO mi = {};
+    if (m_device && SUCCEEDED(m_device.As(&dd)) && SUCCEEDED(dd->GetAdapter(&a)) && SUCCEEDED(a.As(&a3)) && SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mi))) {
+        UINT w = 0, h = 0; { std::lock_guard<std::mutex> lk(m_fmtLock); w = m_outFmt.w; h = m_outFmt.h; }
+        const double frame = double(std::max(w, 640u)) * std::max(h, 360u) * 4.0;
+        const double graph = frame * (200.0 + 4.0 * ps.multiplier) + 600.0 * 1048576.0;
+        const double room = mi.Budget > mi.CurrentUsage ? double(mi.Budget - mi.CurrentUsage) : 0.0;
+        if (room < 2.0 * graph + 512.0 * 1048576.0) { why = std::format("not enough free video memory for two graphs ({:.1f} GB free, {:.1f} GB needed)", room / 1073741824.0, (2.0 * graph + 512.0 * 1048576.0) / 1073741824.0); return false; }
+    }
+    return true;
+}
+// Fast start handover (Receive, under m_coreLock, right after source frame pts went into the quick graph): when the full
+// graph is ready it gets the SAME source frame as its first one (it then holds it as history; its own output for it, the
+// real frame alone, is dropped), the quick graph still delivers the in-between frames up to and including that real
+// frame, and from the next source frame on the full graph generates. No gap, no repeated or missing frame, the
+// timestamps never change; only the upscaler changes (Image Scaling -> RTX VSR).
+void CPushMpcFilter::TryHandover(REFERENCE_TIME pts, const PushCoreSubmitTiming& t)
+{
+    if (!m_quickPhase || m_oldCore || !m_job) return;
+    PushCore* next = nullptr; std::string err; double ms = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_job->lock);
+        if (!m_job->nextDone) return;
+        next = m_job->next; err = m_job->nextErr; ms = m_job->nextMs;
+        m_job->next = nullptr;
+    }
+    if (!next) { m_quickPhase = false; Log("quick start: the full graph did not open (" + err + "): the quick graph stays"); return; }
+    PushCoreSubmitTiming tt = t;
+    const int r = m_api->submit2(next, m_upload.Get(), 0, pts, PUSHCORE_SUBMIT_DISCONTINUITY, &tt);
+    if (r != PUSHCORE_OK) {
+        Log(std::format("quick start: the full graph refused its first frame ({} {}): the quick graph stays", r, m_api->lastError(next)));
+        CloseAsync(m_api, next, "the full graph");
+        m_quickPhase = false;
+        return;
+    }
+    m_oldCore = m_core; m_core = next;
+    m_handoverPts = pts; m_discardUpTo = pts;
+    const PushCoreOutputInfo before = m_oi;
+    m_oi = {};
+    m_api->outputInfo(m_core, &m_oi);
+    m_mult = m_oi.multiplier ? m_oi.multiplier : 1;
+    Log(std::format("quick start: handover at pts {:.3f} s, {:.0f} ms after the quick graph took over ({:.0f} ms after the open started): {} (output {}x{}, x{}; quick graph {}x{} x{})",
+        pts / 1e7, QpcMs(Qpc() - m_quickQpc), ms, m_oi.description, m_oi.width, m_oi.height, m_oi.multiplier, before.width, before.height, before.multiplier));
+    SetStatus(L"active: " + Widen(m_oi.description));
+    m_sizeAfterHandover = m_oi.width != before.width || m_oi.height != before.height;
+}
+// the quick graph after its last frame (the copier) or at a flush: closed on its own thread; Auto starts measuring now
+void CPushMpcFilter::RetireOld(const char* why)
+{
+    if (!m_oldCore) return;
+    PushCore* old = m_oldCore;
+    m_oldCore = nullptr;   // m_discardUpTo stays: the full graph's copy of the handover frame may still come
+    { std::lock_guard<std::mutex> sl(m_srvLock); m_srvs.clear(); }
+    CloseAsync(m_api, old, "the quick graph", 3000);   // later: the full graph's first seconds do not share the GPU with a teardown
+    m_quickPhase = false;
+    { std::lock_guard<std::mutex> al(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
+    m_admGrace = 8;
+    Log(std::format("quick start: the quick graph retired ({}), {:.0f} ms after it took over", why, QpcMs(Qpc() - m_quickQpc)));
 }
 void CPushMpcFilter::DrainCore(bool flush)
 {
     std::lock_guard<std::mutex> lk(m_coreLock);
+    if (m_oldCore) {
+        // a flush during the handover: the quick graph's remaining frames go, and so does the quick graph
+        PushCoreFrame of[16]; uint32_t on = 0;
+        while (m_api->poll(m_oldCore, of, 16, &on, 0) == PUSHCORE_OK && on) { for (uint32_t i = 0; i < on; i++) m_api->presented(m_oldCore, of[i].lease, nullptr); on = 0; }
+        RetireOld("flush");
+    }
+    m_discardUpTo = INT64_MIN;   // a flush: nothing of the full graph is held back any more (the next pts may be earlier)
     if (!m_core || m_faulted) return;
     PushCoreFrame fr[16]; uint32_t n = 0;
     int dropped = 0;
@@ -3352,6 +3582,7 @@ void CPushMpcFilter::DrainCore(bool flush)
 }
 void CPushMpcFilter::CloseCore()
 {
+    bool quickPending = false;
     if (m_job) {
         std::lock_guard<std::mutex> lk(m_job->lock);
         if (!m_job->done) {
@@ -3362,8 +3593,22 @@ void CPushMpcFilter::CloseCore()
             if (!m_core) { m_api = m_job->api; m_core = m_job->core; }
             m_job->core = nullptr;
         }
+        if (m_job->done && m_job->quick) {
+            // fast start: the full graph still opening is closed by its thread; one that opened but never took over, here
+            if (!m_job->nextDone) { m_job->abandoned = true; Log("quick start: the full graph is still opening: abandoned, its thread closes it"); }
+            else if (m_job->next) { CloseAsync(m_job->api, m_job->next, "the full graph (never took over)"); m_job->next = nullptr; }
+            quickPending = !m_job->nextDone;
+        }
     }
     m_job.reset();
+    {
+        std::lock_guard<std::mutex> lk(m_coreLock);
+        if (m_oldCore) { PushCore* o = m_oldCore; m_oldCore = nullptr; CloseAsync(m_api, o, "the quick graph"); }
+        m_quickPhase = false; m_discardUpTo = INT64_MIN;
+        // the quick graph while the full one still builds: pushcore_close would wait for that build (one graph build at a
+        // time in a process), so it closes on its own thread and the player never waits for it
+        if (quickPending && m_core) { CloseAsync(m_api, m_core, "the quick graph"); m_core = nullptr; }
+    }
     if (!LegacyMode() && m_cfg.warmCache && m_haveChoice) {
         bool have = false;
         { std::lock_guard<std::mutex> lk(m_coreLock); have = m_core != nullptr; }
@@ -3412,8 +3657,8 @@ bool CPushMpcFilter::TryActivate(REFERENCE_TIME pts)
     OsdBrief();
     { std::lock_guard<std::mutex> al(m_autoLock); m_graphQpc = m_activeQpc; m_autoTimings.clear(); }
     m_coreDisc = true;
-    Log(std::format("pushcore ACTIVE at input frame {} (pts {:.3f} s) {:.0f} ms after the open started: {} (output {}x{} format {}, x{}, HDR in {} out {})",
-        m_inFrames, pts / 1e7, QpcMs(m_activeQpc - m_openQpc), m_oi.description, m_oi.width, m_oi.height, m_oi.dxgiFormat, m_oi.multiplier, m_oi.hdrInput, m_oi.hdrOutput));
+    Log(std::format("pushcore ACTIVE{} at input frame {} (pts {:.3f} s) {:.0f} ms after the open started: {} (output {}x{} format {}, x{}, HDR in {} out {})",
+        m_quickPhase ? " (quick graph; the full graph follows)" : "", m_inFrames, pts / 1e7, QpcMs(m_activeQpc - m_openQpc), m_oi.description, m_oi.width, m_oi.height, m_oi.dxgiFormat, m_oi.multiplier, m_oi.hdrInput, m_oi.hdrOutput));
     SetStatus(L"active: " + Widen(m_oi.description));
     return true;
 }
@@ -3440,6 +3685,8 @@ void CPushMpcFilter::DeviceLost(int where, const std::string& what)
     m_faulted = true;
     {
         std::lock_guard<std::mutex> lk(m_coreLock);
+        if (m_oldCore) { SehClose(m_api, m_oldCore); m_oldCore = nullptr; }
+        m_quickPhase = false;
         if (m_core) { SehClose(m_api, m_core); m_core = nullptr; }
     }
     if (gone) {
@@ -3660,6 +3907,17 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
     if (m_cfg.simulateLostSec && m_mode == Mode::Active && !m_deviceLostSeen && QpcMs(Qpc() - m_activeQpc) >= m_cfg.simulateLostSec * 1000.0) {
         DeviceLost(m_cfg.simulateLostMode == 2 ? 2 : 1, "simulated");
     }
+    if (m_mode == Mode::Warmup && m_openStarted && m_cfg.paceWarmup) {
+        // fast start: while the graph opens, the source frames are taken just ahead of the clock (LAV would decode ~0.4 s
+        // ahead into our queue): the first generated frames then show right after the open, not after the queued frames
+        for (int i = 0; i < 100 && !m_flushing && !m_stopReq && !m_quit; ++i) {
+            REFERENCE_TIME now = 0;
+            if (!StreamNow(now) || rtStart - now <= 2 * m_atpf) break;
+            if (!m_job) break;
+            { std::lock_guard<std::mutex> lk(m_job->lock); if (m_job->done) break; }
+            Sleep(4);
+        }
+    }
     if (m_mode == Mode::Warmup && m_reopenForRate && OpenFinished()) {
         // F8: the open was decided on the media type's frame rate and the timestamps disagree: closed and opened again
         // for the measured rate (waiting for the first open keeps the second one warm: ~1 s instead of a cold ~3 s)
@@ -3735,6 +3993,7 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
             if (disc && m_firstAfterFlush) Log(std::format("first submit after flush: pts {:.3f} s, {:.1f} ms after BeginFlush", rtStart / 1e7, QpcMs(Qpc() - m_flushStartQpc)));
             m_coreDisc = false; m_firstAfterFlush = false;
             m_lastSubmitPts = rtStart;
+            if (m_quickPhase) TryHandover(rtStart, t);
             {
                 // this source frame's side data (HDR10 static, HDR10+ dynamic, Dolby Vision RPU) for its outputs
                 SideData sd; sd.CopyFrom(pIn, true);
@@ -3747,6 +4006,12 @@ HRESULT CPushMpcFilter::Receive(IMediaSample* pIn)
             m_lastSubmitQpc = Qpc();
             SetEvent(m_hSubmit);
             }
+        }
+        if (m_sizeAfterHandover) {
+            m_sizeAfterHandover = false;
+            OutFmt cur;
+            { std::lock_guard<std::mutex> lk(m_fmtLock); cur = m_outFmt; }
+            RequestOutFmt({ cur.fmt, m_oi.width, m_oi.height }, "the full graph's output size");
         }
         if (submitErr != PUSHCORE_OK) {
             Log(std::format("submit failed {}: {}", submitErr, submitErrText));
@@ -3812,7 +4077,7 @@ void CPushMpcFilter::CopierLoop()
             continue;
         }
         if (m_mode != Mode::Active || m_faulted) { WaitForSingleObject(m_hSubmit, 5); continue; }
-        if (m_settingsPending.exchange(false)) {
+        if (!m_quickPhase && m_settingsPending.exchange(false)) {
             PushCoreSettings ps;
             { std::lock_guard<std::mutex> lk(m_autoLock); ps = m_pending; }
             { std::lock_guard<std::mutex> lk(m_coreLock); if (m_core) m_api->setSettings(m_core, &ps); }
@@ -3820,7 +4085,7 @@ void CPushMpcFilter::CopierLoop()
             { std::lock_guard<std::mutex> lk(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
             continue;
         }
-        if (m_reloadWanted || g_reloadSerial != m_reloadSeen) {
+        if (!m_quickPhase && (m_reloadWanted || g_reloadSerial != m_reloadSeen)) {
             const bool forced = g_reloadSerial != m_reloadSeen;
             m_reloadSeen = g_reloadSerial.load();
             m_reloadWanted = false;
@@ -3829,18 +4094,29 @@ void CPushMpcFilter::CopierLoop()
         }
         PushCoreFrame fr[8]; uint32_t n = 0;
         int pr = PUSHCORE_OK;
+        PushCore* src = nullptr;   // fast start: the quick graph first, until it delivered its last frame (handover)
         {
             std::lock_guard<std::mutex> lk(m_coreLock);
-            if (m_core) pr = m_api->poll(m_core, fr, 8, &n, 0);
+            src = m_oldCore ? m_oldCore : m_core;
+            if (src) pr = m_api->poll(src, fr, 8, &n, 0);
         }
         if (pr == PUSHCORE_DEVICE_LOST) { DeviceLost(1, "pushcore_poll"); continue; }
         OutFmt f;
         { std::lock_guard<std::mutex> lk(m_fmtLock); f = m_outFmt; }
         for (uint32_t i = 0; i < n; i++) {
+            {
+                // fast start: the full graph's own output for the handover frame (and anything before it) is dropped
+                std::lock_guard<std::mutex> lk(m_coreLock);
+                if (src != m_core && src != m_oldCore) break;
+                if (src == m_core && m_discardUpTo != INT64_MIN) {
+                    if (fr[i].pts100ns <= m_discardUpTo) { m_api->presented(src, fr[i].lease, nullptr); SetEvent(m_hLease); continue; }
+                    m_discardUpTo = INT64_MIN;
+                }
+            }
             CD3D11Sample* s = GetFree(f, false);
             std::lock_guard<std::mutex> lk(m_coreLock);
-            if (!m_core) { if (s) s->Release(); break; }
-            if (!s) { m_api->presented(m_core, fr[i].lease, nullptr); continue; }
+            if (src != m_core && src != m_oldCore) { if (s) s->Release(); break; }
+            if (!s) { m_api->presented(src, fr[i].lease, nullptr); if (src == m_oldCore && fr[i].kind == PUSHCORE_FRAME_REAL && fr[i].pts100ns >= m_handoverPts) RetireOld("its last frame dropped"); continue; }
             m_ctx4->Wait(fr[i].readyFence, fr[i].readyValue);
             const bool hdrIn = fr[i].texture && [&] { D3D11_TEXTURE2D_DESC d; fr[i].texture->GetDesc(&d); return d.Format == DXGI_FORMAT_R10G10B10A2_UNORM; }();
             if (s->fmt.fmt == Fmt::Y410 || s->fmt.fmt == Fmt::Y416) {
@@ -3857,7 +4133,7 @@ void CPushMpcFilter::CopierLoop()
             } else {
                 Draw(def.Get(), s, m_psRgb.Get(), SrvFor(fr[i].texture), nullptr);
             }
-            m_api->presented(m_core, fr[i].lease, m_ctx.Get());
+            m_api->presented(src, fr[i].lease, m_ctx.Get());
             SetEvent(m_hLease);
             {
                 // Side data per output frame: a real frame takes its own source frame's; a generated frame takes that of
@@ -3880,6 +4156,14 @@ void CPushMpcFilter::CopierLoop()
             ReadyItem it{ s, fr[i].pts100ns, fr[i].pts100ns + srcStep / mult, fr[i].kind == PUSHCORE_FRAME_REAL ? 0 : 1, fr[i].sourceIndex, m_flushGen.load(), Qpc() };
             PushReady(it);
             copied++;
+            if (src == m_oldCore && fr[i].kind == PUSHCORE_FRAME_REAL && fr[i].pts100ns >= m_handoverPts) RetireOld("after its last frame");
+        }
+        if (n == 0 && src) {
+            std::lock_guard<std::mutex> lk(m_coreLock);
+            if (src == m_oldCore) {
+                PushCoreStats st = { sizeof(st) };
+                if (m_api->stats(src, &st) == PUSHCORE_OK && st.pendingFrames == 0) RetireOld("drained");
+            }
         }
         if (n == 0) {
             if (m_eos) {
@@ -4669,6 +4953,7 @@ void CPushMpcFilter::AutoLoop()
     };
     while (tickWait()) {
         ++tick;
+        if (m_quickPhase) continue;   // fast start: Auto measures and decides on the full graph, after the handover
         if (!wnd || !IsWindow(wnd)) wnd = pm::PlayerWindow();
         pm::Settings s;
         { std::lock_guard<std::mutex> lk(m_autoLock); s = m_appliedSettings; }

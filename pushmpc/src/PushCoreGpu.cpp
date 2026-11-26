@@ -74,6 +74,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -1555,8 +1556,85 @@ struct PushCore {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Fast start (PushMPC 1.0): pushcore_prewarm. The first open in a process creates the adapter's D3D12 device (~100 ms
+// with its context) and initialises CUDA with the device's primary context for VFG (~80 ms). A background thread does
+// both while the player is still connecting its filters and keeps them alive until the next open succeeded (the open
+// then holds its own references, so the device and the context are found ready) or 30 s passed.
+namespace prewarm {
+std::mutex lock;
+HANDLE release = nullptr;     // set by a successful open (or the timeout)
+bool running = false;
+std::string note;             // what the prewarm did, for the next open's log
+using CuInit = int(__stdcall*)(unsigned);
+using CuCount = int(__stdcall*)(int*);
+using CuGet = int(__stdcall*)(int*, int);
+using CuLuid = int(__stdcall*)(char*, unsigned*, int);
+using CuRetain = int(__stdcall*)(void**, int);
+using CuRelease = int(__stdcall*)(int);
+void run(uint64_t luid) {
+    const auto t0 = Clock::now();
+    veyra::gfx::D3D12DeviceContext ctx;
+    veyra::Status status = veyra::Status::Ok;
+    veyra::gfx::DeviceContextDesc dd;
+    dd.commandSlotCount = 1;
+    dd.requiredLuid = luid;
+    const bool d3d = ctx.initialize(dd, status);
+    const double d3dMs = msSince(t0);
+    int cuDevice = -1; CuRelease cuRelease = nullptr; double cudaMs = -1;
+    if (d3d && ctx.adapter().vendorId == 0x10DE) {
+        const auto t1 = Clock::now();
+        if (HMODULE cu = LoadLibraryExW((system32() / L"nvcuda.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+            auto init = reinterpret_cast<CuInit>(GetProcAddress(cu, "cuInit"));
+            auto count = reinterpret_cast<CuCount>(GetProcAddress(cu, "cuDeviceGetCount"));
+            auto get = reinterpret_cast<CuGet>(GetProcAddress(cu, "cuDeviceGet"));
+            auto getLuid = reinterpret_cast<CuLuid>(GetProcAddress(cu, "cuDeviceGetLuid"));
+            auto retain = reinterpret_cast<CuRetain>(GetProcAddress(cu, "cuDevicePrimaryCtxRetain"));
+            cuRelease = reinterpret_cast<CuRelease>(GetProcAddress(cu, "cuDevicePrimaryCtxRelease_v2"));
+            int n = 0;
+            if (init && count && get && getLuid && retain && cuRelease && init(0) == 0 && count(&n) == 0) {
+                for (int i = 0; i < n && cuDevice < 0; ++i) {
+                    int dev = -1; uint64_t l = 0; unsigned node = 0;
+                    if (get(&dev, i) != 0 || getLuid(reinterpret_cast<char*>(&l), &node, dev) != 0) continue;
+                    void* c = nullptr;   // the LUID bytes as DXGI has them (LowPart, then HighPart)
+                    if (l == ctx.adapter().luid && retain(&c, dev) == 0) cuDevice = dev;
+                }
+            }
+            cudaMs = msSince(t1);
+        }
+    }
+    {   // logged by the next open (the log file is opened there)
+        std::lock_guard<std::mutex> lk(lock);
+        note = std::format("fast start: D3D12 device {} in {:.0f} ms, CUDA primary context {} ({:.0f} ms), adapter {}",
+            d3d ? "ready" : "failed", d3dMs, cuDevice >= 0 ? "retained" : "not used", cudaMs, d3d ? narrow(ctx.adapter().description) : std::string("-"));
+    }
+    WaitForSingleObject(release, 30000);
+    if (cuDevice >= 0 && cuRelease) cuRelease(cuDevice);
+    if (ctx.initialized()) ctx.shutdown();
+    std::lock_guard<std::mutex> lk(lock);
+    running = false;
+}
+void done() {   // a successful open: it holds its own references now
+    std::lock_guard<std::mutex> lk(lock);
+    if (running && release) SetEvent(release);
+}
+}  // namespace prewarm
+
+// ---------------------------------------------------------------------------------------------
 // C ABI
 extern "C" {
+
+int pushcore_prewarm(uint64_t adapterLuid) {
+    try {
+        std::lock_guard<std::mutex> lk(prewarm::lock);
+        if (prewarm::running) return PUSHCORE_OK;
+        if (!prewarm::release) prewarm::release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!prewarm::release) return PUSHCORE_ERROR;
+        ResetEvent(prewarm::release);
+        prewarm::running = true;
+        std::thread([adapterLuid] { try { prewarm::run(adapterLuid); } catch (...) { std::lock_guard<std::mutex> l(prewarm::lock); prewarm::running = false; } }).detach();
+        return PUSHCORE_OK;
+    } catch (...) { return PUSHCORE_ERROR; }
+}
 
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
@@ -1582,7 +1660,11 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
         veyra::runtime::setApplicationRootOverride(root);
         if (config->shaderDir && *config->shaderDir) veyra::runtime::setShaderDirectoryOverride(config->shaderDir);
         if (config->logFile && *config->logFile) {
-            veyra::Logger::instance().openFile(config->logFile);
+            // a second instance in the same process (the filter's quick-start graph, then the full one) keeps writing the
+            // same file instead of truncating it
+            static std::mutex logLock; static std::wstring logPath;
+            std::lock_guard<std::mutex> lk(logLock);
+            if (logPath != config->logFile && veyra::Logger::instance().openFile(config->logFile)) logPath = config->logFile;
             veyra::Logger::instance().setConsoleEnabled(false);
         }
         core = new PushCore();
@@ -1601,6 +1683,7 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             const auto preflight = moduleDirectory() / L"pushcore_hip_preflight.exe";
             if (std::filesystem::exists(preflight)) veyra::pipeline::amdhip::setPreflightExecutable(preflight.wstring());
         }
+        { std::lock_guard<std::mutex> lk(prewarm::lock); if (!prewarm::note.empty()) { veyra::log::info("prewarm", prewarm::note); prewarm::note.clear(); } }
         veyra::log::info("pushcore", std::format("open root={} shaders={} runtime={} data={}", narrow(root.wstring()),
                                                  narrow(veyra::runtime::shaderDirectory().wstring()), narrow(core->runtimeDir), narrow(core->dataDir)));
         int built = core->openDevices(device);
@@ -1615,6 +1698,8 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             return nullptr;
         }
         if (!(core->flags & PUSHCORE_FLAG_NO_WARMUP)) core->warmUp();
+        prewarm::done();
+        veyra::Logger::instance().flush();   // the open's timeline on disk now (a player's fast exit skips the buffered rest)
         ++gOpenInstances;
         core->description += std::format("; GPU priority class {}", veyra::gfx::gpuPriorityStatus().actual);
         return core;
