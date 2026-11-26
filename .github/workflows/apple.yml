@@ -452,14 +452,8 @@ jobs:
           PUSHMPC_TEST_K=2 PUSHMPC_TEST_BACKEND=ml perl -e 'alarm 300; exec @ARGV' "$(brew --prefix vapoursynth)/bin/vspipe" vsplugin/tests/ci/apple_clip.vpy /dev/null --progress || true
           grep -h -E "backend|ml: |pmml" "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | cut -c1-300 | head -20 || true
           echo "::notice title=ml backend on macOS (Auto's EP choice)::$(grep -h -E 'backend: |ml: ' "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | head -3 | tr '\n' ' ' | cut -c1-600)"
-          # the same runtime on ONNX Runtime's CPU EP (the VM has no GPU for CoreML): the plugin, graphs and models work
-          export PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/brewlogs-mlcpu"; mkdir -p "$PUSHMPC_VS_LOG_DIR"
-          ffmpeg -v error -i "$clip" -frames:v 9 -vf scale=640:360 -pix_fmt yuv420p -y "$RUNNER_TEMP/ml.y4m"
-          PUSHMPC_VS_PLUGIN="$(ls "$(brew --prefix)"/lib/python3*/site-packages/vapoursynth/plugins/pushmpc_vs.* "$(brew --prefix pushmpc)"/lib/python3*/site-packages/vapoursynth/plugins/pushmpc_vs.* 2>/dev/null | head -1)" \
-            PMML_RUNTIME="$pm" PMML_TEST_CLIP="$RUNNER_TEMP/ml.y4m" PMML_TEST_W=640 PMML_TEST_H=360 PMML_TEST_BACKEND=ort:core:cpu:0 PUSHMPC_TEST_K=2 \
-            perl -e 'alarm 300; exec @ARGV' "$(brew --prefix vapoursynth)/bin/vspipe" vsplugin/tests/ci/ml_clip.vpy /dev/null || true
-          grep -h -E "backend|ml: " "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | cut -c1-300 | head -12 || true
-          grep -q "ml: output YUV" "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null || { echo "::error::the ml backend produced no output on the CPU EP"; exit 1; }
+          # Auto took CoreML (Homebrew's ONNX Runtime): the ml backend must have produced frames
+          grep -q "ml: output YUV" "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null && grep -q -E "ml: instance closed after [1-9]" "$PUSHMPC_VS_LOG_DIR"/*.log || { echo "::error::the ml backend produced no frames"; exit 1; }
           pushmpc-setup uninstall
           [ ! -e "$HOME/.config/mpv/mpv.conf" ] || { echo "::error::mpv.conf left behind"; exit 1; }
           [ ! -e "$pm" ] || { echo "::error::the pmml runtime was left behind"; exit 1; }
@@ -473,5 +467,4 @@ jobs:
           path: |
             ${{ runner.temp }}/brewlogs
             ${{ runner.temp }}/brewlogs-ml
-            ${{ runner.temp }}/brewlogs-mlcpu
             ${{ runner.temp }}/home/Library/Logs/PushMPC
