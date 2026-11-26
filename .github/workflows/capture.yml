@@ -5,6 +5,8 @@
 #                 (--no-present --dump): with frame generation the square must move evenly (check_motion.py against
 #                 --smoother off, the 3:2 judder); then a presented run (the X11 overlay through lavapipe's X11 WSI):
 #                 the overlay window must be mapped over mpv's with the player's size, and the screen there not black.
+#   linux-nvl     ubuntu-24.04: pushmpc-capture with the nvl engine (NVIDIA Video Effects) compiled in, the kernels'
+#                 fatbin from a green run's artifact (else nvcc); the self-test's probe must refuse cleanly (no GPU).
 #   linux-portal  ubuntu-24.04, informational: a headless Sway (pixman) with PipeWire, WirePlumber and
 #                 xdg-desktop-portal-wlr (no picker: the headless output) inside a private session bus: pushmpc-capture
 #                 --monitor through the ScreenCast portal (shared memory there), --no-present to a dump; then the
@@ -95,6 +97,70 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: capture-linux-x11-logs, path: /tmp/capture-*.log, if-no-files-found: ignore }
+
+  # the nvl engine (NVIDIA Video Effects) compiled in: the kernels' fatbin from the newest green run of the workflow that
+  # builds it (nvl-kernels.yml when it exists, else vsplugin-nvidia-linux.yml: artifact nvl-kernels-fatbin), else
+  # nvcc from NVIDIA's apt repository builds it here. No GPU on the runner: the probe must refuse cleanly.
+  linux-nvl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions: { contents: read, actions: read }
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Packages
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools mesa-vulkan-drivers \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
+            libwayland-dev wayland-protocols >/dev/null
+      - name: The kernels' fatbin (a green run's artifact, else nvcc)
+        env: { GH_TOKEN: '${{ github.token }}', REPO: '${{ github.repository }}' }
+        run: |
+          set -u
+          mkdir -p fatbin
+          for wf in nvl-kernels.yml vsplugin-nvidia-linux.yml; do
+            id=$(gh api "repos/$REPO/actions/workflows/$wf/runs?status=success&per_page=1" --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            [ -n "$id" ] && [ "$id" != null ] || continue
+            if gh run download "$id" -R "$REPO" -n nvl-kernels-fatbin -D fatbin 2>/dev/null && [ -f fatbin/nvl_kernels.fatbin ]; then
+              echo "fatbin from $wf run $id"; echo "NVL_FATBIN=$PWD/fatbin/nvl_kernels.fatbin" >> "$GITHUB_ENV"; break
+            fi
+          done
+          if [ ! -f fatbin/nvl_kernels.fatbin ]; then
+            echo "::notice::no fatbin artifact: nvcc 12.8 from NVIDIA's apt repository builds the kernels"
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+            sudo dpkg -i cuda-keyring_1.1-1_all.deb
+            sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+            sudo apt-get install -y -qq --no-install-recommends cuda-nvcc-12-8 cuda-cudart-dev-12-8 >/dev/null
+            echo "CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
+          fi
+          ls -la fatbin
+      - uses: actions/cache@v4
+        with:
+          path: vsplugin/build-nvl/_deps
+          key: capture-deps-linux-nvl-${{ hashFiles('vsplugin/engines/gpu/gpu-pins.json') }}
+      - name: Build (pushmpc-capture with the nvl engine)
+        run: |
+          set -eu
+          extra=""
+          if [ -n "${NVL_FATBIN:-}" ]; then
+            extra="-DPMVS_NVL_FATBIN=$NVL_FATBIN"
+            [ -f fatbin/nvl_guard_sc.fatbin ] && extra="$extra -DPMVS_NVL_GUARD_DIR=$PWD/fatbin"
+          fi
+          # shellcheck disable=SC2086
+          cmake -S vsplugin -B vsplugin/build-nvl -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DPMVS_NVIDIA_LINUX=ON $extra 2>&1 | tee /tmp/configure.log
+          grep -q 'the nvl engine (NVIDIA Video Effects) is built in' /tmp/configure.log || { echo "::error::the nvl engine is not in this build"; exit 1; }
+          cmake --build vsplugin/build-nvl --target pushmpc_capture capture_test
+          ./vsplugin/build-nvl/capture_test | tail -2
+      - name: The probe refuses cleanly (no NVIDIA driver here)
+        run: |
+          set -eu
+          ./vsplugin/build-nvl/pushmpc-capture --selftest --allow-cpu-vulkan 2>&1 | tee /tmp/capture-nvl-selftest.log
+          grep -E 'selftest: nvl: not available' /tmp/capture-nvl-selftest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capture-linux-nvl-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
 
   linux-portal:
     runs-on: ubuntu-24.04

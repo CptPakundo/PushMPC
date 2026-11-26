@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -71,6 +72,8 @@ public:
     void SetVisible(bool on) override { m_wanted = on; Apply(); }
     double RefreshHz() const override { return m_hz; }
     std::string Describe() const override;
+    bool HdrCapable(std::string& why) const override;
+    void SetHdr(bool on) override;
 
 private:
     void Place(NSRect r);   // main thread
@@ -180,6 +183,28 @@ bool MacPresenter::Pump(bool& resized)
     }
     Apply();
     return true;
+}
+
+// an EDR display (extended dynamic range above SDR white: XDR, HDR monitors with HDR on)
+bool MacPresenter::HdrCapable(std::string& why) const
+{
+    if (std::getenv("PUSHMPC_CAPTURE_SDR")) { why = "PUSHMPC_CAPTURE_SDR is set"; return false; }
+    __block double edr = 1.0;
+    NSWindow* w = m_win;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSScreen* s = w.screen ? w.screen : NSScreen.mainScreen;
+        if (@available(macOS 10.15, *)) edr = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    });
+    if (edr <= 1.0) { why = "this display shows no extended dynamic range (SDR)"; return false; }
+    return true;
+}
+
+void MacPresenter::SetHdr(bool on)
+{
+    CAMetalLayer* l = m_layer;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        l.wantsExtendedDynamicRangeContent = on;   // MoltenVK sets the PQ colour space from the swapchain
+    });
 }
 
 std::string MacPresenter::Describe() const

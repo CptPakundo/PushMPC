@@ -20,6 +20,9 @@ struct EngineRequest {
     double srcFps = 0, displayHz = 0;
     int smoother = 0;            // 0 Auto, 1 off, 2..8
     int displayW = 0, displayH = 0;   // the window the picture is shown in (the upscaling target); 0 = unknown
+    int bits = 8;                // the captured pictures: 8 (BT.709 SDR) or 10 (pq: BT.2020 PQ, an HDR capture)
+    bool pq = false;
+    bool hdrOut = false;         // the overlay shows HDR (HDR10): an engine may make HDR (nvl: RTX Video HDR)
 };
 
 class HostEngine {

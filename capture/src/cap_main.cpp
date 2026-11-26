@@ -61,17 +61,17 @@ void Log(const char* fmt, ...)
 class Y4m {
 public:
     ~Y4m() { if (m_f) std::fclose(m_f); }
-    bool Open(const std::string& path, int w, int h, double hz)
+    bool Open(const std::string& path, int w, int h, int bits, double hz)
     {
         m_f = std::fopen(path.c_str(), "wb");
         if (!m_f) return false;
-        std::fprintf(m_f, "YUV4MPEG2 W%d H%d F%d:1000 Ip A1:1 C420jpeg\n", w, h, int(std::lround(hz * 1000)));
-        m_w = w; m_h = h;
+        std::fprintf(m_f, "YUV4MPEG2 W%d H%d F%d:1000 Ip A1:1 %s\n", w, h, int(std::lround(hz * 1000)), bits > 8 ? "C420p10 XYSCSS=420P10" : "C420jpeg");
+        m_w = w; m_h = h; m_bits = bits;
         return true;
     }
     void Write(const I420& p)
     {
-        if (!m_f || p.w != m_w || p.h != m_h) return;
+        if (!m_f || p.w != m_w || p.h != m_h || (p.bits > 8) != (m_bits > 8)) return;
         std::fputs("FRAME\n", m_f);
         std::fwrite(p.y.data(), 1, p.y.size(), m_f);
         std::fwrite(p.u.data(), 1, p.u.size(), m_f);
@@ -80,26 +80,28 @@ public:
     bool IsOpen() const { return m_f != nullptr; }
 private:
     FILE* m_f = nullptr;
-    int m_w = 0, m_h = 0;
+    int m_w = 0, m_h = 0, m_bits = 8;
 };
 
 // ------------------------------------------------------------------------------------------------ the engines
-// one of: the GPU pipeline (frames stay on the GPU) or a host pipeline (cpu / ml / apple)
+// one of: the GPU pipeline (frames stay on the GPU) or a host pipeline (nvl / cpu / ml / apple)
 struct Engines {
     std::unique_ptr<GpuPipeline> gpu;
     std::unique_ptr<HostPipeline> host;
     std::string name, desc;
-    int w = 0, h = 0;
+    int w = 0, h = 0, bits = 8;
     std::vector<uint64_t> Frames() const { return gpu ? gpu->Frames() : host ? host->Frames() : std::vector<uint64_t>{}; }
     std::vector<uint64_t> Discs() const { return gpu ? gpu->Discontinuities() : host ? host->Discontinuities() : std::vector<uint64_t>{}; }
     uint64_t Generated() const { return gpu ? gpu->Generated() : host ? host->Generated() : 0; }
     int Steps() const { return host && host->Engine() ? host->Engine()->Steps() : 0; }
 };
 
-bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int outW, int outH, const Options& o, double hz, int smoother, bool hostOut, std::string& err)
+// bits / pq: the captured pictures (10 + pq: an HDR capture); hdrOut: the overlay is HDR10
+bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int bits, bool pq, bool hdrOut, int outW, int outH, const Options& o, double hz,
+                 int smoother, bool hostOut, std::string& err)
 {
     e = Engines{};
-    e.w = w; e.h = h;
+    e.w = w; e.h = h; e.bits = bits;
     std::vector<std::string> order;
     if (want == "auto") {
 #ifdef __APPLE__
@@ -112,28 +114,32 @@ bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int 
         if (want != "cpu") order.push_back(want == "gpu" ? "cpu" : "gpu"), order.push_back("cpu");
     }
     std::string why;
+    auto note = [&](const std::string& n, const std::string& w) { why += (why.empty() ? "" : "; ") + n + ": " + w; };
     for (const std::string& n : order) {
         if (n == "nvl" && want == "auto" && !NvlAvailable(nullptr)) continue;
         if (n == "ml" && want == "auto" && !MlInstalled()) continue;
         if (n == "apple" && want == "auto" && !AppleAvailable(nullptr)) continue;
         if (n == "gpu") {
-            if (!vk || !vk->dev) { why += (why.empty() ? "" : "; ") + std::string("gpu: no Vulkan device"); continue; }
+            // the GPU engine takes 8-bit pictures: an HDR capture goes to an engine that keeps 10 bits
+            if (bits > 8) { note(n, "an HDR capture (10 bit) needs another engine"); continue; }
+            if (!vk || !vk->dev) { note(n, "no Vulkan device"); continue; }
             auto g = std::make_unique<GpuPipeline>();
             GpuRequest r;
             r.w = w; r.h = h; r.outW = outW; r.outH = outH; r.upscaler = o.upscaler; r.hostOut = hostOut;
             std::string d, ge;
-            if (!g->Open(*vk, r, d, ge)) { why += (why.empty() ? "" : "; ") + ge; continue; }
+            if (!g->Open(*vk, r, d, ge)) { note(n, ge); continue; }
             e.gpu = std::move(g); e.name = "gpu"; e.desc = d;
-            return true;
+        } else {
+            EngineRequest r;
+            r.w = w; r.h = h; r.displayHz = hz; r.smoother = smoother; r.displayW = outW; r.displayH = outH;
+            r.bits = bits; r.pq = pq; r.hdrOut = hdrOut;
+            std::string he;
+            auto eng = OpenHostEngine(n, r, he);
+            if (!eng) { note(n, he); continue; }
+            e.desc = eng->Describe();
+            e.host = std::make_unique<HostPipeline>(std::move(eng));
+            e.name = n;
         }
-        EngineRequest r;
-        r.w = w; r.h = h; r.displayHz = hz; r.smoother = smoother; r.displayW = outW; r.displayH = outH;
-        std::string he;
-        auto eng = OpenHostEngine(n, r, he);
-        if (!eng) { why += (why.empty() ? "" : "; ") + n + ": " + he; continue; }
-        e.desc = eng->Describe();
-        e.host = std::make_unique<HostPipeline>(std::move(eng));
-        e.name = n;
         if (n != order.front()) Log("engine %s instead of %s (%s)", n.c_str(), order.front().c_str(), why.c_str());
         return true;
     }
@@ -204,6 +210,11 @@ int SelfTest(const Options& o)
         if (!out || std::fabs(c - 73.5) > 2.0) { Log("selftest: FAIL CPU engine"); ++fails; }
     } else {
         Log("selftest: FAIL CPU engine: %s", why.c_str()); ++fails;
+    }
+    {   // NVIDIA Video Effects: what the probe finds (no driver: a clean refusal, the next engine runs)
+        std::string nv;
+        const bool on = NvlAvailable(&nv);
+        Log("selftest: nvl: %s (%s)", on ? "available" : "not available", nv.c_str());
     }
     Log("selftest: %s", fails ? "FAILED" : "ok");
     return fails ? 1 : 0;
@@ -302,7 +313,19 @@ int Run(const Options& o)
         int w = 0, h = 0;
         pres->Size(w, h);
         screen = std::make_unique<Screen>();
-        if (!screen->Init(vk.get(), surface, w, h, err)) { Log("the screen: %s", err.c_str()); return 4; }
+        // HDR where the window can show it (macOS EDR displays, Wayland with the compositor's colour management):
+        // an HDR10 swapchain, RTX Video HDR on, HDR captures kept HDR; else SDR. X11 stays SDR.
+        std::string hdrWhy;
+        const bool hdrWanted = pres->HdrCapable(hdrWhy);
+        if (hdrWanted) pres->SetHdr(true);
+        if (!screen->Init(vk.get(), surface, w, h, hdrWanted, err)) { Log("the screen: %s", err.c_str()); return 4; }
+        if (screen->Hdr()) {
+            Log("HDR: on (HDR10, BT.2020 PQ; SDR pictures at %d nits)", 203);
+            Log("HDR capture: %s", src->SetHdr(true) ? "on (10-bit BT.2020 PQ)" : "off (this source captures SDR)");
+        } else {
+            if (hdrWanted) pres->SetHdr(false);
+            Log("HDR: off, SDR (%s)", hdrWanted ? screen->HdrWhy().c_str() : hdrWhy.c_str());
+        }
     }
 
     Y4m dump;
@@ -323,16 +346,16 @@ int Run(const Options& o)
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
-    auto openFor = [&](int w, int h) -> bool {
+    auto openFor = [&](int w, int h, int bits, bool pq) -> bool {
         int ow = 0, oh = 0;
         if (screen) { ow = screen->Width(); oh = screen->Height(); }
-        if (!OpenEngines(eng, want, vkOk ? vk.get() : nullptr, w, h, ow, oh, o, hz, smoother, !screen, err)) { Log("%s", err.c_str()); return false; }
+        if (!OpenEngines(eng, want, vkOk ? vk.get() : nullptr, w, h, bits, pq, screen && screen->Hdr(), ow, oh, o, hz, smoother, !screen, err)) { Log("%s", err.c_str()); return false; }
         if (smoother == 0 && eng.Steps() == 1) smoother = 1;   // upscaling only (nvl without frame generation)
         else if (smoother == 0 && eng.Steps() > 0) smoother = std::clamp(eng.Steps(), 2, 8);   // a k-step engine: its grid
         Log("engine: %s (%s), smoother %s", eng.name.c_str(), eng.desc.c_str(), smoother == 0 ? "Auto" : smoother == 1 ? "off" : ("x" + std::to_string(smoother)).c_str());
         if (!o.dump.empty() && !dump.IsOpen()) {
             const int dw = eng.gpu ? eng.gpu->OutW() : w, dh = eng.gpu ? eng.gpu->OutH() : h;
-            if (!dump.Open(o.dump, dw, dh, hz)) Log("cannot write %s", o.dump.c_str());
+            if (!dump.Open(o.dump, dw, dh, bits, hz)) Log("cannot write %s", o.dump.c_str());
         }
         tl = Timeline{};
         haveFp = false;
@@ -359,13 +382,15 @@ int Run(const Options& o)
         const bool waitFirst = !tl.Valid();
         while (src->Next(f, waitFirst ? 50 : 0)) {
             const int w = f.width & ~1, h = f.height & ~1;
+            const int fbits = f.fmt == PixFmt::RGB10 ? 10 : 8;
+            const bool fpq = f.fmt == PixFmt::RGB10;
             if (w < 16 || h < 16) { f.Release(); continue; }
-            if (!eng.gpu && !eng.host) { if (!openFor(w, h)) { f.Release(); rc = 6; g_stop = true; break; } }
-            else if (w != eng.w || h != eng.h || (reopenAt > 0 && Now() >= reopenAt)) {
+            if (!eng.gpu && !eng.host) { if (!openFor(w, h, fbits, fpq)) { f.Release(); rc = 6; g_stop = true; break; } }
+            else if (w != eng.w || h != eng.h || fbits != eng.bits || (reopenAt > 0 && Now() >= reopenAt)) {
                 Log("the picture is now %dx%d", w, h);
                 reopenAt = 0;
                 eng = Engines{};
-                if (!openFor(w, h)) { f.Release(); rc = 6; g_stop = true; break; }
+                if (!openFor(w, h, fbits, fpq)) { f.Release(); rc = 6; g_stop = true; break; }
             }
             f.width = w; f.height = h;
             ++inFrames;

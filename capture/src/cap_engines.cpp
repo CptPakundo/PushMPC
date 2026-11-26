@@ -38,9 +38,10 @@ public:
     bool Open(const EngineRequest& r, std::string& why)
     {
         pmvs::portable::Config c;
-        c.width = r.w; c.height = r.h; c.bits = 8; c.quality = Quality();
+        c.width = r.w; c.height = r.h; c.bits = r.bits; c.quality = Quality();
+        m_pq = r.pq;
         if (!m_e.Configure(c, why)) return false;
-        const auto cal = pmvs::portable::Calibrate(r.w, r.h, 8, m_e.Threads(), c.quality);
+        const auto cal = pmvs::portable::Calibrate(r.w, r.h, r.bits, m_e.Threads(), c.quality);
         const double fps = r.srcFps > 0 ? r.srcFps : 23.976, hz = r.displayHz > 0 ? r.displayHz : 60;
         const double perSource = hz / fps;   // screen refreshes per source frame
         const double budget = 1000.0 / fps * pmvs::kCpuShare;
@@ -63,25 +64,27 @@ public:
     bool Push(const I420& f, bool contiguous, std::string& err) override
     {
         pmvs::portable::YuvView v;
-        v.width = f.w; v.height = f.h; v.bits = 8;
+        v.width = f.w; v.height = f.h; v.bits = f.bits;
         v.data[0] = f.y.data(); v.data[1] = f.u.data(); v.data[2] = f.v.data();
-        v.stride[0] = f.w; v.stride[1] = v.stride[2] = f.cw();
+        v.stride[0] = f.w * f.bps(); v.stride[1] = v.stride[2] = f.cw() * f.bps();
         return m_e.Push(v, contiguous, err);
     }
     bool Render(float t, I420& out, std::string& err) override
     {
         if (!m_e.HavePair()) { err = "no pair"; return false; }
         const auto& c = m_e.Cfg();
-        if (out.w != c.width || out.h != c.height) out.Resize(c.width, c.height);
+        if (!out.Same(c.width, c.height, c.bits)) out.Resize(c.width, c.height, c.bits);
+        out.pq = m_pq;
         pmvs::portable::YuvOut o;
         o.data[0] = out.y.data(); o.data[1] = out.u.data(); o.data[2] = out.v.data();
-        o.stride[0] = out.w; o.stride[1] = o.stride[2] = out.cw();
+        o.stride[0] = out.w * out.bps(); o.stride[1] = o.stride[2] = out.cw() * out.bps();
         m_e.Generate(t, o);
         return true;
     }
 private:
     pmvs::portable::Engine m_e;
     int m_steps = 0;
+    bool m_pq = false;
     std::string m_desc;
 };
 
@@ -107,6 +110,7 @@ class MlEngine : public HostEngine {
 public:
     bool Open(const EngineRequest& r, std::string& why)
     {
+        if (r.bits > 8) { why = "PushFlow takes 8-bit pictures here (an HDR capture goes to another engine)"; return false; }
         const std::string rt = MlDir();
         if (rt.empty()) { why = "the PushFlow runtime (pmml) is not installed"; return false; }
         pmml::Options o;
@@ -187,7 +191,8 @@ public:
         const double fps = r.srcFps > 0 ? r.srcFps : 23.976, hz = r.displayHz > 0 ? r.displayHz : 60;
         int k = r.smoother >= 2 ? r.smoother : std::clamp(int(std::ceil(hz / fps - 0.02)), 2, 8);
         pmvs::apple::Config c;
-        c.width = r.w; c.height = r.h; c.bits = 8; c.k = k; c.sr = "off"; c.srcFps = fps;
+        c.width = r.w; c.height = r.h; c.bits = r.bits; c.k = k; c.sr = "off"; c.srcFps = fps;
+        m_bits = r.bits; m_pq = r.pq;
         std::string info;
         if (!m_e.Configure(c, why, info)) return false;
         m_k = m_e.K();
@@ -200,21 +205,24 @@ public:
     bool Push(const I420& f, bool contiguous, std::string& err) override
     {
         pmvs::apple::PlanarView v;
-        v.width = f.w; v.height = f.h; v.bits = 8;
+        v.width = f.w; v.height = f.h; v.bits = f.bits;
         v.data[0] = f.y.data(); v.data[1] = f.u.data(); v.data[2] = f.v.data();
-        v.stride[0] = f.w; v.stride[1] = v.stride[2] = f.cw();
+        v.stride[0] = f.w * f.bps(); v.stride[1] = v.stride[2] = f.cw() * f.bps();
         m_gen.resize(size_t(std::max(0, m_k - 1)));
         std::vector<pmvs::apple::PlanarOut> outs(m_gen.size());
         for (size_t i = 0; i < m_gen.size(); ++i) {
-            if (m_gen[i].w != m_w || m_gen[i].h != m_h) m_gen[i].Resize(m_w, m_h);
+            if (!m_gen[i].Same(m_w, m_h, m_bits)) m_gen[i].Resize(m_w, m_h, m_bits);
+            m_gen[i].pq = m_pq;
             outs[i].data[0] = m_gen[i].y.data(); outs[i].data[1] = m_gen[i].u.data(); outs[i].data[2] = m_gen[i].v.data();
-            outs[i].stride[0] = m_w; outs[i].stride[1] = outs[i].stride[2] = m_gen[i].cw();
+            outs[i].stride[0] = m_w * m_gen[i].bps(); outs[i].stride[1] = outs[i].stride[2] = m_gen[i].cw() * m_gen[i].bps();
         }
-        if (m_cur.w != m_w || m_cur.h != m_h) m_cur.Resize(m_w, m_h);
+        if (!m_cur.Same(m_w, m_h, m_bits)) m_cur.Resize(m_w, m_h, m_bits);
+        m_cur.pq = m_pq;
         pmvs::apple::PlanarOut cur;
         cur.data[0] = m_cur.y.data(); cur.data[1] = m_cur.u.data(); cur.data[2] = m_cur.v.data();
-        cur.stride[0] = m_w; cur.stride[1] = cur.stride[2] = m_cur.cw();
-        pmvs::apple::Colour col;   // BT.709 limited
+        cur.stride[0] = m_w * m_cur.bps(); cur.stride[1] = cur.stride[2] = m_cur.cw() * m_cur.bps();
+        pmvs::apple::Colour col;   // BT.709 limited; an HDR capture: BT.2020 PQ (VapourSynth codes 9 / 16 / 9)
+        if (m_pq) { col.matrix = 9; col.transfer = 16; col.primaries = 9; }
         m_pts += 417083;
         return m_e.Process(v, col, m_pts, contiguous, outs, cur, m_have, err);
     }
@@ -229,7 +237,8 @@ private:
     pmvs::apple::Engine m_e;
     std::vector<I420> m_gen;
     I420 m_cur;
-    int m_k = 2, m_w = 0, m_h = 0;
+    int m_k = 2, m_w = 0, m_h = 0, m_bits = 8;
+    bool m_pq = false;
     int64_t m_pts = 0;
     bool m_have = false;
     std::string m_desc;
@@ -265,18 +274,20 @@ public:
         Settings s = LoadSettings([](const char* n) { return pmvs::ReadSetting(n); });
         if (!s.enable) { why = "PushMPC is off (Enable = 0)"; return false; }
         if (r.smoother >= 0) s.smoother = r.smoother;
-        s.sdrToHdr = -1;   // the overlay shows SDR (8-bit BT.709)
+        // an SDR overlay: no RTX Video HDR; an HDR overlay (HDR10): the user's SdrToHdr setting (Auto: on), HDR captures stay HDR
+        if (!r.hdrOut) s.sdrToHdr = -1;
         if (s.targetScreen && r.displayH > 0) s.targetH = TargetForDisplay(r.displayH);
         Source src; src.w = r.w; src.h = r.h; src.fps = r.srcFps > 0 ? r.srcFps : 23.976;
-        Display d; d.refreshHz = r.displayHz;
+        src.hdr = r.pq; src.tenBit = r.bits > 8;
+        Display d; d.refreshHz = r.displayHz; d.hdr = r.hdrOut;
         Costs c; c.card = CardFactor(g.name, g.cls);
         m_flowKey = FlowCostKey(g.name, src.w, src.h, s.targetH);
         ReadFlowCosts(m_flowKey, c.flowMeasured, c.warpMeasured);
         Plan plan = Decide(s, src, d, g.caps, c);
-        plan.hdr = false;
+        if (!r.hdrOut) plan.hdr = false;
         if (plan.k <= 1 && !plan.vsr) { why = "nothing to do here (" + plan.why + ")"; return false; }
         EngineConfig cfg;
-        cfg.srcW = r.w; cfg.srcH = r.h; cfg.bits = 8; cfg.plan = plan;
+        cfg.srcW = r.w; cfg.srcH = r.h; cfg.bits = r.bits; cfg.srcHdr = r.pq; cfg.plan = plan;
         cfg.ampere = plan.k >= 2 && !plan.nvof && VfgAmpere(g.major, g.minor);
         cfg.guardFlow = plan.guardFlow;
         m_eng = std::make_unique<Engine>();
@@ -298,27 +309,30 @@ public:
         m_be.source = [this](int64_t, SrcView& v) -> bool {
             if (!m_src) return false;
             v.data[0] = m_src->y.data(); v.data[1] = m_src->u.data(); v.data[2] = m_src->v.data();
-            v.stride[0] = m_src->w; v.stride[1] = v.stride[2] = m_src->cw();
-            v.width = m_src->w; v.height = m_src->h; v.bits = 8;
-            v.fmt.bits = 8; v.fmt.full = false; v.fmt.matrix = 1;   // the converter's BT.709 limited range
+            v.stride[0] = m_src->w * m_src->bps(); v.stride[1] = v.stride[2] = m_src->cw() * m_src->bps();
+            v.width = m_src->w; v.height = m_src->h; v.bits = m_src->bits;
+            v.fmt.bits = m_src->bits; v.fmt.full = false; v.fmt.matrix = m_src->pq ? 9 : 1;   // the converter's: BT.709, or BT.2020 for PQ
             return true;
         };
         m_be.alloc = [this](const OutView& o, int& slot) -> bool {
             m_store.emplace_back();
             I420& p = m_store.back();
-            p.Resize(o.width, o.height);
+            // HDR (the engine's PQ BT.2020 output) stays 10 bit; a deeper SDR output goes to 8 bit
+            const bool keep = m_eng->OutHdr() && o.bits > 8;
+            p.Resize(o.width, o.height, keep ? o.bits : 8);
+            p.pq = m_eng->OutHdr();
             uint8_t* dst[3] = { p.y.data(), p.u.data(), p.v.data() };
             for (int i = 0; i < 3; ++i) {
                 const int w = i ? p.cw() : p.w, h = i ? p.ch() : p.h;
                 for (int y = 0; y < h; ++y) {
                     const uint8_t* row = o.data[i] + o.pitch[i] * size_t(y);
-                    uint8_t* out = dst[i] + size_t(y) * size_t(w);
-                    if (o.bits > 8) {
+                    uint8_t* out = dst[i] + size_t(y) * size_t(w) * size_t(p.bps());
+                    if (keep || o.bits <= 8) {
+                        std::memcpy(out, row, size_t(w) * size_t(p.bps()));
+                    } else {
                         const uint16_t* r16 = reinterpret_cast<const uint16_t*>(row);
                         const int sh = o.bits - 8;
                         for (int x = 0; x < w; ++x) out[x] = uint8_t(std::min(255, (int(r16[x]) + (1 << (sh - 1))) >> sh));
-                    } else {
-                        std::memcpy(out, row, size_t(w));
                     }
                 }
             }

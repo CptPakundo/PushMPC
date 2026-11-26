@@ -27,12 +27,23 @@ double Now()
 }
 
 // ------------------------------------------------------------------------------------------------ frames
-void I420::Resize(int width, int height)
+void I420::Resize(int width, int height, int depth)
 {
-    w = width; h = height;
-    y.assign(size_t(w) * size_t(h), 16);
-    u.assign(size_t(cw()) * size_t(ch()), 128);
-    v.assign(size_t(cw()) * size_t(ch()), 128);
+    w = width; h = height; bits = depth;
+    if (bits <= 8) {
+        pq = false;
+        y.assign(size_t(w) * size_t(h), 16);
+        u.assign(size_t(cw()) * size_t(ch()), 128);
+        v.assign(size_t(cw()) * size_t(ch()), 128);
+        return;
+    }
+    auto fill = [](std::vector<uint8_t>& p, size_t n, int value) {
+        p.resize(n * 2);
+        for (size_t i = 0; i < n; ++i) { p[2 * i] = uint8_t(value & 255); p[2 * i + 1] = uint8_t(value >> 8); }
+    };
+    fill(y, size_t(w) * size_t(h), 16 << (bits - 8));
+    fill(u, size_t(cw()) * size_t(ch()), 128 << (bits - 8));
+    fill(v, size_t(cw()) * size_t(ch()), 128 << (bits - 8));
 }
 
 namespace {
@@ -79,19 +90,64 @@ void RowsToI420(const uint8_t* px, ptrdiff_t pitch, int w, int h, PixFmt f, I420
         }
     }
 }
+// RGB10 (BT.2020 PQ R'G'B', 10 bit) -> 10-bit limited YUV, BT.2020 NCL: Y = 64 + 876 (0.2627 R + 0.6780 G + 0.0593 B),
+// Cb = 512 + 896 (B - Y) / 1.8814, Cr = 512 + 896 (R - Y) / 1.4746 (R, G, B and Y in 0..1)
+inline void Rgb10(const uint8_t* p, double& r, double& g, double& b)
+{
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    b = double(v & 1023u) / 1023.0; g = double((v >> 10) & 1023u) / 1023.0; r = double((v >> 20) & 1023u) / 1023.0;
+}
+inline void Put16(std::vector<uint8_t>& p, size_t i, double v)
+{
+    const int c = int(std::lround(std::clamp(v, 0.0, 1023.0)));
+    p[2 * i] = uint8_t(c & 255); p[2 * i + 1] = uint8_t(c >> 8);
+}
+void RowsToI420_10(const uint8_t* px, ptrdiff_t pitch, int w, int h, I420& o, int cy0, int cy1)
+{
+    const int cw = o.cw();
+    for (int cy = cy0; cy < cy1; ++cy) {
+        for (int dy = 0; dy < 2 && cy * 2 + dy < h; ++dy) {
+            const int y = cy * 2 + dy;
+            const uint8_t* row = px + ptrdiff_t(y) * pitch;
+            for (int x = 0; x < w; ++x) {
+                double r, g, b;
+                Rgb10(row + 4 * x, r, g, b);
+                Put16(o.y, size_t(y) * size_t(w) + size_t(x), 64.0 + 876.0 * (0.2627 * r + 0.6780 * g + 0.0593 * b));
+            }
+        }
+        const uint8_t* r0 = px + ptrdiff_t(cy * 2) * pitch;
+        const uint8_t* r1 = px + ptrdiff_t(std::min(h - 1, cy * 2 + 1)) * pitch;
+        for (int cx = 0; cx < cw; ++cx) {
+            const int x0 = cx * 2, x1 = std::min(w - 1, cx * 2 + 1);
+            double sr = 0, sg = 0, sb = 0, r, g, b;
+            for (const uint8_t* q : { r0 + 4 * x0, r0 + 4 * x1, r1 + 4 * x0, r1 + 4 * x1 }) { Rgb10(q, r, g, b); sr += r; sg += g; sb += b; }
+            sr *= 0.25; sg *= 0.25; sb *= 0.25;
+            const double Y = 0.2627 * sr + 0.6780 * sg + 0.0593 * sb;
+            Put16(o.u, size_t(cy) * size_t(cw) + size_t(cx), 512.0 + 896.0 * (sb - Y) / 1.8814);
+            Put16(o.v, size_t(cy) * size_t(cw) + size_t(cx), 512.0 + 896.0 * (sr - Y) / 1.4746);
+        }
+    }
+}
 } // namespace
 
 void ToI420(const uint8_t* px, ptrdiff_t pitch, int w, int h, PixFmt f, I420& out, int threads)
 {
-    if (out.w != w || out.h != h) out.Resize(w, h);
+    const int depth = f == PixFmt::RGB10 ? 10 : 8;
+    if (!out.Same(w, h, depth)) out.Resize(w, h, depth);
+    out.pq = f == PixFmt::RGB10;
     const int ch = out.ch();
     if (threads <= 0) threads = int(std::min(8u, std::max(1u, std::thread::hardware_concurrency())));
     threads = std::max(1, std::min(threads, ch / 16));
-    if (threads <= 1) { RowsToI420(px, pitch, w, h, f, out, 0, ch); return; }
+    auto rows = [&out, px, pitch, w, h, f](int a, int b) {
+        if (f == PixFmt::RGB10) RowsToI420_10(px, pitch, w, h, out, a, b);
+        else RowsToI420(px, pitch, w, h, f, out, a, b);
+    };
+    if (threads <= 1) { rows(0, ch); return; }
     std::vector<std::thread> t;
     for (int i = 0; i < threads; ++i) {
         const int a = ch * i / threads, b = ch * (i + 1) / threads;
-        t.emplace_back([=, &out] { RowsToI420(px, pitch, w, h, f, out, a, b); });
+        t.emplace_back([=] { rows(a, b); });
     }
     for (auto& x : t) x.join();
 }

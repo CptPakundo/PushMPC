@@ -25,7 +25,7 @@ bool HasDevExt(VkPhysicalDevice p, const char* n)
     for (auto& x : e) if (std::strcmp(x.extensionName, n) == 0) return true;
     return false;
 }
-struct PresentPush { int w, h, cw, ch, offY, offU, offV, pitchY, pitchC, dw, dh, vx, vy, vw, vh, swapRB; };
+struct PresentPush { int w, h, cw, ch, offY, offU, offV, pitchY, pitchC, dw, dh, vx, vy, vw, vh, swapRB, bits, pq, outMode; float sdrWhite; };
 } // namespace
 
 Vk::~Vk()
@@ -52,6 +52,8 @@ bool Vk::CreateInstance(const std::vector<const char*>& surfaceExts, std::string
     VkInstanceCreateInfo ci{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     if (has(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) { exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME); ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR; }
     if (has(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) exts.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    // HDR swapchains (HDR10 PQ): MoltenVK, Mesa / NVIDIA on a Wayland compositor with the colour-management protocol
+    if (surfaces && has(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) { exts.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); colorspaces = true; }
     VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
     app.pApplicationName = "PushMPC capture"; app.pEngineName = "PushMPC"; app.apiVersion = VK_API_VERSION_1_2;
     ci.pApplicationInfo = &app;
@@ -354,9 +356,9 @@ Screen::~Screen()
     m_vk->Free(m_present);
 }
 
-bool Screen::Init(Vk* vk, VkSurfaceKHR surface, int w, int h, std::string& err)
+bool Screen::Init(Vk* vk, VkSurfaceKHR surface, int w, int h, bool hdr, std::string& err)
 {
-    m_vk = vk; m_surface = surface; m_w = w; m_h = h;
+    m_vk = vk; m_surface = surface; m_w = w; m_h = h; m_hdrWanted = hdr;
     const VkDevice d = vk->dev;
     VkCommandPoolCreateInfo pi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; pi.queueFamilyIndex = vk->family;
@@ -393,9 +395,20 @@ bool Screen::MakeSwapchain(std::string& err)
     if (nf) vkGetPhysicalDeviceSurfaceFormatsKHR(m_vk->phys, m_surface, &nf, fmts.data());
     if (fmts.empty()) { err = "the window offers no picture format"; return false; }
     VkSurfaceFormatKHR f = fmts[0];
-    for (auto& x : fmts) if (x.format == VK_FORMAT_B8G8R8A8_UNORM || x.format == VK_FORMAT_R8G8B8A8_UNORM) { f = x; break; }
+    for (auto& x : fmts) if ((x.format == VK_FORMAT_B8G8R8A8_UNORM || x.format == VK_FORMAT_R8G8B8A8_UNORM) && x.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { f = x; break; }
+    m_hdr = false;
+    if (!m_hdrWanted) m_hdrWhy = "not asked for (an SDR display or desktop)";
+    else if (!m_vk->colorspaces) m_hdrWhy = "the Vulkan driver has no VK_EXT_swapchain_colorspace";
+    else {
+        m_hdrWhy = "the window offers no HDR10 format (the compositor / display does not take HDR here)";
+        for (auto& x : fmts)
+            if (x.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT && (x.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || x.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
+                f = x; m_hdr = true; m_hdrWhy.clear(); break;
+            }
+    }
     m_format = f.format;
-    m_swapRB = f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_SRGB;
+    // the shader packs R in the low bits: a BGRA (or A2R10G10B10) swapchain gets B, G, R
+    m_swapRB = f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_SRGB || f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
     if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { err = "the window's images take no copies"; return false; }
     VkExtent2D ext = caps.currentExtent;
     if (ext.width == 0xFFFFFFFFu) {
@@ -423,7 +436,8 @@ bool Screen::MakeSwapchain(std::string& err)
     vkGetSwapchainImagesKHR(d, m_sc, &ni, m_images.data());
     m_render.resize(ni);
     for (auto& s : m_render) { VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; vkCreateSemaphore(d, &si, nullptr, &s); }
-    for (auto& s : m_slot) if (!m_vk->Image(m_w, m_h, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, s.img, err)) return false;
+    // r32ui: the shader packs the swapchain's own 32-bit texel; the copy is raw (size-compatible formats)
+    for (auto& s : m_slot) if (!m_vk->Image(m_w, m_h, VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, s.img, err)) return false;
     return true;
 }
 
@@ -487,7 +501,8 @@ bool Screen::Record(VkCommandBuffer cb, VkBuffer b, const YuvLayout& L, std::str
     // the picture fills the window with its aspect ratio kept (bars where they differ)
     const double sc = std::min(double(m_w) / double(L.w), double(m_h) / double(L.h));
     const int vw = std::max(1, std::min(m_w, int(std::lround(L.w * sc)))), vh = std::max(1, std::min(m_h, int(std::lround(L.h * sc))));
-    PresentPush p{ L.w, L.h, L.cw, L.ch, int(L.offY), int(L.offU), int(L.offV), L.pitchY, L.pitchC, m_w, m_h, (m_w - vw) / 2, (m_h - vh) / 2, vw, vh, m_swapRB ? 1 : 0 };
+    PresentPush p{ L.w, L.h, L.cw, L.ch, int(L.offY), int(L.offU), int(L.offV), L.pitchY, L.pitchC, m_w, m_h, (m_w - vw) / 2, (m_h - vh) / 2, vw, vh, m_swapRB ? 1 : 0,
+                   L.bits, L.pq ? 1 : 0, m_hdr ? 1 : 0, m_sdrWhite };
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_present.p);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_present.pl, 0, 1, &s.set, 0, nullptr);
     vkCmdPushConstants(cb, m_present.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -508,11 +523,12 @@ bool Screen::ShowHost(const I420& pic, std::string& err)
 {
     Slot& s = m_slot[m_cur];
     YuvLayout L;
-    L.w = pic.w; L.h = pic.h; L.cw = pic.cw(); L.ch = pic.ch(); L.pitchY = pic.w; L.pitchC = pic.cw();
+    L.w = pic.w; L.h = pic.h; L.cw = pic.cw(); L.ch = pic.ch(); L.pitchY = pic.w * pic.bps(); L.pitchC = pic.cw() * pic.bps();
+    L.bits = pic.bits; L.pq = pic.pq;
     L.offY = 0;
-    L.offU = (VkDeviceSize(pic.w) * VkDeviceSize(pic.h) + 255) & ~VkDeviceSize(255);
-    L.offV = (L.offU + VkDeviceSize(L.cw) * VkDeviceSize(L.ch) + 255) & ~VkDeviceSize(255);
-    const VkDeviceSize need = L.offV + VkDeviceSize(L.cw) * VkDeviceSize(L.ch) + 4;
+    L.offU = (VkDeviceSize(pic.y.size()) + 255) & ~VkDeviceSize(255);
+    L.offV = (L.offU + VkDeviceSize(pic.u.size()) + 255) & ~VkDeviceSize(255);
+    const VkDeviceSize need = L.offV + VkDeviceSize(pic.v.size()) + 4;
     if (s.upload.size < need) {
         m_vk->Free(s.upload);
         if (!m_vk->Buffer(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, s.upload, err)) return false;

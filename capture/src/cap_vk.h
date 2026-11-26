@@ -51,6 +51,7 @@ public:
     std::mutex qlock;
     std::string name;
     bool cpuDevice = false, dmabuf = false, surfaces = false;
+    bool colorspaces = false;   // VK_EXT_swapchain_colorspace (HDR swapchains)
     // NVIDIA optical flow (VK_NV_optical_flow, RTX): its own queue family, handed to the engine (Context::Adopt)
     bool opticalFlow = false;
     uint32_t ofFamily = 0;
@@ -62,13 +63,15 @@ private:
 };
 
 // where a planar 8-bit YUV 4:2:0 picture sits in a buffer (byte offsets and pitches)
-struct YuvLayout { VkDeviceSize offY = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0, w = 0, h = 0, cw = 0, ch = 0; };
+// bits: 8 (a byte a sample) or 9..16 (little-endian 16-bit samples); pq: BT.2020 PQ content, else BT.709 SDR
+struct YuvLayout { VkDeviceSize offY = 0, offU = 0, offV = 0; int pitchY = 0, pitchC = 0, w = 0, h = 0, cw = 0, ch = 0, bits = 8; bool pq = false; };
 
 // the swapchain and the present shader
 class Screen {
 public:
     ~Screen();
-    bool Init(Vk* vk, VkSurfaceKHR surface, int w, int h, std::string& err);
+    // hdr: an HDR10 swapchain (BT.2020 PQ, A2B10G10R10) when the surface offers one; Hdr() says what was made, HdrWhy() why not
+    bool Init(Vk* vk, VkSurfaceKHR surface, int w, int h, bool hdr, std::string& err);
     bool Resize(int w, int h, std::string& err);
     int Width() const { return m_w; }
     int Height() const { return m_h; }
@@ -88,6 +91,9 @@ public:
     // presents the acquired image (after the caller's submission signalled RenderSem). 1 = make the swapchain again
     int Present(std::string& err);
     VkFormat Format() const { return m_format; }
+    bool Hdr() const { return m_hdr; }
+    const std::string& HdrWhy() const { return m_hdrWhy; }
+    void SetSdrWhite(float nits) { m_sdrWhite = nits; }
 private:
     bool MakeSwapchain(std::string& err);
     void DropSwapchain();
@@ -104,7 +110,9 @@ private:
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
     VkSwapchainKHR m_sc = VK_NULL_HANDLE;
     VkFormat m_format = VK_FORMAT_UNDEFINED;
-    bool m_swapRB = false;
+    bool m_swapRB = false, m_hdrWanted = false, m_hdr = false;
+    float m_sdrWhite = 203.f;   // ITU-R BT.2408 reference white in an HDR output
+    std::string m_hdrWhy;
     int m_w = 0, m_h = 0;
     std::vector<VkImage> m_images;
     std::vector<VkSemaphore> m_render;   // per swapchain image

@@ -36,6 +36,9 @@ public:
     void SetVisible(bool on) override;
     double RefreshHz() const override;
     std::string Describe() const override;
+    // HDR on Wayland goes through the compositor's colour-management protocol (wp_color_management_v1), which the Vulkan
+    // driver's WSI speaks (Mesa 25.1+, NVIDIA): it offers an HDR10 swapchain only when the compositor takes HDR there
+    bool HdrCapable(std::string& why) const override { why = "the Vulkan driver decides (the compositor's colour management)"; return std::getenv("PUSHMPC_CAPTURE_SDR") == nullptr; }
 
     // listeners (static trampolines below)
     void Global(wl_registry* r, uint32_t name, const char* iface, uint32_t version);

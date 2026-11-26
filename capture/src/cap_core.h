@@ -24,17 +24,25 @@ namespace pmc {
 double Now();   // seconds, the monotonic clock the capture timestamps use (CLOCK_MONOTONIC, mach_absolute_time on macOS)
 
 // ------------------------------------------------------------------------------------------------ frames
-enum class PixFmt { BGRX, RGBX };   // 32-bit pixels: B (or R) in the lowest byte
+// 32-bit pixels: BGRX / RGBX = 8 bits each, B (or R) in the lowest byte; RGB10 = 10 bits each, little-endian x2R10G10B10
+// (B in the low 10 bits): an HDR capture, BT.2020 PQ R'G'B' (macOS ScreenCaptureKit 'l10r' in ITU-R 2100 PQ)
+enum class PixFmt { BGRX, RGBX, RGB10 };
 
-// a planar YUV 4:2:0 picture, 8 bit, rows packed
+// a planar YUV 4:2:0 picture, rows packed. bits 8: one byte per sample, BT.709 SDR; bits 9..16: little-endian 16-bit
+// samples. pq: BT.2020 PQ (HDR: an HDR capture, RTX Video HDR), else BT.709 SDR. Limited range either way.
 struct I420 {
     int w = 0, h = 0;
+    int bits = 8;
+    bool pq = false;
     std::vector<uint8_t> y, u, v;
     int cw() const { return (w + 1) / 2; }
     int ch() const { return (h + 1) / 2; }
-    void Resize(int width, int height);
+    int bps() const { return bits > 8 ? 2 : 1; }
+    bool Same(int width, int height, int depth) const { return w == width && h == height && bits == depth; }
+    void Resize(int width, int height, int depth = 8);
 };
-// BT.709 limited range; the chroma of each 2 x 2 block averaged (centre sited). threads: 0 = hardware threads (<= 8)
+// BGRX / RGBX: BT.709 limited range, 8 bit; RGB10: BT.2020 (non-constant luminance) limited range, 10 bit, pq set.
+// The chroma of each 2 x 2 block averaged (centre sited). threads: 0 = hardware threads (<= 8)
 void ToI420(const uint8_t* px, ptrdiff_t pitch, int w, int h, PixFmt f, I420& out, int threads = 0);
 // back to 32-bit pixels (tests and the dump)
 void FromI420(const I420& in, uint8_t* px, ptrdiff_t pitch, PixFmt f);

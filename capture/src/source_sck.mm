@@ -70,6 +70,7 @@ public:
     std::string Describe() const override;
     std::string PlayerName() const override { return m_owner; }
     uint64_t Window() const override { return m_id; }
+    bool SetHdr(bool on) override;
 
     void Deliver(CMSampleBufferRef sb, CGRect crop, double t)
     {
@@ -96,6 +97,7 @@ private:
     PmcSckOutput* m_out = nil;
     dispatch_queue_t m_queue = nil;
     int m_w = 0, m_h = 0;           // the window in points
+    bool m_hdr = false;             // HDR capture: 10-bit BT.2020 PQ ('l10r')
     double m_scale = 2, m_lastCheck = 0;
     std::mutex m_mx;
     std::condition_variable m_cv;
@@ -125,6 +127,14 @@ bool SckSource::Configure(int w, int h, bool update, std::string& err)
     c.height = size_t(std::max(2, int(h * m_scale)));
     c.pixelFormat = kCVPixelFormatType_32BGRA;
     c.colorSpaceName = kCGColorSpaceSRGB;
+    if (m_hdr) {
+        if (@available(macOS 15.0, *)) {
+            // the window as the display shows it, HDR kept: 10-bit R'G'B' in BT.2020 PQ (ITU-R BT.2100)
+            c.captureDynamicRange = SCCaptureDynamicRangeHDRLocalDisplay;
+            c.pixelFormat = kCVPixelFormatType_ARGB2101010LEPacked;
+            c.colorSpaceName = kCGColorSpaceITUR_2100_PQ;
+        }
+    }
     c.showsCursor = NO;
     c.minimumFrameInterval = CMTimeMake(1, 240);   // every frame the player shows (up to 240 a second)
     c.queueDepth = 6;
@@ -195,6 +205,17 @@ bool SckSource::Start(std::string& err)
     return Configure(int(win.frame.size.width), int(win.frame.size.height), false, err);
 }
 
+bool SckSource::SetHdr(bool on)
+{
+    if (@available(macOS 15.0, *)) {
+        if (on == m_hdr) return true;
+        m_hdr = on;
+        std::string e;
+        return Configure(m_w, m_h, true, e);
+    }
+    return false;   // HDR capture needs macOS 15
+}
+
 bool SckSource::Next(SourceFrame& f, int timeoutMs)
 {
     std::unique_lock<std::mutex> lk(m_mx);
@@ -216,7 +237,8 @@ bool SckSource::Next(SourceFrame& f, int timeoutMs)
         w = std::min(int(crop.size.width + 0.5), W - x); h = std::min(int(crop.size.height + 0.5), H - y);
     }
     f = SourceFrame{};
-    f.width = w; f.height = h; f.fmt = PixFmt::BGRX;
+    f.width = w; f.height = h;
+    f.fmt = CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_ARGB2101010LEPacked ? PixFmt::RGB10 : PixFmt::BGRX;
     f.ptr = base + size_t(y) * bpr + size_t(x) * 4;
     f.pitch = ptrdiff_t(bpr);
     f.time = t;
@@ -253,7 +275,7 @@ bool SckSource::Alive(std::string& why)
 std::string SckSource::Describe() const
 {
     char b[300];
-    std::snprintf(b, sizeof(b), "window %llu of %s (%dx%d points, scale %.1f), ScreenCaptureKit", static_cast<unsigned long long>(m_id), m_owner.c_str(), m_w, m_h, m_scale);
+    std::snprintf(b, sizeof(b), "window %llu of %s (%dx%d points, scale %.1f), ScreenCaptureKit%s", static_cast<unsigned long long>(m_id), m_owner.c_str(), m_w, m_h, m_scale, m_hdr ? ", HDR (10-bit BT.2020 PQ)" : "");
     return b;
 }
 
