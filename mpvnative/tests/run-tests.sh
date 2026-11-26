@@ -79,6 +79,14 @@ if [ "$OS" = linux ] || [ "${PM_TEST_VULKAN:-0}" = 1 ]; then
         dups=$(grep -ho "([0-9]* duplicates)" "$T/engine-twos.log" | tail -1 | tr -dc 0-9)
         if check "$T/twos-vk.mkv" $((1 + (N2 - 1) * 2)) 48 2 && [ "${dups:-0}" -ge $((N2 / 2 - 2)) ]; then result ffmpeg-vulkan-dedup-twos PASS; else echo "duplicates: ${dups:-none} of $N2"; result ffmpeg-vulkan-dedup-twos FAIL; fi
     else tail -15 "$T/twos-vk.log"; result ffmpeg-vulkan-dedup-twos FAIL; fi
+    # a timestamp gap mid-clip (a discontinuity for the filter): every output of the frames before it still comes out, Dedup's
+    # held-back lookahead included, and no pair spans the gap: 2 x (1 + 23 x 2) outputs at x2
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=2" -vf "setpts='PTS+if(gte(N,24),48,0)'" -fps_mode passthrough -pix_fmt yuv420p -c:v ffv1 "$T/gap.mkv"
+    if "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/gap.mkv" -fps_mode passthrough \
+        -vf "format=nv12,hwupload,pushmpc=smoother=2,hwdownload,format=nv12" -c:v ffv1 "$T/gap-vk.mkv" > "$T/gap-vk.log" 2>&1; then
+        gn=$(count "$T/gap-vk.mkv"); echo "discontinuity: $gn outputs (expected 94)"
+        [ "$gn" = 94 ] && result ffmpeg-vulkan-discontinuity-keeps-outputs PASS || result ffmpeg-vulkan-discontinuity-keeps-outputs FAIL
+    else tail -15 "$T/gap-vk.log"; result ffmpeg-vulkan-discontinuity-keeps-outputs FAIL; fi
     # transition rules on the Vulkan path: a flash (one white frame) is held, a dissolve is blended (thumbnails read back)
     "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=4" -vf "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(n,48)'" -pix_fmt yuv420p -c:v ffv1 "$T/flash.mkv"
     "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24:duration=3" -f lavfi -i "smptehdbars=size=640x360:rate=24:duration=3" \

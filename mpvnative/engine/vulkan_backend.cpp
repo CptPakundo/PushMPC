@@ -202,7 +202,15 @@ public:
 
         const int64_t s = int64_t(m_seq++);
         const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_last == s - 1;
-        if (!contiguous) Drop();
+        if (!contiguous) {
+            // a gap or a seek: the outputs Dedup's lookahead still held back for the frames before it are recorded now, as
+            // they stand (no next frame to wait for, no pair across the gap), into the output ring; they stay queued for
+            // Write (the GPU runs them in submission order, before this frame's work). Then the state starts over.
+            m_cadence.Finish();
+            if (!SettleAndEmit()) return PMENG_ERROR;
+            Drop(true);
+            m_cadence.Configure(m_k, m_cadence.Lookahead(), 0);   // Finish set the stream's end: a new stream from here
+        }
         m_last = s;
         // Dedup (PushFPS portable's rule on the GPU: the quarter-size luma against the last distinct picture)
         bool dup = false;
@@ -374,11 +382,14 @@ private:
             }
         return nullptr;
     }
-    // a seek or gap: every queued output and picture forgotten
-    void Drop()
+    // a seek or gap: every picture forgotten, and the queued outputs too unless keepQueue (outputs already recorded into
+    // the output ring for the frames before a discontinuity: they need no source picture any more)
+    void Drop(bool keepQueue = false)
     {
-        for (auto& q : m_q) m_eng.ReleaseOut(q.out);
-        m_q.clear();
+        if (!keepQueue) {
+            for (auto& q : m_q) m_eng.ReleaseOut(q.out);
+            m_q.clear();
+        }
         if (m_holdChain.valid()) m_holdChain.wait();
         m_holdChain = {};
         m_holdOf.clear();

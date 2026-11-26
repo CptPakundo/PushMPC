@@ -7,6 +7,8 @@
 //   Both run the CPU engine by name (backend=portable-cpu): they must not test whatever Auto picks on the machine.
 //   The GPU is never used unless asked: without PUSHMPC_TEST_GPU=1 this test hides every Vulkan driver from the process
 //   (VK_DRIVER_FILES / VK_ICD_FILENAMES), so Auto's portable-vulkan cannot pick a real GPU on a developer's PC.
+//   Vulkan zero copy (same switches; engine_test_vkzc.h): NV12 frames on a Vulkan device of its own, the same box with a
+//   discontinuity: every output (Dedup's held-back ones before the gap included), real frames exact, nothing across the cut.
 //   Portable Vulkan, frames in host memory (PUSHMPC_TEST_GPU=1, or PUSHMPC_TEST_VULKAN=1 for a CPU Vulkan device such
 //   as lavapipe in CI): the same moving box with Dedup's lookahead, so outputs may come up to that many source frames
 //   late; every output is checked against the source it names (real frames byte-identical, the box in place).
@@ -84,6 +86,10 @@ static void Box(Pic& pic, int bx, int bg = 40)
 }
 // x of the box's left edge on row 80 (first pixel > 120), -1 when none
 static int BoxX(const Pic& p) { for (int x = 0; x < p.w; ++x) if (p.Y(x, 80) > 120) return x; return -1; }
+
+#ifdef PME_TEST_VULKAN_ZC
+#include "engine_test_vkzc.h"   // TestVulkanZeroCopy: Vulkan frames on a device of its own, a discontinuity
+#endif
 
 static void TestCpu(const pmeng_api* api, uint32_t fmt, const char* name)
 {
@@ -606,6 +612,9 @@ int main()
         TestVulkanHost(api, PMENG_FMT_YUV420P10, "yuv420p10", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_NV12, "nv12", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_P010, "p010", vulkanAsked);
+#ifdef PME_TEST_VULKAN_ZC
+        TestVulkanZeroCopy(api, vulkanAsked);
+#endif
     }
     {   // a Vulkan open without a device must fail with a reason (the filter then takes the copy fallback)
         pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_VULKAN;
