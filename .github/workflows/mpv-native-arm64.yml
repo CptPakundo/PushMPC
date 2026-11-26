@@ -157,6 +157,14 @@ jobs:
           fi
           pacman -Q mingw-w64-clang-aarch64-mesa
           ls /clangarm64/share/vulkan/icd.d/
+          # lavapipe's ICD file with its library as an absolute path of this MSYS2 (the packaged file's path does not
+          # resolve here: run 45829558170 got VK_ERROR_INCOMPATIBLE_DRIVER); the steps below point the loader at it
+          src=$(ls /clangarm64/share/vulkan/icd.d/lvp_icd*.json | head -1); cat "$src"
+          lib=/clangarm64/bin/vulkan_lvp.dll; [ -f "$lib" ] || lib=$(ls /clangarm64/bin/*lvp*.dll | head -1)
+          R=$(cygpath -u "$RUNNER_TEMP")
+          sed -E "s#\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"#\"library_path\": \"$(cygpath -m "$lib")\"#" "$src" > "$R/lvp_icd.json"
+          cat "$R/lvp_icd.json"
+          echo "LVP_ICD=$(cygpath -w "$R/lvp_icd.json")" >> "$(cygpath -u "$GITHUB_ENV")"
       - uses: actions/cache@v4
         with:
           path: |
@@ -187,7 +195,9 @@ jobs:
           while [ ${#todo[@]} -gt 0 ]; do
             f=${todo[0]}; todo=("${todo[@]:1}")
             for n in $(llvm-objdump -p "$f" 2>/dev/null | awk '/DLL Name:/ {print $3}'); do
-              if [ -f "/clangarm64/bin/$n" ] && [ ! -f "$d/$n" ]; then cp "/clangarm64/bin/$n" "$d/"; todo+=("$d/$n"); fi
+              # never a Windows system DLL (MSYS2's Mesa has an opengl32.dll that would replace the system OpenGL; run
+              # 45829558170 shipped it with libgallium_wgl / libLLVM); the Vulkan loader is ours either way
+              if [ -f "/clangarm64/bin/$n" ] && [ ! -f "$d/$n" ] && { [ ! -f "/c/Windows/System32/$n" ] || [ "$n" = vulkan-1.dll ]; }; then cp "/clangarm64/bin/$n" "$d/"; todo+=("$d/$n"); fi
             done
           done
           cp build-engine/out/pushmpc_engine.dll "$d/"
@@ -215,8 +225,8 @@ jobs:
           t="$R/t"; mkdir -p "$t"
           export PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")" PME_STUB_DIR="$PWD/build-engine/stub"
           export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine.log"
-          lvp=$(ls /clangarm64/share/vulkan/icd.d/lvp_icd*.json | head -1)
-          export VK_DRIVER_FILES="$(cygpath -w "$lvp")" VK_ICD_FILENAMES="$(cygpath -w "$lvp")" PM_TEST_VULKAN=1
+          lvp="$LVP_ICD"
+          export VK_DRIVER_FILES="$lvp" VK_ICD_FILENAMES="$lvp" PM_TEST_VULKAN=1
           rm -rf $R/pm-portable-prefix; mkdir -p $R/pm-portable-prefix; cp -r $R/PushMPC-mpv-windows-arm64 $R/pm-portable-prefix/bin
           bash mpvnative/tests/run-tests.sh $R/pm-portable-prefix "$t" msys2
       - name: The ARM64 engine routes (Auto; portable GPU engine on software and D3D11 frames; NVIDIA's engine without a GPU)
@@ -226,7 +236,7 @@ jobs:
         run: |
           R=$(cygpath -u "$RUNNER_TEMP"); t="$R/t"; B=$R/PushMPC-mpv-windows-arm64; fails=0
           export PATH="$B:$PATH" PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
-          lvp=$(ls /clangarm64/share/vulkan/icd.d/lvp_icd*.json | head -1); export VK_DRIVER_FILES="$(cygpath -w "$lvp")" VK_ICD_FILENAMES="$(cygpath -w "$lvp")"
+          export VK_DRIVER_FILES="$LVP_ICD" VK_ICD_FILENAMES="$LVP_ICD"
           N=$("$B/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv" | tr -d '\r')
           ok() { echo "check $1: PASS"; }; bad() { echo "check $1: FAIL"; fails=$((fails + 1)); }
           frames() { "$B/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1" | tr -d '\r'; }
