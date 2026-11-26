@@ -85,7 +85,7 @@ jobs:
 
   win-setup:
     needs: [autoplan, release]
-    if: always() && github.event_name == 'workflow_dispatch' && needs.autoplan.result == 'success' && (needs.release.result == 'success' || inputs.release_run != '')
+    if: always() && github.event_name == 'workflow_dispatch' && needs.autoplan.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'failure' || inputs.release_run != '')
     runs-on: windows-2025
     timeout-minutes: 70
     defaults: { run: { shell: pwsh } }
@@ -318,7 +318,7 @@ jobs:
   # push run tests the VapourSynth route
   linux-setup:
     needs: [release]
-    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    if: always() && needs.release.result != 'cancelled'
     runs-on: ubuntu-24.04
     container: archlinux:latest
     timeout-minutes: 80   # ncnn from source on a cold machine
