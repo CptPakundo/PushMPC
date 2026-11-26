@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # ffbuild-cache.sh (sourced): incremental FFmpeg builds across CI runs. The configured and built state of an FFmpeg tree
 # (every file git does not track: config.h, ffbuild/config.mak, the objects, the libraries) is kept per tag in a cache
 # folder as <label>.tar. The next run checks the same commit out, puts that state back and marks it newer than the

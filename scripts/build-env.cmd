@@ -22,7 +22,7 @@ rem                           repository folder or inside it, when there is one;
 rem   PUSHMPC_CCACHE_BASEDIR  ccache's base_dir for every build (default: the repository for the filter, updater,
 rem                           installer and plugin; the folder holding the build tree for build-pushmpc.cmd), so
 rem                           checkouts with the same layout share cache hits
-rem   CCACHE_DIR, CCACHE_MAXSIZE  ccache's own settings (CCACHE_HASHDIR defaults to false here: the debug info's
+rem   CCACHE_DIR, CCACHE_MAXSIZE  ccache's own settings (CCACHE_NOHASHDIR defaults to true here: the debug info's
 rem                           build folder does not split the cache between checkouts)
 for %%i in ("%~dp0..") do set "PUSHMPC_REPO=%%~fi"
 for %%i in ("%PUSHMPC_REPO%\..") do set "PUSHMPC_REPO_PARENT=%%~fi"
@@ -74,7 +74,7 @@ if not defined PUSHMPC_COMPILER_CACHE goto :jobs
 if not exist "%PUSHMPC_COMPILER_CACHE%" (echo build-env: PUSHMPC_COMPILER_CACHE=%PUSHMPC_COMPILER_CACHE% does not exist: building without a compiler cache & set PUSHMPC_COMPILER_CACHE=& goto :jobs)
 set "PUSHMPC_LAUNCHER=-DCMAKE_C_COMPILER_LAUNCHER=%PUSHMPC_COMPILER_CACHE:\=/% -DCMAKE_CXX_COMPILER_LAUNCHER=%PUSHMPC_COMPILER_CACHE:\=/%"
 if defined PUSHMPC_CCACHE_BASEDIR (set "CCACHE_BASEDIR=%PUSHMPC_CCACHE_BASEDIR%") else set "CCACHE_BASEDIR=%PUSHMPC_REPO%"
-if not defined CCACHE_HASHDIR set CCACHE_HASHDIR=false
+if not defined CCACHE_HASHDIR if not defined CCACHE_NOHASHDIR set CCACHE_NOHASHDIR=true
 :jobs
 set "PUSHMPC_PARALLEL=--parallel %NUMBER_OF_PROCESSORS% --"
 if defined PUSHMPC_JOBS set "PUSHMPC_PARALLEL=--parallel %PUSHMPC_JOBS% --"
