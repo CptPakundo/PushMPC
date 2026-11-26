@@ -2522,14 +2522,14 @@ function Install-PmmlRuntime($state) {
     if ($rc -ne 0) { Warn "PushFlow runtime not installed (pmml-fetch exit $rc): PushFlow runs on DirectML; run Repair to try again"; return }
     Set-StateValue $state 'pmmlInstalled' $want
     Info "PushFlow runtime installed in $dir"
-    Complete-PmmlArm64 $dir $state
+    Complete-PmmlArm64 $dir $state -Fresh   # a new ONNX Runtime / QNN EP: measure again, which also rebuilds the NPU graph cache
 }
 # G15, Windows on Arm with PushMPC's ARM64 mpv: the rest the ml engine (PushFlow through pmml, the QNN EP) needs next to
 # ONNX Runtime and the EP: pmml's graphs (shipped in the mpv build), the PushFlow models (the installed runtime's, through
 # the MlModels setting: no second copy), and the measurement Auto decides with (pmml_cli auto: every EP x tier on this
 # PC, each in its own process, at the sizes the engine looks up; pmml-autobench.json). Without a measurement the engine
 # leaves PushFlow out and the portable GPU engine runs. Runs at install and update only (never during playback).
-function Complete-PmmlArm64([string]$dir, $state) {
+function Complete-PmmlArm64([string]$dir, $state, [switch]$Fresh) {
     if ((Get-NativeArch) -ne 'ARM64') { return }
     $mpv = Join-Path $InstallDir 'mpv-native'
     $cli = Join-Path $mpv 'pmml_cli.exe'
@@ -2547,9 +2547,11 @@ function Complete-PmmlArm64([string]$dir, $state) {
         }
     }
     # pmml_cli keeps its results per device + driver + size: a measured PC is not measured again until its driver changes
+    # (or, -Fresh, a new ONNX Runtime / QNN EP). Its probes also write the QNN EP context cache (<pmml>/ep-context: the
+    # compiled NPU / GPU graphs, keyed by model, device + driver, EP and ONNX Runtime versions), so playback skips the compile
     Progress 95 'Measuring PushFlow on this PC (NPU and GPU)'
     foreach ($size in '1280x720', '1920x1080', '3840x2160') {
-        $o = & $cli auto --runtime $dir --models $models --graphs (Join-Path $dir 'graphs') --size $size --fps 23.976 --mult 4 --cache $dir 2>&1
+        $o = & $cli auto --runtime $dir --models $models --graphs (Join-Path $dir 'graphs') --size $size --fps 23.976 --mult 4 --cache $dir @(if ($Fresh) { '--refresh' }) 2>&1
         $rc = $LASTEXITCODE
         foreach ($l in @($o) | Select-Object -Last 3) { Info "  pmml_cli auto $size`: $l" }
         if ($rc -ne 0) { Info "  pmml_cli auto $size`: exit $rc (no candidate ran: the portable GPU engine runs at this size)" }

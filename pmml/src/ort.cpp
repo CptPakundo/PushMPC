@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -55,6 +57,19 @@ std::basic_string<ORTCHAR_T> ortPath(const std::string& s) {
     return s;
 #endif
 }
+// a filesystem path as UTF-8 (the same on C++17 and C++20)
+std::string pathUtf8(const std::filesystem::path& p) {
+#ifdef _WIN32
+    const std::wstring w = p.wstring();
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+#else
+    return p.string();
+#endif
+}
 
 std::string envStr(const char* name) { const char* v = std::getenv(name); return v ? v : ""; }
 
@@ -80,6 +95,7 @@ struct Ort {
     OrtEnv* env = nullptr;
     std::string flavor, dir, runtimeDir;
     std::set<std::string> registered;   // plugin EP libraries registered with env
+    std::string versionString;    // ONNX Runtime's own version ("1.30.0"): part of the EP context cache key
 };
 
 std::mutex g_mutex;
@@ -108,6 +124,7 @@ Ort* loadOrt(const std::string& runtimeDir, const std::string& flavor, std::stri
         if (o->api) o->version = v;
     }
     if (!o->api) { if (err) *err = std::string("ONNX Runtime ") + b->GetVersionString() + " is too old (API 14+ needed)"; return nullptr; }
+    o->versionString = b->GetVersionString();
     const std::string level = envStr("PMML_ORT_LOG");
     const OrtLoggingLevel lv = level == "verbose" ? ORT_LOGGING_LEVEL_VERBOSE : level == "info" ? ORT_LOGGING_LEVEL_INFO : ORT_LOGGING_LEVEL_ERROR;
     if (OrtStatus* s = o->api->CreateEnv(lv, "pmml", &o->env)) {
@@ -129,7 +146,7 @@ Ort* loadOrt(const std::string& runtimeDir, const std::string& flavor, std::stri
     } while (0)
 
 // --- plugin EPs -------------------------------------------------------------------------------------------------------
-struct PluginEp { std::string id, epName, library; };
+struct PluginEp { std::string id, epName, library, version; };
 
 std::vector<PluginEp> pluginEps(const std::string& runtimeDir) {
     std::vector<PluginEp> v;
@@ -140,6 +157,7 @@ std::vector<PluginEp> pluginEps(const std::string& runtimeDir) {
         PluginEp p;
         p.id = id;
         p.epName = jsonString(json, "epName");
+        p.version = jsonString(json, "version");
         const std::string lib = jsonString(json, "library");
         if (lib.empty() || p.epName.empty()) continue;
         p.library = (lib.find(':') != std::string::npos || lib[0] == '/') ? lib : joinPath(dir, lib);
@@ -294,6 +312,9 @@ struct EpChoice {
     const OrtMemoryInfo* deviceMemory = nullptr;   // where intermediates live (nullptr = host)
     OrtMemoryInfo* ownedMemory = nullptr;
     bool gpu = false;
+    // EP context cache (QNN: the compiled NPU / GPU graph kept on disk): what the compiled graph depends on besides the
+    // model (EP name + version, the device and its driver, the EP options); empty = no cache for this EP
+    std::string cacheIdentity;
 };
 
 void parseOptions(const std::string& text, std::vector<std::string>* keys, std::vector<std::string>* vals) {
@@ -387,6 +408,14 @@ bool appendEp(Ort* ort, OrtSessionOptions* so, const Options& o, EpChoice* choic
         const OrtHardwareDevice* hw = ort->api->EpDevice_Device(d);
         choice->describe = it->epName + " on " + ort->api->HardwareDevice_Vendor(hw) + " " + metadata(ort, ort->api->HardwareDevice_Metadata(hw), "Description") +
                            " (" + deviceType(ort, d) + ")";
+        if (ep == "qnn" || ep == "qnn-gpu") {
+            // the compiled QNN graph is valid for this EP build, this device + driver and these options only
+            const OrtKeyValuePairs* md = ort->api->HardwareDevice_Metadata(hw);
+            choice->cacheIdentity = it->epName + "|" + it->version + "|" + it->library + "|" + ort->api->HardwareDevice_Vendor(hw) + "|" +
+                                    std::to_string(ort->api->HardwareDevice_VendorId(hw)) + ":" + std::to_string(ort->api->HardwareDevice_DeviceId(hw)) + "|" +
+                                    metadata(ort, md, "Description") + "|" + metadata(ort, md, "DriverVersion") + "|" + metadata(ort, md, "DriverDate") + "|" + deviceType(ort, d);
+            for (size_t i = 0; i < keys.size(); ++i) choice->cacheIdentity += "|" + keys[i] + "=" + vals[i];
+        }
         return true;
     }
 #endif
@@ -628,23 +657,80 @@ private:
         c.ownedMemory = choice_.ownedMemory;
         if (!appendEp(ort, so, o_, &c, err)) return false;
         choice_ = c;
-        if (inits.empty()) {
+        const bool ctx = !c.cacheIdentity.empty() && !o_.cacheDir.empty() && envStr("PMML_EP_CONTEXT") != "0";
+        if (inits.empty() && !ctx) {
             PMML_TRY(ort->api->CreateSession(ort->env, ortPath(path).c_str(), so, out));
             return true;
         }
         // size constants: make_graphs.py writes unique int64 sentinels, replaced here in the model bytes, so they are
         // true constants for every EP (DirectML ignores AddInitializer overrides of the file's own initializers)
         std::string bytes = readText(path);
-        for (auto& i : inits) {
-            int hits = 0;
-            uint64_t sentinel = 0x504D4D4C00000000ull | uint64_t(i.first == "nh" ? 1 : i.first == "nw" ? 2 : i.first == "padh" ? 3 : 4);
-            char pat[8], val[8];
-            const int64_t v = i.second.front();
-            for (int k = 0; k < 8; ++k) { pat[k] = char((sentinel >> (8 * k)) & 0xff); val[k] = char((uint64_t(v) >> (8 * k)) & 0xff); }
-            for (size_t pos = 0; (pos = bytes.find(std::string(pat, 8), pos)) != std::string::npos; pos += 8) { bytes.replace(pos, 8, val, 8); ++hits; }
-            (void)hits;
+        if (ctx) {
+            for (auto& i : inits) replaceSentinel(bytes, i.first, i.second.front());
+            return contextSession(path, bytes, dims, inits, c.cacheIdentity, so, out, err);
         }
+        for (auto& i : inits) replaceSentinel(bytes, i.first, i.second.front());
         PMML_TRY(ort->api->CreateSessionFromArray(ort->env, bytes.data(), bytes.size(), so, out));
+        return true;
+    }
+    static void replaceSentinel(std::string& bytes, const std::string& name, int64_t v) {
+        const uint64_t sentinel = 0x504D4D4C00000000ull | uint64_t(name == "nh" ? 1 : name == "nw" ? 2 : name == "padh" ? 3 : 4);
+        char pat[8], val[8];
+        for (int k = 0; k < 8; ++k) { pat[k] = char((sentinel >> (8 * k)) & 0xff); val[k] = char((uint64_t(v) >> (8 * k)) & 0xff); }
+        for (size_t pos = 0; (pos = bytes.find(std::string(pat, 8), pos)) != std::string::npos; pos += 8) bytes.replace(pos, 8, val, 8);
+    }
+    static uint64_t fnv64(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+        return h;
+    }
+    static std::string hex64(uint64_t v) { char b[17]; std::snprintf(b, sizeof b, "%016llx", (unsigned long long)v); return b; }
+
+    // EP context cache (G15, QNN): the EP's compiled graph as an ONNX "EP context" model in <cacheDir>/ep-context, named
+    // <model>-<ep>-<shape>-<key>. key = the model bytes (after the size constants) + the EP identity (EP name, version and
+    // library, device, driver, options: appendEp's cacheIdentity) + ONNX Runtime's version: any change gives a new key,
+    // and the files of the same model / EP / shape with another key are deleted. The first session compiles and writes
+    // the file (ep.context_enable, embedded); later sessions load it, which skips the NPU compile. A file that does not
+    // load is deleted and the model is compiled again. PMML_EP_CONTEXT=0 turns the cache off.
+    bool contextSession(const std::string& path, const std::string& bytes, const std::vector<std::pair<std::string, int64_t>>& dims,
+                        const std::vector<std::pair<std::string, std::vector<int64_t>>>& inits, const std::string& identity,
+                        OrtSessionOptions* so, OrtSession** out, std::string* err) {
+        namespace fs = std::filesystem;
+        std::string shape;
+        for (auto& d : dims) shape += d.first + "=" + std::to_string(d.second) + ";";
+        for (auto& i : inits) shape += i.first + "=" + std::to_string(i.second.front()) + ";";
+        uint64_t key = fnv64(bytes.data(), bytes.size());
+        const std::string ident = identity + "|ort " + ort->versionString + "|api " + std::to_string(ort->version) + "|" + shape;
+        key = fnv64(ident.data(), ident.size(), key);
+        std::string stem = pathUtf8(fs::path(ortPath(path)).stem());
+        const std::string prefix = stem + "-" + o_.backend.ep + "-" + hex64(fnv64(shape.data(), shape.size())).substr(0, 8) + "-";
+        const fs::path dir = fs::path(ortPath(joinPath(o_.cacheDir, "ep-context")));
+        const fs::path file = dir / fs::path(ortPath(prefix + hex64(key) + ".onnx"));
+        std::error_code ec;
+        if (fs::exists(file, ec)) {
+            if (OrtStatus* s = ort->api->CreateSession(ort->env, file.c_str(), so, out)) {
+                // stale or damaged: compile again below
+                ort->api->ReleaseStatus(s);
+                fs::remove(file, ec);
+                *out = nullptr;
+            } else {
+                return true;
+            }
+        }
+        fs::create_directories(dir, ec);
+        for (const auto& e : fs::directory_iterator(dir, ec)) {   // the same model / EP / shape under an older key
+            const std::string n = pathUtf8(e.path().filename());
+            if (n.rfind(prefix, 0) == 0 && e.path() != file) fs::remove(e.path(), ec);
+        }
+        const fs::path part = dir / fs::path(ortPath(prefix + hex64(key) + ".part.onnx"));
+        fs::remove(part, ec);
+        const std::string partUtf8 = pathUtf8(part);
+        PMML_TRY(ort->api->AddSessionConfigEntry(so, "ep.context_enable", "1"));
+        PMML_TRY(ort->api->AddSessionConfigEntry(so, "ep.context_embed_mode", "1"));
+        PMML_TRY(ort->api->AddSessionConfigEntry(so, "ep.context_file_path", partUtf8.c_str()));
+        PMML_TRY(ort->api->CreateSessionFromArray(ort->env, bytes.data(), bytes.size(), so, out));
+        if (fs::exists(part, ec)) fs::rename(part, file, ec);
+        if (ec) fs::remove(part, ec);
         return true;
     }
 
