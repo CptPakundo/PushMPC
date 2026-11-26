@@ -455,22 +455,29 @@ public:
             for (int i = 0; i < 4; ++i)
                 if (!model_.dims[size_t(i)].empty() && !std::isdigit(static_cast<unsigned char>(model_.dims[size_t(i)][0]))) netDims.push_back({model_.dims[size_t(i)], vals[i]});
         }
-        if (!session(model_.path, netDims, {}, &net, err)) return false;
+        // O4 (qnn-split): the int8 network on the Hexagon NPU, the graphs (pack, the warp in synth) on the Adreno GPU; the
+        // tensors between them go through host memory
+        const bool split = o.backend.ep == "qnn-split";
+        if (split) o_.hostIntermediates = true;
+        const std::string netEp = split ? "qnn" : std::string(), graphEp = split ? "qnn-gpu" : std::string();
+        if (!session(model_.path, netDims, {}, &net, err, netEp)) return false;
+        const std::string netDescribe = choice_.describe;
         const std::vector<std::pair<std::string, int64_t>> dims = {{"pmml_h", o.height}, {"pmml_w", o.width}, {"pmml_ch", o.height / 2},
                                                                    {"pmml_cw", o.width / 2}, {"pmml_ph", net_.padH}, {"pmml_pw", net_.padW}};
         const std::vector<std::pair<std::string, std::vector<int64_t>>> sizes = {
             {"nh", {net_.h}}, {"nw", {net_.w}}, {"padh", {net_.padH - net_.h}}, {"padw", {net_.padW - net_.w}}};
         if (!session(joinPath(o.graphsDir, "pack-" + fmt_ + ".onnx"), dims,
-                     sizes, &pack, err)) return false;
-        if (!session(joinPath(o.graphsDir, "addt.onnx"), dims, {}, &addt, err)) return false;
-        if (!session(joinPath(o.graphsDir, "synth-" + fmt_ + ".onnx"), dims, sizes, &synth, err)) return false;
+                     sizes, &pack, err, graphEp)) return false;
+        if (!session(joinPath(o.graphsDir, "addt.onnx"), dims, {}, &addt, err, graphEp)) return false;
+        if (!session(joinPath(o.graphsDir, "synth-" + fmt_ + ".onnx"), dims, sizes, &synth, err, graphEp)) return false;
+        if (split) choice_.describe = "int8 network: " + netDescribe + "; warp: " + choice_.describe;
         initMs_ = nowMs() - t0;
         for (OrtSession* s : {pack, addt, net, synth}) {
             OrtIoBinding* b = nullptr;
             PMML_TRY(ort->api->CreateIoBinding(s, &b));
             bindings_.push_back(b);
         }
-        if (o.hostIntermediates) choice_.deviceMemory = nullptr;
+        if (o_.hostIntermediates) choice_.deviceMemory = nullptr;
         std::ostringstream d;
         d << "pmml " << kVersion << " ORT " << ort->flavor << " (API " << ort->version << "), " << choice_.describe << "; PushFlow " << o.tier << " ("
           << model_.path.substr(model_.path.find_last_of("/\\") + 1) << ") network " << net_.w << "x" << net_.h << " (padded " << net_.padW << "x" << net_.padH
@@ -646,7 +653,7 @@ private:
     }
 
     bool session(const std::string& path, const std::vector<std::pair<std::string, int64_t>>& dims,
-                 const std::vector<std::pair<std::string, std::vector<int64_t>>>& inits, OrtSession** out, std::string* err) {
+                 const std::vector<std::pair<std::string, std::vector<int64_t>>>& inits, OrtSession** out, std::string* err, const std::string& ep = {}) {
         if (!fileExists(path)) { if (err) *err = "missing " + path; return false; }
         OrtSessionOptions* so = nullptr;
         PMML_TRY(ort->api->CreateSessionOptions(&so));
@@ -655,7 +662,11 @@ private:
         for (auto& d : dims) PMML_TRY(ort->api->AddFreeDimensionOverrideByName(so, d.first.c_str(), d.second));
         EpChoice c;
         c.ownedMemory = choice_.ownedMemory;
-        if (!appendEp(ort, so, o_, &c, err)) return false;
+        // ep: this session's EP when it differs from the interpolator's (qnn-split: the network on qnn, the graphs on qnn-gpu)
+        Options eo = o_;
+        if (!ep.empty()) eo.backend.ep = ep;
+        sessionEp_ = eo.backend.ep;
+        if (!appendEp(ort, so, eo, &c, err)) return false;
         choice_ = c;
         const bool ctx = !c.cacheIdentity.empty() && !o_.cacheDir.empty() && envStr("PMML_EP_CONTEXT") != "0";
         if (inits.empty() && !ctx) {
@@ -703,7 +714,7 @@ private:
         const std::string ident = identity + "|ort " + ort->versionString + "|api " + std::to_string(ort->version) + "|" + shape;
         key = fnv64(ident.data(), ident.size(), key);
         std::string stem = pathUtf8(fs::path(ortPath(path)).stem());
-        const std::string prefix = stem + "-" + o_.backend.ep + "-" + hex64(fnv64(shape.data(), shape.size())).substr(0, 8) + "-";
+        const std::string prefix = stem + "-" + sessionEp_ + "-" + hex64(fnv64(shape.data(), shape.size())).substr(0, 8) + "-";
         const fs::path dir = fs::path(ortPath(joinPath(o_.cacheDir, "ep-context")));
         const fs::path file = dir / fs::path(ortPath(prefix + hex64(key) + ".onnx"));
         std::error_code ec;
@@ -784,6 +795,7 @@ private:
     std::string fmt_, describe_, netInName_;
     std::vector<std::string> netOutNames_;
     EpChoice choice_;
+    std::string sessionEp_;       // the EP of the session being created (qnn-split: qnn or qnn-gpu), for the EP context file name
     OrtMemoryInfo* cpu_ = nullptr;
     OrtAllocator* alloc_ = nullptr;
     std::vector<OrtIoBinding*> bindings_;

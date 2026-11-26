@@ -73,6 +73,8 @@ $runs = @(
     # and the Adreno GPU through QNN; Auto takes ml only after Setup's measurement (pmml_cli auto) says it fits
     @{ id = 'ml-qnn-npu'; vf = 'pushmpc=backend=ml:extra=ml_backend\=qnn' },
     @{ id = 'ml-qnn-gpu'; vf = 'pushmpc=backend=ml:extra=ml_backend\=qnn-gpu' },
+    # O4: the int8 network on the NPU (CI-made, accuracy-gated), the warp on the Adreno GPU
+    @{ id = 'ml-qnn-split'; vf = 'pushmpc=backend=ml:extra=ml_backend\=qnn-split' },
     @{ id = 'auto-x4'; vf = 'pushmpc=smoother=4' },
     @{ id = 'auto-d3d11'; vf = 'format=nv12,hwupload,pushmpc,hwdownload,format=nv12'; hw = $true }
 )

@@ -69,6 +69,16 @@ bool findModel(const Options& o, ModelFiles* m, std::string* err) {
     const std::string role = modelRole(o.tier);
     std::string file = joinPath(o.modelsDir, "pushflow-" + role + (o.fp16 ? "-fp16" : "") + ".onnx");
     if (o.fp16 && !fileExists(file)) file = joinPath(o.modelsDir, "pushflow-" + role + ".onnx");
+    if (o.backend.ep == "qnn-split") {
+        // O4: the int8 (QDQ) network quantize_qnn.py made for the Hexagon NPU. Only one whose accuracy check passed
+        // (pushflow-<role>-qdq.json "pass": true: PSNR loss against the fp16 network on held-out public frames within the
+        // gate) is used; anything else leaves Auto on the fp16 candidates.
+        const std::string qdq = joinPath(joinPath(o.runtimeDir, "qdq"), "pushflow-" + role + "-qdq");
+        const std::string report = readText(qdq + ".json");
+        if (!fileExists(qdq + ".onnx")) { if (err) *err = "no int8 PushFlow network " + qdq + ".onnx"; return false; }
+        if (report.empty() || jsonString(report, "pass") != "true") { if (err) *err = "the int8 PushFlow network did not pass its accuracy check (" + qdq + ".json)"; return false; }
+        file = qdq + ".onnx";
+    }
     if (!fileExists(file)) { if (err) *err = "no PushFlow model " + file; return false; }
     m->path = file;
     const auto facts = readFacts(joinPath(o.modelsDir, "pushflow-" + role + ".onnx.txt"));

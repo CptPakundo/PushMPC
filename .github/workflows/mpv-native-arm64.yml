@@ -17,7 +17,7 @@ name: mpv-native-arm64
 on:
   push:
     branches: ['track/vendor-arm64', 'track/vendor-arm64-*']
-    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'pmml/**', 'scripts/pmml-fetch.ps1', 'scripts/ml-runtime-pin.json', 'scripts/pushmpc-install.ps1', 'scripts/nvidia-vfx-*', '.github/workflows/mpv-native-arm64.yml']
+    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'pmml/**', 'scripts/pmml-fetch.ps1', 'scripts/ml-runtime-pin.json', 'scripts/pushmpc-install.ps1', 'scripts/nvidia-vfx-*', '.github/workflows/mpv-native-arm64.yml', '.github/workflows/pmml-qdq.yml']
   workflow_call:
   workflow_dispatch:
 
@@ -89,8 +89,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: pmml-winarm64, path: out, retention-days: 7, if-no-files-found: error }
 
+  # O4: PushFlow's network as int8 for the Hexagon NPU, quantised and accuracy-gated on x86_64 (pmml-qdq.yml); the passing
+  # networks go into the portable folder (pmml-qdq/). A failure there leaves them out (the fp16 NPU path stays)
+  qdq:
+    uses: ./.github/workflows/pmml-qdq.yml
+
   windows:
-    needs: [nvl-fatbin, pmml-winarm64]
+    needs: [nvl-fatbin, pmml-winarm64, qdq]
+    if: ${{ !cancelled() && needs.nvl-fatbin.result == 'success' && needs.pmml-winarm64.result == 'success' }}
     runs-on: windows-11-arm
     timeout-minutes: 150
     steps:
@@ -99,6 +105,9 @@ jobs:
         with: { name: nvl-fatbin-winarm64, path: '${{ runner.temp }}/fatbin' }
       - uses: actions/download-artifact@v4
         with: { name: pmml-winarm64, path: '${{ runner.temp }}/pmml' }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: pmml-qdq, path: '${{ runner.temp }}/pmml-qdq' }
       - name: Engine module, stub pushcore and engine_test (MSVC ARM64, D3D11 on WARP)
         shell: pwsh
         run: |
@@ -205,6 +214,8 @@ jobs:
           # the QNN EP come from Setup (pinned, fetched on the user's PC), the PushFlow models from the runtime
           cp build-engine/pmml/Release/pmml_cli.exe "$d/"
           mkdir -p "$d/pmml-graphs" && cp $R/pmml/graphs/*.onnx "$d/pmml-graphs/"
+          # O4: the int8 networks that passed their accuracy gate, with their reports (pmml uses one only when "pass": true)
+          if ls $R/pmml-qdq/pushflow-*-qdq.json >/dev/null 2>&1; then mkdir -p "$d/pmml-qdq" && cp $R/pmml-qdq/pushflow-*-qdq.* $R/pmml-qdq/SHA256SUMS "$d/pmml-qdq/" && ls -la "$d/pmml-qdq"; else echo "::warning title=O4::no pmml-qdq artifact: the ARM64 mpv has no int8 network (the fp16 NPU path stays)"; fi
           cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
           ls "$d" | tr '\n' ' '; echo; du -sh "$d"
       - name: Every binary is ARM64 (no emulated x64 piece)

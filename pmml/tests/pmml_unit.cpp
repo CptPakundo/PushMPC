@@ -4,6 +4,7 @@
 #include "pmml/autobench.h"
 #include "pmml/pmml.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -93,6 +94,31 @@ static void autoChoice() {
     CHECK(!c.ok || c.candidate.tier != "fast");
 }
 
+// O4 (qnn-split): an int8 candidate only where the float network does not fit; offered only with both QNN devices
+static void int8Split() {
+    pmml::Backend b;
+    CHECK(pmml::Backend::parse("qnn-split", &b) && b.ep == "qnn-split" && b.flavor == "core");
+    pmml::Candidate fp, q;
+    CHECK(pmml::Candidate::parse("ort:core:qnn:0|fast|pert", &fp) && pmml::Candidate::parse("ort:core:qnn-split:0|fast|pert", &q));
+    CHECK(pmml::qualityRank(q) < pmml::qualityRank(fp));
+    pmml::Candidate fpBal; pmml::Candidate::parse("ort:core:qnn:0|balanced|pert", &fpBal);
+    CHECK(pmml::qualityRank(q) < pmml::qualityRank(fpBal));
+    // both fit at 2x: the float network wins
+    std::vector<pmml::ProbeResult> rs = { result("ort:core:qnn:0|fast|pert", 1, 6, 1), result("ort:core:qnn-split:0|fast|pert", 1, 2, 1) };
+    auto c = pmml::choose(rs, 23.976, 2);
+    CHECK(c.ok && c.candidate.backend.ep == "qnn");
+    // at 5x only the int8 network fits (fp: 1 + 4 * 7 = 29 ms > 13.3 ms at 60 fps; int8: 1 + 4 * 3 = 13 ms)
+    c = pmml::choose(rs, 60, 5);
+    CHECK(c.ok && c.multiplier == 5 && c.candidate.backend.ep == "qnn-split");
+    std::vector<pmml::DeviceInfo> devs(2);
+    devs[0].backend.ep = "qnn"; devs[0].type = "NPU"; devs[1].backend.ep = "qnn-gpu"; devs[1].type = "GPU";
+    auto cands = pmml::candidatesFor(devs);
+    CHECK(std::count_if(cands.begin(), cands.end(), [](const pmml::Candidate& x) { return x.backend.ep == "qnn-split"; }) == 6);
+    devs.pop_back();
+    cands = pmml::candidatesFor(devs);
+    CHECK(std::none_of(cands.begin(), cands.end(), [](const pmml::Candidate& x) { return x.backend.ep == "qnn-split"; }));
+}
+
 static void cache() {
     const std::string file = "pmml_unit_cache.json";
     std::remove(file.c_str());
@@ -164,6 +190,7 @@ int main() {
     affine();
     parsing();
     autoChoice();
+    int8Split();
     cache();
     cpuGraphs();
     std::printf(failures ? "pmml_unit: %d FAILED\n" : "pmml_unit: all passed%.0d\n", failures);

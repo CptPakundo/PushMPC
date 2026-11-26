@@ -2537,6 +2537,10 @@ function Complete-PmmlArm64([string]$dir, $state, [switch]$Fresh) {
     if ($DryRun) { Dry "would copy pmml's graphs into $dir\graphs, point MlModels at the runtime's PushFlow models and measure with pmml_cli auto"; return }
     $g = Join-Path $mpv 'pmml-graphs'
     if (Test-Path -LiteralPath $g) { New-Item -ItemType Directory -Force (Join-Path $dir 'graphs') | Out-Null; Copy-Item (Join-Path $g '*.onnx') (Join-Path $dir 'graphs') -Force }
+    # O4: the int8 networks for the NPU that passed their accuracy gate in CI (pmml-qdq.yml), with their reports; pmml's
+    # qnn-split candidate uses one only when its report says pass (Auto then takes it only where it is the faster fit)
+    $q = Join-Path $mpv 'pmml-qdq'
+    if (Test-Path -LiteralPath $q) { New-Item -ItemType Directory -Force (Join-Path $dir 'qdq') | Out-Null; Copy-Item (Join-Path $q 'pushflow-*-qdq.*') (Join-Path $dir 'qdq') -Force }
     $models = Join-Path (Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel) 'models'
     if (-not (Test-Path -LiteralPath (Join-Path $models 'pushflow-fast.onnx'))) { Warn "PushFlow on this PC's NPU: the PushFlow models are not installed ($models): the portable GPU engine runs"; return }
     if (-not $NoRegister) {
