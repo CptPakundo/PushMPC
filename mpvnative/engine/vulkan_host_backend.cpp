@@ -4,7 +4,12 @@
 // Vulkan device to share): upload, motion both ways and PushMPC's cut guard on the GPU, the k - 1 generated frames read
 // back; real frames are the source frame itself (copied byte for byte). On macOS the device is MoltenVK (bundled next to
 // the module, see vk_context.cpp LoadVulkan). Auto picks it on macOS after the apple engine, before the CPU engine.
+// Dedup (as the zero-copy backend and the VapourSynth GPU route, cadence.h): a frame that repeats the last distinct
+// picture (animation drawn on twos, threes, fours) gets no pair of its own; the outputs between two distinct pictures
+// are spread over the whole held span (lookahead 3 source frames), so a drawing held for several frames moves smoothly
+// instead of moving in one step and stopping. Dedup=0 (setting) or dedup=no (option) turns it off.
 #include <algorithm>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,18 +62,20 @@ public:
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true)
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
+        m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
+        m_cadence.Configure(m_k, m_dedup ? kDedupLookahead : 0, 0);
         const size_t bps = m_bits > 8 ? 2 : 1;
         m_sy = size_t(m_w) * bps; m_sc = size_t((m_w + 1) / 2) * bps;
         const size_t ch = size_t((m_h + 1) / 2);
-        for (int i = 0; i < 2; ++i) { m_src[i][0].resize(m_sy * m_h); m_src[i][1].resize(m_sc * ch); m_src[i][2].resize(m_sc * ch); }
+        m_ch = ch;
         m_gen[0].resize(m_sy * m_h); m_gen[1].resize(m_sc * ch); m_gen[2].resize(m_sc * ch);
         out.mem = PMENG_MEM_CPU; out.fmt = m_fmt; out.width = st.width; out.height = st.height;
         out.multiplier = uint32_t(m_k);
         out.range = st.range; out.matrix = st.matrix; out.primaries = st.primaries; out.transfer = st.transfer;
         out.keep_dynamic_hdr = 1;
         std::snprintf(out.engine, sizeof(out.engine), "portable-vulkan");
-        std::snprintf(out.description, sizeof(out.description), "PushFPS portable engine on %s (own device, frames in host memory), %dx%d %d-bit; %s",
-                      m_eng.Device().Describe().c_str(), m_w, m_h, m_bits, pk.why.c_str());
+        std::snprintf(out.description, sizeof(out.description), "PushFPS portable engine on %s (own device, frames in host memory), %dx%d %d-bit; %s; Dedup %s",
+                      m_eng.Device().Describe().c_str(), m_w, m_h, m_bits, pk.why.c_str(), m_dedup ? "on" : "off");
         return true;
     }
 
@@ -76,50 +83,66 @@ public:
     {
         if (!m_q.empty()) return PMENG_BUSY;
         if (src.mem != PMENG_MEM_CPU || src.fmt != m_fmt) { err = "Vulkan engine: unexpected input memory / format"; return PMENG_ERROR; }
-        const int cur = int(m_seq & 1);
-        ToPlanar(src, m_src[cur]);
-        YuvView v; v.width = m_w; v.height = m_h; v.bits = m_bits;
-        for (int i = 0; i < 3; ++i) { v.data[i] = m_src[cur][i].data(); v.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
-        const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_seq > 0 && m_slot >= 0;
+        const int64_t s = int64_t(m_seq++);
+        const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_last == s - 1;
         if (!contiguous) ReleaseAll();
-        if (m_prevSlot >= 0) { m_eng.ReleaseSlot(m_prevSlot); m_prevSlot = -1; }   // the previous pair's first frame
+        m_last = s;
+        Planes& pl = m_src[s];
+        for (int i = 0; i < 3; ++i) pl.p[i].resize(i ? m_sc * m_ch : m_sy * size_t(m_h));
+        ToPlanar(src, pl.p);
+        YuvView v; v.width = m_w; v.height = m_h; v.bits = m_bits;
+        for (int i = 0; i < 3; ++i) { v.data[i] = pl.p[i].data(); v.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
         const int slot = m_eng.Upload(v, err);
         if (slot < 0) return PMENG_ERROR;
-        m_havePair = false;
-        if (m_slot >= 0) {
-            PairStats ps;
-            const int pair = m_eng.Estimate(m_slot, slot, m_pair, ps, err);
-            if (pair < 0) { m_eng.ReleaseSlot(slot); return PMENG_ERROR; }
-            if (m_pair >= 0) m_eng.ReleasePair(m_pair);
-            m_prevSlot = m_slot;   // still read by this pair's outputs
-            m_pair = pair; m_havePair = true;
-            m_cut = m_guard.Decide(ps) != 0;
-            if (m_cut) ++m_cuts;
-            for (int j = 1; j < m_k; ++j) m_q.push_back({ m_seq, uint32_t(j), uint32_t(m_k), 1 });
+        bool dup = false;
+        if (m_dedup && m_lastDistinctSlot >= 0) {
+            DedupStats ds;
+            if (!m_eng.Duplicate(m_lastDistinctSlot, slot, ds, err)) { m_eng.ReleaseSlot(slot); return PMENG_ERROR; }
+            dup = ds.duplicate;
         }
-        m_slot = slot;
-        m_q.push_back({ m_seq, 0, uint32_t(m_k), 0 });
-        ++m_seq;
+        if (dup) { m_eng.ReleaseSlot(slot); ++m_dups; }
+        else {
+            m_slotOf[s] = slot;
+            m_lastDistinctSlot = slot;
+            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s)) return PMENG_ERROR;
+            m_prevDistinct = s;
+        }
+        m_cadence.Push(s, dup);
+        Settle();
+        Prune();
+        return PMENG_OK;
+    }
+    int Finish() override
+    {
+        m_cadence.Finish();
+        Settle();
         return PMENG_OK;
     }
     int Peek(pmeng_out_info& info, uint32_t) override
     {
         if (m_q.empty()) return 0;
-        info = m_q.front();
+        info = m_q.front().info;
         return 1;
     }
     int Write(const pmeng_image& dst) override
     {
         if (m_q.empty()) { err = "write without an output"; return PMENG_ERROR; }
-        const pmeng_out_info oi = m_q.front();
+        const Item it = m_q.front();
         m_q.pop_front();
         if (dst.mem != PMENG_MEM_CPU || dst.fmt != m_fmt) { err = "Vulkan engine: unexpected output memory / format"; return PMENG_ERROR; }
-        const int cur = int((m_seq - 1) & 1), prev = cur ^ 1;
-        if (oi.subframe == 0) { FromPlanar(m_src[cur], dst); ++m_written; return PMENG_OK; }
-        const float t = float(oi.subframe) / float(oi.multiplier);
-        if (m_cut) { FromPlanar(t < 0.5f ? m_src[prev] : m_src[cur], dst); ++m_written; return PMENG_OK; }   // never morph a cut
+        const Shot& sh = it.shot;
+        auto real = [&](int64_t f) -> int {
+            auto p = m_src.find(f);
+            if (p == m_src.end()) { err = "Vulkan engine: no picture for frame " + std::to_string(f); return PMENG_ERROR; }
+            FromPlanar(p->second.p, dst); ++m_written;
+            return PMENG_OK;
+        };
+        if (sh.kind != Shot::Generated) return real(sh.src);
+        auto pi = m_pairs.find({ sh.d0, sh.d1 });
+        if (pi == m_pairs.end()) { err = "Vulkan engine: the pair is gone"; return PMENG_ERROR; }
+        if (pi->second.cut) return real(sh.t < 0.5f ? sh.d0 : sh.d1);   // never morph a cut
         int o = -1; uint64_t tk = 0;
-        if (!m_eng.Generate(m_pair, t, 0, o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
+        if (!m_eng.Generate(pi->second.id, sh.t, 0, o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
         YuvOut yo;
         for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
         m_eng.Read(o, yo);
@@ -129,26 +152,76 @@ public:
     }
     int Skip() override { if (!m_q.empty()) m_q.pop_front(); return PMENG_OK; }
     uint32_t Pending() override { return uint32_t(m_q.size()); }
-    int Flush() override { m_q.clear(); ReleaseAll(); return PMENG_OK; }
-    std::string Stats() override
+    int Flush() override { m_q.clear(); ReleaseAll(); return PMENG_OK; }    std::string Stats() override
     {
         char b[320];
         const auto& t = m_eng.Times();
-        std::snprintf(b, sizeof(b), "portable-vulkan (%s): %llu sources, %llu outputs (%llu generated), %llu scene cuts; upload %.2f ms, motion %.2f ms a pair",
-                      m_eng.Device().name.c_str(), (unsigned long long)m_seq, (unsigned long long)m_written, (unsigned long long)m_generated,
+        std::snprintf(b, sizeof(b), "portable-vulkan (%s): %llu sources (%llu repeats, Dedup), %llu outputs (%llu generated), %llu scene cuts; upload %.2f ms, motion %.2f ms a pair",
+                      m_eng.Device().name.c_str(), (unsigned long long)m_seq, (unsigned long long)m_dups, (unsigned long long)m_written, (unsigned long long)m_generated,
                       (unsigned long long)m_cuts, t.uploads ? t.uploadMs / double(t.uploads) : 0.0, t.pairs ? t.meMs / double(t.pairs) : 0.0);
         return b;
     }
 
 private:
+    static constexpr int kDedupLookahead = 3;   // twos, threes and fours (HeldFrames.h kLookahead)
+    struct Planes { std::vector<uint8_t> p[3]; };
+    struct PairInfo { int id = -1; bool cut = false; };
+    struct Item { pmeng_out_info info; Shot shot; };
     void ReleaseAll()
     {
-        if (m_pair >= 0) m_eng.ReleasePair(m_pair);
-        if (m_slot >= 0) m_eng.ReleaseSlot(m_slot);
-        if (m_prevSlot >= 0) m_eng.ReleaseSlot(m_prevSlot);
-        m_pair = m_slot = m_prevSlot = -1; m_havePair = m_cut = false;
+        for (auto& [key, p] : m_pairs) m_eng.ReleasePair(p.id);
+        m_pairs.clear();
+        for (auto& [f, slot] : m_slotOf) m_eng.ReleaseSlot(slot);
+        m_slotOf.clear();
+        m_src.clear();
+        m_lastDistinctSlot = -1; m_prevDistinct = -1; m_lastPair = -1; m_last = -1000000;
+        m_cadence.Reset();
     }
-    // the caller's frame -> planar, low-bit samples (the engine's layout)
+    bool StartPair(int64_t d0, int64_t d1)
+    {
+        auto a = m_slotOf.find(d0), b = m_slotOf.find(d1);
+        if (a == m_slotOf.end() || b == m_slotOf.end()) { err = "Vulkan engine: a picture of the pair is gone"; return false; }
+        PairStats ps;
+        const int id = m_eng.Estimate(a->second, b->second, m_lastPair, ps, err);
+        if (id < 0) return false;
+        PairInfo pi; pi.id = id; pi.cut = m_guard.Decide(ps) != 0;
+        if (pi.cut) ++m_cuts;
+        m_pairs[{ d0, d1 }] = pi;
+        m_lastPair = id;
+        return true;
+    }
+    // the outputs Cadence settles now (output n = p k + j: tagged with position p, subframe j, as the zero-copy backend)
+    void Settle()
+    {
+        std::vector<Settled> settled;
+        m_cadence.Settle(settled);
+        for (const Settled& st : settled) {
+            const int64_t pos = st.n / m_k + (st.n % m_k ? 1 : 0);
+            pmeng_out_info info{ uint64_t(pos), uint32_t(st.n % m_k), uint32_t(m_k), st.shot.kind == Shot::Real ? 0u : 1u };
+            if (st.shot.kind == Shot::Hold) ++m_holds;
+            m_q.push_back({ info, st.shot });
+        }
+    }
+    // forget what no later output can need
+    void Prune()
+    {
+        const auto& dist = m_cadence.Distinct();
+        const int64_t front = dist.empty() ? m_last : dist.front();
+        int64_t oldestQueued = m_last;
+        for (const Item& it : m_q) oldestQueued = std::min(oldestQueued, it.shot.kind == Shot::Generated ? it.shot.d0 : it.shot.src);
+        const int64_t keep = std::min(front, oldestQueued);
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first < keep && it->second.id != m_lastPair) { m_eng.ReleasePair(it->second.id); it = m_pairs.erase(it); }
+            else ++it;
+        }
+        for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
+            bool used = false;
+            for (auto& [key, p] : m_pairs) used = used || key.first == it->first || key.second == it->first;
+            if (it->first < keep && !used && it->second != m_lastDistinctSlot) { m_eng.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
+            else ++it;
+        }
+        for (auto it = m_src.begin(); it != m_src.end();) { if (it->first < keep) it = m_src.erase(it); else ++it; }
+    }    // the caller's frame -> planar, low-bit samples (the engine's layout)
     void ToPlanar(const pmeng_image& s, std::vector<uint8_t> (&p)[3]) const
     {
         const int ch = (m_h + 1) / 2, cw = (m_w + 1) / 2;
@@ -204,14 +277,19 @@ private:
 
     Engine m_eng;
     CutGuard m_guard;
+    Cadence m_cadence;
+    bool m_dedup = false;
     uint32_t m_fmt = 0;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1;
-    int m_slot = -1, m_prevSlot = -1, m_pair = -1;
-    bool m_havePair = false, m_cut = false;
-    uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0;
-    size_t m_sy = 0, m_sc = 0;
-    std::vector<uint8_t> m_src[2][3], m_gen[3];
-    std::deque<pmeng_out_info> m_q;
+    int m_lastDistinctSlot = -1, m_lastPair = -1;
+    int64_t m_prevDistinct = -1, m_last = -1000000;
+    uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_dups = 0, m_holds = 0;
+    size_t m_sy = 0, m_sc = 0, m_ch = 0;
+    std::map<int64_t, Planes> m_src;                         // source pictures still shown (real frames, holds, cut frames)
+    std::map<int64_t, int> m_slotOf;                         // distinct frame -> engine slot
+    std::map<std::pair<int64_t, int64_t>, PairInfo> m_pairs; // (d0, d1) -> motion pair
+    std::vector<uint8_t> m_gen[3];
+    std::deque<Item> m_q;
 };
 
 } // namespace

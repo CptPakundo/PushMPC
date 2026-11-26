@@ -113,7 +113,8 @@ public:
         m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);
         m_holdOn = m_k > 1 && ParseBool(Opt(o, "subtitle_hold", ReadSetting("SubtitleHold")), false);
         m_transitions = m_k > 1 && ParseBool(Opt(o, "transitions", ReadSetting("TransitionRules")), true);
-        const int look = m_dedup ? 2 : 0;
+        // lookahead 3 (twos, threes and fours) where the output slots allow it, else 2
+        const int look = m_dedup ? ((3 + 1) * m_k + 2 <= 28 ? 3 : 2) : 0;
         if (const int needOuts = (look + 1) * m_k + 2; needOuts > c.outSlots) {   // a settle can release (lookahead + 1) x k outputs
             c.outSlots = std::min(needOuts, 28);
             if (!m_eng.Configure(c, m_ctx, why) || !MakePipesOnce(why)) return false;

@@ -355,7 +355,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     d->vi.numFrames = int(OutputFrames(vi->numFrames, d->k));
     d->be.dedup = s.dedup != 0;
     d->be.subtitleHold = s.subtitleHold != 0;
-    d->be.cadence.Configure(d->k, d->be.dedup ? 2 : 0, vi->numFrames);
+    d->be.cadence.Configure(d->k, d->be.dedup ? 3 : 0, vi->numFrames);   // lookahead 3: twos, threes and fours (TV anime holds slow motion for four)
     d->pipe.Init(d->k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
     d->pipe.SetLookahead(d->be.Lookahead());
     d->pipe.Reset();
