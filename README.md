@@ -111,7 +111,7 @@ Preview, for mpv and Plex (Plex for Mac and Plex HTPC). You need [Homebrew](http
 
 ```sh
 brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
-brew install pushmpc
+brew install CptPakundo/pushmpc/pushmpc
 pushmpc-setup install
 ```
 

@@ -4,7 +4,7 @@ This repository is its own Homebrew tap: the formula is [`Formula/pushmpc.rb`](.
 looks in `Formula/`). This folder keeps its helper, `pmml-models.py`.
 
     brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
-    brew install pushmpc
+    brew install CptPakundo/pushmpc/pushmpc
     pushmpc-setup install      # mpv's mpv.conf, and Plex for Mac / Plex HTPC when they are in /Applications
     # to remove: pushmpc-setup uninstall && brew uninstall pushmpc
 
@@ -31,5 +31,5 @@ Plex for Mac asset leaves that resource out.
 
 CI: `.github/workflows/apple.yml`, job `homebrew`, on macos-15: makes the three archives from the checkout, points a
 clone of this repository at them with `scripts/update-formula.py`, runs `brew tap CptPakundo/pushmpc <clone>` and
-`brew install pushmpc`, `brew test`, mpv in encode mode through the installed filter, and Plex for Mac through
+`brew install CptPakundo/pushmpc/pushmpc` (the full name, which Homebrew 6 trusts), `brew test`, mpv in encode mode through the installed filter, and Plex for Mac through
 `pushmpc-setup` (install, the re-apply agent, uninstall bit for bit).

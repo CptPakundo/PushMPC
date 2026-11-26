@@ -33,7 +33,7 @@ PushMPC filter (`pushmpc.Enhance`). Two tiers:
 
 For real frame generation on a Mac (Apple's VideoToolbox interpolation and super resolution, or PushFPS's motion
 interpolation), use mpv with the PushMPC filter: `brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC`,
-`brew install pushmpc`, then `pushmpc-setup install`. See `packaging/homebrew`.
+`brew install CptPakundo/pushmpc/pushmpc`, then `pushmpc-setup install`. See `packaging/homebrew`.
 
 ## Install
 

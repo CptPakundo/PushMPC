@@ -83,7 +83,7 @@ PushMPC on the Mac is a preview. It works in mpv and in Plex (Plex for Mac and P
 
 ```sh
 brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
-brew install pushmpc
+brew install CptPakundo/pushmpc/pushmpc
 pushmpc-setup install
 ```
 

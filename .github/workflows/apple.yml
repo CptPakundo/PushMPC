@@ -384,11 +384,11 @@ jobs:
           grep -n -E '^  (url|version|sha256) |resource "' "$RUNNER_TEMP/tap-src/Formula/pushmpc.rb"
           # the README's commands, with the clone in place of the GitHub URL
           brew tap CptPakundo/pushmpc "$RUNNER_TEMP/tap-src"
-          brew info pushmpc | head -3
-          brew install --build-from-source --verbose pushmpc
-          brew test --verbose pushmpc
+          brew install --build-from-source --verbose CptPakundo/pushmpc/pushmpc   # the full name: Homebrew 6 trusts this formula
+          brew info CptPakundo/pushmpc/pushmpc | head -3
+          brew test --verbose CptPakundo/pushmpc/pushmpc
           brew audit --formula cptpakundo/pushmpc/pushmpc || echo "::warning::brew audit reported issues (see log)"
-          brew list --verbose pushmpc | head -30
+          brew list --verbose CptPakundo/pushmpc/pushmpc | head -30
           # without the Plex for Mac archive the script leaves the resource out (a release whose macOS asset is missing)
           cp Formula/pushmpc.rb "$RUNNER_TEMP/noplex.rb"
           python3 -I scripts/update-formula.py "$RUNNER_TEMP/noplex.rb" --version 0.6.0-ci --src "$tgz" --src-url "file://$tgz" --pmml "$gtgz" --pmml-url "file://$gtgz"

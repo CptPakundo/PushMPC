@@ -5,7 +5,7 @@
 #
 # This repository is the tap (Homebrew looks in Formula/):
 #   brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
-#   brew install pushmpc
+#   brew install CptPakundo/pushmpc/pushmpc   (the full name: Homebrew then trusts this formula from the tap)
 #   pushmpc-setup install
 # url / version / sha256 and the release resources below are filled in by the release (scripts/update-formula.py, run by
 # release.yml's publish job on main once the assets exist). CI (.github/workflows/apple.yml, job homebrew) taps a clone
