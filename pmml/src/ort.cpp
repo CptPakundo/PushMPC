@@ -421,11 +421,25 @@ public:
                      sizes, &pack, err)) return false;
         if (!session(joinPath(o.graphsDir, "addt.onnx"), dims, {}, &addt, err)) return false;
         if (!session(joinPath(o.graphsDir, "synth-" + fmt_ + ".onnx"), dims, sizes, &synth, err)) return false;
+        // optional: the per-pixel phase graph (renderMap); graph folders made before it run without
+        {
+            const std::string mapPath = joinPath(o.graphsDir, "synth_map-" + fmt_ + ".onnx");
+            if (FILE* f = std::fopen(mapPath.c_str(), "rb")) {
+                std::fclose(f);
+                std::string e;
+                if (!session(mapPath, dims, sizes, &synthMap, &e)) synthMap = nullptr;
+            }
+        }
         initMs_ = nowMs() - t0;
         for (OrtSession* s : {pack, addt, net, synth}) {
             OrtIoBinding* b = nullptr;
             PMML_TRY(ort->api->CreateIoBinding(s, &b));
             bindings_.push_back(b);
+        }
+        if (synthMap) {
+            OrtIoBinding* b = nullptr;
+            PMML_TRY(ort->api->CreateIoBinding(synthMap, &b));
+            bindings_.push_back(b);   // [4]
         }
         if (o.hostIntermediates) choice_.deviceMemory = nullptr;
         std::ostringstream d;
@@ -487,10 +501,48 @@ public:
         }
         const float s0 = once ? t / o_.tRef : 1.f, s1 = once ? (1.f - t) / (1.f - o_.tRef) : 1.f;
         const float scale[2] = {s0, s1};
-        OrtIoBinding* bind = bindings_[3];
+        std::vector<OrtValue*> tmp;
+        OrtValue* sv = nullptr;
+        { std::string e; if (tensor(const_cast<float*>(scale), {2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &sv, &e)) tmp.push_back(sv); }
+        return runSynth(synth, bindings_[3], {{"scale", sv}}, tmp, out, err);
+    }
+
+    // per-pixel phase: t per cell of a mapW x mapH grid over the picture (bilinear at the network's pixel centres; the
+    // padding takes the nearest edge), the network once at tRef, synth_map with s0 = t / tRef, s1 = (1 - t) / (1 - tRef)
+    bool renderMap(const float* tMap, int mapW, int mapH, const OutFrame& out, std::string* err) override {
+        if (!synthMap) { if (err) *err = "synth_map-" + fmt_ + ".onnx is not in the graphs folder (make_graphs.py)"; return false; }
+        if (!tMap || mapW < 1 || mapH < 1) { if (err) *err = "renderMap: no phase map"; return false; }
+        if (netT_ != o_.tRef) {
+            if (!runNetwork(o_.tRef, err)) return false;
+            netT_ = o_.tRef;
+        }
+        const int pw = net_.padW, ph = net_.padH;
+        map0_.resize(size_t(pw) * ph); map1_.resize(size_t(pw) * ph);
+        for (int y = 0; y < ph; ++y)
+            for (int x = 0; x < pw; ++x) {
+                const float fx = std::clamp((float(std::min(x, net_.w - 1)) + 0.5f) / float(net_.w) * float(mapW) - 0.5f, 0.f, float(mapW - 1));
+                const float fy = std::clamp((float(std::min(y, net_.h - 1)) + 0.5f) / float(net_.h) * float(mapH) - 0.5f, 0.f, float(mapH - 1));
+                const int x0 = int(fx), y0 = int(fy), x1 = std::min(x0 + 1, mapW - 1), y1 = std::min(y0 + 1, mapH - 1);
+                const float ax = fx - float(x0), ay = fy - float(y0);
+                const float t = (tMap[size_t(y0) * mapW + x0] * (1 - ax) + tMap[size_t(y0) * mapW + x1] * ax) * (1 - ay)
+                              + (tMap[size_t(y1) * mapW + x0] * (1 - ax) + tMap[size_t(y1) * mapW + x1] * ax) * ay;
+                map0_[size_t(y) * pw + x] = t / o_.tRef;
+                map1_[size_t(y) * pw + x] = (1.f - t) / (1.f - o_.tRef);
+            }
+        std::vector<OrtValue*> tmp;
+        OrtValue *m0 = nullptr, *m1 = nullptr;
+        if (!tensor(map0_.data(), {1, ph, pw, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &m0, err)) return false;
+        tmp.push_back(m0);
+        if (!tensor(map1_.data(), {1, ph, pw, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &m1, err)) { for (OrtValue* v : tmp) ort->api->ReleaseValue(v); return false; }
+        tmp.push_back(m1);
+        return runSynth(synthMap, bindings_[4], {{"scale0_map", m0}, {"scale1_map", m1}}, tmp, out, err);
+    }
+
+    // a synth graph (synth or synth_map) with its own scale inputs; tmp: values to release afterwards (taken over)
+    bool runSynth(OrtSession* graph, OrtIoBinding* bind, const std::vector<std::pair<const char*, OrtValue*>>& scaleIn, std::vector<OrtValue*>& tmp,
+                  const OutFrame& out, std::string* err) {
         ort->api->ClearBoundInputs(bind);
         ort->api->ClearBoundOutputs(bind);
-        std::vector<OrtValue*> tmp;
         auto host = [&](const float* data, int64_t n) -> OrtValue* {
             OrtValue* v = nullptr;
             std::string e;
@@ -498,17 +550,19 @@ public:
             tmp.push_back(v);
             return v;
         };
-        OrtValue* sv = host(scale, 2);
+        bool scalesOk = true;
+        for (const auto& s : scaleIn) scalesOk = scalesOk && s.second;
         OrtValue* av = host(affine_.data(), 4);
         OrtValue* cv = host(colour_.data(), 8);
-        bool ok = sv && av && cv;
+        bool ok = scalesOk && av && cv;
         auto bindIn = [&](const char* name, OrtValue* v) {
             if (!ok) return;
             if (OrtStatus* s = ort->api->BindInput(bind, name, v)) { ok = false; if (err) *err = std::string("BindInput ") + name + ": " + ort->api->GetErrorMessage(s); ort->api->ReleaseStatus(s); }
         };
         bindIn("frame_a", packed_[1]); bindIn("frame_b", packed_[2]);
         bindIn("grid0", netOut_[1]); bindIn("grid1", netOut_[2]); bindIn("mask", netOut_[3]);
-        bindIn("scale", sv); bindIn("affine", av); bindIn("colour", cv);
+        for (const auto& s : scaleIn) bindIn(s.first, s.second);
+        bindIn("affine", av); bindIn("colour", cv);
         // outputs straight into the caller's planes when contiguous
         const bool yuv = o_.format == PlaneFormat::Yuv420;
         static const char* outRgb[3] = {"out_r", "out_g", "out_b"};
@@ -528,7 +582,7 @@ public:
         }
         if (ok) {
             const double t0 = nowMs();
-            if (OrtStatus* s = ort->api->RunWithBinding(synth, nullptr, bind)) { ok = false; if (err) *err = std::string("synth: ") + ort->api->GetErrorMessage(s); ort->api->ReleaseStatus(s); }
+            if (OrtStatus* s = ort->api->RunWithBinding(graph, nullptr, bind)) { ok = false; if (err) *err = std::string("synth: ") + ort->api->GetErrorMessage(s); ort->api->ReleaseStatus(s); }
             stats_.synthMs = nowMs() - t0;
             ++stats_.synthRuns;
         }
@@ -553,8 +607,10 @@ public:
     OrtSession* addt = nullptr;
     OrtSession* net = nullptr;
     OrtSession* synth = nullptr;
+    OrtSession* synthMap = nullptr;   // synth_map-<fmt>.onnx (renderMap), when the graphs folder has it
 
 private:
+    std::vector<float> map0_, map1_;   // renderMap's scale maps at the padded network size
     bool runNetwork(float t, std::string* err) {
         OrtIoBinding* ba = bindings_[1];
         ort->api->ClearBoundInputs(ba);
@@ -671,7 +727,7 @@ private:
         releaseValues(&packed_);
         releaseValues(&netOut_);
         for (auto* b : bindings_) ort->api->ReleaseIoBinding(b);
-        for (OrtSession* s : {pack, addt, net, synth}) if (s) ort->api->ReleaseSession(s);
+        for (OrtSession* s : {pack, addt, net, synth, synthMap}) if (s) ort->api->ReleaseSession(s);
         if (cpu_) ort->api->ReleaseMemoryInfo(cpu_);
         if (choice_.ownedMemory) ort->api->ReleaseMemoryInfo(choice_.ownedMemory);
     }

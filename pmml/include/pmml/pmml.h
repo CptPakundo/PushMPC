@@ -82,6 +82,15 @@ public:
     // ("per t"); more runs it once at tRef and rebuilds every t from its motion ("flow once"). 0 = always per t.
     virtual bool setPair(const Frame& a, const Frame& b, int phases, std::string* err) = 0;
     virtual bool render(float t, const OutFrame& out, std::string* err) = 0;
+    // A phase per pixel (the held-drawing repair: parts of one frame that share a pair at different phases, one network
+    // run): t per cell of a mapW x mapH grid over the picture, bilinear; the network runs at tRef (synth_map-<fmt>.onnx).
+    // Backends without it return false (ncnn; ONNX Runtime without the graph).
+    virtual bool renderMap(const float* tMap, int mapW, int mapH, const OutFrame& out, std::string* err)
+    {
+        (void)tMap; (void)mapW; (void)mapH; (void)out;
+        if (err) *err = "per-pixel phase is not supported by this backend";
+        return false;
+    }
     virtual Stats stats() const = 0;
     virtual std::string describe() const = 0;
 };

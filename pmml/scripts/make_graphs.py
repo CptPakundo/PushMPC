@@ -10,6 +10,7 @@ frames go to the GPU once per pair and nothing but the finished picture comes ba
                     PushFlowReconstruct.hlsl does: sampled from the full-size real frames), with the grids'
                     displacement scaled by s0 / s1 ("flow once, synthesize many": the network runs once at t_ref and
                     further timesteps reuse its motion; s = 1 is the plain rebuild).
+  synth_map-<fmt>.onnx  the same with s0 / s1 per pixel (scale0_map / scale1_map [1,ph,pw,1]): a phase per pixel.
 
 fmt: rgb   three full-size planes R, G, B
      yuv   Y full size, U and V at half size in both directions (4:2:0), BT.601/709/2020 by the `colour` input
@@ -173,14 +174,19 @@ def addt():
     return g.model()
 
 
-def synth(fmt):
-    g = G(f"pmml_synth_{fmt}")
+def synth(fmt, per_pixel=False):
+    """per_pixel (synth_map-<fmt>.onnx): the displacement factors are maps scale0_map / scale1_map [1, ph, pw, 1] at
+    the network's padded size instead of the scalar pair `scale` (s0 = t / t_ref, s1 = (1 - t) / (1 - t_ref) per pixel):
+    the held-drawing repair gives the parts of one frame that share a pair their own phases in one network run."""
+    g = G(f"pmml_synth_map_{fmt}" if per_pixel else f"pmml_synth_{fmt}")
+    scale_inputs = ([helper.make_tensor_value_info("scale0_map", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 1]),
+                     helper.make_tensor_value_info("scale1_map", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 1])]
+                    if per_pixel else [helper.make_tensor_value_info("scale", TensorProto.FLOAT, [2])])
     g.inputs += [helper.make_tensor_value_info("frame_a", TensorProto.FLOAT, [1, 3, "pmml_h", "pmml_w"]),
                  helper.make_tensor_value_info("frame_b", TensorProto.FLOAT, [1, 3, "pmml_h", "pmml_w"]),
                  helper.make_tensor_value_info("grid0", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 2]),
                  helper.make_tensor_value_info("grid1", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 2]),
-                 helper.make_tensor_value_info("mask", TensorProto.FLOAT, [1, 1, "pmml_ph", "pmml_pw"]),
-                 helper.make_tensor_value_info("scale", TensorProto.FLOAT, [2]),
+                 helper.make_tensor_value_info("mask", TensorProto.FLOAT, [1, 1, "pmml_ph", "pmml_pw"])] + scale_inputs + [
                  helper.make_tensor_value_info("affine", TensorProto.FLOAT, [4]),
                  helper.make_tensor_value_info("colour", TensorProto.FLOAT, [8])]
     crop = g.const([SENTINEL["nh"], SENTINEL["nw"]], np.int64, name="crop_end")   # [nh, nw]
@@ -207,7 +213,7 @@ def synth(fmt):
     up1 = g.op("Concat", [i64([1, 1]), hw], axis=0)
     warped = []
     for k, (grid, frame) in enumerate((("grid0", "frame_a"), ("grid1", "frame_b"))):
-        s = g.op("Gather", ["scale", i64([k])])
+        s = ("scale0_map", "scale1_map")[k] if per_pixel else g.op("Gather", ["scale", i64([k])])   # [1,ph,pw,1] broadcasts over x/y
         gs = g.op("Add", [ident, g.op("Mul", [g.op("Sub", [grid, ident]), s])])
         gs = g.op("Add", [g.op("Mul", [gs, a_vec]), b_vec])
         t = g.op("Transpose", [gs], perm=[0, 3, 1, 2])
@@ -239,6 +245,9 @@ def main():
             path = out / f"{kind}-{fmt}.onnx"
             onnx.save(make(fmt), str(path))
             print(f"wrote {path}")
+        path = out / f"synth_map-{fmt}.onnx"
+        onnx.save(synth(fmt, per_pixel=True), str(path))
+        print(f"wrote {path}")
 
 
 if __name__ == "__main__":
