@@ -569,47 +569,67 @@ jobs:
           [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak installed"; exit 1; }
           [ "$fails" = 0 ] && echo "plex-linux: all checks passed" || exit 1
 
-  # Plex for Mac: what the bundle holds (signature, entitlements, libmpv / FFmpeg dylibs). Dispatch only (macOS minutes).
+  # Plex for Mac / Plex HTPC for Mac: hardened runtime with disable-library-validation, FFmpeg 5.x as separate universal
+  # dylibs (libavfilter.8.dylib = 8.29.100). Proxy libavfilter.8.dylib in Contents/Frameworks; self-test through Plex's
+  # libmpv, a real launch of the modified app, uninstall bit-exact. Dispatch only (plex_macos input).
   plex-macos:
     if: github.event_name == 'workflow_dispatch' && inputs.plex_macos
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
-      - name: Plex for Mac (desktop, HTPC) inspected
+      - uses: actions/checkout@v4
+      - name: Build the Mac pieces (8.29.100 filter build, proxy, engine, self-test host)
+        run: bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac"
+      - name: Plex for Mac and Plex HTPC for Mac (plex.tv downloads)
         run: |
-          set +e
-          for n in 6 7 5; do
-            url=$(curl -fsSL "https://plex.tv/api/downloads/$n.json" | python3 -c "
+          mkdir -p "$RUNNER_TEMP/apps"
+          for n in 6 7; do
+            u=$(curl -fsSL "https://plex.tv/api/downloads/$n.json" | python3 -c "
           import json, sys
           def walk(o):
               if isinstance(o, dict):
                   for k, v in o.items():
                       if k.lower() in ('macos', 'mac') and isinstance(v, dict):
                           for r in v.get('releases', []):
-                              if r.get('url', '').endswith(('.zip', '.dmg')): print(v.get('version', '?'), r['url']); return True
+                              if r.get('url', '').endswith('.zip'): print(r['url']); return True
                       if walk(v): return True
               return False
-          walk(json.load(sys.stdin))" 2>/dev/null | head -1)
-            [ -n "$url" ] || { echo "== downloads/$n.json: no macOS release"; continue; }
-            echo "== downloads/$n.json: $url"
-            u=${url#* }; d=/tmp/plex$n; mkdir -p $d/x
-            curl -fsSL -o $d/pkg "$u" || continue
-            case $u in
-              *.zip) ditto -x -k $d/pkg $d/x ;;
-              *.dmg) hdiutil attach -nobrowse -mountpoint $d/mnt $d/pkg >/dev/null && cp -R $d/mnt/*.app $d/x/ ;;
-            esac
-            app=$(find $d/x -maxdepth 2 -name '*.app' | head -1); echo "bundle: $app"
-            exe="$app/Contents/MacOS/$(defaults read "$app/Contents/Info" CFBundleExecutable 2>/dev/null)"
-            codesign -dvv "$app" 2>&1 | grep -E "Identifier=|TeamIdentifier|flags=|Runtime Version|Authority=Developer"
-            echo "-- entitlements (library validation / DYLD env decide what can be loaded)"
-            codesign -d --entitlements - --xml "$app" 2>/dev/null | plutil -p - 2>/dev/null | head -30
-            echo "-- main executable links:"; otool -L "$exe" | grep -viE "/System/|/usr/lib/" | head -20
-            echo "-- Frameworks:"; ls "$app/Contents/Frameworks" 2>/dev/null | head -60
-            for lib in 'libmpv*' 'libavfilter*' 'libavutil*'; do
-              p=$(find "$app" -name "$lib" -type f | head -1); echo "-- $lib: ${p#$app/}"
-              [ -z "$p" ] || { otool -L "$p" | head -12; codesign -dvv "$p" 2>&1 | grep -E "flags=|TeamIdentifier"; lipo -archs "$p"; }
-            done
-            p=$(find "$app" -name 'libavfilter*' -type f | head -1)
-            [ -z "$p" ] || nm -gU "$p" 2>/dev/null | grep -E " _avfilter_(version|get_by_name)$"
+          walk(json.load(sys.stdin))")
+            echo "downloads/$n.json: $u"
+            curl -fsSL -o "$RUNNER_TEMP/p$n.zip" "$u" && ditto -x -k "$RUNNER_TEMP/p$n.zip" "$RUNNER_TEMP/apps"
           done
-          exit 0
+          ls "$RUNNER_TEMP/apps"
+      - name: Install, self-test, launch the modified app, uninstall bit-exact
+        timeout-minutes: 20
+        run: |
+          set +e; p="$RUNNER_TEMP/plexmac"; fails=0
+          cp mpvnative/install/pushmpc-plex-mac.sh "$p/"
+          for t in 'desktop:Plex.app:Plex' 'htpc:Plex HTPC.app:Plex HTPC'; do
+            n=${t%%:*}; r=${t#*:}; a="$RUNNER_TEMP/apps/${r%%:*}"; exe=${r##*:}
+            [ -d "$a" ] || { echo "::error::$a missing"; fails=$((fails + 1)); continue; }
+            snap() { (cd "$a" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256); ls -la "$HOME/Library/Application Support/$exe/mpv.conf" 2>&1 | awk '{print $5, $NF}'; }
+            echo "$n: libmpv symbols left to the host (flat namespace):"; nm -m "$a/Contents/Frameworks/libmpv.2.dylib" | grep "dynamically looked up" | awk '{print $NF}' | sort -u | tr '\n' ' '; echo
+            before=$(snap)
+            out=$(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json); echo "install -NoConf: $out"
+            out=$(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --opts smoother=2 --json); rc=$?; echo "install again: $out"
+            echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q ', x2' && [ $rc = 0 ] && echo "$n: vf_pushmpc active through Plex's libmpv" \
+              || { echo "::error::$n: install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
+            grep -c 'PushMPC native (Plex): do not edit' "$HOME/Library/Application Support/$exe/mpv.conf"
+            echo "status: $(sh "$p/pushmpc-plex-mac.sh" status --app $n --app-path "$a" --from "$p" --json)"
+            # the real app with the proxy in place: it must start and load the proxy chain
+            open -n "$a"; sleep 25
+            pid=$(pgrep -x "$exe" | head -1)
+            if [ -n "$pid" ]; then
+              echo "$n: $exe running (pid $pid) with the proxy:"; lsof -p "$pid" 2>/dev/null | grep -E 'libavfilter|pushmpc|libmpv' | awk '{print $NF}'
+              lsof -p "$pid" 2>/dev/null | grep -q 'libavfilter.8-plex.dylib' || echo "::warning::$n: libavfilter.8-plex.dylib not mapped (libmpv may load on first playback)"
+            else
+              echo "::error::$n: $exe did not stay running with the proxy in place"; fails=$((fails + 1))
+              log show --last 2m --predicate 'process == "kernel" OR process == "amfid" OR process == "syspolicyd"' 2>/dev/null | grep -iE "$exe|plex|library validation|code signature" | tail -15
+            fi
+            ls -d "$HOME/Library/Application Support/"*lex* 2>/dev/null
+            pkill -x "$exe"; sleep 3
+            echo "uninstall: $(sh "$p/pushmpc-plex-mac.sh" uninstall --app $n --app-path "$a" --from "$p" --json)"
+            after=$(snap)
+            [ "$after" = "$before" ] && echo "$n: bundle and mpv.conf restored bit for bit" || { echo "$before"; echo "$after"; echo "::error::$n: bundle or mpv.conf differ after uninstall"; fails=$((fails + 1)); }
+          done
+          [ "$fails" = 0 ] && echo "plex-macos: all checks passed" || exit 1

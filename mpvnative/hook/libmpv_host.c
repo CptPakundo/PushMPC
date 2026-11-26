@@ -15,6 +15,25 @@
 typedef struct { int event_id; int error; uint64_t reply_userdata; void *data; } mpv_event_t;
 typedef struct { int reason; int error; } mpv_end_file_t;
 
+#ifdef __APPLE__
+/* Plex's libmpv.2.dylib on macOS leaves mpv's Cocoa event hooks to the host executable (looked up in the flat
+ * namespace, normally defined by Plex's app): no-op stand-ins so the self-test can load it. */
+#define PM_STUB(n) __attribute__((visibility("default"), used)) int n(void) { return 0; }
+PM_STUB(cocoa_init_media_keys)
+PM_STUB(cocoa_uninit_media_keys)
+PM_STUB(cocoa_set_input_context)
+PM_STUB(cocoa_set_mpv_handle)
+PM_STUB(cocoa_put_key)
+PM_STUB(cocoa_put_key_with_modifiers)
+PM_STUB(cocoa_init_cocoa_cb)
+PM_STUB(cocoa_main)
+PM_STUB(cocoa_start_event_monitor)
+PM_STUB(cocoa_set_istty)
+#define PM_DLOPEN_FLAGS (RTLD_LAZY | RTLD_GLOBAL)
+#else
+#define PM_DLOPEN_FLAGS (RTLD_NOW | RTLD_GLOBAL)
+#endif
+
 static int write_y4m(const char *path)
 {
     unsigned char px[64 * 64 * 3 / 2];
@@ -43,7 +62,7 @@ int main(int argc, char **argv)
     const char *files[64];
     int nf = 0, f, ok = 0;
     if (argc < 2) { fprintf(stderr, "usage: libmpv_host <libmpv.so> [<media file>...]\n"); return 2; }
-    h = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+    h = dlopen(argv[1], PM_DLOPEN_FLAGS);
     if (!h) { printf("host: cannot load %s: %s\n", argv[1], dlerror()); return 2; }
     create = (void *(*)(void))dlsym(h, "mpv_create");
     init = (int (*)(void *))dlsym(h, "mpv_initialize");
@@ -61,7 +80,7 @@ int main(int argc, char **argv)
         FILE *lf;
         snprintf(log, sizeof(log), "/tmp/libmpv-host-%d-%d.log", (int)getpid(), f);
         ctx = create();
-        set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v");
+        set(ctx, "vo", "null"); set(ctx, "ao", "null"); set(ctx, "log-file", log); set(ctx, "msg-level", "all=v"); set(ctx, "input-media-keys", "no");
         vfrc = set(ctx, "vf", "pushmpc=smoother=2");
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
