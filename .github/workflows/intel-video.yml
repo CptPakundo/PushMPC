@@ -7,18 +7,15 @@
 #     capability reason), VPL frame interpolation's self-test (no Intel runtime -> a clean refusal), the procedural
 #     material's 50/50 blend baseline (calibration of the VPL quality gate);
 #   - auto_test (the Auto rules, Intel rows included); the tester scripts parse.
-# Nothing of Intel's is uploaded except the libvpl install when asked for (only_libvpl, a developer convenience).
+# Nothing of Intel's is uploaded except libvpl's install (its MIT licence included), kept 7 days.
 name: intel-video
 on:
   push:
     branches: ['track/vendor-intelvp']
-    paths: ['.github/workflows/intel-video.yml']
+    paths: ['.github/workflows/intel-video.yml', 'pushmpc/src/PushCoreD3D11Bridge.*', 'pushmpc/src/PushCoreIntelVsr.*', 'pushmpc/src/PushCoreVplFi.*',
+            'pushmpc/tools/pushcore_selftest.cpp', 'tests/intel-v*-manual.ps1']
   workflow_dispatch:
-    inputs:
-      only_libvpl:
-        description: 'Only build libvpl and upload its install (headers + static library)'
-        type: boolean
-        default: false
+# a push whose commit message contains [libvpl only] builds and uploads only libvpl's install (a developer convenience)
 
 permissions:
   contents: read
@@ -63,7 +60,7 @@ jobs:
 
   core:
     needs: libvpl
-    if: ${{ !inputs.only_libvpl }}
+    if: ${{ !contains(github.event.head_commit.message, '[libvpl only]') }}
     runs-on: windows-2025
     timeout-minutes: 120
     defaults:
