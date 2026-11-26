@@ -93,14 +93,14 @@ public static class PlexHost {
         else { $status = 'avfilter-8.dll is not the proxy' }
     }
     function ReadShared($p) { if (-not (Test-Path $p)) { return '' }; $s = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($s)).ReadToEnd() } finally { $s.Dispose() } }   # mpv keeps its log open
-    # what Plex's FFmpeg can open varies (no libavdevice, so no av://lavfi; its own decoder set): a shipped H.264 clip
-    # (pushmpc-selftest-*, next to this script), then a Y4M written here, then av://lavfi
+    # Plex's FFmpeg has no decoders of its own (--disable-decoders; Plex supplies codecs at run time) and no libavdevice:
+    # a Y4M written here (rawvideo), then av://lavfi for other builds
     $y4m = Join-Path ([IO.Path]::GetTempPath()) ('pushmpc-plex-selftest-' + [guid]::NewGuid().ToString('N') + '.y4m')
     $fs = [IO.File]::Create($y4m); $hdr = [Text.Encoding]::ASCII.GetBytes("YUV4MPEG2 W64 H64 F24:1 Ip A1:1 C420jpeg`n"); $fs.Write($hdr, 0, $hdr.Length)
     $fr = [Text.Encoding]::ASCII.GetBytes("FRAME`n"); $px = New-Object byte[] 6144
     for ($n = 0; $n -lt 48; $n++) { for ($k = 0; $k -lt 4096; $k++) { $px[$k] = [byte](($k + $n * 5) % 256) }; for ($k = 4096; $k -lt 6144; $k++) { $px[$k] = 128 }; $fs.Write($fr, 0, $fr.Length); $fs.Write($px, 0, 6144) }
     $fs.Close()
-    $cands = @(Get-ChildItem $PSScriptRoot -Filter 'pushmpc-selftest*' -ErrorAction SilentlyContinue | ForEach-Object FullName) + @($y4m, 'av://lavfi:testsrc=size=320x180:rate=24:duration=2')
+    $cands = @($y4m, 'av://lavfi:testsrc=size=320x180:rate=24:duration=2')
     $reason = 'none'; $f = ''; $tried = @()
     foreach ($c in $cands) {
         [void][PlexHost]::mpv_command_string($ctx, [PlexHost]::U("loadfile `"$($c.Replace('\', '/'))`""))

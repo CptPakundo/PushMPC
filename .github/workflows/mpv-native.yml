@@ -23,6 +23,10 @@ on:
         description: 'also run the Plex on Linux job (unfinished)'
         type: boolean
         default: false
+      plex_macos:
+        description: 'also run the Plex for Mac inspection job'
+        type: boolean
+        default: false
 
 concurrency:
   group: mpv-native-${{ github.ref }}
@@ -410,24 +414,8 @@ jobs:
           path: ${{ runner.temp }}/plexlibs/*.dll
           retention-days: 7
 
-  # self-test clips for players whose FFmpeg is their own (Plex: no libavdevice, a reduced decoder set). Shipped next
-  # to the Plex installers as pushmpc-selftest-*.
-  selftest-clips:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - run: |
-          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg >/dev/null
-          mkdir clips; src="testsrc2=size=320x180:rate=24:duration=2"
-          ffmpeg -v error -f lavfi -i $src -c:v libx264 -profile:v main -pix_fmt yuv420p -movflags +faststart clips/pushmpc-selftest-h264.mp4
-          ffmpeg -v error -f lavfi -i $src -c:v libx265 -pix_fmt yuv420p -x265-params log-level=error clips/pushmpc-selftest-hevc.mkv
-          ffmpeg -v error -f lavfi -i $src -c:v libvpx-vp9 -b:v 200k clips/pushmpc-selftest-vp9.webm
-          ls -la clips
-      - uses: actions/upload-artifact@v4
-        with: { name: selftest-clips, path: clips/, retention-days: 7 }
-
   plex:
-    needs: [plex-libs, selftest-clips]
+    needs: plex-libs
     runs-on: windows-2025
     timeout-minutes: 45
     defaults: { run: { shell: pwsh } }
@@ -435,8 +423,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: plexlibs, path: '${{ runner.temp }}/plexlibs' }
-      - uses: actions/download-artifact@v4
-        with: { name: selftest-clips, path: '${{ runner.temp }}/plexlibs' }
       - name: Engine module (MSVC) next to the proxy
         run: |
           cmake -S mpvnative/engine -B build-engine -A x64 -DPME_VULKAN=OFF
@@ -506,7 +492,7 @@ jobs:
   # `flatpak override --env=LD_PRELOAD` adds vf_pushmpc. Self-test inside the sandbox with Plex's own libmpv.
   plex-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.plex_linux
-    needs: [hook-libs, selftest-clips]
+    needs: hook-libs
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -515,14 +501,12 @@ jobs:
         with:
           pattern: hooklib-x64-*
           path: ${{ runner.temp }}/hooklibs
-      - uses: actions/download-artifact@v4
-        with: { name: selftest-clips, path: '${{ runner.temp }}/clips' }
       - name: The preload, the engine (Debian 12 build), the self-test host
         run: |
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
-          cc -O2 -Wall mpvnative/plex/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
+          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '
@@ -547,12 +531,11 @@ jobs:
         timeout-minutes: 15
         run: |
           set +e; d="$RUNNER_TEMP/plexlin"; fails=0; tested=0
-          cp "$RUNNER_TEMP"/clips/pushmpc-selftest-* "$d/"
           for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
             flatpak info --user "$id" >/dev/null 2>&1 || continue
             tested=$((tested + 1))
             n=$( [ "$id" = tv.plex.PlexDesktop ] && echo desktop || echo htpc )
-            snap() { (cd "$HOME/.var/app" && find "$id" \( -path '*/cache' -o -path '*/Plex Media Server' -o -path '*/Logs' -o -path '*/.local/state' \) -prune -o -type f -print0 | sort -z | xargs -0r sha256sum | sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
+            snap() { (cd "$HOME/.var/app" && find "$id" \( -path '*/cache' -o -path '*/Plex Media Server' -o -path '*/Logs' -o -path '*/.local/state' -o -path '*/.ld.so' \) -prune -o -type f -print0 | sort -z | xargs -0r sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
             before=$(snap)
             out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" --json); rc=$?; echo "install: $out"
             echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \
@@ -560,33 +543,52 @@ jobs:
             flatpak override --user --show "$id"
             echo "status: $(sh mpvnative/install/pushmpc-plex-linux.sh status --target "$n" --json)"
             echo "uninstall: $(sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target "$n" --json)"
-            [ "$(snap)" = "$before" ] && echo "$id: uninstall restored the files and overrides exactly" || { echo "::error::$id: files or overrides differ after uninstall"; fails=$((fails + 1)); }
+            after=$(snap); [ "$after" = "$before" ] && echo "$id: uninstall restored the files and overrides exactly" || { diff <(echo "$before") <(echo "$after") | head -20; echo "::error::$id: files or overrides differ after uninstall"; fails=$((fails + 1)); }
           done
           [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak installed"; exit 1; }
           [ "$fails" = 0 ] && echo "plex-linux: all checks passed" || exit 1
 
   # Plex for Mac: what the bundle holds (signature, entitlements, libmpv / FFmpeg dylibs). Dispatch only (macOS minutes).
   plex-macos:
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    if: github.event_name == 'workflow_dispatch' && inputs.plex_macos
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - name: Plex for Mac, inspected
+      - name: Plex for Mac (desktop, HTPC) inspected
         run: |
-          j=$(curl -fsSL 'https://plex.tv/api/downloads/6.json')
-          url=$(echo "$j" | python3 -c "import json,sys; r=json.load(sys.stdin)['computer']['MacOS']; print(r['releases'][0]['url']); print(r['version'], file=sys.stderr)")
-          echo "Plex for Mac: $url"
-          curl -fsSL -o /tmp/plex.pkg "$url"
-          mkdir -p /tmp/plexx
-          case $url in
-            *.zip) ditto -x -k /tmp/plex.pkg /tmp/plexx ;;
-            *.dmg) hdiutil attach -nobrowse -mountpoint /tmp/plexdmg /tmp/plex.pkg >/dev/null && cp -R /tmp/plexdmg/*.app /tmp/plexx/ ;;
-          esac
-          app=$(find /tmp/plexx -maxdepth 2 -name '*.app' | head -1); echo "bundle: $app"
-          codesign -dvv "$app" 2>&1 | grep -E "Authority|TeamIdentifier|flags|Runtime" || true
-          echo "-- entitlements"; codesign -d --entitlements - "$app" 2>/dev/null | grep -oE "com\.apple\.security\.[a-z.-]+" | sort -u
-          echo "-- Frameworks"; ls "$app/Contents/Frameworks" | head -60
-          m=$(find "$app" -name 'libmpv*.dylib' | head -1); echo "-- libmpv: $m"
-          [ -n "$m" ] && otool -L "$m" | head -40
-          f=$(find "$app" -name 'libavfilter*.dylib' | head -1); echo "-- libavfilter: $f"
-          [ -n "$f" ] && { otool -L "$f" | head -10; codesign -dvv "$f" 2>&1 | grep -E "Authority|flags" || true; }
+          set +e
+          for n in 6 7 5; do
+            url=$(curl -fsSL "https://plex.tv/api/downloads/$n.json" | python3 -c "
+          import json, sys
+          def walk(o):
+              if isinstance(o, dict):
+                  for k, v in o.items():
+                      if k.lower() in ('macos', 'mac') and isinstance(v, dict):
+                          for r in v.get('releases', []):
+                              if r.get('url', '').endswith(('.zip', '.dmg')): print(v.get('version', '?'), r['url']); return True
+                      if walk(v): return True
+              return False
+          walk(json.load(sys.stdin))" 2>/dev/null | head -1)
+            [ -n "$url" ] || { echo "== downloads/$n.json: no macOS release"; continue; }
+            echo "== downloads/$n.json: $url"
+            u=${url#* }; d=/tmp/plex$n; mkdir -p $d/x
+            curl -fsSL -o $d/pkg "$u" || continue
+            case $u in
+              *.zip) ditto -x -k $d/pkg $d/x ;;
+              *.dmg) hdiutil attach -nobrowse -mountpoint $d/mnt $d/pkg >/dev/null && cp -R $d/mnt/*.app $d/x/ ;;
+            esac
+            app=$(find $d/x -maxdepth 2 -name '*.app' | head -1); echo "bundle: $app"
+            exe="$app/Contents/MacOS/$(defaults read "$app/Contents/Info" CFBundleExecutable 2>/dev/null)"
+            codesign -dvv "$app" 2>&1 | grep -E "Identifier=|TeamIdentifier|flags=|Runtime Version|Authority=Developer"
+            echo "-- entitlements (library validation / DYLD env decide what can be loaded)"
+            codesign -d --entitlements - --xml "$app" 2>/dev/null | plutil -p - 2>/dev/null | head -30
+            echo "-- main executable links:"; otool -L "$exe" | grep -viE "/System/|/usr/lib/" | head -20
+            echo "-- Frameworks:"; ls "$app/Contents/Frameworks" 2>/dev/null | head -60
+            for lib in 'libmpv*' 'libavfilter*' 'libavutil*'; do
+              p=$(find "$app" -name "$lib" -type f | head -1); echo "-- $lib: ${p#$app/}"
+              [ -z "$p" ] || { otool -L "$p" | head -12; codesign -dvv "$p" 2>&1 | grep -E "flags=|TeamIdentifier"; lipo -archs "$p"; }
+            done
+            p=$(find "$app" -name 'libavfilter*' -type f | head -1)
+            [ -z "$p" ] || nm -gU "$p" 2>/dev/null | grep -E " _avfilter_(version|get_by_name)$"
+          done
+          exit 0

@@ -68,16 +68,16 @@ conf_remove() {
 files_ok() { [ -f "$from/pushmpc_preload.so" ] && [ -f "$from/libpushmpc_engine.so" ] && ls "$from"/libpushmpc-avfilter-8.*.so >/dev/null 2>&1; }
 copy_files() {
     mkdir -p "$1" && cp "$from/pushmpc_preload.so" "$from/libpushmpc_engine.so" "$from"/libpushmpc-avfilter-*.so "$1/" || return 1
-    for x in SOURCES.txt pushmpc-plex-selftest "$from"/pushmpc-selftest-*; do x=${x##*/}; [ ! -f "$from/$x" ] || cp "$from/$x" "$1/"; done
+    for x in SOURCES.txt pushmpc-plex-selftest; do [ ! -f "$from/$x" ] || cp "$from/$x" "$1/"; done
 }
-remove_files() { rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent" "$1/pushmpc-plex-selftest" "$1"/pushmpc-selftest-*; rmdir "$1" 2>/dev/null; }
-# selftest <dir> <libmpv path> <runner...>: Plex's own libmpv plays the shipped clips with vf=pushmpc through the
-# preload (pushmpc-plex-selftest = mpvnative/plex/libmpv_host.c). Sets st_detail; returns 0 active, 3 not, 2 no test.
+remove_files() { rm -f "$1/pushmpc_preload.so" "$1/libpushmpc_engine.so" "$1"/libpushmpc-avfilter-*.so "$1/SOURCES.txt" "$1/override.backup" "$1/override.absent" "$1/pushmpc-plex-selftest"; rmdir "$1" 2>/dev/null; }
+# selftest <dir> <libmpv path> <runner...>: Plex's own libmpv plays a generated Y4M with vf=pushmpc through the
+# preload (pushmpc-plex-selftest = mpvnative/hook/libmpv_host.c). Sets st_detail; returns 0 active, 3 not, 2 no test.
 selftest() {
     d=$1; lib=$2; shift 2
-    [ -x "$d/pushmpc-plex-selftest" ] && ls "$d"/pushmpc-selftest-* >/dev/null 2>&1 || { st_detail='no self-test files'; return 2; }
+    [ -x "$d/pushmpc-plex-selftest" ] || { st_detail="no self-test (pushmpc-plex-selftest not shipped)"; return 2; }
     [ -n "$lib" ] || { st_detail="no libmpv.so found in Plex"; return 2; }
-    out=$("$@" "$d/pushmpc-plex-selftest" "$lib" "$d"/pushmpc-selftest-* 2>&1); r=$?
+    out=$("$@" "$d/pushmpc-plex-selftest" "$lib" 2>&1); r=$?
     st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
     case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
 }
