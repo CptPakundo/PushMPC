@@ -69,13 +69,27 @@ runs:
       with:
         arch: x64
 
+    # the MSVC loop optimiser bug guard (cmake/msvc-loop-guard.cmake): the canary must make 20 calls when built with the
+    # release flags plus /d2NoLUR; also shows whether this runner's compiler still has the bug without the switch
+    - name: MSVC loop optimiser guard (tests/msvc-loop-guard.cpp)
+      shell: pwsh
+      run: |
+        $d = "$env:RUNNER_TEMP\loop-guard"; New-Item -ItemType Directory -Force $d | Out-Null
+        $flags = @('/nologo', '/O2', '/Ob2', '/DNDEBUG', '/EHsc', '/MT', '/utf-8')
+        cl @flags /d2NoLUR repo/tests/msvc-loop-guard.cpp "/Fe:$d\guarded.exe" "/Fo:$d\guarded.obj" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Host '::error::cl does not accept /d2NoLUR any more (see cmake/msvc-loop-guard.cmake)'; exit 1 }
+        $out = & "$d\guarded.exe"; $rc = $LASTEXITCODE; Write-Host "with /d2NoLUR: $out"
+        if ($rc -ne 0) { Write-Host "::error::the MSVC loop optimiser bug is back even with /d2NoLUR: $out"; exit 1 }
+        cl @flags repo/tests/msvc-loop-guard.cpp "/Fe:$d\plain.exe" "/Fo:$d\plain.obj" | Out-Null
+        $plain = & "$d\plain.exe"; Write-Host "without it: $plain (cl $((cl 2>&1 | Select-Object -First 1) -replace '.*Version\s+(\S+).*', '$1'))"
+
     # The SDKs below (and the FidelityFX 1.x optical flow libraries built from one of them) are cached under a hash of
     # their pins: a run with the same pins restores them in seconds instead of fetching and building them (about 1 min)
     - name: SDK cache key
       id: sdk-key
       shell: bash
       run: |
-        h=$(printf '%s\n' v1 "$DLSS_TAG" "$NVCODEC_TAG" "$CUDART_ZIP" "$XESS_TAG" "$FFX1_TAG" "$FFX2_TAG" "$AMF_COMMIT" | sha256sum | cut -c1-16)
+        h=$(printf '%s\n' v2-nolur "$DLSS_TAG" "$NVCODEC_TAG" "$CUDART_ZIP" "$XESS_TAG" "$FFX1_TAG" "$FFX2_TAG" "$AMF_COMMIT" | sha256sum | cut -c1-16)
         echo "key=pushmpc-sdks-$h" >> "$GITHUB_OUTPUT"
 
     - name: Restore the SDKs
@@ -118,7 +132,7 @@ runs:
       working-directory: ${{ env.DEPS }}/ffx1/sdk
       run: |
         cmake -S . -B build -A x64 -DFFX_API_BACKEND=DX12_X64 -DFFX_ALL=OFF -DFFX_OF=ON -DFFX_AUTO_COMPILE_SHADERS=1 `
-          -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DCMAKE_PROJECT_INCLUDE=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/cmake/msvc-loop-guard.cmake"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build build --config Release --parallel
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -354,6 +368,7 @@ runs:
           "-DVEYRA_AMF_SDK_ROOT=$env:DEPS\amf\amf\public" `
           "-DVEYRA_ONNXRUNTIME_ROOT=$env:DEPS\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=$env:DEPS\pushflow\dml" `
           "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" `
+          "-DCMAKE_PROJECT_INCLUDE=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/cmake/msvc-loop-guard.cmake" `
           "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

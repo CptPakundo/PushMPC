@@ -3,6 +3,7 @@
 #                                           (without it: a developer build that can only repair, update or uninstall)
 cmake_minimum_required(VERSION 3.24)
 project(PushMpcSetup CXX RC)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(PUSHMPC_PAYLOAD "" CACHE FILEPATH "setup payload")

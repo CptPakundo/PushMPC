@@ -68,6 +68,10 @@ the parallel compile jobs, `PUSHMPC_LOAD` makes the build wait while the machine
 builds at once). Your own settings can go into a `pushmpc-build-env.cmd` in the repository folder or next to it; the
 scripts run it first.
 
+Every MSVC build uses `/d2NoLUR` (`cmake/msvc-loop-guard.cmake`, also passed to PushFPS's build): it turns off a loop
+unroller in MSVC (19.44, 19.52) that can silently drop loop iterations at `/O2`; `tests/msvc-loop-guard.cpp` checks it
+on each configure and in CI.
+
 `package` builds Setup itself (`installer\build.cmd <payload>`; `-NoSetup` skips it) and signs `release.json` with
 `-SigningKey <xml>`, the environment variable `PUSHMPC_SIGNING_KEY` (the key's XML text) or
 `deps\signing\release-private.xml`. A release build of the updater: `set PUSHMPC_UPDATER_CMAKE_ARGS=-DPUSHMPC_UPDATER_DEV=OFF`

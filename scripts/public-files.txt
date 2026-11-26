@@ -81,3 +81,4 @@ kodiaddon/**
 mpvnative/**
 scripts/build-env.cmd
 scripts/cmake-configure.cmd
+cmake/**

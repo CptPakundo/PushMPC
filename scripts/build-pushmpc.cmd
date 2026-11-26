@@ -28,7 +28,8 @@ rem PUSHMPC_NVOF_SDK = a folder with NvOFInterface\nvOpticalFlowCommon.h and nvO
 if not defined PUSHMPC_NVOF_SDK if exist "%DEPS%\nvof-sdk\NvOFInterface\nvOpticalFlowD3D12.h" set PUSHMPC_NVOF_SDK=%DEPS%\nvof-sdk
 set NVOF_ARG=
 if defined PUSHMPC_NVOF_SDK set "NVOF_ARG=-DVEYRA_NVOF_SDK_ROOT=%PUSHMPC_NVOF_SDK:\=/%"
-set "PUSHMPC_CFG="-DPUSHMPC_SOURCE_DIR=%CORE:\=/%" %NVOF_ARG%"
+rem the MSVC loop optimiser bug guard for PushFPS's own targets too (cmake\msvc-loop-guard.cmake, no patch hunk needed)
+set "PUSHMPC_CFG="-DPUSHMPC_SOURCE_DIR=%CORE:\=/%" "-DCMAKE_PROJECT_INCLUDE=%REPO:\=/%/cmake/msvc-loop-guard.cmake" %NVOF_ARG%"
 rem a new tree: pushcore only, with the dependencies release.yml uses (options as in its "Configure PushFPS" step)
 set PUSHMPC_CFG_NEW=
 if exist "%PUSHMPC_BUILD_DIR%\build.ninja" goto :configure

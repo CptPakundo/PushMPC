@@ -7,6 +7,7 @@
 # linked statically too, so the plugin only depends on libvlccore and the C library.
 cmake_minimum_required(VERSION 3.20)
 project(pushmpc_vlc C CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)

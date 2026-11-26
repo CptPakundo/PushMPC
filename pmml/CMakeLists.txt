@@ -5,6 +5,7 @@
 #   -DPMML_NCNN_DIR=<dir>      an ncnn release package (lib/cmake/ncnn) for the ncnn-Vulkan backend (optional)
 cmake_minimum_required(VERSION 3.20)
 project(pmml CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

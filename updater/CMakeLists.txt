@@ -3,6 +3,7 @@
 #   -DPUSHMPC_UPDATER_DEV=0                  release build: unsigned feeds refused unless AllowUnsigned=1
 cmake_minimum_required(VERSION 3.24)
 project(PushMpcUpdater CXX RC)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/msvc-loop-guard.cmake")   # MSVC loop optimiser bug guard (/d2NoLUR)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(PUSHMPC_RELEASE_KEY "${CMAKE_CURRENT_SOURCE_DIR}/release-key.xml" CACHE FILEPATH "public release key (RSAKeyValue XML)")

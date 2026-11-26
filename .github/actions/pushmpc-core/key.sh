@@ -6,7 +6,7 @@
 set -eu
 r=$1
 h=$(git -C "$r" ls-tree -r HEAD -- \
-      filter pushmpc updater patches \
+      filter pushmpc updater patches cmake \
       vsplugin/CMakeLists.txt vsplugin/src vsplugin/engines vsplugin/stub vsplugin/third_party \
       pmml/CMakeLists.txt pmml/include pmml/src pmml/scripts/fetch_runtime.py \
       scripts/pushfps-pin.json scripts/ml-runtime-pin.json \
