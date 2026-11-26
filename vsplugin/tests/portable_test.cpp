@@ -329,9 +329,11 @@ static void TestHeldSpan(int hold, int k)
         worst = std::max(worst, e);
         CHECK(e <= 1.5, "held %d n %lld: box at %.2f,%.2f expected %.2f,%.2f", hold, (long long)n, cx, cy, BoxX(t), BoxY(t));
     }
-    // every non-drawing source frame up to the last one submitted (12 + 1 + lookahead 3 = 16, clamped to 15) is a repeat
+    // every non-drawing source frame submitted is a repeat (the Pipeline submits only as far as the outputs asked for
+    // need: through 14 here, the last output being already made by the span that ends at drawing 12 / 14)
     int64_t expect = 0;
-    for (int s = 0; s < 16; ++s) expect += s % hold ? 1 : 0;   // twos: 8; threes: 10
+    for (int64_t s = 0; s < hs.pipe.NextSubmit(); ++s) expect += s % hold ? 1 : 0;   // submitted 0..14: twos 7, threes 9
+    CHECK(hs.pipe.NextSubmit() >= 13, "held %d: submitted through %lld", hold, (long long)hs.pipe.NextSubmit() - 1);
     CHECK(int64_t(hs.be.repeats) == expect, "held %d: %llu repeats (expected %lld)", hold, (unsigned long long)hs.be.repeats, (long long)expect);
     std::printf("  held frames on %ss, x%d: worst position error %.3f px, %llu repeats\n", hold == 2 ? "two" : "three", k, worst, (unsigned long long)hs.be.repeats);
 }
