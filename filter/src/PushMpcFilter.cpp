@@ -53,7 +53,7 @@
 #include "pushmpc/pushcore_abi.h"
 #include "pushmpc/unlocks.h"            // T5b: vendor unlocks (off switches, self-test results)
 #include "pushmpc/content_detect.h"     // what the picture is (class per shot), interlacing and the frame interval, measured
-#include "PushMpcContentModel.h"         // the optional image model behind ContentDetect (pmml, its own thread)
+#include "pushmpc/content_model.h"      // the optional image model behind ContentDetect (pmml, its own thread)
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
@@ -2896,7 +2896,7 @@ private:
     void ContentLoop();
     void StopContent() { { std::lock_guard<std::mutex> lk(m_cdMx); m_cdStop = true; } m_cdCv.notify_all(); if (m_cdThread.joinable()) m_cdThread.join(); m_cdStop = false; m_cdQueue.clear(); }
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
-    std::unique_ptr<pm::ContentModel> m_contentModel;   // created at the first sample, gone with the filter
+    std::unique_ptr<pushmpc::content::ContentModel> m_contentModel;   // created at the first sample, gone with the filter
     double m_contentModelNext = -1;
 #endif
     bool m_showLooked = false;
@@ -5252,7 +5252,7 @@ void CPushMpcFilter::MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool 
                        ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 8, limited);
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
     {   // the image model's evidence: a 224x224 thumbnail about once a second, run on the model's own thread
-        if (!m_contentModel) m_contentModel = std::make_unique<pm::ContentModel>([this](const std::string& m) { Log(m); });
+        if (!m_contentModel) m_contentModel = std::make_unique<pushmpc::content::ContentModel>([this](const std::string& m) { Log(m); });
         if (!m_contentModel->Failed() && (m_contentModelNext < 0 || job.t >= m_contentModelNext || job.t < m_contentModelNext - 5.0)) {
             m_contentModelNext = job.t + 1.0;
             auto in = m_inP010

@@ -39,6 +39,9 @@ extern "C" {
 #include <kodi/gui/General.h>   // GetHWContext: Kodi's own D3D11 device (logged next to pushcore's)
 #include "pushcore_route.h"
 #include "../../pushmpc/include/pushmpc/content_detect.h"   // what the picture is, interlacing: measured, never from names or flags
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+#include "pushmpc/content_model.h"   // the image model behind it (pmml)
+#endif
 #endif
 
 #include <algorithm>
@@ -579,6 +582,13 @@ private:
             if (!rt.empty() && bigger && q->height <= 1080) {
                 const auto pick = pm::PickAnimeSr(unsigned(q->width), unsigned(q->height), unsigned(std::max(m_screenW, q->width)), unsigned(std::max(m_screenH, q->height)),
                                                   m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
+#if defined(_WIN32)
+                // Windows: Auto keeps Kodi's own scaler (RTX / Intel Video Super Resolution in Kodi's renderer): a measured
+                // switch to the anime upscaler would need the add-on to upscale to the screen itself (NIS), a loss on RTX.
+                // The anime upscaler stays a setting there (Upscaling: anime upscaler).
+                if (pick.model >= 0 && autoAnime) { why = "upscaling: Kodi's video scaler (Video Super Resolution); the anime upscaler is a setting on Windows"; mode = 0; }
+                else
+#endif
                 if (pick.model >= 0 && autoAnime) {
                     // Auto: prepared only; the plain route below runs until the picture is measured as drawn
                     const std::wstring id = pm::AnimeSrModel(pick.model).id;
@@ -1371,6 +1381,23 @@ private:
                            ptrdiff_t(pl.stride[1] / 2), m_w, m_h, m_bits, !m_cfg.fullRange)
             : CellsFromYuv(static_cast<const uint8_t*>(pl.data[0]), ptrdiff_t(pl.stride[0]), static_cast<const uint8_t*>(pl.data[1]), static_cast<const uint8_t*>(pl.data[2]),
                            ptrdiff_t(pl.stride[1]), m_w, m_h, 8, !m_cfg.fullRange);
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+        {   // the image model: a thumbnail about once a second on its own thread
+            const double t = double(ptsUs) / 1e6;
+            if (!m_contentModel) m_contentModel = std::make_unique<ContentModel>([](const std::string& m) { Log(ADDON_LOG_INFO, "%s", m.c_str()); });
+            double p, pt;
+            if (m_contentModel->Take(p, pt)) m_content.SetImageEvidence(p, pt);
+            if (!m_contentModel->Failed() && (m_contentModelNext < 0 || t >= m_contentModelNext || t < m_contentModelNext - 5.0)) {
+                m_contentModelNext = t + 1.0;
+                auto in = m_bits > 8
+                    ? ClipInput(reinterpret_cast<const uint16_t*>(pl.data[0]), ptrdiff_t(pl.stride[0] / 2), reinterpret_cast<const uint16_t*>(pl.data[1]), reinterpret_cast<const uint16_t*>(pl.data[2]),
+                                ptrdiff_t(pl.stride[1] / 2), m_w, m_h, m_bits, !m_cfg.fullRange)
+                    : ClipInput(static_cast<const uint8_t*>(pl.data[0]), ptrdiff_t(pl.stride[0]), static_cast<const uint8_t*>(pl.data[1]), static_cast<const uint8_t*>(pl.data[2]),
+                                ptrdiff_t(pl.stride[1]), m_w, m_h, 8, !m_cfg.fullRange);
+                if (!in.empty()) m_contentModel->Offer(std::move(in), t);
+            }
+        }
+#endif
         if (!m_content.Push(c, double(ptsUs) / 1e6)) return;
         const State& st = m_content.Current();
         if (st.cls == m_contentCls) return;
@@ -1885,6 +1912,10 @@ private:
 
     CPushInputStream* m_in = nullptr;
     pushmpc::content::ContentDetector m_content;   // what the picture is (decoder thread)
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+    std::unique_ptr<pushmpc::content::ContentModel> m_contentModel;   // the image model's thread, gone with the decoder
+    double m_contentModelNext = -1;
+#endif
     int m_contentCls = 0;
     bool m_animeSwitched = false;
     std::chrono::steady_clock::time_point m_animeSwitchAt{};

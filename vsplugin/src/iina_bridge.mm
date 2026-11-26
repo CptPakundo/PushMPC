@@ -29,6 +29,9 @@
 #include <algorithm>
 #include <atomic>
 #include "pushmpc/content_detect.h"
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+#include "pushmpc/content_model.h"   // the image model (pmml: CoreML, else CPU)
+#endif
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -128,6 +131,7 @@ mpv_handle* g_mpv = nullptr;
 // user-data/pushmpc/content by the event thread: the filter thread never calls into mpv)
 std::atomic<int> g_contentClass{0};
 pushmpc::content::ContentDetector g_content;   // filter thread only
+std::vector<float> g_vtThumb;                   // the image model's thumbnail of a VideoToolbox frame (filter thread)
 
 void ReleasePixelBuffer(void* opaque, uint8_t*) { CVPixelBufferRelease(static_cast<CVPixelBufferRef>(opaque)); }
 
@@ -396,10 +400,35 @@ bool Feed(Bridge& b, AVFrame* f)
                 const ptrdiff_t ys = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 0)), cs = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 1));
                 c = p10 ? CellsFromYuv(static_cast<const uint16_t*>(y), ys / 2, static_cast<const uint16_t*>(uv), static_cast<const uint16_t*>(nullptr), cs / 2, w, h, 16, true)
                         : CellsFromYuv(static_cast<const uint8_t*>(y), ys, static_cast<const uint8_t*>(uv), static_cast<const uint8_t*>(nullptr), cs, w, h, 8, true);
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+                static double vtNext = -1; const double tt = double(f->pts) / 1e6;
+                if (f->pts != AV_NOPTS_VALUE && (vtNext < 0 || tt >= vtNext || tt < vtNext - 5.0)) {
+                    vtNext = tt + 1.0;
+                    g_vtThumb = p10 ? ClipInput(static_cast<const uint16_t*>(y), ys / 2, static_cast<const uint16_t*>(uv), static_cast<const uint16_t*>(nullptr), cs / 2, w, h, 16, true)
+                                    : ClipInput(static_cast<const uint8_t*>(y), ys, static_cast<const uint8_t*>(uv), static_cast<const uint8_t*>(nullptr), cs, w, h, 8, true);
+                }
+#endif
                 CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
             }
         }
         if (b.lastPts == AV_NOPTS_VALUE || f->pts == AV_NOPTS_VALUE || f->pts <= b.lastPts) g_content.Discontinuity();
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+        if (c.ok() && f->pts != AV_NOPTS_VALUE) {   // the thumbnail: software frames here, VideoToolbox frames above (g_vtThumb)
+            static std::unique_ptr<ContentModel> model; static double next = -1;
+            const double t = double(f->pts) / 1e6;
+            if (!model) model = std::make_unique<ContentModel>([](const std::string& m) { Log("%s", m.c_str()); });
+            double p, pt;
+            if (model->Take(p, pt)) g_content.SetImageEvidence(p, pt);
+            if (!model->Failed() && !g_vtThumb.empty()) { model->Offer(std::move(g_vtThumb), t); g_vtThumb.clear(); }
+            else if (!model->Failed() && (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUV420P10) && (next < 0 || t >= next || t < next - 5.0)) {
+                next = t + 1.0;
+                auto in = f->format == AV_PIX_FMT_YUV420P
+                    ? ClipInput(static_cast<const uint8_t*>(f->data[0]), f->linesize[0], static_cast<const uint8_t*>(f->data[1]), static_cast<const uint8_t*>(f->data[2]), f->linesize[1], f->width, f->height, 8, true)
+                    : ClipInput(reinterpret_cast<const uint16_t*>(f->data[0]), f->linesize[0] / 2, reinterpret_cast<const uint16_t*>(f->data[1]), reinterpret_cast<const uint16_t*>(f->data[2]), f->linesize[1] / 2, f->width, f->height, 10, true);
+                if (!in.empty()) model->Offer(std::move(in), t);
+            }
+        }
+#endif
         if (c.ok() && f->pts != AV_NOPTS_VALUE && g_content.Push(c, double(f->pts) / 1e6)) g_contentClass.store(g_content.Current().cls);
     }
     const bool contiguous = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE && f->pts > b.lastPts &&

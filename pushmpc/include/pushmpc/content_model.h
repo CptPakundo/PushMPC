@@ -1,11 +1,12 @@
-// PushMPC: the image model behind ContentDetect's drawn-vs-not evidence (optional). CLIP ViT-B/32's image encoder
-// (OpenAI, MIT; Setup fetches the pinned ONNX file into <pmml runtime>\content-model\) runs through pmml on the GPU
-// (DirectML; TensorRT-RTX where installed) on a 224x224 thumbnail about once a second, on its own thread: the streaming
+// PushMPC: the image model behind ContentDetect's drawn-vs-not evidence (optional; every route that links pmml: the
+// MPC-HC filter, the Kodi add-on, the VapourSynth plugin, the IINA bridge). CLIP ViT-B/32's image encoder (OpenAI, MIT;
+// Setup fetches the pinned ONNX file into <pmml runtime>/content-model/) runs through pmml (DirectML on Windows, CoreML
+// on macOS, ONNX Runtime CPU otherwise) on a 224x224 thumbnail about once a second, on its own thread: the caller
 // thread only hands over the thumbnail and picks up the probability. No model, no runtime, or a failure: the
 // hand-built cues alone decide (ContentDetector without SetImageEvidence).
 #pragma once
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
-#include <windows.h>
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,7 +20,7 @@
 #include "pmml/pmml.h"
 #include "pushmpc/content_detect.h"
 
-namespace pm {
+namespace pushmpc::content {
 
 class ContentModel {
 public:
@@ -48,13 +49,31 @@ private:
     static std::filesystem::path Runtime()
     {
         namespace fs = std::filesystem;
-        auto ok = [](const fs::path& p) { std::error_code ec; return !p.empty() && fs::exists(p / L"content-model" / L"vision_model_fp16.onnx", ec) &&
-                                                                 (fs::exists(p / L"ort" / L"directml" / L"onnxruntime.dll", ec) || fs::exists(p / L"ort" / L"core" / L"onnxruntime.dll", ec)); };
-        if (const wchar_t* e = _wgetenv(L"PMML_RUNTIME"); e && *e && ok(e)) return e;
-        wchar_t buf[1024]{}; DWORD size = sizeof(buf);
-        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\PushMPC", L"MlRuntime", RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS && ok(buf)) return buf;
-        if (const wchar_t* la = _wgetenv(L"LOCALAPPDATA"); la && ok(fs::path(la) / L"PushMPC" / L"pmml")) return fs::path(la) / L"PushMPC" / L"pmml";
+        auto ok = [](const fs::path& p) {
+            std::error_code ec;
+            return !p.empty() && fs::exists(p / "content-model" / "vision_model_fp16.onnx", ec) && fs::exists(p / "ort", ec);
+        };
+        if (const char* e = std::getenv("PMML_RUNTIME"); e && *e && ok(e)) return e;
+#if defined(_WIN32)
+        // (no windows.h here: it is included by hosts whose own APIs its macros break, e.g. Kodi's vfs::CreateDirectory)
+        if (const char* la = std::getenv("LOCALAPPDATA"); la && ok(fs::path(la) / "PushMPC" / "pmml")) return fs::path(la) / "PushMPC" / "pmml";
+#elif defined(__APPLE__)
+        if (const char* h = std::getenv("HOME"); h && ok(fs::path(h) / "Library/Application Support/PushMPC/pmml")) return fs::path(h) / "Library/Application Support/PushMPC/pmml";
+#else
+        if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x && ok(fs::path(x) / "pushmpc/pmml")) return fs::path(x) / "pushmpc/pmml";
+        if (const char* h = std::getenv("HOME"); h && ok(fs::path(h) / ".local/share/pushmpc/pmml")) return fs::path(h) / ".local/share/pushmpc/pmml";
+#endif
         return {};
+    }
+    static const char* BackendFor(const std::filesystem::path& rt)
+    {
+        std::error_code ec;
+#if defined(_WIN32)
+        if (std::filesystem::exists(rt / "ort" / "directml", ec)) return "ort:directml:dml:0";
+#elif defined(__APPLE__)
+        return "ort:core:coreml:0";
+#endif
+        return "ort:core:cpu:0";
     }
     void Loop()
     {
@@ -66,9 +85,9 @@ private:
             if (rt.empty()) err = "no image model installed (Setup: the content model) or no pmml runtime";
             else {
                 std::error_code ec;
-                const char* backend = fs::exists(rt / L"ort" / L"directml" / L"onnxruntime.dll", ec) ? "ort:directml:dml:0" : "ort:core:cpu:0";
-                pmml::Backend b; pmml::Backend::parse(backend, &b);
-                s = pmml::RawSession::create(rt.string(), b, (rt / L"content-model" / L"vision_model_fp16.onnx").string(), {}, (rt / L"cache").string(), &err);
+                pmml::Backend b; pmml::Backend::parse(BackendFor(rt), &b);
+                s = pmml::RawSession::create(rt.string(), b, (rt / "content-model" / "vision_model_fp16.onnx").string(), {}, (rt / "cache").string(), &err);
+                if (!s && b.ep != "cpu") { pmml::Backend::parse("ort:core:cpu:0", &b); err.clear(); s = pmml::RawSession::create(rt.string(), b, (rt / "content-model" / "vision_model_fp16.onnx").string(), {}, (rt / "cache").string(), &err); }
                 if (s) m_log("content: image model " + s->describe());
             }
             if (!s) { m_log("content: image model not used (" + err + "): the hand-built cues decide"); std::lock_guard<std::mutex> lk(m_mx); m_failed = true; return; }
@@ -89,7 +108,7 @@ private:
             std::lock_guard<std::mutex> lk(m_mx);
             m_busy = false;
             if (!ok) { m_failed = true; m_log("content: image model failed (" + err + "): the hand-built cues decide"); return; }
-            m_p = pushmpc::content::ImageDrawnProbability(emb.data()); m_pPts = pts; m_have = true;
+            m_p = ImageDrawnProbability(emb.data()); m_pPts = pts; m_have = true;
         }
     }
     Log m_log;

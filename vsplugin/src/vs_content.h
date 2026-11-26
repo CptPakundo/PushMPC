@@ -17,6 +17,8 @@
 #include <utility>
 #include "VapourSynth4.h"
 #include "pushmpc/content_detect.h"
+#include "pushmpc/content_model.h"     // the image model (only with PUSHMPC_CONTENT_MODEL: pmml linked)
+#include <memory>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -81,6 +83,21 @@ public:
                 ? CellsFromYuv(a->getReadPtr(f, 0), a->getStride(f, 0), a->getReadPtr(f, 1), a->getReadPtr(f, 2), a->getStride(f, 1), w, h, 8, true)
                 : CellsFromYuv(reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 0)), a->getStride(f, 0) / 2, reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 1)),
                                reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 2)), a->getStride(f, 1) / 2, w, h, vf->bitsPerSample, true);
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+            {   // the image model: a thumbnail about once a second on its own thread, the latest result into the detector
+                if (!m_model) m_model = std::make_unique<ContentModel>([](const std::string&) {});
+                double p, pt;
+                if (m_model->Take(p, pt)) m_det.SetImageEvidence(p, pt);
+                if (!m_model->Failed() && (m_modelNext < 0 || m_t >= m_modelNext || m_t < m_modelNext - 5.0)) {
+                    m_modelNext = m_t + 1.0;
+                    auto in = vf->bytesPerSample == 1
+                        ? ClipInput(a->getReadPtr(f, 0), a->getStride(f, 0), a->getReadPtr(f, 1), a->getReadPtr(f, 2), a->getStride(f, 1), w, h, 8, true)
+                        : ClipInput(reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 0)), a->getStride(f, 0) / 2, reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 1)),
+                                    reinterpret_cast<const uint16_t*>(a->getReadPtr(f, 2)), a->getStride(f, 1) / 2, w, h, vf->bitsPerSample, true);
+                    if (!in.empty()) m_model->Offer(std::move(in), m_t);
+                }
+            }
+#endif
             if (m_det.Push(c, m_t) && m_det.Current().cls != m_cls) { m_cls = m_det.Current().cls; changed = true; }
         }
         m_t += dur;
@@ -114,6 +131,10 @@ private:
     double m_declared = 0, m_t = 0;
     int64_t m_last = -2;
     int m_cls = 0, m_createdClass = 0;
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+    std::unique_ptr<pushmpc::content::ContentModel> m_model;
+    double m_modelNext = -1;
+#endif
 };
 
 } // namespace pmvs

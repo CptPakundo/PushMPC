@@ -107,11 +107,57 @@ inline void Fft2(std::vector<std::complex<float>>& g, int pw, int ph, bool inv)
     line.resize(size_t(ph));
     for (int x = 0; x < pw; ++x) { for (int y = 0; y < ph; ++y) line[size_t(y)] = g[size_t(y) * pw + x]; Fft(line, inv); for (int y = 0; y < ph; ++y) g[size_t(y) * pw + x] = line[size_t(y)]; }
 }
+// in-place radix-2 FFT on split re / im arrays with a precomputed twiddle table (n a power of two; stride for columns)
+struct FftPlan {
+    int n = 0; std::vector<float> c, s; std::vector<uint32_t> rev;
+    void Init(int len)
+    {
+        if (n == len) return;
+        n = len; c.resize(size_t(n / 2)); s.resize(size_t(n / 2)); rev.resize(size_t(n));
+        for (int k = 0; k < n / 2; ++k) { c[size_t(k)] = float(std::cos(6.283185307179586 * k / n)); s[size_t(k)] = float(std::sin(6.283185307179586 * k / n)); }
+        int bits = 0; while ((1 << bits) < n) ++bits;
+        for (int i = 0; i < n; ++i) { uint32_t r = 0; for (int b = 0; b < bits; ++b) if (i & (1 << b)) r |= 1u << (bits - 1 - b); rev[size_t(i)] = r; }
+    }
+    void Run(float* re, float* im, bool inv) const
+    {
+        for (int i = 0; i < n; ++i) { const int j = int(rev[size_t(i)]); if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); } }
+        const float sg = inv ? 1.f : -1.f;
+        for (int len = 2; len <= n; len <<= 1) {
+            const int half = len / 2, step = n / len;
+            for (int i = 0; i < n; i += len)
+                for (int k = 0; k < half; ++k) {
+                    const float wr = c[size_t(k * step)], wi = sg * s[size_t(k * step)];
+                    const int a = i + k, b = a + half;
+                    const float tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+                }
+        }
+    }
+};
+// 2-D FFT of pw x ph split arrays (rows, then columns through a line buffer)
+inline void Fft2Split(std::vector<float>& re, std::vector<float>& im, int pw, int ph, bool inv, FftPlan& rows, FftPlan& cols)
+{
+    rows.Init(pw); cols.Init(ph);
+    for (int y = 0; y < ph; ++y) rows.Run(re.data() + size_t(y) * pw, im.data() + size_t(y) * pw, inv);
+    std::vector<float> lr(static_cast<size_t>(ph)), li(static_cast<size_t>(ph));
+    for (int x = 0; x < pw; ++x) {
+        for (int y = 0; y < ph; ++y) { lr[size_t(y)] = re[size_t(y) * pw + x]; li[size_t(y)] = im[size_t(y) * pw + x]; }
+        cols.Run(lr.data(), li.data(), inv);
+        for (int y = 0; y < ph; ++y) { re[size_t(y) * pw + x] = lr[size_t(y)]; im[size_t(y) * pw + x] = li[size_t(y)]; }
+    }
+}
 inline int Pow2(int v) { int p = 1; while (p < v) p <<= 1; return p; }
 // area mean of a w x h grid into ow x oh (bin edges rounded as the offline extractor's reduceat)
 inline std::vector<float> Area(const std::vector<float>& a, int w, int h, int ow, int oh)
 {
     std::vector<float> o(size_t(ow) * oh, 0.f);
+    if (ow * 2 == w && oh * 2 == h) {   // exact halving: 2 x 2 means (the bins below give the same result)
+        for (int j = 0; j < oh; ++j) {
+            const float* r0 = a.data() + size_t(2 * j) * w; const float* r1 = r0 + w; float* d = o.data() + size_t(j) * ow;
+            for (int i = 0; i < ow; ++i) d[i] = (r0[2 * i] + r0[2 * i + 1] + r1[2 * i] + r1[2 * i + 1]) * 0.25f;
+        }
+        return o;
+    }
     std::vector<int> xe(ow + 1), ye(oh + 1);
     for (int i = 0; i <= ow; ++i) xe[i] = int(std::lround(double(i) * w / ow));
     for (int j = 0; j <= oh; ++j) ye[j] = int(std::lround(double(j) * h / oh));
@@ -171,7 +217,7 @@ public:
         if (m_prev.ok() && (m_prev.w != c.w || m_prev.h != c.h)) Discontinuity();
         Frame f; f.pts = pts;
         if (!m_prev.ok()) {
-            f.first = true; f.cut = true;
+            f.first = true; f.cut = true; m_specValid = false;
             f.chg.assign(Words(c), ~0ull); f.big = f.chg;
             f.chgShare = 1.f; f.dup = false;
         } else Temporal(c, f);
@@ -242,6 +288,7 @@ private:
     };
     static constexpr int kHudW = 60;
     static size_t Words(const Cells& c) { return (size_t(c.w) * c.h + 63) / 64; }
+    static int CountTrailingZeros(uint64_t m) { int k = 0; while (!(m & 1u)) { m >>= 1; ++k; } return k; }
     static bool Bit(const std::vector<uint64_t>& b, size_t i) { return (b[i >> 6] >> (i & 63)) & 1u; }
 
     static std::array<float, 32> Histogram(const Cells& c)
@@ -263,20 +310,32 @@ private:
         mean /= double(n);
         int dx = 0, dy = 0;
         PhaseShift(m_prev, c, dx, dy);
-        std::vector<float> best = d0; double bestMean = mean;
+        // the camera shift refined by +-1 cell: the mean difference of each candidate first (rows with the clamped
+        // source row, the interior without per-pixel clamps), then the best one's map once
+        auto shiftedDiff = [&](int sx, int sy, float* out) {
+            double m = 0;
+            const int xa = std::clamp(sx, 0, w), xb = std::clamp(w + sx, 0, w);   // x - sx inside [0, w) for x in [xa, xb)
+            for (int y = 0; y < h; ++y) {
+                const float* cur = c.y.data() + size_t(y) * w;
+                const float* pr = m_prev.y.data() + size_t(std::clamp(y - sy, 0, h - 1)) * w;
+                float* o = out ? out + size_t(y) * w : nullptr;
+                for (int x = 0; x < w; ++x) {
+                    const float v = std::fabs(cur[x] - pr[x >= xa && x < xb ? x - sx : std::clamp(x - sx, 0, w - 1)]);
+                    m += v; if (o) o[x] = v;
+                }
+            }
+            return m / double(n);
+        };
+        std::vector<float> best;
+        double bestMean = mean; int bx = 0, by = 0;
         if (dx || dy) {
-            std::vector<float> ds(n);
             for (int ox = -1; ox <= 1; ++ox)
                 for (int oy = -1; oy <= 1; ++oy) {
-                    const int sx = dx + ox, sy = dy + oy; double m = 0;
-                    for (int y = 0; y < h; ++y) {
-                        const int py = std::clamp(y - sy, 0, h - 1);
-                        for (int x = 0; x < w; ++x) { const int px = std::clamp(x - sx, 0, w - 1); const float v = std::fabs(c.y[size_t(y) * w + x] - m_prev.y[size_t(py) * w + px]); ds[size_t(y) * w + x] = v; m += v; }
-                    }
-                    m /= double(n);
-                    if (m < bestMean) { bestMean = m; best = ds; f.cam = 1.f; }
+                    const double m = shiftedDiff(dx + ox, dy + oy, nullptr);
+                    if (m < bestMean) { bestMean = m; bx = dx + ox; by = dy + oy; f.cam = 1.f; }
                 }
         }
+        if (f.cam > 0.f) { best.resize(n); shiftedDiff(bx, by, best.data()); } else best = d0;
         f.chg.assign(Words(c), 0); f.big.assign(Words(c), 0);
         size_t nc = 0;
         for (size_t i = 0; i < n; ++i) {
@@ -286,22 +345,13 @@ private:
         }
         f.chgShare = float(nc) / float(n);
         if (n - nc > 1000) {   // the noise of what did not move (live action: grain and sensor noise; drawn: a still painting)
-            std::vector<float> st; st.reserve(n - nc);
-            for (size_t i = 0; i < n; ++i) if (!Bit(f.chg, i)) st.push_back(d0[i]);
-            f.tnoise = detail::Median(std::move(st));
-        }
-        {   // per coarse cell (kHudW across): the share of its cells that changed, for the overlay test
-            // bin edges rounded over the whole grid (the bottom rows, where HUDs sit, are not cut off)
-            const int gw = kHudW, gh = std::max(1, int(std::lround(double(kHudW) * h / w)));
-            f.coarse.assign(size_t(gw) * gh, 0);
-            for (int gy = 0; gy < gh; ++gy)
-                for (int gx = 0; gx < gw; ++gx) {
-                    const int y0 = int(std::lround(double(gy) * h / gh)), y1 = std::max(y0 + 1, int(std::lround(double(gy + 1) * h / gh)));
-                    const int x0 = int(std::lround(double(gx) * w / gw)), x1 = std::max(x0 + 1, int(std::lround(double(gx + 1) * w / gw)));
-                    int c = 0;
-                    for (int y = y0; y < y1 && y < h; ++y) for (int xx = x0; xx < x1 && xx < w; ++xx) c += Bit(f.chg, size_t(y) * w + xx);
-                    f.coarse[size_t(gy) * gw + gx] = uint8_t(std::lround(255.0 * c / double((y1 - y0) * (x1 - x0))));
-                }
+            // the median from a histogram of 1/64 code steps (the values that did not change are below 12 codes)
+            static constexpr int kBins = 64 * 16;
+            uint32_t hist[kBins + 1] = {};
+            for (size_t i = 0; i < n; ++i) if (!Bit(f.chg, i)) ++hist[std::min(kBins, int(d0[i] * 64.f))];
+            const size_t half = (n - nc) / 2; size_t acc = 0; int b = 0;
+            for (; b <= kBins; ++b) { acc += hist[b]; if (acc > half) break; }
+            f.tnoise = (float(b) + 0.5f) / 64.f;
         }
         f.dup = over8 <= std::max<size_t>(3, n / 20000) && mean < 3.0;
         if (f.dup) {
@@ -311,21 +361,34 @@ private:
         const auto hs = Histogram(c); float l1 = 0; for (int k = 0; k < 32; ++k) l1 += std::fabs(hs[k] - m_hist[k]);
         f.cut = l1 >= 0.30f && f.chgShare > 0.5f;
     }
-    static void PhaseShift(const Cells& a, const Cells& b, int& dx, int& dy)
+    // phase correlation at half size; the current frame's spectrum is kept for the next frame (one forward and one
+    // inverse transform a frame instead of three)
+    void PhaseShift(const Cells& a, const Cells& b, int& dx, int& dy)
     {
-        using cf = std::complex<float>;
         const int w2 = a.w / 2, h2 = std::max(1, a.h / 2);
-        const auto A = detail::Area(a.y, a.w, a.h, w2, h2), B = detail::Area(b.y, b.w, b.h, w2, h2);
         const int pw = detail::Pow2(w2), ph = detail::Pow2(h2);
-        double ma = 0, mb = 0; for (size_t i = 0; i < A.size(); ++i) { ma += A[i]; mb += B[i]; } ma /= A.size(); mb /= B.size();
-        std::vector<cf> fa(size_t(pw) * ph), fb(size_t(pw) * ph);
-        for (int y = 0; y < h2; ++y) for (int x = 0; x < w2; ++x) { fa[size_t(y) * pw + x] = float(A[size_t(y) * w2 + x] - ma); fb[size_t(y) * pw + x] = float(B[size_t(y) * w2 + x] - mb); }
-        detail::Fft2(fa, pw, ph, false); detail::Fft2(fb, pw, ph, false);
-        for (size_t i = 0; i < fa.size(); ++i) { const cf r = fb[i] * std::conj(fa[i]); const float m = std::abs(r); fa[i] = r / (m + 1e-6f); }
-        detail::Fft2(fa, pw, ph, true);
-        size_t bi = 0; float bv = -1e30f;
-        for (size_t i = 0; i < fa.size(); ++i) if (fa[i].real() > bv) { bv = fa[i].real(); bi = i; }
-        int py = int(bi / pw), px = int(bi % pw);
+        const size_t N = size_t(pw) * ph;
+        auto spectrum = [&](const Cells& c, std::vector<float>& re, std::vector<float>& im) {
+            const auto A = detail::Area(c.y, c.w, c.h, w2, h2);
+            double m = 0; for (float v : A) m += v; m /= double(A.size());
+            re.assign(N, 0.f); im.assign(N, 0.f);
+            for (int y = 0; y < h2; ++y) for (int x = 0; x < w2; ++x) re[size_t(y) * pw + x] = float(A[size_t(y) * w2 + x] - m);
+            detail::Fft2Split(re, im, pw, ph, false, m_fftRows, m_fftCols);
+        };
+        if (!m_specValid || m_specRe.size() != N) spectrum(a, m_specRe, m_specIm);
+        std::vector<float> br, bi;
+        spectrum(b, br, bi);
+        std::vector<float> rr(N), ri(N);
+        for (size_t i = 0; i < N; ++i) {   // B x conj(A), normalised
+            const float xr = br[i] * m_specRe[i] + bi[i] * m_specIm[i], xi = bi[i] * m_specRe[i] - br[i] * m_specIm[i];
+            const float mg = std::sqrt(xr * xr + xi * xi) + 1e-6f;
+            rr[i] = xr / mg; ri[i] = xi / mg;
+        }
+        m_specRe.swap(br); m_specIm.swap(bi); m_specValid = true;   // b becomes the next frame's a (m_prev)
+        detail::Fft2Split(rr, ri, pw, ph, true, m_fftRows, m_fftCols);
+        size_t bi0 = 0; float bv = -1e30f;
+        for (size_t i = 0; i < N; ++i) if (rr[i] > bv) { bv = rr[i]; bi0 = i; }
+        int py = int(bi0 / pw), px = int(bi0 % pw);
         if (py > ph / 2) py -= ph;
         if (px > pw / 2) px -= pw;
         dx = px * 2; dy = py * 2;
@@ -343,7 +406,7 @@ private:
         const size_t n = size_t(m_prev.w) * m_prev.h;
         // active cells: changed in >= 2 frames of the window
         std::vector<uint16_t> cnt(n, 0);
-        for (size_t t = 0; t < T; ++t) { const auto& b = m_frames[i0 + 1 + t].chg; for (size_t i = 0; i < n; ++i) cnt[i] += uint16_t(Bit(b, i)); }
+        for (size_t t = 0; t < T; ++t) { const auto& b = m_frames[i0 + 1 + t].chg; for (size_t wd = 0; wd < b.size(); ++wd) for (uint64_t m = b[wd]; m; m &= m - 1) { const size_t i = wd * 64 + size_t(CountTrailingZeros(m)); if (i < n) ++cnt[i]; } }
         std::vector<uint32_t> act; act.reserve(n);
         for (size_t i = 0; i < n; ++i) if (cnt[i] >= 2) act.push_back(uint32_t(i));
         const size_t na = act.size();
@@ -352,7 +415,7 @@ private:
         {   // cells that make >= 2 BIG steps (> 3x the noise threshold): drawn parts jump between drawings and hold
             // still in between; live action that moves that much moves on every frame
             std::vector<uint16_t> bc(n, 0);
-            for (size_t t = 0; t < T; ++t) { const auto& b = m_frames[i0 + 1 + t].big; for (size_t i = 0; i < n; ++i) bc[i] += uint16_t(Bit(b, i)); }
+            for (size_t t = 0; t < T; ++t) { const auto& b = m_frames[i0 + 1 + t].big; for (size_t wd = 0; wd < b.size(); ++wd) for (uint64_t m = b[wd]; m; m &= m - 1) { const size_t i = wd * 64 + size_t(CountTrailingZeros(m)); if (i < n) ++bc[i]; } }
             std::vector<uint32_t> ba; for (size_t i = 0; i < n; ++i) if (bc[i] >= 2) ba.push_back(uint32_t(i));
             x[fBactive] = float(ba.size()) / float(n);
             if (ba.size() >= 30) {
@@ -503,6 +566,9 @@ private:
     Cells m_prev;
     std::array<float, 32> m_hist{};
     float m_nf = 0; uint32_t m_nfN = 0;
+    detail::FftPlan m_fftRows, m_fftCols;
+    std::vector<float> m_specRe, m_specIm;   // the previous frame's spectrum (PhaseShift)
+    bool m_specValid = false;   // m_specRe/Im hold m_prev's spectrum
     double m_nextEval = -1, m_t0 = -1, m_L = 0, m_img = 0.5, m_imgT = -1e18;
     bool m_cutPending = true;
     int m_run = 0;

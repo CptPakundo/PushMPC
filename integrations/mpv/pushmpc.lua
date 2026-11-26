@@ -63,6 +63,13 @@ end
 local function meter_start(on_change)
     if meter.on then return true end
     local hw = mp.get_property("hwdec-current") or "no"
+    -- copy-back only up to 1080p (one NV12 copy of at most 3 MB a frame); above that the hardware path stays as it is and
+    -- nothing is measured here (the live-action set stays: the safe side), so 4K playback never gets heavier
+    local vp = mp.get_property_native("video-params") or {}
+    if hw ~= "no" and hw ~= "" and not hw:find("%-copy$") and (vp.h or 0) > 1088 then
+        msg.info("animation measure: " .. tostring(vp.w) .. "x" .. tostring(vp.h) .. " on " .. hw .. ": not measured (no copy-back above 1080p)")
+        return false
+    end
     if hw ~= "no" and hw ~= "" and not hw:find("%-copy$") and not meter.copied then
         meter.copied = true
         mp.set_property("file-local-options/hwdec", hw .. "-copy")

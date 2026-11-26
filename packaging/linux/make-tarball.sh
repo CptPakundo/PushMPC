@@ -43,6 +43,7 @@ if [ -n "${PUSHMPC_PMML_GRAPHS:-}" ] && [ -f "$PUSHMPC_PMML_GRAPHS/synth-yuv.onn
     # the anime upscalers: the model graphs (no weights) and the pin setup.sh fetches them by
     if [ -d "$PUSHMPC_PMML_GRAPHS/anime-sr" ]; then mkdir -p "$d/pmml/graphs/anime-sr"; cp "$PUSHMPC_PMML_GRAPHS"/anime-sr/*.onnx "$d/pmml/graphs/anime-sr/"; fi
     install -m 644 scripts/anime-models-pin.json "$d/pmml/anime-models-pin.json"
+    install -m 644 scripts/content-model-pin.json "$d/pmml/content-model-pin.json"
 fi
 # optional: PushMPC's native hook for the distro mpv (PUSHMPC_MPVNATIVE_DIR = mpv-native.yml's hook folder:
 # pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so; the sidecar engines libpushmpc_engine_nvl.so and

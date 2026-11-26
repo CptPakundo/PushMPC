@@ -311,6 +311,37 @@ sys.exit(1 if bad else 0)
 PY
     say "anime upscalers: files in $dest"
 }
+# ContentDetect's image model (CLIP ViT-B/32 image encoder, MIT, pinned): reliable animation detection; without it the
+# hand-built cues decide alone
+do_content_model() {
+    [ "$os" = Darwin ] && return 0
+    [ -f "$here/pmml/content-model-pin.json" ] || return 0
+    py=$(command -v python3 || true)
+    if [ -z "$py" ]; then say "content model: need python3 for the checked fetch (not found): not installed"; return 0; fi
+    dest=$pm/pmml/content-model
+    if [ "$dry" = 1 ]; then say "  would: fetch the pinned content model (CLIP image encoder, MIT) into $dest"; return 0; fi
+    mkdir -p "$dest"
+    "$py" -I - "$here/pmml/content-model-pin.json" "$dest" <<'PY' | sed 's/^/  /'
+import hashlib, json, os, sys, urllib.request
+pin, dest = sys.argv[1], sys.argv[2]
+bad = 0
+for f in json.load(open(pin, encoding="utf-8"))["files"]:
+    out = os.path.join(dest, f["name"])
+    ok = lambda b: len(b) == f["size"] and hashlib.sha256(b).hexdigest() == f["sha256"]
+    if os.path.exists(out) and ok(open(out, "rb").read()):
+        continue
+    try:
+        data = urllib.request.urlopen(urllib.request.Request(f["url"], headers={"User-Agent": "PushMPC-Setup"}), timeout=120).read()
+    except Exception as e:
+        print(f"{f['name']}: download failed ({e})"); bad += 1; continue
+    if not ok(data):
+        print(f"{f['name']}: refused (size / SHA-256 differ from the pin)"); bad += 1; continue
+    open(out, "wb").write(data)
+    print(f"ok {f['name']} ({f['licence']})")
+sys.exit(1 if bad else 0)
+PY
+    say "content model (animation detection): files in $dest"
+}
 do_pmml() {
     [ "$os" = Darwin ] && return 0
     sel=$(pmml_eps)
@@ -525,6 +556,7 @@ case $action in
             do_kodi_addon
             do_plex
             do_anime
+            do_content_model
             # shellcheck disable=SC2086
             PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }
