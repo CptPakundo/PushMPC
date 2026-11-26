@@ -994,7 +994,7 @@ static av_cold void uninit(AVFilterContext *ctx)
 #define OFFSET(x) offsetof(PushMPCContext, x)
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
 static const AVOption pushmpc_options[] = {
-    { "smoother", "frame generation: auto, off, 2..8 (multiplier)", OFFSET(smoother), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+    { "smoother", "frame generation: auto, off, 2..16 (multiplier)", OFFSET(smoother), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { "sharper", "upscaling / clean-up: auto, off, 1..4", OFFSET(sharper), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { "backend", "engine: auto, nvidia (pushcore), portable", OFFSET(backend), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { "engine", "path of the engine module", OFFSET(engine_path), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },

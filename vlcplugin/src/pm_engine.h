@@ -63,6 +63,8 @@ int pm_engine_threads(const pm_engine *e);
  * size). why: a one-line explanation for the log. */
 /* Auto for an open engine: its own measured costs (the GPU engine has no x2 cap above 1080p) */
 int pm_engine_decide(pm_engine *e, int smoother, double src_fps, double display_hz, char *why, size_t whysize);
+/* 1 = the player is full screen, 0 = windowed, -1 = unknown (before pm_engine_decide; Auto counts a window's composition) */
+void pm_engine_set_fullscreen(pm_engine *e, int fullscreen);
 const char *pm_engine_name(const pm_engine *e);
 
 int pm_engine_decide_k(int smoother, double src_fps, double display_hz, int width, int height, int bits, int threads,

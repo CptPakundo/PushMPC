@@ -247,8 +247,17 @@ inline AppleK DecideAppleK(int smoother, double srcFps, double displayHz)
     if (smoother == 1) { r.k = 1; r.why = "Smoother off: no frame generation"; return r; }
     if (smoother >= 2) { r.k = std::min(smoother, 8); snprintf(b, sizeof(b), "x%d (your setting)", r.k); r.why = b; return r; }
     if (displayHz <= 0) { r.k = 2; r.why = "Auto: display rate unknown: x2"; return r; }
-    r.k = std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8);
-    snprintf(b, sizeof(b), "Auto: display %.2f Hz / source %.3f fps: x%d", displayHz, srcFps, r.k);
+    const int maxK = std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8);
+    // the even cadence at a fixed refresh (PushMpcAuto.h's rule; ProMotion / VRR is not known here): among x1..maxK the one
+    // that shows frames shortest, a tie going to the even cadence, then the larger (240 Hz: x5, not an uneven x8)
+    double bestHold = 1e9; bool bestEven = true; r.k = 1;
+    for (int k = 1; k <= maxK; ++k) {
+        const double q = displayHz / (srcFps * k), n = std::round(q);
+        const bool even = n >= 1 && std::fabs(q - n) / n <= 0.02;
+        const double hold = std::max(1.0, even ? n : std::ceil(q)) * 1000.0 / displayHz;
+        if (k == 1 || hold < bestHold - 0.05 || (std::fabs(hold - bestHold) <= 0.05 && (even || !bestEven))) { r.k = k; bestHold = hold; bestEven = even; }
+    }
+    snprintf(b, sizeof(b), "Auto: display %.2f Hz / source %.3f fps: x%d%s", displayHz, srcFps, r.k, r.k < maxK ? " (the even cadence)" : "");
     r.why = b;
     return r;
 }

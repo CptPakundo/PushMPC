@@ -228,7 +228,7 @@ bool Engine::Open(const GpuInfo& gpu, const EngineConfig& cfg, std::string& err)
             || !Cv(m_vfx.SetImage(m_vfg, sel::kSrc0, m_enh[0].desc), "VFG SrcImage0", err) || !Cv(m_vfx.SetImage(m_vfg, sel::kSrc1, m_enh[1].desc), "VFG SrcImage1", err)
             || !Cv(m_vfx.LoadEffect(m_vfg), "NvVFX_Load(VideoFrameGeneration)", err)
             || !Cv(m_vfx.SetImage(m_vfg, sel::kDst0, m_vfgOut.desc), "VFG DstImage0", err)
-            || !Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(p.k)), "VFG FrameMultiplier", err)) return false;
+            || !Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, p.k > sel::kIndexedMax ? 0u : unsigned(p.k)), "VFG FrameMultiplier", err)) return false;
         what += "VFG " + std::string(p.vfgQuality >= 2 ? "High" : p.vfgQuality <= 0 ? "Low" : "Medium") + " x" + std::to_string(p.k) + (cfg.ampere ? " (RTX 30 compatibility)" : "") + "; ";
     }
     if (p.k >= 2 && (p.nvof || cfg.guardFlow)) {
@@ -362,7 +362,10 @@ int Engine::Generate(int parity, int j, int k, bool newPair, std::string& err)
             if (!Cv(m_vfx.SetImage(m_vfg, sel::kSrc0, m_enh[1 - parity].desc), "VFG SrcImage0", err) || !Cv(m_vfx.SetImage(m_vfg, sel::kSrc1, m_enh[parity].desc), "VFG SrcImage1", err)
                 || !Cv(m_vfx.SetU32(m_vfg, sel::kShot, 0), "VFG ShotChange", err)) return -1;
         }
-        if (!Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, unsigned(k)), "VFG FrameMultiplier", err) || !Cv(m_vfx.SetU32(m_vfg, sel::kIndex, unsigned(j)), "VFG FrameIndex", err)
+        // up to 8x the SDK multiplier mode (FrameIndex j of k), above its timestep mode (Timestep j / k; FrameMultiplier 0)
+        const bool timestep = k > sel::kIndexedMax;
+        if (!Cv(m_vfx.SetU32(m_vfg, sel::kMultiplier, timestep ? 0u : unsigned(k)), "VFG FrameMultiplier", err)
+            || !(timestep ? Cv(m_vfx.SetF32(m_vfg, sel::kTimestep, float(j) / float(k)), "VFG Timestep", err) : Cv(m_vfx.SetU32(m_vfg, sel::kIndex, unsigned(j)), "VFG FrameIndex", err))
             || !Cv(m_vfx.Run(m_vfg, 1), "NvVFX_Run(VideoFrameGeneration)", err)) return -1;
     } else if (m_cfg.plan.nvof && m_of.Ready() && m_flowFresh) {
         // the optical-flow tier: A and B warped to t = j / k along NVOF's two flows (nvl_kernels.cu nvl_warp)

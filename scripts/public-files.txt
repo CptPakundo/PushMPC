@@ -82,3 +82,4 @@ mpvnative/**
 scripts/build-env.cmd
 scripts/cmake-configure.cmd
 cmake/**
+scripts/test-vfg16-mpchc.ps1

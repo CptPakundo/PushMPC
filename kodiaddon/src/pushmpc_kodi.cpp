@@ -11,6 +11,7 @@
 #include <kodi/AddonBase.h>
 #include <kodi/Filesystem.h>
 #include <kodi/General.h>
+#include <kodi/gui/General.h>   // GetVideoResolution: windowed or full screen
 #include <kodi/addon-instance/Inputstream.h>
 #include <kodi/addon-instance/VideoCodec.h>
 
@@ -547,6 +548,10 @@ private:
 
     // the upscaler and output size: Auto = NIS to the screen on the GPU engine, except on Windows, where Kodi's DXVA
     // renderer can run RTX / Intel Video Super Resolution on the add-on's pictures (better than any shader upscaler)
+    // Kodi full screen (Auto: no window composition per shown frame), on every platform: Kodi's own rendering resolution
+    // (kodi::gui::GetVideoResolution) is RES_WINDOW (15) in windowed mode, RES_DESKTOP (16) and up full screen
+    static constexpr int kKodiResWindow = 15;
+    static int KodiFullscreen() { const int r = kodi::gui::GetVideoResolution(); return r < 0 ? -1 : r != kKodiResWindow ? 1 : 0; }
     void DecideUpscale(const AVStream* st, pmk::EngineCfg& c, std::string& why) const
     {
         const AVCodecParameters* p = st->codecpar;
@@ -762,6 +767,7 @@ private:
         if (m_dma && m_engineCfg.bits > 8) m_engineCfg.semiPlanar = true;   // 10-bit dma-bufs as P010 (DRM_FORMAT_P010)
         std::string upWhy, engWhy;
         DecideUpscale(st, m_engineCfg, upWhy);
+        m_engineCfg.fullscreen = KodiFullscreen();
         m_engine = pmk::OpenEngine(m_engineCfg, engWhy);
         const double hz = m_settings.displayHz > 0 ? double(m_settings.displayHz) : pm_display_hz();
         if (!m_engine) {

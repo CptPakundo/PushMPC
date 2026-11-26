@@ -32,6 +32,10 @@ local function apply()
         spec = "@pushmpc:pushmpc"
         local o = {}
         if disp > 0 then o[#o + 1] = string.format("display_fps=%.3f", disp) end
+        -- full screen (Auto: no window composition per shown frame); through "extra", which every vf_pushmpc knows
+        if not string.find(opts.opts, "extra=", 1, true) then
+            o[#o + 1] = "extra=[display_fs=" .. (mp.get_property_native("fullscreen") and "1" or "0") .. "]"
+        end
         if opts.opts ~= "" then o[#o + 1] = opts.opts end
         if #o > 0 then spec = spec .. "=" .. table.concat(o, ":") end
     end
@@ -46,3 +50,4 @@ end
 
 mp.register_event("file-loaded", apply)
 mp.observe_property("display-fps", "number", function() if last ~= nil or mp.get_property("path") then apply() end end)
+mp.observe_property("fullscreen", "bool", function() if last ~= nil then apply() end end)

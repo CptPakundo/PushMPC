@@ -55,7 +55,7 @@
  * VLC's device, made like the pictures of VLC's Direct3D 11 pool (same size, format, bind flags; one texture each, with
  * the luma and chroma shader views VLC's outputs draw from). A picture holds its slot and the ring until VLC releases
  * it, so pictures may outlive the filter. */
-#define PM_RING_MAX 32
+#define PM_RING_MAX 52   /* 3 x 16 + 4: VFG 16x */
 typedef struct pm_ring {
     atomic_int refs;
     ID3D11Device *dev;
@@ -273,8 +273,8 @@ static bool RegTake(picture_t *p, pm_job **job, int *idx)
 }
 static int OutStages(void) { vlc_mutex_lock(&reg_lock); int n = out_stages; vlc_mutex_unlock(&reg_lock); return n; }
 
-static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
-static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8" };
+static const int smoother_values[] = { 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 };
+static const char *const smoother_texts[] = { "Auto (display refresh, CPU budget)", "Off", "x2", "x3", "x4", "x5", "x6", "x8", "x10", "x12", "x16" };
 static const int quality_values[] = { 0, 1 };
 static const char *const quality_texts[] = { "Fast", "Balanced" };
 static const int engine_values[] = { 0, 1, 2, 3 };
@@ -291,7 +291,7 @@ vlc_module_begin()
     set_subcategory(SUBCAT_VIDEO_VFILTER)
     add_integer(CFG "smoother", 0, "Smoother (frame generation)",
                 "Auto picks the multiplier from the display refresh rate and what this computer can generate in time; "
-                "Off passes frames through; x2..x8 force a multiplier.", false)
+                "Off passes frames through; x2..x16 force a multiplier (above x8 with NVIDIA VFG only).", false)
         change_integer_list(smoother_values, smoother_texts)
         change_safe()
     add_integer(CFG "quality", 1, "Motion search quality", "Fast searches on a quarter-size picture, Balanced on a "
@@ -315,7 +315,7 @@ vlc_module_begin()
              "pictures stay on the GPU (pushcore works on VLC's own D3D11 device); off = they are copied to the CPU "
              "and back, as before.", true)
     add_bool(CFG "zerocopy-ring", true, "Own output pictures with zero copy", "Generated pictures come from textures "
-             "of the module's own (up to x8); off = VLC's 4-picture pool (at most x4).", true)
+             "of the module's own (up to x16); off = VLC's 4-picture pool (at most x4).", true)
     add_integer(CFG "hw", 0, "Hardware-decoded video (Linux)", "Auto keeps VA-API / VDPAU pictures on the GPU: real frames "
                 "pass untouched, generated frames go into PushMPC's own surfaces on the decoder's device, after a "
                 "round-trip check of the driver (pass-through if it fails). Convert hands them to VLC's converter "
@@ -355,6 +355,10 @@ struct filter_sys_t {
     int64_t pc_miss_pts, pc_miss_want;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
+    int k_open;            /* k at open: the output rate and the pools were made for it (a later decision stays at or below) */
+    int fs;                /* the vout's live "fullscreen" (our parent object), re-read every 30 input pictures */
+    int fs_smoother;       /* what Auto decided with, for the re-decision on a fullscreen toggle */
+    double fs_fps, fs_hz;
     int alloc;
     int bits, bps;
     picture_t *prev;
@@ -806,6 +810,20 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (!cur) return NULL;
     }
     if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
+    if (sys->in % 30 == 0) {   /* a fullscreen toggle mid-file: var_Inherit reads the vout's live variable */
+        const int fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
+        if (fs != sys->fs) {
+            sys->fs = fs;
+            if (sys->eng) {
+                char why[256] = "";
+                pm_engine_set_fullscreen(sys->eng, fs);
+                int k = pm_engine_decide(sys->eng, sys->fs_smoother, sys->fs_fps, sys->fs_hz, why, sizeof(why));
+                k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
+                msg_Info(f, "PushMPC: %s: x%d (%s)", fs ? "full screen" : "windowed", k, why);
+                sys->k = k;
+            } else msg_Info(f, "PushMPC: %s; pushcore keeps x%d until the next file", fs ? "full screen" : "windowed", sys->k);
+        }
+    }
 
     /* what the engine reads: cur itself, or for hardware formats a CPU copy of its surface */
     picture_t *work = cur;
@@ -1070,13 +1088,14 @@ static int Open(vlc_object_t *obj)
             if (zhz <= 0) zhz = pm_display_hz();
             pm_pc_cfg pcc;
             FillPcc(&pcc, v, v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B ? 10 : 8, smoother, zhz, OptInt(f, CFG "warp", 0) ? 1 : 0);
+            pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
             int pk = 1;
             char err[300] = "";
             sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
             if (sys->pc && pk > 1) {
                 sys->zc = true;
                 bits = pcc.bits;
-                sys->k = pk > 8 ? 8 : pk;
+                sys->k = pk > 16 ? 16 : pk;
                 snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             } else {
                 if (sys->pc) { pmx_close(sys->pc); sys->pc = NULL; snprintf(err, sizeof(err), "pushcore runs x1 here"); }
@@ -1120,11 +1139,12 @@ static int Open(vlc_object_t *obj)
     if (!sys->hw && !sys->zc && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         FillPcc(&pcc, v, bits, smoother, hz, OptInt(f, CFG "warp", 0) ? 1 : 0);
+        pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
         int pk = 1;
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
         if (sys->pc) {
-            sys->k = pk < 1 ? 1 : pk > 8 ? 8 : pk;
+            sys->k = pk < 1 ? 1 : pk > 16 ? 16 : pk;
             snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             if (sys->k <= 1) { pmx_close(sys->pc); sys->pc = NULL; sys->k = 1; }
         } else if (engine == 2) {
@@ -1145,6 +1165,7 @@ static int Open(vlc_object_t *obj)
             sys->k = 1;
         } else {
             char why[256] = "";
+            pm_engine_set_fullscreen(sys->eng, var_InheritBool(f, "fullscreen") ? 1 : 0);   /* the vout's state now; Filter() follows toggles */
             sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
@@ -1158,6 +1179,9 @@ static int Open(vlc_object_t *obj)
         if (sys->k > 1) pm_hw_set_pool_size(sys->hw, 3 * sys->k + 4);   /* the job's pictures, those queued for display, a spare */
         else { pm_hw_release(sys->hw); sys->hw = NULL; }
     }
+    sys->k_open = sys->k;
+    sys->fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
+    sys->fs_smoother = smoother; sys->fs_fps = fps; sys->fs_hz = hz;
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
     sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;

@@ -4,8 +4,8 @@ itself up for your graphics card and display.
 
 ## Highlights
 
-- **Up to 8x smoother motion**, so a 24 fps film fills a 120 Hz or 240 Hz screen. On a GeForce RTX 5090, MPC-HC played
-  a 1080p film at 8x (192 fps) on a 4K screen without dropping a frame.
+- **Up to 16x smoother motion**, so a 24 fps film fills a 120 Hz or 240 Hz screen. On a GeForce RTX 5090, MPC-HC played
+  a 1080p film at 10x (240 fps) on a 4K 240 Hz screen without dropping a frame.
 - **Starts fast:** in MPC-HC and MPC-BE, smooth motion begins about half a second after the picture appears, even
   for the first video after starting the player.
 - **Clean scene cuts:** a new shot starts on its own frame, never a smeared blend.

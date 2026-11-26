@@ -21,6 +21,12 @@
 //     HDR; it may never cost a frame generation step.
 //  8. The VSR style (RTX VSR model family) Auto by the source bitrate: Streaming (cleans hardest, RTX 30+) at a low
 //     bitrate, High bitrate (keeps clean detail) at a Blu-ray-class bitrate, Standard otherwise.
+//  9. The renderer's own work per shown frame counts against the same GPU budget (ShowCost): its HDR to SDR tone map
+//     (an HDR source with Windows HDR off) and the desktop composition of a window (not fullscreen). HDR to SDR Auto puts
+//     the tone map where it is cheaper for the plan: in PushMPC (once per source frame, before frame generation) or in the
+//     renderer (once per shown frame); with frame generation that is PushMPC. On a fixed refresh, a multiplier that shows a
+//     new frame on every refresh must fit with kFixedRefreshSpareMs to spare (a late frame there repeats a whole refresh;
+//     VRR absorbs it), so windowed playback at the budget edge takes the next even cadence (240 Hz: 5x) instead.
 // The costs start from the measured RTX 5090 tables (times a per-card factor) and are refined from pushcore's GPU
 // timings and PushFlow's once-per-card speed test (Costs, HKCU\Software\PushMPC\Learned).
 #pragma once
@@ -51,7 +57,8 @@ struct Display {
     std::wstring vrrHow;              // how vrr was decided (status line)
     bool vrrCapable = false;          // the display can do G-SYNC / VRR in this mode (NVIDIA), whatever the profile says
     bool battery = false;             // the system runs on battery (GetSystemPowerStatus)
-    bool operator==(const Display& o) const { return name == o.name && std::fabs(refreshHz - o.refreshHz) < 0.01 && width == o.width && height == o.height && hdr == o.hdr && vrr == o.vrr && battery == o.battery; }
+    bool fullscreen = false;          // the player's window covers its monitor (no desktop composition); false = windowed or unknown
+    bool operator==(const Display& o) const { return name == o.name && std::fabs(refreshHz - o.refreshHz) < 0.01 && width == o.width && height == o.height && hdr == o.hdr && vrr == o.vrr && battery == o.battery && fullscreen == o.fullscreen; }
 };
 struct Source {
     UINT w = 1920, h = 1080;
@@ -112,10 +119,13 @@ enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFas
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
 struct Costs {
-    // FG batch p95 per multiplier M = 2..8 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
-    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's.
-    double vfgMedium[7] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51 };
-    double vfgHigh[7]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91 };
+    // FG batch p95 per multiplier M = 2..16 at 3840x2160 after VSR (the slower of the two runs, 3840x2080 x 1/0.963;
+    // 3x and 7x interpolated). The old single 7.4 ms per frame was High's. 10x, 12x and 16x Medium: measured 2026-11-26
+    // the same way (RTX 5090, clip A 1080p -> 3840x2080 VSR 4, two runs; batch p95 26.6 / 31.9 / 42.3 ms, 8x 20.3 in the
+    // same runs: about 2.6 ms per generated frame); 9x, 11x, 13x-15x interpolated. High above 8x: 8x plus 9.4 ms per frame (not measured).
+    double vfgMedium[15] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51, 25.09, 27.66, 30.38, 33.09, 35.80, 38.51, 41.22, 43.93 };
+    // vfgHigh 10x-16x: extrapolated (8x + 9.4 ms per frame) until the phase-4 harness run (--backend vfg --q 2 --multiplier 10/12/16)
+    double vfgHigh[15]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91, 72.32, 81.73, 91.14, 100.55, 109.96, 119.37, 128.78, 138.19 };
     double vfgLowShare = 0.40;                      // VFG Low ~0.35-0.4 x Medium (1080p quality runs)
     // DLSS-G with FidelityFX flow: flow + refine per source frame, then per generated frame (2x 1.47, 4x 3.87 p95)
     double dlssgFlow = 1.8, dlssgPerFrame = 1.2;
@@ -140,6 +150,14 @@ struct Costs {
     double nrMs = 4.0;                              // AI enhancement p95 (prior; per family below until measured)
     double hdr4k = 2.0;                             // RTX Video HDR at 4K (prior)
     double itm4k = 0.2;                             // PushMPC's inverse tone map in the filter (estimate)
+    // The renderer's work per SHOWN frame at 4K (MPC Video Renderer, RTX 5090), seen as the extra VFG batch time at 10x in
+    // the 2026-11-26 MPC-HC runs (harness without a renderer 26.6 ms p95): clip A SDR fullscreen 27.2, windowed 30.5;
+    // a 4K HDR10 episode on the SDR desktop fullscreen 31.0, windowed 34.0. So about 0.33 ms per shown frame for the desktop
+    // composition of a window and 0.38 ms for the renderer's HDR to SDR tone map. Priors until the phase-4 A/B (MPC-VR's
+    // own Times(ms) line, Y410 vs PushMPC's tone map).
+    double rendererTm4k = 0.38;                     // the renderer's HDR to SDR tone map, per shown frame
+    double compose4k = 0.33;                        // desktop composition of a windowed player, per shown frame
+    double coreTm4k = 0.10;                         // PushMPC's tone map at ingress (PushFPS BT.2390), per source frame (estimate)
     double guardScore = 0.3;                        // the cut guard's own test per source frame (scene score + Fourier-Mellin: 0.25-0.29 ms, round 5)
     double guardFlow = 1.0;                         // the cut guard's NVOF pass per source frame: +1.0 ms graph time at 1080p, RTX 5090 (round 4)
     double card = 1.0;                              // CardFactor for the priors (or the measured one, ApplyMeasuredCard)
@@ -148,10 +166,13 @@ struct Costs {
     double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
+    bool learnedBase = false;                       // base4k from the measured graph minus its stages (LearnCosts)
 };
 
 struct Choice {               // resolved values for pushcore and the filter
     bool sr = false; int srLevel = 0; bool artifactReduction = false; UINT outW = 0, outH = 0;
+    bool coreToneMap = false;            // HDR source, Windows HDR off: PushMPC tone-maps it to SDR (else the renderer); connect time
+    std::wstring toneMapNote;
     int srFamily = 0;         // VsrStyle actually used (Standard for artifact reduction)
     Upscaler srMethod = Upscaler::Rtx;
     int multiplier = 1; bool nr = false; bool hdr = false; bool hdrItm = false;
@@ -174,12 +195,18 @@ inline constexpr double kBudgetShare = 0.85;      // 15 % headroom against the p
 inline constexpr double kRefreshSlack = 1.02;     // output fps <= refresh x 1.02
 inline constexpr double kCadenceTolerance = 0.02; // refresh / output fps within 2 % of a whole number
 inline constexpr double kHighSpareMs = 3.0;       // High (PushFlow Quality) only with this much p95 to spare
+// Fixed refresh (no VRR): a multiplier whose output reaches one new frame per refresh (refresh / fps < 1.5) has no slack
+// for a late frame (it repeats a whole refresh, the hold doubles), so it must fit with this much more to spare. Measured
+// (2026-11-26, 240 Hz windowed, 10x): clip A at a graph p95 of 34.9 of the 35.4 ms budget played clean; a 4K HDR episode
+// at 40.0 dropped frames.
+inline constexpr double kFixedRefreshSpareMs = 1.0;
 // Clean up Auto: H.264-equivalent bits per pixel per frame at or below this is "streaming level". Blu-ray 1080p H.264
 // at 25-35 Mbit/s is 0.5-0.7; a web stream 1080p24 at 6 Mbit/s H.264 is 0.12, YouTube AV1 at 2.5 Mbit/s ~0.09
-// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.48 equivalent. Codec factors in CodecEfficiency.
+// equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.68 equivalent, a 4K HEVC web stream at 16.5 Mbit/s 0.19 (at
+// 1080p quality, BitsPerPixel). Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
 inline constexpr double kDebandBpp8Bit = 0.25;
-// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.48): high bitrate
+// VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.68): high bitrate
 inline constexpr double kHighBitrateBpp = 0.40;
 
 inline bool CadenceEven(double refresh, double outFps)
@@ -237,7 +264,50 @@ inline int FgKeyOf(FgMethod m, int quality)
     default: return kKeyVfgMed;
     }
 }
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? 8 : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
+// NVIDIA VFG: up to 16x (8x in the SDK multiplier mode, above in its timestep mode); a pushcore without
+// PUSHCORE_FEATURE_VFG16 stops at 8x (the filter lowers VfgCeiling() when it loads one).
+inline int& VfgCeiling() { static int v = 16; return v; }
+// The no-output guard (the filter): source frames keep going into pushcore while none has come out for this long (and for
+// this many submits) -> the filter shows the source frames itself, so a stuck engine never leaves a black picture
+inline constexpr double kNoOutputMs = 1500.0;
+inline constexpr int kNoOutputSubmits = 24;
+inline bool CoreOutputStalled(double msSinceOutput, int submitsSinceOutput, bool running)
+{
+    return running && submitsSinceOutput >= kNoOutputSubmits && msSinceOutput >= kNoOutputMs;
+}
+// The delivery check (the filter, every 10 s of playback): this many generated frames dropped or shown late in the window
+// means the multiplier does not hold here even when the GPU timings fit (the renderer's own per-frame work, for one, is
+// not in them): Auto caps the multiplier one step lower (DeliveryCap below)
+inline bool DeliveryOverloaded(uint64_t lateFrames, uint64_t generatedFrames)
+{
+    return lateFrames >= 10 && lateFrames * 100 >= generatedFrames;
+}
+// The cap the delivery check keeps for one file: a multiplier that came late caps Auto one step below it; after a clean
+// stretch (60 s, doubled for each time that multiplier failed, at most 16 min) the cap opens one step again, so Auto
+// can go back up. Within the cap Auto's usual rules pick (VRR: the largest that fits; a fixed refresh: the shortest hold,
+// a tie going to the even cadence).
+struct DeliveryCap {
+    int cap = 0;                 // 0 = none
+    int fails[kMaxSmoother + 2] = {};
+    double cleanMs = 0;          // clean playback since the last change
+    // one 10-s window at the applied multiplier; true when the cap changed
+    bool Update(bool overloaded, int applied, double windowMs)
+    {
+        if (overloaded && applied > 2) {
+            ++fails[std::min(applied, kMaxSmoother + 1)];
+            cap = applied - 1; cleanMs = 0;
+            return true;
+        }
+        if (overloaded) { cleanMs = 0; return false; }
+        if (!cap) return false;
+        cleanMs += windowMs;
+        const int n = std::max(1, fails[std::min(cap + 1, kMaxSmoother + 1)]);
+        if (cleanMs < std::min(60000.0 * double(1 << std::min(n - 1, 4)), 960000.0)) return false;
+        cap = cap + 1 >= kMaxSmoother ? 0 : cap + 1; cleanMs = 0;
+        return true;
+    }
+};
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -246,7 +316,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     const double sizeVfg = 0.75 + 0.25 * pix;
     switch (method) {
     case FgMethod::Vfg: {
-        const double med = c.vfgMedium[std::min(m, 8) - 2], high = c.vfgHigh[std::min(m, 8) - 2];
+        const double med = c.vfgMedium[std::clamp(m, 2, 16) - 2], high = c.vfgHigh[std::clamp(m, 2, 16) - 2];
         const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
         return v * sizeVfg * c.card;
     }
@@ -266,6 +336,22 @@ inline double FgCost(const Costs& c, FgMethod method, int quality, int m, double
 {
     return FgPrior(c, method, quality, m, pix) * c.fgScale[FgKeyOf(method, quality)];
 }
+// The renderer's work per source frame interval for m shown frames of pixShow (/ 4K): its HDR to SDR tone map unless
+// PushMPC tone-maps (then PushMPC's own pass once per source frame of pixSrc), and the desktop composition of a window.
+inline double ShowCost(const Costs& c, const Display& d, bool hdrToSdr, bool coreTm, int m, double pixShow, double pixSrc)
+{
+    const int shown = std::max(1, m);
+    double ms = d.fullscreen ? 0.0 : c.compose4k * pixShow * shown;
+    if (hdrToSdr) ms += coreTm ? c.coreTm4k * pixSrc : c.rendererTm4k * pixShow * shown;
+    return ms * c.card;
+}
+// HDR to SDR Auto: PushMPC's tone map when it costs less than the renderer's at m shown frames per source frame
+inline bool CoreToneMapCheaper(const Costs& c, int m, double pixShow, double pixSrc)
+{
+    return c.coreTm4k * pixSrc < c.rendererTm4k * pixShow * std::max(1, m);
+}
+// One new frame on every refresh at a fixed refresh rate (kFixedRefreshSpareMs)
+inline bool EveryRefresh(const Display& d, double outFps) { return !d.vrr && outFps > 0 && d.refreshHz / outFps < 1.5; }
 inline std::vector<FgMethod> FgOrder(const Gpu& g);
 // The measured card factor (T5b item 11): where no per-method measurement exists, the priors scale with the card. The
 // name table (CardFactor) is a guess; PushFlow's speed test (pushcore_pushFlowBench, run once per card, cached in
@@ -389,6 +475,14 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     const bool upscaled = srOn && !atOutput;
     (void)upscaled;
 
+    // --- HDR to SDR (an HDR source with Windows HDR off): who tone-maps, and the renderer's work per shown frame
+    const bool hdrToSdr = src.hdr && !d.hdr;
+    const double pixSrc = Pix(src.w, src.h);
+    auto coreTmAt = [&](int m) {
+        return hdrToSdr && (s.hdrToSdr == HdrToSdr::PushMpc || (s.hdrToSdr == HdrToSdr::Auto && CoreToneMapCheaper(c, m, pixFg, pixSrc)));
+    };
+    auto show = [&](int m) { return ShowCost(c, d, hdrToSdr, coreTmAt(m), m, pixFg, pixSrc); };
+
     // --- VSR style: the user's, or Auto by the bitrate (streaming needs RTX 30+; both VFX families need their files)
     int family = int(VsrStyle::Standard);
     std::wstring styleNote;
@@ -439,19 +533,28 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         double bestHold = HoldMs(d, fps);
         bool bestEven = true;
         std::wstring brk;
-        const int maxM = MaxMultiplier(m);
+        const int maxM = s.autoCap >= 2 ? std::min(MaxMultiplier(m), s.autoCap) : MaxMultiplier(m);
         for (int mm = 2; mm <= maxM; ++mm) {
             const double out = fps * mm;
             if (out > d.refreshHz * kRefreshSlack) { brk = std::format(L"refresh {:.2f} Hz ({}x would be {:.1f} fps)", d.refreshHz, mm, out); break; }
-            const double cost = base + vsr(level) + FgCost(c, m, q, mm, pixFg);
+            // the plan at mm: frame generation, the cut guard's test (always with frame generation), the renderer's work
+            // for mm shown frames; one new frame per refresh on a fixed refresh needs kFixedRefreshSpareMs more
+            const double cost = base + vsr(level) + FgCost(c, m, q, mm, pixFg) + c.guardScore * c.card + show(mm);
+            const double spare = EveryRefresh(d, out) ? kFixedRefreshSpareMs : 0.0;
             if (cost > r.budgetMs) { brk = std::format(L"GPU budget ({} {}x would take {:.1f} of {:.1f} ms)", FgMethodLabel(m), mm, cost, r.budgetMs); break; }
+            if (cost + spare > r.budgetMs) {
+                brk = std::format(L"GPU budget ({} {}x would take {:.1f} of {:.1f} ms; a new frame on every refresh of a fixed {:.2f} Hz needs {:.0f} ms spare)",
+                                  FgMethodLabel(m), mm, cost, r.budgetMs, d.refreshHz, spare);
+                break;
+            }
             lastFit = mm;
             const double h = HoldMs(d, out);
             const bool even = d.vrr || CadenceEven(d.refreshHz, out);
             const bool better = h < bestHold - 0.05 || (std::fabs(h - bestHold) <= 0.05 && (even && !bestEven || even == bestEven));
             if (best == 1 || better) { best = mm; bestHold = h; bestEven = even; }
         }
-        if (brk.empty()) brk = std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
+        if (brk.empty()) brk = maxM < MaxMultiplier(m) ? std::format(L"{}x: frames came late at {}x during this file (delivery measured)", maxM, maxM + 1)
+                                                        : std::format(L"{}x, the most {} makes", maxM, FgMethodLabel(m));
         if (best >= 2 && !bestEven) brk = std::format(L"{}x is uneven at {:.2f} Hz but holds shortest ({:.1f} ms); next: {}", best, d.refreshHz, bestHold, brk);
         else if (lastFit > best) brk = std::format(L"cadence at {:.2f} Hz ({}x would not show frames shorter); next: {}", d.refreshHz, lastFit, brk);
         stop = brk;
@@ -504,9 +607,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (s.cleanUp != kAuto) { nr = true; r.cleanNote = L"on"; }
     else if (!lowBitrate) { r.cleanNote = L"off, " + rateNote; }
     else {
-        const int mNr = chooseFg(baseCost(true)).mult;
+        const Pick withNr = chooseFg(baseCost(true));
+        const int mNr = withNr.mult;
+        // the whole plan with clean-up must fit: frame generation at the multiplier it then gets (a fixed Smoother does not
+        // step down for it), the upscaler at its lowest level
+        const double planNr = baseCost(true) + vsr(level) + (mNr >= 2 ? FgCost(c, withNr.m, withNr.q, mNr, pixFg) + c.guardScore * c.card : 0.0) + show(mNr);
         if (mNoNr >= 2 && mNr < 2) r.cleanNote = L"off, " + rateNote + L" but it would cost frame generation";
-        else if (baseCost(true) + vsr(level) > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget", nrPrior);
+        else if (planNr > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget (the plan with it: {:.1f} of {:.1f} ms)", nrPrior, planNr, r.budgetMs);
         else { nr = true; r.cleanNote = L"on, " + rateNote; }
     }
     r.nr = nr;
@@ -517,8 +624,8 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if (r.multiplier >= 2 && s.fgQuality == FgQuality::Auto) {
         const Tiers t = TiersOf(r.fgMethod, s.fgQuality);
         if (t.upgrade >= 0 && r.fgQuality == t.base) {
-            const double now = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.base, r.multiplier, pixFg);
-            const double up = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.upgrade, r.multiplier, pixFg);
+            const double now = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.base, r.multiplier, pixFg) + show(r.multiplier);
+            const double up = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.upgrade, r.multiplier, pixFg) + show(r.multiplier);
             if (up <= r.budgetMs - kHighSpareMs) { r.fgQuality = t.upgrade; r.qualityNote = std::format(L"{} ({:.1f} ms of {:.1f}, 3 ms spare)", QualityName(r.fgMethod, t.upgrade), up, r.budgetMs); }
             else r.qualityNote = std::format(L"{} ({} at {}x would take {:.1f} of {:.1f} ms; it needs 3 ms spare)", QualityName(r.fgMethod, t.base),
                                              QualityName(r.fgMethod, t.upgrade), r.multiplier, up, r.budgetMs);
@@ -527,7 +634,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     } else if (r.multiplier >= 2) r.qualityNote = std::wstring(QualityName(r.fgMethod, r.fgQuality)) + L" (your choice)";
 
     // --- the rest goes to VSR (Auto): raise 1 -> 4 while it fits; frame generation is never lowered for it
-    const double fixedCost = baseCost(nr) + FgCost(c, r.fgMethod, r.fgQuality, r.multiplier, pixFg);
+    const double fixedCost = baseCost(nr) + FgCost(c, r.fgMethod, r.fgQuality, r.multiplier, pixFg) + show(r.multiplier);
     const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : L"NIS";
     if (s.sharper == kAuto) {
         if (!atOutput) {
@@ -575,6 +682,17 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (r.hdr && (r.hdrBoost == HdrBoost::Medium || r.hdrBoost == HdrBoost::High)) { r.hdrBoost = HdrBoost::Low; r.rtxHdrPeak = 500; }
         if (r.guardFlow) { r.guardFlow = false; r.guardNote = L"scene score only (on battery)"; }
         r.batteryNote = L"on battery: light profile";
+    }
+    // --- HDR to SDR: decided for the multiplier in use (the filter applies it when the player connects)
+    r.coreToneMap = coreTmAt(r.multiplier);
+    if (!src.hdr) r.toneMapNote = L"";
+    else if (d.hdr) r.toneMapNote = L"none, Windows HDR is on (HDR10 to the renderer)";
+    else if (s.hdrToSdr != HdrToSdr::Auto) r.toneMapNote = r.coreToneMap ? L"PushMPC (your choice)" : L"the renderer (your choice)";
+    else {
+        const double core = c.coreTm4k * pixSrc * c.card, rend = c.rendererTm4k * pixFg * std::max(1, r.multiplier) * c.card;
+        const int shown = std::max(1, r.multiplier);
+        r.toneMapNote = r.coreToneMap ? std::format(L"PushMPC, {:.2f} ms per source frame (the renderer: {:.2f} ms for {} shown frames)", core, rend, shown)
+                                      : std::format(L"the renderer, {:.2f} ms for {} shown frames (PushMPC: {:.2f} ms)", rend, shown, core);
     }
     return r;
 }
@@ -648,7 +766,10 @@ inline double CodecEfficiency(DWORD fourcc)
 inline double BitsPerPixel(double bitsPerSecond, UINT w, UINT h, double fps, DWORD fourcc)
 {
     if (bitsPerSecond <= 0 || !w || !h || fps <= 0) return -1;
-    return bitsPerSecond * CodecEfficiency(fourcc) / (double(w) * h * fps);
+    // normalised to 1080p: a larger picture needs fewer bits per pixel for the same quality (bitrate ~ pixels^0.75, so
+    // 4K needs about 2.8x the bits of 1080p, not 4x); the thresholds below are set at 1080p
+    const double pix = double(w) * h;
+    return bitsPerSecond * CodecEfficiency(fourcc) / (pix * fps) * std::pow(pix / (1920.0 * 1080.0), 0.25);
 }
 
 // ------------------------------------------------------------------------------------------------ VRR (G-SYNC)
@@ -1018,6 +1139,7 @@ inline Display QueryDisplay(HWND wnd, VrrMode vrrMode = VrrMode::Auto, bool nvid
             }
         }
     }
+    { RECT wr{}; d.fullscreen = wnd && GetWindowRect(wnd, &wr) && wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom; }
     if (vrrMode == VrrMode::On) { d.vrr = true; d.vrrKnown = true; d.vrrHow = L"assumed (your setting)"; }
     else if (vrrMode == VrrMode::Off) { d.vrr = false; d.vrrKnown = true; d.vrrHow = L"fixed refresh assumed (your setting)"; }
     else { const VrrProbe p = ProbeVrr(wnd, mi, nvidia); d.vrr = p.active; d.vrrKnown = p.known; d.vrrHow = p.how; d.vrrCapable = p.possible || p.caps; }

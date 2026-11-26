@@ -31,8 +31,8 @@ template <class Get> Settings LoadSettings(Get&& get)
 {
     Settings s;
     s.enable = ParseBool(get("Enable"), true);
-    const int sm = ParseLevel(get("Smoother"), 2, 8, 0);
-    s.smoother = sm < 0 ? 1 : sm;   // Settings: 0 Auto, 1 off, 2..8
+    const int sm = ParseLevel(get("Smoother"), 2, 16, 0);
+    s.smoother = sm < 0 ? 1 : sm;   // Settings: 0 Auto, 1 off, 2..16
     s.sharper = ParseLevel(get("Sharper"), 1, 4, 0);
     const std::string q = LowerAscii(TrimAscii(get("FgQuality")));
     s.fgQuality = q == "low" ? 0 : q == "medium" ? 1 : q == "high" ? 2 : -1;
@@ -52,7 +52,7 @@ template <class Get> Settings LoadSettings(Get&& get)
 inline bool ApplyArg(Settings& s, const std::string& key, const std::string& v)
 {
     if (key == "enable") { s.enable = ParseBool(v, s.enable); return true; }
-    if (key == "smoother") { const int sm = ParseLevel(v, 2, 8, s.smoother == 1 ? -1 : s.smoother); s.smoother = sm < 0 ? 1 : sm; return true; }
+    if (key == "smoother") { const int sm = ParseLevel(v, 2, 16, s.smoother == 1 ? -1 : s.smoother); s.smoother = sm < 0 ? 1 : sm; return true; }
     if (key == "sharper") { s.sharper = ParseLevel(v, 1, 4, s.sharper); return true; }
     if (key == "fg_method") { s.fgMethod = ParseFgMethod(v); return true; }
     if (key == "fg_quality") { const std::string q = LowerAscii(v); s.fgQuality = q == "low" ? 0 : q == "medium" ? 1 : q == "high" ? 2 : -1; return true; }

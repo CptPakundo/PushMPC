@@ -121,6 +121,9 @@ bool LoadCore(const Options& o, std::wstring& coreDir, std::string& why)
     const PushCoreApi* api = getApi ? getApi(PUSHCORE_ABI_VERSION) : nullptr;
     if (!api) { why = "pushcore.dll has no ABI " + std::to_string(PUSHCORE_ABI_VERSION) + " table"; return false; }
     w.dll = h; w.api = api; w.dllPath = dll;
+    // VFG above 8x only with a core that has it (PUSHCORE_FEATURE_VFG16)
+    const auto feat = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(h, "pushcore_features"));
+    pm::VfgCeiling() = feat && (feat() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;
     w.caps = reinterpret_cast<PushCoreCapabilitiesFn>(GetProcAddress(h, "pushcore_capabilities"));
     if (auto feat = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(h, "pushcore_features"))) w.features = feat();
     return true;
@@ -295,12 +298,12 @@ public:
         const double displayFps = std::atof(Opt(o, "display_fps", "0").c_str());
         const int displayHdr = Opt(o, "display_hdr").empty() ? -1 : std::atoi(Opt(o, "display_hdr").c_str());
         m_disp = pmvs::ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdr);
-        m_choice = pm::Decide(s, m_src, m_disp, costs, g);
+        m_choice = pm::Decide(pmvs::WithToneMapBy(s, true), m_src, m_disp, costs, g);   // pushcore tone-maps for an SDR display (displayHdr 0)
         m_settings = s;
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);
         // tests: a fixed multiplier whatever Auto says
-        m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, 8);
+        m_forceK = std::clamp(std::atoi(Opt(o, "force_multiplier", "0").c_str()), 0, pm::VfgCeiling());
         if (m_forceK) m_ps.multiplier = uint32_t(m_forceK);
         Log(std::format("d3d11: {}x{} {}, colour {}/{}/{}/{}; display {:.3f} Hz HDR {}; GPU {} ({}); Auto x{} SR {} -> {}x{}{}{}",
             st.width, st.height, ten ? "P010" : "NV12", col[0], col[1], col[2], col[3], m_disp.refreshHz, m_disp.hdr ? "on" : "off", Narrow(g.name),
@@ -652,7 +655,7 @@ private:
         // a guessed SDR stream that might turn out HDR at the first frame keeps the 10-bit pool (the copy pass converts)
         out.width = oi.width ? oi.width : m_st.width;
         out.height = oi.height ? oi.height : m_st.height;
-        out.multiplier = std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : m_ps.multiplier, 1, 8);
+        out.multiplier = std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : m_ps.multiplier, 1, PUSHCORE_MAX_MULTIPLIER);
         const bool hdr = oi.hdrOutput != 0;
         out.hdr_output = hdr ? 1 : 0;
         out.range = 2;                    // AVCOL_RANGE_JPEG (full)

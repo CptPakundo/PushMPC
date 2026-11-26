@@ -3,13 +3,16 @@
 //
 // Values (REG_SZ, absent = the default; case-insensitive):
 //   Enable           DWORD 1/0                       default 1
-//   Smoother         Auto | Off | 2..8               default Auto   (NVIDIA VFG frame generation multiplier)
+//   Smoother         Auto | Off | 2..16              default Auto   (NVIDIA VFG frame generation multiplier)
 //   Sharper          Auto | Off | 1..4               default Auto   (RTX Video Super Resolution quality)
 //   CleanUp          Auto | Off | On                 default Auto   (PushFPS "AI picture enhancement", NR)
 //   SdrToHdr         Auto | Off | On                 default Auto   (SDR video as HDR10 when Windows HDR is on)
 //   HdrBoost         Auto | Off | Low | Medium | High   default Auto (highlight expansion of SDR to HDR; Off = SDR at 203 cd/m2)
 //   HdrMethod        Auto | RTX                      default Auto   (Auto: PushMPC's curve on every GPU; RTX: RTX Video HDR, NVIDIA RTX)
 //   SdrGamma         2.2 | 2.4                       default 2.2    (SDR to HDR decode power; never piecewise sRGB)
+//   HdrToSdr         Auto | Player | PushMPC         default Auto   (HDR video with Windows HDR off: who tone-maps it to SDR. Player =
+//                                                                    the renderer, once per shown frame; PushMPC = once per source frame
+//                                                                    before frame generation; Auto = the cheaper one for the plan)
 //   HdrLimit         DWORD 1/0                       default 1      (SDR to HDR: limit brightness on bright scenes)
 //   DisplayPeak      Auto | 100..10000 (cd/m2)       default Auto   (the display's peak: Auto = what Windows reports)
 //   Osd              Off | Brief | Always            default Brief  (on-screen status: about 3 s at start and on changes)
@@ -36,6 +39,7 @@ namespace pm {
 
 inline constexpr const wchar_t* kSettingsKey = L"Software\\PushMPC";
 inline constexpr int kAuto = -1, kOff = 0;
+inline constexpr int kMaxSmoother = 16;   // the largest fixed Smoother (NVIDIA VFG 16x; other methods stop lower)
 
 enum class FgQuality { Low = 0, Medium = 1, High = 2, Auto = 3 };
 // Frame generation method (pushcore PUSHCORE_FG_* + 1; Auto = by GPU family and budget)
@@ -51,18 +55,21 @@ enum class DebandStrength { Low = 0, Medium = 1, High = 2 };
 // SDR to HDR highlight expansion (PushMPC's curve: the multiplier M of SDR white; RTX Video HDR: its peak)
 enum class HdrBoost { Auto = 0, Off = 1, Low = 2, Medium = 3, High = 4 };
 enum class HdrMethod { Auto = 0, Rtx = 1 };
+enum class HdrToSdr { Auto = 0, Player = 1, PushMpc = 2 };   // HDR source, Windows HDR off: who tone-maps (registry only)
 enum class OsdMode { Off = 0, Brief = 1, Always = 2 };
 enum class BatteryMode { Light = 0, Same = 1 };
 
 struct Settings {
     bool enable = true;
-    int smoother = kAuto;   // kAuto, kOff, 2..8
+    int smoother = kAuto;   // kAuto, kOff, 2..16
+    int autoCap = 0;        // runtime only (never stored): Auto's multiplier cap after frames came late at the higher one
     int sharper = kAuto;    // kAuto, kOff, 1..4
     int cleanUp = kAuto;    // kAuto, kOff, 1 = on
     int sdrToHdr = kAuto;   // kAuto, kOff, 1 = on
     HdrBoost hdrBoost = HdrBoost::Auto;
     HdrMethod hdrMethod = HdrMethod::Auto;
     bool sdrGamma24 = false;   // decode SDR with 2.4 instead of 2.2 (hidden)
+    HdrToSdr hdrToSdr = HdrToSdr::Auto;   // registry only (HdrToSdr), like SdrGamma
     bool hdrLimit = true;      // SDR to HDR: the bright-scene limiter (both methods)
     OsdMode osd = OsdMode::Brief;
     BatteryMode onBattery = BatteryMode::Light;
@@ -133,6 +140,7 @@ inline const wchar_t* VsrStyleStr(VsrStyle v) { return v == VsrStyle::HighBitrat
 inline const wchar_t* VsrStyleLabel(VsrStyle v) { return v == VsrStyle::HighBitrate ? L"high bitrate (keeps detail)" : v == VsrStyle::Streaming ? L"streaming (cleans hardest)" : L"standard"; }
 inline const wchar_t* HdrBoostStr(HdrBoost b) { switch (b) { case HdrBoost::Off: return L"Off"; case HdrBoost::Low: return L"Low"; case HdrBoost::Medium: return L"Medium"; case HdrBoost::High: return L"High"; default: return L"Auto"; } }
 inline const wchar_t* HdrMethodStr(HdrMethod m) { return m == HdrMethod::Rtx ? L"RTX" : L"Auto"; }
+inline const wchar_t* HdrToSdrStr(HdrToSdr m) { return m == HdrToSdr::Player ? L"Player" : m == HdrToSdr::PushMpc ? L"PushMPC" : L"Auto"; }
 inline const wchar_t* DebandStrengthStr(DebandStrength d) { return d == DebandStrength::Low ? L"Low" : d == DebandStrength::High ? L"High" : L"Medium"; }
 
 inline int ParseChoice(const std::wstring& s, int lo, int hi, int def)
@@ -177,7 +185,7 @@ inline Settings LoadSettings()
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return s;
     s.enable = RegReadBool(k, L"Enable", true);
-    s.smoother = ParseChoice(RegReadStr(k, L"Smoother"), 2, 8, kAuto);
+    s.smoother = ParseChoice(RegReadStr(k, L"Smoother"), 2, kMaxSmoother, kAuto);
     s.sharper = ParseChoice(RegReadStr(k, L"Sharper"), 1, 4, kAuto);
     s.cleanUp = ParseOnOff(RegReadStr(k, L"CleanUp"), kAuto);
     s.sdrToHdr = ParseOnOff(RegReadStr(k, L"SdrToHdr"), kAuto);
@@ -213,6 +221,9 @@ inline Settings LoadSettings()
     const std::wstring hm = RegReadStr(k, L"HdrMethod");
     s.hdrMethod = (_wcsicmp(hm.c_str(), L"RTX") == 0 || _wcsicmp(hm.c_str(), L"RTX Video HDR") == 0) ? HdrMethod::Rtx : HdrMethod::Auto;
     s.sdrGamma24 = RegReadStr(k, L"SdrGamma") == L"2.4";
+    { const std::wstring h = RegReadStr(k, L"HdrToSdr");
+      s.hdrToSdr = (_wcsicmp(h.c_str(), L"Player") == 0 || _wcsicmp(h.c_str(), L"Renderer") == 0) ? HdrToSdr::Player
+                 : _wcsicmp(h.c_str(), L"PushMPC") == 0 ? HdrToSdr::PushMpc : HdrToSdr::Auto; }
     s.hdrLimit = RegReadBool(k, L"HdrLimit", true);
     { const int p = _wtoi(RegReadStr(k, L"DisplayPeak").c_str()); s.displayPeak = p >= 100 && p <= 10000 ? p : 0; }
     { const std::wstring o = RegReadStr(k, L"Osd"); s.osd = _wcsicmp(o.c_str(), L"Off") == 0 ? OsdMode::Off : _wcsicmp(o.c_str(), L"Always") == 0 ? OsdMode::Always : OsdMode::Brief; }
@@ -250,7 +261,7 @@ inline bool SaveSettings(const Settings& s)
     str(L"DisplayPeak", s.displayPeak ? std::to_wstring(s.displayPeak) : std::wstring(L"Auto"));
     str(L"Osd", s.osd == OsdMode::Off ? L"Off" : s.osd == OsdMode::Always ? L"Always" : L"Brief");
     str(L"OnBattery", s.onBattery == BatteryMode::Same ? L"Same" : L"Light");
-    // SdrGamma is registry-only (never written here, so the page keeps it)
+    // SdrGamma and HdrToSdr are registry-only (never written here, so the page keeps them)
     dw(L"FrameLog", s.frameLog);
     RegCloseKey(k);
     return true;

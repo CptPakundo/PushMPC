@@ -107,7 +107,8 @@ public:
         if (!MakePipesOnce(why)) return false;
 
         const GpuCalibration cal = s.enable && s.smoother == 0 ? CalibrateGpu(m_eng) : GpuCalibration{};
-        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true)
+        const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true,
+                                                       Opt(o, "display_fs") == "1" ? 0.0 : -1.0, VrrActive(Opt(o, "display_fs").empty() ? -1 : std::atoi(Opt(o, "display_fs").c_str())))   // pushmpc-native.lua; vrr_probe.h
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
         m_dedup = m_k > 1 && ParseBool(Opt(o, "dedup", ReadSetting("Dedup")), true);

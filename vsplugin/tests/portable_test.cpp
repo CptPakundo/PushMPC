@@ -192,9 +192,13 @@ static void TestSelect()
 
 static void TestBudget()
 {
-    // 1080p23.976 on 240 Hz: display x10 -> capped at 8; cost 8 + 7 x 3 = 29 <= 25? no -> x6 (8 + 15 = 23 <= 25.0)
+    // 1080p23.976 on 240 Hz: display x10 -> capped at 8; cost 8 + 7 x 3 = 29 <= 25? no; x6 fits (8 + 15 = 23 <= 25.0), but at a
+    // fixed 240 Hz x6 holds frames as long as x5 (2 refreshes) and is uneven: x5, the even cadence
     auto r = DecidePortableK(0, 23.976, 240, 1080, 8, 3);
-    CHECK(r.k == 6, "k %d: %s", r.k, r.why.c_str());
+    CHECK(r.k == 5 && r.why.find("even cadence") != std::string::npos, "k %d: %s", r.k, r.why.c_str());
+    // one new frame per refresh needs 1 ms spare: 30 fps x2 on 60 Hz costs 10 + 9.5 = 19.5 of 20.0 ms, + 1 does not fit -> x1
+    r = DecidePortableK(0, 29.97, 60, 1080, 10, 9.5);
+    CHECK(r.k == 1, "x2 at one frame per refresh needs the spare: %d (%s)", r.k, r.why.c_str());
     r = DecidePortableK(0, 23.976, 60, 1080, 8, 3); CHECK(r.k == 2, "60 Hz -> x2: %d", r.k);
     r = DecidePortableK(0, 23.976, 240, 2160, 8, 3); CHECK(r.k == 2 && r.why.find("capped") != std::string::npos, "4K capped at x2: %s", r.why.c_str());
     r = DecidePortableK(0, 23.976, 240, 2160, 40, 10); CHECK(r.k == 1 && r.why.find("too slow") != std::string::npos, "slow CPU: %s", r.why.c_str());
@@ -203,6 +207,15 @@ static void TestBudget()
     r = DecidePortableK(4, 23.976, 60, 2160, 40, 10); CHECK(r.k == 4 && r.why.find("over the CPU budget") != std::string::npos, "fixed x4 kept: %s", r.why.c_str());
     r = DecidePortableK(1, 23.976, 240, 1080, 1, 1); CHECK(r.k == 1, "off");
     r = DecidePortableK(0, 29.97, 120, 720, 2, 1); CHECK(r.k == 4, "720p30 on 120 Hz -> x4: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 1080, 8, 3, false, -1, 1); CHECK(r.k == 6, "VRR running (vrr_probe): the largest that fits, x6: %d", r.k);
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 0.0); CHECK(r.k == 5 && r.costMs < 7.5, "GPU, player full screen: no composition share (%.1f ms)", r.costMs);
+    {   // the DRM VRR probe runs without crashing anywhere (CI runners: no /dev/dri -> unknown); its answer is a tri-state
+        const int v = LinuxVrrActive(), w = VrrActive(-1), x = VrrActive(1);
+        CHECK(v >= -1 && v <= 1 && w >= -1 && w <= 1 && x >= -1 && x <= 1, "VRR probes: DRM %d, all (unknown / full screen) %d / %d", v, w, x);
+        std::printf("  VRR probe: %d\n", v);
+    }
+    CHECK(CadenceK(8, 23.976, 240) == 5 && CadenceK(6, 23.976, 240) == 5 && CadenceK(4, 23.976, 240) == 4 && CadenceK(2, 23.976, 60) == 2 && CadenceK(8, 23.976, 0) == 8,
+          "CadenceK: the even cadence at a fixed refresh");
 }
 
 static void TestPlatform()
@@ -368,8 +381,11 @@ static void TestCadence()
     m = RunCadence(2, 2, 4, { false, false, false, false });
     CHECK(m.count(6) && m[6].kind == Shot::Real && m[6].src == 3, "end: all settled");
     // the GPU's K rule has no 1080p cap; the upscale decision
+    // 4K: 2 + (k - 1) + k x 1.0 (the player's share per shown frame) fits up to x8, but at a fixed 240 Hz x5 is the even cadence
     auto r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true);
-    CHECK(r.k == 8, "GPU at 4K: x8 when it fits (%d)", r.k);
+    CHECK(r.k == 5, "GPU at 4K: x5, the even cadence, when x8 fits (%d)", r.k);
+    r = DecidePortableK(0, 23.976, 240, 2160, 2, 1, true, 3.0);   // a heavy player share: x5 costs 2 + 4 + 15 = 21 ms, x7 29 (over)
+    CHECK(r.k == 5 && r.costMs > 20, "GPU: the player's share counts (%d, %.1f ms)", r.k, r.costMs);
     auto u = DecideUpscale("auto", "screen", 3840, 2160, 1920, 1080);
     CHECK(u.kind == kAutoUpscaler && u.w == 3840 && u.h == 2160, "upscale to the screen: %s", u.why.c_str());
     u = DecideUpscale("nis", "screen", 0, 0, 1920, 1080); CHECK(u.kind == GpuUpscaler::None, "unknown screen: none");

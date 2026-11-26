@@ -61,8 +61,8 @@ inline double CardFactor(const std::string& name, GpuClass c)
 // two conversions and the readback of every output frame (CUDA copies over PCIe, overlapped; kOverheadPerOutput4k is
 // the GPU-side share at 4K).
 struct Costs {
-    double vfgMedium[7] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51 };
-    double vfgHigh[7]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91 };
+    double vfgMedium[15] = { 4.22, 7.12, 10.02, 13.78, 14.91, 18.71, 22.51, 25.09, 27.66, 30.38, 33.09, 35.80, 38.51, 41.22, 43.93 };   // = PushMpcAuto.h
+    double vfgHigh[15]   = { 9.39, 17.72, 26.04, 34.74, 44.14, 53.50, 62.91, 72.32, 81.73, 91.14, 100.55, 109.96, 119.37, 128.78, 138.19 };
     double vfgLowShare = 0.40;
     double vsrUp[4] = { 0.61, 0.76, 1.59, 2.40 };   // standard 1080p -> 4K
     double vsrUpHb[4] = { 1.19, 1.80, 2.73, 4.40 }; // high bitrate 16..19
@@ -78,6 +78,10 @@ struct Costs {
     double nvofPair1080 = 3.0, warp4k = 0.35;
     double flowMeasured = 0, warpMeasured = 0;      // ms at the measured source / output size (as is)
     double guardFlow = 1.0;                         // the guard's flow measures on top of VFG (Windows: +1.0 ms at 1080p)
+    // the player's work per SHOWN frame at 4K on the same GPU (PushMpcAuto.h ShowCost, RTX 5090 priors): a window's
+    // desktop composition, and mpv's HDR to SDR tone map (this route hands HDR sources on as HDR; mpv maps them for an SDR
+    // display)
+    double compose4k = 0.33, rendererTm4k = 0.38;
 };
 // the optical-flow tier's cost per source frame at multiplier m (src = source pixels / 1080p, out = output pixels / 4K)
 inline double NvofCost(const Costs& c, int m, double srcPix1080, double pixOut)
@@ -87,7 +91,12 @@ inline double NvofCost(const Costs& c, int m, double srcPix1080, double pixOut)
     const double warp = c.warpMeasured > 0 ? c.warpMeasured : c.warp4k * pixOut * c.card;
     return flow + (m - 1) * warp;
 }
+// NVIDIA VFG up to 16x (the SDK multiplier mode to 8x, its timestep mode above; nvl_engine.cpp); the optical-flow tier to 8x
+inline constexpr int kVfgMaxK = 16;
 inline constexpr double kBudgetShare = 0.85, kRefreshSlack = 1.02, kCadenceTolerance = 0.02, kHighSpareMs = 3.0;
+// a fixed refresh (no VRR) with one new frame on every refresh (refresh / fps < 1.5): a late frame repeats a whole
+// refresh, so the plan needs this much more to spare (PushMpcAuto.h kFixedRefreshSpareMs)
+inline constexpr double kFixedRefreshSpareMs = 1.0;
 
 inline bool CadenceEven(double refresh, double outFps)
 {
@@ -108,7 +117,7 @@ inline double VfgCost(const Costs& c, int quality, int m, double pix)
 {
     if (m < 2) return 0;
     const double sizeVfg = 0.75 + 0.25 * pix;
-    const double med = c.vfgMedium[std::min(m, 8) - 2], high = c.vfgHigh[std::min(m, 8) - 2];
+    const double med = c.vfgMedium[std::clamp(m, 2, kVfgMaxK) - 2], high = c.vfgHigh[std::clamp(m, 2, kVfgMaxK) - 2];
     const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
     return v * sizeVfg * c.card;
 }
@@ -136,7 +145,7 @@ struct Caps {
 };
 struct Settings {
     bool enable = true;
-    int smoother = 0;       // 0 Auto, 1 off, 2..8
+    int smoother = 0;       // 0 Auto, 1 off, 2..16 (VFG; the optical-flow tier stops at 8)
     int sharper = 0;        // 0 Auto, 1..4 fixed VSR level, -1 off
     int fgQuality = -1;     // -1 Auto, 0 Low, 1 Medium, 2 High
     int fgMethod = -1;      // -1 Auto (VFG where it runs, else optical flow), 0 VFG, 1 optical flow (NVOF + warp)
@@ -148,7 +157,9 @@ struct Settings {
     bool hdrPeakSet = false;    // the user chose it (else the display's peak when mpv reports one)
 };
 struct Source { int w = 1920, h = 1080; double fps = 23.976; bool hdr = false; bool tenBit = false; double bpp = -1; };
-struct Display { double refreshHz = 0; bool vrr = false; bool hdr = false; };   // refreshHz <= 0: unknown
+// refreshHz <= 0: unknown. vrr: not detectable on Linux (fixed refresh assumed). fullscreen: mpv's fullscreen property
+// (display_fs from pushmpc-display.lua); unknown = a window
+struct Display { double refreshHz = 0; bool vrr = false; bool hdr = false; bool fullscreen = false; };
 
 struct Plan {
     int k = 1, vfgQuality = 1;
@@ -191,7 +202,9 @@ inline Plan Decide(const Settings& s, const Source& src, const Display& d, const
     const double pixOut = Pix(outW, outH);
     const double base = (r.hdr ? c.hdr4k * pixOut * c.card : 0.0);
     auto vsr = [&](int level) { return wantVsr ? VsrCost(c, level, style, pixOut) : 0.0; };
-    auto over = [&](int m) { return c.overheadPerOutput4k * pixOut * c.card * m; };
+    // per shown frame: this route's conversion and readback, the window's composition, mpv's tone map of an HDR source
+    const double showPer = (d.fullscreen ? 0.0 : c.compose4k) + (src.hdr && !d.hdr ? c.rendererTm4k : 0.0);
+    auto over = [&](int m) { return (c.overheadPerOutput4k + showPer) * pixOut * c.card * m; };
     int level = wantVsr ? (s.sharper >= 1 ? s.sharper : 1) : 0;
     // --- frame generation
     const double refresh = d.refreshHz > 1 ? d.refreshHz : fps * 2;   // unknown display: aim at x2
@@ -203,23 +216,28 @@ inline Plan Decide(const Settings& s, const Source& src, const Display& d, const
     auto fgCost = [&](int quality, int m) { return useNvof ? NvofCost(c, m, srcPix1080, pixOut) : VfgCost(c, quality, m, pixOut); };
     if (s.smoother == 1) stop = "Smoother off";
     else if (!caps.vfg && !useNvof) { r.interpElsewhere = true; stop = "no VFG on this GPU (" + caps.vfgWhy + ") and no optical-flow hardware: interpolation by ml / rife / portable, this backend upscales"; }
-    else if (s.smoother >= 2) { k = std::min(s.smoother, 8); stop = "your setting"; }
+    else if (s.smoother >= 2) { k = std::min(s.smoother, useNvof ? 8 : kVfgMaxK); stop = "your setting"; }
     else {
         auto pick = [&](int quality, std::string& why) {
             int best = 1, lastFit = 1; double bestHold = HoldMs(refresh, d.vrr, fps); bool bestEven = true;
             why.clear();
-            for (int m = 2; m <= 8; ++m) {
+            for (int m = 2; m <= (useNvof ? 8 : kVfgMaxK); ++m) {
                 const double out = fps * m;
                 if (out > refresh * kRefreshSlack) { snprintf(b, sizeof(b), "refresh %.2f Hz (%dx would be %.1f fps)", refresh, m, out); why = b; break; }
                 const double cost = base + vsr(level) + fgCost(quality, m) + over(m);
                 if (cost > r.budgetMs) { snprintf(b, sizeof(b), "GPU budget (%dx would take %.1f of %.1f ms)", m, cost, r.budgetMs); why = b; break; }
+                if (!d.vrr && refresh / out < 1.5 && cost + kFixedRefreshSpareMs > r.budgetMs) {
+                    snprintf(b, sizeof(b), "GPU budget (%dx would take %.1f of %.1f ms; a new frame on every refresh of a fixed %.2f Hz needs %.0f ms spare)",
+                             m, cost, r.budgetMs, refresh, kFixedRefreshSpareMs);
+                    why = b; break;
+                }
                 lastFit = m;
                 const double h = HoldMs(refresh, d.vrr, out);
                 const bool even = d.vrr || CadenceEven(refresh, out);
                 const bool better = h < bestHold - 0.05 || (std::fabs(h - bestHold) <= 0.05 && ((even && !bestEven) || even == bestEven));
                 if (best == 1 || better) { best = m; bestHold = h; bestEven = even; }
             }
-            if (why.empty()) why = useNvof ? "8x, the most this backend makes" : "8x, the most VFG makes";
+            if (why.empty()) why = useNvof ? "8x, the most this backend makes" : "16x, the most VFG makes here";
             if (lastFit > best) { snprintf(b, sizeof(b), "cadence at %.2f Hz (%dx would not show frames shorter); next: ", refresh, lastFit); why = b + why; }
             return best;
         };

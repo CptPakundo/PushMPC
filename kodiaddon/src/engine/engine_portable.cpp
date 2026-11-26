@@ -84,7 +84,7 @@ extern "C" int pm_engine_decide_k(int smoother, double src_fps, double display_h
             it = cache.emplace(key, pmvs::portable::Calibrate(width, height, bits, threads, quality)).first;
         cal = it->second;
     }
-    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs);
+    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs, false, -1, pmvs::VrrActive(-1));
     SetErr(why, whysize, k.why);
     return k.k;
 }

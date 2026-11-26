@@ -22,7 +22,7 @@ and sets itself up for your graphics card and display.
 
 ## What you get
 
-- **Smoother motion.** Up to 8 frames for every frame of the video, so a 24 fps film fills a 120 Hz or 240 Hz screen.
+- **Smoother motion.** Up to 16 frames for every frame of the video, so a 24 fps film fills a 120 Hz or 240 Hz screen.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
 - **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
   clean-up for low-quality streams.
@@ -31,8 +31,8 @@ and sets itself up for your graphics card and display.
   You can still change anything.
 - **Your player stays your player.** PushMPC plugs into it, and uninstalling puts its settings back the way they were.
 
-In our tests on a GeForce RTX 5090, MPC-HC played a 1080p film at 8x (192 fps) on a 4K 240 Hz screen without dropping
-a single frame.
+In our tests on a GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps, one new frame for every refresh) on a 4K
+240 Hz screen without dropping a single frame.
 
 ## Players
 
@@ -67,7 +67,7 @@ PushMPC works on any graphics card that runs DirectX 12 (Windows) or Vulkan (Lin
 
 | Graphics card | Smoother motion | Sharper picture |
 |---|---|---|
-| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 8x | RTX Video Super Resolution, RTX Video HDR |
+| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 16x | RTX Video Super Resolution, RTX Video HDR |
 | **GeForce RTX 30 / 20** | NVIDIA frame generation (RTX 30), DLSS frame generation, PushFlow | RTX Video Super Resolution, RTX Video HDR |
 | **GeForce GTX 16 / 10** | PushFlow, FSR | RTX Video Super Resolution (GTX 16) or NIS |
 | **Radeon RX 6000 / 7000 / 9000** | PushFlow, FSR, AMD Fluid Motion | FSR |
@@ -122,7 +122,7 @@ To remove it: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. More in 
 Just open a video in your player. PushMPC switches on by itself.
 
 - **On-screen info.** In MPC-HC, MPC-BE and PotPlayer, a small line in the top-left corner shows what PushMPC is doing
-  for the first few seconds, for example `PushMPC · 8x Medium · VSR 4 · 191 fps · VRR`.
+  for the first few seconds, for example `PushMPC · 10x Medium · VSR 4 · 240 fps · VRR`.
 - **Settings.** In MPC-HC and MPC-BE: **Play > Filters > PushMPC Filter**. In Kodi: the PushMPC add-on's settings. In
   VLC: **Tools > Preferences > All > Video > Filters > PushMPC**. Everything starts on Auto.
 - **Plex, mpv and the others** use Auto with the same rules and need nothing from you.

@@ -23,6 +23,7 @@
 
 struct pm_engine {
     bool gpu = false;
+    int fullscreen = -1;   // pm_engine_set_fullscreen: VLC's "fullscreen" option (Auto: the window composition per shown frame)
     int width = 0, height = 0, bits = 8, threads = 0, quality = 1;
     pmvs::portable::Engine cpu;
 #ifdef PMVS_GPU
@@ -213,6 +214,8 @@ extern "C" const char *pm_engine_name(const pm_engine *e)
     return s.c_str();
 }
 
+extern "C" void pm_engine_set_fullscreen(pm_engine *e, int fullscreen) { if (e) e->fullscreen = fullscreen; }
+
 extern "C" int pm_engine_decide(pm_engine *e, int smoother, double src_fps, double display_hz, char *why, size_t whysize)
 {
     // the calibration costs one motion estimation and one generated frame; cached per (engine kind, size, depth)
@@ -240,7 +243,7 @@ extern "C" int pm_engine_decide(pm_engine *e, int smoother, double src_fps, doub
         }
         me = it->second.first; gen = it->second.second;
     }
-    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, e->height, me, gen, e->gpu);
+    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, e->height, me, gen, e->gpu, e->fullscreen == 1 ? 0.0 : -1.0, pmvs::VrrActive(e->fullscreen));
     SetErr(why, whysize, std::string(ok ? "" : "GPU trial run failed; ") + k.why);
     return k.k;
 }
@@ -259,7 +262,7 @@ extern "C" int pm_engine_decide_k(int smoother, double src_fps, double display_h
             it = cache.emplace(key, pmvs::portable::Calibrate(width, height, bits, threads, quality)).first;
         cal = it->second;
     }
-    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs);
+    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs, false, -1, pmvs::VrrActive(-1));
     SetErr(why, whysize, k.why);
     return k.k;
 }

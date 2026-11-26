@@ -97,7 +97,7 @@ typedef struct PushCoreConfig {
     const wchar_t* runtimeDir; /* NVIDIA runtimes. NULL = PushFPS's own rule (<pushfpsDir>\runtime\experimental) */
     const wchar_t* logFile;    /* PushFPS engine log file. NULL = no file log */
     int32_t sr, fg;            /* overrides on the saved chain: -1 keep, 0 off, 1 on */
-    int32_t multiplier;        /* -1 keep, else 2..8 */
+    int32_t multiplier;        /* -1 keep, else 2..8 (2..PUSHCORE_MAX_MULTIPLIER with PUSHCORE_FEATURE_VFG16) */
     int32_t vfgQuality;        /* -1 keep */
     uint32_t flags;            /* PUSHCORE_FLAG_* */
     /* ABI 3 */
@@ -118,7 +118,7 @@ typedef struct PushCoreSettings {
     int32_t sr;                /* 1 = RTX Video Super Resolution (on a source at the output size: its artifact reduction) */
     uint32_t srQuality;        /* 1..4 = RTX VSR quality (videoSrQuality, standard family) */
     uint32_t srTarget;         /* PUSHCORE_SR_TARGET_* */
-    uint32_t multiplier;       /* 1 = no frame generation, 2..8 = NVIDIA VFG multiplier */
+    uint32_t multiplier;       /* 1 = no frame generation, 2..8 = NVIDIA VFG multiplier (2..16 with PUSHCORE_FEATURE_VFG16) */
     uint32_t vfgQuality;       /* 0 Low, 1 Medium, 2 High (NvVFX model) */
     int32_t nr;                /* 1 = AI picture enhancement (PushFPS "AI 画面增强", NR) */
     float nrTone, nrStructure; /* 0..1, PushFPS's look presets: 0.4/0.5 subtle, 0.7/0.8 balanced, 1/1 strong */
@@ -327,6 +327,8 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
+#define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
+#define PUSHCORE_MAX_MULTIPLIER 16u
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_FG_METHODS 16u /* PushCoreSettings.fgBackend/fgTier/srMethod/cutGuard/activeArea/fgLite, the guard
                                            for every backend, non-NVIDIA GPUs, pushcore_capabilities, pushcore_pushFlowBench */

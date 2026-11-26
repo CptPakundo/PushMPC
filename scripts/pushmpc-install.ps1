@@ -2538,8 +2538,8 @@ function Get-AutoPlan {
     $rtx = $fam -like 'RTX*'
     $nvofa = Test-Nvofa $g $fam
     $fg = switch ($fam) {
-        'RTX 50' { 'NVIDIA VFG (Medium, High when it fits; up to 8x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
-        'RTX 40' { 'NVIDIA VFG (Medium, High when it fits; up to 8x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'RTX 50' { 'NVIDIA VFG (Medium, High when it fits; up to 16x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
+        'RTX 40' { 'NVIDIA VFG (Medium, High when it fits; up to 16x), then DLSS-G, PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
         'RTX 30' { 'NVIDIA VFG (RTX 30 port, on by default), then DLSS-G (unlocked), PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
         'RTX 20' { 'DLSS-G, then PushFlow, NVIDIA optical flow + warp, FSR 3.1 FG' }
         'GTX' { if ($nvofa) { 'PushFlow, then NVIDIA optical flow + warp, FSR 3.1 FG (a slower card starts with the optical flow / FSR until PushFlow''s speed test has run)' } else { 'PushFlow, then FSR 3.1 FG (a slower card starts with FSR until PushFlow''s speed test has run)' } }
