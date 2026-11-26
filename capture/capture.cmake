@@ -7,7 +7,8 @@
 #                       portal     dbus-1 libpipewire-0.3                       -> source_portal.cpp
 #                       Wayland    wayland-client wayland-scanner wayland-protocols -> present_wayland.cpp
 #                     macOS: ScreenCaptureKit + AppKit + MoltenVK (source_sck.mm, present_mac.mm).
-#                     Engines: gpu always; ml when pmml is built (PMML_ORT_INCLUDE); apple on macOS (pmvs_apple).
+#                     Engines: gpu always (NVIDIA optical flow as a candidate where the device has it); ml when pmml
+#                     is built (PMML_ORT_INCLUDE); nvl on Linux when the nvidia backend is (pmvs_nvl); apple on macOS.
 #   pmc_vk_check      every OS with PMVS_GPU_ON (Windows included; by name): cap_vk.cpp and cap_gpu.cpp compiled (not linked) so
 #                     a Windows build checks the Vulkan code too; stub shader headers when glslang is missing.
 # Ubuntu / Debian packages: libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev
@@ -29,6 +30,11 @@ endif()
 if(TARGET pmml)
   target_link_libraries(pmc_core PUBLIC pmml)
   target_compile_definitions(pmc_core PUBLIC PMC_HAVE_PMML)
+endif()
+# the Linux NVIDIA backend (engines/nvidia-linux/nvl.cmake, PMVS_NVIDIA_VFX: nvcc or PMVS_NVL_FATBIN)
+if(TARGET pmvs_nvl)
+  target_link_libraries(pmc_core PUBLIC pmvs_nvl)
+  target_compile_definitions(pmc_core PUBLIC PMC_HAVE_NVL)
 endif()
 if(APPLE AND TARGET pmvs_apple)
   target_link_libraries(pmc_core PUBLIC pmvs_apple)

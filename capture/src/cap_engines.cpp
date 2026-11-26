@@ -14,6 +14,14 @@
 #if defined(__APPLE__) && defined(PMC_HAVE_APPLE)
 #include "apple_engine.h"
 #endif
+#ifdef PMC_HAVE_NVL
+#include <cstring>
+#include <deque>
+#include <memory>
+#include "nvl_backend.h"        // the plugin's nvidia backend on Linux (engines/nvidia-linux), used as it is
+#include "nvl_host.h"
+#include "nvl_settings.h"
+#endif
 
 namespace pmc {
 namespace {
@@ -228,6 +236,157 @@ private:
 };
 #endif
 
+
+// ------------------------------------------------------------------------------------------------ nvl (Linux NVIDIA)
+#ifdef PMC_HAVE_NVL
+void NvlLog(const std::string& m) { std::fprintf(stderr, "pushmpc-capture: %s\n", m.c_str()); }
+
+// The plugin's Linux nvidia backend as a k-step engine: nvl::NvlBackend (the same submit / poll order, cut guard and
+// optical-flow tier as in mpv) on nvl::Engine, decided by nvl::Decide (Auto: VFG where it runs, RTX 30 after its
+// self-test, else the optical-flow tier; RTX VSR to the window's size; RTX Video HDR off: the overlay is SDR). Each push
+// runs the pair to the end and keeps its k - 1 generated frames and the enhanced real frame.
+class NvlEngine : public HostEngine {
+public:
+    ~NvlEngine() override
+    {
+        if (!m_eng) return;
+        std::string e;
+        m_be.Flush(e);
+        double fl = 0, wa = 0;
+        m_eng->FlowCosts(fl, wa);
+        if (fl > 0 && wa > 0) pmvs::nvl::WriteFlowCosts(m_flowKey, fl, wa);   // Auto's optical-flow costs, measured here
+    }
+    bool Open(const EngineRequest& r, std::string& why)
+    {
+        using namespace pmvs::nvl;
+        const GpuInfo& g = ProbeGated(-1, pmvs::ReadSetting("NvidiaVfxRuntime"), NvlLog);
+        if (!g.driver) { why = g.why; return false; }
+        if (!g.runtime) { why = g.runtimeWhy; return false; }
+        Settings s = LoadSettings([](const char* n) { return pmvs::ReadSetting(n); });
+        if (!s.enable) { why = "PushMPC is off (Enable = 0)"; return false; }
+        if (r.smoother >= 0) s.smoother = r.smoother;
+        s.sdrToHdr = -1;   // the overlay shows SDR (8-bit BT.709)
+        if (s.targetScreen && r.displayH > 0) s.targetH = TargetForDisplay(r.displayH);
+        Source src; src.w = r.w; src.h = r.h; src.fps = r.srcFps > 0 ? r.srcFps : 23.976;
+        Display d; d.refreshHz = r.displayHz;
+        Costs c; c.card = CardFactor(g.name, g.cls);
+        m_flowKey = FlowCostKey(g.name, src.w, src.h, s.targetH);
+        ReadFlowCosts(m_flowKey, c.flowMeasured, c.warpMeasured);
+        Plan plan = Decide(s, src, d, g.caps, c);
+        plan.hdr = false;
+        if (plan.k <= 1 && !plan.vsr) { why = "nothing to do here (" + plan.why + ")"; return false; }
+        EngineConfig cfg;
+        cfg.srcW = r.w; cfg.srcH = r.h; cfg.bits = 8; cfg.plan = plan;
+        cfg.ampere = plan.k >= 2 && !plan.nvof && VfgAmpere(g.major, g.minor);
+        cfg.guardFlow = plan.guardFlow;
+        m_eng = std::make_unique<Engine>();
+        std::string err;
+        if (!m_eng->Open(g, cfg, err)) {
+            if (cfg.plan.k < 2 || !cfg.plan.vsr) { why = err; m_eng.reset(); return false; }
+            // frame generation failed: upscaling only, as pushcore's fallback chain does
+            NvlLog(std::string("nvidia: ") + (cfg.plan.nvof ? "the optical-flow tier" : "VFG") + " could not start (" + err + "): upscaling only");
+            cfg.plan.k = 1; cfg.plan.nvof = false; cfg.ampere = false; cfg.guardFlow = false;
+            m_eng = std::make_unique<Engine>();
+            if (!m_eng->Open(g, cfg, err)) { why = err; m_eng.reset(); return false; }
+        }
+        const Plan& ep = m_eng->Config().plan;
+        m_k = std::max(1, ep.k);
+        m_be.engine = m_eng.get();
+        m_be.grid.k = m_k;
+        m_be.grid.srcDur100ns = 1e7 / src.fps;
+        m_be.guard.Configure(r.w, r.h);
+        m_be.source = [this](int64_t, SrcView& v) -> bool {
+            if (!m_src) return false;
+            v.data[0] = m_src->y.data(); v.data[1] = m_src->u.data(); v.data[2] = m_src->v.data();
+            v.stride[0] = m_src->w; v.stride[1] = v.stride[2] = m_src->cw();
+            v.width = m_src->w; v.height = m_src->h; v.bits = 8;
+            v.fmt.bits = 8; v.fmt.full = false; v.fmt.matrix = 1;   // the converter's BT.709 limited range
+            return true;
+        };
+        m_be.alloc = [this](const OutView& o, int& slot) -> bool {
+            m_store.emplace_back();
+            I420& p = m_store.back();
+            p.Resize(o.width, o.height);
+            uint8_t* dst[3] = { p.y.data(), p.u.data(), p.v.data() };
+            for (int i = 0; i < 3; ++i) {
+                const int w = i ? p.cw() : p.w, h = i ? p.ch() : p.h;
+                for (int y = 0; y < h; ++y) {
+                    const uint8_t* row = o.data[i] + o.pitch[i] * size_t(y);
+                    uint8_t* out = dst[i] + size_t(y) * size_t(w);
+                    if (o.bits > 8) {
+                        const uint16_t* r16 = reinterpret_cast<const uint16_t*>(row);
+                        const int sh = o.bits - 8;
+                        for (int x = 0; x < w; ++x) out[x] = uint8_t(std::min(255, (int(r16[x]) + (1 << (sh - 1))) >> sh));
+                    } else {
+                        std::memcpy(out, row, size_t(w));
+                    }
+                }
+            }
+            slot = int(m_store.size()) - 1;
+            return true;
+        };
+        m_be.release = [](int) {};
+        m_desc = "NVIDIA Video Effects on " + g.name + ": " + ep.why;
+        return true;
+    }
+    std::string Describe() const override { return m_desc; }
+    int Steps() const override { return m_k; }
+    bool EnhancesReal() const override { return true; }
+    bool Push(const I420& f, bool contiguous, std::string& err) override
+    {
+        std::vector<pmvs::Out<int>> outs;
+        m_store.clear();
+        const int64_t s = ++m_s;
+        m_src = &f;
+        const bool ok = m_be.CanSubmit() && m_be.Submit(s, m_be.grid.Pts(s), !contiguous, err);
+        m_src = nullptr;
+        if (!ok) { if (err.empty()) err = "nvidia: no free output slot"; return false; }
+        // the pair's generated frames (k - 1, or none after a jump), then the real frame
+        const size_t want = size_t(contiguous && m_k >= 2 ? m_k : 1);
+        while (outs.size() < want) {
+            const size_t before = outs.size();
+            if (!m_be.Poll(2000, outs, err)) return false;
+            if (outs.size() == before) { err = "nvidia: the GPU did not finish in time"; return false; }
+        }
+        m_gen.clear();
+        m_have = false;
+        for (auto& o : outs) {
+            if (o.generated) m_gen.push_back(std::move(m_store[size_t(o.frame)]));
+            else { m_real = std::move(m_store[size_t(o.frame)]); m_have = true; }
+        }
+        m_store.clear();
+        return m_have;
+    }
+    bool Render(float t, I420& out, std::string& err) override
+    {
+        if (m_gen.empty()) { err = "no pair"; return false; }
+        const int j = std::clamp(int(std::lround(t * m_k)), 1, int(m_gen.size()));
+        out = m_gen[size_t(j - 1)];
+        return true;
+    }
+    bool RenderReal(I420& out, std::string& err) override
+    {
+        if (!m_have) { err = "no frame yet"; return false; }
+        out = m_real;
+        return true;
+    }
+
+private:
+    using SrcView = pmvs::nvl::SrcView;
+    using OutView = pmvs::nvl::OutView;
+    std::unique_ptr<pmvs::nvl::Engine> m_eng;
+    pmvs::nvl::NvlBackend<int> m_be;
+    const I420* m_src = nullptr;
+    std::deque<I420> m_store;   // the outputs of one push (a deque: what alloc filled stays where it is)
+    std::vector<I420> m_gen;
+    I420 m_real;
+    bool m_have = false;
+    int m_k = 1;
+    int64_t m_s = 0;
+    std::string m_desc, m_flowKey;
+};
+#endif
+
 } // namespace
 
 bool MlInstalled()
@@ -251,8 +410,24 @@ bool AppleAvailable(std::string* why)
 #endif
 }
 
+bool NvlAvailable(std::string* why)
+{
+#ifdef PMC_HAVE_NVL
+    const auto& g = pmvs::nvl::ProbeGated(-1, pmvs::ReadSetting("NvidiaVfxRuntime"), NvlLog);
+    const bool ok = g.driver && g.runtime && (g.caps.vfg || g.caps.vsr || g.caps.nvof);
+    if (why) *why = ok ? "NVIDIA Video Effects" : !g.driver ? g.why : !g.runtime ? g.runtimeWhy : "no NVIDIA effect runs on this GPU";
+    return ok;
+#else
+    if (why) *why = "not in this build (Linux with the nvidia backend)";
+    return false;
+#endif
+}
+
 std::unique_ptr<HostEngine> OpenHostEngine(const std::string& name, const EngineRequest& r, std::string& why)
 {
+#ifdef PMC_HAVE_NVL
+    if (name == "nvl") { auto e = std::make_unique<NvlEngine>(); if (e->Open(r, why)) return e; return nullptr; }
+#endif
     if (name == "cpu") { auto e = std::make_unique<CpuEngine>(); if (e->Open(r, why)) return e; return nullptr; }
 #ifdef PMC_HAVE_PMML
     if (name == "ml") { auto e = std::make_unique<MlEngine>(); if (e->Open(r, why)) return e; return nullptr; }
@@ -293,24 +468,48 @@ HostPipeline::Entry* HostPipeline::Find(uint64_t idx)
     return nullptr;
 }
 
+// the newest pushed frame is b of the engine's pair; a push is contiguous when it follows the last pushed frame in order
+bool HostPipeline::Real(Entry& a, std::string& err)
+{
+    if (m_realIdx == a.idx) return true;
+    if (!(m_pushed && m_pb == a.idx)) {
+        bool contiguous = false;
+        if (m_pushed && !a.disc)
+            for (size_t i = 1; i < m_q.size(); ++i) if (&m_q[i] == &a) { contiguous = m_q[i - 1].idx == m_pb; break; }
+        if (!m_eng->Push(a.pic, contiguous, err)) return false;
+        ++m_pushes;
+        m_havePair = contiguous; m_pa = m_pb; m_pb = a.idx; m_pushed = true;
+        m_haveOut = false;
+    }
+    if (!m_eng->RenderReal(m_real, err)) return false;
+    m_realIdx = a.idx;
+    return true;
+}
+
 const I420* HostPipeline::Get(const Pick& p, std::string& err)
 {
     Entry* a = Find(p.a);
     if (!a) { err = "frame gone"; return nullptr; }
-    if (!p.generated()) return &a->pic;
+    const bool enh = m_eng->EnhancesReal();
+    if (!p.generated()) {
+        if (!enh) return &a->pic;
+        if (m_pushed && a->idx < m_pb) return &a->pic;   // behind the engine (after a jump back): the captured picture
+        return Real(*a, err) ? &m_real : nullptr;
+    }
     Entry* b = Find(p.b);
-    if (!b) return &a->pic;
+    if (!b) return enh ? (Real(*a, err) ? &m_real : nullptr) : &a->pic;
     if (m_haveOut && m_oa == p.a && m_ob == p.b && m_ot == p.t) return &m_out;
     // the engine's pair must be (a, b): the next pair in order needs one push, any other two
     if (!(m_havePair && m_pa == p.a && m_pb == p.b)) {
-        if (!(m_havePair && m_pb == p.a)) {
+        if (!(m_pushed && m_pb == p.a)) {
             if (!m_eng->Push(a->pic, false, err)) return nullptr;
             ++m_pushes;
         }
         if (!m_eng->Push(b->pic, true, err)) return nullptr;
         ++m_pushes;
-        m_havePair = true; m_pa = p.a; m_pb = p.b;
+        m_havePair = true; m_pushed = true; m_pa = p.a; m_pb = p.b;
         m_haveOut = false;
+        m_realIdx = ~0ull;
     }
     if (!m_eng->Render(p.t, m_out, err)) return nullptr;
     m_haveOut = true; m_oa = p.a; m_ob = p.b; m_ot = p.t;

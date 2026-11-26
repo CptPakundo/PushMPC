@@ -55,7 +55,12 @@ bool GpuPipeline::Open(Vk& vk, const GpuRequest& r, std::string& desc, std::stri
     c.quality = s.quality == 0 ? 1 : 2;
     c.deviceReadback = !r.hostOut;
     c.sourceSlots = 8; c.outSlots = 6;
-    c.blockMatcherOnly = true;
+    // motion: the plugin's rule (portable_vs.cpp): Auto = hybrid where the device has NVIDIA optical flow (the flow is one
+    // more block-matcher candidate and the block matcher's SAD picks: measured per block, every pair), else the block
+    // matcher; PortableMotion blocks / nvof / hybrid choose by hand
+    const bool hybrid = s.motion == "hybrid" || s.motion == "auto" || s.motion.empty();
+    c.blockMatcherOnly = s.motion != "nvof" && !hybrid;
+    c.nvofHybrid = hybrid;
     m_eng = std::make_shared<pmvs::gpu::Engine>();
     if (!m_eng->Configure(c, ctx, err)) { err = "GPU engine: " + err; m_eng.reset(); return false; }
     m_outW = m_eng->OutWidth(); m_outH = m_eng->OutHeight();
@@ -70,7 +75,9 @@ bool GpuPipeline::Open(Vk& vk, const GpuRequest& r, std::string& desc, std::stri
         if (vkAllocateDescriptorSets(vk.dev, &sa, &u.set) != VK_SUCCESS) { err = "vkAllocateDescriptorSets failed"; return false; }
     }
     char b[512];
-    std::snprintf(b, sizeof(b), "the portable GPU engine on %s: motion search and the cut guard on the GPU, %dx%d%s%s", vk.name.c_str(), r.w, r.h,
+    std::snprintf(b, sizeof(b), "the portable GPU engine on %s: %s, the cut guard on the GPU, %dx%d%s%s", vk.name.c_str(),
+                  !m_eng->OpticalFlowActive() ? "PushFPS's block matcher" : c.nvofHybrid ? "the block matcher with NVIDIA optical flow as a candidate (hybrid)" : "NVIDIA optical flow",
+                  r.w, r.h,
                   uc.kind != pmvs::GpuUpscaler::None ? ", upscaled " : "", uc.kind != pmvs::GpuUpscaler::None ? uc.why.c_str() : "");
     desc = b;
     return true;

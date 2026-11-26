@@ -333,7 +333,7 @@ const char* const kUsage =
     "  --list             list the windows capture mode can take, then exit\n"
     "Picture:\n"
     "  --smoother auto|off|2..8   frame generation (Auto: a frame of its own for every screen refresh)\n"
-    "  --engine auto|gpu|cpu|ml|apple\n"
+    "  --engine auto|gpu|cpu|ml|apple|nvl\n"
     "  --upscaler auto|nis|fsr|off\n"
     "  --fullscreen        show the player's picture on the whole screen (upscaled) instead of over its window\n"
     "  --display-hz <hz>   the screen's refresh rate when it cannot be read\n"
@@ -391,7 +391,7 @@ bool ParseOptions(int argc, char** argv, Options& o, std::string& why)
         else if (a == "-h" || a == "--help") o.help = true;
         else { why = "unknown option " + a; return false; }
     }
-    if (o.engine != "auto" && o.engine != "gpu" && o.engine != "cpu" && o.engine != "ml" && o.engine != "apple") { why = "--engine takes auto, gpu, cpu, ml or apple"; return false; }
+    if (o.engine != "auto" && o.engine != "gpu" && o.engine != "cpu" && o.engine != "ml" && o.engine != "apple" && o.engine != "nvl") { why = "--engine takes auto, gpu, cpu, ml, apple or nvl"; return false; }
     return true;
 }
 

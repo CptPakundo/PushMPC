@@ -117,7 +117,7 @@ struct Options {
     std::string window;          // X11 window id / macOS window number
     std::string player;          // the player's process / app name
     bool pick = false, list = false, portal = false, x11 = false, monitor = false;
-    std::string engine = "auto"; // auto | gpu | cpu | ml | apple
+    std::string engine = "auto"; // auto | gpu | cpu | ml | apple | nvl
     int smoother = -1;           // -1 = the setting (Smoother); 0 Auto, 1 off, 2..8
     std::string upscaler;        // auto | nis | fsr | off ("" = the setting)
     bool fullscreen = false;

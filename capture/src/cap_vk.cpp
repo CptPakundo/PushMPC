@@ -137,14 +137,45 @@ bool Vk::CreateDevice(VkSurfaceKHR surface, const std::string& want, bool allowC
     VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     f2.features.shaderStorageImageExtendedFormats = VK_TRUE;
     f2.pNext = &f12;
+    // NVIDIA's optical-flow engine (as vk_context.cpp's own device does: VK_NV_optical_flow with synchronization2 and
+    // format_feature_flags2, on an optical-flow queue family of its own); PUSHMPC_VK_NO_OPTICAL_FLOW=1 leaves it out
+    VkPhysicalDeviceOpticalFlowFeaturesNV fOf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV };
+    VkPhysicalDeviceSynchronization2FeaturesKHR fSync2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR };
+    int ofFam = -1;
+    {
+        const char* noOf = std::getenv("PUSHMPC_VK_NO_OPTICAL_FLOW");
+        if (!(noOf && noOf[0] == '1') && HasDevExt(phys, VK_NV_OPTICAL_FLOW_EXTENSION_NAME) && HasDevExt(phys, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
+            && HasDevExt(phys, VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME)) {
+            VkPhysicalDeviceOpticalFlowFeaturesNV qOf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV };
+            VkPhysicalDeviceFeatures2 q2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            q2.pNext = &qOf;
+            vkGetPhysicalDeviceFeatures2(phys, &q2);
+            uint32_t qn = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, nullptr);
+            std::vector<VkQueueFamilyProperties> q(qn);
+            vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, q.data());
+            for (uint32_t i = 0; i < qn && ofFam < 0; ++i) if ((q[i].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV) && i != family) ofFam = int(i);
+            if (qOf.opticalFlow && ofFam >= 0) {
+                exts.push_back(VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
+                exts.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+                exts.push_back(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
+                fOf.opticalFlow = VK_TRUE; fSync2.synchronization2 = VK_TRUE;
+                fOf.pNext = &fSync2; f12.pNext = &fOf;
+            } else ofFam = -1;
+        }
+    }
+    VkDeviceQueueCreateInfo qis[2] = { qi, qi };
+    uint32_t qCount = 1;
+    if (ofFam >= 0) { qis[1].queueFamilyIndex = uint32_t(ofFam); qCount = 2; }
     VkDeviceCreateInfo di{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     di.pNext = &f2;
-    di.queueCreateInfoCount = 1; di.pQueueCreateInfos = &qi;
+    di.queueCreateInfoCount = qCount; di.pQueueCreateInfos = qis;
     di.enabledExtensionCount = uint32_t(exts.size()); di.ppEnabledExtensionNames = exts.data();
     const VkResult r = vkCreateDevice(phys, &di, nullptr, &dev);
     if (r != VK_SUCCESS) { err = "vkCreateDevice failed (" + std::to_string(int(r)) + ") on " + name; dev = VK_NULL_HANDLE; return false; }
     volkLoadDevice(dev);
     vkGetDeviceQueue(dev, family, 0, &queue);
+    if (ofFam >= 0 && vkCreateOpticalFlowSessionNV) { ofFamily = uint32_t(ofFam); vkGetDeviceQueue(dev, ofFamily, 0, &ofQueue); opticalFlow = ofQueue != VK_NULL_HANDLE; }
     return true;
 }
 
@@ -155,6 +186,7 @@ std::shared_ptr<pmvs::gpu::Context> Vk::EngineContext(std::string& why)
     e.instance = inst; e.phys = phys; e.device = dev; e.getInstanceProcAddr = vkGetInstanceProcAddr;
     e.family = family; e.queueIndex = 0;
     e.queueLock = QLock; e.queueUnlock = QUnlock; e.lockCtx = &qlock;
+    if (opticalFlow) { e.ofFamily = ofFamily; e.ofQueue = ofQueue; }
     m_ctx = pmvs::gpu::Context::Adopt(e, why);
     return m_ctx;
 }

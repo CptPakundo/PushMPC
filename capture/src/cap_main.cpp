@@ -5,8 +5,10 @@
 // on a 60 Hz screen is gone), and every screen refresh shows its own moment: a generated frame between two real ones
 // (frame generation, Smoother) on the engine Auto picks, upscaled to the window by NIS / FSR1 on the GPU engine, in a
 // window right over the player that lets every click through.
-//   Engines (Auto): Linux: ml (PushFlow / RIFE through pmml, when its runtime is installed), else the portable GPU
-//   engine on Vulkan, else the CPU engine. macOS: apple (VideoToolbox frame interpolation), else the GPU engine on
+//   Engines (Auto): Linux: nvl (NVIDIA Video Effects: VFG, RTX VSR, the optical-flow tier; behind its own probe and the
+//   RTX 30 self-test), else ml (PushFlow / RIFE through pmml, when its runtime is installed), else the portable GPU
+//   engine on Vulkan (NVIDIA optical flow as a block-matcher candidate where the device has it), else the CPU engine.
+//   macOS: apple (VideoToolbox frame interpolation), else the GPU engine on
 //   MoltenVK, else the CPU engine.
 // Copy-protected video (a black capture) makes capture mode step aside and say why once. Lip sync: --audio-conf writes
 // the measured delay into an mpv-based player's mpv.conf (a marked block, removed again on exit).
@@ -103,7 +105,7 @@ bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int 
 #ifdef __APPLE__
         order = { "apple", "gpu", "cpu" };
 #else
-        order = { "ml", "gpu", "cpu" };
+        order = { "nvl", "ml", "gpu", "cpu" };   // NVIDIA Video Effects first where they run (RTX 30 after its self-test)
 #endif
     } else {
         order = { want };
@@ -111,6 +113,7 @@ bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int 
     }
     std::string why;
     for (const std::string& n : order) {
+        if (n == "nvl" && want == "auto" && !NvlAvailable(nullptr)) continue;
         if (n == "ml" && want == "auto" && !MlInstalled()) continue;
         if (n == "apple" && want == "auto" && !AppleAvailable(nullptr)) continue;
         if (n == "gpu") {
@@ -124,7 +127,7 @@ bool OpenEngines(Engines& e, const std::string& want, Vk* vk, int w, int h, int 
             return true;
         }
         EngineRequest r;
-        r.w = w; r.h = h; r.displayHz = hz; r.smoother = smoother;
+        r.w = w; r.h = h; r.displayHz = hz; r.smoother = smoother; r.displayW = outW; r.displayH = outH;
         std::string he;
         auto eng = OpenHostEngine(n, r, he);
         if (!eng) { why += (why.empty() ? "" : "; ") + n + ": " + he; continue; }
@@ -324,7 +327,8 @@ int Run(const Options& o)
         int ow = 0, oh = 0;
         if (screen) { ow = screen->Width(); oh = screen->Height(); }
         if (!OpenEngines(eng, want, vkOk ? vk.get() : nullptr, w, h, ow, oh, o, hz, smoother, !screen, err)) { Log("%s", err.c_str()); return false; }
-        if (smoother == 0 && eng.Steps() > 0) smoother = std::clamp(eng.Steps(), 2, 8);   // a k-step engine: its grid
+        if (smoother == 0 && eng.Steps() == 1) smoother = 1;   // upscaling only (nvl without frame generation)
+        else if (smoother == 0 && eng.Steps() > 0) smoother = std::clamp(eng.Steps(), 2, 8);   // a k-step engine: its grid
         Log("engine: %s (%s), smoother %s", eng.name.c_str(), eng.desc.c_str(), smoother == 0 ? "Auto" : smoother == 1 ? "off" : ("x" + std::to_string(smoother)).c_str());
         if (!o.dump.empty() && !dump.IsOpen()) {
             const int dw = eng.gpu ? eng.gpu->OutW() : w, dh = eng.gpu ? eng.gpu->OutH() : h;

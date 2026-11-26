@@ -51,6 +51,10 @@ public:
     std::mutex qlock;
     std::string name;
     bool cpuDevice = false, dmabuf = false, surfaces = false;
+    // NVIDIA optical flow (VK_NV_optical_flow, RTX): its own queue family, handed to the engine (Context::Adopt)
+    bool opticalFlow = false;
+    uint32_t ofFamily = 0;
+    VkQueue ofQueue = VK_NULL_HANDLE;
     VkPhysicalDeviceLimits limits{};
 private:
     VkPhysicalDeviceMemoryProperties m_mem{};
