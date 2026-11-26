@@ -1414,30 +1414,34 @@ function Add-FidelityFxSdk([string]$dest) {
     if ($LASTEXITCODE -ne 0) { Warn "FSR SDK 2.4.0 not installed (fidelityfx-fetch.ps1 exit $LASTEXITCODE): the package's FidelityFX 2.3.0 stays" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + FidelityFX SDK 2.4.0" }
 }
-# DLSS frame generation on RTX 20 and GTX 16 (TU116 / TU117) through the community port sdli1995/dlssg_for_sm86 (unlock TuringDlssg): downloaded from
-# its GitHub release, pinned and hashed (scripts\dlssg-port-fetch.ps1), into runtime\experimental\community\dlssg-sm75,
-# where pushcore looks for it. pushcore's first DLSS-G open on the card is the self-test; a failure falls back to the next
-# method. Off: -ExperimentalExtras No, PUSHMPC_DISABLE_TURINGDLSSG=1 or HKCU\Software\PushMPC\Unlocks TuringDlssg = 0.
+# DLSS frame generation through the community port sdli1995/dlssg_for_sm86 on RTX 20 and GTX 16 (TU116 / TU117; unlock
+# TuringDlssg) and on RTX 30 (unlock AmpereDlssg: next to DlssgTransfusion, pushcore picks one per open from what it
+# measured; also FG Lite): downloaded from its GitHub release, pinned and hashed (scripts\dlssg-port-fetch.ps1), into
+# runtime\experimental\community\dlssg-sm75, where pushcore looks for it. pushcore's first DLSS-G open on the port is the
+# self-test; a failure falls back to the next method. Off: -ExperimentalExtras No, PUSHMPC_DISABLE_TURINGDLSSG=1 /
+# PUSHMPC_DISABLE_AMPEREDLSSG=1, or HKCU\Software\PushMPC\Unlocks TuringDlssg / AmpereDlssg = 0.
 function Add-DlssgPort([string]$dest) {
     if ($GpuVendor -ne 'NVIDIA') { return }
-    # RTX 20 and the GTX 16 chips (TU116 / TU117: the same Turing instruction set; pushcore's self-test decides)
+    # RTX 20, the GTX 16 chips (TU116 / TU117: the same Turing instruction set; pushcore's self-test decides) and RTX 30
     $gi = Get-GpuInfo
+    $fam = Get-GpuFamily $gi
     $tu11x = ($gi.Device -ge 0x2180 -and $gi.Device -le 0x21DF) -or ($gi.Device -ge 0x1F80 -and $gi.Device -le 0x1FBF)
-    if ((Get-GpuFamily $gi) -ne 'RTX 20' -and -not $tu11x) { return }
-    $off = $ExperimentalExtras -eq 'No' -or $env:PUSHMPC_DISABLE_TURINGDLSSG -match '^(1|true|yes|on)$'
-    try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name TuringDlssg -ErrorAction Stop).TuringDlssg -eq 0) { $off = $true } } catch {}
-    if ($off) { Info 'Turing DLSS-G port: switched off (unlock TuringDlssg or -ExperimentalExtras No): DLSS-G stays off on this card'; return }
+    if ($fam -ne 'RTX 20' -and $fam -ne 'RTX 30' -and -not $tu11x) { return }
+    $unlock = if ($fam -eq 'RTX 30') { 'AmpereDlssg' } else { 'TuringDlssg' }
+    $off = $ExperimentalExtras -eq 'No' -or [Environment]::GetEnvironmentVariable("PUSHMPC_DISABLE_$($unlock.ToUpperInvariant())") -match '^(1|true|yes|on)$'
+    try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $unlock -ErrorAction Stop).$unlock -eq 0) { $off = $true } } catch {}
+    if ($off) { Info "DLSS-G port: switched off (unlock $unlock or -ExperimentalExtras No)"; return }
     $fetch = Join-Path $PSScriptRoot 'dlssg-port-fetch.ps1'
     if (-not (Test-Path $fetch)) { Warn 'dlssg-port-fetch.ps1 is not next to the installer: no DLSS-G on this card'; return }
     $target = Join-Path $dest 'runtime\experimental\community\dlssg-sm75'
-    if ($DryRun) { Dry "would add the Turing DLSS-G port (sdli1995/dlssg_for_sm86 0.4.2, pinned) in $target (dlssg-port-fetch.ps1)"; return }
-    Step 'DLSS frame generation for RTX 20 / GTX 16 (community port sdli1995/dlssg_for_sm86 0.4.2), from its GitHub release, pinned'
+    if ($DryRun) { Dry "would add the community DLSS-G port (sdli1995/dlssg_for_sm86 0.4.2, pinned) in $target (dlssg-port-fetch.ps1)"; return }
+    Step 'DLSS frame generation for RTX 20 / GTX 16 / RTX 30 (community port sdli1995/dlssg_for_sm86 0.4.2), from its GitHub release, pinned'
     $cache = if ($PackageCache) { Join-Path $PackageCache 'dlssg-port-0.4.2' } else { Join-Path $InstallDir 'download\dlssg-port-0.4.2' }
     & $fetch -Dest $target -Cache $cache
-    if ($LASTEXITCODE -ne 0) { Warn "Turing DLSS-G port not installed (dlssg-port-fetch.ps1 exit $LASTEXITCODE): PushFlow and the other methods stay" }
+    if ($LASTEXITCODE -ne 0) { Warn "Community DLSS-G port not installed (dlssg-port-fetch.ps1 exit $LASTEXITCODE): the other frame generation methods stay" }
     else {
-        Info 'DLSS frame generation turns on after a self-test on your card (the first video with DLSS-G)'
-        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + Turing DLSS-G port 0.4.2"
+        Info 'The community DLSS-G port turns on after a self-test on your card (during the first videos with DLSS-G)'
+        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + community DLSS-G port 0.4.2"
     }
 }
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {

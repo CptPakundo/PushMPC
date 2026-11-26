@@ -64,6 +64,11 @@ constexpr uint32_t kRouteSimulateAmpere = 1u << 1; // [Compatibility] SimulateAm
 constexpr uint32_t kRouteMultiFrame = 1u << 2;    // MaxGeneratedFrames > 1
 constexpr uint32_t kRouteLoaderBase = 1u << 3;    // set by the upstream loader on every install
 constexpr uint32_t kRouteKernelPtx = 0x10, kRouteKernelCubin = 0x20;   // [Compatibility] KernelImage (Auto = neither)
+// [DLSSG] Preset, pinned on every DLSS-G feature the backend creates (bits 25-26: 1 = A, 2 = B UI recomposition, 3 = C
+// FG Lite). Read from the 0.4.2 proxy (version.dll 0x180017935..0x18001796A: "b" -> 0x4000000, "c" -> 0x6000000, else
+// 0x2000000, OR-ed into the flags it passes to DlssgMod_Install). Upstream's factory value is A. The pin is set once per
+// install, and the backend installs once per process: FG Lite on / off is a per-process choice.
+constexpr uint32_t kRoutePresetA = 0x2000000u, kRoutePresetB = 0x4000000u, kRoutePresetC = 0x6000000u;
 
 struct ModInstallArgs {
     uint32_t size = 0x50;
@@ -77,9 +82,9 @@ struct ModInstallArgs {
 };
 static_assert(offsetof(ModInstallArgs, options) == 0x20 && sizeof(ModInstallArgs) == 0x50, "DlssgMod_Install checks size 0x50");
 
-inline uint32_t RouteFlagsFor(uint32_t maxGeneratedFrames)
+inline uint32_t RouteFlagsFor(uint32_t maxGeneratedFrames, bool lite = false)
 {
-    return kRouteLoaderBase | (maxGeneratedFrames > 1 ? kRouteMultiFrame : 0u);
+    return kRouteLoaderBase | (maxGeneratedFrames > 1 ? kRouteMultiFrame : 0u) | (lite ? kRoutePresetC : kRoutePresetA);
 }
 
 // ---- the pinned port ----
@@ -104,12 +109,15 @@ struct PortState {
     bool attempted = false;
     bool installed = false;
     bool turingHost = false;
+    bool touched = false;       // DlssgMod_Install was called: the backend's hooks may be in this process from here on
+    bool lite = false;          // installed with preset C (FG Lite)
     std::string why;            // the result in words (log, capability reason, self-test reason)
 };
 // Once per process: verify the three files (size + SHA-256), map the NGX core from the driver (NGXCore FullPath) so
 // the backend hooks it at once, map the runtime, handshake (GetInfo: ABI and the runtime SHA the backend serves),
-// install, pin both modules for the life of the process. Later calls return the first result.
-const PortState& EnsurePort(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames);
+// install (lite = DLSS-G preset C, FG Lite; else preset A), pin both modules for the life of the process. Later calls
+// return the first result (the preset stays what the first install chose).
+const PortState& EnsurePort(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames, bool lite = false);
 const PortState& CurrentPort();
 
 }  // namespace pmport

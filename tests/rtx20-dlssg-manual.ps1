@@ -30,7 +30,9 @@ $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.PNPDeviceID -ma
 if (-not $gpu) { Write-Host 'No NVIDIA GPU found.' -ForegroundColor Red; exit 1 }
 $dev = if ("$($gpu.PNPDeviceID)" -match 'DEV_([0-9A-Fa-f]{4})') { $Matches[1] } else { '?' }
 Write-Host ("GPU: {0}  device {1}  driver {2}" -f $gpu.Name, $dev, $gpu.DriverVersion)
-if ($gpu.Name -notmatch 'RTX 20|TITAN RTX|Quadro RTX|GTX 16|GTX 1650|GTX 1660') { Write-Host 'Note: this is not an RTX 20 or GTX 16 card; the port is used on those only.' -ForegroundColor Yellow }
+$rtx30 = $gpu.Name -match 'RTX 30|RTX A'
+if ($rtx30) { Write-Host 'RTX 30: the port runs next to DlssgTransfusion; PushMPC tries it after Transfusion has run once (force it with HKCU\Software\PushMPC\Unlocks AmpereDlssg = 1). Records: HKCU\Software\PushMPC\DlssgRoute.' -ForegroundColor Yellow }
+elseif ($gpu.Name -notmatch 'RTX 20|TITAN RTX|Quadro RTX|GTX 16|GTX 1650|GTX 1660') { Write-Host 'Note: this is not an RTX 20, GTX 16 or RTX 30 card; the port is used on those only.' -ForegroundColor Yellow }
 
 $backend = @(Get-ChildItem -LiteralPath $Root -Recurse -Filter 'sm86_backend.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\community\\dlssg-sm75\\dlssg_sm86\\backend\\' })
 if (-not $backend.Count) { Write-Host "The port is not installed under $Root (Setup fetches it on RTX 20 cards; check Setup's output)." -ForegroundColor Red; exit 1 }
@@ -45,12 +47,20 @@ foreach ($k in $pins.Keys) {
     Write-Host ("  {0} {1}" -f $(if ($ok) { 'ok  ' } else { 'BAD ' }), $k)
 }
 
-$key = 'HKCU:\Software\PushMPC\SelfTest\TuringDlssg'
+$unlock = if ($rtx30) { 'AmpereDlssg' } else { 'TuringDlssg' }
+$key = "HKCU:\Software\PushMPC\SelfTest\$unlock"
 $st = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-$mode = (Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name TuringDlssg -ErrorAction SilentlyContinue).TuringDlssg
-Write-Host ("Unlock TuringDlssg: {0}" -f $(if ($null -eq $mode) { 'Auto' } elseif ($mode -eq 0) { 'off' } else { 'forced on' }))
+$mode = (Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $unlock -ErrorAction SilentlyContinue).$unlock
+Write-Host ("Unlock {0}: {1}" -f $unlock, $(if ($null -eq $mode) { 'Auto' } elseif ($mode -eq 0) { 'off' } else { 'forced on' }))
 if ($st) { Write-Host ("Self-test: {0}  key {1}  {2}  {3}{4}" -f $st.Result, $st.Key, $st.When, $st.Reason, $(if ($st.Running) { "  (running: $($st.Running))" } else { '' })) }
 else { Write-Host 'Self-test: not run yet' }
+if ($rtx30) {
+    foreach ($r in 'Transfusion', 'Port') {
+        $rec = Get-ItemProperty -LiteralPath "HKCU:\Software\PushMPC\DlssgRoute\$r" -ErrorAction SilentlyContinue
+        if ($rec) { Write-Host ("Backend {0}: runs {1}, fails {2}, crashes {3}, {4} ms per generated frame at 4K" -f $r, $rec.Runs, $rec.Fails, $rec.Crashes, $rec.MsPerGen) }
+        else { Write-Host "Backend ${r}: no record yet" }
+    }
+}
 if ($Before) { Write-Host "`nNow play a video with DLSS-G (or Auto) at 2x or more for 30 seconds, then run this script again without -Before."; exit 0 }
 
 $logs = @(Get-ChildItem -LiteralPath $Root -Recurse -Include '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 20)

@@ -29,9 +29,9 @@ them.
 - **PushFlow**: ONNX Runtime and its execution providers (MIT, Microsoft; TensorRT-RTX under NVIDIA's licence,
   OpenVINO under Apache-2.0) from nuget.org and pypi.org, and the RIFE models (MIT) from PushFPS's release.
 - **AMD FidelityFX SDK** runtime (FSR 4.1 on Radeon RX 6000-9000), from AMD's GitHub release, under AMD's licence.
-- **DLSS frame generation on older GeForce cards** (RTX 20 and GTX 16 only): the community port sdli1995/dlssg_for_sm86 0.4.2
+- **DLSS frame generation on older GeForce cards** (RTX 20, GTX 16 and RTX 30 only): the community port sdli1995/dlssg_for_sm86 0.4.2
   from its GitHub release, checked against fixed hashes. Its code is MIT; it carries NVIDIA's unmodified DLSS frame
-  generation runtime (under NVIDIA's terms) and its own Turing kernels (from Coldwood1026/dlssg_for_sm75, binary only).
+  generation runtime (under NVIDIA's terms) and its own RTX 30 and Turing kernels (the Turing ones from Coldwood1026/dlssg_for_sm75; binary only).
   Its `LICENSE.md` and `THIRD_PARTY_NOTICES.txt` are installed with it.
 - **VapourSynth** R82 portable (LGPL-2.1) and Python's embeddable package (PSF licence), for the mpv route on Windows.
 - **mpv** for Plex, when Plex's own player can't take PushMPC's filter: shinchiro's libmpv build (GPL/LGPL).

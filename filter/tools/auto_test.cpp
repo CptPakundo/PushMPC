@@ -2,6 +2,7 @@
 #include "../src/PushMpcAuto.h"
 #include "../src/PushMpcExtras.h"
 #include "../../pushmpc/include/pushmpc/unlocks.h"
+#include "../../pushmpc/include/pushmpc/dlssg_route.h"
 #include <cstdio>
 #include <random>
 using namespace pm;
@@ -252,6 +253,43 @@ int main()
             check(n4.fgMethod == FgMethod::Dlssg && n4.multiplier >= 2, L"RTX 2080 Ti with the DLSS-G port: DLSS-G", n4.smootherNote + L" | " + n4.stoppedAt);
             const Choice n5 = Decide({}, film, d144, cold, Family(kRtx20, L"NVIDIA GeForce RTX 2080 Ti"));
             check(n5.fgMethod != FgMethod::Dlssg, L"RTX 2080 Ti without the DLSS-G port: not DLSS-G", n5.smootherNote);
+            // RTX 30: Transfusion or the community port per open (pmu::ChooseDlssgRoute)
+            using pmu::DlssgRoute;
+            auto route = [](auto f) { pmu::DlssgRouteInputs in; in.transfusionUsable = true; in.portUsable = true; f(in); return pmu::ChooseDlssgRoute(in); };
+            check(route([](auto& in) { in.portUsable = false; in.transfusion.runs = 3; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Transfusion, L"RTX 30 without the port: Transfusion");
+            check(route([](auto&) {}).route == DlssgRoute::Transfusion, L"RTX 30 with the port, nothing measured: Transfusion (default)");
+            check(route([](auto& in) { in.transfusion.runs = 1; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Port, L"RTX 30, Transfusion measured, port self-test pending: the port (its self-test)");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion.runs = 1; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Port, L"RTX 30, port passed but not measured: the port (measuring it)");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 0, 1.5 }; }).route == DlssgRoute::Port, L"RTX 30, the port measured cheaper: the port");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 1.5 }; in.port = { 4, 0, 0, 2.0 }; }).route == DlssgRoute::Transfusion, L"RTX 30, Transfusion measured cheaper: Transfusion");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 0, 1.98 }; }).route == DlssgRoute::Transfusion, L"RTX 30, near tie (< 3 %): Transfusion stays");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 1, 1.0 }; }).route == DlssgRoute::Transfusion, L"RTX 30, the port crashed once: Transfusion");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 1, 1.0 }; in.port = { 4, 0, 0, 2.0 }; }).route == DlssgRoute::Port, L"RTX 30, Transfusion crashed once: the port");
+            check(route([](auto& in) { in.transfusion = { 0, 0, 1, 0 }; }).route == DlssgRoute::Port, L"RTX 30, Transfusion crashed before any measurement: the port's self-test");
+            check(route([](auto& in) { in.transfusionUsable = false; }).route == DlssgRoute::Port, L"RTX 30, Transfusion not usable: the port");
+            { const auto c = route([](auto& in) { in.portPassed = true; in.wantLite = true; }); check(c.route == DlssgRoute::Port && c.lite, L"RTX 30, FG Lite asked for, port passed: the port with preset C"); }
+            { const auto c = route([](auto& in) { in.wantLite = true; }); check(c.route == DlssgRoute::Transfusion && !c.lite, L"RTX 30, FG Lite asked for, port not tested: Transfusion, no Lite"); }
+            { const auto c = route([](auto& in) { in.portPassed = true; in.wantLite = true; in.latch = DlssgRoute::Transfusion; }); check(c.route == DlssgRoute::Transfusion && !c.lite, L"RTX 30, process latched to Transfusion: Transfusion even for FG Lite"); }
+            check(route([](auto& in) { in.latch = DlssgRoute::Port; in.portPassed = true; in.transfusion = { 4, 0, 0, 1.0 }; in.port = { 4, 0, 0, 3.0 }; }).route == DlssgRoute::Port, L"RTX 30, process latched to the port: the port");
+            // FG Lite as an Auto tier: only where pushcore offers it, and only when it reaches a higher multiplier
+            {
+                Gpu g30 = Family(kRtx30, L"NVIDIA GeForce RTX 3060"); g30.available &= ~(1u << kCapVfg);
+                Gpu g30lite = g30; g30lite.available |= 1u << kCapDlssgLite;
+                bool liteSeen = false, liteBad = false, liteWithoutCap = false;
+                for (double card = 1.0; card <= 40.0; card += 0.5) {
+                    Costs k = cold; k.card = card;
+                    const Choice std2 = Decide({}, film, d144, k, g30);
+                    const Choice lite2 = Decide({}, film, d144, k, g30lite);
+                    if (std2.fgMethod == FgMethod::Dlssg && std2.fgQuality == kDlssgLiteQ) liteWithoutCap = true;
+                    if (lite2.fgMethod == FgMethod::Dlssg && lite2.fgQuality == kDlssgLiteQ) {
+                        liteSeen = true;
+                        if (!(lite2.multiplier > (std2.fgMethod == FgMethod::Dlssg ? std2.multiplier : 1))) liteBad = true;
+                    }
+                }
+                check(liteSeen && !liteBad, L"RTX 30 with FG Lite: Auto takes it on weaker cards, only for a higher multiplier");
+                check(!liteWithoutCap, L"RTX 30 without FG Lite (no port self-test): never FG Lite");
+                check(FgKeyOf(FgMethod::Dlssg, kDlssgLiteQ) == kKeyDlssgLite && FgKeyOf(FgMethod::Dlssg, 0) == kKeyDlssg, L"FG Lite has its own learned cost key");
+            }
             Settings fm; fm.fgMethod = FgMethod::Nvof;
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;

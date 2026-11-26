@@ -78,7 +78,7 @@ void pin(HMODULE m)
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(m), &out);
 }
 
-void install(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames)
+void install(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames, bool lite)
 {
     PortState& s = gState;
     s.attempted = true;
@@ -115,9 +115,10 @@ void install(const std::filesystem::path& runtimeDir, const std::filesystem::pat
     ModInstallArgs a;
     a.runtime = runtime;
     a.options.maxGeneratedFrames = std::clamp<uint32_t>(maxGeneratedFrames, 1, 5);
-    a.routeFlags = RouteFlagsFor(a.options.maxGeneratedFrames);
+    a.routeFlags = RouteFlagsFor(a.options.maxGeneratedFrames, lite);
     const std::wstring log = logFile.wstring();
     a.logFile = log.empty() ? nullptr : log.c_str();
+    s.touched = true;
     const int r = doInstall(&a);
     // the backend's hooks point into both modules from here on, whatever the result: never unload them
     pin(runtime); pin(backend);
@@ -126,9 +127,10 @@ void install(const std::filesystem::path& runtimeDir, const std::filesystem::pat
     const std::string pack = after.kernelPackOutcome ? after.kernelPackOutcome : "?";
     if (r != 0) { s.why = std::format("the port's backend refused the install (result {}, kernel pack {})", r, pack); return; }
     s.installed = true;
+    s.lite = lite;
     s.turingHost = turing() == 1;
-    s.why = std::format("community DLSS-G port {} installed ({}, runtime 310.9.16, kernel pack {}, {} host; {})", kPortVersion,
-                        info.name ? info.name : "?", pack, s.turingHost ? "Turing" : "non-Turing", core);
+    s.why = std::format("community DLSS-G port {} installed ({}, runtime 310.9.16, kernel pack {}, {} host, preset {}; {})", kPortVersion,
+                        info.name ? info.name : "?", pack, s.turingHost ? "Turing" : "non-Turing", lite ? "C (FG Lite)" : "A", core);
 }
 }  // namespace
 
@@ -142,10 +144,10 @@ bool PortFilesPresent(const std::filesystem::path& runtimeDir)
     return true;
 }
 
-const PortState& EnsurePort(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames)
+const PortState& EnsurePort(const std::filesystem::path& runtimeDir, const std::filesystem::path& logFile, uint32_t maxGeneratedFrames, bool lite)
 {
     std::call_once(gOnce, [&] {
-        install(runtimeDir, logFile, maxGeneratedFrames);
+        install(runtimeDir, logFile, maxGeneratedFrames, lite);
         if (gState.installed) veyra::log::info("dlssg-port", gState.why);
         else veyra::log::warn("dlssg-port", "not used: " + gState.why);
     });

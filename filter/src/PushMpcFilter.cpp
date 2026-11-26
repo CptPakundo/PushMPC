@@ -4309,6 +4309,7 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.fgBackend = CoreFg(c.fgMethod);
     p.vfgQuality = c.fgMethod == pm::FgMethod::Vfg ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
     p.fgTier = c.fgMethod == pm::FgMethod::PushFlow ? uint32_t(std::clamp(c.fgQuality, 0, 2)) : 1u;
+    p.fgLite = c.fgMethod == pm::FgMethod::Dlssg && c.fgQuality == pm::kDlssgLiteQ ? 1 : 0;   // RTX 50 performance mode / RTX 30 port preset C
     p.nr = c.nr ? 1 : 0;
     bool hdrFmt = false;
     { std::lock_guard<std::mutex> lk(m_fmtLock); hdrFmt = IsHdrFmt(m_outFmt.fmt); }
@@ -4326,7 +4327,7 @@ static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
     if (a.videoHdr && a.videoHdrPeak != b.videoHdrPeak) return false;
     if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold)) return false;
     if (a.sr && (a.srQuality != b.srQuality || a.srTarget != b.srTarget || a.srFamily != b.srFamily || a.srMethod != b.srMethod)) return false;
-    if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier)) return false;
+    if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier || a.fgLite != b.fgLite)) return false;
     if (a.nr && (a.nrTone != b.nrTone || a.nrStructure != b.nrStructure)) return false;
     // the deband pass is not part of the graph, but a change must still reach pushcore (setSettings: next frame)
     if (a.deband != b.deband || (a.deband && a.debandStrength != b.debandStrength)) return false;
@@ -4335,7 +4336,7 @@ static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
 static bool IsUpgrade(const PushCoreSettings& from, const PushCoreSettings& to)
 {
     return to.multiplier > from.multiplier || (to.sr && (!from.sr || to.srQuality > from.srQuality)) || (to.nr && !from.nr) ||
-           (to.multiplier == from.multiplier && to.fgBackend == from.fgBackend && (to.vfgQuality > from.vfgQuality || to.fgTier > from.fgTier));
+           (to.multiplier == from.multiplier && to.fgBackend == from.fgBackend && (to.vfgQuality > from.vfgQuality || to.fgTier > from.fgTier || (from.fgLite && !to.fgLite)));
 }
 static std::wstring GraphKey(const PushCoreSettings& p)
 {
@@ -4496,7 +4497,7 @@ void CPushMpcFilter::LearnCosts()
     if (fg.size() >= 48 && m_fgRun <= PUSHCORE_FG_NVOF) {
         // what pushcore really runs (after its own fallback), at the applied multiplier (capped for 2x-only methods)
         const pm::FgMethod m = MethodOf(m_fgRun);
-        const int q = m == pm::FgMethod::PushFlow ? int(a.fgTier) : int(a.vfgQuality);
+        const int q = m == pm::FgMethod::PushFlow ? int(a.fgTier) : m == pm::FgMethod::Dlssg ? (a.fgLite ? pm::kDlssgLiteQ : 0) : int(a.vfgQuality);
         const int mult = std::min<int>(int(a.multiplier), pm::MaxMultiplier(m));
         const double prior = pm::FgPrior(c, m, q, mult, pix);
         const int key = pm::FgKeyOf(m, q);
@@ -4732,7 +4733,7 @@ void CPushMpcFilter::AutoLoop()
         std::wstring running = L"not running";
         if (m_mode == Mode::Active) {
             const pm::FgMethod rm = MethodOf(m_fgRun);
-            const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : int(applied.vfgQuality);
+            const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : rm == pm::FgMethod::Dlssg ? (applied.fgLite ? pm::kDlssgLiteQ : 0) : int(applied.vfgQuality);
             running = m_fgRun > PUSHCORE_FG_NVOF || applied.multiplier < 2 ? std::wstring(L"off")
                     : std::format(L"{} {}x{}, cut guard {}", pm::FgMethodLabel(rm), std::min<int>(int(applied.multiplier), pm::MaxMultiplier(rm)),
                                   *pm::QualityName(rm, rq) ? std::wstring(L" ") + pm::QualityName(rm, rq) : std::wstring(), m_cutGuardRun ? (c.guardNote.empty() ? std::wstring(L"on") : L"on, " + c.guardNote) : std::wstring(L"off"));
@@ -4747,7 +4748,7 @@ void CPushMpcFilter::AutoLoop()
             if (!s.enable) osd += L" \u00B7 off";
             else if (m_mode == Mode::Active) {
                 const pm::FgMethod rm = MethodOf(m_fgRun);
-                const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : int(applied.vfgQuality);
+                const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : rm == pm::FgMethod::Dlssg ? (applied.fgLite ? pm::kDlssgLiteQ : 0) : int(applied.vfgQuality);
                 if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
                 if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel) : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : L" \u00B7 NIS");
                 osd += std::format(L" \u00B7 {:.0f} fps", fps);

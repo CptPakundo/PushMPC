@@ -107,7 +107,10 @@ inline bool IsWeakGpu(uint32_t family, const std::wstring& name)
 }
 
 // Frame generation methods as Auto sees them (index = FgMethod - 1 = PUSHCORE_FG_*)
-enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kFgKeys };
+enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kKeyDlssgLite, kFgKeys };
+// DLSS-G's quality values: 0 = standard, kDlssgLiteQ = FG Lite (RTX 50's performance mode; RTX 30's community port
+// preset C), offered where pushcore reports PUSHCORE_CAP_DLSSG_LITE
+inline constexpr int kDlssgLiteQ = 1;
 
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
@@ -119,6 +122,9 @@ struct Costs {
     double vfgLowShare = 0.40;                      // VFG Low ~0.35-0.4 x Medium (1080p quality runs)
     // DLSS-G with FidelityFX flow: flow + refine per source frame, then per generated frame (2x 1.47, 4x 3.87 p95)
     double dlssgFlow = 1.8, dlssgPerFrame = 1.2;
+    // FG Lite: each generated frame skips the second network (the port's RTX 3070 figures: -29..-34 % per generated
+    // frame at 2x, -45 % at 4x); a prior until measured (fgScale[kKeyDlssgLite])
+    double dlssgLiteShare = 0.62;
     // PushFlow (4K p95, gpu-best 4b): first generated frame of a pair, each further one; Fast, Balanced, Quality
     double pfFirst[3] = { 4.49, 5.68, 11.96 }, pfNext[3] = { 3.15, 3.93, 11.40 };
     bool pfBenched = false;                         // replaced by PushFlowBench on this card (already absolute)
@@ -145,7 +151,7 @@ struct Costs {
     double card = 1.0;                              // CardFactor for the priors (or the measured one, ApplyMeasuredCard)
     bool cardMeasured = false;                      // card comes from this GPU's own speed test, not the name table
     double vsrScale = 1.0;                          // learned measured/prior ratio for VSR
-    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
+    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
 };
@@ -229,7 +235,7 @@ inline int FgKeyOf(FgMethod m, int quality)
 {
     switch (m) {
     case FgMethod::Vfg: return quality <= 0 ? kKeyVfgLow : quality >= 2 ? kKeyVfgHigh : kKeyVfgMed;
-    case FgMethod::Dlssg: return kKeyDlssg;
+    case FgMethod::Dlssg: return quality == kDlssgLiteQ ? kKeyDlssgLite : kKeyDlssg;
     case FgMethod::PushFlow: return kKeyPfFast + std::clamp(quality, 0, 2);
     case FgMethod::Fsr: return kKeyFsr;
     case FgMethod::AmdFrc: return kKeyFrc;
@@ -250,7 +256,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
         const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
         return v * sizeVfg * c.card;
     }
-    case FgMethod::Dlssg: return (c.dlssgFlow * pix + c.dlssgPerFrame * (m - 1) * sizeVfg) * c.card;
+    case FgMethod::Dlssg: return (c.dlssgFlow * pix + c.dlssgPerFrame * (quality == kDlssgLiteQ ? c.dlssgLiteShare : 1.0) * (m - 1) * sizeVfg) * c.card;
     case FgMethod::PushFlow: {
         const int t = std::clamp(quality, 0, 2);
         const double v = c.pfFirst[t] + c.pfNext[t] * (m - 2);
@@ -305,8 +311,14 @@ inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == F
 // base quality, upgrade, and the fallback when the base cannot reach 2x (VFG: Medium -> High, Low; PushFlow: Balanced ->
 // Quality, Fast); the user's FG quality fixes it (PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 struct Tiers { int base, upgrade, fallback; };
-inline Tiers TiersOf(FgMethod m, FgQuality q)
+// lite: the GPU has DLSS-G's FG Lite (PUSHCORE_CAP_DLSSG_LITE): Auto keeps standard DLSS-G and takes FG Lite when that
+// reaches a higher multiplier (a weaker card); the fixed quality Low means FG Lite, Medium / High standard
+inline Tiers TiersOf(FgMethod m, FgQuality q, bool lite = false)
 {
+    if (m == FgMethod::Dlssg && lite) {
+        if (q == FgQuality::Auto) return { 0, -1, kDlssgLiteQ };
+        return { int(q) <= 0 ? kDlssgLiteQ : 0, -1, -1 };
+    }
     if (m != FgMethod::Vfg && m != FgMethod::PushFlow) return { 0, -1, -1 };
     if (q != FgQuality::Auto) return { int(q), -1, -1 };
     return { 1, 2, 0 };
@@ -315,6 +327,7 @@ inline const wchar_t* QualityName(FgMethod m, int q)
 {
     if (m == FgMethod::PushFlow) return q <= 0 ? L"Fast" : q >= 2 ? L"Quality" : L"Balanced";
     if (m == FgMethod::Vfg) return q <= 0 ? L"Low" : q >= 2 ? L"High" : L"Medium";
+    if (m == FgMethod::Dlssg && q == kDlssgLiteQ) return L"FG Lite";
     return L"";
 }
 
@@ -329,8 +342,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // DLSS-G on RTX 20 runs NVIDIA's Ada kernels re-targeted to Turing by the community port (SM75 images, FP16 tensor
     // cores, no FP8): its prior is 1.5x the card-scaled one until the running graph has measured it (fgScale learned)
     // GTX 16 has no tensor cores (FP16 units instead): 4x, as for RTX VSR there
-    if (g.family == kRtx20 && !c.fgLearned[kKeyDlssg]) c.fgScale[kKeyDlssg] *= 1.5;
-    if (g.family == kGtx && !c.fgLearned[kKeyDlssg]) c.fgScale[kKeyDlssg] *= 4.0;
+    for (int k : { int(kKeyDlssg), int(kKeyDlssgLite) }) {
+        if (g.family == kRtx20 && !c.fgLearned[k]) c.fgScale[k] *= 1.5;
+        if (g.family == kGtx && !c.fgLearned[k]) c.fgScale[k] *= 4.0;
+    }
     // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
     // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
     // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
@@ -475,11 +490,16 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
             const FgMethod m = order[i];
             if (i > 0 && m == order[0] && s.fgMethod != FgMethod::Auto) continue;
             if (!g.has(CapOf(m))) { notes += std::format(L"{} not available ({}); ", FgMethodLabel(m), g.reason[CapOf(m)]); continue; }
-            const Tiers t = TiersOf(m, s.fgQuality);
+            const Tiers t = TiersOf(m, s.fgQuality, g.has(kCapDlssgLite));
             std::wstring stop;
             int q = t.base;
             int mult = s.smoother != kAuto ? std::min(s.smoother, MaxMultiplier(m)) : pickFor(m, q, base, stop);
             if (s.smoother == kAuto && mult < 2 && t.fallback >= 0) { std::wstring s2; const int m2 = pickFor(m, t.fallback, base, s2); if (m2 >= 2) { mult = m2; q = t.fallback; stop = s2; } }
+            // DLSS-G FG Lite: taken when it reaches a higher multiplier than standard DLSS-G (a card where standard does not fit)
+            else if (s.smoother == kAuto && m == FgMethod::Dlssg && t.fallback == kDlssgLiteQ) {
+                std::wstring s2; const int m2 = pickFor(m, kDlssgLiteQ, base, s2);
+                if (m2 > mult) { mult = m2; q = kDlssgLiteQ; stop = s2; }
+            }
             if (mult >= 2) {
                 p.m = m; p.mult = mult; p.q = q; p.stop = stop.empty() ? L"fixed" : stop;
                 if (!notes.empty()) p.stop = notes + p.stop;
@@ -520,7 +540,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- the quality upgrade at the same multiplier (Auto quality only)
     if (r.multiplier >= 2 && s.fgQuality == FgQuality::Auto) {
-        const Tiers t = TiersOf(r.fgMethod, s.fgQuality);
+        const Tiers t = TiersOf(r.fgMethod, s.fgQuality, g.has(kCapDlssgLite));
         if (t.upgrade >= 0 && r.fgQuality == t.base) {
             const double now = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.base, r.multiplier, pixFg);
             const double up = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.upgrade, r.multiplier, pixFg);
