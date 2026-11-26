@@ -19,6 +19,10 @@
 #include "nvl_selftest.h"
 #include "nvl_settings.h"
 #include "platform.h"
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace pmk {
 
@@ -39,7 +43,12 @@ const GpuInfo& Probe()
         const std::string key = SelfTestKey(g);
         int r = force ? (std::strcmp(force, "0") ? 1 : 0) : ReadSelfTest(key);
         std::string log;
-        if (r < 0) r = RunSelfTest(SelfTestExe(), g.runtimeDir, g.device, 120, log);
+        const std::string exe = SelfTestExe();
+#if !defined(_WIN32)
+        // Kodi's "Install from zip file" drops the executable bit of the self-test next to the library: put it back
+        if (!exe.empty() && access(exe.c_str(), F_OK) == 0 && access(exe.c_str(), X_OK) != 0) chmod(exe.c_str(), 0755);
+#endif
+        if (r < 0) r = RunSelfTest(exe, g.runtimeDir, g.device, 120, log);
         if (r == 1) { g.caps.vfg = true; g.caps.vfgWhy.clear(); }
         else g.caps.vfgWhy = "RTX 30: the VFG compatibility self-test did not pass";
     }

@@ -3,7 +3,9 @@
 # on Linux, from Flathub and distro packages to LibreELEC, CoreELEC and OSMC (aarch64). Run by kodi-addon.yml with the
 # checkout and $RUNNER_TEMP mounted at the same paths as on the host, so the host runs the unit tests afterwards.
 #   build-linux.sh <kodi dev kit include dir> <ffmpeg prefix> <build dir> [nvl]
-# nvl: also the NVIDIA engine (x86_64; nvcc from NVIDIA's RHEL 8 repository, build time only)
+# nvl: also the NVIDIA engine (x86_64; nvcc from NVIDIA's RHEL 8 repository, build time only); with SLANG_DIR set (the
+# pinned Slang, scripts/slang-pin.json) also its GPU cut guard, else the CPU guard
+# FFMPEG_VERSION comes from the environment (kodi-addon.yml passes it into the container).
 set -euo pipefail
 devkit="$1"; ff="$2"; build="$3"; nvl="${4:-}"
 here=$(cd "$(dirname "$0")" && pwd); src=$(cd "$here/.." && pwd)
@@ -16,8 +18,9 @@ fi
 args=()
 if [ "$nvl" = nvl ] && [ "$(uname -m)" = x86_64 ]; then
   ver="${CUDA_PKG_VERSION:-12-8}"
-  dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo >/dev/null 2>&1 || true
-  dnf install -y -q "cuda-nvcc-$ver" "cuda-cudart-devel-$ver" >/dev/null
+  # NVIDIA's RHEL 8 repository (manylinux_2_28 is AlmaLinux 8); written directly, dnf config-manager is not always there
+  curl -fsSL --retry 3 -o /etc/yum.repos.d/cuda-rhel8.repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+  dnf install -y -q "cuda-nvcc-$ver" "cuda-cudart-devel-$ver" "cuda-crt-$ver" >/dev/null 2>&1 || dnf install -y -q "cuda-nvcc-$ver" "cuda-cudart-devel-$ver" >/dev/null
   export CUDA_PATH=/usr/local/cuda-${ver/-/.}
   "$CUDA_PATH/bin/nvcc" --version | tail -1
   args+=(-DPM_NVL=ON -DPM_NVCC="$CUDA_PATH/bin/nvcc")

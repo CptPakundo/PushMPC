@@ -4,7 +4,9 @@ build, portable mode, on WARP) with inputstream.pushmpc installed, and judge eac
 usage: run_cases.py --kodi "<command>" --home <kodi home> --addon <built add-on dir> --clips <dir> --major 21|22
                     --out <dir> [--cases a,b,...]
 <kodi home> is the folder holding addons/ and userdata/ (Flathub: ~/.var/app/tv.kodi.Kodi/data; portable Windows:
-<kodi>/portable_data)."""
+<kodi>/portable_data). Android (an emulator over adb): <kodi home> is a local mirror; --before pushes it to the device
+before every start, --after pulls Kodi's log and add-on database back, and --player-clips is where the clips are on the
+device (Kodi and drive.py get that path)."""
 import argparse, glob, os, shlex, shutil, sqlite3, subprocess, sys, time
 
 ap = argparse.ArgumentParser()
@@ -21,8 +23,13 @@ ap.add_argument("--alloc-off", default="", help="command that takes Kodi's dma-b
 ap.add_argument("--alloc-on", default="", help="command that gives it back")
 ap.add_argument("--gpu", action="store_true", help="the GPU engine is expected (Vulkan present)")
 ap.add_argument("--play", type=float, default=14.0)
+ap.add_argument("--first", type=float, default=25.0, help="seconds for each first start (Kodi registers the add-on)")
+ap.add_argument("--before", default="", help="command run before every Kodi start, after the settings are written")
+ap.add_argument("--after", default="", help="command run after every Kodi run (after --kill)")
+ap.add_argument("--player-clips", default="", help="the clips folder as Kodi sees it (default: --clips)")
 a = ap.parse_args()
 here = os.path.dirname(os.path.abspath(__file__))
+pclips = a.player_clips or a.clips
 os.makedirs(a.out, exist_ok=True)
 summary = os.path.join(a.out, "summary.md")
 kodi22 = a.major >= 22
@@ -56,7 +63,9 @@ EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2,
          # stream details Kodi probes from a decoded frame at play start, and a Videos listing of every clip, where Kodi
          # extracts thumbnails and stream details
          ("hdr10_noalloc", "hdr10.mkv", {"smoother": 2, "_noalloc": 1}, 2, kodi22, "640x360", "play"),
-         ("browse_noalloc", None, {"smoother": 2, "_noalloc": 1}, 1, False, "*", "browse")]
+         ("browse_noalloc", None, {"smoother": 2, "_noalloc": 1}, 1, False, "*", "browse"),
+         # Windows: pushcore (engine 3) through pm_pushcore.dll with the stub core on WARP ($PUSHMPC_CORE_DIR)
+         ("pushcore_x2", "h264.mp4", {"smoother": 2, "engine": 3, "upscale": 0}, 2, True, "640x360", "play")]
 if a.cases:
     keep = set(a.cases.split(","))
     CASES = [c for c in CASES + EXTRA if c[0] in keep]
@@ -102,10 +111,12 @@ def launch(args, seconds, drive_case=None, drive_out=None, stdout_path=None):
     if log:
         os.remove(log)
     kodi_settings()
+    if a.before:
+        subprocess.run(a.before, shell=True, check=False)
     p = subprocess.Popen(cmd, stdout=open(stdout_path, "w") if stdout_path else subprocess.DEVNULL, stderr=subprocess.STDOUT)
     d = None
     if drive_case:
-        d = subprocess.Popen([sys.executable, os.path.join(here, "drive.py"), drive_case, str(seconds), a.clips],
+        d = subprocess.Popen([sys.executable, os.path.join(here, "drive.py"), drive_case, str(seconds), pclips],
                              stdout=open(drive_out, "w"), stderr=subprocess.STDOUT)
     try:
         p.wait(timeout=seconds + 100)
@@ -120,12 +131,14 @@ def launch(args, seconds, drive_case=None, drive_out=None, stdout_path=None):
             d.kill()
     if a.kill:
         subprocess.run(a.kill, shell=True, check=False)
+    if a.after:
+        subprocess.run(a.after, shell=True, check=False)
     time.sleep(2)
 
 # first start: Kodi registers the add-on (disabled, as for any add-on copied in by hand); enable it in the database
 # a slow first start (Wayland, a cold Flatpak) may end before Kodi wrote its add-on database: start again then
 for attempt in range(3):
-    launch([], 25, "enable", os.path.join(a.out, f"first-start-{attempt}.txt"))
+    launch([], a.first, "enable", os.path.join(a.out, f"first-start-{attempt}.txt"))
     print(open(os.path.join(a.out, f"first-start-{attempt}.txt"), encoding="utf-8", errors="replace").read(), flush=True)
     dbs = sorted(glob.glob(os.path.join(ud, "Database", "Addons*.db")))
     if dbs:
@@ -162,7 +175,7 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
         subprocess.run(a.alloc_off, shell=True, check=False)
     # a start that never got as far as Kodi's log (the previous Flatpak instance still going away) is tried once more
     for attempt in range(2):
-        launch([os.path.join(a.clips, clip)] if clip else [], a.play * 2 if drive_case == "browse" else a.play, drive_case, drive_out,
+        launch([(pclips.rstrip("/") + "/" + clip) if a.player_clips else os.path.join(a.clips, clip)] if clip else [], a.play * 2 if drive_case == "browse" else a.play, drive_case, drive_out,
                os.path.join(a.out, f"{name}.stdout.txt"))
         log = find_log()
         if log and os.path.getsize(log) > 0:

@@ -1139,21 +1139,23 @@ private:
         AVFrame* f = m_frame;
         int64_t pts = f->best_effort_timestamp;
         if (pts == AV_NOPTS_VALUE) pts = m_havePrev ? m_prevPts + int64_t(m_frameUs > 0 ? m_frameUs : 41708) : 0;
+        // the CPU planes at the frame's size (a frame pushcore cannot take falls back to them); a new size: no pair across it
+        const int bits = m_pc->TenBit() ? 10 : 8;
+        if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
         const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
         const int cur = m_havePrev ? 1 - m_prevSlot : 0;
         std::string err;
         int slot = -1;
         if (f->format == AV_PIX_FMT_D3D11 && f->hw_frames_ctx) {
-            if (m_w != f->width || m_h != f->height) { m_w = m_outW = f->width; m_h = m_outH = f->height; m_bits = m_pc->TenBit() ? 10 : 8; }
             slot = m_pc->PushTexture(f->data[0], unsigned(reinterpret_cast<intptr_t>(f->data[1])), pts, contiguous, err);
             if (slot < 0) {   // keep it on the CPU
                 av_frame_unref(m_sw);
-                if (av_hwframe_transfer_data(m_sw, f, 0) >= 0) { av_frame_copy_props(m_sw, f); f = m_sw; }
+                if (av_hwframe_transfer_data(m_sw, f, 0) < 0) { av_frame_unref(m_frame); return; }   // no picture at all: drop it
+                av_frame_copy_props(m_sw, f);
+                f = m_sw;
             }
         }
         if (slot < 0 && !f->hw_frames_ctx) {
-            const int bits = m_pc->TenBit() ? 10 : 8;
-            if (m_pic[0].buf.empty() || f->width != m_w || f->height != m_h || bits != m_bits) Setup(f->width, f->height, bits);
             ToPlanes(f, m_pic[cur]);
             if (err.empty()) {
                 pm_yuv src{};
