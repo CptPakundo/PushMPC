@@ -176,6 +176,7 @@ files, Setup reuses them instead of downloading.
 
 - Capture mode on Linux and Mac without OBS, with the best picture PushMPC can make there.
 - Plex on Mac.
+- Faster AI frame generation on more graphics chips: AMD Radeon and Snapdragon on Windows, and more Linux setups.
 
 ## 📚 More
 

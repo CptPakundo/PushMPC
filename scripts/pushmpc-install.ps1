@@ -64,7 +64,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'potplayer-apply', 'potplayer-remove', 'mpv-apply', 'mpv-remove', 'autoplan')]
+    [ValidateSet('stage', 'package', 'install', 'update', 'apply-pending', 'rollback', 'uninstall', 'status', 'plan', 'prepare-runtime', 'mpcbe-apply', 'mpcbe-remove', 'potplayer-apply', 'potplayer-remove', 'mpv-apply', 'mpv-remove', 'autoplan', 'plexcheck')]
     [string]$Action,
     [string]$StageDir = '',
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'PushMPC'),
@@ -1741,7 +1741,7 @@ function Invoke-Package {
         components = @(
             [ordered]@{ name = 'filter'; version = $zips.filter.version; url = $zips.filter.file; sha256 = $zips.filter.sha; manifestSha256 = $zips.filter.msha },
             [ordered]@{ name = 'core'; version = $zips.core.version; pushfps = $cm.kv['pushfps']; nvof = $cm.kv['nvof']; requiresRuntime = ($Packages.NVIDIA.Version + '|' + $Packages.AMD.Version); url = $zips.core.file; sha256 = $zips.core.sha; manifestSha256 = $zips.core.msha }
-        ) + @(if ($zips.vsplugin) { [ordered]@{ name = 'vsplugin'; version = $zips.vsplugin.version; optional = $true; url = $zips.vsplugin.file; sha256 = $zips.vsplugin.sha; manifestSha256 = $zips.vsplugin.msha } }) + $runtimes
+        ) + @(if ($zips.vsplugin) { [ordered]@{ name = 'vsplugin'; version = $zips.vsplugin.version; optional = $true; url = $zips.vsplugin.file; sha256 = $zips.vsplugin.sha; manifestSha256 = $zips.vsplugin.msha } }) + @(if ($zips.plexnative) { [ordered]@{ name = 'plexnative'; version = $zips.plexnative.version; optional = $true; url = $zips.plexnative.file; sha256 = $zips.plexnative.sha; manifestSha256 = $zips.plexnative.msha } }) + $runtimes
         note = 'Component URLs are relative to this release (https://github.com/CptPakundo/PushMPC/releases/download/<tag>/). The runtime is a reference to Veyra''s package on Veyra''s GitHub release; PushMPC hosts no NVIDIA file.'
         signature = 'release.json.sig next to this file: base64 RSA-SHA256 over the file bytes, checked with release-key.xml'
     }
@@ -2462,8 +2462,8 @@ function Find-PmmlRuntime {
 # TensorRT-RTX on an NVIDIA RTX card, OpenVINO on Intel. Every other GPU keeps PushFlow on DirectML, pushcore's own
 # zero-copy session: Radeon (the AMD GPU EP is not published as a plugin EP; MIGraphX is Linux / ROCm only),
 # GeForce GTX (TensorRT-RTX needs RTX), Snapdragon (QNN's NPU path for PushFlow is not built yet).
-# GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5, the oldest TensorRT-RTX runs on): a candidate only; pmml's measurement
-# must prefer it, without one PushFlow stays on DirectML there (Get-PmmlChoice)
+# GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5, the oldest TensorRT-RTX supports): TensorRT-RTX as on RTX
+# (Get-PmmlChoice); pushcore keeps DirectML when the EP does not load or its session fails
 function Get-PmmlEps([string]$fam, $g = $null) {
     switch -Wildcard ($fam) { 'RTX*' { return @('trt-rtx') } 'Intel' { return @('openvino') } 'GTX' { if ($g -and (Test-Gtx16 $g)) { return @('trt-rtx') }; return @() } default { return @() } }
 }
@@ -2519,6 +2519,9 @@ function Get-PmmlChoice([string]$rt, [string]$fam, $g) {
         } catch { }
     }
     if ($fam -like 'RTX*' -and (Test-Path -LiteralPath (Join-Path $rt 'eps\trt-rtx\ep.json'))) { return @{ backend = 'ort:core:trt-rtx:0'; why = 'NVIDIA RTX with the TensorRT-RTX EP installed (pmml''s order without a measurement: trt-rtx before dml)' } }
+    # GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5: TensorRT-RTX's oldest supported architecture): the same as RTX;
+    # pushcore goes back to DirectML when the EP does not load or its session fails
+    if ($fam -eq 'GTX' -and $g -and (Test-Gtx16 $g) -and (Test-Path -LiteralPath (Join-Path $rt 'eps\trt-rtx\ep.json'))) { return @{ backend = 'ort:core:trt-rtx:0'; why = 'GeForce GTX 16 / MX450 / MX550 (Turing, SM 7.5) with the TensorRT-RTX EP installed (DirectML when its session fails)' } }
     # Intel: OpenVINO's GPU plugin uses the XMX engines DirectML does not reach (Auto's default table for Arc / Xe)
     if ($fam -eq 'Intel' -and (Test-Path -LiteralPath (Join-Path $rt 'eps\openvino\ep.json'))) { return @{ backend = 'ort:core:openvino:0'; why = 'Intel GPU with the OpenVINO EP installed (Auto''s default for Arc / Xe: OpenVINO uses the XMX engines)' } }
     return @{ backend = ''; why = 'pmml''s order without a measurement keeps DirectML on this GPU' }
@@ -2668,7 +2671,10 @@ function Invoke-PlexNative([string]$dir, [string]$verb, [string[]]$more = @()) {
     if (Test-Path -LiteralPath $rf) { Remove-Item -LiteralPath $rf -Force }
     # an elevated process has no pipes to this one: a wrapper runs the installer as a child (its JSON lines on stdout and
     # its log on stderr are written by [Console], so only a process pipe catches them), into one file, and passes its exit code
-    $wrapped = "& $(& $q $exe) -NoProfile -ExecutionPolicy Bypass -File $(& $q $script) $verb -From $(& $q $dir) -Json $($more -join ' ') 2>&1 | ForEach-Object { [string]`$_ } | Set-Content -Encoding UTF8 -LiteralPath $(& $q $rf); `$rc = `$LASTEXITCODE"
+    # refresh (new proxy files from an update): uninstall, then install with the new files, in one elevation
+    $run = { param($v, $m, $how) "& $(& $q $exe) -NoProfile -ExecutionPolicy Bypass -File $(& $q $script) $v -From $(& $q $dir) -Json $($m -join ' ') 2>&1 | ForEach-Object { [string]`$_ } | $how -Encoding UTF8 -LiteralPath $(& $q $rf)" }
+    if ($verb -eq 'refresh') { $wrapped = (& $run 'uninstall' @() 'Set-Content') + '; ' + (& $run 'install' $more 'Add-Content') + "; `$rc = `$LASTEXITCODE" }
+    else { $wrapped = (& $run $verb $more 'Set-Content') + "; `$rc = `$LASTEXITCODE" }
     if ($verb -eq 'uninstall') {
         # the installer removes its per-app backup folders; their parents in ProgramData (made elevated) go here when empty
         $pd = Join-Path $env:ProgramData 'PushMPC'
@@ -2691,7 +2697,8 @@ function Invoke-PlexNative([string]$dir, [string]$verb, [string[]]$more = @()) {
         }
         Remove-Item -LiteralPath $rf -Force -ErrorAction SilentlyContinue
     }
-    foreach ($r in $rows) { Info ("Plex ({0}): {1}{2}" -f $r.target, $r.state, $(if ($r.detail) { " ($($r.detail))" } else { '' })) }
+    foreach ($r in $rows) { Info ("Plex ({0}, {1}): {2}{3}" -f $r.target, $r.action, $r.state, $(if ($r.detail) { " ($($r.detail))" } else { '' })) }
+    if ($verb -eq 'refresh') { $rows = @($rows | Where-Object { $_.action -ne 'uninstall' }) }
     return @{ rc = $rc; rows = $rows }
 }
 function Get-PlexScript { foreach ($p in @((Join-Path $InstallDir 'filter\pushmpc-plex.ps1'), (Join-Path $StageDir 'filter\pushmpc-plex.ps1'), (Join-Path $here 'pushmpc-plex.ps1'))) { if ($p -and (Test-Path -LiteralPath $p)) { return $p } }; return '' }
@@ -2702,6 +2709,68 @@ function Invoke-PlexSwap([string]$verb) {
     if ($PlexRoot) { $a.PlexRoot = $PlexRoot }
     if ($NoTask) { $a.NoTask = $true }
     & $s $verb @a
+}
+# The proxy after a Plex update: a logon task (\PushMPC\Plex proxy check, highest available rights, like the swap's) runs
+# "pushmpc-install.ps1 plexcheck": nothing when the proxy is still in place (checked without elevation), else
+# pushmpc-plex-native.ps1 reapply; when that does not pass, the proxy comes out and the libmpv swap goes in.
+$PlexTaskPath = '\PushMPC\'; $PlexTaskName = 'Plex proxy check'
+function Register-PlexNativeTask {
+    if ($NoTask -or $DryRun) { return }
+    $me = Join-Path $InstallDir 'filter\pushmpc-install.ps1'
+    if (-not (Test-Path -LiteralPath $me)) { return }
+    try {
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $user = "$env:USERDOMAIN\$env:USERNAME"
+        $act = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$me`" plexcheck -InstallDir `"$InstallDir`""
+        $trg = New-ScheduledTaskTrigger -AtLogOn -User $user
+        $pri = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskPath $PlexTaskPath -TaskName $PlexTaskName -Action $act -Trigger $trg -Principal $pri -Force | Out-Null
+        Info "Plex: logon check registered ($PlexTaskPath$PlexTaskName): sets the proxy up again after a Plex update"
+    } catch { Warn "Plex: the logon check could not be registered ($($_.Exception.Message)); after a Plex update run Setup's Repair" }
+}
+function Unregister-PlexNativeTask { if (-not $DryRun) { Unregister-ScheduledTask -TaskPath $PlexTaskPath -TaskName $PlexTaskName -Confirm:$false -ErrorAction SilentlyContinue } }
+# every Plex app with its libmpv still has PushMPC's proxy (the hash its installer recorded), read without elevation
+function Test-PlexNativeInPlace {
+    $any = $false
+    foreach ($a in @(@{ Key = 'htpc'; Dir = "$env:ProgramFiles\Plex\Plex HTPC" }, @{ Key = 'desktop'; Dir = "$env:ProgramFiles\Plex\Plex" })) {
+        if (-not (Test-Path -LiteralPath (Join-Path $a.Dir 'libmpv-2.dll'))) { continue }
+        $rec = Join-Path $env:ProgramData "PushMPC\plex-native\$($a.Key)\proxy.sha256"
+        if (-not (Test-Path -LiteralPath $rec)) { continue }   # an app the proxy did not take (unsupported)
+        $any = $true
+        if (-not (Test-Path -LiteralPath (Join-Path $a.Dir 'avfilter-8-plex.dll'))) { return $false }
+        if ((Get-Sha256 (Join-Path $a.Dir 'avfilter-8.dll')) -ne (Get-Content -LiteralPath $rec -Raw).Trim().ToUpperInvariant()) { return $false }
+    }
+    return $any
+}
+function Get-PlexNativeBuild([string]$dir) { $m = Join-Path $dir 'manifest.txt'; if (Test-Path -LiteralPath $m) { return Get-Sha256 $m }; return '' }
+function Invoke-PlexCheck($state) {
+    if (-not (Get-StateValue $state 'plexNative')) { Unregister-PlexNativeTask; return }
+    $dst = Join-Path $InstallDir 'plexnative'
+    if (-not (Test-Path -LiteralPath (Join-Path $dst 'pushmpc-plex-native.ps1'))) { return }
+    # an update brought new proxy files (another plexnative build than the one set up into Plex): refresh
+    $refresh = (Get-PlexNativeBuild $dst) -ne (Get-StateValue $state 'plexNativeBuild')
+    if (-not $refresh -and (Test-PlexNativeInPlace)) { return }
+    if (@(Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue).Count) { Info 'Plex is running: the proxy is set up again at the next sign-in'; return }
+    $r = Invoke-PlexNative $dst $(if ($refresh) { 'refresh' } else { 'reapply' }) @('-AllowBoth')
+    if ($r.rc -eq -1) { return }
+    $active = @($r.rows | Where-Object { $_.state -eq 'installed' })
+    $other = @($r.rows | Where-Object { $_.state -notin 'installed', 'unsupported' })
+    if ($active.Count -and -not $other.Count -and $r.rc -in 0, 3) { Set-StateValue $state 'plexNativeBuild' (Get-PlexNativeBuild $dst); Info 'Plex: the proxy is in place (again)'; return }
+    if (-not $active.Count -and -not $other.Count) { Info 'Plex: no Plex app the proxy can serve any more'; return }
+    # never both: the proxy out, then the swap (which registers its own logon check)
+    Info 'Plex: the proxy does not pass with this Plex version: Plex''s files go back and the libmpv swap is tried'
+    $u = Invoke-PlexNative $dst 'uninstall'
+    if ($u.rc -ne 0 -and $u.rc -ne 3) { Warn "Plex: the proxy uninstall returned $($u.rc); left as it is"; return }
+    Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
+    $state.PSObject.Properties.Remove('plexNative'); if ($state.PSObject.Properties['plexNativeBuild']) { $state.PSObject.Properties.Remove('plexNativeBuild') }; Unregister-PlexNativeTask
+    if (-not (Read-Manifest (Join-Path $InstallDir 'vsplugin'))) { return }
+    Invoke-PlexSwap 'apply'
+    if (Test-Path -LiteralPath (Join-Path $InstallDir 'plex\plex.json')) {
+        Set-StateValue $state 'plexSwap' (Get-Date).ToString('s')
+        # the swapped libmpv plays through the mpv route's block (mpv-integration's Kind plexvs)
+        $rt = Get-VapourSynthRuntime
+        if ($rt) { foreach ($x in @(Invoke-MpvIntegration 'Install' -onPath:($rt -ne 'user') -noSm)) { if ($x.Player -like 'Plex*') { Info ("{0}: {1}" -f $x.Player, $x.Result) } } }
+    }
 }
 function Install-PlexRoute($state) {
     if ($PlexSwap -eq 'No') { Info 'Plex: declined (-PlexSwap No): capture mode gives Plex frame generation'; return }
@@ -2717,7 +2786,8 @@ function Install-PlexRoute($state) {
         }
         # -AllowBoth: the swap is not in place (checked above); the guard would otherwise trip over a block that
         # mpv-integration wrote for Plex earlier (with the proxy in place mpv-integration leaves Plex alone)
-        $verb = if (Get-StateValue $state 'plexNative') { 'reapply' } else { 'install' }
+        # a repair keeps it (reapply), an update with other proxy files puts the new ones in (refresh)
+        $verb = if (-not (Get-StateValue $state 'plexNative')) { 'install' } elseif ((Get-PlexNativeBuild $dst) -ne (Get-StateValue $state 'plexNativeBuild')) { 'refresh' } else { 'reapply' }
         $r = Invoke-PlexNative $dst $verb @('-AllowBoth')
         if ($r.rc -eq -1) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; return }
         if (@($r.rows | Where-Object { $_.state -eq 'unsupported' -and $_.target -notin 'htpc', 'desktop' }).Count) {
@@ -2729,7 +2799,9 @@ function Install-PlexRoute($state) {
         $other = @($r.rows | Where-Object { $_.state -notin 'installed', 'unsupported' })
         if ($active.Count -and -not $other.Count -and $r.rc -in 0, 3) {
             Set-StateValue $state 'plexNative' (Get-Date).ToString('s')
+            Set-StateValue $state 'plexNativeBuild' (Get-PlexNativeBuild $dst)
             Info "Plex: smoother motion through PushMPC's filter inside Plex's own player"
+            Register-PlexNativeTask
             return
         }
         # never both: the proxy comes out before the swap is tried
@@ -2740,7 +2812,8 @@ function Install-PlexRoute($state) {
         else { $u = @{ rc = 0 }; foreach ($k in @('htpc', 'desktop' | Where-Object { $_ -notin $skip })) { $x = Invoke-PlexNative $dst 'uninstall' @('-App', $k); if ($x.rc -ne 0 -and $x.rc -ne 3) { $u = $x } } }
         if ($u.rc -ne 0 -and $u.rc -ne 3) { Warn "Plex: the proxy uninstall returned $($u.rc); the libmpv swap is not tried"; Set-StateValue $state 'plexNative' (Get-Date).ToString('s'); return }
         Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
-        if ($state.PSObject.Properties['plexNative']) { $state.PSObject.Properties.Remove('plexNative') }
+        if ($state.PSObject.Properties['plexNative']) { $state.PSObject.Properties.Remove('plexNative'); if ($state.PSObject.Properties['plexNativeBuild']) { $state.PSObject.Properties.Remove('plexNativeBuild') } }
+        Unregister-PlexNativeTask
     }
     if (-not (Read-Manifest (Join-Path $StageDir 'vsplugin'))) { Info 'Plex: this build has no mpv route (vsplugin): Plex is not changed'; return }
     Invoke-PlexSwap 'apply'
@@ -2752,7 +2825,7 @@ function Uninstall-PlexRoute($state) {
         if ($DryRun) { Dry 'would run pushmpc-plex-native.ps1 uninstall (Plex''s own avfilter-8.dll back)' }
         else {
             $r = Invoke-PlexNative $dst 'uninstall'
-            if ($r.rc -eq 0 -or $r.rc -eq 3) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; if ($state.PSObject.Properties['plexNative']) { $state.PSObject.Properties.Remove('plexNative') } }
+            if ($r.rc -eq 0 -or $r.rc -eq 3) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; if ($state.PSObject.Properties['plexNative']) { $state.PSObject.Properties.Remove('plexNative'); if ($state.PSObject.Properties['plexNativeBuild']) { $state.PSObject.Properties.Remove('plexNativeBuild') } }; Unregister-PlexNativeTask }
             else { Warn "Plex: the proxy uninstall returned $($r.rc); its files stay in $dst (run Setup's uninstall again)" }
         }
     }
@@ -3069,7 +3142,7 @@ switch ($Action) {
         else { Warn 'Unsigned release manifest accepted (-AllowUnsigned).' }
         $rel = Get-Content $rmPath -Raw | ConvertFrom-Json
         Step "Release $($rel.release)"
-        $pending = @()
+        $pending = @(); $plexNew = $false
         # the runtime first (a failed download leaves filter and core as they are)
         $relRuntime = Get-ReleaseRuntime $rel
         $comps = @($rel.components | Where-Object { $_.name -ne 'runtime' })
@@ -3077,6 +3150,8 @@ switch ($Action) {
         foreach ($c in $comps) {
             $cur = Read-Manifest (Join-Path $InstallDir $c.name)
             $curVer = ''; if ($cur) { $curVer = $cur.kv['version'] }
+            # an optional component (the mpv route, the Plex proxy) is updated where it is installed, never added
+            if ($c.optional -and -not $cur) { Info "$($c.name): not installed here, not added by an update"; continue }
             # the runtime is always a reference to Veyra's package: PushMPC hosts no NVIDIA file
             if ($c.name -eq 'runtime') {
                 if ($c.format -ne 'veyra-package' -or $c.url -notmatch '^https://github\.com/[^/]+/[^/]+/releases/download/') {
@@ -3117,9 +3192,11 @@ switch ($Action) {
             $bad = Test-ComponentFiles $staging -Hash
             if ($bad) { Fail "$($c.name) package check failed: $bad" }
             if ($c.manifestSha256 -and (Get-Sha256 (Join-Path $staging 'manifest.txt')) -ine $c.manifestSha256) { Fail "$($c.name) package: its manifest.txt does not match manifestSha256 in the release manifest." }
-            if (Swap-Component $c.name $staging) { Remove-Item $staging -Recurse -Force; Info "$($c.name) $($c.version) installed (previous kept for rollback)" }
+            if (Swap-Component $c.name $staging) { Remove-Item $staging -Recurse -Force; Info "$($c.name) $($c.version) installed (previous kept for rollback)"; if ($c.name -eq 'plexnative') { $plexNew = $true } }
             else { $pending += [pscustomobject]@{ name = $c.name; version = $c.version; staging = $staging } }
         }
+        # new proxy files: the Plex logon check puts them into Plex now (it has the rights; no prompt)
+        if ($plexNew -and -not $DryRun) { try { Start-ScheduledTask -TaskPath $PlexTaskPath -TaskName $PlexTaskName -ErrorAction Stop; Info 'Plex: the proxy files are refreshed by the Plex logon check' } catch { Info 'Plex: the new proxy files go into Plex at the next sign-in' } }
         if ($pending.Count -and -not $DryRun) {
             $pending | ConvertTo-Json | Set-Content (Join-Path $InstallDir 'pending.json') -Encoding UTF8
             Warn "Staged until MPC-HC closes: $(($pending | ForEach-Object name) -join ', '). Run apply-pending then (a later version does it automatically)."
@@ -3211,6 +3288,12 @@ switch ($Action) {
         Info "Removed (logs are kept in $InstallDir\logs)."
     }
 
+    'plexcheck' {
+        # the logon task after a Plex update (Register-PlexNativeTask)
+        $state = Read-State
+        try { Invoke-PlexCheck $state } catch { Warn "Plex check: $($_.Exception.Message)" }
+        Write-State $state
+    }
     'autoplan' {
         # Auto's engine choice for this PC (nothing is changed); with -Machine "@@plan|key=value" lines
         $p = Get-AutoPlan

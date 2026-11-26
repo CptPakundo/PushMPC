@@ -239,6 +239,24 @@ jobs:
           if ($env:PUSHMPC_MPVBUILD_ZIP -and -not ($mpvb -and $mpvl)) { $bad += "PushMPC's mpv was not installed" }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
           exit 0
+      - name: A Plex update simulated (Plex's own avfilter-8.dll back), then the logon check sets the proxy up again
+        timeout-minutes: 10
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"; $bad = @()
+          if (-not (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue)) { $bad += 'no Plex proxy logon check task' }
+          $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\avfilter-8-plex.dll" }
+          foreach ($d in $dirs) { Copy-Item "$d\avfilter-8-plex.dll" "$d\avfilter-8.dll" -Force }
+          $t = Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue
+          if ($t) { $a = $t.Actions[0]; "logon check: $($a.Execute) $($a.Arguments)" | Tee-Object -Append $log; $p = Start-Process $a.Execute -ArgumentList $a.Arguments -Wait -PassThru; "logon check exit $($p.ExitCode)" | Tee-Object -Append $log }
+          foreach ($d in $dirs) {
+            $k = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
+            $want = (Get-Content "$env:ProgramData\PushMPC\plex-native\$k\proxy.sha256" -Raw -ErrorAction SilentlyContinue).Trim()
+            $now = (Get-FileHash "$d\avfilter-8.dll").Hash
+            "$d after the logon check: avfilter-8.dll $now (proxy $want)" | Tee-Object -Append $log
+            if ($now -ne $want) { $bad += "${d}: the logon check did not put the proxy back" }
+          }
+          if (-not $dirs) { $bad += 'no Plex proxy to test the logon check with' }
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
       - name: Auto plan on the runner's own adapter (the installed script)
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-install.ps1" autoplan 2>&1 | Tee-Object -Append "$env:RUNNER_TEMP\ux.txt"
@@ -269,6 +287,7 @@ jobs:
           if ($pd) { $bad += "Plex's folders or mpv.conf not as before: $(($pd | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }
           if (Test-Path "$env:ProgramData\PushMPC\plex-native") { $bad += 'left: the Plex proxy backup folder' }
           if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left: the Plex logon check task' }
+          if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue) { $bad += 'left: the Plex proxy logon check task' }
           $left = @(Get-ChildItem "$env:LOCALAPPDATA\PushMPC" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'logs', 'PushMpcSetup.exe' } | ForEach-Object Name)
           if ($left) { $bad += "left in the install folder: $($left -join ', ')" }
           "after uninstall: $(if ($bad) { $bad -join ' / ' } else { 'nothing left; MPC-HC, VLC, Plex and the environment as before' })" | Tee-Object -Append $log
@@ -302,6 +321,7 @@ jobs:
           if ($q) { $u = Start-Process cmd.exe -ArgumentList '/c', "`"$q`"" -PassThru; $u.WaitForExit(300000) | Out-Null; "fallback uninstall exit $($u.ExitCode)" | Tee-Object -Append $log }
           PlexSnap "$s\after2-plex.txt"
           if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex libmpv check' -ErrorAction SilentlyContinue) { $bad += 'left after the fallback: the Plex logon check task' }
+          if (Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue) { $bad += 'left after the fallback: the Plex proxy logon check task' }
           if (Test-Path "$env:ProgramData\PushMPC\plex-native") { $bad += 'left after the fallback: the Plex proxy backup folder' }
           $pd = Compare-Object @(Get-Content "$s\before-plex.txt") @(Get-Content "$s\after2-plex.txt")
           if ($pd) { $bad += "after the fallback's uninstall, Plex's folders or mpv.conf not as before: $(($pd | Select-Object -First 6 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')" }

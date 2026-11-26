@@ -315,6 +315,8 @@ do_plex() {
     flatpak info tv.plex.PlexDesktop >/dev/null 2>&1 || flatpak info tv.plex.PlexHTPC >/dev/null 2>&1 || return 0
     say "Plex (Flathub):"
     if [ "$dry" = 1 ]; then say "  would: sh plex/pushmpc-plex-linux.sh install"; return 0; fi
+    # set up before (an earlier download): out first, so this download's files go in (its installer keeps what is there)
+    if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall >/dev/null 2>&1; fi
     mkdir -p "$pm/plex-installer"; cp "$pi" "$pm/plex-installer/pushmpc-plex-linux.sh"
     out=$(sh "$pi" install --from "$here/plex" --json 2>"$pm/plex-installer/install.log"); rc=$?
     sed 's/^/  /' "$pm/plex-installer/install.log" | tail -n 5

@@ -145,7 +145,7 @@ permission once.
 - If that test fails, Setup takes its files out again and uses its second way instead: it swaps in a player library
   that PushMPC can work with (only on Plex versions we have tested). It never does both. On any other Plex version you
   can use [capture mode](#capture-mode-fallback).
-- After Plex updates itself, run PushMPC Setup again and choose **Repair** to set Plex up again.
+- When Plex updates itself, PushMPC sets it up again at your next sign-in (if Plex is open then, at the one after).
 - Don't want this? Untick the Plex box on Setup's first page.
 - **On Linux**, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex,
   and checks it with a test picture there too. The Snap version of Plex can't be set up this way and is left as it is.
