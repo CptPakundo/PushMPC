@@ -138,10 +138,10 @@ void InterpolatePlanes(const Picture& a, const Picture& b, const MotionField& fw
     // object's edge gets a mix of the object's and the background's vector that fits neither. The edge then
     // cross-fades instead of moving, and the half-way switch to the nearer frame (occlusion) makes it jump: uneven
     // spacing (a moving box at x4: steps of 0.5 to 2.2 px instead of 1; x8: frames that repeat a position). Where
-    // the four block vectors around a pixel disagree by more than a pixel, the one that matches best (error over a
-    // small cross of pixels) replaces the mix when it matches better. Smooth fields (most of a picture) are unchanged.
+    // the four block vectors around a pixel disagree by more than a pixel, the one that matches best (its error at
+    // the pixel) replaces the mix when it matches better. Smooth fields (most of a picture) are unchanged.
     auto patch = [&](float px, float py, float vx, float vy) {
-        static const float off[5][2] = { { 0, 0 }, { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+        static const float off[1][2] = { { 0, 0 } };   // the pixel itself: a cross of five cost 35 % more for the same spacing
         float e = 0;
         for (const auto& o : off)
             e += std::abs(Sample(a.p[0], px + o[0] - t * vx, py + o[1] - t * vy) - Sample(b.p[0], px + o[0] + (1.f - t) * vx, py + o[1] + (1.f - t) * vy));
