@@ -4396,7 +4396,8 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
     p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS : PUSHCORE_SR_METHOD_RTX;
     p.deband = c.deband ? 1 : 0;
-    p.debandStrength = uint32_t(std::clamp(c.debandStrength, 0, 2));
+    // the anime preset (3) only on cores with PUSHCORE_FEATURE_ANIME_HOLD; an older core gets Medium
+    p.debandStrength = c.debandStrength == 3 ? ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) ? PUSHCORE_DEBAND_ANIME : PUSHCORE_DEBAND_MEDIUM) : uint32_t(std::clamp(c.debandStrength, 0, 2));
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
     if (c.artifactReduction) t = m_visH > 2160 || m_visW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4; // never a downscale
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;

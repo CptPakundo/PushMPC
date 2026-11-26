@@ -14,7 +14,12 @@
 // Where a pixel was replaced, triangular grain of +-grain code values is added before the 8-bit store, so the
 // smoothed gradient is dithered and not quantised back into the same bands. Pixels that kept their value (edges,
 // texture, flat areas with no nearby step) are stored unchanged, so clean sources stay bit-exact outside gradients.
-// The random numbers are a PCG hash of the pixel, the plane and a per-frame counter.
+// The random numbers are a PCG hash of the pixel, the plane and a seed per 16 x 16 block of the picture that advances
+// only where the source changed (anime round 5, "grain seeded per drawing"): a pass compares each block with the frame
+// before (mean |change| above 0.75 code or any pixel above 6 codes) and keeps the block's seed where it did not, so a held
+// drawing gets the same samples and the same grain on every repeat. With a per-frame seed the grain and the smoothed
+// values "boiled" on held drawings, frame generation interpolated the boiling, and the held-frame test saw changes that
+// are not in the source.
 #pragma once
 #include <windows.h>
 #include <d3d11_4.h>
@@ -40,13 +45,16 @@ cbuffer Params : register(b0)
     float radius;      // texels, iteration 1 (iteration i reaches i x radius)
     float grain;       // normalised triangular grain amplitude where a pixel was replaced
     uint iterations;
-    uint seed;         // frame counter and plane
-    uint pad;
+    uint seed;         // frame counter
+    uint plane;        // 0 luma, 1 chroma (a chroma pixel's block is id / 8); CS_Seed: 1 = every block takes the seed
 };
 Texture2D<float4> src : register(t0);
+Texture2D<uint> blockSeed : register(t1);
+Texture2D<float> prevY : register(t2);
 SamplerState linearClamp : register(s0);
 RWTexture2D<unorm float> outY : register(u0);
 RWTexture2D<unorm float2> outUV : register(u1);
+RWTexture2D<uint> seedOut : register(u2);
 
 uint pcg(uint v)
 {
@@ -63,7 +71,7 @@ float4 deband(uint2 id, out bool replaced)
     const float2 p = float2(id) + 0.5;
     const float4 original = src.Load(int3(id, 0));
     float4 res = original;
-    uint s = pcg(id.x + pcg(id.y + pcg(seed)));
+    uint s = pcg(id.x + pcg(id.y + pcg(blockSeed.Load(int3(id / (plane != 0 ? 8u : 16u), 0)) * 2u + plane)));
     [loop] for (uint i = 1; i <= iterations; ++i) {
         const float d = rnd(s) * float(i) * radius;
         float sn, cs;
@@ -83,6 +91,19 @@ float4 deband(uint2 id, out bool replaced)
     return res;
 }
 
+// one thread per 16 x 16 luma block (size = blocks): the block's seed advances to this frame where the source changed
+[numthreads(8, 8, 1)] void CS_Seed(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y) return;
+    float sum = 0, peak = 0;
+    [loop] for (uint y = 0; y < 16; ++y)
+        [loop] for (uint x = 0; x < 16; ++x) {
+            const int3 p = int3(id.xy * 16u + uint2(x, y), 0);
+            const float d = abs(src.Load(p).x - prevY.Load(p));
+            sum += d; peak = max(peak, d);
+        }
+    if (plane != 0 || sum / 256.0 > 0.75 / 255.0 || peak > 6.0 / 255.0) seedOut[id.xy] = seed;
+}
 [numthreads(8, 8, 1)] void CS_DebandY(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= size.x || id.y >= size.y) return;
@@ -103,10 +124,12 @@ struct DebandPreset { uint32_t iterations; float thresholdCodes, radius, grainCo
 // Low ~ libplacebo's defaults (1 iteration, threshold ~1 code value, radius 16, grain ~1.5 code values: here grain is
 // applied only where a pixel was smoothed); Medium and High add iterations and a wider threshold for the coarse bands
 // of low-bitrate web video.
-inline constexpr DebandPreset kDebandPresets[3] = {
+// Anime (round 5, Auto on 8-bit animation): a wider radius for large flat fills, a slightly higher threshold, less grain.
+inline constexpr DebandPreset kDebandPresets[4] = {
     { 1, 1.0f, 16.0f, 1.0f, "low" },
     { 2, 1.6f, 16.0f, 1.0f, "medium" },
     { 4, 2.4f, 20.0f, 1.25f, "high" },
+    { 2, 2.0f, 24.0f, 0.5f, "anime" },
 };
 
 class Deband {
@@ -120,14 +143,17 @@ public:
         if (FAILED(dev_.As(&dev3_))) return failWith("no ID3D11Device3 (plane views)");
         // NV12 plane UAVs (R8 / R8G8 typed stores) are tried when the textures are made (ensure): that is the real test;
         // CheckFeatureSupport's answer for planar formats differs between drivers.
-        ComPtr<ID3DBlob> y, uv, err;
+        ComPtr<ID3DBlob> y, uv, sd0, err;
         const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
         if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandY", "cs_5_0", flags, 0, &y, &err)))
             return failWith(std::string("compile CS_DebandY: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
         if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_DebandUV", "cs_5_0", flags, 0, &uv, &err)))
             return failWith(std::string("compile CS_DebandUV: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
+        if (FAILED(D3DCompile(kDebandHlsl, std::strlen(kDebandHlsl), "PushMpcDeband", nullptr, nullptr, "CS_Seed", "cs_5_0", flags, 0, &sd0, &err)))
+            return failWith(std::string("compile CS_Seed: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?"));
         if (FAILED(dev_->CreateComputeShader(y->GetBufferPointer(), y->GetBufferSize(), nullptr, &csY_)) ||
-            FAILED(dev_->CreateComputeShader(uv->GetBufferPointer(), uv->GetBufferSize(), nullptr, &csUV_)))
+            FAILED(dev_->CreateComputeShader(uv->GetBufferPointer(), uv->GetBufferSize(), nullptr, &csUV_)) ||
+            FAILED(dev_->CreateComputeShader(sd0->GetBufferPointer(), sd0->GetBufferSize(), nullptr, &csSeed_)))
             return failWith("CreateComputeShader");
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -136,7 +162,7 @@ public:
         if (FAILED(dev_->CreateSamplerState(&sd, &sampler_))) return failWith("CreateSamplerState");
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = 32; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        if (FAILED(dev_->CreateBuffer(&bd, nullptr, &cbY_)) || FAILED(dev_->CreateBuffer(&bd, nullptr, &cbUV_))) return failWith("CreateBuffer");
+        if (FAILED(dev_->CreateBuffer(&bd, nullptr, &cbY_)) || FAILED(dev_->CreateBuffer(&bd, nullptr, &cbUV_)) || FAILED(dev_->CreateBuffer(&bd, nullptr, &cbSeed_))) return failWith("CreateBuffer");
         if (FAILED(dev_->CreateDeferredContext(0, &deferred_))) return failWith("CreateDeferredContext");
         for (auto& q : queries_) {
             D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
@@ -159,30 +185,52 @@ public:
         for (auto& c : queries_) if (!c.pending) { q = &c; break; }
         if (q) { imm->Begin(q->disjoint.Get()); imm->End(q->begin.Get()); }
         imm->CopySubresourceRegion(in_.Get(), 0, 0, 0, 0, src, subresource, nullptr);
-        const DebandPreset& p = kDebandPresets[std::min<uint32_t>(strength, 2)];
+        const DebandPreset& p = kDebandPresets[std::min<uint32_t>(strength, 3)];
         ++frame_;
-        struct Params { uint32_t w, h; float threshold, radius, grain; uint32_t iterations, seed, pad; };
-        const Params py{ w_, h_, p.thresholdCodes / 255.0f, p.radius, p.grainCodes / 255.0f, p.iterations, frame_ * 2u, 0 };
-        const Params pc{ w_ / 2, h_ / 2, p.thresholdCodes / 255.0f, p.radius * 0.5f, p.grainCodes / 255.0f, p.iterations, frame_ * 2u + 1u, 0 };
+        struct Params { uint32_t w, h; float threshold, radius, grain; uint32_t iterations, seed, plane; };
+        const Params py{ w_, h_, p.thresholdCodes / 255.0f, p.radius, p.grainCodes / 255.0f, p.iterations, frame_, 0 };
+        const Params pc{ w_ / 2, h_ / 2, p.thresholdCodes / 255.0f, p.radius * 0.5f, p.grainCodes / 255.0f, p.iterations, frame_, 1 };
+        const Params ps{ bw_, bh_, 0, 0, 0, 0, frame_, primed_ ? 0u : 1u };   // 1: the first frame, every block takes its seed
         imm->UpdateSubresource(cbY_.Get(), 0, nullptr, &py, 0, 0);
         imm->UpdateSubresource(cbUV_.Get(), 0, nullptr, &pc, 0, 0);
+        imm->UpdateSubresource(cbSeed_.Get(), 0, nullptr, &ps, 0, 0);
         ID3D11SamplerState* samplers[] = { sampler_.Get() };
         deferred_->CSSetSamplers(0, 1, samplers);
+        // the block seeds (per drawing): this frame against the one before
+        {
+            ID3D11ShaderResourceView* s3[] = { inY_.Get(), nullptr, prevY_.Get() };
+            ID3D11UnorderedAccessView* u3[] = { nullptr, nullptr, seedUav_.Get() };
+            ID3D11Buffer* cs[] = { cbSeed_.Get() };
+            deferred_->CSSetShaderResources(0, 3, s3);
+            deferred_->CSSetUnorderedAccessViews(0, 3, u3, nullptr);
+            deferred_->CSSetConstantBuffers(0, 1, cs);
+            deferred_->CSSetShader(csSeed_.Get(), nullptr, 0);
+            deferred_->Dispatch((bw_ + 7) / 8, (bh_ + 7) / 8, 1);
+            ID3D11UnorderedAccessView* none[3] = {};
+            deferred_->CSSetUnorderedAccessViews(0, 3, none, nullptr);
+        }
+        primed_ = true;
         // luma
-        ID3D11ShaderResourceView* srv[] = { inY_.Get() };
+        ID3D11ShaderResourceView* srv[] = { inY_.Get(), seedSrv_.Get() };
         ID3D11UnorderedAccessView* uav[] = { outY_.Get(), outUV_.Get() };
         deferred_->CSSetUnorderedAccessViews(0, 2, uav, nullptr);
         ID3D11Buffer* cb[] = { cbY_.Get() };
         deferred_->CSSetConstantBuffers(0, 1, cb);
-        deferred_->CSSetShaderResources(0, 1, srv);
+        deferred_->CSSetShaderResources(0, 2, srv);
         deferred_->CSSetShader(csY_.Get(), nullptr, 0);
         deferred_->Dispatch((w_ + 7) / 8, (h_ + 7) / 8, 1);
         // chroma (half size)
         srv[0] = inUV_.Get(); cb[0] = cbUV_.Get();
         deferred_->CSSetConstantBuffers(0, 1, cb);
-        deferred_->CSSetShaderResources(0, 1, srv);
+        deferred_->CSSetShaderResources(0, 2, srv);
         deferred_->CSSetShader(csUV_.Get(), nullptr, 0);
         deferred_->Dispatch((w_ / 2 + 7) / 8, (h_ / 2 + 7) / 8, 1);
+        {
+            ID3D11ShaderResourceView* none[3] = {};
+            deferred_->CSSetShaderResources(0, 3, none);
+        }
+        // this source's luma plane is the next frame's "before"
+        deferred_->CopySubresourceRegion(prev_.Get(), 0, 0, 0, 0, in_.Get(), 0, nullptr);
         Microsoft::WRL::ComPtr<ID3D11CommandList> list;
         if (FAILED(deferred_->FinishCommandList(FALSE, &list))) return false;
         imm->ExecuteCommandList(list.Get(), TRUE);
@@ -208,6 +256,7 @@ private:
         w &= ~1u; h &= ~1u;
         if (out_ && w == w_ && h == h_) return true;
         in_.Reset(); out_.Reset(); inY_.Reset(); inUV_.Reset(); outY_.Reset(); outUV_.Reset();
+        prev_.Reset(); prevY_.Reset(); seed_.Reset(); seedSrv_.Reset(); seedUav_.Reset(); primed_ = false;
         D3D11_TEXTURE2D_DESC td{};
         td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_NV12;
         td.SampleDesc = {1, 0}; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -230,6 +279,15 @@ private:
             if (FAILED(dev3_->CreateUnorderedAccessView1(out_.Get(), &ud, &u))) return failWith("deband plane UAV");
             (plane ? outUV_ : outY_) = u;
         }
+        // the frame before (luma as R8: the NV12 luma plane copies into it) and the block seeds
+        bw_ = (w + 15) / 16; bh_ = (h + 15) / 16;
+        D3D11_TEXTURE2D_DESC pd{};
+        pd.Width = w; pd.Height = h; pd.MipLevels = 1; pd.ArraySize = 1; pd.Format = DXGI_FORMAT_R8_UNORM;
+        pd.SampleDesc = {1, 0}; pd.Usage = D3D11_USAGE_DEFAULT; pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev_->CreateTexture2D(&pd, nullptr, &prev_)) || FAILED(dev_->CreateShaderResourceView(prev_.Get(), nullptr, &prevY_))) return failWith("deband previous-frame texture");
+        pd.Width = bw_; pd.Height = bh_; pd.Format = DXGI_FORMAT_R32_UINT; pd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        if (FAILED(dev_->CreateTexture2D(&pd, nullptr, &seed_)) || FAILED(dev_->CreateShaderResourceView(seed_.Get(), nullptr, &seedSrv_)) ||
+            FAILED(dev_->CreateUnorderedAccessView(seed_.Get(), nullptr, &seedUav_))) return failWith("deband seed texture");
         w_ = w; h_ = h;
         return true;
     }
@@ -252,10 +310,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device> dev_;
     Microsoft::WRL::ComPtr<ID3D11Device3> dev3_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> deferred_;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> csY_, csUV_;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> csY_, csUV_, csSeed_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> cbY_, cbUV_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> in_, out_;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> cbY_, cbUV_, cbSeed_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> in_, out_, prev_, seed_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> prevY_, seedSrv_;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> seedUav_;
+    UINT bw_ = 0, bh_ = 0;
+    bool primed_ = false;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> inY_, inUV_;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> outY_, outUV_;
     std::array<Query, 4> queries_{};

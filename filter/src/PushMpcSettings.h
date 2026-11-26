@@ -53,7 +53,7 @@ enum class CleanStrength { Subtle = 0, Balanced = 1, Strong = 2 };
 // RTX VSR model family (pushcore PUSHCORE_SR_FAMILY_*): Standard = RTX Video SDK (balanced); High bitrate keeps clean
 // detail (no compression clean-up, for Blu-ray-class sources); Streaming cleans hardest (web video; Ampere or newer).
 enum class VsrStyle { Standard = 0, HighBitrate = 1, Streaming = 2, Auto = 3 };
-enum class DebandStrength { Low = 0, Medium = 1, High = 2 };
+enum class DebandStrength { Low = 0, Medium = 1, High = 2, Anime = 3 };   // Anime: Auto only (animation), not in the page
 // SDR to HDR highlight expansion (PushMPC's curve: the multiplier M of SDR white; RTX Video HDR: its peak)
 enum class HdrBoost { Auto = 0, Off = 1, Low = 2, Medium = 3, High = 4 };
 enum class HdrMethod { Auto = 0, Rtx = 1 };
@@ -143,7 +143,7 @@ inline const wchar_t* VsrStyleStr(VsrStyle v) { return v == VsrStyle::HighBitrat
 inline const wchar_t* VsrStyleLabel(VsrStyle v) { return v == VsrStyle::HighBitrate ? L"high bitrate (keeps detail)" : v == VsrStyle::Streaming ? L"streaming (cleans hardest)" : L"standard"; }
 inline const wchar_t* HdrBoostStr(HdrBoost b) { switch (b) { case HdrBoost::Off: return L"Off"; case HdrBoost::Low: return L"Low"; case HdrBoost::Medium: return L"Medium"; case HdrBoost::High: return L"High"; default: return L"Auto"; } }
 inline const wchar_t* HdrMethodStr(HdrMethod m) { return m == HdrMethod::Rtx ? L"RTX" : L"Auto"; }
-inline const wchar_t* DebandStrengthStr(DebandStrength d) { return d == DebandStrength::Low ? L"Low" : d == DebandStrength::High ? L"High" : L"Medium"; }
+inline const wchar_t* DebandStrengthStr(DebandStrength d) { return d == DebandStrength::Low ? L"Low" : d == DebandStrength::High ? L"High" : d == DebandStrength::Anime ? L"Anime" : L"Medium"; }
 
 inline int ParseChoice(const std::wstring& s, int lo, int hi, int def)
 {

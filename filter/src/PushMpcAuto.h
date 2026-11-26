@@ -208,6 +208,9 @@ inline constexpr double kHighSpareMs = 3.0;       // High (PushFlow Quality) onl
 // equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.48 equivalent. Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
 inline constexpr double kDebandBpp8Bit = 0.25;
+// anime round 5 (V10): deband Auto on for 8-bit animation whatever the bitrate (anime preset), Low from Blu-ray class up
+inline constexpr bool kDebandAnimationAuto = true;
+inline constexpr double kDebandAnimeLowBpp = 0.5;
 // VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.48): high bitrate
 inline constexpr double kHighBitrateBpp = 0.40;
 
@@ -251,7 +254,7 @@ inline double VsrCost(const Costs& c, int level, bool ar, double pix, int family
 }
 inline double DebandCost(const Costs& c, int strength, UINT w, UINT h)
 {
-    const double k = strength <= 0 ? 0.6 : strength >= 2 ? 1.8 : 1.0;
+    const double k = strength <= 0 ? 0.6 : strength == 3 ? 1.2 : strength >= 2 ? 1.8 : 1.0;   // 3: the anime preset (2 iterations, radius 24)
     return c.deband1080 * k * double(w) * double(h) / (1920.0 * 1080.0);
 }
 inline int FgKeyOf(FgMethod m, int quality)
@@ -479,9 +482,16 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if (s.deband == kOff) r.debandNote = L"off";
     else if (!debandEligible) r.debandNote = src.hdr ? L"off, HDR source (banding is rare there)" : L"off, 10-bit source (banding is rare there)";
     else if (s.deband != kAuto) { deband = true; r.debandNote = L"on"; }
+    else if (r.animation && kDebandAnimationAuto) {
+        // anime round 5: flat cel fills band in any 8-bit encode, so animation gets the pass whatever the bitrate, with
+        // the anime preset (wider radius, less grain; grain seeded per drawing in pushcore); Blu-ray class keeps Low
+        deband = true;
+        r.debandNote = src.bppEq >= kDebandAnimeLowBpp ? std::format(L"on, animation (flat fills band), Low at {:.2f} bits per pixel", src.bppEq) : L"on, animation (flat fills band): anime preset";
+    }
     else if (debandRate) { deband = true; r.debandNote = std::format(L"on, 8-bit source at {:.2f} bits per pixel", src.bppEq); }
     else r.debandNote = L"off, " + rateNote;
     r.debandStrength = int(s.debandStrength);
+    if (deband && s.deband == kAuto && r.animation && kDebandAnimationAuto) r.debandStrength = src.bppEq >= kDebandAnimeLowBpp ? 0 : 3;
     double debandMs = deband ? DebandCost(c, r.debandStrength, src.w, src.h) : 0.0;
 
     // NR cost by family until measured (heavy on RTX 30 and on the RX 7000 worker)

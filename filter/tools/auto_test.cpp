@@ -271,6 +271,13 @@ int main()
             check(ShowKeyFor(L"media/Show/Season 1/e01.mkv") == ShowKeyFor(L"Media/show/season 2/e05.mkv") && ShowKeyFor(L"media/Show/S01/e01.mkv") == ShowKeyFor(L"media/Show/e09.mkv")
                   && ShowKeyFor(L"media/Show/e01.mkv") != ShowKeyFor(L"media/Other/e01.mkv") && ShowKeyFor(L"media/Show/e01.mkv").size() == 16,
                   L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"media/Show/e01.mkv"));
+            // round 5 (item 5): deband Auto on 8-bit animation whatever the bitrate (anime preset; Low from Blu-ray class);
+            // live action keeps the bitrate rule; 10-bit animation stays off
+            Source an = held; an.bppEq = 0.3; Source anBd = held; anBd.bppEq = 0.6; Source lv = live; lv.bppEq = 0.3; Source an10 = an; an10.tenBit = true;
+            const Choice d1 = Decide({}, an, d, {}, g), d2 = Decide({}, anBd, d, {}, g), d3 = Decide({}, lv, d, {}, g), d4 = Decide({}, an10, d, {}, g);
+            check(d1.deband && d1.debandStrength == 3 && d2.deband && d2.debandStrength == 0 && !d3.deband && !d4.deband,
+                  L"deband Auto: 8-bit animation on at any bitrate (anime preset, Low from 0.5 bpp), live action by bitrate, 10-bit off",
+                  d1.debandNote + L" | " + d2.debandNote + L" | " + d3.debandNote + L" | " + d4.debandNote);
         }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;

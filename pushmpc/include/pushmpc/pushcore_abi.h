@@ -188,6 +188,7 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_DEBAND_LOW 0u
 #define PUSHCORE_DEBAND_MEDIUM 1u
 #define PUSHCORE_DEBAND_HIGH 2u
+#define PUSHCORE_DEBAND_ANIME 3u   /* anime round 5 (PUSHCORE_FEATURE_ANIME_HOLD cores): wider radius for flat fills, less grain */
 
 typedef struct PushCoreStreamInfo {
     uint32_t structSize;       /* sizeof(PushCoreStreamInfo) */
