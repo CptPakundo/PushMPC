@@ -77,7 +77,7 @@ if ! done_ mpv mpv || { [ ! -x "$P/bin/mpv" ] && [ ! -f "$P/bin/mpv.exe" ]; }; t
         macos) ;;   # mpv 0.42 builds its macOS player with Swift (Xcode's): cplayer needs it
     esac
     CC="$CC" meson setup "$S/mpv/b" "$S/mpv" --prefix="$P" --libdir=lib --buildtype=release -Dlibmpv=true -Dcplayer=true \
-        -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled "${extra[@]}" > "$S/mpv-setup.log" 2>&1 \
+        -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled ${extra[@]+"${extra[@]}"} > "$S/mpv-setup.log" 2>&1 \
         || { tail -60 "$S/mpv-setup.log"; exit 1; }
     grep -iE "ffmpeg|libplacebo|vulkan|d3d11|lua|enabled features" "$S/mpv-setup.log" | head -20 || true
     ninja -C "$S/mpv/b" install >/dev/null
