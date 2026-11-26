@@ -4,7 +4,7 @@
 
 // Plain Win32 controls only (no owner draw, no own colours): MPC-HC hosts COM property pages in its
 // CMPCThemeComPropertyPage, which subclasses standard controls for its dark theme, as it does for LAV's pages.
-IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 426
+IDD_PUSHMPC_PAGE DIALOGEX 0, 0, 300, 462
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
@@ -27,7 +27,7 @@ BEGIN
     LTEXT           "Status", -1, 7, 108, 100, 8
     EDITTEXT        IDC_PM_STATUS, 7, 118, 278, 64, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
     PUSHBUTTON      "Show advanced settings", IDC_PM_ADVANCED, 7, 188, 110, 14
-    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 278, 216
+    GROUPBOX        "Advanced", IDC_PM_ADV_GROUP, 7, 206, 278, 234
     LTEXT           "FG quality", IDC_PM_FGQ_LBL, 15, 220, 62, 8
     COMBOBOX        IDC_PM_FGQ, 78, 218, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Upscale style", IDC_PM_STYLE_LBL, 150, 220, 60, 8
@@ -65,6 +65,12 @@ BEGIN
     LTEXT           "Subtitle hold", IDC_PM_SUBHOLD_LBL, 15, 406, 62, 8
     COMBOBOX        IDC_PM_SUBHOLD, 78, 404, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Keeps burned-in subtitles steady in generated frames", IDC_PM_SUBHOLD_NOTE, 150, 403, 128, 17
+    LTEXT           "Animation", IDC_PM_ANIM_LBL, 15, 424, 62, 8
+    COMBOBOX        IDC_PM_ANIM, 78, 422, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Smooth motion for cartoons and anime drawn on twos", IDC_PM_ANIM_NOTE, 150, 421, 128, 17
+    LTEXT           "Drawn motion", IDC_PM_ANIMMODE_LBL, 15, 442, 62, 8
+    COMBOBOX        IDC_PM_ANIMMODE, 78, 440, 64, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Camera only keeps the drawn look: pans stay smooth, drawings change as drawn", IDC_PM_ANIMMODE_NOTE, 150, 439, 128, 17
 END
 
 IDD_PUSHMPC_ABOUT DIALOGEX 0, 0, 300, 352

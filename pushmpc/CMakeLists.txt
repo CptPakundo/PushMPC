@@ -34,7 +34,7 @@ endif()
 execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD OUTPUT_VARIABLE PUSHMPC_PUSHFPS_COMMIT
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 configure_file(res/pushcore.rc.in ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc @ONLY)
-add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDlssgPort.cpp src/PushCoreDlssgPort.h src/PushCoreDeband.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc
+add_library(pushcore_dll SHARED src/PushCoreGpu.cpp src/PushCoreDlssgPort.cpp src/PushCoreDlssgPort.h src/PushCoreDeband.h src/PushCoreAnimeSr.h include/pushmpc/pushcore_abi.h ${CMAKE_CURRENT_BINARY_DIR}/pushcore.rc
             src/PushCoreZludaVsr.cpp src/PushCoreZludaVsr.h src/ZludaVsrClient.h include/pushmpc/zluda_vsr.h)
 set_target_properties(pushcore_dll PROPERTIES OUTPUT_NAME pushcore ARCHIVE_OUTPUT_NAME pushcore_import)
 target_compile_features(pushcore_dll PRIVATE cxx_std_20)
@@ -49,6 +49,16 @@ add_executable(pushcore_selftest tools/pushcore_selftest.cpp)
 target_compile_features(pushcore_selftest PRIVATE cxx_std_20)
 target_compile_options(pushcore_selftest PRIVATE /utf-8)
 target_include_directories(pushcore_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# the anime upscalers' TensorRT-RTX zero copy: the CUDA driver API types (nvcuda.dll is loaded at run time)
+if(VEYRA_CUDA_DRIVER_INCLUDE_DIR)
+  target_include_directories(pushcore_dll PRIVATE "${VEYRA_CUDA_DRIVER_INCLUDE_DIR}")
+endif()
+# anime upscalers (src/PushCoreAnimeSr.h): pmml, when PushFPS's tree builds it (PUSHMPC_PMML_ORT_INCLUDE); without it the
+# capability says so and srMethod PMML falls back to RTX VSR / FSR
+if(TARGET pmml)
+  target_link_libraries(pushcore_dll PRIVATE pmml)
+  target_compile_definitions(pushcore_dll PRIVATE PUSHMPC_HAVE_PMML=1)
+endif()
 
 # GPU harness: loads pushcore.dll by path, decodes with D3D11VA on its own D3D11 device (as LAV does),
 # feeds the textures in and "presents" the outputs in D3D11. FFmpeg is delay-loaded so the

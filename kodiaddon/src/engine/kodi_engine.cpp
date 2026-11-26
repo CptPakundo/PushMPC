@@ -11,6 +11,9 @@
 #ifdef PMVS_GPU
 #include "gpu_backend.h"
 #endif
+#ifdef PMK_PMML
+#include "anime_sr_engine.h"
+#endif
 
 namespace pmk {
 
@@ -43,6 +46,8 @@ public:
     bool Generate(float t, const pm_yuv_out& out, std::string&) override { pm_engine_generate(m_e, t, &out); return true; }
     bool Real(bool, const pm_yuv_out&, std::string&) override { return false; }
     void Forget() override { pm_engine_forget(m_e); }
+    void SetDedup(bool on) override { pm_engine_set_dedup(m_e, on ? 1 : 0); }
+    bool LastDup() const override { return pm_engine_last_dup(m_e) != 0; }
     EngineStats Stats() const override
     {
         pm_engine_stats s{};
@@ -116,6 +121,12 @@ public:
     bool PushSlot(int slot, bool contiguous, std::string& err)
     {
         ++m_stats.pushed;
+        m_lastDup = false;
+        if (m_dedup && contiguous && m_curSlot >= 0) {   // held frames: a repeat of the last distinct frame keeps the pair
+            pmvs::gpu::DedupStats ds;
+            if (!m_e.Duplicate(m_curSlot, slot, ds, err)) { m_e.ReleaseSlot(slot); return false; }
+            if (ds.duplicate) { m_e.ReleaseSlot(slot); m_lastDup = true; return true; }
+        }
         const int oldPair = m_pair;
         m_pair = -1;
         m_cut = false;
@@ -160,6 +171,8 @@ public:
         return true;
     }
     void Forget() override { ReleaseAll(); }
+    void SetDedup(bool on) override { m_dedup = on; m_lastDup = false; }
+    bool LastDup() const override { return m_lastDup; }
     EngineStats Stats() const override { return m_stats; }
     bool Layout(OutLayout& l) const override
     {
@@ -228,6 +241,7 @@ private:
     int m_curSlot = -1, m_prevSlot = -1, m_prevPrevPending = -1, m_pair = -1;
     bool m_cut = false;
     EngineStats m_stats;
+    bool m_dedup = false, m_lastDup = false;   // held frames (SetDedup)
 };
 bool GpuBuilt() { return true; }
 #else
@@ -236,8 +250,44 @@ bool GpuBuilt() { return false; }
 
 bool NonNull(const void* p) { return p != nullptr; }
 
-std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
+std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfgIn, std::string& why)
 {
+    EngineCfg cfg = cfgIn;
+#ifdef PMK_PMML
+    // the anime upscaler: the inner engine runs at its output size; it falls back to the plain engine when it cannot start
+    if (!cfg.animeModel.empty() && !cfg.external) {
+        pmml::UpscaleOptions u;
+        u.runtimeDir = cfg.pmmlRuntime; u.graphsDir = cfg.pmmlRuntime + "/graphs"; u.cacheDir = cfg.pmmlRuntime;
+        u.model = cfg.animeModel; u.io = pmml::UpscaleIo::Yuv420; u.colour = pmml::Colour::limited(cfg.bits);
+        u.width = cfg.width; u.height = cfg.height;
+        std::string ue;
+        if (!cfg.pmmlBackend.empty()) pmml::Backend::parse(cfg.pmmlBackend, &u.backend);
+        else {
+            std::string log;
+            const auto devs = pmml::listDevices(cfg.pmmlRuntime, &log);
+            for (const char* ep : {"trt-rtx", "dml", "amdgpu", "openvino", "migraphx", "coreml", "qnn-gpu"}) {
+                auto it = std::find_if(devs.begin(), devs.end(), [&](const pmml::DeviceInfo& d) { return d.backend.ep == ep; });
+                if (it != devs.end()) { u.backend = it->backend; break; }
+            }
+        }
+        auto up = u.backend.ep == "cpu" && cfg.pmmlBackend.empty() ? nullptr : pmml::Upscaler::create(u, &ue);   // the CPU only when named (tests)
+        if (up) {
+            EngineCfg inner = cfg;
+            inner.animeModel.clear();
+            inner.width = up->outWidth(); inner.height = up->outHeight();
+            if (inner.outWidth > 0 && inner.outWidth <= inner.width * 11 / 10 && inner.outHeight <= inner.height * 11 / 10) { inner.upscaler = 0; inner.outWidth = inner.outHeight = 0; }
+            std::string innerWhy;
+            auto e = OpenEngine(inner, innerWhy);
+            if (e) {
+                why = innerWhy + "; anime upscaler " + cfg.animeModel + " first";
+                return std::make_unique<AnimeSrEngine>(std::move(up), std::move(e), cfg.width, cfg.height, cfg.bits);
+            }
+            ue = innerWhy;
+        }
+        why = "anime upscaler " + cfg.animeModel + " not used (" + (ue.empty() ? std::string("no GPU execution provider in the pmml runtime") : ue) + "); ";
+        cfg.animeModel.clear();
+    }
+#endif
     std::string gpuWhy, nvlWhy;
 #if defined(PM_NVL)
     // Linux with an NVIDIA GPU: NVIDIA VFG / optical flow and RTX VSR first (Auto, or the GPU choice); the portable
@@ -258,8 +308,8 @@ std::unique_ptr<IEngine> OpenEngine(const EngineCfg& cfg, std::string& why)
 #endif
     auto c = std::make_unique<CpuEngine>(cfg);
     std::string cpuWhy;
-    if (!c->Open(cpuWhy)) { why = "CPU engine: " + cpuWhy; return nullptr; }
-    why = cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + (nvlWhy.empty() ? "" : "; NVIDIA: " + nvlWhy) + "): CPU engine";
+    if (!c->Open(cpuWhy)) { why += "CPU engine: " + cpuWhy; return nullptr; }
+    why += cfg.backend == 1 ? "CPU engine (your setting)" : "no usable GPU (" + gpuWhy + (nvlWhy.empty() ? "" : "; NVIDIA: " + nvlWhy) + "): CPU engine";
     return c;
 }
 

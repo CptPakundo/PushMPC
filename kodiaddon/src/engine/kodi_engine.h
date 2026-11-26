@@ -29,6 +29,9 @@ struct EngineCfg {
     int matrix = 1;                    // H.273
     bool fullRange = false, hdr = false;
     int fullscreen = -1;               // Kodi's window covers its screen: 1 / 0 / -1 unknown (Auto: the window composition per shown frame)
+    std::string animeModel;            // the anime upscaler before the engine (pmml model id; "" none; builds with pmml only)
+    std::string pmmlRuntime;           // pmml's runtime folder (ort/, eps/, graphs/ with anime-sr/)
+    std::string pmmlBackend;           // e.g. ort:directml:dml:0, ort:core:trt-rtx:0 ("" = the first GPU EP the runtime has)
 };
 
 // the GPU engine's output layout (packed rows); a player buffer laid out like this can be written in place
@@ -67,6 +70,11 @@ public:
     virtual int ImportHost(void* /*ptr*/, uint64_t /*size*/, std::string& err) { err = "no host import on this engine"; return -1; }
     virtual bool GenerateInto(float /*t*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
     virtual bool RealInto(bool /*current*/, int /*id*/, std::string& err) { err = "no zero copy on this engine"; return false; }
+    // held frames (animation on twos, threes, fours): with dedup on, a pushed frame that repeats the last DISTINCT one
+    // (PushFPS's duplicate test: the GPU engine's Duplicate pass, the CPU engine's quarter-size luma) leaves the pair as
+    // it is and LastDup() says so; Real(true) is then still the last distinct frame
+    virtual void SetDedup(bool) {}
+    virtual bool LastDup() const { return false; }
     virtual EngineStats Stats() const = 0;
     // > 0: the multiplier this engine was opened for (it cannot change per stream)
     virtual int FixedK() const { return 0; }

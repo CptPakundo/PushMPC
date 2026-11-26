@@ -174,3 +174,8 @@ msgstr ""
 msgctxt "#30044"
 msgid "PushMPC core (Windows)"
 msgstr ""
+
+
+msgctxt "#30111"
+msgid "Anime upscaler (ArtCNN, CuNNy, AnimeSR)"
+msgstr ""

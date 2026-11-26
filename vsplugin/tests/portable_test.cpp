@@ -88,6 +88,7 @@ static bool Centroid(const std::vector<uint8_t>& p, int w, int h, int bits, int 
 // ------------------------------------------------------------------------------------------------ test backend glue
 struct Harness {
     int bits = 8, k = 4, frames = 12, cutAt = -1;   // cutAt: the first frame of scene 1
+    int hold = 1;                                   // held frames: each drawing shown for `hold` source frames (Dedup on when > 1)
     std::map<int64_t, Frame3> src;
     struct Buf { Frame3 f; bool live = false; int64_t pts = 0; bool generated = false; };
     std::vector<Buf> bufs;
@@ -100,12 +101,14 @@ struct Harness {
         be.engine.Configure(c, err);
         const double dur = SrcDur100ns(24000, 1001);
         pipe.Init(k, frames, dur);
+        be.dedup = hold > 1; be.srcFrames = frames;
+        pipe.SetLookahead(be.Lookahead());
         pipe.Reset();
         be.grid = pipe.GridOf();
         be.source = [this](int64_t s, YuvView& v) {
             if (s < 0 || s >= frames) return false;
             auto it = src.find(s);
-            if (it == src.end()) it = src.emplace(s, MakeFrame(int(s), bits, cutAt >= 0 && s >= cutAt ? 1 : 0)).first;
+            if (it == src.end()) it = src.emplace(s, MakeFrame(int(s / hold * hold), bits, cutAt >= 0 && s >= cutAt ? 1 : 0)).first;
             v = it->second.View();
             return true;
         };
@@ -324,6 +327,60 @@ static void TestHardCut()
     CHECK(hs.be.engine.Stat().cuts == 1, "exactly one scene cut: %llu", (unsigned long long)hs.be.engine.Stat().cuts);
 }
 
+// held frames (Dedup, held_dedup.h) on the CPU route: the box drawn on twos / threes (a drawing every `hold` source
+// frames, the same 6 px per source frame as TestMovingBox) must still move evenly: every output that is not a drawing's
+// own real frame is generated, with the box where linear motion puts it at output time n / k
+static void TestHeldSpan(int hold, int k)
+{
+    Harness hs; hs.bits = 8; hs.k = k; hs.hold = hold; hs.frames = 16;
+    hs.Init();
+    double worst = 0;
+    std::string err;
+    const int64_t last = int64_t(k) * 12;   // outputs 0 .. 12 k - 1 (the clip's end is TestHeldStill's)
+    for (int64_t n = 0; n < last; ++n) {
+        Frame3 f; bool gen = false, rep = false;
+        if (!hs.Produce(n, f, gen, rep, err)) { CHECK(false, "held %d: produce %lld: %s", hold, (long long)n, err.c_str()); return; }
+        const int64_t s = n / k;
+        const bool drawing = n % k == 0 && s % hold == 0;
+        CHECK(gen == !drawing && !rep, "held %d n %lld: generated %d repeated %d (expected generated %d)", hold, (long long)n, gen, rep, !drawing);
+        if (drawing) { CHECK(SamePlanes(f, MakeFrame(int(s), 8, 0)), "held %d: drawing %lld unchanged", hold, (long long)s); continue; }
+        double cx, cy; int cnt;
+        if (!Centroid(f.p[0], kW, kH, 8, 150, cx, cy, cnt)) { CHECK(false, "held %d: no box in %lld", hold, (long long)n); continue; }
+        const double t = double(n) / k, e = std::hypot(cx - BoxX(t), cy - BoxY(t));   // expected: BoxX(n / k), BoxY(n / k)
+        worst = std::max(worst, e);
+        CHECK(e <= 1.5, "held %d n %lld: box at %.2f,%.2f expected %.2f,%.2f", hold, (long long)n, cx, cy, BoxX(t), BoxY(t));
+    }
+    // every non-drawing source frame submitted is a repeat (the Pipeline submits only as far as the outputs asked for
+    // need: through 14 here, the last output being already made by the span that ends at drawing 12 / 14)
+    int64_t expect = 0;
+    for (int64_t s = 0; s < hs.pipe.NextSubmit(); ++s) expect += s % hold ? 1 : 0;   // submitted 0..14: twos 7, threes 9
+    CHECK(hs.pipe.NextSubmit() >= 13, "held %d: submitted through %lld", hold, (long long)hs.pipe.NextSubmit() - 1);
+    CHECK(int64_t(hs.be.repeats) == expect, "held %d: %llu repeats (expected %lld)", hold, (unsigned long long)hs.be.repeats, (long long)expect);
+    std::printf("  held frames on %ss, x%d: worst position error %.3f px, %llu repeats\n", hold == 2 ? "two" : "three", k, worst, (unsigned long long)hs.be.repeats);
+}
+// a run longer than the lookahead (a drawing every 5 source frames: 4 repeats) is a still: shown as it is, and only its
+// last interval moves (the pair (drawing 0, drawing 5) at t = j / k)
+static void TestHeldStill()
+{
+    Harness hs; hs.bits = 8; hs.k = 2; hs.hold = 5; hs.frames = 12;
+    hs.Init();
+    std::string err;
+    const Frame3 d0 = MakeFrame(0, 8, 0), d5 = MakeFrame(5, 8, 0);
+    for (int64_t n = 0; n <= 10; ++n) {
+        Frame3 f; bool gen = false, rep = false;
+        if (!hs.Produce(n, f, gen, rep, err)) { CHECK(false, "still: produce %lld: %s", (long long)n, err.c_str()); return; }
+        if (n <= 8) CHECK(SamePlanes(f, d0) && !gen, "still n %lld: drawing 0 as it is (generated %d)", (long long)n, gen);   // outputs 0..8
+        else if (n == 9) {                                                                                  // between 4 and 5: t = 0.5 of (0, 5)
+            double cx, cy; int cnt;
+            CHECK(gen && Centroid(f.p[0], kW, kH, 8, 150, cx, cy, cnt) && std::hypot(cx - BoxX(2.5), cy - BoxY(2.5)) <= 3.0,
+                  "still n 9: generated %d, box at %.2f expected %.2f (half way from drawing 0 to drawing 5)", gen, cx, BoxX(2.5));
+        } else CHECK(SamePlanes(f, d5) && !gen, "still n 10: drawing 5");
+    }
+    // the clip's end: frames 10 (a drawing) and 11 (a repeat, nothing after it) - output 23 is frame 11 as it is
+    Frame3 f; bool gen = false, rep = false;
+    CHECK(hs.Produce(23, f, gen, rep, err) && SamePlanes(f, MakeFrame(10, 8, 0)), "the clip's end: the last repeat shows drawing 10: %s", err.c_str());
+}
+
 static void TestSeekAndOrder()
 {
     Harness hs; hs.bits = 8; hs.k = 3; hs.frames = 40;
@@ -460,6 +517,9 @@ int main()
     TestMovingBox(10);
     TestHardCut();
     TestSeekAndOrder();
+    TestHeldSpan(2, 2);
+    TestHeldSpan(3, 2);
+    TestHeldStill();
     TestCadence();
     TestTransitions();
     TestCalibrate();

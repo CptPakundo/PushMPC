@@ -12,6 +12,7 @@
 #pragma once
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <deque>
@@ -19,9 +20,11 @@
 #include <future>
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 #include "cadence.h"
 #include "gpu_engine.h"
+#include "region_repair.h"
 #include "schedule.h"
 #include "subtitle_hold.h"
 #include "transitions.h"
@@ -143,6 +146,10 @@ public:
     Grid grid;
     CutGuard guard;
     bool dedup = true, subtitleHold = true;
+    // The held-drawing repair (pushmpc/src/HeldFrames.h, as on pushcore): the parts of a frame that are held between two
+    // of their drawings (a character on twos over a pan) are laid in from their own pair at their own phase before the
+    // frame's pairs are estimated. Needs Dedup (the cadence lookahead 3) and Engine::RepairAvailable(); set by the caller.
+    RegionRepair repair;   // repair.on: set by the caller
     struct Stats { uint64_t pushed = 0, duplicates = 0, pairs = 0, cuts = 0, guardCuts = 0, generated = 0, holds = 0, heldPairs = 0, heldPixels = 0, flashes = 0, linearBlends = 0; double meMs = 0, waitMs = 0; };
     TransitionRules transitions;
     bool transitionRules = true;   // dissolves and fades blended instead of held, flashes held (transitions.h)
@@ -171,11 +178,13 @@ public:
             dup = ds.duplicate;
         }
         stats.pushed++;
+        if (!repair.Classify(engine, s, slot, m_lastDistinctSlot, dup, err)) return false;   // before the slot of a duplicate is released
         if (dup) { engine.ReleaseSlot(slot); stats.duplicates++; }
         else {
             m_slotOf[s] = slot;
             m_lastDistinctSlot = slot;
-            if (m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s, err)) return false;
+            // with the repair a pair's motion waits until both its frames are repaired (PairFor starts it on demand)
+            if (!repair.on && m_prevDistinct >= 0 && !StartPair(m_prevDistinct, s, err)) return false;
             m_prevDistinct = s;
             if (subtitleHold) {
                 // the rule runs over the distinct frames in order, on a worker (the frame stays kept until it is used)
@@ -186,6 +195,7 @@ public:
             }
         }
         cadence.Push(s, dup);
+        if (!repair.RepairUpTo(engine, s - cadence.Lookahead(), m_slotOf, double(grid.srcDur100ns) / 10000.0, [&](int64_t f) { ForgetPairsOf(f, err); }, err)) return false;
         std::vector<Settled> settled;
         cadence.Settle(settled);
         for (const Settled& st : settled) if (!Emit(st, err)) return false;
@@ -245,6 +255,7 @@ private:
         cadence.Reset();
         guard.Reset();
         m_last = -1000000;
+        repair.Reset();
         return ok;
     }
     int64_t PtsOf(int64_t n) const { const int64_t s = n / grid.k, j = n % grid.k; return grid.Pts(s) + int64_t(std::llround(double(j) * grid.srcDur100ns / grid.k)); }
@@ -336,7 +347,7 @@ private:
             if (!k) { err = "GPU engine: source frame " + std::to_string(sh.src) + " is gone"; return false; }
             const int kind = sh.kind == Shot::Real ? 0 : 2;
             if (sh.kind == Shot::Hold) stats.holds++;
-            if (!up) {
+            if (!up && !repair.Repaired(sh.src)) {   // a repaired frame comes from its GPU slot
                 if (!CopyReal(sh.src, f, *k, err)) return false;
                 if (tag) tag(pts, kind, f);
                 // queued behind the GPU outputs before it: the Pipeline must see the outputs in order (a real frame
@@ -404,7 +415,8 @@ private:
         for (auto it = m_slotOf.begin(); it != m_slotOf.end();) {
             bool usedByPair = false;
             for (auto& [key, p] : m_pairs) usedByPair = usedByPair || key.first == it->first || key.second == it->first;
-            if (it->first < front && !usedByPair && it->second != m_lastDistinctSlot) { engine.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
+            const bool repairNeeds = repair.Needs(it->first, m_last, cadence.Lookahead());
+            if (it->first < front && !usedByPair && !repairNeeds && it->second != m_lastDistinctSlot) { engine.ReleaseSlot(it->second); it = m_slotOf.erase(it); }
             else ++it;
         }
         const int64_t keepFrom = m_last - (cadence.Lookahead() + 2);
@@ -420,6 +432,16 @@ private:
         stats.waitMs = engine.Times().waitMs;
     }
 
+    // a pair estimated on frame f before its repair is estimated again
+    void ForgetPairsOf(int64_t f, std::string& err)
+    {
+        for (auto it = m_pairs.begin(); it != m_pairs.end();) {
+            if (it->first.first != f && it->first.second != f) { ++it; continue; }
+            if (it->second.pending) { PairStats st; engine.EstimateEnd(it->second.id, st, err); }
+            if (it->second.id == m_lastPair) { m_lastPair = -1; m_lastPairKey = { -1, -1 }; }
+            engine.ReleasePair(it->second.id); it = m_pairs.erase(it);
+        }
+    }
     int64_t m_last = -1000000;
     int m_lastDistinctSlot = -1;
     int64_t m_prevDistinct = -1;

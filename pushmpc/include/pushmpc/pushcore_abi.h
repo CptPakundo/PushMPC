@@ -156,7 +156,35 @@ typedef struct PushCoreSettings {
        is found (>= 0.4 % of the frame for ~1.5 s; off after ~5 s below 0.05 %); PushCoreStats.subtitleHoldState 4 =
        running, waiting for text. */
     int32_t subtitleHold;
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): held-frame re-timing. 1 = a source frame that repeats the one before it
+       (animation drawn on twos or threes) is not given to frame generation; the frames generated between the two
+       distinct frames around it are spread over the whole held span, so the motion no longer moves in one step and
+       holds in the next. Runs of more than three held frames (a still) are shown as they are. The outputs keep the
+       source timestamps; pushcore takes up to 9 source frames ahead to wait for the next distinct one. 2 = the same, and
+       the per-region source repair runs without waiting for held drawings to be found (Animation On). Default 0. */
+    int32_t heldFrames;
+    /* Appended (PUSHCORE_FEATURE_ANIME_SR): the anime upscaler that srMethod PUSHCORE_SR_METHOD_PMML runs
+       (PUSHCORE_ANIME_SR_*; default ArtCNN C4F16 for a smaller struct). */
+    uint32_t animeSrModel;
+    /* Appended (PUSHCORE_FEATURE_ANIME_HOLD): how drawn animation is shown (with heldFrames != 0).
+       animationMode: 0 Full (default: held drawings re-timed, every part moves at its own cadence), 1 Camera only (keep
+       the drawn feel: what slides rigidly on ones - pans, scrolls, a cel slid over the background - stays smooth; what
+       is redrawn shows each drawing for its own time, camera-warped, as drawn; no source repair), 2 Off (plain frame
+       generation, no re-timing). holdFlags (PUSHCORE_HOLD_*): generated frames show the real frame where frame
+       generation cannot be right; default 0 (a smaller struct). */
+    int32_t animationMode;
+    uint32_t holdFlags;
 } PushCoreSettings;
+#define PUSHCORE_ANIM_FULL 0
+#define PUSHCORE_ANIM_CAMERA_ONLY 1
+#define PUSHCORE_ANIM_OFF 2
+#define PUSHCORE_HOLD_TRANSIENTS 1u      /* flashes and impact frames shown as drawn (nearest real frame, whole picture), and
+                                            objects no motion explains (smears, appearing objects) on animation */
+#define PUSHCORE_HOLD_LINE_ART 2u        /* line contrast of generated frames matched to the drawing; doubled lines replaced */
+#define PUSHCORE_HOLD_SIGNS 4u           /* typeset signs (text drawn into the picture) held with the Subtitle Hold pass */
+#define PUSHCORE_HOLD_FILM_TIME 16u      /* P9: drawn parts of 24p-grid shots in 29.97 video switch at film time (Camera only;
+                                            off by default until the verdict) */
+#define PUSHCORE_HOLD_LIVE_TRANSIENTS 8u /* flash / impact hold on every video, live action too */
 #define PUSHCORE_SETTINGS_SIZE_BASE 44u  /* sizeof(PushCoreSettings) up to videoHdr (the first ABI 3 layout) */
 #define PUSHCORE_SETTINGS_SIZE_V2 56u    /* ... up to debandStrength (before the frame generation methods) */
 #define PUSHCORE_FG_VFG 0u         /* NVIDIA Video Effects frame generation (RTX 40/50; RTX 30 through VfgAmpereCompat) */
@@ -187,12 +215,28 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_SR_METHOD_ZLUDA_VSR 5u /* PUSHCORE_FEATURE_ZLUDA_VSR: RTX VSR on AMD RX 7000 / 9000 through ZLUDA (a worker process;
                                       unlock ZludaVsr, self-tested). On those cards PUSHCORE_SR_METHOD_RTX runs it too when
                                       PUSHCORE_CAP_ZLUDA_VSR is available; elsewhere it is FSR (AMD) or RTX VSR (NVIDIA) */
+#define PUSHCORE_SR_METHOD_PMML 6u /* PUSHCORE_FEATURE_ANIME_SR: an anime upscaler (ArtCNN / CuNNy / AnimeSR, settings.animeSrModel)
+                                      through pmml (ONNX Runtime: TensorRT-RTX on RTX, DirectML on any DirectX 12 GPU) in
+                                      the graph's RTX VSR slot; not available or stopped: RTX VSR on NVIDIA, else FSR */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16 0u     /* ArtCNN (MIT) 2x luma: real time at 1080p on most GPUs */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16_DS 1u  /* ... denoise + sharpen (low bitrate sources) */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F16_DN 2u  /* ... denoise (grainy sources) */
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32 3u
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32_DS 4u
+#define PUSHCORE_ANIME_SR_ARTCNN_C4F32_DN 5u
+#define PUSHCORE_ANIME_SR_ARTCNN_R8F64 6u     /* heavy: DVD-class (480p / 576p) sources only */
+#define PUSHCORE_ANIME_SR_CUNNY_FAST 7u       /* CuNNy (LGPL-3.0, a separate replaceable component) 2x luma */
+#define PUSHCORE_ANIME_SR_CUNNY_4X16 8u       /* ... 2x RGB */
+#define PUSHCORE_ANIME_SR_CUNNY_8X32 9u
+#define PUSHCORE_ANIME_SR_ANIMESR_V2 10u      /* AnimeSR v2 (Apache-2.0) 4x recurrent: DVD-class sources only */
+#define PUSHCORE_ANIME_SR_COUNT 11u
 #define PUSHCORE_SR_FAMILY_STANDARD 0u      /* RTX Video SDK (NGX), tiers 1..4 = videoSrQuality 1..4 */
 #define PUSHCORE_SR_FAMILY_HIGH_BITRATE 1u  /* VFX VideoSuperRes, keeps detail (no compression clean-up): 16..19 */
 #define PUSHCORE_SR_FAMILY_STREAMING 2u     /* VFX VideoSuperRes, cleans hardest (Ampere+): tiers 1-2 -> 21, 3-4 -> 23 */
 #define PUSHCORE_DEBAND_LOW 0u
 #define PUSHCORE_DEBAND_MEDIUM 1u
 #define PUSHCORE_DEBAND_HIGH 2u
+#define PUSHCORE_DEBAND_ANIME 3u   /* anime round 5 (PUSHCORE_FEATURE_ANIME_HOLD cores): wider radius for flat fills, less grain */
 
 typedef struct PushCoreStreamInfo {
     uint32_t structSize;       /* sizeof(PushCoreStreamInfo) */
@@ -279,10 +323,35 @@ typedef struct PushCoreStats {
        method without it), 4 Auto: running and detecting, not holding (no burned-in text found); subtitleHoldPixels = pixels of the band it held in the frame sampled last */
     uint32_t subtitleHoldState;
     uint32_t subtitleHoldPixels;
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): held-frame re-timing (PushCoreSettings.heldFrames) */
+    uint32_t heldActive;          /* 1 = the held-frame test runs on this graph (asked for, frame generation on) */
+    uint32_t heldRatioPermille;   /* held frames among the last heldTested (up to 240) source frames, per mille */
+    uint32_t heldTested;
+    uint32_t heldGraphMultiplier; /* the graph's built multiplier (the largest per-span multiplier) */
+    uint64_t heldFrames;          /* source frames found held since open */
+    uint64_t heldDropped;         /* held frames covered by a re-timed span (not given to the graph) */
+    uint64_t heldSpans;           /* re-timed spans */
+    /* Appended (PUSHCORE_FEATURE_HELD_FRAMES): per-region re-timing by source repair: held parts of a frame between two of
+       their drawings get the span stream's in-between (a second VFG effect at the source size) before the graph */
+    uint32_t repairActive;        /* 1 = the source repair runs (VFG, animation found or heldFrames 2) */
+    uint32_t repairReserved;
+    uint64_t repairedFrames;      /* source frames repaired */
+    uint64_t repairedParts;       /* parts laid in (one span-stream frame each) */
     /* Appended (PUSHCORE_FEATURE_QUICK_VSR): 1 = this instance upscales with the driver's RTX VSR through the D3D11 video
        processor (PUSHCORE_FLAG_QUICK_VSR took effect) */
     uint32_t quickVsr;
     uint32_t quickVsrReserved;
+    /* Appended (PUSHCORE_FEATURE_ANIME_SR) */
+    uint32_t animeSrModel;        /* PUSHCORE_ANIME_SR_* running (srMethod PMML), ~0u = none */
+    float animeSrMs;              /* its last frame: readback + model + upload, CPU wall time */
+    /* Appended (PUSHCORE_FEATURE_ANIME_HOLD): the hold compose on generated frames */
+    uint32_t holdActive;          /* 1 = hold plans are made for this stream */
+    uint32_t animClass;           /* the picture's class from its cadence (Auto per show): 0 not known yet, 1 feature
+                                     (moving parts mostly on ones), 2 TV limited (twos / threes), 3 mixed CG (rarely
+                                     drawn on twos); + 16 once final (after ~2 minutes), provisional before */
+    uint64_t holdPairs;           /* source pairs with a hold */
+    uint64_t holdFrames;          /* generated frames composed */
+    uint64_t holdFlashes;         /* flash / impact pairs held whole */
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -343,6 +412,9 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_DV_P5_EXACT 128u /* PushCoreSubmitTiming.dvP5Exact / dvP5ExactCurve */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD 256u /* PushCoreSettings.subtitleHold, PushCoreStats.subtitleHoldState/Pixels */
 #define PUSHCORE_FEATURE_NVOF_FG 1024u /* PushCoreSettings.fgBackend = PUSHCORE_FG_NVOF, PUSHCORE_CAP_NVOF_FG */
+#define PUSHCORE_FEATURE_HELD_FRAMES 2048u /* PushCoreSettings.heldFrames, PushCoreStats.held* */
+#define PUSHCORE_FEATURE_ANIME_SR (1u << 18) /* srMethod PUSHCORE_SR_METHOD_PMML, PushCoreSettings.animeSrModel, PushCoreStats.animeSr*, PUSHCORE_CAP_ANIME_SR */
+#define PUSHCORE_FEATURE_ANIME_HOLD (1u << 19) /* PushCoreSettings.animationMode / holdFlags, PushCoreStats.hold* / animClass */
 #define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
 #define PUSHCORE_MAX_MULTIPLIER 16u
 #define PUSHCORE_FEATURE_PUSHFLOW16 16384u /* PushFlow up to PUSHCORE_MAX_MULTIPLIER (flow once above 4x: one network run per pair, every subframe rebuilt from its grids); older cores stop at 4x */
@@ -408,7 +480,9 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_HELIX_FG 19u    /* PUSHCORE_FG_HELIXFG: the HelixSR files + its self-test pending or passed (unlock HelixFg) */
 #define PUSHCORE_CAP_HLX_FSR4 20u    /* FSR upscaling runs HelixSR's HLX FSR 4 (AMD's FSR 4 network as compute shaders) here: RX 5000
                                         (Full) and GTX 16 / 10 (Lite), after its self-test (unlock HlxFsr4); else FSR 3.1 */
-#define PUSHCORE_CAP_COUNT 22u       /* set at the v1 merge: 0-20 used, 21 = PUSHCORE_CAP_ANIME_SR (Anime, merged later); PushCoreCaps.reason[] has this many rows */
+#define PUSHCORE_CAP_ANIME_SR 21u     /* PUSHCORE_FEATURE_ANIME_SR: pmml's runtime (TensorRT-RTX or DirectML) + the anime models */
+#define PUSHCORE_SELFTEST_ANIME_SR 256u /* self-test id: the chosen anime upscaler on a synthetic picture (pushmpc::animeSrSelfTest) */
+#define PUSHCORE_CAP_COUNT 22u       /* highest index + 1 (21 = PUSHCORE_CAP_ANIME_SR); PushCoreCaps.reason[] has this many rows */
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */
     uint32_t vendorId, deviceId;
@@ -464,7 +538,7 @@ typedef int (*PushCorePrewarmReleaseFn)(void);
    global bit space for every method that has a self-test); flags = PUSHCORE_SELFTEST_FLAG_*. adapterLuid 0 = the first hardware
    adapter (FLAG_WARP: Windows' software adapter, for CI); rootDir = the runtime root (NULL = pushcore's folder). report = one
    JSON object (UTF-8): "adapter", "driver", "features", per asked-for test "<key>": its verdict line ("pass; ..." / "fail: ..."
-   / "unavailable: ...") and "<key>.<name>" fields with its numbers. Keys: xefg, xesssr, ivsr, vplfi, bridge, zludavsr. PUSHCORE_OK =
+   / "unavailable: ...") and "<key>.<name>" fields with its numbers. Keys: xefg, xesssr, ivsr, vplfi, bridge, zludavsr, animesr. PUSHCORE_OK =
    every asked-for test passed. FLAG_RECORD writes each hardware result into HKCU\Software\PushMPC\SelfTest\<unlock name>
    (keyed vendor:device:driver), which pushcore_capabilities reads; capabilities also runs a missing test itself (Auto). */
 #define PUSHCORE_SELFTEST_XEFG 1u

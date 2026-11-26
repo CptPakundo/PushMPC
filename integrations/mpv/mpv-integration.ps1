@@ -116,7 +116,20 @@ function Get-PmShaderLines($E, [string]$ScriptPath) {
     $when = if ($all -match 'NVIDIA.*RTX|RTX') { 'fallback' } else { 'always' }
     $file = Join-Path (Split-Path -Parent $ScriptPath) ("shaders\ArtCNN_{0}_fragment.glsl" -f $(if ($big) { 'C4F32' } else { 'C4F16' }))
     if (-not (Test-Path -LiteralPath $file)) { return @() }
-    return @("script-opts-append=pushmpc-shaders=$(Get-PmQuoted $file.Replace('\', '/'))", "script-opts-append=pushmpc-shaders-when=$when")
+    $lines = @("script-opts-append=pushmpc-shaders=$(Get-PmQuoted $file.Replace('\', '/'))", "script-opts-append=pushmpc-shaders-when=$when")
+    # the anime upscaling shaders (ArtCNN, CuNNy as their authors publish them; Setup's anime-models-fetch.ps1 puts them in
+    # <InstallDir>\pmml\graphs\anime-sr): best first, each lighter than the one before; pushmpc.lua uses them for animation
+    $anime = @((Join-Path (Split-Path -Parent $ScriptPath) '..\pmml\graphs\anime-sr'), (Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptPath)) 'pmml\graphs\anime-sr')) + @(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'PushMPC\pmml\graphs\anime-sr' }) |
+        Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'ArtCNN_C4F16.glsl')) } | Select-Object -First 1
+    if ($anime) {
+        $set = foreach ($e in @(@('artcnn-c4f32', 'ArtCNN_C4F32.glsl'), @('artcnn-c4f32-ds', 'ArtCNN_C4F32_DS.glsl'), @('artcnn-c4f16', 'ArtCNN_C4F16.glsl'),
+                                 @('artcnn-c4f16-ds', 'ArtCNN_C4F16_DS.glsl'), @('cunny-4x16', 'CuNNy-4x16-DS.glsl'), @('cunny-fast', 'CuNNy-fast-DS.glsl'))) {
+            $f = Join-Path $anime $e[1]
+            if (Test-Path -LiteralPath $f) { "$($e[0])=$((Resolve-Path -LiteralPath $f).Path.Replace('\', '/'))" }
+        }
+        if ($set) { $lines += "script-opts-append=pushmpc-anime-shaders=$(Get-PmQuoted ($set -join ';'))" }
+    }
+    return $lines
 }
 function Get-PmBlock([string]$ScriptPath, [int]$Buffered, [int]$Concurrent, [string]$Nl, [switch]$Direct) {
     if ($Direct) { $mid = @("vf-append=$(Get-PmVfOption $ScriptPath $Buffered $Concurrent)") }

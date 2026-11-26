@@ -17,3 +17,10 @@
 #include "pack.h"
 #include "ofconv.h"
 #include "blur.h"
+// the held-drawing repair (cells, repair8, repair16): made by glslang at build time until checked in (CI)
+#if __has_include("cells.h") && __has_include("repair8.h") && __has_include("repair16.h")
+#include "cells.h"
+#include "repair8.h"
+#include "repair16.h"
+#define PMVS_HAVE_REPAIR_SPV 1
+#endif

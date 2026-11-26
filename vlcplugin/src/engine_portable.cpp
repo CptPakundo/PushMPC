@@ -8,6 +8,7 @@
 #include "pm_engine.h"
 #include "portable_engine.h"
 #include "backend.h"   // pmvs::DecidePortableK: the same Auto rule as the mpv route
+#include "held_dedup.h" // held frames: PushFPS's duplicate test on the quarter-size luma (CPU engine)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,8 @@
 #include <new>
 #include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 #ifdef PMVS_GPU
 #include "gpu_backend.h"   // CutGuard, CalibrateGpu
 #endif
@@ -58,6 +61,12 @@ struct pm_engine {
     std::string dbWhy;
 #endif
 #endif
+    // held frames (pm_engine_set_dedup): checked = the frame tested by pm_engine_check_dup is a new picture and its
+    // push comes next; CPU engine: the quarter-size luma of the last distinct frame and of the one tested; GPU engine:
+    // the tested frame's slot (the push takes it), compared with slotCur (the last distinct frame)
+    bool dedup = false, haveDistinct = false, lastDup = false, checked = false;
+    std::vector<uint8_t> lastQ, curQ;
+    int staged = -1;
 };
 
 static void SetErr(char *err, size_t n, const std::string &s)
@@ -95,6 +104,20 @@ static void GpuForget(pm_engine *e)
     e->cut = false;
 }
 #endif
+// held frames: the tested frame's upload is dropped (a new test); HeldDrop also the last distinct frame (a seek, the end)
+static void Unstage(pm_engine *e)
+{
+#ifdef PMVS_GPU
+    if (e->staged >= 0 && e->g) e->g->ReleaseSlot(e->staged);
+#endif
+    e->staged = -1;
+    e->lastDup = e->checked = false;
+}
+static void HeldDrop(pm_engine *e)
+{
+    Unstage(e);
+    e->haveDistinct = false;
+}
 
 #ifdef PM_APPLE_MODULE
 // libpushmpc_engine_apple.dylib from this plugin's folder; the backend for this stream, or null with the reason
@@ -159,6 +182,7 @@ extern "C" void pm_engine_close(pm_engine *e)
 #ifdef PM_APPLE_MODULE
     if (e) AppleClose(e);
 #endif
+    if (e) HeldDrop(e);
 #ifdef PMVS_GPU
     if (e && e->gpu) GpuForget(e);
 #endif
@@ -198,10 +222,18 @@ extern "C" int pm_engine_push(pm_engine *e, const pm_yuv *src, int contiguous, c
     v.width = e->width; v.height = e->height; v.bits = e->bits;
     for (int i = 0; i < 3; ++i) { v.data[i] = src->data[i]; v.stride[i] = src->stride[i]; }
     std::string why;
+    if (e->dedup) {   // held frames: a repeat of the last distinct frame leaves the pair as it is
+        if (!e->checked && pm_engine_check_dup(e, src, contiguous, err, errsize) == 1) return 0;
+        e->checked = false;
+        std::swap(e->lastQ, e->curQ);
+        e->haveDistinct = true;
+    }
 #ifdef PMVS_GPU
     if (e->gpu) {
         if (!contiguous) GpuForget(e);
-        const int slot = e->g->Upload(v, why);
+        int slot = e->staged;   // held frames: pm_engine_check_dup's upload of this frame
+        e->staged = -1;
+        if (slot < 0) slot = e->g->Upload(v, why);
         if (slot < 0) { SetErr(err, errsize, why); GpuForget(e); return -1; }
         e->st.pushed++;
         if (e->slotCur < 0) { e->slotCur = slot; return 0; }
@@ -290,6 +322,7 @@ extern "C" void pm_engine_forget(pm_engine *e)
 #ifdef PM_APPLE_MODULE
     if (e->ap) { e->ap->Flush(); e->apPair = false; return; }
 #endif
+    HeldDrop(e);
 #ifdef PMVS_GPU
     if (e->gpu) { GpuForget(e); return; }
 #endif
@@ -416,6 +449,20 @@ static bool DbReady(pm_engine *e)
     }
     return e->db != nullptr;
 }
+// a dmabuf into a free source slot (the import lives until the upload has run); -2: the import failed
+static int DbUpload(pm_engine *e, const pm_dmabuf *src, std::string &why)
+{
+    pmdb::Imported im;
+    if (!e->db->Import(*src, false, im, why)) return -2;
+    uint64_t ticket = 0;
+    const int slot = e->g->UploadWith([&](VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc &d, std::string &er) {
+        return e->db->RecordIn(cb, im, d, er); }, ticket, why);
+    std::string werr;
+    if (ticket) e->g->Wait(ticket, werr);
+    e->db->Recycle();
+    e->db->Release(im);
+    return slot;
+}
 #endif
 
 extern "C" int pm_engine_dmabuf_ok(const pm_engine *e, const char **why)
@@ -437,18 +484,17 @@ extern "C" int pm_engine_push_dmabuf(pm_engine *e, const pm_dmabuf *src, int con
 #ifdef PM_DMABUF
     if (!DbReady(e)) { SetErr(err, errsize, e->dbWhy); return -1; }
     std::string why;
-    pmdb::Imported im;
-    if (!e->db->Import(*src, false, im, why)) { SetErr(err, errsize, why); return -1; }
+    // held frames: a repeat of the last distinct frame leaves the pair as it is
+    if (e->dedup && !e->checked && pm_engine_check_dup_dmabuf(e, src, contiguous, err, errsize) == 1) return 0;
+    int slot = e->staged;   // pm_engine_check_dup*'s upload of this frame
+    e->staged = -1;
+    if (slot < 0) {
+        slot = DbUpload(e, src, why);
+        if (slot == -2) { SetErr(err, errsize, why); return -1; }   // not imported: the caller copies (the test stands)
+        if (slot < 0) { SetErr(err, errsize, why); GpuForget(e); return -1; }
+    }
+    if (e->dedup) { e->checked = false; e->haveDistinct = true; }
     if (!contiguous) GpuForget(e);
-    uint64_t ticket = 0;
-    const int slot = e->g->UploadWith([&](VkCommandBuffer cb, const pmvs::gpu::Engine::PlanarDesc &d, std::string &er) {
-        return e->db->RecordIn(cb, im, d, er); }, ticket, why);
-    // the import lives until the upload has run
-    std::string werr;
-    if (ticket) e->g->Wait(ticket, werr);
-    e->db->Recycle();
-    e->db->Release(im);
-    if (slot < 0) { SetErr(err, errsize, why); GpuForget(e); return -1; }
     e->st.pushed++;
     if (e->slotCur < 0) { e->slotCur = slot; return 0; }
     pmvs::gpu::PairStats ps;
@@ -501,3 +547,71 @@ extern "C" int pm_engine_generate_dmabuf(pm_engine *e, float t, const pm_dmabuf 
     return -1;
 #endif
 }
+
+// ---- held frames (pm_engine.h): PushFPS's duplicate test against the last distinct frame pushed
+extern "C" void pm_engine_set_dedup(pm_engine *e, int on)
+{
+    HeldDrop(e);
+    e->dedup = on != 0;
+}
+
+#ifdef PMVS_GPU
+// the GPU engine: the uploaded frame against slotCur (the last distinct frame) with the engine's Duplicate pass; a new
+// picture stays uploaded for its push, a repeat's slot is freed. A failed test counts as a new picture.
+static int GpuStage(pm_engine *e, int slot, int contiguous, char *err, size_t errsize)
+{
+    bool dup = false;
+    if (contiguous && e->slotCur >= 0) {
+        pmvs::gpu::DedupStats ds;
+        std::string why;
+        if (!e->g->Duplicate(e->slotCur, slot, ds, why)) { e->staged = slot; e->checked = true; SetErr(err, errsize, why); return -1; }
+        dup = ds.duplicate;
+    }
+    if (dup) e->g->ReleaseSlot(slot);
+    else e->staged = slot;
+    e->lastDup = dup;
+    e->checked = !dup;
+    return dup ? 1 : 0;
+}
+#endif
+
+extern "C" int pm_engine_check_dup(pm_engine *e, const pm_yuv *src, int contiguous, char *err, size_t errsize)
+{
+    Unstage(e);   // only the last distinct frame stays (CPU: lastQ; GPU: slotCur)
+    if (!e->dedup) return 0;
+#ifdef PMVS_GPU
+    if (e->gpu) {
+        pmvs::portable::YuvView v;
+        v.width = e->width; v.height = e->height; v.bits = e->bits;
+        for (int i = 0; i < 3; ++i) { v.data[i] = src->data[i]; v.stride[i] = src->stride[i]; }
+        std::string why;
+        const int slot = e->g->Upload(v, why);
+        if (slot < 0) { SetErr(err, errsize, why); return -1; }
+        return GpuStage(e, slot, contiguous, err, errsize);
+    }
+#endif
+    (void)err; (void)errsize;
+    pmvs::held::QuarterLuma(src->data[0], src->stride[0], e->width, e->height, e->bits > 8 ? 2 : 1, e->bits > 8 ? e->bits - 8 : 0, e->curQ);
+    e->lastDup = contiguous && e->haveDistinct && pmvs::held::QuarterDuplicate(e->lastQ, e->curQ, e->width, e->height);
+    e->checked = !e->lastDup;   // a new picture: the next push takes this test
+    return e->lastDup ? 1 : 0;
+}
+
+extern "C" int pm_engine_check_dup_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, char *err, size_t errsize)
+{
+#ifdef PM_DMABUF
+    Unstage(e);
+    if (!e->dedup) return 0;
+    if (!DbReady(e)) { SetErr(err, errsize, e->dbWhy); return -1; }
+    std::string why;
+    const int slot = DbUpload(e, src, why);
+    if (slot < 0) { SetErr(err, errsize, why); return -1; }
+    return GpuStage(e, slot, contiguous, err, errsize);
+#else
+    (void)e; (void)src; (void)contiguous;
+    SetErr(err, errsize, "no zero-copy path in this build");
+    return -1;
+#endif
+}
+
+extern "C" int pm_engine_last_dup(const pm_engine *e) { return e->lastDup ? 1 : 0; }

@@ -142,12 +142,120 @@ static void KodiEngine(int upscale)
     CHECK(k >= 1 && k <= 5);
 }
 
+// held frames (cadence.h HeldCadence): anime drawn on twos / threes, a still, a gap, the end of the stream. 25 fps
+// (40000 us a frame) so every expected timestamp is a round number.
+static bool Is(const pmk::Slot& s, int64_t pts, double t, bool real, bool newest = false)
+{
+    return s.pts == pts && std::fabs(double(s.t) - t) < 1e-6 && s.real == real && s.newest == newest;
+}
+static void HeldSchedule()
+{
+    using V = std::vector<pmk::Slot>;
+    {   // twos at x2: drawings at 0, 80000, 160000; repeats at 40000, 120000
+        pmk::HeldCadence h;
+        CHECK(h.Next(0, false, false, 2, false).empty());         // the first frame waits for its successor
+        CHECK(h.Next(40000, true, true, 2, true).empty());        // a repeat waits for the next drawing
+        V a = h.Next(80000, false, true, 2, true);                // g = 2, k = 2: real 0, then t = 1/4, 2/4, 3/4
+        CHECK(a.size() == 4 && Is(a[0], 0, 0, true) && Is(a[1], 20000, 0.25, false) && Is(a[2], 40000, 0.5, false) && Is(a[3], 60000, 0.75, false));
+        CHECK(h.Next(120000, true, true, 2, true).empty());
+        V b = h.Next(160000, false, true, 2, true);               // real 80000, then 100000 / 120000 / 140000
+        CHECK(b.size() == 4 && Is(b[0], 80000, 0, true) && Is(b[1], 100000, 0.25, false) && Is(b[3], 140000, 0.75, false));
+        CHECK(h.Repeats() == 2 && h.Stills() == 0);
+    }
+    {   // threes at x2: g = 3, six pictures 20000 apart, t = j / 6
+        pmk::HeldCadence h;
+        h.Next(0, false, false, 2, false);
+        CHECK(h.Next(40000, true, true, 2, true).empty() && h.Next(80000, true, true, 2, true).empty());
+        V a = h.Next(120000, false, true, 2, true);
+        CHECK(a.size() == 6 && Is(a[0], 0, 0, true));
+        for (int j = 1; j < 6 && j < int(a.size()); ++j) CHECK(Is(a[size_t(j)], 20000 * j, j / 6.0, false));
+    }
+    {   // a still: the 4th repeat (160000) shows the drawing and the 3 waiting repeats as they are (the engine's newest
+        // frame); a 5th repeat goes out as it comes; the next drawing moves only the last interval (t = 1/2 at x2)
+        pmk::HeldCadence h;
+        h.Next(0, false, false, 2, false);
+        CHECK(h.Next(40000, true, true, 2, true).empty() && h.Next(80000, true, true, 2, true).empty() && h.Next(120000, true, true, 2, true).empty());
+        V a = h.Next(160000, true, true, 2, true);                // real 0, 40000, 80000, 120000 (newest)
+        CHECK(a.size() == 4 && Is(a[0], 0, 0, true, true) && Is(a[1], 40000, 0, true, true) && Is(a[3], 120000, 0, true, true));
+        V b = h.Next(200000, true, true, 2, true);                // real 160000 (newest)
+        CHECK(b.size() == 1 && Is(b[0], 160000, 0, true, true));
+        V c = h.Next(240000, false, true, 2, true);               // real 200000, then 220000 at t = 0.5 of (drawing, new)
+        CHECK(c.size() == 2 && Is(c[0], 200000, 0, true) && Is(c[1], 220000, 0.5, false));
+        CHECK(h.Repeats() == 5 && h.Stills() == 1);
+        // a gap with a repeat waiting: the base and the repeat as they are, no pair across it
+        CHECK(h.Next(280000, true, true, 2, true).empty());
+        V d = h.Next(9000000, false, false, 2, true);             // real 240000, real 280000
+        CHECK(d.size() == 2 && Is(d[0], 240000, 0, true) && Is(d[1], 280000, 0, true));
+        // the end of the stream with a repeat waiting: the base and the repeat, as they are (the engine's newest)
+        CHECK(h.Next(9040000, true, true, 2, true).empty());
+        V e = h.Drain();                                          // real 9000000, real 9040000 (newest)
+        CHECK(e.size() == 2 && Is(e[0], 9000000, 0, true, true) && Is(e[1], 9040000, 0, true, true));
+        CHECK(!h.Have());
+    }
+    {   // the engine has no pair (an error): the base and the repeats go out as they are
+        pmk::HeldCadence h;
+        h.Next(0, false, false, 2, false);
+        h.Next(40000, true, true, 2, false);
+        V a = h.Next(80000, false, true, 2, false);               // real 0, real 40000
+        CHECK(a.size() == 2 && Is(a[0], 0, 0, true) && Is(a[1], 40000, 0, true));
+    }
+    // without repeats HeldCadence is SlotsForPair (the 23.976 fps clip of Schedule, x5)
+    const double fu = 1e6 * 1001.0 / 24000.0;
+    pmk::HeldCadence h;
+    int64_t prev = 0;
+    h.Next(0, false, false, 5, false);
+    for (int i = 1; i <= 24; ++i) {
+        const int64_t cur = int64_t(std::llround(i * fu / 1000.0)) * 1000;
+        const V a = h.Next(cur, false, true, 5, true), b = pmk::SlotsForPair(prev, cur, 5, true, true);
+        CHECK(a.size() == b.size());
+        for (size_t j = 0; j < a.size() && j < b.size(); ++j) CHECK(a[j].pts == b[j].pts && a[j].t == b[j].t && a[j].real == b[j].real);
+        prev = cur;
+    }
+}
+
+// the CPU engine's duplicate test (pm_engine_set_dedup): a repeat leaves the pair as it is. The box moves 16 px per
+// drawing (A at 40, B at 56, C at 72; its centre is x0 + 24)
+static void EngineDedup()
+{
+    pm_engine_cfg cfg{};
+    cfg.width = W; cfg.height = H; cfg.bits = 8; cfg.threads = 2; cfg.quality = 1;
+    char err[256] = {};
+    pm_engine* e = pm_engine_open(&cfg, err, sizeof(err));
+    CHECK(e != nullptr);
+    if (!e) return;
+    pm_engine_set_dedup(e, 1);
+    pm_yuv_out o{{OY, OU, OV}, {W, W / 2, W / 2}};
+    pm_yuv s0{{Y[0], U[0], V[0]}, {W, W / 2, W / 2}}, s1{{Y[1], U[1], V[1]}, {W, W / 2, W / 2}};
+    Frame(0, 40, 220);                                                       // A
+    CHECK(pm_engine_push(e, &s0, 0, err, sizeof(err)) == 0 && !pm_engine_last_dup(e));
+    CHECK(pm_engine_push(e, &s0, 1, err, sizeof(err)) == 0 && pm_engine_last_dup(e) && !pm_engine_have_pair(e));   // A again: a repeat, no pair yet
+    Frame(1, 56, 220);                                                       // B
+    CHECK(pm_engine_push(e, &s1, 1, err, sizeof(err)) == 0 && !pm_engine_last_dup(e) && pm_engine_have_pair(e));
+    pm_engine_generate(e, 0.5f, &o);
+    CHECK(std::fabs(BoxCentre(OY) - 72.0) <= 3.0);                          // (A, B) at 0.5: 48 + 24 = 72
+    CHECK(pm_engine_check_dup(e, &s1, 1, err, sizeof(err)) == 1);            // B again: the test alone says repeat
+    CHECK(pm_engine_push(e, &s1, 1, err, sizeof(err)) == 0 && pm_engine_last_dup(e));
+    pm_engine_generate(e, 0.25f, &o);
+    const double c = BoxCentre(OY);
+    CHECK(std::fabs(c - 68.0) <= 3.0);                                       // still the pair (A, B): 44 + 24 = 68
+    std::printf("engine dedup: a repeat kept the pair, box at t=0.25 %.2f (expected 68.00)\n", c);
+    Frame(0, 72, 220);                                                       // C
+    CHECK(pm_engine_check_dup(e, &s0, 1, err, sizeof(err)) == 0);            // a new drawing; the push takes the test
+    CHECK(pm_engine_push(e, &s0, 1, err, sizeof(err)) == 0 && !pm_engine_last_dup(e));
+    pm_engine_generate(e, 0.5f, &o);
+    CHECK(std::fabs(BoxCentre(OY) - 88.0) <= 3.0);                          // (B, C) at 0.5: 64 + 24 = 88
+    CHECK(pm_engine_push(e, &s0, 0, err, sizeof(err)) == 0 && !pm_engine_last_dup(e));   // not contiguous: never a repeat
+    pm_engine_close(e);
+}
+
 #include "zero_copy_test.inc"
 
 int main()
 {
     Schedule();
+    HeldSchedule();
     Engine();
+    EngineDedup();
     KodiEngine(0);
     KodiEngine(1);
     ZeroCopy();

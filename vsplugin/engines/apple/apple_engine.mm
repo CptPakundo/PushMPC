@@ -361,6 +361,7 @@ struct Engine::Impl {
     Thumb prevThumb, curThumb;
     bool havePrev = false, haveCur = false;
     bool freshPair = true;     // the next pair is the first since a reset (FRC: random submission, clears its cache)
+    int span = 1;              // held frames (SetSpan): the next pair spans this many source intervals
     // editing super resolution's temporal state: the last frame it upscaled (source size, output) in this stream
     Buf srLastSrc, srLastOut;
     float srLastPhase = 0;
@@ -630,7 +631,7 @@ struct Engine::Impl {
     // only on a hard error. Super resolution runs in presentation order (generated frames, then the real one).
     bool Interpolate(bool sequential, std::vector<Buf>& out, std::string& err, const std::function<void(const std::string&)>& log)
     {
-        const int k = cfg.k;
+        const int k = cfg.k * std::max(1, span);   // held frames: g k - 1 outputs over a span of g source intervals
         PhasePlan plan;
         if (lastCut || fi == Fi::None) plan = MakePlan(k, 0);
         else if (fi == Fi::Frc && ladder.Level() < 2) plan = MakePlan(k, 0, true);
@@ -839,6 +840,7 @@ int Engine::OutWidth() const { return m->outW; }
 int Engine::OutHeight() const { return m->outH; }
 int Engine::K() const { return m->cfg.k; }
 bool Engine::LastPairWasCut() const { return m->lastCut; }
+void Engine::SetSpan(int g) { m->span = std::clamp(g, 1, 8); }
 const Stats& Engine::Stat() const { m->stats.ladder = m->ladder.Level(); return m->stats; }
 std::string Engine::Describe() const { return m->chain + "; ladder: " + m->ladder.Describe(); }
 
@@ -1117,6 +1119,7 @@ namespace {
 // the shared middle of Process / ProcessBuffer: the new frame is uploaded (d.cur, d.cur16, d.curVt); runs the pair
 bool Step(Engine::Impl& d, int64_t pts, const Thumb& thumb, std::vector<Buf>& out, bool& havePair, std::string& err, const std::function<void(const std::string&)>& log)
 {
+    struct SpanReset { Engine::Impl& d; ~SpanReset() { d.span = 1; } } spanReset{ d };   // SetSpan holds for this one pair
     if (d.rgb && d.fi != Fi::None && d.cfg.k >= 2) { d.curVt = d.Convert(d.cur, d.vtSrcPool, err); if (!d.curVt) return false; }
     d.curPts = pts;
     d.curThumb = thumb;
@@ -1130,7 +1133,7 @@ bool Step(Engine::Impl& d, int64_t pts, const Thumb& thumb, std::vector<Buf>& ou
         const bool sequential = !d.freshPair;
         d.freshPair = false;
         if (!d.Interpolate(sequential, out, err, log)) return false;
-        const double ms = NowMs() - t0;
+        const double ms = (NowMs() - t0) / double(std::max(1, d.span));   // per source interval (a held span covers several)
         d.stats.pairMs = d.stats.pairMs <= 0 ? ms : d.stats.pairMs * 0.95 + ms * 0.05;
         if (d.ladder.Record(ms) && log)
             log(Fmt("apple: pairs take %.1f ms (budget %.1f ms per source frame): stepping down to %s", d.ladder.MeanMs(), d.ladder.BudgetMs(), d.ladder.Describe().c_str()));
@@ -1258,6 +1261,7 @@ int Engine::K() const { return 1; }
 bool Engine::Process(const PlanarView&, const Colour&, int64_t, bool, const std::vector<PlanarOut>&, const PlanarOut&, bool& havePair, std::string& err) { havePair = false; err = "unavailable"; return false; }
 void Engine::Forget() {}
 bool Engine::LastPairWasCut() const { return false; }
+void Engine::SetSpan(int) {}
 const Stats& Engine::Stat() const { return m->stats; }
 std::string Engine::Describe() const { return "unavailable"; }
 bool Engine::ProcessBuffer(void*, const Colour&, int64_t, bool, std::vector<void*>& gen, void*& cur, bool& havePair, std::string& err) { gen.clear(); cur = nullptr; havePair = false; err = "unavailable"; return false; }

@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 #include "PushMpcSettings.h"
+#include "PushMpcAnimeSr.h"   // anime upscalers: models, costs, PickAnimeSr
 
 namespace pm {
 
@@ -67,12 +68,35 @@ struct Source {
     bool hdr = false;         // PQ / HLG
     double bppEq = -1;        // H.264-equivalent bits per pixel per frame (< 0 = unknown)
     bool tenBit = false;      // P010 input (10-bit)
+    bool animHint = false;    // the file's path names it animation (AnimationHint)
+    double heldShare = -1;    // held frames pushcore found (share of the last ~10 s; < 0 = not measured); sticky once >= kAnimationHeldShare
+    int showClass = 0;        // the show's class (PushMpcShows.h: 1 feature, 2 TV limited, 3 mixed CG; 0 not known yet)
+    int showChoice = -1;      // the user's mode for this show (0 Full, 1 Camera only, 2 Off; -1 none)
 };
+// Animation (cartoons, anime): drawn on twos or threes, a quarter to two thirds of a TV episode's frames repeat the drawing
+// before them (pushcore's held-frame test); live action and 3D CG at 24 distinct frames have almost none. The path is the
+// early hint, before ~4 s of frames are measured: a folder or file named with a whole word anime / animation / animated /
+// cartoon(s).
+inline constexpr double kAnimationHeldShare = 0.20;
+inline bool AnimationHint(const std::wstring& path)
+{
+    std::wstring p = path;
+    for (auto& ch : p) ch = wchar_t(towlower(ch));
+    for (const wchar_t* w : { L"anime", L"animation", L"animations", L"animated", L"cartoon", L"cartoons" }) {
+        const size_t n = wcslen(w);
+        for (size_t i = p.find(w); i != std::wstring::npos; i = p.find(w, i + 1)) {
+            const bool before = i == 0 || !iswalpha(p[i - 1]);
+            const bool after = i + n >= p.size() || !iswalpha(p[i + n]);
+            if (before && after) return true;
+        }
+    }
+    return false;
+}
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
 enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg,
-                     kCapXefg = 14, kCapVplFi = 15, kCapXessSr = 16, kCapIvsr = 17, kCapZludaVsr = 18, kCapHelixFg = 19, kCapHlxFsr4 = 20,
-                     kCapCount };   // = PUSHCORE_CAP_* (21 = Anime SR, added with the Anime merge; PUSHCORE_CAP_COUNT 22 leaves it room)
+                     kCapXefg = 14, kCapVplFi = 15, kCapXessSr = 16, kCapIvsr = 17, kCapZludaVsr = 18, kCapHelixFg = 19, kCapHlxFsr4 = 20, kCapAnimeSr = 21,
+                     kCapCount };   // = PUSHCORE_CAP_* (PUSHCORE_CAP_COUNT 22)
 struct Gpu {
     uint32_t family = kRtx50;          // default for the headless test: this machine
     uint32_t available = 0xFFFFFFFFu;  // bit per Cap
@@ -203,6 +227,9 @@ struct Costs {
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
     bool learnedBase = false;                       // base4k from the measured graph minus its stages (LearnCosts)
+    // anime upscalers (PushMpcAnimeSr.h): measured ms per input megapixel on this card per model (< 0 = not yet)
+    double animeSrLearned[11] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    double animeSrMs = 0;                           // set by Decide: the chosen anime upscaler's cost a frame
 };
 
 struct Choice {               // resolved values for pushcore and the filter
@@ -211,6 +238,8 @@ struct Choice {               // resolved values for pushcore and the filter
     std::wstring toneMapNote;
     int srFamily = 0;         // VsrStyle actually used (Standard for artifact reduction)
     Upscaler srMethod = Upscaler::Rtx;
+    int animeModel = -1;      // srMethod Anime: the model (PushMpcAnimeSr.h index = PUSHCORE_ANIME_SR_*)
+    std::wstring animeSrNote; // what Auto made of the anime upscalers
     int multiplier = 1; bool nr = false; bool hdr = false; bool hdrItm = false;
     HdrBoost hdrBoost = HdrBoost::Off;   // resolved boost (never Auto): PushMPC's curve M, or RTX Video HDR's peak
     int rtxHdrPeak = 1000;               // RTX Video HDR peakNits for the boost (Low 500 / Medium 700 / High 1000)
@@ -221,9 +250,14 @@ struct Choice {               // resolved values for pushcore and the filter
     FgMethod fgMethod = FgMethod::Vfg;   // the method in use (Auto never)
     int fgQuality = 1;        // VFG model 0..2, or PushFlow tier 0..2
     bool deband = false; int debandStrength = 1;
+    bool animation = false;   // treated as animation (Settings.animation On, or Auto: AnimationHint / held frames found)
+    std::wstring animNote;
+    int animMode = 0;         // PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off
+    uint32_t holdFlags = 0;   // PUSHCORE_HOLD_* bits (pushcore_abi.h)
+    std::wstring animModeNote;
     double predictedMs = 0, budgetMs = 0;
     std::wstring smootherNote, sharperNote, cleanNote, hdrNote, debandNote, stoppedAt, fgNote, qualityNote;
-    bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod; }
+    bool sameGraph(const Choice& o) const { return sr == o.sr && srLevel == o.srLevel && srFamily == o.srFamily && multiplier == o.multiplier && nr == o.nr && hdr == o.hdr && outW == o.outW && outH == o.outH && fgMethod == o.fgMethod && fgQuality == o.fgQuality && srMethod == o.srMethod && animeModel == o.animeModel; }
 };
 
 // ------------------------------------------------------------------------------------------------ rules
@@ -242,6 +276,9 @@ inline constexpr double kFixedRefreshSpareMs = 1.0;
 // 1080p quality, BitsPerPixel). Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
 inline constexpr double kDebandBpp8Bit = 0.25;
+// anime round 5 (V10): deband Auto on for 8-bit animation whatever the bitrate (anime preset), Low from Blu-ray class up
+inline constexpr bool kDebandAnimationAuto = true;
+inline constexpr double kDebandAnimeLowBpp = 0.5;
 // VSR style Auto: Blu-ray class at or above this (1080p H.264 remux 0.5-0.7, UHD HEVC ~0.68): high bitrate
 inline constexpr double kHighBitrateBpp = 0.40;
 
@@ -282,12 +319,13 @@ inline double VsrCost(const Costs& c, int level, bool ar, double pix, int family
     if (method == Upscaler::Nis) return c.nisSr * pix * c.vsrP95 * c.card;
     if (method == Upscaler::IntelVsr) return c.ivsrSr * pix * c.vsrP95 * c.ivsrScale * (c.ivsrMeasured ? 1.0 : c.card);
     if (method == Upscaler::Xess) return c.xessSr * pix * c.vsrP95 * c.xessScale * (c.xessMeasured ? 1.0 : c.card);
+    if (method == Upscaler::Anime) return c.animeSrMs;   // absolute (PickAnimeSr)
     const double* table = ar ? c.vsrAr : family == int(VsrStyle::HighBitrate) ? c.vsrUpHb : family == int(VsrStyle::Streaming) ? c.vsrUpSt : c.vsrUp;
     return table[std::min(level, 4) - 1] * pix * c.vsrP95 * c.vsrScale * c.card;
 }
 inline double DebandCost(const Costs& c, int strength, UINT w, UINT h)
 {
-    const double k = strength <= 0 ? 0.6 : strength >= 2 ? 1.8 : 1.0;
+    const double k = strength <= 0 ? 0.6 : strength == 3 ? 1.2 : strength >= 2 ? 1.8 : 1.0;   // 3: the anime preset (2 iterations, radius 24)
     return c.deband1080 * k * double(w) * double(h) / (1920.0 * 1080.0);
 }
 inline int FgKeyOf(FgMethod m, int quality)
@@ -456,7 +494,7 @@ inline std::vector<FgMethod> FgOrder(const Gpu& g)
 }
 // pushcore's numbering of the upscaler (PUSHCORE_SR_METHOD_* = Upscaler - 1; Auto never reaches pushcore: RTX)
 inline uint32_t CoreSrMethod(Upscaler u) { return u == Upscaler::Auto ? 0u : uint32_t(int(u) - 1); }
-inline Upscaler UpscalerOfCore(uint32_t m) { return m <= 4u ? Upscaler(int(m) + 1) : Upscaler::Rtx; }
+inline Upscaler UpscalerOfCore(uint32_t m) { return m <= 4u ? Upscaler(int(m) + 1) : m == 6u ? Upscaler::Anime : Upscaler::Rtx; }   // 6 = PUSHCORE_SR_METHOD_PMML
 // The Intel methods' self-test numbers, which pushcore_capabilities puts in reason[] of an AVAILABLE capability ("ms4k="
 // Intel VSR / XeSS SR, "gate passed ... ms=" VPL FI): every route calls this after copying the reasons
 inline void ReadMeasured(Gpu& g)
@@ -496,6 +534,17 @@ inline const wchar_t* QualityName(FgMethod m, int q)
     return L"";
 }
 
+// Anime round 5: Auto's animation mode per show class, until the user's verdict on the split-screen pairs (V1-V4: two
+// "Camera only" answers for a class set its constant to 1). 0 Full, 1 Camera only, 2 Off.
+inline constexpr int kAnimModeFeature = 0, kAnimModeTv = 0, kAnimModeMixedCg = 0;
+// V5-V7: transient hold and line-art protection on by default for animation (flash / impact hold on every video:
+// the user's rule, 2026-11-26)
+inline constexpr bool kHoldTransientsAuto = true, kHoldLiveTransientsAuto = true, kLineArtAuto = true;
+// item 4: the sign hold (typeset signs, burned-in lines and credits standing over a pan) on animation
+inline constexpr bool kSignsAuto = true;
+// Budget priors of line-art protection (compose on every generated frame, ms per generated frame at 4K) and of the sign
+// FIND (ms per source frame at 4K work size); research §9: 1-2 ms per source frame at 8x 4K, 0.3-0.6 ms
+inline constexpr double kLineArtMs4k = 0.2, kSignsMs4k = 0.45;
 inline Choice Decide(const Settings& s, const Source& src, const Display& d, const Costs& costsIn, const Gpu& g = Gpu{})
 {
     Choice r;
@@ -523,6 +572,26 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if ((g.family == kRdna1 || g.family == kGtx) && g.has(kCapHlxFsr4) && !c.learnedVsr) c.fsrSr *= 4.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;
+    // --- animation: held drawings are re-timed by pushcore whenever frame generation runs (unless Off)
+    if (s.animation == kOff) { r.animation = false; r.animNote = L"off (held drawings are not re-timed)"; }
+    else if (s.animation != kAuto) { r.animation = true; r.animNote = L"on"; }
+    else if (src.heldShare >= kAnimationHeldShare) { r.animation = true; r.animNote = std::format(L"on, held drawings found ({:.0f} % of frames)", 100.0 * std::min(1.0, src.heldShare)); }
+    else if (src.animHint) { r.animation = true; r.animNote = L"on, the file name or folder says animation"; }
+    else { r.animation = false; r.animNote = src.heldShare >= 0 ? std::format(L"off, no held drawings ({:.0f} % of frames); held frames are still re-timed", 100.0 * src.heldShare) : L"Auto, measuring"; }
+    // --- the animation mode (round 5): the setting, else the show's own choice, else Auto's constant for its class
+    {
+        static const wchar_t* kModeName[3] = { L"Full", L"Camera only", L"Off" };
+        if (s.animMode >= 0 && s.animMode <= 2) { r.animMode = s.animMode; r.animModeNote = std::wstring(kModeName[r.animMode]); }
+        else if (src.showChoice >= 0 && src.showChoice <= 2) { r.animMode = src.showChoice; r.animModeNote = std::wstring(kModeName[r.animMode]) + L", this show's choice"; }
+        else {
+            r.animMode = src.showClass == 1 ? kAnimModeFeature : src.showClass == 3 ? kAnimModeMixedCg : kAnimModeTv;
+            r.animModeNote = std::wstring(kModeName[r.animMode]) + (src.showClass == 1 ? L" (Auto: feature)" : src.showClass == 2 ? L" (Auto: TV)" : src.showClass == 3 ? L" (Auto: mixed CG)" : L" (Auto)");
+        }
+        const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
+        const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation) : true;
+        const bool signs = kSignsAuto && r.animation && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)
+        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (signs ? 4u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
+    }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);
 
@@ -563,9 +632,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     else if (s.upscaler == Upscaler::Fsr && !g.has(kCapFsrSr)) methodNote = L" (FSR: " + g.reason[kCapFsrSr] + L")";
     else if (s.upscaler == Upscaler::IntelVsr && !g.has(kCapIvsr)) methodNote = L" (Intel VSR: " + g.reason[kCapIvsr] + L")";
     else if (s.upscaler == Upscaler::Xess && !g.has(kCapXessSr)) methodNote = L" (XeSS SR: " + g.reason[kCapXessSr] + L")";
+    else if (s.upscaler == Upscaler::Anime && !g.has(kCapAnimeSr)) methodNote = L" (anime upscaler: " + g.reason[kCapAnimeSr] + L")";
     else if (s.upscaler != Upscaler::Auto) method = s.upscaler;
     r.srMethod = method;
-    const bool rtxSr = method == Upscaler::Rtx;
+    bool rtxSr = method == Upscaler::Rtx;
 
     // --- output size: VSR to the target, or the source size (a source at or above the target: artifact reduction)
     UINT tw, th; TargetExtent(s.target, d, tw, th);
@@ -574,6 +644,25 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     const bool atOutput = scale <= 1.05 || (fillsScreen && s.sharper == kAuto);
     UINT upW = src.w, upH = src.h;
     if (!atOutput) { upW = Even(src.w * scale); upH = Even(src.h * scale); }
+
+    // --- anime upscalers (PushMpcAnimeSr.h): animation only, and only when the picture is enlarged (they are 2x / 4x
+    // models, no artifact reduction at the output size). Asked for (Upscaler Anime): the setting's model or Auto's; Auto:
+    // the best fitting one where RTX VSR is not available (and before RTX VSR once the verdict sets kAnimeSrBeforeRtxVsr)
+    r.animeModel = -1;
+    c.animeSrMs = 0;
+    if (g.has(kCapAnimeSr) && r.animation && !atOutput && src.h <= 1080) {
+        const bool asked = s.upscaler == Upscaler::Anime;
+        const bool autoWants = s.upscaler == Upscaler::Auto && (!g.has(kCapRtxVsr) || kAnimeSrBeforeRtxVsr);
+        const AnimeSrPick pick = PickAnimeSr(src.w, src.h, upW, upH, src.fps, lowBitrate, c.card, c.animeSrLearned, asked ? AnimeSrModelIndex(s.animeModel) : -1);
+        r.animeSrNote = pick.note;
+        if ((asked || autoWants) && pick.model >= 0) { method = Upscaler::Anime; r.animeModel = pick.model; c.animeSrMs = pick.ms; }
+        else if (!asked && !autoWants && pick.model >= 0) r.animeSrNote = L"candidate " + pick.note + L"; RTX VSR stays first until the verdict";
+    } else if (s.upscaler == Upscaler::Anime) {
+        r.animeSrNote = !g.has(kCapAnimeSr) ? L"not available" : !r.animation ? L"not used: not animation" : L"not used: the picture is not enlarged";
+    }
+    if (method == Upscaler::Anime && r.animeModel < 0) method = g.has(kCapRtxVsr) ? Upscaler::Rtx : g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
+    r.srMethod = method;
+    rtxSr = method == Upscaler::Rtx;
 
     // --- SDR to HDR (display mode first: it is part of the base cost)
     if (s.sdrToHdr == kOff) { r.hdr = false; r.hdrNote = L"off"; }
@@ -645,16 +734,24 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if (s.deband == kOff) r.debandNote = L"off";
     else if (!debandEligible) r.debandNote = src.hdr ? L"off, HDR source (banding is rare there)" : L"off, 10-bit source (banding is rare there)";
     else if (s.deband != kAuto) { deband = true; r.debandNote = L"on"; }
+    else if (r.animation && kDebandAnimationAuto) {
+        // anime round 5: flat cel fills band in any 8-bit encode, so animation gets the pass whatever the bitrate, with
+        // the anime preset (wider radius, less grain; grain seeded per drawing in pushcore); Blu-ray class keeps Low
+        deband = true;
+        r.debandNote = src.bppEq >= kDebandAnimeLowBpp ? std::format(L"on, animation (flat fills band), Low at {:.2f} bits per pixel", src.bppEq) : L"on, animation (flat fills band): anime preset";
+    }
     else if (debandRate) { deband = true; r.debandNote = std::format(L"on, 8-bit source at {:.2f} bits per pixel", src.bppEq); }
     else r.debandNote = L"off, " + rateNote;
     r.debandStrength = int(s.debandStrength);
+    if (deband && s.deband == kAuto && r.animation && kDebandAnimationAuto) r.debandStrength = src.bppEq >= kDebandAnimeLowBpp ? 0 : 3;
     double debandMs = deband ? DebandCost(c, r.debandStrength, src.w, src.h) : 0.0;
 
     // NR cost by family until measured (heavy on RTX 30 and on the RX 7000 worker)
     const double nrPrior = c.learnedNr ? c.nrMs : g.family == kRtx50 ? c.nrMs : g.family == kRtx40 ? c.nrMs * 1.5 : g.family == kRtx30 ? c.nrMs * 4
                          : g.family == kRdna4 ? 6.0 * 1.2 : g.family == kRdna3 ? 30.0 : c.nrMs * 4;
+    double holdMs = 0;   // line-art protection and the sign hold while their admission is tried (below)
     auto baseCost = [&](bool nr) {
-        return c.base4k * pixFg * c.card + debandMs + (nr ? nrPrior : 0) + (r.hdr ? (r.hdrItm ? c.itm4k : c.hdr4k * c.card) * pixFg : 0);
+        return c.base4k * pixFg * c.card + debandMs + holdMs + (nr ? nrPrior : 0) + (r.hdr ? (r.hdrItm ? c.itm4k : c.hdr4k * c.card) * pixFg : 0);
     };
     auto vsr = [&](int l) { return srOn ? VsrCost(c, l, atOutput, pixOut, family, method) : 0.0; };
 
@@ -701,6 +798,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (s.smoother == kOff) { p.mult = 1; p.stop = L"off"; return p; }
         std::vector<FgMethod> order = FgOrder(g, c);
         std::wstring notes;
+        // animation: DLSS-G after PushFlow. On a big jump between two drawings (a fast pan on twos, RTX 5090, 2026-11-26)
+        // DLSS-G with FidelityFX flow doubled and smeared the line art, while VFG and PushFlow kept the lines whole; VFG
+        // stays first (as clean as PushFlow there, and up to the engine's full multiplier for the re-timed spans)
+        if (r.animation) {
+            const auto dl = std::find(order.begin(), order.end(), FgMethod::Dlssg), pf = std::find(order.begin(), order.end(), FgMethod::PushFlow);
+            if (dl != order.end() && pf != order.end() && dl < pf) { order.erase(dl); order.insert(std::find(order.begin(), order.end(), FgMethod::PushFlow) + 1, FgMethod::Dlssg); }
+        }
         if (IsWeakGpu(g.family, g.name) && !c.pfBenched && s.fgMethod == FgMethod::Auto) notes = L"cold start: FSR FG first until PushFlow's speed test has measured this GPU; ";
         if (s.fgMethod != FgMethod::Auto) {
             if (g.has(CapOf(s.fgMethod))) order.insert(order.begin(), s.fgMethod);
@@ -741,6 +845,14 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     }
     r.deband = deband;
 
+    // line-art protection and the sign hold never cost a frame generation step: they are the first to go (research §9;
+    // pushcore drops them at run time too when the measured p95 has no room)
+    if (r.holdFlags & 6u) {
+        const int without = chooseFg(baseCost(false)).mult;
+        holdMs = ((r.holdFlags & 2u) ? kLineArtMs4k * pixFg * c.card * std::max(0, without - 1) : 0.0) + ((r.holdFlags & 4u) ? kSignsMs4k * pixFg * c.card : 0.0);
+        if (chooseFg(baseCost(false)).mult < without) { r.holdFlags &= ~6u; holdMs = 0; r.animModeNote += L"; line art and sign hold off (they would cost a frame generation step)"; }
+    }
+
     // --- clean up: fixed, off, or Auto (low bitrate, an NR runtime on this GPU; never at the cost of 2x)
     const int mNoNr = chooseFg(baseCost(false)).mult;
     bool nr = false;
@@ -777,7 +889,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- the rest goes to VSR (Auto): raise 1 -> 4 while it fits; frame generation is never lowered for it
     const double fixedCost = baseCost(nr) + FgCost(c, r.fgMethod, r.fgQuality, r.multiplier, pixFg) + show(r.multiplier);
-    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : method == Upscaler::IntelVsr ? L"Intel VSR" : method == Upscaler::Xess ? L"XeSS SR" : L"NIS";
+    const wchar_t* mname = method == Upscaler::Rtx ? L"RTX VSR" : method == Upscaler::Fsr ? L"FSR" : method == Upscaler::IntelVsr ? L"Intel VSR" : method == Upscaler::Xess ? L"XeSS SR" : method == Upscaler::Anime && r.animeModel >= 0 ? AnimeSrModel(r.animeModel).label : L"NIS";
     if (s.sharper == kAuto) {
         if (!atOutput) {
             if (rtxSr) while (level < 4 && fixedCost + vsr(level + 1) <= r.budgetMs) ++level;

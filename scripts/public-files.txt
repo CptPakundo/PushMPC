@@ -7,6 +7,7 @@ filter/build.cmd
 filter/src/**
 filter/tools/auto_test.cpp
 filter/tools/dshow_graph_test.cpp
+filter/tools/held_test.cpp
 pushmpc/CMakeLists.txt
 pushmpc/include/**
 pushmpc/src/**
@@ -90,3 +91,5 @@ scripts/dlssg-port-fetch.ps1
 scripts/helixsr-fetch.ps1
 capture/**
 scripts/pushmpc-capture.sh
+scripts/anime-models-pin.json
+scripts/anime-models-fetch.ps1

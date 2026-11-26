@@ -58,6 +58,7 @@ struct Config {
     // bits of 16 (P010). Both default off: planar, low bits (the VapourSynth and Kodi planar formats)
     bool semiPlanarOut = false, msbOut = false;
     bool refined = true;                // InterpolatePlanesRefined's rule (portable_engine.h); false: PushFPS's own
+    bool regionRepair = false;          // the held-drawing repair (Cells, RepairSlot): source slots also storage images
     float boundaryPx = 1.0f;
     // the block matcher at quality 2 (8 px blocks on the full-size picture): search on a 3x3 binomial-filtered copy; double
     // the smoothness penalty at the full-size level; the equiangular sub-pixel fit; the quadtree merge to 16 px where
@@ -207,6 +208,18 @@ public:
     int UploadWith(const std::function<bool(VkCommandBuffer, const PlanarDesc&, std::string&)>& rec, uint64_t& ticket, std::string& err);
     bool GenerateWith(int pair, float t, int mode, const std::function<bool(VkCommandBuffer, const PackedDesc&, std::string&)>& rec,
                       int& out, uint64_t& ticket, std::string& err);
+
+    // ---- the held-drawing repair (pushmpc/src/HeldFrames.h on the portable routes; Config::regionRepair) ----
+    // Cells: the cell grid of an uploaded picture (f x f luma cells, f = width / 480, at least 2: means in 8-bit codes,
+    // and per cell the packed sub-cell change against prevSlot (-1: none) and Cb / Cr; CellGrid::unpackAux). Waits.
+    // RepairSlot: each part's pair (slotA = its pair start, slotB = its next drawing) generated at its phase t at the
+    // source size, laid into `slot` inside the part's cell mask (feathered, camera residual shiftX / Y in pixels, detail
+    // matching on luma), then the slot's pyramid again. Up to 3 parts, disjoint masks. Waits.
+    struct CellGridOut { int w = 0, h = 0, cell = 0; std::vector<float> v; std::vector<uint32_t> aux; };
+    struct RepairPart { int slotA = -1, slotB = -1; float t = 0.5f, shiftX = 0, shiftY = 0; const std::vector<uint8_t>* mask = nullptr; };
+    bool RepairAvailable() const;       // regionRepair set and this build has the shaders
+    bool Cells(int slot, int prevSlot, CellGridOut& out, std::string& err);
+    bool RepairSlot(int slot, const RepairPart* parts, int n, float featherCells, bool detail, std::string& err);
 
     // gpu_test: a pair's fields from / to the CPU reference's MotionField
     bool InjectFields(int pair, const veyra::portable::MotionField& f, const veyra::portable::MotionField& k, std::string& err);

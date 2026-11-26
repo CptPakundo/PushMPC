@@ -55,6 +55,7 @@
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
+#include "PushMpcShows.h"
 #include "PushMpcAuto.h"
 #include <commctrl.h>
 #include <shellapi.h>
@@ -716,11 +717,11 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
         std::wstring s = std::format(L"GPU {} ({}, vendor {:04X} device {:04X}): available", g.name, pm::FamilyName(g.family), c.vendorId, c.deviceId);
         static const wchar_t* names[] = { L"VFG", L"DLSS-G", L"PushFlow", L"FSR FG", L"FSR 4 FG", L"AMD FRC", L"RTX VSR", L"VSR styles", L"FSR SR", L"NIS", L"RTX HDR", L"NR", L"DLSS-G Lite", L"NVOF FG",
                                           L"XeSS FG", L"Intel VPL FI", L"XeSS SR", L"Intel VSR", L"ZLUDA VSR",
-                                          L"HelixSR FG", L"HLX FSR 4" };
+                                          L"HelixSR FG", L"HLX FSR 4", L"anime upscalers" };
         static_assert(std::size(names) >= pm::kCapCount, "a name per capability");
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += std::wstring(L" ") + names[i];
         s += L"; not:";
-        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", names[i], g.reason[i]);
+        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", nm(i), g.reason[i]);
         if (c.nrRuntime[0]) s += L" NR runtime " + Widen(c.nrRuntime);
         *log = s;
     }
@@ -1634,6 +1635,7 @@ public:
         // timed per step (RC1 F7: one close took 9.2 s; the exit helper's line says how long after these steps it ran)
         const int64_t q0 = Qpc();
         ExitMark("filter teardown started");
+        if (!m_showKey.empty() && pm::CurrentShow() == m_showKey) pm::SetCurrentShow({});   // round 5: no show playing now
         StopThreads();
         const int64_t q1 = Qpc();
         StopWatcher();
@@ -2553,6 +2555,7 @@ private:
     void LogChoice(const char* why, const pm::Choice& c);
     void StartAuto();
     void StopAuto();
+    void AnimationHintOnce();
     void AutoLoop();
     void LearnCosts();
     void LoadLearned();
@@ -2811,6 +2814,8 @@ private:
     uint32_t m_graphGen = 0; int64_t m_graphQpc = 0;
     std::atomic<bool> m_settingsPending = false;
     std::atomic<double> m_debandMsNow = -1.0;   // pushcore's measured deband pass (median), < 0 = off / not measured
+    std::atomic<double> m_animeSrMsNow = -1.0;  // the anime upscaler's last frame (PushCoreStats.animeSrMs), < 0 = not running
+    std::atomic<int> m_animeSrModelNow = -1;
     uint32_t m_settingsSeen = 0;
     std::thread m_autoThread; HANDLE m_hAutoStop = nullptr;
     int64_t m_lastCostChangeQpc = 0, m_lastUpgradeQpc = 0;
@@ -2870,6 +2875,13 @@ private:
     void ConvBegin(); void ConvEnd();
     uint32_t m_fgRun = PUSHCORE_FG_NONE, m_srRun = 0; bool m_cutGuardRun = false; std::wstring m_fgRunNote;   // what pushcore runs
     uint32_t m_subtitleState = 0, m_subtitlePixels = 0;   // PushFPS Subtitle Hold as pushcore reports it (PushCoreStats)
+    // Animation Auto: the path hint (once per file) and pushcore's held-frame share (sticky once it says animation)
+    std::atomic<int> m_animHint = -1;          // -1 not looked at yet, 0 / 1
+    std::atomic<double> m_heldShare = -1.0;
+    std::wstring m_showKey;                     // round 5: this file's show (PushMpcShows.h), empty = none
+    std::atomic<int> m_showClass = 0, m_showChoice = -1;
+    bool m_showClassSaved = false;
+    bool m_heldLogged = false;
 };
 
 // ------------------------------------------------------------------------------------------------ device
@@ -3447,6 +3459,7 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     if (m_openStarted) return;
     if (ShouldDeferOpen()) return;
     m_openStarted = true;
+    AnimationHintOnce();
     PushCoreStreamInfo si = {};
     si.structSize = sizeof(si);
     si.width = m_visW; si.height = m_visH;
@@ -4544,6 +4557,12 @@ void CPushMpcFilter::DelivererLoop()
             Log(std::format("delivering a media type change: {} -> {}", m_deliveredFmt.Str(), it.sample->fmt.Str()));
         }
         REFERENCE_TIME st = it.start, sp = it.stop;
+        {
+            // the sample lasts until the next one (held-frame re-timing spaces outputs 2-4 grid steps apart in a held span)
+            std::lock_guard<std::mutex> lk(m_readyLock);
+            if (!m_ready.empty() && m_ready.front().gen == it.gen && m_ready.front().kind != 3 && m_ready.front().start > st && m_ready.front().start - st < 10000000)
+                sp = m_ready.front().start;
+        }
         it.sample->SetTime(&st, &sp);
         it.sample->SetSyncPoint(TRUE);
         it.sample->SetDiscontinuity(m_discNext.exchange(false) ? TRUE : FALSE);
@@ -4703,6 +4722,11 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.hdr = InputHdr();
     s.tenBit = m_inP010;
     s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
+    s.animHint = m_animHint.load() == 1;
+    s.heldShare = m_heldShare.load();
+    // the page may set this show's choice while it plays (Shows\<key>\Choice)
+    if (!m_showKey.empty()) m_showChoice = pm::ReadShow(m_showKey).choice;
+    s.showClass = m_showClass.load(); s.showChoice = m_showChoice.load();
     return s;
 }
 // The stream's bitrate, for Clean up's Auto rule: the splitter's video type (dwBitRate), else the file's size over its
@@ -4786,8 +4810,10 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
     p.srMethod = c.srMethod == pm::Upscaler::Fsr ? PUSHCORE_SR_METHOD_FSR : c.srMethod == pm::Upscaler::Nis ? PUSHCORE_SR_METHOD_NIS
                : c.srMethod == pm::Upscaler::IntelVsr ? PUSHCORE_SR_METHOD_IVSR : c.srMethod == pm::Upscaler::Xess ? PUSHCORE_SR_METHOD_XESS : PUSHCORE_SR_METHOD_RTX;
+    if (c.srMethod == pm::Upscaler::Anime && c.animeModel >= 0 && (g_coreFeatures & PUSHCORE_FEATURE_ANIME_SR)) { p.srMethod = PUSHCORE_SR_METHOD_PMML; p.animeSrModel = uint32_t(c.animeModel); }
     p.deband = c.deband ? 1 : 0;
-    p.debandStrength = uint32_t(std::clamp(c.debandStrength, 0, 2));
+    // the anime preset (3) only on cores with PUSHCORE_FEATURE_ANIME_HOLD; an older core gets Medium
+    p.debandStrength = c.debandStrength == 3 ? ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) ? PUSHCORE_DEBAND_ANIME : PUSHCORE_DEBAND_MEDIUM) : uint32_t(std::clamp(c.debandStrength, 0, 2));
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, m_display);
     if (c.artifactReduction) t = m_visH > 2160 || m_visW > 3840 ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::K4; // never a downscale
     p.srTarget = t == pm::UpscaleTarget::P1440 ? PUSHCORE_SR_TARGET_1440P : t == pm::UpscaleTarget::K5 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
@@ -4805,13 +4831,18 @@ PushCoreSettings CPushMpcFilter::ToCore(const pm::Settings& s, const pm::Choice&
     // PushFPS 4.5's Subtitle Hold: only with frame generation (pushcore leaves it out of a graph without it anyway)
     p.subtitleHold = (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) && p.multiplier > 1
         ? pm::SubtitleHoldValue(s, (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) != 0, pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off) : 0;
+    // held-frame re-timing (animation drawn on twos / threes): with frame generation, unless Animation is Off. pushcore
+    // re-times only where it finds held frames, so it is on for every video (live action has none and is unchanged).
+    p.heldFrames = (g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && p.multiplier > 1 && s.enable && s.animation != pm::kOff ? (s.animation == pm::kAuto ? 1 : 2) : 0;
+    // round 5: the animation mode and the holds (pushcore makes hold plans only with heldFrames)
+    if ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) && p.heldFrames) { p.animationMode = c.animMode; p.holdFlags = c.holdFlags; }
     return p;
 }
 static bool SameGraph(const PushCoreSettings& a, const PushCoreSettings& b)
 {
     if (a.sr != b.sr || a.multiplier != b.multiplier || a.nr != b.nr || a.videoHdr != b.videoHdr) return false;
     if (a.videoHdr && a.videoHdrPeak != b.videoHdrPeak) return false;
-    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold)) return false;
+    if (a.multiplier > 1 && (a.cutGuard != b.cutGuard || a.subtitleHold != b.subtitleHold || a.heldFrames != b.heldFrames || a.animationMode != b.animationMode || a.holdFlags != b.holdFlags)) return false;
     if (a.sr && (a.srQuality != b.srQuality || a.srTarget != b.srTarget || a.srFamily != b.srFamily || a.srMethod != b.srMethod)) return false;
     if (a.multiplier > 1 && (a.vfgQuality != b.vfgQuality || a.fgBackend != b.fgBackend || a.fgTier != b.fgTier || a.fgLite != b.fgLite)) return false;
     if (a.nr && (a.nrTone != b.nrTone || a.nrStructure != b.nrStructure)) return false;
@@ -4826,8 +4857,8 @@ static bool IsUpgrade(const PushCoreSettings& from, const PushCoreSettings& to)
 }
 static std::wstring GraphKey(const PushCoreSettings& p)
 {
-    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{} sub{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
-                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1, p.subtitleHold);
+    return std::format(L"{} {}x q{} t{} sr{} m{} L{} style{} nr{} hdr{} deband{} sub{} held{}", pm::FgMethodLabel(MethodOf(p.fgBackend)), p.multiplier, p.vfgQuality, p.fgTier,
+                       p.sr, p.srMethod, p.srQuality, p.srFamily, p.nr, p.videoHdr, p.deband ? int(p.debandStrength) : -1, p.subtitleHold, p.heldFrames);
 }
 void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
 {
@@ -4844,13 +4875,13 @@ void CPushMpcFilter::PublishNotes(const pm::Settings& s, const pm::Choice& c)
         deband += std::format(L" ({} strength{})", pm::DebandStrengthStr(pm::DebandStrength(c.debandStrength)),
                               ms > 0 ? std::format(L", {:.2f} ms per frame", ms) : std::wstring());
     }
-    SetNotes(c.smootherNote, c.sharperNote, c.cleanNote, hdr, deband);
+    SetNotes(c.smootherNote, c.animeSrNote.empty() ? c.sharperNote : c.sharperNote + L"; anime upscaler: " + c.animeSrNote, c.cleanNote, hdr, deband);
 }
 void CPushMpcFilter::LogChoice(const char* why, const pm::Choice& c)
 {
-    Log(std::format("Auto ({}): frame generation {} [stopped at: {}]; sharpen {}; clean up {}; SDR to HDR {}; deband {}; output {}x{}; predicted {:.1f} ms of {:.1f} ms budget; "
+    Log(std::format("Auto ({}): frame generation {} [stopped at: {}]; sharpen {}; clean up {}; SDR to HDR {}; deband {}; animation {}; output {}x{}; predicted {:.1f} ms of {:.1f} ms budget; "
         "HDR to SDR {} (connected: {}); display {} {:.3f} Hz HDR {} VRR {} ({}) {}; GPU {} ({}, prior factor {:.1f})",
-        why, Narrow(c.smootherNote), Narrow(c.stoppedAt), Narrow(c.sharperNote), Narrow(c.cleanNote), Narrow(c.hdrNote), Narrow(c.debandNote), c.outW, c.outH, c.predictedMs, c.budgetMs,
+        why, Narrow(c.smootherNote), Narrow(c.stoppedAt), Narrow(c.sharperNote), Narrow(c.cleanNote), Narrow(c.hdrNote), Narrow(c.debandNote), Narrow(c.animNote), c.outW, c.outH, c.predictedMs, c.budgetMs,
         c.toneMapNote.empty() ? "-" : Narrow(c.toneMapNote), !InputHdr() ? "-" : m_coreToneMap ? "PushMPC" : "the renderer",
         Narrow(m_display.name), m_display.refreshHz, m_display.hdr ? "on" : "off", m_display.vrr ? "on" : "off", Narrow(m_display.vrrHow), m_display.fullscreen ? "fullscreen" : "windowed",
         Narrow(m_gpu.name), Narrow(pm::FamilyName(m_gpu.family)), m_costs.card));
@@ -4874,6 +4905,7 @@ void CPushMpcFilter::LoadLearned()
         num(L"Hdr4kMs", m_costs.hdr4k, &m_costs.learnedHdr, 0.05, 30);
         num(L"Deband1080Ms", m_costs.deband1080, &m_costs.learnedDeband, 0.001, 20);
         num(L"Base4kMs", m_costs.base4k, &m_costs.learnedBase, 0.05, 20);
+        for (int i = 0; i < pm::kAnimeSrModels; ++i) num(std::wstring(L"AnimeSr-") + pm::AnimeSrModel(i).id, m_costs.animeSrLearned[i], nullptr, 0.01, 500);
         bool bench = true;
         for (int t = 0; t < 3; ++t) {
             bench = num(std::format(L"PfFirst{}", t), m_costs.pfFirst[t], nullptr, 0.1, 500) && bench;
@@ -4896,6 +4928,7 @@ void CPushMpcFilter::SaveLearned()
     pm::Costs c;
     { std::lock_guard<std::mutex> lk(m_autoLock); c = m_costs; }
     bool any = c.learnedVsr || c.learnedIvsr || c.learnedXess || c.learnedNr || c.learnedHdr || c.learnedDeband || c.learnedBase;
+    for (double v : c.animeSrLearned) any = any || v > 0;
     for (bool b : c.fgLearned) any = any || b;
     if (m_gpuName.empty() || !any) return;
     HKEY k = nullptr;
@@ -4916,6 +4949,7 @@ void CPushMpcFilter::SaveLearned()
     if (c.learnedHdr) str(L"Hdr4kMs", std::format(L"{:.3f}", c.hdr4k));
     if (c.learnedDeband) str(L"Deband1080Ms", std::format(L"{:.4f}", c.deband1080));
     if (c.learnedBase) str(L"Base4kMs", std::format(L"{:.3f}", c.base4k));
+    for (int i = 0; i < pm::kAnimeSrModels; ++i) if (c.animeSrLearned[i] > 0) str(std::wstring(L"AnimeSr-") + pm::AnimeSrModel(i).id, std::format(L"{:.3f}", c.animeSrLearned[i]));
     RegCloseKey(k);
 }
 // PushFlow's once-per-card speed test (pushcore_pushFlowBench, a port of PushFPS's PushFlowBench): run lazily, the first
@@ -5029,6 +5063,13 @@ void CPushMpcFilter::LearnCosts()
         if (x > 0.1 && x < 10 && um == pm::Upscaler::Xess) { if (!c.learnedXess) c.xessScale = x; else ema(c.xessScale, x); c.learnedXess = true; }
     }
     if (nr.size() >= 48) { const double x = p95(nr); if (!c.learnedNr) c.nrMs = x; else ema(c.nrMs, x); c.learnedNr = true; }
+    // the anime upscaler: its own time per input megapixel on this card (the transfer prior taken off), per model
+    if (const int am = m_animeSrModelNow.load(); am >= 0 && m_animeSrMsNow.load() > 0 && m_choice.outW && m_choice.outH) {
+        const pm::Source src = SourceInfo();
+        const double inMpx = double(src.w) * src.h / 1e6, outMpx = double(m_choice.outW) * m_choice.outH / 1e6;
+        const double x = (m_animeSrMsNow.load() - pm::kAnimeSrTransferMsPerMpx * (inMpx + outMpx)) / std::max(1e-3, inMpx);
+        if (std::isfinite(x) && x > 0.01 && x < 500) { double& v = c.animeSrLearned[am]; if (v <= 0) v = x; else ema(v, x); }
+    }
     if (hdr.size() >= 48) { const double x = p95(hdr) / pix; if (!c.learnedHdr) c.hdr4k = x; else ema(c.hdr4k, x); c.learnedHdr = true; }
     if (rest.size() >= 48) {
         // base4k: what the model adds besides the stages it times (Decide: base4k x size x card, the guard's test and flow, deband)
@@ -5158,8 +5199,23 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
         if (!file.empty() && !RequestReopen()) SetStatus(L"no PushFPS (source frames converted by the filter, not deinterlaced): " + why);
     }
 }
+// Animation Auto's early hint: the file's path (once per file, before the first decision)
+void CPushMpcFilter::AnimationHintOnce()
+{
+    if (m_animHint.load() >= 0) return;
+    m_animHint = pm::AnimationHint(SourceFile()) ? 1 : 0;
+    m_showKey = pm::ShowKeyFor(SourceFile());
+    if (!m_showKey.empty()) {
+        const pm::ShowInfo si = pm::ReadShow(m_showKey);
+        m_showClass = si.cls; m_showChoice = si.choice; m_showClassSaved = si.cls != 0;
+        pm::SetCurrentShow(m_showKey);
+        Log(std::format("animation mode: show class {}, choice {}", si.cls, si.choice));
+    }
+    if (m_animHint.load() == 1) Log("animation: the file name or folder says animation");
+}
 void CPushMpcFilter::StartAuto()
 {
+    AnimationHintOnce();
     if (m_autoThread.joinable()) return;
     m_hAutoStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_autoThread = std::thread([this] { AutoLoop(); });
@@ -5212,10 +5268,29 @@ void CPushMpcFilter::AutoLoop()
             bool ok = false;
             { std::lock_guard<std::mutex> lk(m_coreLock); if (m_core && !m_faulted) ok = m_api->stats(m_core, &st) == PUSHCORE_OK; }
             m_debandMsNow = ok && st.debandActive ? st.debandMs : -1.0;
+            const bool animeSrRuns = ok && (g_coreFeatures & PUSHCORE_FEATURE_ANIME_SR) && st.animeSrModel < uint32_t(pm::kAnimeSrModels) && st.animeSrMs > 0;
+            m_animeSrModelNow = animeSrRuns ? int(st.animeSrModel) : -1; m_animeSrMsNow = animeSrRuns ? double(st.animeSrMs) : -1.0;
             if (ok && (g_coreFeatures & PUSHCORE_FEATURE_FG_METHODS)) {
                 const bool changed = st.fgBackend != m_fgRun;
                 m_fgRun = st.fgBackend; m_srRun = st.srMethod; m_cutGuardRun = st.cutGuardActive != 0; m_fgRunNote = Widen(st.fgNote);
                 if (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD) { m_subtitleState = st.subtitleHoldState; m_subtitlePixels = st.subtitleHoldPixels; }
+                if ((g_coreFeatures & PUSHCORE_FEATURE_ANIME_HOLD) && (st.animClass & 16u) && !m_showClassSaved && !m_showKey.empty()) {
+                    // the class pushcore measured over ~2 minutes: kept for this show (Auto per show)
+                    m_showClassSaved = true; m_showClass = int(st.animClass & 3u);
+                    pm::WriteShowDword(m_showKey, L"Class", int(st.animClass & 3u));
+                    Log(std::format("animation mode: show class {} measured and kept", st.animClass & 3u));
+                }
+                if ((g_coreFeatures & PUSHCORE_FEATURE_HELD_FRAMES) && st.heldActive && st.heldTested >= 96) {
+                    // ~4 s of frames tested: the share of held drawings (kept once it says animation: a still or a 3D CG
+                    // scene in a cartoon does not undo it)
+                    const double share = st.heldRatioPermille / 1000.0;
+                    if (m_heldShare.load() < pm::kAnimationHeldShare) m_heldShare = share;
+                    if (!m_heldLogged && share >= pm::kAnimationHeldShare) {
+                        m_heldLogged = true;
+                        Log(std::format("held drawings: {:.1f} % of the last {} frames (animation); re-timed spans {}, held frames given no graph pair {}, graph {}x",
+                                        share * 100.0, st.heldTested, st.heldSpans, st.heldDropped, st.heldGraphMultiplier));
+                    }
+                }
                 if (changed && st.fgFallback) {
                     // the method Auto asked for did not start on this GPU: not offered again in this session
                     PushCoreSettings asked;
@@ -5288,6 +5363,8 @@ void CPushMpcFilter::AutoLoop()
             if (applied.multiplier >= 2 && KnownFg(m_fgRun) && m_subtitleState)
                 running += m_subtitleState == 1 ? (m_subtitlePixels ? std::format(L", subtitle hold on ({} px held)", m_subtitlePixels) : std::wstring(L", subtitle hold on"))
                          : m_subtitleState == 2 ? std::wstring(L", subtitle hold unavailable") : std::wstring(L", subtitle hold not with this method");
+            if (applied.multiplier >= 2 && m_fgRun <= PUSHCORE_FG_NVOF && applied.heldFrames)
+                running += c.animation ? L", animation: " + c.animNote : std::wstring(L", held frames re-timed");
             if (!m_fgRunNote.empty()) running += L" (" + m_fgRunNote + L")";
         }
         {
@@ -5299,6 +5376,7 @@ void CPushMpcFilter::AutoLoop()
                 const int rq = rm == pm::FgMethod::PushFlow ? int(applied.fgTier) : rm == pm::FgMethod::Dlssg ? (applied.fgLite ? pm::kDlssgLiteQ : 0) : int(applied.vfgQuality);
                 if (applied.multiplier >= 2 && KnownFg(m_fgRun)) osd += std::format(L" \u00B7 {}x {}", applied.multiplier, pm::QualityName(rm, rq));
                 if (c.sr) osd += c.srMethod == pm::Upscaler::Rtx ? std::format(L" \u00B7 VSR {}", c.srLevel)
+                               : c.srMethod == pm::Upscaler::Anime && c.animeModel >= 0 ? std::wstring(L" \u00B7 ") + pm::AnimeSrModel(c.animeModel).label
                                : std::wstring(c.srMethod == pm::Upscaler::Fsr ? L" \u00B7 FSR" : c.srMethod == pm::Upscaler::Xess ? L" \u00B7 XeSS"
                                               : c.srMethod == pm::Upscaler::IntelVsr ? L" \u00B7 Intel VSR" : L" \u00B7 NIS");
                 osd += std::format(L" \u00B7 {:.0f} fps", fps);
@@ -5564,6 +5642,8 @@ public:
         FillCombo(m_Dlg, IDC_PM_VRR, { L"Auto", L"Assume VRR", L"Assume fixed" });
         FillCombo(m_Dlg, IDC_PM_DEBAND, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_DBSTR, { L"Low", L"Medium", L"High" });
+        FillCombo(m_Dlg, IDC_PM_ANIM, { L"Auto", L"Off", L"On" });
+        FillCombo(m_Dlg, IDC_PM_ANIMMODE, { L"Auto", L"Full", L"Camera only", L"Off" });
         FillCombo(m_Dlg, IDC_PM_SUBHOLD, { (g_coreFeatures & PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO) && pmu::ReadUnlockMode(pmu::Unlock::SubtitleHoldAuto) != pmu::UnlockMode::Off ? L"Auto (on text)" : pm::kSubtitleHoldAuto ? L"Auto (on)" : L"Auto (off)", L"Off", L"On" });
         // drop-down widths in dialog units (they scale with the font and the display's DPI, as the template does)
         for (int id : { IDC_PM_STYLE, IDC_PM_DEBAND, IDC_PM_DBSTR, IDC_PM_VRR }) SendDlgItemMessageW(m_Dlg, id, CB_SETDROPPEDWIDTH, Dlu(95), 0);
@@ -5724,7 +5804,8 @@ private:
         SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_RESETCONTENT, 0, 0);
         for (const auto& s : f) SendDlgItemMessageW(m_Dlg, IDC_PM_FGMETHOD, CB_ADDSTRING, 0, (LPARAM)s.c_str());
         const std::wstring u[] = { L"Auto", item(L"RTX VSR", pm::kCapRtxVsr), item(L"FSR", pm::kCapFsrSr), item(L"NIS", pm::kCapNis),
-                                   item(L"XeSS SR (Intel)", pm::kCapXessSr), item(L"Intel VSR", pm::kCapIvsr) };
+                                   item(L"XeSS SR (Intel)", pm::kCapXessSr), item(L"Intel VSR", pm::kCapIvsr),
+                                   item(L"Anime upscaler", pm::kCapAnimeSr) };
         SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_RESETCONTENT, 0, 0);
         for (const auto& s : u) SendDlgItemMessageW(m_Dlg, IDC_PM_UPSCALER, CB_ADDSTRING, 0, (LPARAM)s.c_str());
         if (fsel >= 0) ComboSet(m_Dlg, IDC_PM_FGMETHOD, fsel);
@@ -5732,7 +5813,7 @@ private:
         // the rows this GPU has nothing to choose in are greyed out
         auto count = [&](std::initializer_list<uint32_t> caps) { int n = 0; for (uint32_t c : caps) n += m_capsGpu.has(c) ? 1 : 0; return n; };
         EnableWindow(GetDlgItem(m_Dlg, IDC_PM_FGMETHOD), !m_capsKnown || count({ pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc, pm::kCapNvofFg, pm::kCapXefg, pm::kCapVplFi }) > 0);
-        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_UPSCALER), !m_capsKnown || count({ pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr }) > 1);
+        EnableWindow(GetDlgItem(m_Dlg, IDC_PM_UPSCALER), !m_capsKnown || count({ pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr, pm::kCapAnimeSr }) > 1);
         EnableWindow(GetDlgItem(m_Dlg, IDC_PM_STYLE), !m_capsKnown || m_capsGpu.has(pm::kCapVsrFamilies));
         EnableWindow(GetDlgItem(m_Dlg, IDC_PM_HDR), !m_capsKnown || true);
         UpdateCapsNote();
@@ -5744,7 +5825,7 @@ private:
         else {
             const int f = ComboSel(m_Dlg, IDC_PM_FGMETHOD), u = ComboSel(m_Dlg, IDC_PM_UPSCALER);
             const uint32_t fc[] = { 0, pm::kCapVfg, pm::kCapDlssg, pm::kCapPushFlow, pm::kCapFsrFg, pm::kCapFrc, pm::kCapNvofFg, pm::kCapXefg, pm::kCapVplFi };
-            const uint32_t uc[] = { 0, pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr };
+            const uint32_t uc[] = { 0, pm::kCapRtxVsr, pm::kCapFsrSr, pm::kCapNis, pm::kCapXessSr, pm::kCapIvsr, pm::kCapAnimeSr };
             if (f > 0 && f < int(std::size(fc)) && !m_capsGpu.has(fc[f])) note += std::format(L"{}: {}; Auto's method is used. ", pm::FgMethodLabel(pm::FgMethod(f)), m_capsGpu.reason[fc[f]]);
             if (u > 0 && u < int(std::size(uc)) && !m_capsGpu.has(uc[u])) note += std::format(L"Upscaler: {}; Auto's is used. ", m_capsGpu.reason[uc[u]]);
             if (!m_capsGpu.has(pm::kCapVsrFamilies)) note += L"Upscale style: " + m_capsGpu.reason[pm::kCapVsrFamilies] + L". ";
@@ -5776,13 +5857,20 @@ private:
         ComboSet(m_Dlg, IDC_PM_FGQ, s.fgQuality == pm::FgQuality::Auto ? 0 : int(s.fgQuality) + 1);
         ComboSet(m_Dlg, IDC_PM_FGMETHOD, int(s.fgMethod));
         ComboSet(m_Dlg, IDC_PM_VRR, int(s.vrr));
-        ComboSet(m_Dlg, IDC_PM_UPSCALER, int(s.upscaler));
+        ComboSet(m_Dlg, IDC_PM_UPSCALER, s.upscaler == pm::Upscaler::Anime ? 6 : int(s.upscaler));
         ComboSet(m_Dlg, IDC_PM_TARGET, int(s.target));
         ComboSet(m_Dlg, IDC_PM_STRENGTH, int(s.strength));
         ComboSet(m_Dlg, IDC_PM_STYLE, s.vsrStyle == pm::VsrStyle::Auto ? 0 : int(s.vsrStyle) + 1);
         ComboSet(m_Dlg, IDC_PM_DEBAND, OnOffIdx(s.deband));
         ComboSet(m_Dlg, IDC_PM_DBSTR, int(s.debandStrength));
         ComboSet(m_Dlg, IDC_PM_SUBHOLD, OnOffIdx(s.subtitleHold));
+        ComboSet(m_Dlg, IDC_PM_ANIM, OnOffIdx(s.animation));
+        {   // the show playing now (its own choice), else the default for every show
+            const std::wstring show = pm::CurrentShow();
+            const int v = show.empty() ? s.animMode : pm::ReadShow(show).choice;
+            ComboSet(m_Dlg, IDC_PM_ANIMMODE, v < 0 ? 0 : v + 1);
+            SetDlgItemTextW(m_Dlg, IDC_PM_ANIMMODE_LBL, show.empty() ? L"Drawn motion" : L"This show");
+        }
         CheckDlgButton(m_Dlg, IDC_PM_FRAMELOG, s.frameLog ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(m_Dlg, IDC_PM_HDRLIMIT, s.hdrLimit ? BST_CHECKED : BST_UNCHECKED);
     }
@@ -5803,13 +5891,23 @@ private:
         { const int q = ComboSel(m_Dlg, IDC_PM_FGQ); s.fgQuality = q <= 0 ? pm::FgQuality::Auto : pm::FgQuality(std::clamp(q - 1, 0, 2)); }
         s.fgMethod = pm::FgMethod(std::clamp(ComboSel(m_Dlg, IDC_PM_FGMETHOD), 0, int(pm::FgMethod::Vpl)));
         s.vrr = pm::VrrMode(std::clamp(ComboSel(m_Dlg, IDC_PM_VRR), 0, 2));
-        s.upscaler = pm::Upscaler(std::clamp(ComboSel(m_Dlg, IDC_PM_UPSCALER), 0, int(pm::Upscaler::IntelVsr)));
+        {   // the combo's rows: Auto, RTX VSR, FSR, NIS, XeSS SR, Intel VSR, Anime (Upscaler::Anime = 7: index - 1 = PUSHCORE_SR_METHOD_PMML)
+            const int sel = ComboSel(m_Dlg, IDC_PM_UPSCALER);
+            s.upscaler = sel == 6 ? pm::Upscaler::Anime : pm::Upscaler(std::clamp(sel, 0, int(pm::Upscaler::IntelVsr)));
+        }
         s.target = pm::UpscaleTarget(std::clamp(ComboSel(m_Dlg, IDC_PM_TARGET), 0, 3));
         s.strength = pm::CleanStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_STRENGTH), 0, 2));
         { const int v = ComboSel(m_Dlg, IDC_PM_STYLE); s.vsrStyle = v <= 0 ? pm::VsrStyle::Auto : pm::VsrStyle(std::clamp(v - 1, 0, 2)); }
         s.deband = OnOffVal(ComboSel(m_Dlg, IDC_PM_DEBAND));
         s.debandStrength = pm::DebandStrength(std::clamp(ComboSel(m_Dlg, IDC_PM_DBSTR), 0, 2));
         s.subtitleHold = OnOffVal(ComboSel(m_Dlg, IDC_PM_SUBHOLD));
+        s.animation = OnOffVal(ComboSel(m_Dlg, IDC_PM_ANIM));
+        {
+            const int v = ComboSel(m_Dlg, IDC_PM_ANIMMODE) - 1;   // -1 Auto
+            const std::wstring show = pm::CurrentShow();
+            if (show.empty()) s.animMode = v < 0 ? pm::kAuto : v;
+            else pm::WriteShowDword(show, L"Choice", v);           // sticky for this show; the default stays as it is
+        }
         s.frameLog = IsDlgButtonChecked(m_Dlg, IDC_PM_FRAMELOG) == BST_CHECKED;
         s.hdrLimit = IsDlgButtonChecked(m_Dlg, IDC_PM_HDRLIMIT) == BST_CHECKED;
         return s;
@@ -5822,7 +5920,8 @@ private:
                         IDC_PM_STYLE_LBL, IDC_PM_STYLE, IDC_PM_DEBAND_LBL, IDC_PM_DEBAND, IDC_PM_DBSTR_LBL, IDC_PM_DBSTR, IDC_PM_DEBAND_NOW,
                         IDC_PM_FGMETHOD_LBL, IDC_PM_FGMETHOD, IDC_PM_VRR_LBL, IDC_PM_VRR, IDC_PM_UPSCALER_LBL, IDC_PM_UPSCALER, IDC_PM_CAPS_NOTE,
                         IDC_PM_HDRMETHOD_LBL, IDC_PM_HDRMETHOD, IDC_PM_HDRLIMIT, IDC_PM_DISPPEAK_LBL, IDC_PM_DISPPEAK,
-                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE })
+                        IDC_PM_OSD_LBL, IDC_PM_OSD, IDC_PM_BATTERY_LBL, IDC_PM_BATTERY, IDC_PM_GSYNC_NOTE, IDC_PM_SUBHOLD_LBL, IDC_PM_SUBHOLD, IDC_PM_SUBHOLD_NOTE,
+                        IDC_PM_ANIM_LBL, IDC_PM_ANIM, IDC_PM_ANIM_NOTE, IDC_PM_ANIMMODE_LBL, IDC_PM_ANIMMODE, IDC_PM_ANIMMODE_NOTE })
             ShowWindow(GetDlgItem(m_Dlg, id), on ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_IMPORT), on && !m_pushFpsData.empty() ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(m_Dlg, IDC_PM_GSYNC), on && m_gsyncOffer ? SW_SHOW : SW_HIDE);

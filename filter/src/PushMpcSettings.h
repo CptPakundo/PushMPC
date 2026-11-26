@@ -20,13 +20,22 @@
 //   FgQuality        Auto | High | Medium | Low      default Auto   (Auto: Medium, High only where it fits at the same multiplier; PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 //   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC | NVOF | XeFG | VPL   default Auto (frame generation method; Auto by GPU family and budget)
 //   Vrr              Auto | On | Off                 default Auto   (Auto: detected (NVIDIA G-SYNC state); On/Off: assume VRR / fixed refresh)
-//   Upscaler         Auto | RTX | FSR | NIS | XeSS | IntelVSR   default Auto   (RTX VSR on NVIDIA RTX; XeSS SR or Intel VSR on Intel when they fit; else FSR)
+//   Upscaler         Auto | RTX | FSR | NIS | XeSS | IntelVSR | Anime   default Auto   (RTX VSR on NVIDIA RTX; XeSS SR or Intel VSR on
+//                                                                   Intel when they fit; else FSR; Anime = AnimeModel through pmml;
+//                                                                   Auto: on animation, the best fitting anime upscaler where RTX VSR is not)
+//   AnimeModel       Auto | artcnn-c4f16 | artcnn-c4f32 | artcnn-r8f64 | cunny-fast | cunny-4x16 | cunny-8x32 | animesr-v2 (+ -ds / -dn ArtCNN C)
+//                                                   default Auto   (the anime upscaler: Auto = the best that fits the source and this GPU)
 //   UpscaleTarget    Screen | 1440p | 4K | 5K        default Screen
 //   CleanUpStrength  Subtle | Balanced | Strong      default Strong (PushFPS's presets; Strong is its default)
 //   VsrStyle         Auto | Standard | HighBitrate | Streaming   default Auto (RTX VSR model family; Auto picks it by the source bitrate)
 //   Deband           Auto | Off | On                 default Auto   (PushMPC's own deband pass, 8-bit SDR sources)
 //   DebandStrength   Low | Medium | High             default Medium
 //   SubtitleHold     Auto | Off | On                 default Auto   (PushFPS's Subtitle Hold: burned-in subtitles kept out of frame generation; Auto = kSubtitleHoldAuto)
+//   Animation        Auto | Off | On                 default Auto   (cartoons and anime: held drawings re-timed, the animation tuning; Auto = when the picture is found to be animation)
+//   AnimationMode    Auto | Full | CameraOnly | Off  default Auto   (how drawn animation moves: Full = every part smooth at its own cadence; Camera only = pans and slides smooth, drawings
+//                                                                   pop as drawn; Off = plain frame generation. Auto = the show's own choice (HKCU\Software\PushMPC\Shows), else by its class)
+//   HoldTransients   Auto | Off | On                 default Auto   (flashes and impact frames shown as drawn, every video; smears and appearing objects on animation)
+//   LineArt          Auto | Off | On                 default Auto   (line contrast of generated frames kept at the drawing's on animation; dropped first when the GPU is short)
 //   FrameLog         DWORD 1/0                       default 0 (troubleshooting only; the filter log is always written)
 // Debug and test values stay in HKCU\Software\PushMPC\Filter (see ReadConfig in PushMpcFilter.cpp).
 #pragma once
@@ -45,13 +54,13 @@ enum class FgQuality { Low = 0, Medium = 1, High = 2, Auto = 3 };
 // Frame generation method (pushcore PUSHCORE_FG_* + 1; Auto = by GPU family and budget)
 enum class FgMethod { Auto = 0, Vfg = 1, Dlssg = 2, PushFlow = 3, Fsr = 4, AmdFrc = 5, Nvof = 6, XeFg = 7, Vpl = 8, HelixFg = 9 };   // index - 1 = PUSHCORE_FG_*
 enum class VrrMode { Auto = 0, On = 1, Off = 2 };
-enum class Upscaler { Auto = 0, Rtx = 1, Fsr = 2, Nis = 3, Xess = 4, IntelVsr = 5 };   // index - 1 = PUSHCORE_SR_METHOD_*
+enum class Upscaler { Auto = 0, Rtx = 1, Fsr = 2, Nis = 3, Xess = 4, IntelVsr = 5, Anime = 7 };   // index - 1 = PUSHCORE_SR_METHOD_* (6: ZLUDA VSR, pushcore-side only)
 enum class UpscaleTarget { Screen = 0, P1440 = 1, K4 = 2, K5 = 3 };
 enum class CleanStrength { Subtle = 0, Balanced = 1, Strong = 2 };
 // RTX VSR model family (pushcore PUSHCORE_SR_FAMILY_*): Standard = RTX Video SDK (balanced); High bitrate keeps clean
 // detail (no compression clean-up, for Blu-ray-class sources); Streaming cleans hardest (web video; Ampere or newer).
 enum class VsrStyle { Standard = 0, HighBitrate = 1, Streaming = 2, Auto = 3 };
-enum class DebandStrength { Low = 0, Medium = 1, High = 2 };
+enum class DebandStrength { Low = 0, Medium = 1, High = 2, Anime = 3 };   // Anime: Auto only (animation), not in the page
 // SDR to HDR highlight expansion (PushMPC's curve: the multiplier M of SDR white; RTX Video HDR: its peak)
 enum class HdrBoost { Auto = 0, Off = 1, Low = 2, Medium = 3, High = 4 };
 enum class HdrMethod { Auto = 0, Rtx = 1 };
@@ -79,12 +88,17 @@ struct Settings {
     FgMethod fgMethod = FgMethod::Auto;
     VrrMode vrr = VrrMode::Auto;
     Upscaler upscaler = Upscaler::Auto;
+    std::wstring animeModel;   // AnimeModel: "" = Auto, else a pmml model id (PushMpcAnimeSr.h)
     UpscaleTarget target = UpscaleTarget::Screen;
     CleanStrength strength = CleanStrength::Strong;
     VsrStyle vsrStyle = VsrStyle::Auto;
     int deband = kAuto;     // kAuto, kOff, 1 = on
     DebandStrength debandStrength = DebandStrength::Medium;
     int subtitleHold = kAuto;  // kAuto, kOff, 1 = on (PushFPS 4.5's Subtitle Hold, only while frame generation runs)
+    int animation = kAuto;     // kAuto, kOff, 1 = on: held-frame re-timing (pushcore heldFrames) and Auto's animation tuning
+    int animMode = kAuto;      // kAuto, or PUSHCORE_ANIM_*: 0 Full, 1 Camera only, 2 Off (AnimationMode)
+    int holdTransients = kAuto;   // kAuto, kOff, 1 = on
+    int lineArt = kAuto;          // kAuto, kOff, 1 = on
     bool frameLog = false;   // the per-frame CSVs (about 150 kB a minute): for troubleshooting, off unless asked for
     bool operator==(const Settings&) const = default;
 };
@@ -133,7 +147,7 @@ inline const wchar_t* FgQualityStr(FgQuality q) { return q == FgQuality::High ? 
 inline const wchar_t* FgMethodStr(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"VFG"; case FgMethod::Dlssg: return L"DLSSG"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR"; case FgMethod::AmdFrc: return L"AMDFRC"; case FgMethod::Nvof: return L"NVOF"; case FgMethod::XeFg: return L"XeFG"; case FgMethod::Vpl: return L"VPL"; case FgMethod::HelixFg: return L"HELIXFG"; default: return L"Auto"; } }
 inline const wchar_t* FgMethodLabel(FgMethod m) { switch (m) { case FgMethod::Vfg: return L"NVIDIA VFG"; case FgMethod::Dlssg: return L"DLSS-G"; case FgMethod::PushFlow: return L"PushFlow"; case FgMethod::Fsr: return L"FSR FG"; case FgMethod::AmdFrc: return L"AMD FRC"; case FgMethod::Nvof: return L"NVOF FG"; case FgMethod::XeFg: return L"XeSS FG"; case FgMethod::Vpl: return L"Intel VPL FI"; case FgMethod::HelixFg: return L"HelixSR FG"; default: return L"Auto"; } }
 inline const wchar_t* VrrStr(VrrMode v) { return v == VrrMode::On ? L"On" : v == VrrMode::Off ? L"Off" : L"Auto"; }
-inline const wchar_t* UpscalerStr(Upscaler u) { return u == Upscaler::Rtx ? L"RTX" : u == Upscaler::Fsr ? L"FSR" : u == Upscaler::Nis ? L"NIS" : u == Upscaler::Xess ? L"XeSS" : u == Upscaler::IntelVsr ? L"IntelVSR" : L"Auto"; }
+inline const wchar_t* UpscalerStr(Upscaler u) { return u == Upscaler::Rtx ? L"RTX" : u == Upscaler::Fsr ? L"FSR" : u == Upscaler::Nis ? L"NIS" : u == Upscaler::Xess ? L"XeSS" : u == Upscaler::IntelVsr ? L"IntelVSR" : u == Upscaler::Anime ? L"Anime" : L"Auto"; }
 inline const wchar_t* TargetStr(UpscaleTarget t) { return t == UpscaleTarget::P1440 ? L"1440p" : t == UpscaleTarget::K4 ? L"4K" : t == UpscaleTarget::K5 ? L"5K" : L"Screen"; }
 inline const wchar_t* StrengthStr(CleanStrength s) { return s == CleanStrength::Subtle ? L"Subtle" : s == CleanStrength::Balanced ? L"Balanced" : L"Strong"; }
 inline const wchar_t* VsrStyleStr(VsrStyle v) { return v == VsrStyle::HighBitrate ? L"HighBitrate" : v == VsrStyle::Streaming ? L"Streaming" : v == VsrStyle::Standard ? L"Standard" : L"Auto"; }
@@ -141,7 +155,7 @@ inline const wchar_t* VsrStyleLabel(VsrStyle v) { return v == VsrStyle::HighBitr
 inline const wchar_t* HdrBoostStr(HdrBoost b) { switch (b) { case HdrBoost::Off: return L"Off"; case HdrBoost::Low: return L"Low"; case HdrBoost::Medium: return L"Medium"; case HdrBoost::High: return L"High"; default: return L"Auto"; } }
 inline const wchar_t* HdrMethodStr(HdrMethod m) { return m == HdrMethod::Rtx ? L"RTX" : L"Auto"; }
 inline const wchar_t* HdrToSdrStr(HdrToSdr m) { return m == HdrToSdr::Player ? L"Player" : m == HdrToSdr::PushMpc ? L"PushMPC" : L"Auto"; }
-inline const wchar_t* DebandStrengthStr(DebandStrength d) { return d == DebandStrength::Low ? L"Low" : d == DebandStrength::High ? L"High" : L"Medium"; }
+inline const wchar_t* DebandStrengthStr(DebandStrength d) { return d == DebandStrength::Low ? L"Low" : d == DebandStrength::High ? L"High" : d == DebandStrength::Anime ? L"Anime" : L"Medium"; }
 
 inline int ParseChoice(const std::wstring& s, int lo, int hi, int def)
 {
@@ -205,7 +219,9 @@ inline Settings LoadSettings()
     s.vrr = _wcsicmp(vr.c_str(), L"On") == 0 ? VrrMode::On : _wcsicmp(vr.c_str(), L"Off") == 0 ? VrrMode::Off : VrrMode::Auto;
     const std::wstring up = RegReadStr(k, L"Upscaler");
     s.upscaler = _wcsicmp(up.c_str(), L"RTX") == 0 ? Upscaler::Rtx : _wcsicmp(up.c_str(), L"FSR") == 0 ? Upscaler::Fsr : _wcsicmp(up.c_str(), L"NIS") == 0 ? Upscaler::Nis
-               : _wcsicmp(up.c_str(), L"XeSS") == 0 ? Upscaler::Xess : (_wcsicmp(up.c_str(), L"IntelVSR") == 0 || _wcsicmp(up.c_str(), L"IVSR") == 0) ? Upscaler::IntelVsr : Upscaler::Auto;
+               : _wcsicmp(up.c_str(), L"XeSS") == 0 ? Upscaler::Xess : (_wcsicmp(up.c_str(), L"IntelVSR") == 0 || _wcsicmp(up.c_str(), L"IVSR") == 0) ? Upscaler::IntelVsr : _wcsicmp(up.c_str(), L"Anime") == 0 ? Upscaler::Anime : Upscaler::Auto;
+    s.animeModel = RegReadStr(k, L"AnimeModel");
+    if (_wcsicmp(s.animeModel.c_str(), L"Auto") == 0) s.animeModel.clear();
     const std::wstring t = RegReadStr(k, L"UpscaleTarget");
     s.target = _wcsicmp(t.c_str(), L"1440p") == 0 ? UpscaleTarget::P1440 : _wcsicmp(t.c_str(), L"4K") == 0 ? UpscaleTarget::K4
              : _wcsicmp(t.c_str(), L"5K") == 0 ? UpscaleTarget::K5 : UpscaleTarget::Screen;
@@ -217,6 +233,11 @@ inline Settings LoadSettings()
     s.deband = ParseOnOff(RegReadStr(k, L"Deband"), kAuto);
     const std::wstring ds = RegReadStr(k, L"DebandStrength");
     s.subtitleHold = ParseOnOff(RegReadStr(k, L"SubtitleHold"), kAuto);
+    s.animation = ParseOnOff(RegReadStr(k, L"Animation"), kAuto);
+    { const std::wstring am = RegReadStr(k, L"AnimationMode");
+      s.animMode = _wcsicmp(am.c_str(), L"Full") == 0 ? 0 : (_wcsicmp(am.c_str(), L"CameraOnly") == 0 || _wcsicmp(am.c_str(), L"Camera only") == 0) ? 1 : _wcsicmp(am.c_str(), L"Off") == 0 ? 2 : kAuto; }
+    s.holdTransients = ParseOnOff(RegReadStr(k, L"HoldTransients"), kAuto);
+    s.lineArt = ParseOnOff(RegReadStr(k, L"LineArt"), kAuto);
     s.debandStrength = _wcsicmp(ds.c_str(), L"Low") == 0 ? DebandStrength::Low : _wcsicmp(ds.c_str(), L"High") == 0 ? DebandStrength::High : DebandStrength::Medium;
     const std::wstring hb = RegReadStr(k, L"HdrBoost");
     s.hdrBoost = _wcsicmp(hb.c_str(), L"Off") == 0 ? HdrBoost::Off : _wcsicmp(hb.c_str(), L"Low") == 0 ? HdrBoost::Low
@@ -251,6 +272,7 @@ inline bool SaveSettings(const Settings& s)
     str(L"FgMethod", FgMethodStr(s.fgMethod));
     str(L"Vrr", VrrStr(s.vrr));
     str(L"Upscaler", UpscalerStr(s.upscaler));
+    str(L"AnimeModel", s.animeModel.empty() ? std::wstring(L"Auto") : s.animeModel);
     str(L"SettingsVersion", L"2");
     str(L"UpscaleTarget", TargetStr(s.target));
     str(L"CleanUpStrength", StrengthStr(s.strength));
@@ -258,6 +280,10 @@ inline bool SaveSettings(const Settings& s)
     str(L"Deband", OnOffStr(s.deband));
     str(L"DebandStrength", DebandStrengthStr(s.debandStrength));
     str(L"SubtitleHold", OnOffStr(s.subtitleHold));
+    str(L"Animation", OnOffStr(s.animation));
+    str(L"AnimationMode", s.animMode == 0 ? L"Full" : s.animMode == 1 ? L"CameraOnly" : s.animMode == 2 ? L"Off" : L"Auto");
+    str(L"HoldTransients", OnOffStr(s.holdTransients));
+    str(L"LineArt", OnOffStr(s.lineArt));
     str(L"HdrBoost", HdrBoostStr(s.hdrBoost));
     str(L"HdrMethod", HdrMethodStr(s.hdrMethod));
     dw(L"HdrLimit", s.hdrLimit);

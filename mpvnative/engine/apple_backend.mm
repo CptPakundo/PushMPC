@@ -16,6 +16,8 @@
 #include <vector>
 #include "apple_engine.h"
 #include "engine.h"
+#include "held_dedup.h"   // held frames: PushFPS's duplicate test on the quarter-size luma
+#include "platform.h"     // ReadSetting("Dedup"), ParseBool
 
 namespace {
 
@@ -60,6 +62,7 @@ public:
         std::string info;
         if (!m_eng.Configure(c, why, info)) { why = "apple engine: " + why; return false; }
         m_k = std::max(1, m_eng.K());
+        m_dedup = m_k > 1 && ParseBool(O(o, "dedup", ReadSetting("Dedup")), true);   // held frames (Dedup=0 / dedup=no: off)
         const size_t bps = m_bits > 8 ? 2 : 1;
         m_sy = size_t(m_w) * bps; m_sc = size_t((m_w + 1) / 2) * bps;
         const size_t ch = size_t((m_h + 1) / 2);
@@ -84,50 +87,99 @@ public:
         apple::PlanarView v; v.width = m_w; v.height = m_h; v.bits = m_bits;
         if (!Semi(m_fmt)) { for (int i = 0; i < 3; ++i) { v.data[i] = src.data[i]; v.stride[i] = src.linesize[i]; } }
         else { ToPlanar(src); for (int i = 0; i < 3; ++i) { v.data[i] = m_in[i].data(); v.stride[i] = ptrdiff_t(i ? m_sc : m_sy); } }
-        std::vector<apple::PlanarOut> gen;
-        for (int j = 1; j < m_k; ++j) gen.push_back(Out(size_t(j)));
         const bool contiguous = !(flags & PMENG_SUBMIT_DISCONTINUITY) && m_seq > 0;
+        if (!contiguous) { m_pending.clear(); m_still = false; m_haveDistinct = false; }
+        const uint64_t s = m_seq;
+        // held frames (as cpu_backend.cpp, eagerly): a repeat of the last distinct frame is not processed; the next
+        // distinct frame's one pair makes the whole held span (VTFrameRateConversion takes any phase); a run longer than
+        // the lookahead is a still (shown as it is, only its last interval moves)
+        if (m_dedup) {
+            held::QuarterLuma(v.data[0], v.stride[0], m_w, m_h, m_bits > 8 ? 2 : 1, m_bits > 8 ? m_bits - 8 : 0, m_curQ);
+            if (contiguous && m_haveDistinct && held::QuarterDuplicate(m_lastQ, m_curQ, m_w, m_h)) {
+                ++m_seq;
+                ++m_dups;
+                m_pending.push_back(s);
+                if (!m_still && m_pending.size() > size_t(held::kLookahead)) m_still = true;
+                if (m_still) { for (uint64_t p : m_pending) HoldPosition(p); m_pending.clear(); }
+                return PMENG_OK;
+            }
+            std::swap(m_lastQ, m_curQ);
+            m_haveDistinct = true;
+        }
+        const int g = m_still ? 1 : int(m_pending.size()) + 1;   // source intervals from the last distinct frame
+        Bufs(size_t(g * m_k));
+        std::vector<apple::PlanarOut> gen;
+        for (int j = 1; j < g * m_k; ++j) gen.push_back(Out(size_t(j)));
+        if (g > 1) m_eng.SetSpan(g);
         bool havePair = false;
         if (!m_eng.Process(v, m_col, pts * 10, contiguous, gen, Out(0), havePair, err)) { err = "apple engine: " + err; return PMENG_ERROR; }
         if (havePair) {
-            for (int j = 1; j < m_k; ++j) m_q.push_back({ m_seq, uint32_t(j), uint32_t(m_k), 1 });
+            // position p's outputs (its in-betweens, then p itself) from buffer (p - 1 - d0) k + j: phase j / (g k) of the span
+            const uint64_t d0 = s - uint64_t(g);
+            for (uint64_t p = d0 + 1; p <= s; ++p) {
+                for (int j = 1; j < m_k; ++j) m_q.push_back({ { p, uint32_t(j), uint32_t(m_k), 1 }, size_t(p - 1 - d0) * size_t(m_k) + size_t(j) });
+                if (p < s) m_q.push_back({ { p, 0, uint32_t(m_k), 1 }, size_t(p - d0) * size_t(m_k) });
+            }
             if (m_eng.LastPairWasCut()) ++m_cuts;
         }
-        m_q.push_back({ m_seq, 0, uint32_t(m_k), 0 });
+        m_q.push_back({ { s, 0, uint32_t(m_k), 0 }, 0 });
+        m_pending.clear();
+        m_still = false;
         ++m_seq;
+        return PMENG_OK;
+    }
+    int Finish() override
+    {
+        for (uint64_t p : m_pending) HoldPosition(p);   // the end of the stream: what waited for a next drawing, as it is
+        m_pending.clear();
         return PMENG_OK;
     }
     int Peek(pmeng_out_info& info, uint32_t) override
     {
         if (m_q.empty()) return 0;
-        info = m_q.front();
+        info = m_q.front().info;
         return 1;
     }
     int Write(const pmeng_image& dst) override
     {
         if (m_q.empty()) { err = "write without an output"; return PMENG_ERROR; }
-        const pmeng_out_info oi = m_q.front();
+        const Item it = m_q.front();
         m_q.pop_front();
         if (dst.mem != PMENG_MEM_CPU || dst.fmt != m_fmt) { err = "apple engine: unexpected output memory / format"; return PMENG_ERROR; }
-        FromPlanar(m_bufs[oi.subframe], dst);
+        FromPlanar(m_bufs[it.buf], dst);
         ++m_written;
-        if (oi.subframe) ++m_generated;
+        if (it.buf) ++m_generated;
         return PMENG_OK;
     }
     int Skip() override { if (!m_q.empty()) m_q.pop_front(); return PMENG_OK; }
     uint32_t Pending() override { return uint32_t(m_q.size()); }
-    int Flush() override { m_q.clear(); m_eng.Forget(); return PMENG_OK; }
+    int Flush() override { m_q.clear(); m_eng.Forget(); m_pending.clear(); m_still = false; m_haveDistinct = false; return PMENG_OK; }
     std::string Stats() override
     {
         const auto& s = m_eng.Stat();
-        char b[320];
-        std::snprintf(b, sizeof(b), "apple: %llu sources, %llu outputs (%llu generated), %llu scene cuts; %llu VideoToolbox calls (%llu errors), %.2f ms a pair; %s",
-                      (unsigned long long)m_seq, (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_cuts,
+        char b[400];
+        std::snprintf(b, sizeof(b), "apple: %llu sources (%llu repeats, Dedup %s), %llu outputs (%llu generated), %llu scene cuts; %llu VideoToolbox calls (%llu errors), %.2f ms a pair; %s",
+                      (unsigned long long)m_seq, (unsigned long long)m_dups, m_dedup ? "on" : "off", (unsigned long long)m_written, (unsigned long long)m_generated, (unsigned long long)m_cuts,
                       (unsigned long long)s.vtCalls, (unsigned long long)s.vtErrors, s.pairMs, m_eng.Describe().c_str());
         return b;
     }
 
 private:
+    struct Item { pmeng_out_info info; size_t buf; };   // buf: m_bufs index (0: the last real frame)
+    // a held position (a still): all its outputs show the last distinct picture (m_bufs[0], the last real frame written)
+    void HoldPosition(uint64_t p)
+    {
+        for (int j = 1; j < m_k; ++j) m_q.push_back({ { p, uint32_t(j), uint32_t(m_k), 1 }, 0 });
+        m_q.push_back({ { p, 0, uint32_t(m_k), 1 }, 0 });
+    }
+    // n output buffers ([0] the real frame, [1..n-1] generated): a held span needs up to (lookahead + 1) k
+    void Bufs(size_t n)
+    {
+        if (m_bufs.size() >= n) return;
+        const size_t ch = size_t((m_h + 1) / 2), old = m_bufs.size();
+        m_bufs.resize(n);
+        for (size_t i = old; i < n; ++i) { m_bufs[i][0].resize(m_sy * m_h); m_bufs[i][1].resize(m_sc * ch); m_bufs[i][2].resize(m_sc * ch); }
+    }
     apple::PlanarOut Out(size_t i)
     {
         apple::PlanarOut o;
@@ -192,7 +244,12 @@ private:
     size_t m_sy = 0, m_sc = 0;
     std::vector<std::array<std::vector<uint8_t>, 3>> m_bufs;
     std::vector<uint8_t> m_in[3];
-    std::deque<pmeng_out_info> m_q;
+    std::deque<Item> m_q;
+    // held frames: Dedup on, a still, the repeats waiting for the next distinct frame, quarter-size luma (last distinct, new)
+    bool m_dedup = false, m_still = false, m_haveDistinct = false;
+    uint64_t m_dups = 0;
+    std::deque<uint64_t> m_pending;
+    std::vector<uint8_t> m_lastQ, m_curQ;
 };
 
 } // namespace

@@ -9,7 +9,13 @@
 //
 // usage: pushcore_gpu_harness <video> <outdir> [--pushfps DIR] [--frames N] [--start S] [--paced 0|1]
 //            [--copy 0|1] [--save 0,1,2,60] [--data DIR] [--sr 0|1] [--fg 0|1] [--multiplier N] [--warmup N]
-//            [--shaders DIR] [--subtitles 0|1]
+//            [--shaders DIR] [--subtitles 0|1] [--held 0|1] [--gray W]
+// --held 1: held-frame re-timing (PushCoreSettings.heldFrames; implies the PushMPC settings route). The per-source count
+// check then becomes: real outputs at their source time, generated ones strictly between the real output before them
+// and their batch's real frame, all in order; the output steps are reported on the 1/k grid (EVENNESS line).
+// --gray W: every output's luma, box-downscaled to W pixels wide, appended to <outdir>\gray.raw (header: width,
+// height as uint32; then one byte per pixel per output, in output order; outputs.csv gives the times) for a motion
+// and judder analysis.
 // --subtitles 1: PushFPS's Subtitle Hold (PushCoreSettings.subtitleHold; implies the PushMPC settings route)
 // --shaders: the compiled shaders pushcore uses. Default: the build tree's own (<harness folder>\..\shaders, the
 // shaders built from the patched PushFPS source) when that folder exists, else <pushfps>\shaders. A copy of an
@@ -116,6 +122,7 @@ int wmain(int argc, wchar_t** argv) {
     bool paced = false, copy = false;
     std::set<uint64_t> save{0, 1, 2, 60};
     int sr = -1, fgOpt = -1, mult = -1;
+    uint32_t grayWidth = 0;
     // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|xefg|vpl|none, --srmethod rtx|fsr|nis|xess|ivsr): the filter's route
     bool useSettings = false;
     // G10: --adapter nvidia (default) | intel | amd | any | warp (Windows' software GPU, sets PUSHMPC_TEST_WARP=1 for pushcore);
@@ -150,6 +157,8 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
+        if (k == L"--held") { useSettings = true; ps.heldFrames = _wtoi(v.c_str()); continue; }
+        if (k == L"--gray") { grayWidth = uint32_t(_wtoi(v.c_str())); continue; }
         if (k == L"--pushfps") pushfps = v;
         else if (k == L"--shaders") shaderDir = v;
         else if (k == L"--frames") maxFrames = unsigned(_wtoi(v.c_str()));
@@ -403,7 +412,9 @@ int wmain(int argc, wchar_t** argv) {
     std::vector<uint32_t> perSource;
     uint64_t submitted = 0, presentedCount = 0, real = 0, generated = 0, orderErrors = 0, ptsErrors = 0, sizeErrors = 0, busy = 0;
     uint64_t late = 0, pngs = 0, pngFail = 0;
-    int64_t lastPts = INT64_MIN;
+    int64_t lastPts = INT64_MIN, lastRealPts = INT64_MIN, prevOutPts = INT64_MIN;
+    std::vector<int64_t> steps;   // --held: output pts steps
+    const bool heldOn = useSettings && ps.heldFrames != 0;
     bool haveFrame = true, failed = false;
     std::vector<double> lateness;
     Clock::time_point clockStart{}; int64_t clockOrigin = 0; bool clockRunning = false;
@@ -411,6 +422,11 @@ int wmain(int argc, wchar_t** argv) {
     const uint64_t pacedFrom = 4; // paced: sources before this (graph and VFG warm-up) are shown at once, then the clock starts
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     const double outIntervalMs = si.fpsNum > 0 ? 1000.0 * si.fpsDen / si.fpsNum / m : 10;
+    FILE* gray = nullptr;
+    if (grayWidth >= 16 && grayWidth <= oi.width) {
+        gray = _wfopen((outDir / L"gray.raw").wstring().c_str(), L"wb");
+        if (gray) { const uint32_t dims[2] = { grayWidth, std::max<uint32_t>(1, uint32_t(uint64_t(oi.height) * grayWidth / oi.width)) }; fwrite(dims, 4, 2, gray); }
+    }
     std::ofstream csv(outDir / L"outputs.csv");
     csv << "output,source,kind,subframe,pts100ns,presentMs,latenessMs\n";
     uint32_t subtitleMax = 0; uint64_t subtitleSamples = 0;   // Subtitle Hold pixels seen in the stats during the run
@@ -471,6 +487,30 @@ int wmain(int argc, wchar_t** argv) {
         imm4->Wait(f.readyFence, f.readyValue);           // GPU-side wait for the graph's output
         imm->CopyResource(backbuffer.Get(), f.texture);   // the presenter's one pass
         const bool snap = save.count(f.sourceIndex) != 0;
+        if (grayWidth && gray) {   // motion analysis: the output's luma, box-downscaled
+            imm->CopyResource(staging.Get(), backbuffer.Get());
+            D3D11_MAPPED_SUBRESOURCE map{};
+            if (SUCCEEDED(imm->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
+                const uint32_t gw = grayWidth, gh = std::max<uint32_t>(1, uint32_t(uint64_t(oi.height) * gw / oi.width)), bx = oi.width / gw, by = oi.height / gh;
+                std::vector<uint8_t> row(gw);
+                const bool r10 = oi.dxgiFormat == 24;
+                for (uint32_t y = 0; y < gh; ++y) {
+                    for (uint32_t x = 0; x < gw; ++x) {
+                        uint64_t acc = 0;
+                        for (uint32_t yy = 0; yy < by; ++yy) {
+                            const uint8_t* p = static_cast<const uint8_t*>(map.pData) + size_t(y * by + yy) * map.RowPitch + size_t(x * bx) * 4;
+                            for (uint32_t xx = 0; xx < bx; ++xx, p += 4) {
+                                if (r10) { const uint32_t v = *reinterpret_cast<const uint32_t*>(p); acc += (((v & 1023) + 2 * ((v >> 10) & 1023) + ((v >> 20) & 1023)) >> 2) >> 2; }
+                                else acc += (uint32_t(p[0]) + 2u * p[1] + p[2]) >> 2;
+                            }
+                        }
+                        row[x] = uint8_t(acc / (uint64_t(bx) * by));
+                    }
+                    fwrite(row.data(), 1, gw, gray);
+                }
+                imm->Unmap(staging.Get(), 0);
+            }
+        }
         if (api->presented(core, f.lease, imm.Get()) != PUSHCORE_OK) { std::cout << "presented failed: " << api->lastError(core) << "\n"; return false; }
         if (snap) {   // picture check only: CPU readback of the backbuffer copy
             imm->CopyResource(staging.Get(), backbuffer.Get());
@@ -506,7 +546,16 @@ int wmain(int argc, wchar_t** argv) {
         // checks
         if (f.pts100ns <= lastPts) ++orderErrors;
         lastPts = f.pts100ns;
-        if (f.sourceIndex < sourcePts.size()) {
+        if (heldOn && f.sourceIndex < sourcePts.size()) {
+            // re-timing: a real output at its source time; a generated one between the real output before it and its
+            // batch's real frame (the pair may span held frames)
+            const int64_t b = sourcePts[f.sourceIndex];
+            if (f.kind == PUSHCORE_FRAME_REAL) { if (f.pts100ns != b) ++ptsErrors; lastRealPts = b; }
+            else if (lastRealPts == INT64_MIN || f.pts100ns <= lastRealPts || f.pts100ns >= b) ++ptsErrors;
+            ++perSource[f.sourceIndex];
+            if (prevOutPts != INT64_MIN) steps.push_back(f.pts100ns - prevOutPts);
+            prevOutPts = f.pts100ns;
+        } else if (f.sourceIndex < sourcePts.size()) {
             const int64_t b = sourcePts[f.sourceIndex];
             if (f.kind == PUSHCORE_FRAME_REAL) { if (f.pts100ns != b) ++ptsErrors; }
             else if (f.sourceIndex == 0) ++ptsErrors;
@@ -591,9 +640,22 @@ int wmain(int argc, wchar_t** argv) {
     const Agg srA = aggregate(srV), fgA = aggregate(fgV), grA = aggregate(graphV);
     PushCoreStats s{}; s.structSize = sizeof(s); api->stats(core, &s);
 
+    if (gray) fclose(gray);
     uint64_t countMismatch = 0;
-    for (size_t i = 0; i < perSource.size(); ++i) if (perSource[i] != (i == 0 ? 1u : m)) ++countMismatch;
-    const uint64_t expected = submitted ? 1 + (submitted - 1) * m : 0;
+    if (!heldOn) for (size_t i = 0; i < perSource.size(); ++i) if (perSource[i] != (i == 0 ? 1u : m)) ++countMismatch;
+    const uint64_t expected = heldOn ? presentedCount : submitted ? 1 + (submitted - 1) * m : 0;
+    if (heldOn) {
+        // output steps on the 1/k grid of the source interval: on-grid share, the step histogram
+        const double grid = sourcePts.size() > 1 ? double(sourcePts.back() - sourcePts.front()) / double(sourcePts.size() - 1) / m : 1;
+        std::map<long, uint64_t> hist; uint64_t onGrid = 0;
+        for (int64_t d : steps) { const double u = double(d) / grid; const long r = std::lround(u); if (std::fabs(u - double(r)) < 0.05) ++onGrid; ++hist[r]; }
+        std::string h;
+        for (auto& kv : hist) h += std::format(" {}:{}", kv.first, kv.second);
+        uint64_t zeroSources = 0; for (size_t i = 1; i < perSource.size(); ++i) zeroSources += perSource[i] == 0;
+        std::cout << std::format("EVENNESS grid {:.3f} ms; steps {} on grid {:.1f} %; steps in grid units (units:count){}; source frames with no output (held, re-timed) {}; held stats: found {} dropped {} spans {} ratio {:.1f} % of {} graph x{}; source repair {} (frames {}, parts {})\n",
+                                 grid / 1e4, steps.size(), steps.empty() ? 0.0 : 100.0 * onGrid / steps.size(), h, zeroSources,
+                                 s.heldFrames, s.heldDropped, s.heldSpans, s.heldRatioPermille / 10.0, s.heldTested, s.heldGraphMultiplier, s.repairActive ? "on" : "off", s.repairedFrames, s.repairedParts);
+    }
     std::cout << std::format(
         "RESULT source={} outputs={} real={} generated={} skippedGenerated={} expectedOutputs={} countMismatches={} orderErrors={} ptsErrors={} sizeErrors={} pngs={} pngFailures={}\n",
         submitted, presentedCount, real, generated, s.skippedGenerated, expected, countMismatch, orderErrors, ptsErrors, sizeErrors, pngs, pngFail);

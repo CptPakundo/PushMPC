@@ -40,6 +40,9 @@ if [ -n "${PUSHMPC_PMML_GRAPHS:-}" ] && [ -f "$PUSHMPC_PMML_GRAPHS/synth-yuv.onn
     install -m 644 pmml/scripts/fetch_runtime.py "$d/pmml/fetch_runtime.py"; install -m 644 scripts/ml-runtime-pin.json "$d/pmml/ml-runtime-pin.json"
     # pmml_cli (PUSHMPC_PMML_CLI): Auto's measurement of every PushFlow candidate on the user's GPU (setup.sh starts it)
     if [ -n "${PUSHMPC_PMML_CLI:-}" ] && [ -f "$PUSHMPC_PMML_CLI" ]; then install -m 755 "$PUSHMPC_PMML_CLI" "$d/pmml/pmml_cli"; fi
+    # the anime upscalers: the model graphs (no weights) and the pin setup.sh fetches them by
+    if [ -d "$PUSHMPC_PMML_GRAPHS/anime-sr" ]; then mkdir -p "$d/pmml/graphs/anime-sr"; cp "$PUSHMPC_PMML_GRAPHS"/anime-sr/*.onnx "$d/pmml/graphs/anime-sr/"; fi
+    install -m 644 scripts/anime-models-pin.json "$d/pmml/anime-models-pin.json"
 fi
 # optional: PushMPC's native hook for the distro mpv (PUSHMPC_MPVNATIVE_DIR = mpv-native.yml's hook folder:
 # pushmpc_hook.so, libpushmpc-avfilter-*.so, libpushmpc_engine.so; the sidecar engines libpushmpc_engine_nvl.so and

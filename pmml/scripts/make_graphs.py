@@ -10,6 +10,11 @@ frames go to the GPU once per pair and nothing but the finished picture comes ba
                     PushFlowReconstruct.hlsl does: sampled from the full-size real frames), with the grids'
                     displacement scaled by s0 / s1 ("flow once, synthesize many": the network runs once at t_ref and
                     further timesteps reuse its motion; s = 1 is the plain rebuild).
+  synth_map-<fmt>.onnx  the same with s0 / s1 per pixel (scale0_map / scale1_map [1,ph,pw,1]): a phase per pixel.
+  synth_line-<fmt>.onnx, synth_map_line-<fmt>.onnx  the same with line-art protection (anime round 5): where either
+                    warped frame has a dark line pixel (3x3 black top-hat of luma > LINE_TAU) and the two warped frames
+                    differ there (luma > LINE_DELTA), the mask becomes smoothstep(0.35, 0.65, mask): one sharp line, not
+                    two faint ones. Elsewhere identical to synth (pmml's synthCpu(lineArt) is the CPU reference).
 
 fmt: rgb   three full-size planes R, G, B
      yuv   Y full size, U and V at half size in both directions (4:2:0), BT.601/709/2020 by the `colour` input
@@ -173,14 +178,22 @@ def addt():
     return g.model()
 
 
-def synth(fmt):
-    g = G(f"pmml_synth_{fmt}")
+LINE_TAU, LINE_DELTA = 0.05, 0.04   # pmml internal.h kLineTau / kLineDelta
+
+
+def synth(fmt, per_pixel=False, line=False):
+    """per_pixel (synth_map-<fmt>.onnx): the displacement factors are maps scale0_map / scale1_map [1, ph, pw, 1] at
+    the network's padded size instead of the scalar pair `scale` (s0 = t / t_ref, s1 = (1 - t) / (1 - t_ref) per pixel):
+    the held-drawing repair gives the parts of one frame that share a pair their own phases in one network run."""
+    g = G(("pmml_synth_map" if per_pixel else "pmml_synth") + ("_line" if line else "") + f"_{fmt}")
+    scale_inputs = ([helper.make_tensor_value_info("scale0_map", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 1]),
+                     helper.make_tensor_value_info("scale1_map", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 1])]
+                    if per_pixel else [helper.make_tensor_value_info("scale", TensorProto.FLOAT, [2])])
     g.inputs += [helper.make_tensor_value_info("frame_a", TensorProto.FLOAT, [1, 3, "pmml_h", "pmml_w"]),
                  helper.make_tensor_value_info("frame_b", TensorProto.FLOAT, [1, 3, "pmml_h", "pmml_w"]),
                  helper.make_tensor_value_info("grid0", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 2]),
                  helper.make_tensor_value_info("grid1", TensorProto.FLOAT, [1, "pmml_ph", "pmml_pw", 2]),
-                 helper.make_tensor_value_info("mask", TensorProto.FLOAT, [1, 1, "pmml_ph", "pmml_pw"]),
-                 helper.make_tensor_value_info("scale", TensorProto.FLOAT, [2]),
+                 helper.make_tensor_value_info("mask", TensorProto.FLOAT, [1, 1, "pmml_ph", "pmml_pw"])] + scale_inputs + [
                  helper.make_tensor_value_info("affine", TensorProto.FLOAT, [4]),
                  helper.make_tensor_value_info("colour", TensorProto.FLOAT, [8])]
     crop = g.const([SENTINEL["nh"], SENTINEL["nw"]], np.int64, name="crop_end")   # [nh, nw]
@@ -207,7 +220,7 @@ def synth(fmt):
     up1 = g.op("Concat", [i64([1, 1]), hw], axis=0)
     warped = []
     for k, (grid, frame) in enumerate((("grid0", "frame_a"), ("grid1", "frame_b"))):
-        s = g.op("Gather", ["scale", i64([k])])
+        s = ("scale0_map", "scale1_map")[k] if per_pixel else g.op("Gather", ["scale", i64([k])])   # [1,ph,pw,1] broadcasts over x/y
         gs = g.op("Add", [ident, g.op("Mul", [g.op("Sub", [grid, ident]), s])])
         gs = g.op("Add", [g.op("Mul", [gs, a_vec]), b_vec])
         t = g.op("Transpose", [gs], perm=[0, 3, 1, 2])
@@ -217,6 +230,20 @@ def synth(fmt):
         warped.append(g.op("GridSample", [frame, f], align_corners=1, mode="bilinear", padding_mode="border"))
     m = g.op("Slice", ["mask", i64([0, 0]), crop, i64([2, 3])])
     m = g.op("Resize", [m, "", "", up1], mode="linear", coordinate_transformation_mode="half_pixel")
+    if line:
+        wts = g.const(np.array([0.299, 0.587, 0.114], np.float32).reshape(1, 3, 1, 1))
+        lum = [g.op("ReduceSum", [g.op("Mul", [w_, wts]), i64([1])], keepdims=1) for w_ in warped]   # [1,1,h,w]
+
+        def tophat(x):   # 3x3 grey closing (max-pool, then min-pool = -max-pool(-x)) minus x
+            dil = g.op("MaxPool", [x], kernel_shape=[3, 3], pads=[1, 1, 1, 1], strides=[1, 1])
+            clo = g.op("Neg", [g.op("MaxPool", [g.op("Neg", [dil])], kernel_shape=[3, 3], pads=[1, 1, 1, 1], strides=[1, 1])])
+            return g.op("Sub", [clo, x])
+        tau, delta = g.const(LINE_TAU), g.const(LINE_DELTA)
+        is_line = g.op("And", [g.op("Or", [g.op("Greater", [tophat(lum[0]), tau]), g.op("Greater", [tophat(lum[1]), tau])]),
+                               g.op("Greater", [g.op("Abs", [g.op("Sub", [lum[0], lum[1]])]), delta])])
+        q = g.op("Clip", [g.op("Div", [g.op("Sub", [m, g.const(0.35)]), g.const(0.3)]), g.const(0.0), g.const(1.0)])
+        sm = g.op("Mul", [g.op("Mul", [q, q]), g.op("Sub", [g.const(3.0), g.op("Mul", [q, g.const(2.0)])])])
+        m = g.op("Where", [is_line, sm, m])
     rgb = g.op("Add", [warped[1], g.op("Mul", [g.op("Sub", [warped[0], warped[1]]), m])])
     names = ["out_r", "out_g", "out_b"] if fmt == "rgb" else ["out_y", "out_u", "out_v"]
     from_rgb(g, rgb, fmt, "colour", names)
@@ -239,6 +266,23 @@ def main():
             path = out / f"{kind}-{fmt}.onnx"
             onnx.save(make(fmt), str(path))
             print(f"wrote {path}")
+        path = out / f"synth_map-{fmt}.onnx"
+        onnx.save(synth(fmt, per_pixel=True), str(path))
+        print(f"wrote {path}")
+        for per_pixel, name in ((False, "synth_line"), (True, "synth_map_line")):
+            path = out / f"{name}-{fmt}.onnx"
+            onnx.save(synth(fmt, per_pixel=per_pixel, line=True), str(path))
+            print(f"wrote {path}")
+    # PushMPC's anime upscalers: the wrappers sr_in_* / sr_out_* here, the model graphs in <out>/anime-sr (their
+    # weights stay in the pinned upstream files that Setup fetches into that folder; see anime_sr_graphs.py)
+    import json
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import anime_sr_graphs
+    anime_sr_graphs.write_wrappers(out)
+    pins = Path(__file__).resolve().parents[2] / "scripts" / "anime-models-pin.json"
+    if pins.exists():
+        anime_sr_graphs.write_models(json.loads(pins.read_text(encoding="utf-8")), out / "anime-sr")
 
 
 if __name__ == "__main__":

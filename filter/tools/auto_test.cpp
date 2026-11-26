@@ -1,6 +1,7 @@
 // Headless check of the Auto rules (no GPU): prints the decision for a few sources, displays and GPU families.
 #include "../src/PushMpcAuto.h"
 #include "../src/PushMpcExtras.h"
+#include "../src/PushMpcShows.h"
 #include "../../pushmpc/include/pushmpc/unlocks.h"
 #include "../../pushmpc/include/pushmpc/dlssg_route.h"
 #include <cstdio>
@@ -321,6 +322,49 @@ int main()
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;
         }
+        {   // Animation: the path hint, the held-frame share, Off / On, and DLSS-G behind PushFlow for animation
+            check(AnimationHint(L"videos/anime/show - 01.mkv") && AnimationHint(L"Cartoons/ep1.mkv") && AnimationHint(L"animated films/a.mkv")
+                  && !AnimationHint(L"videos/animal planet/a.mkv") && !AnimationHint(L"animes2/x.mkv") && !AnimationHint(L"movies/film.mkv"),
+                  L"Animation hint: whole words anime / cartoons / animated only");
+            Source s; s.fps = 23.976; Display d; d.refreshHz = 240; Gpu g = Family(kRtx40, L"NVIDIA GeForce RTX 4090"); g.available &= ~(1u << kCapVfg);
+            Source held = s; held.heldShare = 0.4; Source hint = s; hint.animHint = true; Source live = s; live.heldShare = 0.01;
+            Settings off; off.animation = kOff; Settings on; on.animation = 1;
+            const Choice a = Decide({}, held, d, {}, g), b = Decide({}, live, d, {}, g), c2 = Decide({}, hint, d, {}, g), e = Decide(off, held, d, {}, g), f = Decide(on, live, d, {}, g);
+            check(a.animation && !b.animation && c2.animation && !e.animation && f.animation, L"Animation Auto: held share >= 20 % or the path; Off / On fixed", a.animNote + L" | " + b.animNote);
+            check(a.fgMethod == FgMethod::PushFlow && b.fgMethod == FgMethod::Dlssg, L"animation without VFG: PushFlow before DLSS-G (live action keeps DLSS-G)",
+                  std::wstring(FgMethodLabel(a.fgMethod)) + L" / " + FgMethodLabel(b.fgMethod));
+            // round 5: the animation mode (Auto = Full for every class until the verdict; the show's choice; the setting)
+            Source tv = held; tv.showClass = 2; Source picked = held; picked.showClass = 2; picked.showChoice = 1;
+            Settings cam; cam.animMode = 1; Settings noTrans; noTrans.holdTransients = kOff;
+            const Choice m1 = Decide({}, tv, d, {}, g), m2 = Decide({}, picked, d, {}, g), m3 = Decide(cam, picked, d, {}, g), m4 = Decide(noTrans, live, d, {}, g), m5 = Decide({}, live, d, {}, g);
+            check(m1.animMode == 0 && m2.animMode == 1 && m3.animMode == 1, L"animation mode: Auto = Full by class until the verdict, a show's choice is kept, the setting wins", m1.animModeNote + L" | " + m2.animModeNote);
+            check((m1.holdFlags & 1) && (m1.holdFlags & 2) && (m5.holdFlags & 1) && (m5.holdFlags & 8) && !(m5.holdFlags & 2) && m4.holdFlags == 0,
+                  L"holds: transients on for every video (flash / impact also on live action), line art on animation only; Off turns them off", std::to_wstring(m1.holdFlags) + L" / " + std::to_wstring(m5.holdFlags));
+            check(ShowKeyFor(L"media/Show/Season 1/e01.mkv") == ShowKeyFor(L"Media/show/season 2/e05.mkv") && ShowKeyFor(L"media/Show/S01/e01.mkv") == ShowKeyFor(L"media/Show/e09.mkv")
+                  && ShowKeyFor(L"media/Show/e01.mkv") != ShowKeyFor(L"media/Other/e01.mkv") && ShowKeyFor(L"media/Show/e01.mkv").size() == 16,
+                  L"show key: one per series folder (season folders folded, case-insensitive), a 16-digit hash", ShowKeyFor(L"media/Show/e01.mkv"));
+            // round 5 (item 4): sign hold on animation; line art and sign hold go before a frame generation step
+            {
+                bool found = false, same = true;
+                Settings noLine; noLine.lineArt = kOff;
+                for (double card = 1.0; card < 40.0 && !found; card += 0.05) {
+                    Costs cc; cc.card = card;
+                    const Choice with = Decide({}, tv, d, cc, g);
+                    if (with.animModeNote.find(L"would cost a frame generation step") != std::wstring::npos) {
+                        found = true; same = with.multiplier == Decide(noLine, tv, d, cc, g).multiplier && !(with.holdFlags & 6u);
+                    }
+                }
+                check((m1.holdFlags & 4) && !(m5.holdFlags & 4) && found && same,
+                      L"sign hold Auto on animation only; line art + sign hold dropped where they would cost a frame generation step (same multiplier as without)", std::to_wstring(m1.holdFlags));
+            }
+            // round 5 (item 5): deband Auto on 8-bit animation whatever the bitrate (anime preset; Low from Blu-ray class);
+            // live action keeps the bitrate rule; 10-bit animation stays off
+            Source an = held; an.bppEq = 0.3; Source anBd = held; anBd.bppEq = 0.6; Source lv = live; lv.bppEq = 0.3; Source an10 = an; an10.tenBit = true;
+            const Choice d1 = Decide({}, an, d, {}, g), d2 = Decide({}, anBd, d, {}, g), d3 = Decide({}, lv, d, {}, g), d4 = Decide({}, an10, d, {}, g);
+            check(d1.deband && d1.debandStrength == 3 && d2.deband && d2.debandStrength == 0 && !d3.deband && !d4.deband,
+                  L"deband Auto: 8-bit animation on at any bitrate (anime preset, Low from 0.5 bpp), live action by bitrate, 10-bit off",
+                  d1.debandNote + L" | " + d2.debandNote + L" | " + d3.debandNote + L" | " + d4.debandNote);
+        }
         {   // Subtitle Hold: Auto = 2 (gated) when the core gates it and the unlock is not off; Off / On stay manual
             Settings a; Settings off; off.subtitleHold = kOff; Settings on; on.subtitleHold = 1;
             check(SubtitleHoldValue(a, true, true) == 2 && SubtitleHoldValue(a, false, true) == 0 && SubtitleHoldValue(a, true, false) == 0
@@ -395,6 +439,49 @@ int main()
                   L"one new frame per refresh: 10x at 240 Hz fixed, not 5x, not with VRR");
             check(f.multiplier == 5 && f.stoppedAt.find(L"spare") != std::wstring::npos && v.multiplier == 10,
                   L"windowed 10x at the budget edge: 5x (even cadence, said so); fullscreen VRR keeps 10x", std::format(L"{}x / {}x | {}", f.multiplier, v.multiplier, f.stoppedAt));
+        }
+        {   // Anime upscalers (round 5 item 7): candidates for animation only, by source class and cost; RTX VSR stays first on RTX
+            // until the verdict; on GPUs without RTX VSR the best fitting one is the anime default; R8F64 / AnimeSR on DVD only
+            auto withAnime = [](Gpu g) { g.available |= 1u << kCapAnimeSr; g.reason[kCapAnimeSr].clear(); return g; };
+            const Gpu rdna3 = withAnime(Family(kRdna3, L"AMD Radeon RX 7900 XTX")), rtx50 = withAnime(Family(kRtx50, L"NVIDIA GeForce RTX 5090"));
+            const Gpu rdnaNo = Family(kRdna3, L"AMD Radeon RX 7900 XTX");   // anime models not installed
+            Display d; d.refreshHz = 240; d.width = 3840; d.height = 2160;
+            Source bd{ 1920, 1080, 23.976, false, 0.5 }; bd.heldShare = 0.4;
+            Source dvd = bd; dvd.w = 720; dvd.h = 480;
+            Source p720 = bd; p720.w = 1280; p720.h = 720;
+            Source live = bd; live.heldShare = 0.01;
+            Source uhd = bd; uhd.w = 3840; uhd.h = 2160;
+            const Choice a = Decide({}, bd, d, {}, rdna3);
+            check(a.srMethod == Upscaler::Anime && (a.animeModel == 3 || a.animeModel == 0), L"anime SR: 1080p animation on a GPU without RTX VSR: ArtCNN C (the best that fits)", a.animeSrNote);
+            const Choice b = Decide({}, dvd, d, {}, rdna3);
+            check(b.srMethod == Upscaler::Anime && b.animeModel == 6, L"anime SR: DVD animation: ArtCNN R8F64 (heavy, DVD-class only) when it fits", b.animeSrNote);
+            Costs slow; slow.card = 4.0;   // a slower card: R8F64 no longer fits a DVD's frame share, a C model does
+            const Choice b2 = Decide({}, dvd, d, slow, rdna3);
+            check(b2.srMethod == Upscaler::Anime && b2.animeModel != 6 && b2.animeModel != 10, L"anime SR: a slow card falls back to a lighter model", b2.animeSrNote);
+            const Choice c3 = Decide({}, live, d, {}, rdna3);
+            check(c3.srMethod != Upscaler::Anime, L"anime SR: never for live action", c3.animeSrNote);
+            const Choice e = Decide({}, uhd, d, {}, rdna3);
+            check(e.srMethod != Upscaler::Anime, L"anime SR: not on a source at the output size (2x / 4x models only)");
+            const Choice f = Decide({}, bd, d, {}, rtx50);
+            check(f.srMethod == Upscaler::Rtx && f.animeSrNote.find(L"candidate") == 0, L"anime SR: RTX VSR stays first on RTX until the verdict; the candidate is named", f.animeSrNote);
+            Settings asked; asked.upscaler = Upscaler::Anime;
+            Settings askedSr = asked; askedSr.animeModel = L"animesr-v2";
+            const Choice g1 = Decide(asked, bd, d, {}, rtx50), g2 = Decide(askedSr, dvd, d, {}, rtx50);
+            check(g1.srMethod == Upscaler::Anime && g1.animeModel >= 0 && g2.animeModel == 10, L"anime SR: Upscaler Anime on RTX: Auto's model, or the setting's (AnimeSR on DVD)", g2.animeSrNote);
+            Settings askedR8 = asked; askedR8.animeModel = L"cunny-8x32";
+            check(Decide(askedR8, bd, d, {}, rdna3).animeModel == 9, L"anime SR: the setting's CuNNy model is used");
+            const Choice h = Decide({}, bd, d, {}, rdnaNo);
+            check(h.srMethod == Upscaler::Fsr, L"anime SR: without its files the GPU keeps FSR");
+            Source lowRate = bd; lowRate.bppEq = 0.02;
+            const Choice l = Decide({}, lowRate, d, {}, rdna3);
+            check(l.animeModel == 1 || l.animeModel == 4, L"anime SR: a low-bitrate source gets the denoise + sharpen variant", l.animeSrNote);
+            Costs learned; learned.animeSrLearned[3] = 40.0; learned.animeSrLearned[0] = 40.0;   // measured slow on this card
+            const Choice m = Decide({}, bd, d, learned, rdna3);
+            check(m.animeModel != 3 && m.animeModel != 0, L"anime SR: this card's measurement replaces the prior", m.animeSrNote);
+            const Choice n = Decide({}, p720, d, {}, rdna3);
+            check(n.animeModel != 6 && n.animeModel != 10, L"anime SR: 720p never gets the DVD-only models", n.animeSrNote);
+            check(AnimeSrModelIndex(L"ARTCNN-C4F32") == 3 && AnimeSrModelIndex(L"apisr") == -1 && AnimeSrModel(10).scale == 4, L"anime SR: model table");
+            check(!Decide({}, bd, d, {}, rdna3).sameGraph(Decide({}, dvd, d, {}, rdna3)), L"anime SR: another model is another graph");
         }
         check(!CoreOutputStalled(800, 40, true) && !CoreOutputStalled(5000, 10, true) && !CoreOutputStalled(5000, 40, false) && CoreOutputStalled(1600, 24, true),
               L"no-output guard: source frames shown after 1.5 s and 24 frames in, nothing out (playing)");

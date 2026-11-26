@@ -441,8 +441,7 @@ int mpv_open_cplugin(mpv_handle *h)
     PM_RESOLVE(mpv_get_property_string); PM_RESOLVE(mpv_free); PM_RESOLVE(mpv_command); PM_RESOLVE(mpv_error_string);
     PM_RESOLVE(mpv_wait_event); PM_RESOLVE(mpv_observe_property);
     if (!pfn_mpv_get_property_string || !pfn_mpv_free || !pfn_mpv_command || !pfn_mpv_error_string || !pfn_mpv_wait_event || !pfn_mpv_observe_property) {
-        fprintf(stderr, "[pushmpc_hook] not active: this libmpv gives C plugins no client API (mpv older than 0.36 in a private namespace)
-");
+        fprintf(stderr, "[pushmpc_hook] not active: this libmpv gives C plugins no client API (mpv older than 0.36 in a private namespace)\n");
         return -1;
     }
     opts = pfn_mpv_get_property_string(h, "script-opts");

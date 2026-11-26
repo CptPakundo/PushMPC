@@ -6,15 +6,22 @@
 // until the portable engine's cut guard (T1) is shared: RIFE has no cut awareness of its own.
 // Frame: a VSFrame* in the plugin.
 #pragma once
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 #include "pmml/pmml.h"
+// the held-drawing repair (pushmpc/src/HeldRepair.h); a tree without it builds without the repair
+#if __has_include("../../../pushmpc/src/HeldRepair.h")
+#include "../../../pushmpc/src/HeldRepair.h"
+#define PMVS_ML_REGION_REPAIR 1
+#endif
 #include "portable_engine.h"   // YuvView / YuvOut
 #include "schedule.h"
 
@@ -86,10 +93,21 @@ public:
     bool flowOnce = false;
     uint64_t generated = 0, cuts = 0;
     double lastMs = 0;
+    // The held-drawing repair (HeldRepair.h): frames go out kLookahead (3) source frames late; before frame q goes out
+    // its held parts are laid in from their own pair (pmml renderMap: one network run per pair, a phase per pixel; or
+    // render at the pair's one phase). The caller sets the Pipeline's lookahead to RepairLookahead() and `frames`.
+    bool regionRepair = false;
+    int64_t frames = 0;
+    static constexpr int kRepairLookahead = 3;
+    int RepairLookahead() const { return regionRepair ? kRepairLookahead : 0; }
+    struct RepairCounts { uint64_t frames = 0, parts = 0, pairs = 0, mapRuns = 0, gated = 0, overBudget = 0; double ms = 0; } repairCounts;
 
     bool CanSubmit() override { return true; }
     bool Submit(int64_t s, int64_t pts, bool discontinuity, std::string& err) override
     {
+#ifdef PMVS_ML_REGION_REPAIR
+        if (regionRepair) return SubmitDelayed(s, pts, discontinuity, err);
+#endif
         YuvView v;
         if (!source || !source(s, v)) { err = "ml: source frame " + std::to_string(s) + " is not available"; return false; }
         const bool contiguous = !discontinuity && m_last == s - 1 && m_have;
@@ -146,6 +164,9 @@ public:
         m_queue.clear();
         m_have = false;
         m_last = -1000000;
+#ifdef PMVS_ML_REGION_REPAIR
+        m_hist.clear(); m_ptsOf.clear(); m_rs.Reset(); m_next = -1; m_first = -1;
+#endif
         return true;
     }
     void Release(Frame f) override { if (release) release(f); }
@@ -155,6 +176,137 @@ public:
     }
 
 private:
+    // the generated frames of the pair (a, b) and b's real frame (b = a + 1 unless the stream started at b)
+    bool EmitPair(const Planes16* a, const Planes16& b, int64_t sb, int64_t ptsB, std::string& err)
+    {
+        if (a && grid.k > 1) {
+            const bool cut = LooksLikeCut(*a, b, bits);
+            if (cut) ++cuts;
+            pmml::Frame A, B;
+            for (int i = 0; i < 3; ++i) { A.plane[i] = a->p[i].data(); B.plane[i] = b.p[i].data(); A.stride[i] = B.stride[i] = i ? b.w / 2 : b.w; }
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!cut && !interp->setPair(A, B, flowOnce ? grid.k - 1 : 1, &err)) return false;
+            for (int j = 1; j < grid.k; ++j) {
+                Frame f{}; YuvOut o;
+                if (!alloc(o, f)) { err = "ml: could not allocate an output frame"; return false; }
+                const float t = float(j) / float(grid.k);
+                if (cut) FromPlanes16(t < 0.5f ? *a : b, bits, o);
+                else {
+                    m_out.w = b.w; m_out.h = b.h;
+                    for (int i = 0; i < 3; ++i) m_out.p[i].resize(b.p[i].size());
+                    pmml::OutFrame O;
+                    for (int i = 0; i < 3; ++i) { O.plane[i] = m_out.p[i].data(); O.stride[i] = i ? b.w / 2 : b.w; }
+                    if (!interp->render(t, O, &err)) { release(f); return false; }
+                    FromPlanes16(m_out, bits, o);
+                }
+                const int64_t p = grid.Pts(sb - 1) + int64_t(std::llround(double(j) * grid.srcDur100ns / grid.k));
+                if (tag) tag(p, true, f);
+                m_queue.push_back({ p, true, f });
+                ++generated;
+            }
+            lastMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        }
+        Frame f{}; YuvOut o;
+        if (!alloc(o, f)) { err = "ml: could not allocate an output frame"; return false; }
+        FromPlanes16(b, bits, o);
+        if (tag) tag(ptsB, false, f);
+        m_queue.push_back({ ptsB, false, f });
+        return true;
+    }
+#ifdef PMVS_ML_REGION_REPAIR
+    bool SubmitDelayed(int64_t s, int64_t pts, bool discontinuity, std::string& err)
+    {
+        using namespace pushmpc::held;
+        YuvView v;
+        if (!source || !source(s, v)) { err = "ml: source frame " + std::to_string(s) + " is not available"; return false; }
+        if (discontinuity || m_last != s - 1 || m_next < 0) {   // a seek or a gap: what waits goes out as it is
+            if (!EmitUpTo(m_last, err)) return false;
+            m_hist.clear(); m_ptsOf.clear(); m_rs.Reset(); m_next = s; m_first = s;
+        }
+        m_last = s;
+        Planes16& cur = m_hist[s];
+        ToPlanes16(v, cur);
+        m_ptsOf[s] = pts;
+        auto prev = m_hist.find(s - 1);
+        CellGrid g = CellsFromPlanes(cur.p[0].data(), cur.w, cur.p[1].data(), cur.p[2].data(), cur.w / 2, prev != m_hist.end() ? prev->second.p[0].data() : nullptr, cur.w, cur.h, bits);
+        bool dup = false;
+        if (const CellGrid* pg = m_rs.Grid(s - 1); pg && pg->v.size() == g.v.size()) {
+            DiffStats d; d.valid = true;
+            for (size_t i = 0; i < g.v.size(); ++i) {
+                const uint32_t q = uint32_t(std::fabs(g.v[i] - pg->v[i]) * 16.f + 0.5f);
+                ++d.cells; d.maxQ = std::max(d.maxQ, q); d.sumQ += q; for (int j = 0; j < 4; ++j) d.over[j] += q > kOverCodes[j] * 16;
+            }
+            dup = IsHeld(d);
+        }
+        m_rs.Push(s, std::move(g), dup);
+        const int64_t q = s - kRepairLookahead;
+        if (q >= m_next) { if (!Repair(q, err) || !EmitUpTo(q, err)) return false; }
+        if (frames > 0 && s >= frames - 1 && !EmitUpTo(s, err)) return false;   // the clip's end: the rest as it is
+        while (!m_hist.empty() && m_hist.begin()->first < s - 8) { m_ptsOf.erase(m_hist.begin()->first); m_hist.erase(m_hist.begin()); }
+        return true;
+    }
+    bool EmitUpTo(int64_t q, std::string& err)
+    {
+        for (; m_next >= 0 && m_next <= q; ++m_next) {
+            auto b = m_hist.find(m_next);
+            if (b == m_hist.end()) continue;
+            auto a = m_hist.find(m_next - 1);
+            if (!EmitPair(m_next > m_first && a != m_hist.end() ? &a->second : nullptr, b->second, m_next, m_ptsOf[m_next], err)) return false;
+        }
+        return true;
+    }
+    // frame q's held parts from their pairs (pairs whose frames are still kept), composited on the CPU
+    bool Repair(int64_t q, std::string& err)
+    {
+        using namespace pushmpc::held;
+        const auto groups = m_rs.Plan(q, 0.5 * grid.srcDur100ns / 10000.0);
+        const CellGrid* g = m_rs.Grid(q);
+        auto dst = m_hist.find(q);
+        if (groups.empty() || !g || dst == m_hist.end()) return true;
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::pair<uint64_t, uint64_t>> pairs;
+        for (const auto& gr : groups) if (std::find(pairs.begin(), pairs.end(), std::make_pair(gr.pairFrom, gr.d1)) == pairs.end()) pairs.push_back({ gr.pairFrom, gr.d1 });
+        size_t parts = 0;
+        for (const auto& pr : pairs) {
+            auto a = m_hist.find(int64_t(pr.first)), b = m_hist.find(int64_t(pr.second));
+            if (a == m_hist.end() || b == m_hist.end()) continue;
+            std::vector<float> tmap, alpha;
+            if (!PairPhaseMap(groups, pr.first, pr.second, tmap, alpha)) continue;
+            pmml::Frame A, B;
+            for (int i = 0; i < 3; ++i) { A.plane[i] = a->second.p[i].data(); B.plane[i] = b->second.p[i].data(); A.stride[i] = B.stride[i] = i ? a->second.w / 2 : a->second.w; }
+            m_rep.w = a->second.w; m_rep.h = a->second.h;
+            for (int i = 0; i < 3; ++i) m_rep.p[i].resize(a->second.p[i].size());
+            pmml::OutFrame O;
+            for (int i = 0; i < 3; ++i) { O.plane[i] = m_rep.p[i].data(); O.stride[i] = i ? m_rep.w / 2 : m_rep.w; }
+            // one network run at tRef, every part at its own phase (synth_map); else the parts' mean phase per t
+            std::string e2;
+            bool ok = interp->setPair(A, B, 2, &err) && interp->renderMap(tmap.data(), int(g->w), int(g->h), O, &e2);
+            if (ok) ++repairCounts.mapRuns;
+            else {
+                float tm = 0, n = 0;
+                for (const auto& gr : groups) if (gr.pairFrom == pr.first && gr.d1 == pr.second) { tm += gr.t * float(gr.cells); n += float(gr.cells); }
+                if (n <= 0 || !interp->setPair(A, B, 1, &err) || !interp->render(tm / n, O, &err)) return false;
+            }
+            uint16_t* d[3] = { dst->second.p[0].data(), dst->second.p[1].data(), dst->second.p[2].data() };
+            const uint16_t* sp[3] = { m_rep.p[0].data(), m_rep.p[1].data(), m_rep.p[2].data() };
+            const ptrdiff_t ds[3] = { dst->second.w, dst->second.w / 2, dst->second.w / 2 };
+            CompositePlanes(d, ds, sp, ds, dst->second.w, dst->second.h, alpha, int(g->w), int(g->h), int(g->cell));
+            ++repairCounts.pairs;
+            for (const auto& gr : groups) parts += gr.pairFrom == pr.first && gr.d1 == pr.second;
+        }
+        if (!parts) return true;
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        m_rs.Cost(ms, parts);
+        repairCounts.frames = m_rs.stats.frames; repairCounts.parts = m_rs.stats.parts; repairCounts.ms = m_rs.stats.ms;
+        repairCounts.gated = m_rs.stats.gated; repairCounts.overBudget = m_rs.stats.overBudget;
+        return true;
+    }
+    pushmpc::held::RepairScheduler m_rs;
+    std::map<int64_t, Planes16> m_hist;
+    std::map<int64_t, int64_t> m_ptsOf;
+    Planes16 m_rep;
+    int64_t m_next = -1, m_first = -1;
+#endif
     Planes16 m_prev, m_cur, m_out;
     bool m_have = false;
     int64_t m_last = -1000000;

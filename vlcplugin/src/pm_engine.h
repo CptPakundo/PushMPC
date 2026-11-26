@@ -87,6 +87,19 @@ int pm_engine_push_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, ch
 /* the frame at phase t of the current pair into dst (written and finished when this returns). 0 = ok */
 int pm_engine_generate_dmabuf(pm_engine *e, float t, const pm_dmabuf *dst, char *err, size_t errsize);
 
+/* ---- held frames (anime drawn on twos, threes, fours). Off until pm_engine_set_dedup(e, 1). Then a frame that
+ * repeats the last DISTINCT frame pushed (PushFPS's duplicate test: the GPU engine's Duplicate pass, the CPU engine's
+ * quarter-size luma) does not advance the pair: the pair stays (last distinct, the one before) and the module makes
+ * the held span from the next distinct frame's pair. pm_engine_check_dup runs the test alone, before the push (the
+ * worker mode must know before it hands out pictures): 1 = a repeat (do not push it), 0 = a new picture (push the SAME
+ * frame next: the GPU engine keeps its upload for that push), -1 = the test failed (treated as a new picture). Not
+ * contiguous: never a repeat. pm_engine_push runs the test itself when no check came first; pm_engine_last_dup says
+ * whether the last push / check was a repeat. pm_engine_forget drops the held state. */
+void pm_engine_set_dedup(pm_engine *e, int on);
+int pm_engine_check_dup(pm_engine *e, const pm_yuv *src, int contiguous, char *err, size_t errsize);
+int pm_engine_check_dup_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, char *err, size_t errsize);
+int pm_engine_last_dup(const pm_engine *e);
+
 #ifdef __cplusplus
 }
 #endif

@@ -277,6 +277,40 @@ pmml_eps() {
         *) echo "core webgpu 1" ;;
     esac
 }
+# the anime upscalers (ArtCNN MIT, CuNNy LGPL-3.0, AnimeSR Apache-2.0): their files from the authors' own release places,
+# each checked against its pinned size and SHA-256 (pmml/anime-models-pin.json; a mismatch is refused), and the model
+# graphs from this download, into .../pushmpc/pmml/graphs/anime-sr; the mpv route's anime shaders come from there too
+do_anime() {
+    [ "$os" = Darwin ] && return 0
+    [ -f "$here/pmml/anime-models-pin.json" ] || return 0
+    py=$(command -v python3 || true)
+    if [ -z "$py" ]; then say "anime upscalers: need python3 for the checked fetch (not found): not installed"; return 0; fi
+    dest=$pm/pmml/graphs/anime-sr
+    if [ "$dry" = 1 ]; then say "  would: fetch the pinned anime upscaler files into $dest"; return 0; fi
+    mkdir -p "$dest"
+    [ -d "$here/pmml/graphs/anime-sr" ] && cp "$here/pmml/graphs/anime-sr/"*.onnx "$dest/" 2>/dev/null
+    for g in "$here/pmml/graphs/"sr_*.onnx; do [ -f "$g" ] && cp "$g" "$pm/pmml/graphs/"; done
+    "$py" -I - "$here/pmml/anime-models-pin.json" "$dest" <<'PY' | sed 's/^/  /'
+import hashlib, json, os, sys, urllib.request
+pin, dest = sys.argv[1], sys.argv[2]
+bad = 0
+for f in json.load(open(pin, encoding="utf-8"))["files"]:
+    out = os.path.join(dest, f["name"])
+    ok = lambda b: len(b) == f["size"] and hashlib.sha256(b).hexdigest() == f["sha256"]
+    if os.path.exists(out) and ok(open(out, "rb").read()):
+        continue
+    try:
+        data = urllib.request.urlopen(urllib.request.Request(f["url"], headers={"User-Agent": "PushMPC-Setup"}), timeout=120).read()
+    except Exception as e:
+        print(f"{f['name']}: download failed ({e})"); bad += 1; continue
+    if not ok(data):
+        print(f"{f['name']}: refused (size / SHA-256 differ from the pin)"); bad += 1; continue
+    open(out, "wb").write(data)
+    print(f"ok {f['name']} ({f['licence']})")
+sys.exit(1 if bad else 0)
+PY
+    say "anime upscalers: files in $dest"
+}
 do_pmml() {
     [ "$os" = Darwin ] && return 0
     sel=$(pmml_eps)
@@ -337,6 +371,8 @@ PY
     then say "  PushFlow's models could not be taken from PushFPS's release: PushFlow runtime not installed"; rm -rf "$pm/pmml.part" "$dl"; return 0; fi
     cp -R "$here/pmml/graphs" "$pm/pmml.part/graphs"
     [ -f "$here/pmml/pmml_cli" ] && install -m 755 "$here/pmml/pmml_cli" "$pm/pmml.part/pmml_cli"
+    # keep the anime upscalers' files (do_anime) across a runtime refresh
+    [ -d "$pm/pmml/graphs/anime-sr" ] && { mkdir -p "$pm/pmml.part/graphs/anime-sr"; cp -R "$pm/pmml/graphs/anime-sr/." "$pm/pmml.part/graphs/anime-sr/"; }
     rm -rf "$pm/pmml" "$dl"; mv "$pm/pmml.part" "$pm/pmml"
     record pmml
     say "  PushFlow runtime installed in $pm/pmml (the mpv route's ml backend finds it there)"
@@ -488,6 +524,7 @@ case $action in
             # the Kodi add-on first: install.sh leaves a Kodi that has it alone
             do_kodi_addon
             do_plex
+            do_anime
             # shellcheck disable=SC2086
             PUSHMPC_NATIVE_HOOK=$hookon sh "$here/install.sh" install $pass; rc=$?
             [ "$rc" = 0 ] || { echo "setup.sh: install.sh failed ($rc)" >&2; exit "$rc"; }

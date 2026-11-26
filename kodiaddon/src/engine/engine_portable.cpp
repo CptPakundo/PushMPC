@@ -2,6 +2,7 @@
 #include "pm_engine.h"
 #include "portable_engine.h"
 #include "backend.h"   // pmvs::DecidePortableK: the same Auto rule as the mpv route
+#include "held_dedup.h" // held frames: PushFPS's duplicate test on the quarter-size luma
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -9,10 +10,15 @@
 #include <new>
 #include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 struct pm_engine {
     pmvs::portable::Engine eng;
     int width = 0, height = 0, bits = 8;
+    // held frames (pm_engine_set_dedup): the quarter-size luma of the last distinct frame and of the frame tested
+    bool dedup = false, haveDistinct = false, lastDup = false, checked = false;
+    std::vector<uint8_t> lastQ, curQ;
 };
 
 static void SetErr(char *err, size_t n, const std::string &s)
@@ -44,6 +50,12 @@ extern "C" int pm_engine_push(pm_engine *e, const pm_yuv *src, int contiguous, c
     v.width = e->width; v.height = e->height; v.bits = e->bits;
     for (int i = 0; i < 3; ++i) { v.data[i] = src->data[i]; v.stride[i] = src->stride[i]; }
     std::string why;
+    if (e->dedup) {   // held frames: a repeat of the last distinct frame leaves the pair as it is
+        if (!e->checked && pm_engine_check_dup(e, src, contiguous, err, errsize) == 1) return 0;
+        e->checked = false;
+        std::swap(e->lastQ, e->curQ);
+        e->haveDistinct = true;
+    }
     if (!e->eng.Push(v, contiguous != 0, why)) { SetErr(err, errsize, why); return -1; }
     return 0;
 }
@@ -58,7 +70,7 @@ extern "C" void pm_engine_generate(pm_engine *e, float t, const pm_yuv_out *out)
     e->eng.Generate(t, o);
 }
 
-extern "C" void pm_engine_forget(pm_engine *e) { e->eng.Forget(); }
+extern "C" void pm_engine_forget(pm_engine *e) { e->eng.Forget(); e->haveDistinct = e->lastDup = e->checked = false; }
 
 extern "C" void pm_engine_stats_get(const pm_engine *e, pm_engine_stats *out)
 {
@@ -88,3 +100,22 @@ extern "C" int pm_engine_decide_k(int smoother, double src_fps, double display_h
     SetErr(why, whysize, k.why);
     return k.k;
 }
+
+// ---- held frames (pm_engine.h): PushFPS's duplicate test against the last distinct frame pushed
+extern "C" void pm_engine_set_dedup(pm_engine *e, int on)
+{
+    e->dedup = on != 0;
+    e->haveDistinct = e->lastDup = e->checked = false;
+}
+
+extern "C" int pm_engine_check_dup(pm_engine *e, const pm_yuv *src, int contiguous, char *, size_t)
+{
+    e->lastDup = e->checked = false;
+    if (!e->dedup) return 0;
+    pmvs::held::QuarterLuma(src->data[0], src->stride[0], e->width, e->height, e->bits > 8 ? 2 : 1, e->bits > 8 ? e->bits - 8 : 0, e->curQ);
+    e->lastDup = contiguous && e->haveDistinct && pmvs::held::QuarterDuplicate(e->lastQ, e->curQ, e->width, e->height);
+    e->checked = !e->lastDup;   // a new picture: the next push takes this test
+    return e->lastDup ? 1 : 0;
+}
+
+extern "C" int pm_engine_last_dup(const pm_engine *e) { return e->lastDup ? 1 : 0; }

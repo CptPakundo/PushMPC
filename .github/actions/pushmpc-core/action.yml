@@ -494,6 +494,9 @@ runs:
         cmake --build "$env:RUNNER_TEMP\filter-build" --parallel
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & "$env:RUNNER_TEMP\filter-build\auto_test.exe" | Select-Object -First 20
+        # held-frame re-timing (animation on twos / threes): the rules, the GPU test pass on WARP, the output spacing
+        & "$env:RUNNER_TEMP\filter-build\held_test.exe" | Tee-Object -Variable held | Select-Object -Last 14
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error::held_test failed: $(($held | Select-String '^RESULT').Line)"; exit 1 }
         cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc -DPUSHMPC_UPDATER_DEV=OFF
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build "$env:RUNNER_TEMP\updater-build" --parallel

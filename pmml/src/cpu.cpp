@@ -112,7 +112,7 @@ void rgbToPlanes(const float* rgb, PlaneFormat fmt, const Colour& c, int w, int 
 }
 
 void synthCpu(const float* fa, const float* fb, int w, int h, const float* g0, const float* g1, const float* mask,
-              const NetworkSize& n, const std::array<float, 4>& aff, float s0, float s1, float* out, int threads) {
+              const NetworkSize& n, const std::array<float, 4>& aff, float s0, float s1, float* out, int threads, bool lineArt) {
     const int pw = n.padW, ph = n.padH;
     // scaled, affine-mapped grids at the padded network size, as planes [2][ph][pw]
     std::vector<float> G0(size_t(2) * pw * ph), G1(G0.size());
@@ -127,6 +127,9 @@ void synthCpu(const float* fa, const float* fb, int w, int h, const float* g0, c
             G1[size_t(pw) * ph + i] = (iy + (b[1] - iy) * s1) * aff[2] + aff[3];
         }
     const size_t plane = size_t(w) * h;
+    // lineArt: both warped frames and the mask first (the top-hat needs the neighbours), then the blend
+    std::vector<float> wa, wb, mk;
+    if (lineArt) { wa.resize(plane * 3); wb.resize(plane * 3); mk.resize(plane); }
     parallelRows(h, threads, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             // Resize of the cropped [n.h][n.w] fields to [h][w], half_pixel; the crop sits at the top left of the padded
@@ -140,10 +143,47 @@ void synthCpu(const float* fa, const float* fb, int w, int h, const float* g0, c
                 for (int c = 0; c < 3; ++c) {
                     const float a = sampleClamped(fa + c * plane, w, h, x0, y0p);
                     const float b = sampleClamped(fb + c * plane, w, h, x1, y1p);
-                    out[c * plane + size_t(y) * w + x] = b + (a - b) * m;
+                    if (lineArt) { wa[c * plane + size_t(y) * w + x] = a; wb[c * plane + size_t(y) * w + x] = b; }
+                    else out[c * plane + size_t(y) * w + x] = b + (a - b) * m;
                 }
+                if (lineArt) mk[size_t(y) * w + x] = m;
             }
         }
+    });
+    if (!lineArt) return;
+    // luma of both warped frames, then the 3x3 grey closing (max then min, separable) minus the value: the contrast of a
+    // dark thin line (black top-hat), as the graph does it
+    auto topHat = [&](const std::vector<float>& f, std::vector<float>& lum, std::vector<float>& th) {
+        lum.resize(plane); th.resize(plane);
+        for (size_t i = 0; i < plane; ++i) lum[i] = 0.299f * f[i] + 0.587f * f[plane + i] + 0.114f * f[2 * plane + i];
+        std::vector<float> t(plane), d(plane);
+        auto pass = [&](const std::vector<float>& in, std::vector<float>& o, bool horiz, bool mx) {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    float v = in[size_t(y) * w + x];
+                    for (int k = -1; k <= 1; k += 2) {
+                        const int xx = horiz ? std::min(std::max(x + k, 0), w - 1) : x, yy = horiz ? y : std::min(std::max(y + k, 0), h - 1);
+                        const float q = in[size_t(yy) * w + xx];
+                        v = mx ? std::max(v, q) : std::min(v, q);
+                    }
+                    o[size_t(y) * w + x] = v;
+                }
+        };
+        pass(lum, t, true, true); pass(t, d, false, true);     // dilation
+        pass(d, t, true, false); pass(t, d, false, false);     // erosion of it: the closing
+        for (size_t i = 0; i < plane; ++i) th[i] = d[i] - lum[i];
+    };
+    std::vector<float> la, lb, ta, tb;
+    topHat(wa, la, ta); topHat(wb, lb, tb);
+    parallelRows(h, threads, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0; x < w; ++x) {
+                const size_t i = size_t(y) * w + x;
+                float m = mk[i];
+                const bool line = (ta[i] > kLineTau || tb[i] > kLineTau) && std::fabs(la[i] - lb[i]) > kLineDelta;
+                if (line) { const float q = std::min(std::max((m - 0.35f) / 0.3f, 0.f), 1.f); m = q * q * (3.f - 2.f * q); }
+                for (int c = 0; c < 3; ++c) out[c * plane + i] = wb[c * plane + i] + (wa[c * plane + i] - wb[c * plane + i]) * m;
+            }
     });
 }
 

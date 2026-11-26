@@ -27,6 +27,8 @@ sets itself up for your graphics card and display.
 - SDR to HDR with PushMPC's own curve on every card, or RTX Video HDR, tuned to your display's brightness.
 - HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) pass through untouched.
 - Subtitle Hold keeps subtitles that are burned into the picture steady.
+- Smooth motion for cartoons and anime drawn "on twos" or "on threes" (each drawing shown for two or three frames):
+  the in-between frames are spread over the whole drawing instead of moving in one step and stopping in the next.
 
 ### Auto
 

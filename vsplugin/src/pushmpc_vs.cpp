@@ -601,7 +601,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
         "display_w:int:opt;display_h:int:opt;display_fs:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
-        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
+        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }

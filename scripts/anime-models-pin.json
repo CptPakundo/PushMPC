@@ -1,0 +1,1143 @@
+{
+ "_comment": "PushMPC's anime upscalers (Setup: scripts/anime-models-fetch.ps1; graphs: pmml/scripts/anime_sr_graphs.py). Every file is checked by size and SHA-256; a mismatch is refused. Sources: ArtCNN v1.6.2 (github.com/Artoriuz/ArtCNN, MIT), CuNNy at 906031bb00c15dd6a6bbbaa21c0eb0b724ca8437 (github.com/funnyplanter/CuNNy, LGPL-3.0), AnimeSR v2 (github.com/TencentARC/AnimeSR at 80a24bf7a5270907c703158ff6affb3248bf0dc2, Apache-2.0; the weights are only on the authors' Google Drive, pinned by hash). tensors: [name, dtype, shape, offset, length] of each weight inside its file (ONNX external data). The .glsl files are the authors' own mpv user shaders (compute), for the mpv-based players (pushmpc.lua).",
+ "schema": 1,
+ "folder": "anime-sr",
+ "files": [
+  {
+   "name": "ArtCNN_C4F16.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16.onnx",
+   "size": 51559,
+   "sha256": "7a6436299b8c757dbb7084ac39a25c310db1941133e73d1ee3e74c8b3bddc1ca",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DS.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DS.onnx",
+   "size": 51562,
+   "sha256": "efe94e2d6c3463d1cb95087fa71149a39bf7f00c095631e902bcb1b563afbfba",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DN.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DN.onnx",
+   "size": 51562,
+   "sha256": "c05055bec4149988cdaeadc9a67d4d7a1382f22f512302ba15510a5a7cca2b0e",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32.onnx",
+   "size": 193085,
+   "sha256": "b1a1130469a0538d4484fc3d6ca39854ef3906a3a01df8799997b6ed0408f6ea",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DS.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DS.onnx",
+   "size": 193088,
+   "sha256": "44b9e9bb2e5c3846f52cf354792a20b736554c39837561741fc17aec01046d85",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DN.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DN.onnx",
+   "size": 193088,
+   "sha256": "5e11a24929cfec6b5e917e8407b92df180fc3ab813eae576832258c77a1d3ff4",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_R8F64.onnx",
+   "component": "artcnn",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_R8F64.onnx",
+   "size": 3714817,
+   "sha256": "e446f67ce1c36e281d4fccf3082956656d605c101450406fbec0ad372f44722c",
+   "licence": "MIT"
+  },
+  {
+   "name": "LICENSE-ArtCNN.txt",
+   "component": "artcnn",
+   "url": "https://raw.githubusercontent.com/Artoriuz/ArtCNN/v1.6.2/LICENSE",
+   "size": 1075,
+   "sha256": "285055c4b8b8bcb891685ca9cc6047baf25a8c1cf56e8ab2cbcdecaea0437c0b",
+   "licence": "MIT"
+  },
+  {
+   "name": "CuNNy-fast-NVL.pickle",
+   "component": "cunny",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/pretrained/fast-NVL.pickle",
+   "size": 10740,
+   "sha256": "aaa827382ff33e5344d5ce448895d3078919f634c05a088dc7fd2286abd4107f",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-4x16-NVL.pickle",
+   "component": "cunny",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/pretrained/4x16-NVL.pickle",
+   "size": 46168,
+   "sha256": "4bb8ef648d026d2b1fd887c2f7e9849a0a04c3d8d24335e3583203ff0e347f6b",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-8x32-NVL.pickle",
+   "component": "cunny",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/pretrained/8x32-NVL.pickle",
+   "size": 313156,
+   "sha256": "0603ed798617a8bc5dcee6c6577fce390d354bb93c530d827d21f5386309fb98",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "LICENSE-CuNNy.txt",
+   "component": "cunny",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/LICENSE",
+   "size": 7652,
+   "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "AnimeSR_v2.pth",
+   "component": "animesr",
+   "url": "https://drive.usercontent.google.com/download?id=1E_qsFqlIre-fMUSSLADQboBssNIWSqmm&export=download&confirm=t",
+   "size": 5996559,
+   "sha256": "d0f29c8966b53718828bd424bbdc306e7ff0cbf6350beadaf8b5b2500b108548",
+   "licence": "Apache-2.0"
+  },
+  {
+   "name": "LICENSE-AnimeSR.txt",
+   "component": "animesr",
+   "url": "https://raw.githubusercontent.com/TencentARC/AnimeSR/80a24bf7a5270907c703158ff6affb3248bf0dc2/LICENSE",
+   "size": 32109,
+   "sha256": "e76e4ac4395070e74fc17fb370841055b93026ba95666b53bf772194ad77546f",
+   "licence": "Apache-2.0"
+  },
+  {
+   "name": "ArtCNN_C4F16.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16.glsl",
+   "size": 212905,
+   "sha256": "03d0b3d31cb82c898a94a46663021a3e8f02c5a21d69c5cfdf0208de4bfd453e",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DS.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DS.glsl",
+   "size": 213065,
+   "sha256": "57df650fddec3969e17799f5522c9b03dd2d33b1aeace237fef216bf3858125a",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F16_DN.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F16_DN.glsl",
+   "size": 213279,
+   "sha256": "047f33cd43ca3751b00c7c81206e076ac921c1fbc06d49f23010a0b428271acf",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32.glsl",
+   "size": 761029,
+   "sha256": "f773bce6cf5fe7e5e5d599a695edd40df5cd7a20c3d08c4d164d07591d5bead3",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DS.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DS.glsl",
+   "size": 761546,
+   "sha256": "a04c9cba6fbb8e6db9239d61848390208aedf8e348ef116e12174c803d22077e",
+   "licence": "MIT"
+  },
+  {
+   "name": "ArtCNN_C4F32_DN.glsl",
+   "component": "artcnn-glsl",
+   "url": "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/ArtCNN_C4F32_DN.glsl",
+   "size": 763012,
+   "sha256": "6b51a6f7d75826c9492c3f78b5e60acffa24a71928e2d47c4a329423922a143c",
+   "licence": "MIT"
+  },
+  {
+   "name": "CuNNy-fast-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-fast-DS.glsl",
+   "size": 43586,
+   "sha256": "86681e39ef4a2f22ad5622be88c2bff179007f4f9b898e05638d6ab1239e03c0",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-4x16-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-4x16-DS.glsl",
+   "size": 146323,
+   "sha256": "2e9dba9e7915d7d8b35db4a08d63a64ff1406f3e975d377f2b6f90e37bb187f4",
+   "licence": "LGPL-3.0"
+  },
+  {
+   "name": "CuNNy-8x32-DS.glsl",
+   "component": "cunny-glsl",
+   "url": "https://raw.githubusercontent.com/funnyplanter/CuNNy/906031bb00c15dd6a6bbbaa21c0eb0b724ca8437/mpv/ds/CuNNy-8x32-DS.glsl",
+   "size": 1012213,
+   "sha256": "87e79777b7b1ed347f1ca6bc9ab798c5b999bc827d09b2877c5ed5a783a90c66",
+   "licence": "LGPL-3.0"
+  }
+ ],
+ "models": [
+  {
+   "id": "artcnn-c4f16",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F16.onnx",
+   "graph": "ArtCNN_C4F16.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-c4f16-ds",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F16_DS.onnx",
+   "graph": "ArtCNN_C4F16_DS.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-c4f16-dn",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F16_DN.onnx",
+   "graph": "ArtCNN_C4F16_DN.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-c4f32",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F32.onnx",
+   "graph": "ArtCNN_C4F32.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-c4f32-ds",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F32_DS.onnx",
+   "graph": "ArtCNN_C4F32_DS.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-c4f32-dn",
+   "family": "artcnn",
+   "file": "ArtCNN_C4F32_DN.onnx",
+   "graph": "ArtCNN_C4F32_DN.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "artcnn-r8f64",
+   "family": "artcnn",
+   "file": "ArtCNN_R8F64.onnx",
+   "graph": "ArtCNN_R8F64.onnx",
+   "kind": "luma",
+   "scale": 2
+  },
+  {
+   "id": "cunny-fast",
+   "family": "cunny",
+   "file": "CuNNy-fast-NVL.pickle",
+   "graph": "sr-cunny-fast.onnx",
+   "kind": "luma",
+   "scale": 2,
+   "tensors": [
+    [
+     "cin.weight",
+     "float32",
+     [
+      12,
+      1,
+      3,
+      3
+     ],
+     161,
+     432
+    ],
+    [
+     "cin.bias",
+     "float32",
+     [
+      12
+     ],
+     690,
+     48
+    ],
+    [
+     "conv.0.weight",
+     "float32",
+     [
+      12,
+      12,
+      3,
+      3
+     ],
+     779,
+     5184
+    ],
+    [
+     "conv.1.weight",
+     "float32",
+     [
+      8,
+      12,
+      3,
+      3
+     ],
+     6011,
+     3456
+    ],
+    [
+     "cout.weight",
+     "float32",
+     [
+      4,
+      8,
+      3,
+      3
+     ],
+     9513,
+     1152
+    ],
+    [
+     "cout.bias",
+     "float32",
+     [
+      4
+     ],
+     10709,
+     16
+    ]
+   ],
+   "arch": {
+    "rgb": false,
+    "quant": true,
+    "layers": [
+     12,
+     12,
+     8
+    ]
+   }
+  },
+  {
+   "id": "cunny-4x16",
+   "family": "cunny",
+   "file": "CuNNy-4x16-NVL.pickle",
+   "graph": "sr-cunny-4x16.onnx",
+   "kind": "rgb",
+   "scale": 2,
+   "tensors": [
+    [
+     "cin.weight",
+     "float32",
+     [
+      16,
+      3,
+      3,
+      3
+     ],
+     165,
+     1728
+    ],
+    [
+     "cin.bias",
+     "float32",
+     [
+      16
+     ],
+     1990,
+     64
+    ],
+    [
+     "conv.0.weight",
+     "float32",
+     [
+      16,
+      16,
+      3,
+      3
+     ],
+     2095,
+     9216
+    ],
+    [
+     "conv.1.weight",
+     "float32",
+     [
+      16,
+      16,
+      3,
+      3
+     ],
+     11359,
+     9216
+    ],
+    [
+     "conv.2.weight",
+     "float32",
+     [
+      16,
+      16,
+      3,
+      3
+     ],
+     20623,
+     9216
+    ],
+    [
+     "conv.3.weight",
+     "float32",
+     [
+      16,
+      16,
+      3,
+      3
+     ],
+     29887,
+     9216
+    ],
+    [
+     "cout.weight",
+     "float32",
+     [
+      12,
+      16,
+      3,
+      3
+     ],
+     39149,
+     6912
+    ],
+    [
+     "cout.bias",
+     "float32",
+     [
+      12
+     ],
+     46105,
+     48
+    ]
+   ],
+   "arch": {
+    "rgb": true,
+    "quant": true,
+    "layers": [
+     16,
+     16,
+     16,
+     16,
+     16
+    ]
+   }
+  },
+  {
+   "id": "cunny-8x32",
+   "family": "cunny",
+   "file": "CuNNy-8x32-NVL.pickle",
+   "graph": "sr-cunny-8x32.onnx",
+   "kind": "rgb",
+   "scale": 2,
+   "tensors": [
+    [
+     "cin.weight",
+     "float32",
+     [
+      32,
+      3,
+      3,
+      3
+     ],
+     173,
+     3456
+    ],
+    [
+     "cin.bias",
+     "float32",
+     [
+      32
+     ],
+     3726,
+     128
+    ],
+    [
+     "conv.0.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     3895,
+     36864
+    ],
+    [
+     "conv.1.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     40807,
+     36864
+    ],
+    [
+     "conv.2.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     77728,
+     36864
+    ],
+    [
+     "conv.3.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     114640,
+     36864
+    ],
+    [
+     "conv.4.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     151561,
+     36864
+    ],
+    [
+     "conv.5.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     188473,
+     36864
+    ],
+    [
+     "conv.6.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     225394,
+     36864
+    ],
+    [
+     "conv.7.weight",
+     "float32",
+     [
+      32,
+      32,
+      3,
+      3
+     ],
+     262306,
+     36864
+    ],
+    [
+     "cout.weight",
+     "float32",
+     [
+      12,
+      32,
+      3,
+      3
+     ],
+     299225,
+     13824
+    ],
+    [
+     "cout.bias",
+     "float32",
+     [
+      12
+     ],
+     313093,
+     48
+    ]
+   ],
+   "arch": {
+    "rgb": true,
+    "quant": true,
+    "layers": [
+     32,
+     32,
+     32,
+     32,
+     32,
+     32,
+     32,
+     32,
+     32
+    ]
+   }
+  },
+  {
+   "id": "animesr-v2",
+   "family": "animesr",
+   "file": "AnimeSR_v2.pth",
+   "graph": "sr-animesr-v2.onnx",
+   "kind": "animesr",
+   "scale": 4,
+   "tensors": [
+    [
+     "recurrent_cell.conv_s1_first.0.weight",
+     "float32",
+     [
+      64,
+      121,
+      3,
+      3
+     ],
+     5952,
+     278784
+    ],
+    [
+     "recurrent_cell.conv_s1_first.0.bias",
+     "float32",
+     [
+      64
+     ],
+     284800,
+     256
+    ],
+    [
+     "recurrent_cell.conv_s2_first.0.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1024960,
+     147456
+    ],
+    [
+     "recurrent_cell.conv_s2_first.0.bias",
+     "float32",
+     [
+      64
+     ],
+     1912320,
+     256
+    ],
+    [
+     "recurrent_cell.conv_s4_first.0.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2652480,
+     147456
+    ],
+    [
+     "recurrent_cell.conv_s4_first.0.bias",
+     "float32",
+     [
+      64
+     ],
+     5697216,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.0.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     5697536,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.0.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     5845056,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.0.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     5845376,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.0.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     5992896,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.1.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     285184,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.1.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     432768,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.1.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     433152,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.1.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     580736,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.2.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     581120,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.2.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     728704,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.2.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     729088,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.2.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     876672,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.3.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     877056,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.3.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     1024640,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.3.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1172544,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.3.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     1320128,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.4.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1320512,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.4.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     1468096,
+     256
+    ],
+    [
+     "recurrent_cell.body_s1_first.4.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1468480,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s1_first.4.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     1616064,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.0.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1616448,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.0.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     1764032,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.0.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1764416,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.0.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     1912000,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.1.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     1912704,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.1.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     2060288,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.1.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2060672,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.1.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     2208256,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.2.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2208640,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.2.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     2356224,
+     256
+    ],
+    [
+     "recurrent_cell.body_s2_first.2.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2356608,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s2_first.2.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     2504192,
+     256
+    ],
+    [
+     "recurrent_cell.body_s4_first.0.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2504576,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s4_first.0.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     2652160,
+     256
+    ],
+    [
+     "recurrent_cell.body_s4_first.0.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2800064,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s4_first.0.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     2947648,
+     256
+    ],
+    [
+     "recurrent_cell.body_s4_first.1.conv1.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     2948032,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s4_first.1.conv1.bias",
+     "float32",
+     [
+      64
+     ],
+     3095616,
+     256
+    ],
+    [
+     "recurrent_cell.body_s4_first.1.conv2.weight",
+     "float32",
+     [
+      64,
+      64,
+      3,
+      3
+     ],
+     3096000,
+     147456
+    ],
+    [
+     "recurrent_cell.body_s4_first.1.conv2.bias",
+     "float32",
+     [
+      64
+     ],
+     3243584,
+     256
+    ],
+    [
+     "recurrent_cell.fusion.0.weight",
+     "float32",
+     [
+      224,
+      192,
+      3,
+      3
+     ],
+     3243968,
+     1548288
+    ],
+    [
+     "recurrent_cell.fusion.0.bias",
+     "float32",
+     [
+      224
+     ],
+     4792384,
+     896
+    ],
+    [
+     "recurrent_cell.fusion.2.weight",
+     "float32",
+     [
+      112,
+      224,
+      3,
+      3
+     ],
+     4793408,
+     903168
+    ],
+    [
+     "recurrent_cell.fusion.2.bias",
+     "float32",
+     [
+      112
+     ],
+     5696704,
+     448
+    ]
+   ]
+  }
+ ]
+}

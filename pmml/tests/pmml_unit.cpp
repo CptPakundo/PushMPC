@@ -3,10 +3,12 @@
 #include "internal.h"
 #include "pmml/autobench.h"
 #include "pmml/pmml.h"
+#include "pmml/upscale.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -183,6 +185,125 @@ static void cpuGraphs() {
     std::fill(m.begin(), m.end(), 1.f);
     pmml::detail::synthCpu(rgb.data(), fb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 0.5f, 0.5f, out.data(), 1);
     NEAR(out[size_t(10) * w + 20], rgb[size_t(10) * w + 22], 1e-4);
+    // synth_line (anime round 5): identical to synth where there are no lines (smooth gradients, any mask)
+    for (int yy = 0; yy < h; ++yy)
+        for (int xx = 0; xx < w; ++xx) g[(size_t(yy) * w + xx) * 2] = 2.f * xx / (w - 1) - 1.f;
+    const size_t P = size_t(w) * h;
+    std::vector<float> ga(rgb.size()), gb(rgb.size()), o1(rgb.size()), o2(rgb.size());
+    for (int c = 0; c < 3; ++c)
+        for (int yy = 0; yy < h; ++yy)
+            for (int xx = 0; xx < w; ++xx) { ga[c * P + size_t(yy) * w + xx] = 0.2f + 0.005f * xx; gb[c * P + size_t(yy) * w + xx] = 0.7f - 0.004f * yy; }
+    std::fill(m.begin(), m.end(), 0.5f);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o1.data(), 1);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o2.data(), 1, true);
+    double d = 0;
+    for (size_t i = 0; i < o1.size(); ++i) d = std::max(d, double(std::fabs(o1[i] - o2[i])));
+    CHECK(d < 1e-6);
+    // a dark line in a at x = 20 and in b at x = 26 (a doubled line in the blend): with mask 0.6 the plain blend shows
+    // two faint lines; synth_line one, nearly a's (smoothstep(0.35, 0.65, 0.6) = 0.94)
+    std::fill(ga.begin(), ga.end(), 0.8f); std::fill(gb.begin(), gb.end(), 0.8f);
+    for (int c = 0; c < 3; ++c)
+        for (int yy = 0; yy < h; ++yy) { ga[c * P + size_t(yy) * w + 20] = 0.1f; gb[c * P + size_t(yy) * w + 26] = 0.1f; }
+    std::fill(m.begin(), m.end(), 0.6f);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o1.data(), 1);
+    pmml::detail::synthCpu(ga.data(), gb.data(), w, h, g.data(), g.data(), m.data(), n, aff, 1.f, 1.f, o2.data(), 1, true);
+    const size_t at20 = size_t(24) * w + 20, at26 = size_t(24) * w + 26;
+    CHECK(o1[at20] > 0.3f && o1[at26] > 0.45f);          // plain: 0.38 and 0.52, two faint lines
+    CHECK(o2[at20] < 0.16f && o2[at26] > 0.7f);          // line: a's line (0.15), b's nearly gone (0.75)
+    CHECK(std::fabs(o2[size_t(24) * w + 40] - 0.8f) < 1e-5);   // flat elsewhere untouched
+}
+
+// Anime upscalers (pmml/upscale.h): the model table agrees with scripts/anime-models-pin.json; missing files are named.
+// With PMML_TEST_RUNTIME (a runtime folder with ort/core) and PMML_TEST_GRAPHS (make_graphs.py output whose anime-sr
+// folder holds the fetched weights) every model also runs on the CPU: output size, and a reference picture (flat
+// areas stay flat; a smooth gradient stays within a few codes of the source at the same place), 8- and 10-bit, YUV
+// and RGBA8.
+static void upscaleTable() {
+#ifdef PMML_PIN_FILE
+    const std::string pin = pmml::detail::readText(PMML_PIN_FILE);
+    CHECK(!pin.empty());
+    for (const auto& m : pmml::upscaleModels()) {
+        CHECK(pin.find(std::string("\"id\": \"") + m.id + "\"") != std::string::npos);
+        CHECK(pin.find(std::string("\"file\": \"") + m.file + "\"") != std::string::npos);
+        CHECK(pin.find(std::string("\"graph\": \"") + m.graph + "\"") != std::string::npos);
+        CHECK(m.scale == 2 || m.scale == 4);
+    }
+#endif
+    CHECK(pmml::findUpscaleModel("artcnn-c4f32") && pmml::findUpscaleModel("cunny-fast") && pmml::findUpscaleModel("animesr-v2"));
+    CHECK(!pmml::findUpscaleModel("apisr"));
+    pmml::UpscaleOptions o;
+    o.graphsDir = "no-such-folder";
+    o.model = "cunny-fast";
+    CHECK(pmml::upscaleFilesMissing(o).find("CuNNy-fast-NVL.pickle") != std::string::npos);
+    std::string err;
+    o.backend.runtime = "ncnn";
+    CHECK(!pmml::Upscaler::create(o, &err) && !err.empty());
+}
+
+static void upscaleRun() {
+    const char* rt = std::getenv("PMML_TEST_RUNTIME");
+    const char* graphs = std::getenv("PMML_TEST_GRAPHS");
+    if (!rt || !graphs || !*rt || !*graphs) { std::printf("upscale run: skipped (PMML_TEST_RUNTIME / PMML_TEST_GRAPHS not set)\n"); return; }
+    const int w = 64, h = 48;
+    for (const auto& m : pmml::upscaleModels()) {
+        for (int bits : {8, 10}) {
+            pmml::UpscaleOptions o;
+            o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.width = w; o.height = h;
+            o.colour = pmml::Colour::limited(bits);
+            std::string err;
+            auto up = pmml::Upscaler::create(o, &err);
+            if (!up) { std::printf("FAIL upscale %s %d-bit: %s\n", m.id, bits, err.c_str()); ++failures; continue; }
+            CHECK(up->outWidth() == w * m.scale && up->outHeight() == h * m.scale);
+            // left half flat grey, right half a smooth horizontal ramp; chroma neutral
+            const int sh = bits - 8;
+            std::vector<uint16_t> y(size_t(w) * h), u(size_t(w / 2) * (h / 2), uint16_t(128 << sh)), v(u);
+            for (int yy = 0; yy < h; ++yy)
+                for (int xx = 0; xx < w; ++xx) y[size_t(yy) * w + xx] = uint16_t((xx < w / 2 ? 120 : 60 + 3 * (xx - w / 2)) << sh);
+            const int ow = up->outWidth(), oh = up->outHeight();
+            std::vector<uint16_t> oy(size_t(ow) * oh), ou(size_t(ow / 2) * (oh / 2)), ov(ou);
+            pmml::Frame in; in.plane[0] = y.data(); in.plane[1] = u.data(); in.plane[2] = v.data(); in.stride[0] = w; in.stride[1] = in.stride[2] = w / 2;
+            pmml::OutFrame out; out.plane[0] = oy.data(); out.plane[1] = ou.data(); out.plane[2] = ov.data(); out.stride[0] = ow; out.stride[1] = out.stride[2] = ow / 2;
+            bool ok = true;
+            for (int rep = 0; rep < (std::string(m.kind) == "animesr" ? 3 : 1) && ok; ++rep) ok = up->run(in, out, &err);   // recurrent: settles
+            if (!ok) { std::printf("FAIL upscale run %s: %s\n", m.id, err.c_str()); ++failures; continue; }
+            double flat = 0, ramp = 0;
+            const int s = m.scale;
+            for (int yy = 4 * s; yy < oh - 4 * s; ++yy)
+                for (int xx = 4 * s; xx < ow - 4 * s; ++xx) {
+                    const double got = oy[size_t(yy) * ow + xx] / double(1 << sh);
+                    const int sx = xx / s;
+                    if (sx < w / 2 - 4) flat = std::max(flat, std::fabs(got - 120));
+                    else if (sx > w / 2 + 4) ramp = std::max(ramp, std::fabs(got - (60 + 3 * ((xx + 0.5) / s - 0.5 - w / 2))));
+                }
+            double chroma = 0;
+            for (size_t i = 0; i < ou.size(); ++i) chroma = std::max(chroma, std::fabs(ou[i] / double(1 << sh) - 128));
+            std::printf("upscale %-16s %2d-bit %dx%d -> %dx%d: flat max %.2f, ramp max %.2f, chroma max %.2f codes (8-bit scale)\n", m.id, bits, w, h, ow, oh, flat, ramp, chroma);
+            // AnimeSR v2 is a restoration GAN: it redraws a little even on flat colour (measured 3.5-4 codes, CPU EP)
+            const double tol = std::string(m.kind) == "animesr" ? 6.0 : 3.0;
+            CHECK(flat <= tol);
+            CHECK(ramp <= 8.0);
+            CHECK(chroma <= tol);
+        }
+        // RGBA8 to a caller's size (pushcore's route)
+        pmml::UpscaleOptions o;
+        o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.io = pmml::UpscaleIo::Rgba8; o.width = w; o.height = h; o.outWidth = 150; o.outHeight = 100;
+        o.inPitchPx = 72; o.outPitchPx = 160;   // D3D12-style padded rows (the zero-copy layout): cropped in, padded out
+        std::string err;
+        auto up = pmml::Upscaler::create(o, &err);
+        if (!up) { std::printf("FAIL upscale rgba8 %s: %s\n", m.id, err.c_str()); ++failures; continue; }
+        CHECK(up->outWidth() == 150 && up->outHeight() == 100);
+        std::vector<uint8_t> src(size_t(72) * 4 * h), dst(size_t(160) * 4 * 100, 7);
+        for (size_t i = 0; i < src.size(); i += 4) { src[i] = 200; src[i + 1] = 100; src[i + 2] = 50; src[i + 3] = 255; }
+        for (int yy = 0; yy < h; ++yy) for (int xx = w; xx < 72; ++xx) src[size_t(yy) * 288 + xx * 4] = 0;   // the pad columns must not leak in
+        CHECK(up->runRgba(src.data(), 72 * 4, dst.data(), 160 * 4, &err));
+        double e = 0;
+        for (int yy = 10; yy < 90; ++yy)
+            for (int xx = 10; xx < 140; ++xx)
+                for (int c = 0; c < 3; ++c) e = std::max(e, std::fabs(double(dst[size_t(yy) * 640 + xx * 4 + c]) - double(src[size_t(c)])));
+        std::printf("upscale %-16s rgba8 %dx%d -> 150x100: flat colour max %.0f\n", m.id, w, h, e);
+        CHECK(e <= (std::string(m.kind) == "animesr" ? 6 : 3));
+        CHECK(dst[size_t(50) * 640 + 150 * 4] == 0);   // the graph pads the rows to the pitch
+    }
 }
 
 int main() {
@@ -193,6 +314,8 @@ int main() {
     int8Split();
     cache();
     cpuGraphs();
+    upscaleTable();
+    upscaleRun();
     std::printf(failures ? "pmml_unit: %d FAILED\n" : "pmml_unit: all passed%.0d\n", failures);
     return failures ? 1 : 0;
 }

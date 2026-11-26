@@ -20,13 +20,72 @@ local options = require 'mp.options'
 -- Upscaling shaders (pushmpc-shaders, ";" between paths; PushMPC ships ArtCNN fragment shaders): shaders-when=always
 -- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
+-- Anime upscaling shaders (pushmpc-anime-shaders: "id=path;..." best first; ArtCNN (MIT) and CuNNy (LGPL-3.0) as their
+-- authors publish them, fetched and checked by Setup): used instead of the set above for animation (the file's path
+-- names it: anime / animation / animated / cartoon(s) as whole words), only when the picture is enlarged (their
+-- //!WHEN guard), the "-ds" (denoise + sharpen) variant at a low bitrate. After a few seconds their measured render time
+-- (vo-passes) must stay within anime-share of a frame's time, else the next lighter one takes over. They are compute
+-- shaders: renderers without compute (OpenGL below 4.3) keep the fragment set.
 local opts = { vpy = "", buffered = "4", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
-               shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "" }
+               shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "", ["anime-shaders"] = "", ["anime-share"] = "0.35" }
 options.read_options(opts, "pushmpc")
 
 local shaders_on = false
+local anime = { list = {}, at = 0, path = nil, timer = nil }
+for e in opts["anime-shaders"]:gmatch("[^;]+") do
+    local id, path = e:match("^([^=]+)=(.+)$")
+    if id then anime.list[#anime.list + 1] = { id = id, path = path } end
+end
+local function is_animation()
+    local p = (mp.get_property("path") or ""):lower():gsub("\\", "/")
+    for _, w in ipairs({ "anime", "animation", "animations", "animated", "cartoon", "cartoons" }) do
+        if p:find("%f[%w]" .. w .. "%f[^%w]") then return true end
+    end
+    return false
+end
+local function low_bitrate()
+    local br, vp, fps = mp.get_property_number("video-bitrate", 0), mp.get_property_native("video-params"), mp.get_property_number("container-fps", 24)
+    if br <= 0 or not vp or not vp.w or vp.w <= 0 then return false end
+    return br / (vp.w * vp.h * math.max(fps, 1)) <= 0.05   -- bits per pixel per frame (H.264-class low bitrate)
+end
+local function set_anime(i)
+    if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end
+    local e = anime.list[i]
+    if not e then return false end
+    if low_bitrate() and not e.id:find("%-ds$") then
+        for _, x in ipairs(anime.list) do if x.id == e.id .. "-ds" then e = x end end
+    end
+    mp.commandv("change-list", "glsl-shaders", "append", e.path)
+    anime.at, anime.path = i, e.path
+    msg.info("anime upscaling shader: " .. e.id)
+    -- the measured cost: the shader's passes in vo-passes (average ns) against the share of a frame's time
+    if anime.timer then anime.timer:kill() end
+    anime.timer = mp.add_timeout(4, function()
+        local passes, ns = mp.get_property_native("vo-passes"), 0
+        for _, kind in ipairs({ "fresh" }) do
+            for _, ps in ipairs((passes and passes[kind]) or {}) do
+                if ps.desc and (ps.desc:find("ArtCNN") or ps.desc:find("CuNNy")) then ns = ns + (ps.avg or 0) end
+            end
+        end
+        local fps = math.max(mp.get_property_number("display-fps", 0), mp.get_property_number("container-fps", 24))
+        local budget = tonumber(opts["anime-share"]) * 1e9 / math.max(fps, 1)
+        msg.info(string.format("anime upscaling shader %s: %.2f ms a frame (%.2f allowed)", e.id, ns / 1e6, budget / 1e6))
+        if ns > budget then
+            local j = i + 1
+            while anime.list[j] and anime.list[j].id:find("%-ds$") do j = j + 1 end
+            if anime.list[j] then set_anime(j) else msg.warn("no anime shader fits this frame time: keeping " .. e.id) end
+        end
+    end)
+    return true
+end
 local function shaders(why)
-    if shaders_on or opts.shaders == "" then return end
+    if shaders_on then return end
+    if #anime.list > 0 and is_animation() then
+        local first = 1
+        while anime.list[first] and anime.list[first].id:find("%-ds$") do first = first + 1 end
+        if set_anime(first) then shaders_on = true; return end
+    end
+    if opts.shaders == "" then return end
     local have = {}
     for _, p in ipairs(mp.get_property_native("glsl-shaders") or {}) do have[p] = true end
     for p in opts.shaders:gmatch("[^;]+") do
@@ -35,6 +94,7 @@ local function shaders(why)
     shaders_on = true
     msg.info("upscaling shaders added (" .. why .. "): " .. opts.shaders)
 end
+mp.register_event("end-file", function() if anime.timer then anime.timer:kill() end; if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end; shaders_on = false end)
 
 if opts.mode == "vsr" then
     local failed_for, last = nil, nil

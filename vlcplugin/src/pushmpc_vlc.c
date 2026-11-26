@@ -210,6 +210,8 @@ void pm_out_close(vlc_object_t *o) { CloseOut(o); }
  * before it is shown, waits until that picture is filled (at most until its display time; if it is not ready by
  * then, the real frame is shown in its place). So generated frame j has j/k of the frame interval to be made, instead
  * of everything having to be ready before VLC's video thread may go on. */
+#define PM_HOLD 3               /* held frames: repeats that wait for the next drawing (twos, threes, fours) */
+#define PM_JOB_MAX 64           /* pictures per job: a held span of (PM_HOLD + 1) x 16 - 1 */
 typedef struct pm_job {
     vlc_mutex_t lock;
     vlc_cond_t cond;
@@ -217,12 +219,12 @@ typedef struct pm_job {
     int n;                      /* pictures to generate */
     int done;                   /* filled so far, in order */
     bool finished, cancel, contiguous;
-    bool failed[16];            /* hardware formats: the upload failed, show the real frame instead */
+    bool failed[PM_JOB_MAX];    /* hardware formats: the upload failed, show the real frame instead */
     picture_t *src;             /* the newest source frame (pushed to the engine by the worker) */
     picture_t *real;            /* the real frame shown before them (the fallback) */
-    picture_t *outs[16];
-    picture_t *stage[16];       /* hardware formats: the CPU picture the engine writes, uploaded into outs[i] */
-    float t[16];
+    picture_t *outs[PM_JOB_MAX];
+    picture_t *stage[PM_JOB_MAX]; /* hardware formats: the CPU picture the engine writes, uploaded into outs[i] */
+    float t[PM_JOB_MAX];
 } pm_job;
 
 static pm_job *JobNew(void)
@@ -315,6 +317,9 @@ vlc_module_begin()
         change_private()
     add_bool(CFG "worker", true, "Generate on a worker thread", "Frames are made off VLC's video thread and each one "
              "has until its display time (needs pushmpc_out after postproc).", true)
+    add_bool(CFG "dedup", true, "Held frames (animation)", "Animation drawn on twos, threes or fours: a repeated frame "
+             "waits for the next drawing, and the generated frames move evenly over the whole held span (portable "
+             "engines).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
     add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
@@ -385,6 +390,11 @@ struct filter_sys_t {
     bool cvpx_off;              /* a picture failed the checks: pass-through from there on */
     uint64_t cvpx_gen, cvpx_err;
 #endif
+    /* held frames (HeldStep): repeats of sys->prev waiting for the next drawing, a still, the last frame's date */
+    bool dedup, dedup_set, still;
+    int held;
+    mtime_t held_last;
+    uint64_t repeats, stills;
 };
 
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
@@ -868,6 +878,70 @@ static picture_t *FilterCvpx(filter_t *f, struct filter_sys_t *sys, picture_t *c
 }
 #endif
 
+/* ---- held frames (animation drawn on twos, threes, fours; portable engines). A frame that repeats the last distinct
+ * one (the engine's duplicate test) is dropped: it shows the same picture, so nothing changes on screen. Up to PM_HOLD
+ * of them wait for the next distinct frame, whose pair then makes the whole held span: the last distinct frame, then
+ * k x span - 1 generated pictures dated evenly up to the new frame (t = j / (k x span)). One more repeat makes a still:
+ * the last distinct frame goes out at once (a clone), and when the still ends only its last interval moves (the base
+ * becomes a clone dated at the last repeat). */
+/* the duplicate test of the frame the engine reads next (as EnginePush reads it); 1 = a repeat. Failed: a new picture */
+static int EngineCheck(struct filter_sys_t *sys, picture_t *src, bool contiguous)
+{
+    char err[200];
+    if (sys->zc_hw) {
+        pm_dmabuf d;
+        if (pm_hw_export(sys->hw, src, &d) == 0) {
+            const int r = pm_engine_check_dup_dmabuf(sys->eng, &d, contiguous, err, sizeof(err));
+            pm_hw_dmabuf_close(&d);
+            if (r >= 0) return r;
+        }
+        picture_t *c = pm_hw_cpu_picture(sys->hw);
+        if (!c || pm_hw_download(sys->hw, src, c) != 0) { if (c) picture_Release(c); return 0; }
+        pm_yuv y;
+        PlanesIn(c, &sys->wfmt, sys->bps, &y);
+        const int r = pm_engine_check_dup(sys->eng, &y, contiguous, err, sizeof(err));
+        picture_Release(c);
+        return r > 0;
+    }
+    pm_yuv y;
+    PlanesIn(src, &sys->wfmt, sys->bps_w, &y);
+    return pm_engine_check_dup(sys->eng, &y, contiguous, err, sizeof(err)) > 0;
+}
+/* true: cur was a repeat and is consumed (*out: what to return, NULL or the still's picture). Else *span: the source
+ * intervals from sys->prev to cur, *contig: cur follows the last frame received (-1: dedup off, the caller decides) */
+static bool HeldStep(struct filter_sys_t *sys, picture_t *cur, picture_t *work, int *span, int *contig, picture_t **out)
+{
+    *span = 1; *contig = -1; *out = NULL;
+    if (!sys->dedup || !sys->eng) return false;
+    if (!sys->dedup_set) { pm_engine_set_dedup(sys->eng, 1); sys->dedup_set = true; }
+    picture_t *prev = sys->prev;
+    const mtime_t last = sys->held_last, dt = prev ? cur->date - last : 0;
+    const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+    const int dup = EngineCheck(sys, work, contiguous);
+    sys->held_last = cur->date;
+    *contig = contiguous;
+    if (dup && contiguous) {
+        sys->repeats++;
+        if (!sys->still && ++sys->held > PM_HOLD) {   /* a still: the last distinct frame goes out as it is, now */
+            sys->still = true;
+            sys->stills++;
+            picture_t *c = picture_Clone(prev);
+            if (c) { picture_CopyProperties(c, prev); c->p_next = NULL; *out = c; }
+        }
+        if (work != cur) picture_Release(work);
+        picture_Release(cur);
+        return true;
+    }
+    if (contiguous && sys->still) {   /* only the still's last interval moves: the base is its last repeat */
+        picture_t *c = picture_Clone(prev);
+        if (c) { picture_CopyProperties(c, prev); c->date = last; c->p_next = NULL; picture_Release(prev); sys->prev = c; }
+    }
+    *span = contiguous && !sys->still ? sys->held + 1 : 1;
+    sys->held = 0;
+    sys->still = false;
+    return false;
+}
+
 static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
@@ -908,6 +982,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
             /* this surface could not be read: show the real frame held so far, then start the pair over */
             picture_t *p = sys->prev;
             sys->prev = cur;
+            sys->held = 0; sys->still = false; sys->held_last = cur->date;   /* held frames start over too */
             if (sys->eng) pm_engine_forget(sys->eng);
             sys->restarts++;
             if (p) { p->p_next = NULL; sys->out++; }
@@ -920,10 +995,13 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
         WorkerIdle(sys, false);
+        int span, hc;                               /* held frames: a repeat waits (HeldStep) */
+        picture_t *still;
+        if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
         picture_t *prev = sys->prev;
         sys->prev = cur;
         const mtime_t dt = prev ? cur->date - prev->date : 0;
-        const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+        const bool contiguous = hc >= 0 ? hc != 0 : prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
         pm_job *j = JobNew();
         if (!j) {
             if (work != cur) picture_Release(work);
@@ -936,18 +1014,18 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (prev && contiguous) {
             prev->p_next = NULL;
             j->real = picture_Hold(prev);
-            for (int i = 0; i < sys->k - 1 && i < 16; i++) {
+            for (int i = 0; i < sys->k * span - 1 && i < PM_JOB_MAX; i++) {
                 picture_t *o = NewOut(f, sys);
                 if (!o) break;
                 picture_t *st = NULL;
                 if (sys->hw && !sys->zc_hw && !(st = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
                 picture_CopyProperties(o, prev);
-                o->date = prev->date + dt * (i + 1) / sys->k;
+                o->date = prev->date + dt * (i + 1) / (sys->k * span);
                 o->b_force = false;
                 o->p_next = NULL;
                 j->outs[i] = picture_Hold(o);       /* the worker writes into it */
                 j->stage[i] = st;
-                j->t[i] = (float)(i + 1) / (float)sys->k;
+                j->t[i] = (float)(i + 1) / (float)(sys->k * span);
                 j->n = i + 1;
                 if (async) {                        /* pushmpc_out waits for j->done >= i + 1 */
                     JobHold(j);
@@ -983,11 +1061,13 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     }
     WorkerIdle(sys, false);     /* synchronous mode below; the engine must not be shared */
 
-
+    int span, hc;                                 /* held frames: a repeat waits (HeldStep) */
+    picture_t *still;
+    if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
     picture_t *prev = sys->prev;
     sys->prev = cur;
     mtime_t dt = prev ? cur->date - prev->date : 0;
-    const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+    const bool contiguous = hc >= 0 ? hc != 0 : prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
     char err[160] = "";
     const int pushed = EnginePush(sys, work, contiguous, err, sizeof(err));
     if (work != cur) picture_Release(work);        /* the engine keeps its own copy */
@@ -1006,25 +1086,25 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     prev->p_next = NULL;
     sys->out++;
     if (pm_engine_have_pair(sys->eng)) {
-        for (int j = 1; j < sys->k; j++) {
+        for (int j = 1; j < sys->k * span; j++) {
             picture_t *o = NewOut(f, sys);
             if (!o) break;
             picture_t *dstpic = o;
             picture_CopyProperties(o, prev);
             if (sys->zc_hw) {           /* straight into the output surface */
-                if (EngineGenerateHw(sys, (float)j / (float)sys->k, o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; }
+                if (EngineGenerateHw(sys, (float)j / (float)(sys->k * span), o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; }
             } else {
                 if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
                 pm_yuv_out dst;
                 PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
-                pm_engine_generate(sys->eng, (float)j / (float)sys->k, &dst);
+                pm_engine_generate(sys->eng, (float)j / (float)(sys->k * span), &dst);
             }
             if (dstpic != o) {
                 const int up = pm_hw_upload(sys->hw, dstpic, o);
                 picture_Release(dstpic);
                 if (up != 0) { sys->hw_up_fail++; picture_Release(o); continue; }
             }
-            o->date = prev->date + dt * j / sys->k;
+            o->date = prev->date + dt * j / (sys->k * span);
             o->b_force = false;
             o->p_next = NULL;
             RegAdd(o, NULL, 0);
@@ -1042,6 +1122,7 @@ static void Flush(filter_t *f)
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
     WorkerIdle(sys, true);
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
+    sys->held = 0; sys->still = false;   /* held frames: the repeats waiting are dropped */
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
     if (sys->download) filter_chain_VideoFlush(sys->download);
@@ -1222,6 +1303,7 @@ static int Open(vlc_object_t *obj)
     sys->bits = bits;
     sys->bps = bits > 8 ? 2 : 1;
     sys->alloc = (int)OptInt(f, CFG "alloc", 0);
+    sys->dedup = OptInt(f, CFG "dedup", 1) != 0;   /* held frames (portable engines; set on the engine at the first frame) */
     const int smoother = (int)OptInt(f, CFG "smoother", 0);
     const int quality = (int)OptInt(f, CFG "quality", 1);
     const int threads = (int)OptInt(f, CFG "threads", 0);
@@ -1274,7 +1356,7 @@ static int Open(vlc_object_t *obj)
     }
 
     if (sys->hw) {
-        if (sys->k > 1) pm_hw_set_pool_size(sys->hw, 3 * sys->k + 4);   /* the job's pictures, those queued for display, a spare */
+        if (sys->k > 1) pm_hw_set_pool_size(sys->hw, (sys->dedup && sys->eng ? 2 + PM_HOLD : 3) * sys->k + 4);   /* the job's pictures (a held span: up to (PM_HOLD + 1) x k), those queued for display, a spare */
         else { pm_hw_release(sys->hw); sys->hw = NULL; }
     }
     sys->k_open = sys->k;
@@ -1319,6 +1401,8 @@ static void Close(vlc_object_t *obj)
              "(jobs %" PRIu64 ", cut short %" PRIu64 ")",
              sys->in, sys->out, sys->generated, sys->pool_out, sys->heap_out, sys->alloc_fail, sys->restarts,
              st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
+    if (sys->eng && sys->dedup_set)
+        msg_Info(f, "PushMPC: held frames: %" PRIu64 " repeats waited for the next drawing, %" PRIu64 " stills", sys->repeats, sys->stills);
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->pc) {
         msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64

@@ -162,7 +162,7 @@ void VS_CC PFree(void* inst, VSCore*, const VSAPI* a)
     {
         std::lock_guard<std::mutex> lk(d->lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
-        Log(std::format("portable: instance closed after {} frames ({} scene cuts)", d->produced, d->be.engine.Stat().cuts));
+        Log(std::format("portable: instance closed after {} frames ({} scene cuts, {} held repeats)", d->produced, d->be.engine.Stat().cuts, d->be.repeats));
     }
     a->freeNode(d->node);
     delete d;
@@ -259,10 +259,11 @@ const VSFrame* VS_CC GGetFrame(int n, int reason, void* inst, void** frameData, 
         d->lastLogged = d->produced;
         const auto& c = d->pipe.Count();
         const auto& st = d->be.stats;
+        const auto rs = d->be.repair.Stats();
         Log(std::format("portable (GPU): {} frames out: {} submitted ({} duplicates), {} generated, {} repeated, {} resets; {} pairs, {} cuts ({} by the guard), "
-                        "{} pairs with subtitles held; motion {:.1f} ms a pair",
+                        "{} pairs with subtitles held; motion {:.1f} ms a pair; held-drawing repair: {} frames, {} parts, {:.1f} ms a frame, spans gated {}, over budget {}",
             d->produced, c.submitted, st.duplicates, st.generated, c.repeats, c.discontinuities, st.pairs, st.cuts, st.guardCuts, st.heldPairs,
-            st.pairs ? st.meMs / double(st.pairs) : 0.0));
+            st.pairs ? st.meMs / double(st.pairs) : 0.0, rs.frames, rs.parts, rs.frames ? rs.ms / double(rs.frames) : 0.0, rs.gated, rs.overBudget));
     }
     return out;
 }
@@ -311,6 +312,10 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     const bool hybrid = s.motion == "hybrid" || s.motion == "auto" || s.motion.empty();
     c.blockMatcherOnly = s.motion != "nvof" && !hybrid;
     c.nvofHybrid = hybrid;
+    // the held-drawing repair (HeldFrames.h, with Dedup; PUSHMPC_REGION_REPAIR=0 turns it off): the slots also hold the
+    // frames a part's pair can start at (kLookahead + 1 behind) and end at (kLookahead ahead)
+    c.regionRepair = gpu::RegionRepairWanted(s.dedup != 0);
+    if (c.regionRepair) c.sourceSlots = 14;
     if (!d->be.engine.Configure(c, req, why)) { delete d; return false; }
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);
@@ -356,15 +361,17 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     d->vi.numFrames = int(OutputFrames(vi->numFrames, d->k));
     d->be.dedup = s.dedup != 0;
     d->be.subtitleHold = s.subtitleHold != 0;
-    d->be.cadence.Configure(d->k, d->be.dedup ? 2 : 0, vi->numFrames);
+    d->be.repair.on = d->be.dedup && d->be.engine.RepairAvailable();
+    d->be.cadence.Configure(d->k, d->be.dedup ? 3 : 0, vi->numFrames);   // lookahead 3: twos, threes and fours (TV anime holds slow motion for four)
     d->pipe.Init(d->k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
     d->pipe.SetLookahead(d->be.Lookahead());
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     d->api = a;
     BindGpu(d);
-    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); Dedup {} (lookahead {}), Subtitle Hold {}, cut guard on",
-        bits, d->vi.width, d->vi.height, outFps.num, outFps.den, d->k, d->be.dedup ? "on" : "off", d->be.Lookahead(), d->be.subtitleHold ? "on" : "off"));
+    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}); Dedup {} (lookahead {}), held-drawing repair {}, Subtitle Hold {}, cut guard on",
+        bits, d->vi.width, d->vi.height, outFps.num, outFps.den, d->k, d->be.dedup ? "on" : "off", d->be.Lookahead(),
+        d->be.repair.on ? "on" : c.regionRepair ? "off (this build has no repair shaders)" : "off", d->be.subtitleHold ? "on" : "off"));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, GGetFrame, GFree, fmUnordered, deps, 1, d, core);
     return true;
@@ -437,10 +444,14 @@ void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, V
     portable::Config c; c.width = w; c.height = h; c.bits = bits; c.threads = s.threads; c.quality = cpuQuality;
     if (!d->be.engine.Configure(c, err)) { a->freeNode(node); delete d; return fail(err); }
     d->pipe.Init(d->k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));
+    d->be.dedup = s.dedup != 0;          // held frames: lookahead 3 (twos, threes, fours), as the GPU route
+    d->be.srcFrames = vi->numFrames;
+    d->pipe.SetLookahead(d->be.Lookahead());
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     Bind(d);
-    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}), CPU engine", bits, w, h, outFps.num, outFps.den, d->k));
+    Log(std::format("portable: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{}), CPU engine; Dedup {} (lookahead {})", bits, w, h, outFps.num, outFps.den, d->k,
+        d->be.dedup ? "on" : "off", d->be.Lookahead()));
     VSFilterDependency deps[] = { { node, rpGeneral } };
     a->createVideoFilter(out, "Enhance", &d->vi, PGetFrame, PFree, fmUnordered, deps, 1, d, core);
 }

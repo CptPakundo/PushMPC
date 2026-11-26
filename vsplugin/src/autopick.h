@@ -40,7 +40,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     }
     if (key == L"vrr") { s.vrr = is(L"On") ? pm::VrrMode::On : is(L"Off") ? pm::VrrMode::Off : pm::VrrMode::Auto; return true; }
     if (key == L"upscaler") { s.upscaler = is(L"RTX") ? pm::Upscaler::Rtx : is(L"FSR") ? pm::Upscaler::Fsr : is(L"NIS") ? pm::Upscaler::Nis
-                                             : is(L"XeSS") ? pm::Upscaler::Xess : (is(L"IntelVSR") || is(L"IVSR")) ? pm::Upscaler::IntelVsr : pm::Upscaler::Auto; return true; }
+                                             : is(L"XeSS") ? pm::Upscaler::Xess : (is(L"IntelVSR") || is(L"IVSR")) ? pm::Upscaler::IntelVsr : is(L"Anime") ? pm::Upscaler::Anime : pm::Upscaler::Auto; return true; }
     if (key == L"target") { s.target = is(L"1440p") ? pm::UpscaleTarget::P1440 : is(L"4K") ? pm::UpscaleTarget::K4 : is(L"5K") ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::Screen; return true; }
     if (key == L"vsr_style") { s.vsrStyle = is(L"HighBitrate") ? pm::VsrStyle::HighBitrate : is(L"Streaming") ? pm::VsrStyle::Streaming : is(L"Standard") ? pm::VsrStyle::Standard : pm::VsrStyle::Auto; return true; }
     if (key == L"cleanup_strength") { s.strength = is(L"Subtle") ? pm::CleanStrength::Subtle : is(L"Balanced") ? pm::CleanStrength::Balanced : pm::CleanStrength::Strong; return true; }
@@ -131,6 +131,9 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     p.srQuality = c.srLevel >= 1 ? uint32_t(c.srLevel) : 2u;
     p.srFamily = c.sr && c.srMethod == pm::Upscaler::Rtx ? uint32_t(std::clamp(c.srFamily, 0, 2)) : PUSHCORE_SR_FAMILY_STANDARD;
     p.srMethod = pm::CoreSrMethod(c.srMethod);   // RTX / FSR / NIS / XeSS SR / Intel VSR (PUSHCORE_SR_METHOD_* = Upscaler - 1)
+    if (c.srMethod == pm::Upscaler::Anime) {   // PUSHCORE_SR_METHOD_PMML with the chosen model; none chosen: RTX VSR / FSR
+        if (c.animeModel >= 0) p.animeSrModel = uint32_t(c.animeModel); else p.srMethod = PUSHCORE_SR_METHOD_RTX;
+    }
     p.deband = c.deband ? 1 : 0;
     p.debandStrength = uint32_t(std::clamp(c.debandStrength, 0, 2));
     pm::UpscaleTarget t = pm::ResolvedTarget(s.target, d);
