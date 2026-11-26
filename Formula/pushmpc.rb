@@ -27,6 +27,11 @@ class Pushmpc < Formula
   # PushFlow (RIFE) through pmml, the plugin's ml backend: Homebrew's ONNX Runtime (built with CoreML on macOS)
   depends_on "onnxruntime"
   depends_on "vapoursynth"
+  # capture mode on macOS (pushmpc-capture: QuickTime Player, Infuse, browsers): its shaders, and Vulkan on Metal
+  on_macos do
+    depends_on "glslang" => :build
+    depends_on "molten-vk"
+  end
 
   # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release time
   # set url / sha256 as for the tarball above (CI replaces both with a freshly generated archive)
@@ -43,6 +48,18 @@ class Pushmpc < Formula
     resource "plex-mac" do
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
+  # Vulkan-Headers and volk for capture mode's GPU engine (the pins of vsplugin/engines/gpu/gpu-pins.json)
+  on_macos do
+    resource "vulkan-headers" do
+      url "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz"
+      sha256 "7937d8ec21785736436d9ff52564db7d55992070b5ac98324472cce6e425a7ba"
+    end
+    resource "volk" do
+      url "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz"
+      sha256 "ff6facfca90161325a1f817c08c7edb6f892bd3bf4745449b735d7e13585ec4c"
     end
   end
 
@@ -102,6 +119,48 @@ class Pushmpc < Formula
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
+
+    # capture mode (macOS): pushmpc-capture inside an app bundle, because macOS gives the Screen Recording permission to
+    # an app ("PushMPC Capture" in System Settings > Privacy & Security). Its own build folder with the GPU engine.
+    if OS.mac?
+      resource("vulkan-headers").stage(buildpath/"deps/vulkan-headers")
+      resource("volk").stage(buildpath/"deps/volk")
+      system "cmake", "-S", "vsplugin", "-B", "build-capture", "-DPUSHMPC_APPLE=ON", "-DPMML_ORT_INCLUDE=#{ort}",
+             "-DPMVS_VULKAN_HEADERS_DIR=#{buildpath}/deps/vulkan-headers", "-DPMVS_VOLK_DIR=#{buildpath}/deps/volk",
+             "-DPMVS_GLSLANG=#{Formula["glslang"].opt_bin}/glslangValidator", *std_cmake_args
+      system "cmake", "--build", "build-capture", "--target", "pushmpc_capture", "capture_test", "--parallel"
+      system "build-capture/capture_test"
+      app = libexec/"PushMPC Capture.app/Contents"
+      (app/"MacOS").install "build-capture/pushmpc-capture"
+      (app/"Info.plist").write <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>CFBundleIdentifier</key><string>org.pushmpc.capture</string>
+          <key>CFBundleName</key><string>PushMPC Capture</string>
+          <key>CFBundleDisplayName</key><string>PushMPC Capture</string>
+          <key>CFBundleExecutable</key><string>pushmpc-capture</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>#{version}</string>
+          <key>CFBundleVersion</key><string>#{version}</string>
+          <key>LSMinimumSystemVersion</key><string>13.3</string>
+          <key>LSUIElement</key><true/>
+        </dict>
+        </plist>
+      XML
+      system "codesign", "--force", "--sign", "-", libexec/"PushMPC Capture.app"
+      libexec.install "scripts/pushmpc-capture.sh"
+      # the app itself must start the capture (macOS asks the starting app for the permission, not the terminal): open
+      # starts it as the app; --list / --help / --selftest need no permission and run here
+      (bin/"pushmpc-capture").write <<~SH
+        #!/bin/sh
+        # pushmpc-capture [--player <app>] [options]: PushMPC capture mode (pushmpc-capture --help)
+        exe="#{opt_libexec}/PushMPC Capture.app/Contents/MacOS/pushmpc-capture"
+        for a in "$@"; do case $a in --list|--help|-h|--selftest|--no-present) exec "$exe" "$@" ;; esac; done
+        exec open -W -n -a "#{opt_libexec}/PushMPC Capture.app" --args "$@"
+      SH
+    end
 
     # VapourSynth autoloads plugins from <site-packages>/vapoursynth/plugins (Homebrew links it into its prefix)
     plugin = Dir["vsplugin/bin/pushmpc_vs.*"].reject { |f| f.end_with?(".pdb") }.first

@@ -16,6 +16,9 @@
 #                     PushFPS's release (pinned), pmml's graphs from this download, into .../pushmpc/pmml (default on;
 #                     --no-pmml declines it; needs python3)
 #   macOS             Homebrew's pushmpc-setup (mpv, IINA) and the VLC module
+#   capture/          capture mode (pushmpc-capture) for players with no other route here: Flathub Celluloid, Stremio,
+#                     Totem, Clapper, Dragon, Snap Plex (menu entries "<Player> with PushMPC"); browsers on request
+#                     (sh ~/.local/share/pushmpc/capture/pushmpc-capture.sh enable firefox)
 #
 #   sh setup.sh [install]  [--yes] [--dry-run] [--flatpak ask|yes|no] [--nvidia-vfx ask|yes|no] [--no-pmml]
 #   sh setup.sh uninstall  [--keep-flatpak-mpv]
@@ -40,7 +43,7 @@ while [ $# -gt 0 ]; do
         --dry-run) dry=1; pass="$pass --dry-run"; shift ;;
         --keep-flatpak-mpv) pass="$pass $1"; shift ;;
         --no-pmml) nopmml=1; shift ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
         *) echo "setup.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -145,8 +148,14 @@ make_plan() {
             else mpv="portable: the CPU engine (about 2x at 1080p; no Vulkan device found)"; fi
         fi
     fi
-    osname=Linux; [ "$os" = Darwin ] && osname=macOS
-    capture="not available on $osname: PushFPS's $osname build reads capture cards only, it has no window capture (capture mode is Windows only)"
+    if [ "$os" = Darwin ]; then
+        if have pushmpc-capture; then capture="available: pushmpc-capture for QuickTime Player, Infuse, browsers and other apps (pushmpc-capture --player <app>; macOS asks for the Screen Recording permission once)"
+        else capture="comes with Homebrew's pushmpc (brew install pushmpc), for QuickTime Player, Infuse, browsers and other apps"; fi
+    elif [ -x "$here/capture/pushmpc-capture" ] || [ -x "$pm/capture/pushmpc-capture" ]; then
+        capture="available for players with no other route (menu entries \"<Player> with PushMPC\"; X11, or your desktop's screen-capture portal on Wayland)"
+    else
+        capture="not in this download (capture/pushmpc-capture is missing)"
+    fi
 }
 show_plan() {
     say "Graphics card: ${gpu_name:-none found} [${gpu_vendor:-?}:${gpu_device:-?}] (family $fam; from ${gpu_src:-nothing})"
@@ -181,7 +190,7 @@ list_players() {
     none=''
     for p in stremio totem clapper dragon; do have "$p" && none="$none${none:+, }$p"; done
     if have flatpak; then for a in com.stremio.Stremio tv.plex.PlexDesktop; do flatpak info "$a" >/dev/null 2>&1 && none="$none${none:+, }$a"; done; fi
-    [ -n "$none" ] && say "No PushMPC route yet for: $none (play through mpv instead; capture mode is Windows only)"
+    [ -n "$none" ] && say "No plug-in route for: $none (capture mode covers them; or play through mpv)"
     return 0
 }
 
@@ -308,7 +317,7 @@ PY
 }
 # Plex desktop / Plex HTPC from Flathub: PushMPC's filter inside Plex's own player through LD_PRELOAD (plex/, the
 # installer self-tests it through Plex's libmpv in its sandbox). A target that does not pass is undone again. Snap Plex
-# cannot take LD_PRELOAD: it is left as it is (capture mode is Windows-only; the OBS workaround in the user guide).
+# cannot take LD_PRELOAD: it is left as it is (capture mode covers it: do_capture).
 do_plex() {
     pi=$here/plex/pushmpc-plex-linux.sh
     [ -f "$pi" ] && have flatpak || return 0
@@ -342,6 +351,38 @@ do_kodi_addon() {
     printf '%s\n' "$out" | sed 's/^/  /'
     if [ "$rc" = 0 ]; then record kodi-addon; else say "  the Kodi add-on's installer did not install it (exit $rc): Kodi keeps mpv as its external player"; fi
 }
+# capture mode (capture/: pushmpc-capture and its launcher) for the players with no other route here: a menu entry
+# "<Player> with PushMPC" each; browsers only on request (the launcher's enable). Undone by uninstall.
+capture_players() {   # the launcher's keys of the players found here that PushMPC cannot plug into
+    out=''
+    if have flatpak; then
+        flatpak info io.github.celluloid_player.Celluloid >/dev/null 2>&1 && out="$out celluloid"
+        flatpak info com.stremio.Stremio >/dev/null 2>&1 && out="$out stremio"
+    fi
+    have stremio && case $out in *stremio*) ;; *) out="$out stremio" ;; esac
+    for p in totem clapper dragon; do
+        if have "$p" || { have flatpak && flatpak list --app --columns=application 2>/dev/null | grep -qi "$p"; }; then out="$out $p"; fi
+    done
+    # Plex: the Flathub one has its own route (do_plex); the Snap one cannot take it
+    if have snap && snap list plex-desktop >/dev/null 2>&1 && ! recorded plex; then out="$out plex"; fi
+    printf '%s\n' "$out"
+}
+do_capture() {
+    [ "$os" = Darwin ] && return 0
+    [ -x "$here/capture/pushmpc-capture" ] && [ -f "$here/capture/pushmpc-capture.sh" ] || return 0
+    list=$(capture_players)
+    say "Capture mode:"
+    if [ "$dry" = 1 ]; then say "  would: install capture/ into $pm/capture${list:+ and add menu entries for:$list}"; return 0; fi
+    mkdir -p "$pm/capture"
+    cp "$here/capture/pushmpc-capture" "$pm/capture/pushmpc-capture" && chmod 755 "$pm/capture/pushmpc-capture"
+    cp "$here/capture/pushmpc-capture.sh" "$pm/capture/pushmpc-capture.sh"
+    record capture
+    if ! "$pm/capture/pushmpc-capture" --help >/dev/null 2>&1; then
+        say "  pushmpc-capture does not start on this system (missing libraries?): no menu entries added"; return 0
+    fi
+    for p in $list; do sh "$pm/capture/pushmpc-capture.sh" enable "$p" | sed 's/^/  /'; done
+    [ -n "$list" ] || say "  installed (no player without a route found; for a browser: sh $pm/capture/pushmpc-capture.sh enable firefox)"
+}
 do_mac() {
     if have pushmpc-setup; then say "mpv / IINA (Homebrew's pushmpc-setup):"; [ "$dry" = 1 ] && say "  would: pushmpc-setup install" || { pushmpc-setup install | sed 's/^/  /'; record brew-setup; }
     else say "mpv / IINA: install PushMPC with Homebrew first (brew install pushmpc), then run this again"; fi
@@ -372,6 +413,7 @@ case $action in
         do_vlc
         [ "$os" = Darwin ] && do_kodi_addon
         do_pmml
+        do_capture
         # the plan again: NVIDIA's files may have arrived in the meantime
         make_plan; write_plan
         if [ "$dry" = 0 ]; then mkdir -p "$pm"; [ "$here/setup.sh" = "$pm/setup.sh" ] || cp "$here/setup.sh" "$pm/setup.sh"; fi
@@ -387,6 +429,11 @@ case $action in
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi
+        if [ "$dry" = 0 ] && recorded capture; then
+            [ -f "$pm/capture/pushmpc-capture.sh" ] && sh "$pm/capture/pushmpc-capture.sh" stop >/dev/null 2>&1
+            [ -f "$pm/capture/pushmpc-capture.sh" ] && sh "$pm/capture/pushmpc-capture.sh" disable --all >/dev/null 2>&1
+            rm -rf "$pm/capture"; say "Capture mode removed"
+        fi
         if [ "$dry" = 0 ]; then rm -rf "$pm/kodi-installer" "$pm/plex-installer"; rm -f "$pm/pushmpc-vlc.sh" "$pm/pushmpc-selftest.mkv" "$sstate" "$plan" "$pm/setup.sh"; fi
         if [ -f "$pm/install.sh" ]; then
             # shellcheck disable=SC2086

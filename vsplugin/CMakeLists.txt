@@ -247,3 +247,6 @@ if(EXISTS "${VAPOURSYNTH_SDK}/VapourSynth4.h")
 else()
   message(WARNING "VapourSynth SDK headers not found in ${VAPOURSYNTH_SDK}: pushmpc_vs and vs_harness are not built (see third_party/README.md)")
 endif()
+
+# capture mode for Linux and macOS (pushmpc-capture), capture_test on every OS
+include("${CMAKE_SOURCE_DIR}/../capture/capture.cmake")

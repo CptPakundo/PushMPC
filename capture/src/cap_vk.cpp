@@ -2,7 +2,9 @@
 // PushMPC capture mode: the Vulkan device and the screen (cap_vk.h).
 #include "cap_vk.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #ifndef _WIN32
 #include <unistd.h>
