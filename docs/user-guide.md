@@ -217,7 +217,7 @@ Advanced:
 | Clean-up strength | Subtle, Balanced, Strong | the AI enhancement look |
 | Deband | Auto, Off, On | PushMPC's own deband pass on 8-bit video, before the upscaler |
 | Deband strength | Low, Medium, High | how wide and how strong the smoothing is |
-| Subtitle hold | Auto (off), Off, On | PushFPS's Subtitle Hold for subtitles burned into the picture: text that stands still near the bottom while the picture moves is kept out of frame generation and laid back over the generated frames, so it does not warp or ghost. Only for burned-in text; subtitles the player draws (soft subtitles) are added after PushMPC and never need it. Off under Auto: it costs about 0.5 ms per frame at 4K |
+| Subtitle hold | Auto (on text), Off, On | PushFPS's Subtitle Hold for subtitles burned into the picture: text that stands still near the bottom while the picture moves is kept out of frame generation and laid back over the generated frames, so it does not warp or ghost. Only for burned-in text; subtitles the player draws (soft subtitles) are added after PushMPC and never need it. Under Auto it watches for burned-in text and holds it only while text is found (about 0.5 ms per frame at 4K) |
 
 | On-screen status | Brief at start, Always, Off | shows what PushMPC is doing (for example "5x Medium · VSR 4 · 120 fps") in the top-left corner. Brief at start (default): for 3 seconds when playback starts or settings change; Always: kept on; Off: hidden. While it is visible it also appears in MPC-HC's Save Image screenshots. |
 | On battery | Light, Same as plugged in | Light (default) uses a lighter profile on laptop battery: frame generation up to 2x, VSR up to level 2, clean up and deband off, SDR to HDR boost Low. Same as plugged in keeps the full profile. |

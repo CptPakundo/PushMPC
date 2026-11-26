@@ -44,7 +44,7 @@ index 452c889a..f7630fe4 100644
    add_library(veyra_sources STATIC
      src/source/NativeCaptureSink.cpp
      src/source/MediaFileSource.cpp
-@@ -2407,3 +2419,9 @@ if(TARGET veyra_qml_ui)
+@@ -2410,3 +2422,9 @@ if(TARGET veyra_qml_ui)
    configure_file(apps/veyra/veyra.manifest ${CMAKE_CURRENT_BINARY_DIR}/veyra-qml.manifest COPYONLY)
    target_link_options(veyra_qml_ui PRIVATE "/MANIFESTINPUT:veyra-qml.manifest")
  endif()
