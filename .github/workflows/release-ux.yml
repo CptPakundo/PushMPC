@@ -259,6 +259,45 @@ jobs:
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC\PushMPC Capture (fallback).lnk") { $bad += 'the old capture shortcut name is still there' }
           if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
           exit 0
+      # the release's VLC component: pushcore through pm_pushcore.dll and PushMPC's Direct3D 11 output, as Setup installed
+      # them; the module runs once on the stub core (vlc-plugin.yml's bridge-win64, this run) in place of the real core
+      # on WARP, which must say "pushcore" in its log line; the real core goes back right after
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: bridge-win64, path: '${{ runner.temp }}/bridge', run-id: '${{ inputs.release_run || github.run_id }}' }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: clips, path: '${{ runner.temp }}/vlcclips', run-id: '${{ inputs.release_run || github.run_id }}' }
+      - name: VLC on pushcore (stub core, WARP) and PushMPC's Direct3D 11 output, from Setup's install
+        timeout-minutes: 10
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"; $bad = @()
+          $pd = "$env:LOCALAPPDATA\PushMPC\vlc"; $vlcrc = Get-Content "$env:APPDATA\vlc\vlcrc" -Raw -ErrorAction SilentlyContinue
+          foreach ($x in 'libpushmpc_plugin.dll', 'pm_pushcore.dll', 'libpushmpc_d3d11_plugin.dll') { if (-not (Test-Path "$pd\$x")) { $bad += "VLC: $x not installed" } }
+          if ("$vlcrc" -notmatch '(?m)^vout=pushmpc_d3d11\r?$') { $bad += 'VLC: vout=pushmpc_d3d11 not set in vlcrc' }
+          "VLC files: $((Get-ChildItem $pd -File -ErrorAction SilentlyContinue).Name -join ', '); vlcrc vout $([regex]::Match("$vlcrc", '(?m)^vout=.*$').Value)" | Tee-Object -Append $log
+          $stub = Get-ChildItem "$env:RUNNER_TEMP\bridge" -Recurse -Filter pushcore.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          $clip = Get-ChildItem "$env:RUNNER_TEMP\vlcclips" -Recurse -Filter clip720.mkv -ErrorAction SilentlyContinue | Select-Object -First 1
+          $core = "$env:LOCALAPPDATA\PushMPC\core\pushcore.dll"
+          if (-not $stub -or -not $clip) { $bad += 'no bridge-win64 / clips artifact for the pushcore run' }
+          elseif (-not (Test-Path $core)) { $bad += 'no installed core' }
+          else {
+            Copy-Item $core "$env:RUNNER_TEMP\pushcore.real.dll" -Force; Copy-Item $stub.FullName $core -Force
+            try {
+              $env:VLC_PLUGIN_PATH = [Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User')
+              $vl = "$env:RUNNER_TEMP\vlc-pushcore.log"
+              $p = Start-Process "$env:ProgramFiles\VideoLAN\VLC\vlc.exe" -PassThru -ArgumentList @('-I', 'dummy', '--no-audio', '--play-and-exit', '--avcodec-hw=none',
+                     '--pushmpc-engine=2', '--pushmpc-warp', '--pushmpc-smoother=2', '--file-logging', "--logfile=$vl", '--log-verbose=2', "`"$($clip.FullName)`"")
+              if (-not $p.WaitForExit(90000)) { $p.Kill() }
+              $lines = @(Select-String -Path $vl -Pattern 'PushMPC 0|using vout display module|PushMPC: close' -ErrorAction SilentlyContinue | ForEach-Object Line)
+              $lines | Select-Object -First 6 | Tee-Object -Append $log
+              if (-not ($lines -match 'PushMPC 0.*-> x2 \(pushcore: ')) { $bad += 'VLC: the installed module did not run on pushcore' }
+              if (-not ($lines -match 'using vout display module "pushmpc_d3d11"')) { $bad += 'VLC: PushMPC''s Direct3D 11 output did not open' }
+            } finally { Copy-Item "$env:RUNNER_TEMP\pushcore.real.dll" $core -Force }
+          }
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
+          'VLC: pushcore and the Direct3D 11 output from Setup''s install' | Tee-Object -Append $log
+          exit 0
       - name: The earlier settings survive the install and a repair (R-REG1)
         run: |
           $log = "$env:RUNNER_TEMP\ux.txt"

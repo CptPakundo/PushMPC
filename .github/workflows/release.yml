@@ -287,13 +287,12 @@ jobs:
           pkg=$($PY -c "import os, vapoursynth; print(os.path.dirname(vapoursynth.__file__))")
           mkdir -p vsplugin/third_party/vapoursynth
           cp "$pkg"/include/VapourSynth4.h "$pkg"/include/VSHelper4.h vsplugin/third_party/vapoursynth/
-      # the VLC module and its hardware-decoding self-test clip (vlc-plugin.yml, this run; x86_64 builds only)
+      # the VLC module (with its OpenGL output) and its hardware-decoding self-test clip (vlc-plugin.yml, this run;
+      # plugin-linux for x86_64, plugin-linux-aarch64 for aarch64)
       - uses: actions/download-artifact@v4
-        if: matrix.arch == 'x86_64'
         continue-on-error: true
-        with: { name: plugin-linux, path: vlc-linux }
+        with: { name: "${{ matrix.arch == 'aarch64' && 'plugin-linux-aarch64' || 'plugin-linux' }}", path: vlc-linux }
       - uses: actions/download-artifact@v4
-        if: matrix.arch == 'x86_64'
         continue-on-error: true
         with: { name: clips, path: vlc-clips }
       # the Kodi add-on with its installer (kodi-addon.yml, this run; x86_64 and aarch64 builds)

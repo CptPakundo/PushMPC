@@ -60,6 +60,10 @@ runs:
     - uses: actions/download-artifact@v4
       continue-on-error: true
       with: { name: plugin-win64, path: '${{ runner.temp }}/vlc-win64' }
+    # the VLC module's pushcore bridge (pm_pushcore.dll; MSVC, vlc-plugin.yml build-bridge)
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with: { name: bridge-win64, path: '${{ runner.temp }}/vlc-bridge' }
     - uses: actions/download-artifact@v4
       continue-on-error: true
       with: { name: mpvnative-windows, path: '${{ runner.temp }}/mpv-windows' }
@@ -83,7 +87,7 @@ runs:
         # RC2 F1: a core without NVIDIA optical flow is never packaged silently: stage refuses it (-RequireNvof) unless dry run
         $nvofReq = @{}; if ('${{ inputs.dry_run }}' -ne 'true') { $nvofReq = @{ RequireNvof = $true } }
         $vlc = @{}; $vd = "$env:RUNNER_TEMP\vlc-win64\libpushmpc_plugin.dll"
-        if (Test-Path $vd) { $vlc = @{ VlcPlugin = $vd } } else { Write-Host '::warning title=VLC module::no plugin-win64 artifact: the release has no VLC component' }
+        if (Test-Path $vd) { $vlc = @{ VlcPlugin = $vd; VlcBridge = "$env:RUNNER_TEMP\vlc-bridge\pm_pushcore.dll" } } else { Write-Host '::warning title=VLC module::no plugin-win64 artifact: the release has no VLC component' }
         # PushMPC's own mpv build for Windows (mpv-native.yml): a release asset; Setup offers it (off by default)
         $mpvb = @{}
         if (Test-Path "$env:RUNNER_TEMP\mpv-windows\*") {

@@ -98,6 +98,31 @@ paths_for() { # sets DIR, RC for a target
   esac
 }
 
+# PushMPC's OpenGL output (FSR 1 upscaling; Linux): copied next to the plugin when it ships with it, and VLC's output
+# when this VLC loads it (its plugin list names it) and the user has not picked another output
+gl_fork_copy() {
+  GLFORK=0
+  [ -f "$(dirname "$1")/libpushmpc_gl_plugin.so" ] || { rm -f "$DIR/libpushmpc_gl_plugin.so"; return 0; }
+  [ "$(cd "$(dirname "$1")" && pwd)" = "$(cd "$DIR" && pwd)" ] || cp -f "$(dirname "$1")/libpushmpc_gl_plugin.so" "$DIR/"
+  GLFORK=1
+}
+gl_fork_vout() {
+  [ "${GLFORK:-0}" = 1 ] || return 0
+  case "$1" in
+    native)  set -- env VLC_PLUGIN_PATH="$DIR" "${VLC_BIN:-vlc}" ;;
+    flatpak) set -- flatpak run "$APPID" ;;
+    *) return 0 ;;
+  esac
+  if ! timeout 60 "$@" --list 2>/dev/null | grep -q 'pushmpc_gl'; then
+    say "PushMPC's OpenGL output does not load in this VLC: VLC keeps its own output"; return 0
+  fi
+  v="$(vlcrc_get "$RC" core vout)"
+  case "$v" in
+    ''|any|gl|pushmpc_gl) vlcrc_set "$RC" core vout pushmpc_gl ;;
+    *) say "VLC's video output stays $v (your choice); vout=pushmpc_gl adds PushMPC's FSR upscaling" ;;
+  esac
+}
+
 install_one() {
   tgt="$1"; paths_for "$tgt"
   plug="$PLUGIN"
@@ -110,6 +135,7 @@ install_one() {
   [ "$OS" = Darwin ] && xattr -d com.apple.quarantine "$DIR/$(basename "$plug")" 2>/dev/null || true
   case "$tgt" in
     native)
+      gl_fork_copy "$plug"
       mkdir -p "$HOME/.config/environment.d"
       printf '# PushMPC for VLC\nVLC_PLUGIN_PATH=%s\n' "$DIR" > "$HOME/.config/environment.d/60-pushmpc-vlc.conf"
       for src in /usr/share/applications/vlc.desktop /usr/local/share/applications/vlc.desktop; do
@@ -121,6 +147,7 @@ install_one() {
         fi
       done ;;
     flatpak)
+      gl_fork_copy "$plug"
       flatpak override --user --env=VLC_PLUGIN_PATH="$DIR" "$APPID" ;;
     snap)
       # the Lua bootstrap: VLC's user Lua folder (per snap revision; snapd copies it on refresh) plus a seed copy
@@ -149,6 +176,7 @@ EOF
   [ -f "$RC" ] && [ ! -f "$RC.pushmpc-backup" ] && cp "$RC" "$RC.pushmpc-backup"
   vlcrc_set "$RC" core video-filter "$(filters_add "$(vlcrc_get "$RC" core video-filter)")"
   vlcrc_set "$RC" pushmpc pushmpc-smoother 0
+  gl_fork_vout "$tgt"
   [ "$tgt" != macos ] && vlcrc_set "$RC" avcodec avcodec-hw none
   if [ "$tgt" = snap ]; then
     intfs="$(vlcrc_get "$RC" core extraintf)"
@@ -171,7 +199,8 @@ st_run() {
   esac
   if [ "$interop" = 1 ]; then
     # X11 or XWayland, as the Qt interface uses (with WAYLAND_DISPLAY set, VLC would pick its Wayland window instead)
-    set -- env -u WAYLAND_DISPLAY "$@" --vout=gl --width=160 --height=90 --no-video-deco --no-embedded-video
+    stvout=gl; [ "$(vlcrc_get "$RC" core vout)" = pushmpc_gl ] && stvout=pushmpc_gl   # the output VLC will use
+    set -- env -u WAYLAND_DISPLAY "$@" --vout="$stvout" --width=160 --height=90 --no-video-deco --no-embedded-video
   else
     set -- "$@" --vout=dummy
   fi
@@ -260,8 +289,10 @@ uninstall_one() {
   case "$tgt" in
     native)
       rm -f "$HOME/.config/environment.d/60-pushmpc-vlc.conf"
-      grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc.desktop" ;;
-    flatpak) flatpak override --user --unset-env=VLC_PLUGIN_PATH "$APPID" 2>/dev/null || true ;;
+      grep -q '^X-PushMPC=1' "$HOME/.local/share/applications/vlc.desktop" 2>/dev/null && rm -f "$HOME/.local/share/applications/vlc.desktop"
+      rm -f "$DIR/libpushmpc_gl_plugin.so"; rmdir "$DIR" 2>/dev/null || true ;;
+    flatpak) flatpak override --user --unset-env=VLC_PLUGIN_PATH "$APPID" 2>/dev/null || true
+      rm -f "$DIR/libpushmpc_gl_plugin.so"; rmdir "$DIR" 2>/dev/null || true ;;
     snap)
       rm -f "$DIR/pushmpc_boot.lua" "$DIR/pushmpc.conf"; rmdir "$DIR" 2>/dev/null || true
       for d in "$HOME"/snap/vlc/*/.local/share/vlc/lua/intf; do rm -f "$d/pushmpc_boot.lua"; done
@@ -276,6 +307,10 @@ uninstall_one() {
     rest="$(filters_del "$(vlcrc_get "$RC" core video-filter)")"
     if [ -n "$rest" ]; then vlcrc_set "$RC" core video-filter "$rest"; else vlcrc_del "$RC" core video-filter; fi
     vlcrc_del "$RC" pushmpc pushmpc-smoother
+    if [ "$(vlcrc_get "$RC" core vout)" = pushmpc_gl ]; then
+      old="$(vlcrc_get "$RC.pushmpc-backup" core vout)"
+      if [ -n "$old" ] && [ "$old" != pushmpc_gl ]; then vlcrc_set "$RC" core vout "$old"; else vlcrc_del "$RC" core vout; fi
+    fi
     if [ "$tgt" != macos ]; then
       old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
       if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi

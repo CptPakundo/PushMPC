@@ -121,6 +121,10 @@ param(
     # VLC: skip it; stage: the VLC module build (libpushmpc_plugin.dll; staged as vlc\ with pushmpc-vlc.ps1)
     [switch]$NoVlc,
     [string]$VlcPlugin = '',
+    # stage: the VLC module's pushcore bridge (pm_pushcore.dll, vlc-plugin.yml's bridge-win64) and its Direct3D 11 output
+    # (libpushmpc_d3d11_plugin.dll; default: next to -VlcPlugin), staged beside the plugin
+    [string]$VlcBridge = '',
+    [string]$VlcD3d11 = '',
     # stage: the Kodi add-on package (kodi-addon.yml's artifact: kodi21\inputstream.pushmpc, kodi22\inputstream.pushmpc),
     # staged as kodi\ with kodiaddon\install\install.ps1; install: -NoKodi skips it
     [string]$KodiPackage = '',
@@ -1799,7 +1803,14 @@ function Stage-Vlc([string]$version) {
     New-Item -ItemType Directory -Force $v | Out-Null
     Copy-Item -LiteralPath $VlcPlugin (Join-Path $v 'libpushmpc_plugin.dll')
     Copy-Item -LiteralPath $inst $v
-    Invoke-CodeSign @((Join-Path $v 'libpushmpc_plugin.dll'))
+    $sign = @((Join-Path $v 'libpushmpc_plugin.dll'))
+    # pushcore for VLC (VFG, DLSS-G, PushFlow, FSR FG, zero copy) and PushMPC's Direct3D 11 output (driver SR, else NIS)
+    $d3 = if ($VlcD3d11) { $VlcD3d11 } else { Join-Path (Split-Path -Parent $VlcPlugin) 'libpushmpc_d3d11_plugin.dll' }
+    foreach ($x in @(@($VlcBridge, 'pm_pushcore.dll', 'VLC gets the portable engine only'), @($d3, 'libpushmpc_d3d11_plugin.dll', 'VLC keeps its own output'))) {
+        if ($x[0] -and (Test-Path -LiteralPath $x[0])) { Copy-Item -LiteralPath $x[0] (Join-Path $v $x[1]); $sign += (Join-Path $v $x[1]) }
+        else { Warn "vlc: no $($x[1]) staged ($($x[2]))" }
+    }
+    Invoke-CodeSign $sign
     Write-Manifest $v @{ component = 'vlc'; version = $version; 'vlc-api' = '3.0' }
 }# The optional vsplugin component (the mpv route): pushmpc_vs.dll, pushmpc.vpy, mpv-integration.ps1 and the
 # VapourSynth runtime pins. Skipped with a warning while pushmpc_vs.dll is not built (it needs the VapourSynth SDK headers).
@@ -2854,7 +2865,8 @@ function Find-VlcExe {
     foreach ($d in @((Join-Path "$env:ProgramFiles" 'VideoLAN\VLC'), $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'VideoLAN\VLC' }))) { if ($d -and (Test-Path -LiteralPath (Join-Path $d 'vlc.exe'))) { return (Join-Path $d 'vlc.exe') } }
     return ''
 }
-function Get-VlcInstaller { foreach ($d in @((Join-Path $InstallDir 'vlc'), (Join-Path $StageDir 'vlc'))) { $s = Join-Path $d 'pushmpc-vlc.ps1'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath (Join-Path $d 'libpushmpc_plugin.dll'))) { return $d } }; return '' }
+# the payload's module first (an update brings the new one), else the installed copy (a repair without a payload)
+function Get-VlcInstaller { foreach ($d in @((Join-Path $StageDir 'vlc'), (Join-Path $InstallDir 'vlc'))) { $s = Join-Path $d 'pushmpc-vlc.ps1'; if ((Test-Path -LiteralPath $s) -and (Test-Path -LiteralPath (Join-Path $d 'libpushmpc_plugin.dll'))) { return $d } }; return '' }
 function Install-VlcRoute($state) {
     if ($NoVlc) { Info 'VLC skipped (-NoVlc)'; return $true }
     $exe = Find-VlcExe

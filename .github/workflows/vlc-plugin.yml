@@ -6,7 +6,7 @@ name: vlc-plugin
 
 on:
   push:
-    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4', 'track/vlc-hwfmt', 'track/vlc-hwfix']
+    branches: ['track/vlc', 'track/vlc-2', 'track/vlc-3', 'track/vlc-4', 'track/vlc-hwfmt', 'track/vlc-hwfix', 'track/vlcship']
     paths: ['vlcplugin/**', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/src/backend.h', '.github/workflows/vlc-plugin.yml']
   # release.yml builds the release's VLC module through this workflow (artifacts plugin-win64, plugin-linux, clips)
   workflow_call:
@@ -65,9 +65,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: clips, path: clips, retention-days: 5 }
 
+  # x86_64 (artifact plugin-linux) and aarch64 (plugin-linux-aarch64, on the Arm runner: Raspberry Pi 4/5, Arm laptops
+  # and boards with a distro VLC 3)
   build-linux:
     if: ${{ inputs.part != 'extra' }}
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, art: plugin-linux }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, art: plugin-linux-aarch64 }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +101,7 @@ jobs:
           set -eux
           # Ubuntu's headers name the entry __3_0_0ft64 (Debian time64 build); the alias adds upstream's __3_0_0f
           if grep -q '3_0_0ft64' vlcinc/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
-          docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc "
+          docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_${{ matrix.arch }} bash -euxc "
             gcc --version | head -1
             cmake -S vlcplugin -B build -DCMAKE_BUILD_TYPE=Release -DVLC_PLUGIN_INCLUDE=/w/vlcinc -DPM_ALT_ENTRY=$alt -DPM_FETCH_GPU_DEPS=ON -DPM_GL_INCLUDE=/w/glinc -DPM_SPV_DIR=/w/vlcspv
             cmake --build build -j4
@@ -115,7 +123,7 @@ jobs:
           nm -C out/linux/libpushmpc_plugin.so | grep -q "pmdb::DmabufIO::Init" && echo "zero copy (VA-API dmabuf -> GPU engine) built in" \
             || { echo "::error::the zero-copy path is not in the build"; exit 1; }
       - uses: actions/upload-artifact@v4
-        with: { name: plugin-linux, path: out/linux, retention-days: 7 }
+        with: { name: '${{ matrix.art }}', path: out/linux, retention-days: 7 }
 
   build-windows:
     if: ${{ inputs.part != 'extra' }}
@@ -207,6 +215,11 @@ jobs:
           cat ~/.config/vlc/vlcrc; cat ~/.config/environment.d/60-pushmpc-vlc.conf
           grep -q '^video-filter=adjust:postproc:pushmpc_out$' ~/.config/vlc/vlcrc
           d=$(sed -n 's/^VLC_PLUGIN_PATH=//p' ~/.config/environment.d/60-pushmpc-vlc.conf)
+          # PushMPC's OpenGL output (FSR 1) installed and set as VLC's output; VLC opens it from the vlcrc alone
+          [ -f "$d/libpushmpc_gl_plugin.so" ] && grep -q '^vout=pushmpc_gl$' ~/.config/vlc/vlcrc || { echo "::error::the OpenGL output fork is not set up"; exit 1; }
+          VLC_PLUGIN_PATH="$d" timeout 60 xvfb-run -a -s "-screen 0 1280x720x24" vlc -I dummy --no-audio --play-and-exit --avcodec-hw=none             --file-logging --logfile=/tmp/vout-installed.log --log-verbose=2 art/clips/clip.mkv >/dev/null 2>&1 || true
+          grep -E 'using vout display module|PushMPC FSR' /tmp/vout-installed.log | sort | uniq -c
+          grep -q 'using vout display module "pushmpc_gl"' /tmp/vout-installed.log || { echo "::error::VLC did not open pushmpc_gl from the installer's vlcrc"; exit 1; }
           cp art/plugin-linux/libpushdump_plugin.so "$d/"
           export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv OUT=res/installed CASES=installed INSTALLED_MULT=0 \
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, after the installer (Xvfb 60 Hz: Auto x2)"
@@ -215,7 +228,8 @@ jobs:
           rm -f "$d/libpushdump_plugin.so"
           sh vlcplugin/install/pushmpc-vlc.sh uninstall --target native
           diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' ~/.config/vlc/vlcrc | grep .) && echo "vlcrc restored (active settings)"
-          [ ! -e ~/.config/environment.d/60-pushmpc-vlc.conf ] && [ ! -e "$d/libpushmpc_plugin.so" ] && echo "files removed"
+          [ ! -e ~/.config/environment.d/60-pushmpc-vlc.conf ] && [ ! -e "$d/libpushmpc_plugin.so" ] && [ ! -e "$d/libpushmpc_gl_plugin.so" ] && echo "files removed"
+          grep -q '^vout=' ~/.config/vlc/vlcrc && { echo "::error::vout left in vlcrc"; exit 1; }; echo "vout restored"
       - name: Flathub VLC with the same plugin (flatpak override --env=VLC_PLUGIN_PATH, the installer's route)
         timeout-minutes: 20
         run: |
@@ -225,6 +239,9 @@ jobs:
           flatpak install --user -y --noninteractive flathub org.videolan.VLC >/dev/null 2>&1 || { echo "::warning::flatpak install failed"; exit 0; }
           d=~/.var/app/org.videolan.VLC/data/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux/*.so "$d/"
           flatpak override --user --env=VLC_PLUGIN_PATH="$d" org.videolan.VLC
+          flatpak run --user org.videolan.VLC --version 2>/dev/null | head -1
+          flatpak run --user org.videolan.VLC --list 2>/dev/null | grep -E 'pushmpc' || echo "::warning::the Flathub VLC lists no PushMPC module"
+          flatpak run --user org.videolan.VLC --list 2>/dev/null | grep -q pushmpc_gl && echo "pushmpc_gl loads in the Flathub VLC (the installer sets it there)"
           cp art/clips/clip.mkv ~/.var/app/org.videolan.VLC/clip.mkv
           export VLC="" VLC_WRAP="flatpak run --user org.videolan.VLC" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv \
                  OUT=res/flatpak SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) LABEL="Linux, Flathub VLC" \
@@ -233,6 +250,48 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-linux, path: res, retention-days: 7 }
+
+  # aarch64: the same module in Ubuntu 24.04's arm64 VLC (frames multiplied, the portable GPU engine on lavapipe, the
+  # OpenGL output fork's pixel test, the installer round trip)
+  test-linux-arm:
+    needs: [clips, build-linux]
+    if: ${{ format('{0}', inputs.tests) != 'false' }}   # release.yml: build only
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: VLC (Ubuntu 24.04 arm64), Xvfb, Mesa
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base vlc-plugin-video-output xvfb libgl1-mesa-dri             mesa-vulkan-drivers ffmpeg python3 >/dev/null
+          file art/plugin-linux-aarch64/*.so
+      - name: Module cases (CPU engine) and the GPU engine on lavapipe
+        run: |
+          set -u
+          d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux-aarch64/*.so "$d/"
+          export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP720=art/clips/clip720.mkv OUT=res/arm                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) PUSHMPC_VK_ALLOW_CPU=1 GPU_TEST=1                  CASES="base x2 x4 x8 gpu_x4" LABEL="Linux aarch64, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
+          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh | tee res-arm.txt
+          for c in x2 x4 x8; do grep -q "^PASS {\"case\": \"$c\"" res-arm.txt || { echo "::error::$c failed on aarch64"; exit 1; }; done
+          grep -q "GPU engine (Vulkan)" res/arm/gpu_x4.log || { echo "::error::the GPU engine did not run on aarch64"; exit 1; }
+      - name: The OpenGL output fork (FSR 1) against VLC's gl on screen
+        run: PLUGDIR=~/.local/share/pushmpc/vlc OUT=res/gl-pixel-arm xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/display/tests/gl_pixel_test.sh
+      - name: Installer round trip (native target, as from the aarch64 tarball)
+        run: |
+          set -eu
+          rm -rf ~/.local/share/pushmpc/vlc
+          mkdir -p ~/.config/vlc && printf '[core]\nvideo-filter=adjust\n[avcodec]\n#avcodec-hw=any\n' > ~/.config/vlc/vlcrc
+          cp ~/.config/vlc/vlcrc /tmp/vlcrc.before
+          sh vlcplugin/install/pushmpc-vlc.sh install --no-hw-selftest --plugin art/plugin-linux-aarch64/libpushmpc_plugin.so --target native
+          cat ~/.config/vlc/vlcrc
+          grep -q '^vout=pushmpc_gl$' ~/.config/vlc/vlcrc && [ -f ~/.local/share/pushmpc/vlc/libpushmpc_gl_plugin.so ] || { echo "::error::the OpenGL output fork is not set up"; exit 1; }
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target native
+          diff <(grep -v -e '^#' -e '^\[' /tmp/vlcrc.before | grep .) <(grep -v -e '^#' -e '^\[' ~/.config/vlc/vlcrc | grep .) && echo "vlcrc restored (active settings)"
+          [ ! -e ~/.local/share/pushmpc/vlc ] && echo "files removed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: results-linux-arm, path: res, retention-days: 7 }
 
   # the manylinux2014 binary in other distros' own VLC (Debian 12: 3.0.21; Debian 13: t64 build;
   # Ubuntu 22.04: 3.0.16): it must load (entry name, glibc) and multiply frames
@@ -262,6 +321,9 @@ jobs:
             VLC=/usr/bin/vlc PLUGDIR=\$d CLIP=art/clips/clip.mkv OUT=res/distro SRC_FRAMES=\$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) \
             LABEL='${{ matrix.image }} distro VLC' CASES='base x2 x4 x8' bash vlcplugin/tests/run-module.sh" | tee distro.txt
           grep -q '^PASS {"case": "x4"' distro.txt || { echo "::error::x4 failed in ${{ matrix.image }}"; exit 1; }
+          # PushMPC's OpenGL output in this VLC: the installer sets vout=pushmpc_gl only where VLC lists it
+          su tester -c "VLC_PLUGIN_PATH=\$HOME/.local/share/pushmpc/vlc vlc --list 2>/dev/null" | grep pushmpc || true
+          su tester -c "VLC_PLUGIN_PATH=\$HOME/.local/share/pushmpc/vlc vlc --list 2>/dev/null" | grep -q pushmpc_gl             && echo "pushmpc_gl loads in ${{ matrix.image }}" || echo "::warning::pushmpc_gl does not load in ${{ matrix.image }}'s VLC (the installer keeps VLC's output there)"
   # The hardware-format path (VA-API / VDPAU pictures kept on the GPU) without a GPU: PushMPC's null drivers
   # (vlcplugin/tests/fakehw) decode by drawing a moving box, VLC's own VA-API (DRM) and VDPAU decoders use them, and
   # the CSV display measures where the box is in every shown frame. Quirk switches reproduce what real drivers differ in;
@@ -576,14 +638,21 @@ jobs:
           grep -h "PushMPC 0\|pushcore\|PushMPC: close\|output stage:" res/windows-pushcore/*.log | sort | uniq -c | head -20
           cp -r "$LOCALAPPDATA/PushMPC/logs" res/windows-pushcore/ 2>/dev/null || true; tail -40 res/windows-pushcore/logs/*.log 2>/dev/null || true
           rm -f "$d/pm_pushcore.dll"; rm -rf "$LOCALAPPDATA/PushMPC/core"
-      - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; a run with no arguments; uninstall)
+      - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; the vlc component with pushcore and the D3D11 output; runs with no arguments; uninstall)
         run: |
           set -eu
-          mkdir -p "$APPDATA/vlc" && printf '[core]\n#video-filter=\n[direct3d11]\n#d3d11-upscale-mode=linear\n' > "$APPDATA/vlc/vlcrc"
-          powershell -NoProfile -ExecutionPolicy Bypass -File vlcplugin/install/pushmpc-vlc.ps1 -Action Install -SkipVlcCheck \
-            -Plugin "$(cygpath -w art/plugin-win64/libpushmpc_plugin.dll)"
+          mkdir -p "$APPDATA/vlc" && printf '[core]\n#vout=\n#video-filter=\nvolume=200\n[direct3d11]\n#d3d11-upscale-mode=linear\n' > "$APPDATA/vlc/vlcrc"
+          before=$(sha256sum "$APPDATA/vlc/vlcrc" | cut -d' ' -f1)
+          # the files as Setup's vlc component stages them (scripts/pushmpc-install.ps1 Stage-Vlc)
+          comp="$RUNNER_TEMP/vlc-component"; mkdir -p "$comp"
+          cp art/plugin-win64/libpushmpc_plugin.dll art/plugin-win64/libpushmpc_d3d11_plugin.dll art/bridge-win64/pm_pushcore.dll vlcplugin/install/pushmpc-vlc.ps1 "$comp/"
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$comp/pushmpc-vlc.ps1")" -Action Install -SkipVlcCheck \
+            -Plugin "$(cygpath -w "$comp/libpushmpc_plugin.dll")"
           cat "$APPDATA/vlc/vlcrc"
           grep -q '^video-filter=postproc:pushmpc_out' "$APPDATA/vlc/vlcrc"; grep -q '^d3d11-upscale-mode=super' "$APPDATA/vlc/vlcrc"
+          grep -q '^vout=pushmpc_d3d11' "$APPDATA/vlc/vlcrc" || { echo "::error::vout=pushmpc_d3d11 not set"; exit 1; }
+          pd="$LOCALAPPDATA/PushMPC/vlc"
+          for x in libpushmpc_plugin.dll pm_pushcore.dll libpushmpc_d3d11_plugin.dll; do [ -f "$pd/$x" ] || { echo "::error::$x not installed"; exit 1; }; done
           pp=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH','User')" | tr -d '\r')
           echo "VLC_PLUGIN_PATH (user) = $pp"
           cp art/plugin-win64/libpushdump_plugin.dll "$(cygpath -u "$pp")/"
@@ -592,11 +661,29 @@ jobs:
                  LABEL="Windows, after the installer (Auto from the runner's display mode)" HWARGS=" "
           bash vlcplugin/tests/run-module.sh
           grep -h "PushMPC 0" res/installed/installed.log | head -1 | grep -q -- "-> x" || { echo "::error::the module did not run from the installer's settings"; exit 1; }
+          # pushcore through the installed pm_pushcore.dll: the stub core where Setup puts the core (WARP, 720p, x2)
+          mkdir -p "$LOCALAPPDATA/PushMPC/core" && cp art/bridge-win64/stub/pushcore.dll "$LOCALAPPDATA/PushMPC/core/"
+          CLIP=art/clips/clip720.mkv OUT=res/installed-pushcore HWARGS=--avcodec-hw=none INSTALLED_MULT=2 INSTALLED_ARGS="--pushmpc-engine=2 --pushmpc-warp --pushmpc-smoother=2" \
+            SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip720.txt | tr -d '\r') LABEL="Windows, after the installer: pushcore (stub core, WARP)" \
+            bash vlcplugin/tests/run-module.sh
+          grep -h "PushMPC 0" res/installed-pushcore/installed.log | head -2
+          grep -h "PushMPC 0" res/installed-pushcore/installed.log | head -1 | grep -q -- "-> x2 (pushcore: " \
+            || { echo "::error::the installed module did not run on pushcore"; grep -h "PushMPC" res/installed-pushcore/installed.log | head; exit 1; }
+          rm -rf "$LOCALAPPDATA/PushMPC/core"
           rm -f "$(cygpath -u "$pp")/libpushdump_plugin.dll"
-          powershell -NoProfile -ExecutionPolicy Bypass -File vlcplugin/install/pushmpc-vlc.ps1 -Action Uninstall
+          # VLC with no arguments opens PushMPC's Direct3D 11 output from the vlcrc (WARP: software decoding)
+          timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --avcodec-hw=none --file-logging --logfile=res/installed/vout.log --log-verbose=2 \
+            art/clips/clip720.mkv > /dev/null 2>&1 || true
+          taskkill //F //T //IM vlc.exe > /dev/null 2>&1 || true
+          grep -hE "using vout display module|PushMPC NIS|generated=" res/installed/vout.log | sort | uniq -c || true
+          grep -q 'using vout display module "pushmpc_d3d11"' res/installed/vout.log || { echo "::error::VLC did not open pushmpc_d3d11 from the installer's vlcrc"; exit 1; }
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$comp/pushmpc-vlc.ps1")" -Action Uninstall
           cat "$APPDATA/vlc/vlcrc"
           left=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH','User')" | tr -d '\r')
           [ -z "$left" ] && echo "VLC_PLUGIN_PATH removed"; ! grep -q '^video-filter=' "$APPDATA/vlc/vlcrc" && echo "video-filter restored"
+          [ "$(sha256sum "$APPDATA/vlc/vlcrc" | cut -d' ' -f1)" = "$before" ] || { echo "::error::vlcrc not restored byte for byte"; exit 1; }
+          echo "vlcrc restored byte for byte"
+          [ ! -e "$pd" ] || { echo "::error::files left: $(ls "$pd")"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: results-windows, path: res, retention-days: 7 }
