@@ -327,7 +327,7 @@ bool GpuCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode
     }
     if (!cal.ok) { why = "the GPU engine failed its trial run on " + d->be.engine.Device().name; delete d; return false; }
     const PortableK pk = DecidePortableK(s.smoother, srcFps, displayHz, h, cal.meMs, cal.genMs, true,
-                                         PArgI(in, a, "display_fs", -1) == 1 ? 0.0 : -1.0, LinuxVrrActive());   // pushmpc-display.lua; vrr_probe.h
+                                         PArgI(in, a, "display_fs", -1) == 1 ? 0.0 : -1.0, VrrActive(int(PArgI(in, a, "display_fs", -1))));   // pushmpc-display.lua; vrr_probe.h
     Log(std::format("portable: GPU engine on {}; motion from {}; {}x{} {}-bit, {}/{} fps, {} frames; display {:.3f} Hz{}; quality {}; settings from {}{}",
         d->be.engine.Device().Describe(), !d->be.engine.OpticalFlowActive() ? "PushFPS's block matcher on the GPU" : c.nvofHybrid ? "PushFPS's block matcher with NVIDIA optical flow as a candidate (hybrid)" : "NVIDIA optical flow (VK_NV_optical_flow)",
         w, h, bits, vi->fpsNum, vi->fpsDen, vi->numFrames, displayHz, displayHz > 1 ? " (mpv's display_fps)" : " (unknown)",
@@ -410,7 +410,7 @@ void PortableCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, V
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     const double displayHz = PArgF(in, a, "display_fps", 0);
     const portable::Calibration cal = CalibrateCached(w, h, bits, s.threads, cpuQuality);
-    const PortableK pk = DecidePortableK(s.smoother, srcFps, displayHz, h, cal.meMs, cal.genMs, false, -1, LinuxVrrActive());
+    const PortableK pk = DecidePortableK(s.smoother, srcFps, displayHz, h, cal.meMs, cal.genMs, false, -1, VrrActive(int(PArgI(in, a, "display_fs", -1))));
     Log(std::format("portable: {}x{} {}-bit, {}/{} fps, {} frames; display {:.3f} Hz{}; {} threads, quality {}; settings from {}{}", w, h, bits, vi->fpsNum, vi->fpsDen,
         vi->numFrames, displayHz, displayHz > 1 ? " (mpv's display_fps)" : " (unknown)", cal.threads, cpuQuality ? "balanced" : "fast",
 #ifdef _WIN32

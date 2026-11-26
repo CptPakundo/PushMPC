@@ -11,6 +11,7 @@
 #include <kodi/AddonBase.h>
 #include <kodi/Filesystem.h>
 #include <kodi/General.h>
+#include <kodi/gui/General.h>   // GetVideoResolution: windowed or full screen
 #include <kodi/addon-instance/Inputstream.h>
 #include <kodi/addon-instance/VideoCodec.h>
 
@@ -48,15 +49,6 @@ extern "C" {
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>   // KodiFullscreen: Kodi's window against its monitor
-#endif
 #include <deque>
 #include <map>
 #include <memory>
@@ -556,24 +548,10 @@ private:
 
     // the upscaler and output size: Auto = NIS to the screen on the GPU engine, except on Windows, where Kodi's DXVA
     // renderer can run RTX / Intel Video Super Resolution on the add-on's pictures (better than any shader upscaler)
-    // Kodi full screen (Auto: no window composition per shown frame): Android and Linux without a desktop (GBM, e.g.
-    // LibreELEC) always are; Windows: Kodi's main window (class "Kodi") covers its monitor; X11 / Wayland desktops: not
-    // known to an add-on (-1: a window assumed)
-    static int KodiFullscreen()
-    {
-#if defined(__ANDROID__)
-        return 1;
-#elif defined(_WIN32)
-        HWND w = FindWindowW(L"Kodi", nullptr);
-        RECT r{}; MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-        if (!w || !GetWindowRect(w, &r) || !GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi)) return -1;
-        return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom ? 1 : 0;
-#elif defined(__linux__)
-        return !std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY") ? 1 : -1;
-#else
-        return -1;
-#endif
-    }
+    // Kodi full screen (Auto: no window composition per shown frame), on every platform: Kodi's own rendering resolution
+    // (kodi::gui::GetVideoResolution) is RES_WINDOW (15) in windowed mode, RES_DESKTOP (16) and up full screen
+    static constexpr int kKodiResWindow = 15;
+    static int KodiFullscreen() { const int r = kodi::gui::GetVideoResolution(); return r < 0 ? -1 : r != kKodiResWindow ? 1 : 0; }
     void DecideUpscale(const AVStream* st, pmk::EngineCfg& c, std::string& why) const
     {
         const AVCodecParameters* p = st->codecpar;

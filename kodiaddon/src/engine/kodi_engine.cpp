@@ -200,7 +200,7 @@ public:
             m_stats.genMs = cal.genMs;
         }
         const pmvs::PortableK k = pmvs::DecidePortableK(smoother, srcFps, displayHz, m_cfg.height, cal.meMs, cal.genMs, true,
-                                                        m_cfg.fullscreen == 1 ? 0.0 : -1.0, pmvs::LinuxVrrActive());
+                                                        m_cfg.fullscreen == 1 ? 0.0 : -1.0, pmvs::VrrActive(m_cfg.fullscreen));
         why = k.why;
         return k.k;
     }

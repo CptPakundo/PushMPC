@@ -355,6 +355,10 @@ struct filter_sys_t {
     int64_t pc_miss_pts, pc_miss_want;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
+    int k_open;            /* k at open: the output rate and the pools were made for it (a later decision stays at or below) */
+    int fs;                /* the vout's live "fullscreen" (our parent object), re-read every 30 input pictures */
+    int fs_smoother;       /* what Auto decided with, for the re-decision on a fullscreen toggle */
+    double fs_fps, fs_hz;
     int alloc;
     int bits, bps;
     picture_t *prev;
@@ -806,6 +810,20 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (!cur) return NULL;
     }
     if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
+    if (sys->in % 30 == 0) {   /* a fullscreen toggle mid-file: var_Inherit reads the vout's live variable */
+        const int fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
+        if (fs != sys->fs) {
+            sys->fs = fs;
+            if (sys->eng) {
+                char why[256] = "";
+                pm_engine_set_fullscreen(sys->eng, fs);
+                int k = pm_engine_decide(sys->eng, sys->fs_smoother, sys->fs_fps, sys->fs_hz, why, sizeof(why));
+                k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
+                msg_Info(f, "PushMPC: %s: x%d (%s)", fs ? "full screen" : "windowed", k, why);
+                sys->k = k;
+            } else msg_Info(f, "PushMPC: %s; pushcore keeps x%d until the next file", fs ? "full screen" : "windowed", sys->k);
+        }
+    }
 
     /* what the engine reads: cur itself, or for hardware formats a CPU copy of its surface */
     picture_t *work = cur;
@@ -1147,7 +1165,7 @@ static int Open(vlc_object_t *obj)
             sys->k = 1;
         } else {
             char why[256] = "";
-            pm_engine_set_fullscreen(sys->eng, var_InheritBool(f, "fullscreen") ? 1 : 0);   /* VLC's start state (the filter sees no vout events) */
+            pm_engine_set_fullscreen(sys->eng, var_InheritBool(f, "fullscreen") ? 1 : 0);   /* the vout's state now; Filter() follows toggles */
             sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
@@ -1161,6 +1179,9 @@ static int Open(vlc_object_t *obj)
         if (sys->k > 1) pm_hw_set_pool_size(sys->hw, 3 * sys->k + 4);   /* the job's pictures, those queued for display, a spare */
         else { pm_hw_release(sys->hw); sys->hw = NULL; }
     }
+    sys->k_open = sys->k;
+    sys->fs = var_InheritBool(f, "fullscreen") ? 1 : 0;
+    sys->fs_smoother = smoother; sys->fs_fps = fps; sys->fs_hz = hz;
     if (f->fmt_out.video.i_frame_rate)
         f->fmt_out.video.i_frame_rate *= (unsigned)sys->k;
     sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;

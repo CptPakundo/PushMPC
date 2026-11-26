@@ -313,7 +313,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     src.hdr = IsHdrTransfer(transfer); src.tenBit = bits > 8;
     Display disp; disp.refreshHz = NArgF(in, a, "display_fps", 0); disp.hdr = NArgI(in, a, "display_hdr", 0) != 0;
     disp.fullscreen = NArgI(in, a, "display_fs", 0) != 0;   // mpv's fullscreen property (pushmpc-display.lua)
-    disp.vrr = LinuxVrrActive() == 1;                       // DRM VRR_ENABLED (vrr_probe.h); unknown: a fixed refresh
+    disp.vrr = VrrActive(disp.fullscreen ? 1 : 0) == 1;     // DRM VRR_ENABLED / NV-CONTROL (vrr_probe.h); unknown: a fixed refresh
     // pushmpc-display.lua: the display's size (UpscaleTarget Screen) and its peak (RTX Video HDR) from mpv
     const int dispH = int(NArgI(in, a, "display_h", 0));
     if (s.targetScreen && dispH > 0) s.targetH = TargetForDisplay(dispH);

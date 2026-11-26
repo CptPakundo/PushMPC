@@ -55,7 +55,7 @@ public:
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
         const GpuCalibration cal = s.enable && s.smoother == 0 ? CalibrateGpu(m_eng) : GpuCalibration{};
         const PortableK pk = s.enable ? DecidePortableK(s.smoother, srcFps, displayHz, m_h, cal.ok ? cal.meMs : 1.0, cal.ok ? cal.genMs : 1.0, true,
-                                                       Opt(o, "display_fs") == "1" ? 0.0 : -1.0, LinuxVrrActive())   // pushmpc-native.lua; vrr_probe.h
+                                                       Opt(o, "display_fs") == "1" ? 0.0 : -1.0, VrrActive(Opt(o, "display_fs").empty() ? -1 : std::atoi(Opt(o, "display_fs").c_str())))   // pushmpc-native.lua; vrr_probe.h
                                       : PortableK{ 1, 0, 0, "PushMPC is off (Enable = 0)" };
         m_k = std::clamp(pk.k, 1, 8);
         const size_t bps = m_bits > 8 ? 2 : 1;

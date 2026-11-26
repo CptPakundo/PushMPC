@@ -7,14 +7,33 @@
 // X11 RandR has no standard VRR output property. Everything else (Windows, macOS, no DRM access): unknown.
 //   LinuxVrrActive(): 1 = VRR is on for an active output, 0 = the outputs have the property and none has it on,
 //   -1 = unknown (Auto then assumes a fixed refresh, as before).
+// VrrActive(fullscreen) adds the other sources (fullscreen: 1 / 0 / -1 unknown; VRR on a fullscreen-only scope engages
+// for a full-screen player only):
+//   - NVIDIA's proprietary X11 driver: NV-CONTROL through libXNVCtrl.so.0 (run-time load): NV_CTRL_DISPLAY_VRR_ENABLED (431,
+//     any display target) and NV_CTRL_VRR_ALLOWED (408, the X screen), plus full screen (G-SYNC needs flipping);
+//   - Windows (MSVC builds): the DirectShow filter's own NVAPI / AMD ADL probe (PushMpcAuto.h ProbeVrr: the driver
+//     profile's G-SYNC scope, the monitor's capability, AMD FreeSync switched on) on the primary display (these routes do
+//     not know the player's window); the MinGW-built VLC plugin keeps -1;
+//   - macOS: NSScreen.mainScreen minimumRefreshInterval < maximumRefreshInterval (macOS 12+: ProMotion or external
+//     Adaptive-Sync), through the Objective-C runtime (dlsym, no link dependency).
+// Not covered (-1, fixed refresh assumed): X11 RandR has no standard "VRR active" property (DRM covers amdgpu /
+// modesetting); Intel's IGCL has no confirmed "VRR active" query.
 #pragma once
 #include <cstdint>
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <dlfcn.h>
+#elif defined(_WIN32) && defined(_MSC_VER)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "../../filter/src/PushMpcAuto.h"   // ProbeVrr (NVAPI / ADL, header-only, run-time loads)
 #endif
 
 namespace pmvs {
@@ -73,8 +92,81 @@ inline int LinuxVrrActive()
     dlclose(lib);
     return result;
 }
+// NVIDIA's proprietary X11 driver (NV-CONTROL; libXNVCtrl's API as in nvidia-settings' NVCtrlLib.h)
+inline int NvCtrlVrrActive(int fullscreen)
+{
+    if (!std::getenv("DISPLAY")) return -1;
+    void* x11 = dlopen("libX11.so.6", RTLD_LAZY | RTLD_LOCAL);
+    void* nvc = x11 ? dlopen("libXNVCtrl.so.0", RTLD_LAZY | RTLD_LOCAL) : nullptr;
+    int result = -1;
+    if (x11 && nvc) {
+        using Dpy = void;
+        auto openD = reinterpret_cast<Dpy* (*)(const char*)>(dlsym(x11, "XOpenDisplay"));
+        auto closeD = reinterpret_cast<int (*)(Dpy*)>(dlsym(x11, "XCloseDisplay"));
+        auto defScreen = reinterpret_cast<int (*)(Dpy*)>(dlsym(x11, "XDefaultScreen"));
+        auto queryExt = reinterpret_cast<int (*)(Dpy*, int*, int*)>(dlsym(nvc, "XNVCTRLQueryExtension"));
+        auto queryAttr = reinterpret_cast<int (*)(Dpy*, int, unsigned, unsigned, int*)>(dlsym(nvc, "XNVCTRLQueryAttribute"));
+        auto queryTarget = reinterpret_cast<int (*)(Dpy*, int, int, unsigned, unsigned, int*)>(dlsym(nvc, "XNVCTRLQueryTargetAttribute"));
+        Dpy* d = openD && closeD ? openD(nullptr) : nullptr;
+        int ev = 0, er = 0;
+        if (d && defScreen && queryExt && queryAttr && queryTarget && queryExt(d, &ev, &er)) {
+            constexpr unsigned kVrrAllowed = 408, kDisplayVrrEnabled = 431;
+            constexpr int kTargetDisplay = 8;   // NV_CTRL_TARGET_TYPE_DISPLAY
+            int allowed = 0, any = -1;
+            const bool haveAllowed = queryAttr(d, defScreen(d), 0, kVrrAllowed, &allowed) != 0;
+            for (int id = 0; id < 32 && any != 1; ++id) {
+                int v = 0;
+                if (queryTarget(d, kTargetDisplay, id, 0, kDisplayVrrEnabled, &v)) any = v ? 1 : (any < 0 ? 0 : any);
+            }
+            if (any >= 0) result = any == 1 && (!haveAllowed || allowed) && fullscreen == 1 ? 1 : 0;
+        }
+        if (d) closeD(d);
+    }
+    if (nvc) dlclose(nvc);
+    if (x11) dlclose(x11);
+    return result;
+}
+inline int VrrActive(int fullscreen)
+{
+    const int drm = LinuxVrrActive(), nv = NvCtrlVrrActive(fullscreen);
+    return drm == 1 || nv == 1 ? 1 : drm == 0 || nv == 0 ? 0 : -1;
+}
 #else
 inline int LinuxVrrActive() { return -1; }
+#if defined(__APPLE__)
+// NSScreen.mainScreen's minimum / maximum refresh interval through the Objective-C runtime (AppKit is loaded in the players)
+inline int VrrActive(int)
+{
+    using Id = void*;
+    using Sel = void*;
+    auto getClass = reinterpret_cast<Id (*)(const char*)>(dlsym(RTLD_DEFAULT, "objc_getClass"));
+    auto selName = reinterpret_cast<Sel (*)(const char*)>(dlsym(RTLD_DEFAULT, "sel_registerName"));
+    void* send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    if (!getClass || !selName || !send) return -1;
+    const Id cls = getClass("NSScreen");
+    if (!cls) return -1;
+    const Id screen = reinterpret_cast<Id (*)(Id, Sel)>(send)(cls, selName("mainScreen"));
+    const Sel minSel = selName("minimumRefreshInterval"), maxSel = selName("maximumRefreshInterval"), resp = selName("respondsToSelector:");
+    auto responds = reinterpret_cast<signed char (*)(Id, Sel, Sel)>(send);
+    if (!screen || !responds(screen, resp, minSel) || !responds(screen, resp, maxSel)) return -1;
+    const double mn = reinterpret_cast<double (*)(Id, Sel)>(send)(screen, minSel), mx = reinterpret_cast<double (*)(Id, Sel)>(send)(screen, maxSel);
+    if (!(mn > 0) || !(mx > 0)) return -1;
+    return mn < mx * 0.99 ? 1 : 0;
+}
+#elif defined(_WIN32) && defined(_MSC_VER)
+// the primary display (a portable route does not know the player's window): NVAPI's profile scope / capability, AMD FreeSync
+inline int VrrActive(int fullscreen)
+{
+    MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi)) return -1;
+    const pm::VrrProbe p = pm::ProbeVrr(nullptr, mi, true);
+    if (!p.known) return -1;
+    const bool covers = p.scope == 2 || (p.scope == 1 && fullscreen == 1);
+    return (p.possible || p.caps) && covers ? 1 : 0;
+}
+#else
+inline int VrrActive(int) { return -1; }
+#endif
 #endif
 
 } // namespace pmvs

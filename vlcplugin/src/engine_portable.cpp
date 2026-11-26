@@ -243,7 +243,7 @@ extern "C" int pm_engine_decide(pm_engine *e, int smoother, double src_fps, doub
         }
         me = it->second.first; gen = it->second.second;
     }
-    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, e->height, me, gen, e->gpu, e->fullscreen == 1 ? 0.0 : -1.0, pmvs::LinuxVrrActive());
+    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, e->height, me, gen, e->gpu, e->fullscreen == 1 ? 0.0 : -1.0, pmvs::VrrActive(e->fullscreen));
     SetErr(why, whysize, std::string(ok ? "" : "GPU trial run failed; ") + k.why);
     return k.k;
 }
@@ -262,7 +262,7 @@ extern "C" int pm_engine_decide_k(int smoother, double src_fps, double display_h
             it = cache.emplace(key, pmvs::portable::Calibrate(width, height, bits, threads, quality)).first;
         cal = it->second;
     }
-    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs, false, -1, pmvs::LinuxVrrActive());
+    const pmvs::PortableK k = pmvs::DecidePortableK(smoother, src_fps, display_hz, height, cal.meMs, cal.genMs, false, -1, pmvs::VrrActive(-1));
     SetErr(why, whysize, k.why);
     return k.k;
 }
