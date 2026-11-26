@@ -278,6 +278,26 @@ int main()
         Gpu vplArc = Family(kIntel, L"Intel(R) Arc(TM) A770 Graphics"); vplArc.available |= 1u << kCapVplFi; vplArc.reason[kCapVplFi] = L"gate passed ms=9.50 psnr=31.0 maxM=4";
         ReadMeasured(vplArc);
         check(vplArc.vplGate && vplArc.vplMs1080 > 9.4 && vplArc.vplMs1080 < 9.6 && FgOrder(vplArc).front() == FgMethod::Vpl, L"VPL's gate and cost read from the capability; VPL first once gated");
+        // XeSS on the GPUs without a better method (GTX, RX 5000, other): a measured candidate; never on RTX / RX 6000+
+        {
+            Gpu gtx = Family(kGtx, L"NVIDIA GeForce GTX 1080"); gtx.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            gtx.reason[kCapXefg] = L"ms4k=6.00"; gtx.reason[kCapXessSr] = L"ms4k=3.00"; ReadMeasured(gtx);
+            Costs slowPfGtx = cold; slowPfGtx.pfBenched = true; for (int t = 0; t < 3; ++t) { slowPfGtx.pfFirst[t] = 60 + 20 * t; slowPfGtx.pfNext[t] = 50 + 20 * t; }
+            ApplyMeasuredCard(slowPfGtx);
+            const Choice g1 = Decide({}, film, d60, slowPfGtx, gtx);
+            check(gtx.xefgMs4k > 5.9 && g1.fgMethod == FgMethod::XeFg && g1.multiplier >= 2, L"GTX 1080, PushFlow measured too slow: XeSS FG (measured) before NVOF / FSR FG", g1.smootherNote + L" | " + g1.stoppedAt);
+            const Display d4k{ L"4K 60", 60.0, 3840, 2160, false };
+            const Choice g2 = Decide({}, film, d4k, slowPfGtx, gtx);
+            check(g2.sr && g2.srMethod == Upscaler::Xess, L"GTX 1080, 4K screen: XeSS SR (DP4a, measured) over FSR", g2.sharperNote);
+            Gpu rx5 = Family(kRdna1, L"AMD Radeon RX 5700 XT"); rx5.available |= 1u << kCapXefg;
+            check(FgOrder(rx5)[1] == FgMethod::XeFg && FgOrder(Family(kOtherGpu, L"x"))[1] == FgMethod::XeFg, L"RX 5000 and other GPUs: XeSS FG right after PushFlow");
+            Gpu rtx = Family(kRtx40, L"NVIDIA GeForce RTX 4070"); rtx.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            const Choice r1 = Decide({}, film, d4k, cold, rtx);
+            Gpu rx7 = Family(kRdna3, L"AMD Radeon RX 7800 XT"); rx7.available |= (1u << kCapXefg) | (1u << kCapXessSr);
+            const Choice r2 = Decide({}, film, d4k, cold, rx7);
+            check(r1.fgMethod != FgMethod::XeFg && r1.srMethod != Upscaler::Xess && r2.fgMethod != FgMethod::XeFg && r2.srMethod != Upscaler::Xess,
+                  L"RTX 40 / RX 7000 with XeSS installed: their own better methods stay", r1.smootherNote + L" | " + r2.smootherNote);
+        }
         wprintf(L"  intel video: %d failed\n", fails);
     }
     Display real = QueryDisplay(PlayerWindow());

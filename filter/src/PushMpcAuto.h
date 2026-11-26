@@ -74,6 +74,7 @@ struct Gpu {
     double vplMs1080 = -1;             // Intel VPL FI, ms per source frame at 1080p 2x
     bool vplGate = false;              // VPL passed the default-on gate (discrete Arc, quality and speed margins)
     double xessMs4k = -1;              // Intel XeSS SR, ms per frame for a 4K output (its self-test)
+    double xefgMs4k = -1;              // Intel XeSS FG, ms per generated frame for a 4K output (its self-test)
     bool has(uint32_t cap) const { return (available >> cap) & 1u; }
     bool hw(uint32_t cap) const { return (hardware >> cap) & 1u; }
     bool nvidia() const { return family >= kRtx50 && family <= kGtx; }
@@ -142,7 +143,7 @@ struct Costs {
     double ivsrScale = 1.0; bool learnedIvsr = false;   // learned measured/prior ratio (pushcore's srMs while it runs)
     // Intel XeSS frame generation (headless swap chain): the graph's flow + refine per source frame (as DLSS-G's), XeFG's
     // interpolation per generated frame at 4K (estimate for Arc with the card factor; learned through fgScale)
-    double xefgFlow = 1.8, xefgPerFrame = 4.0;
+    double xefgFlow = 1.8, xefgPerFrame = 4.0; bool xefgMeasured = false;   // measured: per frame absolute (the self-test)
     // Intel XeSS SR (temporal, XMX on Arc): ms for a 4K output (estimate; the self-test's measurement), learned ratio
     double xessSr = 3.5; bool xessMeasured = false;
     double xessScale = 1.0; bool learnedXess = false;
@@ -281,7 +282,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     case FgMethod::AmdFrc: return c.frc * pix * c.card;
     case FgMethod::Nvof: return c.nvofEngine * (c.nvofTuring ? 2.0 : 1.0) + c.fsrFg * c.nvofInterpShare * pix * c.card;
     case FgMethod::Vpl: return c.vplFi * (pix / 0.25) * (m - 1) * (c.vplMeasured ? 1.0 : c.card);
-    case FgMethod::XeFg: return (c.xefgFlow + c.xefgPerFrame * (m - 1)) * pix * c.card;
+    case FgMethod::XeFg: return (c.xefgFlow * c.card + c.xefgPerFrame * (m - 1) * (c.xefgMeasured ? 1.0 : c.card)) * pix;
     default: return 0;
     }
 }
@@ -319,15 +320,18 @@ inline std::vector<FgMethod> FgOrder(const Gpu& g)
     // RTX 5090, T5b), and its flow costs no shader time; Decide takes it only where it fits (else FSR FG)
     case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
     case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
-    case kGtx: return { FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    // GTX 10 / 16, RX 5000 and older Radeons, other GPUs: XeSS FG (any Shader Model 6.4 GPU since XeSS 2.1, after its self-test
+    // passed on this card) right after PushFlow, before the 2x-only methods; Decide takes the first that reaches 2x in budget
+    case kGtx: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Nvof, FgMethod::Fsr };
     // Intel: VPL AI frame interpolation first where it passed its default-on gate (discrete Arc: quality margin over a blend like
     // PushFlow Fast's on the probe material, <= 20.8 ms per source frame), then XeSS FG (Intel's own frame generation on the
     // XMX engines, the graph's flow as its motion; after its self-test), PushFlow, VPL as a candidate; Decide takes the first
     // that reaches 2x within the budget (costs: the self-tests' measurements, then live)
     case kIntel: return g.vplGate ? std::vector<FgMethod>{ FgMethod::Vpl, FgMethod::XeFg, FgMethod::PushFlow, FgMethod::Fsr }
                                   : std::vector<FgMethod>{ FgMethod::XeFg, FgMethod::PushFlow, FgMethod::Vpl, FgMethod::Fsr };
-    case kOtherGpu: return { FgMethod::PushFlow, FgMethod::Fsr };
-    default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon
+    case kOtherGpu: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Fsr };
+    case kRdna1: case kAmdOther: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Fsr, FgMethod::AmdFrc };
+    default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon RX 6000+
     }
 }
 // pushcore's numbering of the upscaler (PUSHCORE_SR_METHOD_* = Upscaler - 1; Auto never reaches pushcore: RTX)
@@ -344,6 +348,7 @@ inline void ReadMeasured(Gpu& g)
     };
     g.ivsrMs4k = num(kCapIvsr, L"ms4k=");
     g.xessMs4k = num(kCapXessSr, L"ms4k=");
+    g.xefgMs4k = num(kCapXefg, L"ms4k=");
     g.vplMs1080 = num(kCapVplFi, L"ms=");
     g.vplGate = g.has(kCapVplFi) && g.reason[kCapVplFi].rfind(L"gate passed", 0) == 0;
 }
@@ -385,11 +390,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     if (g.ivsrMs4k > 0 && !c.ivsrMeasured) { c.ivsrSr = g.ivsrMs4k; c.ivsrMeasured = true; }
     if (g.vplMs1080 > 0 && !c.vplMeasured) { c.vplFi = g.vplMs1080; c.vplMeasured = true; }
     if (g.xessMs4k > 0 && !c.xessMeasured) { c.xessSr = g.xessMs4k; c.xessMeasured = true; }
+    if (g.xefgMs4k > 0 && !c.xefgMeasured) { c.xefgPerFrame = g.xefgMs4k; c.xefgMeasured = true; }
     // Intel's upscalers (Auto, no RTX VSR): XeSS SR (temporal AI on an Intel GPU's XMX engines) and Intel VSR (the driver's
     // video processor) are candidates against FSR / NIS by cost, in that order of expected quality: Auto takes the first
     // that costs no frame generation step against the shader upscaler and fits the budget (the same costs, measured where
-    // known). XeSS SR on another GPU (DP4a) is a manual choice only.
-    const bool xessAuto = g.has(kCapXessSr) && g.family == kIntel;
+    // known). XeSS SR also on the GPUs without a better upscaler (GTX, RX 5000 and older, other GPUs: DP4a), after its self-test.
+    const bool xessFamily = g.family == kIntel || g.family == kGtx || g.family == kRdna1 || g.family == kAmdOther || g.family == kOtherGpu;
+    const bool xessAuto = g.has(kCapXessSr) && xessFamily;
     if (s.upscaler == Upscaler::Auto && !g.has(kCapRtxVsr) && (xessAuto || g.has(kCapIvsr))) {
         Settings sf = s; sf.upscaler = g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
         Choice cf = Decide(sf, src, d, c, g);
