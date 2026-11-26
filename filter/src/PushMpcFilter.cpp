@@ -721,7 +721,7 @@ static pm::Gpu QueryGpu(const Runtime& rt, uint64_t luid, std::wstring* log)
         static_assert(std::size(names) >= pm::kCapCount, "a name per capability");
         for (uint32_t i = 0; i < pm::kCapCount; ++i) if (g.has(i)) s += std::wstring(L" ") + names[i];
         s += L"; not:";
-        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", nm(i), g.reason[i]);
+        for (uint32_t i = 0; i < pm::kCapCount; ++i) if (!g.has(i)) s += std::format(L" {} ({});", names[i], g.reason[i]);
         if (c.nrRuntime[0]) s += L" NR runtime " + Widen(c.nrRuntime);
         *log = s;
     }
