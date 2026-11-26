@@ -1,20 +1,19 @@
 #!/bin/bash
 # build-plex-libs.sh <src dir> <out dir>  (MSYS2 UCRT64): the Windows pieces for players whose libmpv loads FFmpeg 5.x
-# as separate DLLs (Plex): pushmpc-avfilter-8.<min>.<micro>.dll for every pinned FFmpeg 5.0 / 5.1 tag (libavfilter with
-# only vf_pushmpc, D3D11 frames enabled; it imports avutil-57.dll by name) and the proxy avfilter-8.dll whose exports
-# forward to the renamed original. Tags of one libavfilter version give one file.
+# as separate DLLs (Plex): pushmpc-avfilter-8.<min>.<micro>.dll for every pinned FFmpeg 5.0 / 5.1 tag and every pinned
+# master snapshot (pins.json snapshotCommits: Plex ships libavfilter 8.29.100, a master version between 5.0 and 5.1),
+# each a libavfilter with only vf_pushmpc and D3D11 frames that imports avutil-57.dll by name; and the proxy
+# avfilter-8.dll whose exports forward to the renamed original. Builds of one libavfilter version give one file.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 src=$1; out=$2
 mkdir -p "$out"
 cc=gcc; command -v ccache >/dev/null && cc="ccache gcc"
-tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.load(open(sys.argv[1]))['hookTags'] if re.fullmatch(r'n5\.[01](\.\d+)?', t['tag'])))" "$here/../pins.json")
+pins="$here/../pins.json"
 ref=''
-for tag in $tags; do
-    commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$here/../pins.json" "$tag")
-    if [ ! -d "$src/.git" ]; then git clone -q --depth 1 -b "$tag" https://git.ffmpeg.org/ffmpeg.git "$src"
-    else git -C "$src" fetch -q --depth 1 origin tag "$tag" && git -C "$src" checkout -q -f "$tag"; fi
-    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
+
+build_tree() {   # build_tree <label>: the tree in $src is checked out
+    local label=$1
     sh "$here/../ffmpeg/add-to-ffmpeg.sh" "$src" >/dev/null
     (
         cd "$src"
@@ -24,17 +23,33 @@ for tag in $tags; do
             --disable-postproc --disable-asm --enable-d3d11va --extra-ldflags=-static-libgcc > configure.out 2>&1 \
             || { tail -30 configure.out; exit 1; }
         grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h
-        grep -q 'CONFIG_D3D11VA 1' config.h || echo "::warning::$tag: D3D11VA is not enabled (no D3D11 frames for pushmpc)"
+        grep -q 'CONFIG_D3D11VA 1' config.h || echo "::warning::$label: D3D11VA is not enabled (no D3D11 frames for pushmpc)"
         make -j"$(nproc)" >/dev/null
     )
-    vdir="$src/libavfilter/"
+    local vdir="$src/libavfilter/" maj min mic name
     maj=$( (cat "${vdir}version_major.h" "${vdir}version.h" 2>/dev/null || true) | sed -n 's/^#define LIBAVFILTER_VERSION_MAJOR *\([0-9]*\).*/\1/p' | head -1)
-    min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' "$src"/libavfilter/version.h | head -1)
-    mic=$(sed -n 's/^#define LIBAVFILTER_VERSION_MICRO *\([0-9]*\).*/\1/p' "$src"/libavfilter/version.h | head -1)
+    min=$(sed -n 's/^#define LIBAVFILTER_VERSION_MINOR *\([0-9]*\).*/\1/p' "${vdir}version.h" | head -1)
+    mic=$(sed -n 's/^#define LIBAVFILTER_VERSION_MICRO *\([0-9]*\).*/\1/p' "${vdir}version.h" | head -1)
     name="pushmpc-avfilter-$maj.$min.$mic.dll"
     cp "$src/libavfilter/avfilter-$maj.dll" "$out/$name"
-    echo "$tag -> $name (imports: $(objdump -p "$out/$name" | sed -n 's/^\s*DLL Name: //p' | tr '\n' ' '))"
+    echo "$label -> $name (imports: $(objdump -p "$out/$name" | sed -n 's/^\s*DLL Name: //p' | grep -v '^api-ms-win-crt' | tr '\n' ' '))"
     ref="$out/$name"
+}
+
+# release tags (git.ffmpeg.org)
+tags=$(python3 -c "import json,sys,re; print(' '.join(t['tag'] for t in json.load(open(sys.argv[1]))['hookTags'] if re.fullmatch(r'n5\.[01](\.\d+)?', t['tag'])))" "$pins")
+for tag in $tags; do
+    commit=$(python3 -c "import json,sys; print([t['commit'] for t in json.load(open(sys.argv[1]))['hookTags'] if t['tag']==sys.argv[2]][0])" "$pins" "$tag")
+    if [ ! -d "$src/.git" ]; then git clone -q --depth 1 -b "$tag" https://git.ffmpeg.org/ffmpeg.git "$src"
+    else git -C "$src" fetch -q --depth 1 origin tag "$tag" && git -C "$src" checkout -q -f "$tag"; fi
+    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::$tag: commit mismatch"; exit 1; }
+    build_tree "$tag"
+done
+# master snapshots (by commit, from the GitHub mirror, which serves single commits)
+for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in json.load(open(sys.argv[1])).get('snapshotCommits', [])))" "$pins"); do
+    git -C "$src" fetch -q --depth 1 https://github.com/FFmpeg/FFmpeg.git "$commit" && git -C "$src" checkout -q -f "$commit"
+    [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "::error::snapshot $commit: checkout failed"; exit 1; }
+    build_tree "master@${commit:0:12}"
 done
 # the proxy: libavfilter 8's exports, forwarded
 sh "$here/make-def.sh" "$ref" "$out/avfilter_proxy.def"
