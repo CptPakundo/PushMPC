@@ -247,7 +247,9 @@ jobs:
           $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\avfilter-8-plex.dll" }
           foreach ($d in $dirs) { Copy-Item "$d\avfilter-8-plex.dll" "$d\avfilter-8.dll" -Force }
           $t = Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue
-          if ($t) { $a = $t.Actions[0]; "logon check: $($a.Execute) $($a.Arguments)" | Tee-Object -Append $log; $p = Start-Process $a.Execute -ArgumentList $a.Arguments -Wait -PassThru; "logon check exit $($p.ExitCode)" | Tee-Object -Append $log }
+          # as at a sign-in: Windows PowerShell 5.1 without pwsh's module path (5.1 would load 7's modules and fail)
+          if ($t) { $a = $t.Actions[0]; "logon check: $($a.Execute) $($a.Arguments)" | Tee-Object -Append $log; $keep = $env:PSModulePath; Remove-Item Env:PSModulePath; $p = Start-Process $a.Execute -ArgumentList $a.Arguments -Wait -PassThru; $env:PSModulePath = $keep; "logon check exit $($p.ExitCode)" | Tee-Object -Append $log }
+          Get-Content "$env:LOCALAPPDATA\PushMPC\logs\plex-check.log" -ErrorAction SilentlyContinue | Select-Object -Last 25 | Tee-Object -Append $log
           foreach ($d in $dirs) {
             $k = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
             $want = (Get-Content "$env:ProgramData\PushMPC\plex-native\$k\proxy.sha256" -Raw -ErrorAction SilentlyContinue).Trim()
@@ -441,7 +443,8 @@ jobs:
           mkdir -p $HOME/.config/pushmpc
           export PUSHMPC_VS_LOG_DIR=/tmp/vslog-ml
           ffmpeg -v error -i /tmp/clip.mp4 -frames:v 9 -vf scale=640:360 -pix_fmt yuv420p -y /tmp/ml.y4m
-          MESA_SHADER_CACHE_DISABLE=true PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PMML_RUNTIME=$p PMML_TEST_CLIP=/tmp/ml.y4m PMML_TEST_W=640 PMML_TEST_H=360 PMML_TEST_BACKEND=ncnn:ncnn:vulkan:0 PUSHMPC_TEST_K=2 \
+          # VSScript writes its Python registration (vapoursynth.toml) on first use: kept out of the checked HOME
+          XDG_CONFIG_HOME=/tmp/vs-cfg PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PMML_RUNTIME=$p PMML_TEST_CLIP=/tmp/ml.y4m PMML_TEST_W=640 PMML_TEST_H=360 PMML_TEST_BACKEND=ncnn:ncnn:vulkan:0 PUSHMPC_TEST_K=2 \
             timeout 300 vspipe vsplugin/tests/ci/ml_clip.vpy /dev/null > /tmp/vspipe-ml.txt 2>&1 || true
           tail -5 /tmp/vspipe-ml.txt
           echo "--- ml backend:"; grep -h 'backend: \|ml: \|pmml' /tmp/vslog-ml/*.log 2>/dev/null | head -12 || true

@@ -3290,9 +3290,13 @@ switch ($Action) {
 
     'plexcheck' {
         # the logon task after a Plex update (Register-PlexNativeTask)
+        # its own log (it runs hidden at sign-in): logs\plex-check.log, kept short
+        $pl = Join-Path $InstallDir 'logs\plex-check.log'
+        try { if ((Test-Path -LiteralPath $pl) -and (Get-Item -LiteralPath $pl).Length -gt 256KB) { Remove-Item -LiteralPath $pl -Force }; Start-Transcript -LiteralPath $pl -Append | Out-Null } catch { }
         $state = Read-State
         try { Invoke-PlexCheck $state } catch { Warn "Plex check: $($_.Exception.Message)" }
         Write-State $state
+        try { Stop-Transcript | Out-Null } catch { }
     }
     'autoplan' {
         # Auto's engine choice for this PC (nothing is changed); with -Machine "@@plan|key=value" lines
