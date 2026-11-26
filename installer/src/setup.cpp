@@ -307,7 +307,14 @@ void UiLine(const std::wstring& text) {
 int RunScript(const std::wstring& script, const std::wstring& args, int lo, int hi, std::map<std::string, std::string>* plan, std::wstring& failText) {
     std::wstring cmd = QuoteArg(PowerShellExe()) + L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + QuoteArg(script) + L" " + args +
                        L" -Machine -InstallDir " + QuoteArg(g_installDir);
-    if (opt.sandbox) cmd += L" -NoMpcHc -NoRegister -NoTask -KeepSettings";
+    // S-ISO: a sandbox install changes nothing outside its own folder: no player entries (MPC-HC, MPC-BE, PotPlayer), no
+    // mpv / VLC / Kodi routes, no Plex installer, no capture-mode Start menu entry, no registration, task or settings
+    if (opt.sandbox) {
+        cmd += L" -NoMpcHc -NoMpcBe -NoPotPlayer -NoMpv -NoVlc -NoKodi -Capture Off -NoRegister -NoTask -KeepSettings";
+        cmd += L" -CaptureStartMenu " + QuoteArg(JoinPath(g_installDir, L"start-menu"));   // never the real Start menu
+        if (args.find(L"-PlexSwap") == std::wstring::npos) cmd += L" -PlexSwap No";
+        if (args.find(L"-Pmml ") == std::wstring::npos) cmd += L" -Pmml No";   // its runtime would set the real MlRuntime value
+    }
     if (opt.dryRun) cmd += L" -DryRun";
     if (opt.noExisting) cmd += L" -NoExisting";
     if (!opt.packageCache.empty()) cmd += L" -PackageCache " + QuoteArg(opt.packageCache);
@@ -444,7 +451,7 @@ Result DoInstall(Op op, bool autoUpdates) {
     fail.clear();
     if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
     rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package") + (g_pmml ? L"" : L" -Pmml No") +
-                   (g_plexSwap ? L"" : L" -PlexSwap No") + (g_mpvBuild ? L" -MpvBuild Yes" : L""), scriptLo, 98, nullptr, fail);
+                   (g_plexSwap ? L"" : L" -PlexSwap No") + (g_mpvBuild && !opt.sandbox ? L" -MpvBuild Yes" : L""), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -645,7 +652,7 @@ void Layout();
 void ShowPage(Page p) {
     g_page = p;
     for (int id = IDC_BODY; id <= IDC_DETAILS; id++) Show(id, false);
-    Show(IDC_LINK, false);
+    for (int id = IDC_LINK; id <= IDC_MPVBUILD; id++) Show(id, false);   // F-SU1: the welcome page's offers too
     Show(IDC_BACK, p == PLicence || (p == PWelcome && false));
     EnableWindow(C(IDC_BACK), TRUE);
     EnableWindow(C(IDC_NEXT), TRUE);
@@ -739,6 +746,20 @@ void ShowPage(Page p) {
     Layout();
 }
 
+// the height a static's text takes when wrapped at width w (its own font)
+int TextHeight(int id, int w) {
+    HWND h = C(id);
+    std::wstring t(size_t(GetWindowTextLengthW(h)) + 1, L' ');
+    t.resize(size_t(GetWindowTextW(h, t.data(), int(t.size()))));
+    HDC dc = GetDC(h);
+    HGDIOBJ old = SelectObject(dc, reinterpret_cast<HGDIOBJ>(SendMessageW(h, WM_GETFONT, 0, 0)));
+    RECT r = { 0, 0, w, 0 };
+    DrawTextW(dc, t.c_str(), int(t.size()), &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+    SelectObject(dc, old);
+    ReleaseDC(h, dc);
+    return r.bottom + S(4);
+}
+
 void Layout() {
     RECT rc; GetClientRect(g_wnd, &rc);
     int W = rc.right, H = rc.bottom, m = S(24), top = S(84);
@@ -751,15 +772,23 @@ void Layout() {
     MoveWindow(C(IDC_LINK), m, by + S(6), S(220), S(20), TRUE);
     int ch = by - S(16) - top;
     switch (g_page) {
-    case PWelcome:
-        MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(178), TRUE);
-        MoveWindow(C(IDC_WARN), m, top + S(180), W - 2 * m, S(70), TRUE);
-        MoveWindow(C(IDC_AUTOUPD), m, top + S(254), W - 2 * m, S(22), TRUE);
-        MoveWindow(C(IDC_FSRSDK), m, top + S(276), W - 2 * m, S(22), TRUE);
-        MoveWindow(C(IDC_PMML), m, top + S(298), W - 2 * m, S(22), TRUE);
-        MoveWindow(C(IDC_PLEX), m, top + S(320), W - 2 * m, S(22), TRUE);
-        MoveWindow(C(IDC_MPVBUILD), m, top + S(342), W - 2 * m, S(22), TRUE);
+    case PWelcome: {
+        // F-SU2: laid out from the text's own height at this DPI (the body was a fixed S(178) and lost its last line at
+        // 200 %), then the shown offers one under another (hidden ones leave no gap); the player list gets the rest
+        const int w = W - 2 * m;
+        std::vector<int> boxes;
+        for (int id : { IDC_AUTOUPD, IDC_FSRSDK, IDC_PMML, IDC_PLEX, IDC_MPVBUILD }) if (GetWindowLongW(C(id), GWL_STYLE) & WS_VISIBLE) boxes.push_back(id);
+        const int boxesH = int(boxes.size()) * S(22);
+        int y = top;
+        const int bodyH = TextHeight(IDC_BODY, w);
+        MoveWindow(C(IDC_BODY), m, y, w, bodyH, TRUE);
+        y += bodyH + S(8);
+        const int warnH = std::max(S(20), std::min(TextHeight(IDC_WARN, w), ch - (y - top) - boxesH - S(8)));
+        MoveWindow(C(IDC_WARN), m, y, w, warnH, TRUE);
+        y += warnH + S(8);
+        for (int id : boxes) { MoveWindow(C(id), m, y, w, S(22), TRUE); y += S(22); }
         break;
+    }
     case PMaintenance:
         MoveWindow(C(IDC_BODY), m, top, W - 2 * m, S(22), TRUE);
         MoveWindow(C(IDC_R_REPAIR), m + S(8), top + S(34), W - 2 * m, S(22), TRUE);
