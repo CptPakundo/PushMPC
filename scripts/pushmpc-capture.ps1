@@ -50,7 +50,7 @@ $ProgressPreference = 'SilentlyContinue'
 $PushFps = @{
     Version = '4.5.4'
     Asset   = 'PushFPS-4.5.4-win64.zip'
-    Url     = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.3/PushFPS-4.5.4-win64.zip'
+    Url     = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip'
     Sha256  = '4BF3FE869EB8A2CA579DD7ADE849C0C6CB2BF959F1A434FD53849F8E715F0AF5'
     Size    = 138574882
 }
