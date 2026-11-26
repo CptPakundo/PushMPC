@@ -111,8 +111,8 @@ class Pushmpc < Formula
     libexec.install "integrations/mpv/mpv-integration.sh"
     if OS.mac?
       (pkgshare/"plex-mac").mkpath
-      resource("plex-mac").fetch
-      cp resource("plex-mac").cached_download, pkgshare/"plex-mac/pushmpc-plex-mac.tar.gz"
+      # packed again as it came (an archive in the keg is neither relocated nor re-signed by Homebrew)
+      resource("plex-mac").stage { system "tar", "-czf", pkgshare/"plex-mac/pushmpc-plex-mac.tar.gz", "." }
     end
     resource("pmml-graphs").stage { (pkgshare/"pmml/graphs").install Dir["*.onnx", "**/*.onnx"].uniq }
     (pkgshare/"pmml").install "scripts/ml-runtime-pin.json"
