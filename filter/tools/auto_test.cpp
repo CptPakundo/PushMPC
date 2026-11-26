@@ -245,6 +245,13 @@ int main()
             Costs slow2060 = cold; slow2060.card = 8.0; slow2060.pfBenched = true; for (int t = 0; t < 3; ++t) { slow2060.pfFirst[t] = 70 + 10 * t; slow2060.pfNext[t] = 60 + 10 * t; }
             const Choice n3 = Decide({}, film, d60, slow2060, g2060);
             check(n3.fgMethod == FgMethod::Nvof, L"RTX 2060, PushFlow measured too slow: NVOF FG (before FSR FG)", n3.smootherNote + L" | " + n3.stoppedAt);
+            // RTX 20 with the community DLSS-G port available (self-test passed or pending): DLSS-G first, above 2x where
+            // it fits; without the port (kCapDlssg off) the order is unchanged
+            Gpu g2080 = Family(kRtx20, L"NVIDIA GeForce RTX 2080 Ti"); g2080.available |= 1u << kCapDlssg;
+            const Choice n4 = Decide({}, film, d144, cold, g2080);
+            check(n4.fgMethod == FgMethod::Dlssg && n4.multiplier >= 2, L"RTX 2080 Ti with the DLSS-G port: DLSS-G", n4.smootherNote + L" | " + n4.stoppedAt);
+            const Choice n5 = Decide({}, film, d144, cold, Family(kRtx20, L"NVIDIA GeForce RTX 2080 Ti"));
+            check(n5.fgMethod != FgMethod::Dlssg, L"RTX 2080 Ti without the DLSS-G port: not DLSS-G", n5.smootherNote);
             Settings fm; fm.fgMethod = FgMethod::Nvof;
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;

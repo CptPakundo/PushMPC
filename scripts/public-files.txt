@@ -78,3 +78,4 @@ pmml/scripts/**
 scripts/ml-runtime-pin.json
 kodiaddon/**
 mpvnative/**
+scripts/dlssg-port-fetch.ps1

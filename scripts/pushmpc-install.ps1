@@ -1389,6 +1389,7 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     $extraNote = 'none'
     if ($keep -and $extras.Count) { $extraNote = ($extras -join ';') }
     Add-FidelityFxSdk $dest
+    Add-DlssgPort $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
@@ -1412,6 +1413,29 @@ function Add-FidelityFxSdk([string]$dest) {
     & $fetch -Dest (Join-Path $dest 'runtime_local\amd\fidelityfx') -Cache $cache -Record
     if ($LASTEXITCODE -ne 0) { Warn "FSR SDK 2.4.0 not installed (fidelityfx-fetch.ps1 exit $LASTEXITCODE): the package's FidelityFX 2.3.0 stays" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + FidelityFX SDK 2.4.0" }
+}
+# DLSS frame generation on RTX 20 through the community port sdli1995/dlssg_for_sm86 (unlock TuringDlssg): downloaded from
+# its GitHub release, pinned and hashed (scripts\dlssg-port-fetch.ps1), into runtime\experimental\community\dlssg-sm75,
+# where pushcore looks for it. pushcore's first DLSS-G open on the card is the self-test; a failure falls back to the next
+# method. Off: -ExperimentalExtras No, PUSHMPC_DISABLE_TURINGDLSSG=1 or HKCU\Software\PushMPC\Unlocks TuringDlssg = 0.
+function Add-DlssgPort([string]$dest) {
+    if ($GpuVendor -ne 'NVIDIA') { return }
+    if ((Get-GpuFamily (Get-GpuInfo)) -ne 'RTX 20') { return }
+    $off = $ExperimentalExtras -eq 'No' -or $env:PUSHMPC_DISABLE_TURINGDLSSG -match '^(1|true|yes|on)$'
+    try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name TuringDlssg -ErrorAction Stop).TuringDlssg -eq 0) { $off = $true } } catch {}
+    if ($off) { Info 'RTX 20 DLSS-G port: switched off (unlock TuringDlssg or -ExperimentalExtras No): DLSS-G stays off on this card'; return }
+    $fetch = Join-Path $PSScriptRoot 'dlssg-port-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'dlssg-port-fetch.ps1 is not next to the installer: no DLSS-G on this RTX 20 card'; return }
+    $target = Join-Path $dest 'runtime\experimental\community\dlssg-sm75'
+    if ($DryRun) { Dry "would add the RTX 20 DLSS-G port (sdli1995/dlssg_for_sm86 0.4.2, pinned) in $target (dlssg-port-fetch.ps1)"; return }
+    Step 'DLSS frame generation for RTX 20 (community port sdli1995/dlssg_for_sm86 0.4.2), from its GitHub release, pinned'
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'dlssg-port-0.4.2' } else { Join-Path $InstallDir 'download\dlssg-port-0.4.2' }
+    & $fetch -Dest $target -Cache $cache
+    if ($LASTEXITCODE -ne 0) { Warn "RTX 20 DLSS-G port not installed (dlssg-port-fetch.ps1 exit $LASTEXITCODE): PushFlow and the other methods stay" }
+    else {
+        Info 'RTX 20: DLSS frame generation turns on after a self-test on your card (the first video with DLSS-G)'
+        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + RTX 20 DLSS-G port 0.4.2"
+    }
 }
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
@@ -1454,6 +1478,7 @@ function Prepare-Runtime($pkg = $Runtime) {
     if (Get-ExistingRuntime $dest $pkg) {
         if ($DryRun) { Add-PushFlow $dest | Out-Null; return $null }
         Add-FidelityFxSdk $dest
+        Add-DlssgPort $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1560,7 +1585,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1708,7 +1733,7 @@ function Invoke-Package {
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
     # PushMPC's own mpv build (an optional release asset, not in Setup's payload)
     foreach ($z in @(Get-ChildItem -LiteralPath $StageDir -Filter 'PushMPC-mpv-windows-*.zip' -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $z.FullName $ReleaseDir -Force }
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'dlssg-port-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
     [IO.File]::WriteAllText((Join-Path $out 'Install-PushMPC.cmd'), ($cmd -join "`r`n") + "`r`n")
