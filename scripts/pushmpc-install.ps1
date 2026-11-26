@@ -89,8 +89,9 @@ param(
     [ValidateSet('Auto', 'Package', 'Sdk240')]
     [string]$FidelityFx = 'Auto',
     # Intel's XeSS DLLs (XeSS SR, XeSS frame generation, XeLL; scripts\xess-fetch.ps1, Intel SDK 3.0.2, pinned, Intel-signed) into
-    # runtime\runtime_local\intel\experimental: Auto = on an Intel GPU unless both unlocks XessFg and XessSr are switched off,
-    # Yes = on any GPU (XeSS runs on every Shader Model 6.4 GPU; pushcore's self-tests decide), No = never
+    # runtime\runtime_local\intel\experimental: Auto = on an Intel GPU, and on the GPUs without a better frame generation or
+    # upscaler (GeForce GTX, Radeon RX 5000 and older, other GPUs; XeSS runs on every Shader Model 6.4 GPU, XeSS SR on DP4a),
+    # unless both unlocks XessFg and XessSr are switched off; Yes = on any GPU; No = never. pushcore's self-tests decide.
     [ValidateSet('Auto', 'Yes', 'No')]
     [string]$Xess = 'Auto',
     # reuse an existing PushFPS / Veyra install's files as hard links (same volume) instead of copies
@@ -1430,14 +1431,17 @@ function Test-XessWanted {
         try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $u -ErrorAction Stop).$u -eq 0) { $o = $true } } catch {}
         if ($o) { $off++ }
     }
-    return $GpuVendor -eq 'Intel' -and $off -lt 2
+    if ($off -ge 2) { return $false }
+    if ($GpuVendor -eq 'Intel') { return $true }
+    # no RTX (DLSS-G / VFG / RTX VSR) and no RX 6000+ (FSR 4.1 upscaling): XeSS is a candidate there, measured by Auto
+    return (Get-GpuFamily (Get-GpuInfo)) -in @('GTX', 'RX 5000', 'Radeon', 'other')
 }
 function Add-XessSdk([string]$dest) {
     if (-not (Test-XessWanted)) { return }
     $fetch = Join-Path $PSScriptRoot 'xess-fetch.ps1'
     if (-not (Test-Path $fetch)) { Warn 'xess-fetch.ps1 is not next to the installer: Intel XeSS is left out'; return }
     if ($DryRun) { Dry "would add Intel's XeSS SDK 3.0.2 DLLs to runtime_local\intel\experimental (xess-fetch.ps1, about 100 MB)"; return }
-    Step 'Intel XeSS (super resolution and frame generation), from Intel''s repository, pinned'
+    Step 'Intel XeSS (super resolution and frame generation; on Intel and on GPUs without a better method), from Intel''s repository, pinned'
     $cache = if ($PackageCache) { Join-Path $PackageCache 'xess-v3.0.2' } else { Join-Path $InstallDir 'download\xess-v3.0.2' }
     & $fetch -Dest (Join-Path $dest 'runtime_local\intel\experimental') -Cache $cache -Licenses (Join-Path $dest 'licenses\intel-xess')
     if ($LASTEXITCODE -ne 0) { Warn "Intel XeSS not installed (xess-fetch.ps1 exit $LASTEXITCODE): XeSS SR and XeSS frame generation stay off" }

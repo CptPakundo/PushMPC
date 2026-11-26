@@ -145,6 +145,7 @@ XessSrSelfTestResult xessSrSelfTest(uint64_t adapterLuid, bool warp, uint32_t wi
 struct XessCaps {
     bool fgHw = false, fgOn = false;
     std::string fgWhy;            // the decision line (or why not)
+    double fgMs4k = -1;           // XeFG ms per generated frame for a 4K output (self-test), -1 = unknown
     bool srHw = false, srOn = false;
     std::string srWhy;
     double srMs4k = -1;           // XeSS SR ms per frame for a 4K output (self-test), -1 = unknown

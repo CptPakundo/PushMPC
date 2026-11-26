@@ -311,6 +311,7 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         set(PUSHCORE_CAP_XEFG, xc.fgHw, xc.fgOn, xc.fgWhy.c_str(), xc.fgWhy.c_str());
         set(PUSHCORE_CAP_XESS_SR, xc.srHw, xc.srOn, xc.srWhy.c_str(), xc.srWhy.c_str());
         if (xc.srOn && xc.srMs4k > 0) std::snprintf(c.reason[PUSHCORE_CAP_XESS_SR], sizeof(c.reason[0]), "ms4k=%.2f", xc.srMs4k);
+        if (xc.fgOn && xc.fgMs4k > 0) std::snprintf(c.reason[PUSHCORE_CAP_XEFG], sizeof(c.reason[0]), "ms4k=%.2f", xc.fgMs4k);
     }
     set(PUSHCORE_CAP_VFG, vfgHw, veyra::pipeline::VfgBackend::runtimeAvailable(rt), "needs an NVIDIA RTX 30, 40 or 50 card",
         "the VFG files are not installed (runtime\\nvidia-vfg)");

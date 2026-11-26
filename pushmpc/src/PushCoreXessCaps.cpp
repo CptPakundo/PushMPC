@@ -54,6 +54,12 @@ XessSrSelfTestResult runSr(uint64_t luid, bool warp, uint32_t& w, uint32_t& h) {
 double ms4kOf(const XessSrSelfTestResult& r, uint32_t w, uint32_t h) {
     return r.msPerFrame > 0 && w && h ? r.msPerFrame * (3840.0 * 2160.0) / (double(w) * h) : -1;
 }
+// XeFG's cost per generated frame for a 4K output (Auto's prior), from the test's ms per generated frame at its size
+double xefgMs4kOf(const XefgSelfTestResult& r) {
+    uint32_t w = 640, h = 360;
+    envSize(w, h);
+    return r.msPerGenerated > 0 ? r.msPerGenerated * (3840.0 * 2160.0) / (double(w) * h) : -1;
+}
 std::string verdict(bool ran, bool passed, const std::string& note) {
     return (passed ? "pass; " : ran ? "fail: " : "unavailable: ") + note;
 }
@@ -71,9 +77,10 @@ selftest::Result testXefg(const selftest::Context& ctx) {
     o.fields = {{"multiplier", std::to_string(r.multiplier)}, {"real", std::to_string(r.realOut)}, {"generated", std::to_string(r.generatedOut)},
                 {"expected", std::to_string(r.expectedGenerated)}, {"positionErrorPx", std::format("{:.3f}", r.medianPositionErrorPx)},
                 {"psnr", std::format("{:.2f}", r.medianPsnr)}, {"psnrBlend", std::format("{:.2f}", r.medianPsnrBlend)},
-                {"msPerGenerated", std::format("{:.3f}", r.msPerGenerated)}};
+                {"msPerGenerated", std::format("{:.3f}", r.msPerGenerated)}, {"ms4k", std::format("{:.2f}", xefgMs4kOf(r))}};
     if (ctx.record && r.ran)
-        pmu::WriteSelfTest(pmu::Unlock::XessFg, pmu::SelfTestKey(ctx.adapter.VendorId, ctx.adapter.DeviceId, ctx.driver), r.passed, widen(r.note));
+        pmu::WriteSelfTest(pmu::Unlock::XessFg, pmu::SelfTestKey(ctx.adapter.VendorId, ctx.adapter.DeviceId, ctx.driver), r.passed,
+                           widen(std::format("{} ms4k={:.2f}", r.note, xefgMs4kOf(r))));
     return o;
 }
 selftest::Result testXessSr(const selftest::Context& ctx) {
@@ -133,8 +140,9 @@ XessCaps capabilities(const DXGI_ADAPTER_DESC1& d, const std::wstring& driver, b
     pmu::SelfTest tfg, tsr;
     decide(pmu::Unlock::XessFg, fgFiles, fgWhy, true, "", [&] {
         const XefgSelfTestResult r = runXefg(luid, false);
-        return std::tuple<bool, bool, std::string>{r.ran, r.passed, r.note};
+        return std::tuple<bool, bool, std::string>{r.ran, r.passed, std::format("{} ms4k={:.2f}", r.note, xefgMs4kOf(r))};
     }, c.fgHw, c.fgOn, c.fgWhy, tfg);
+    if (tfg.known) c.fgMs4k = numberAfter(tfg.reason, L"ms4k=");
     decide(pmu::Unlock::XessSr, srFiles, srWhy, srProviderBuilt(), "this pushcore has no slot for XeSS SR (PushFPS without the FsrSrBackend provider patch)", [&] {
         uint32_t w = 0, h = 0;
         const XessSrSelfTestResult r = runSr(luid, false, w, h);
