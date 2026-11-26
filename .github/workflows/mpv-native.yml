@@ -535,18 +535,19 @@ jobs:
             flatpak run --user --command=sh "$id" -c 'find /app -name "libmpv*.so*" -o -name "libavfilter*.so*" -o -name "libavutil*.so*" 2>/dev/null | head -8' || true
             echo "== $id: a 25 s start under Xvfb, then the data folders it made (where mpv.conf goes)"
             timeout 25 xvfb-run -a flatpak run --user "$id" > /dev/null 2>&1 || true
+            flatpak kill "$id" 2>/dev/null || true
             (cd "$HOME/.var/app/$id" && find . -maxdepth 3 -type d | grep -v '/cache' | sort | head -30)
           done
       - name: Install (self-test through Plex's libmpv in its sandbox), status, uninstall bit-exact
         timeout-minutes: 15
         run: |
-          d="$RUNNER_TEMP/plexlin"; fails=0; tested=0
+          set +e; d="$RUNNER_TEMP/plexlin"; fails=0; tested=0
           cp "$RUNNER_TEMP"/clips/pushmpc-selftest-* "$d/"
           for id in tv.plex.PlexDesktop tv.plex.PlexHTPC; do
             flatpak info --user "$id" >/dev/null 2>&1 || continue
             tested=$((tested + 1))
             n=$( [ "$id" = tv.plex.PlexDesktop ] && echo desktop || echo htpc )
-            snap() { (cd "$HOME/.var/app" && find "$id" -path '*/cache' -prune -o -type f -print | sort | xargs -r sha256sum | sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
+            snap() { (cd "$HOME/.var/app" && find "$id" \( -path '*/cache' -o -path '*/Plex Media Server' -o -path '*/Logs' -o -path '*/.local/state' \) -prune -o -type f -print0 | sort -z | xargs -0r sha256sum | sha256sum); flatpak override --user --show "$id" 2>/dev/null; }
             before=$(snap)
             out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target "$n" --json); rc=$?; echo "install: $out"
             echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \

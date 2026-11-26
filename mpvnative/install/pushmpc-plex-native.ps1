@@ -92,6 +92,7 @@ public static class PlexHost {
         if ($p -ne [IntPtr]::Zero) { $status = [Runtime.InteropServices.Marshal]::PtrToStringAnsi(([Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($p, [PlexHost+StatusFn])).Invoke()) }
         else { $status = 'avfilter-8.dll is not the proxy' }
     }
+    function ReadShared($p) { if (-not (Test-Path $p)) { return '' }; $s = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite, Delete'); try { (New-Object IO.StreamReader($s)).ReadToEnd() } finally { $s.Dispose() } }   # mpv keeps its log open
     # what Plex's FFmpeg can open varies (no libavdevice, so no av://lavfi; its own decoder set): a shipped H.264 clip
     # (pushmpc-selftest-*, next to this script), then a Y4M written here, then av://lavfi
     $y4m = Join-Path ([IO.Path]::GetTempPath()) ('pushmpc-plex-selftest-' + [guid]::NewGuid().ToString('N') + '.y4m')
@@ -110,13 +111,13 @@ public static class PlexHost {
             if ($id -eq 1) { $reason = 'shutdown'; break }
         }
         Start-Sleep -Milliseconds 200
-        $t = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { '' }
+        $t = ReadShared $log
         $f = [regex]::Match($t, '(?:pushcore|portable-cpu|portable-vulkan) \([^\r\n]*?, x\d').Value
         $tried += "$(if ($c -like 'av://*') { 'lavfi' } else { [IO.Path]::GetFileName($c) -replace '^pushmpc-selftest-', '' -replace '^pushmpc-plex-selftest-[0-9a-f]+', 'generated' }): $reason"
         if ($reason -eq 'eof' -and $f) { break }
     }
     [PlexHost]::mpv_terminate_destroy($ctx)
-    $t = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { '' }
+    $t = ReadShared $log
     $why = if ($reason -eq 'eof' -and $f) { '' } else { '; log: ' + ((@([regex]::Matches($t, '[^\r\n]*(?:Failed|failed|rror|not found|No such)[^\r\n]*') | Select-Object -First 4 | ForEach-Object { $_.Value.Trim() })) -join ' | ') }
     Write-Output "selftest: vf option $(if ($vfrc -ge 0) { 'accepted' } else { "refused ($vfrc)" }); proxy: $status; playback: $($tried -join ', '); filter: $(if ($f) { $f } else { 'not seen' })$why"
     Remove-Item $log, $y4m -ErrorAction SilentlyContinue
