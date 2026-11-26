@@ -43,6 +43,8 @@ public:
     bool Generate(float t, const pm_yuv_out& out, std::string&) override { pm_engine_generate(m_e, t, &out); return true; }
     bool Real(bool, const pm_yuv_out&, std::string&) override { return false; }
     void Forget() override { pm_engine_forget(m_e); }
+    void SetDedup(bool on) override { pm_engine_set_dedup(m_e, on ? 1 : 0); }
+    bool LastDup() const override { return pm_engine_last_dup(m_e) != 0; }
     EngineStats Stats() const override
     {
         pm_engine_stats s{};
@@ -115,6 +117,12 @@ public:
     bool PushSlot(int slot, bool contiguous, std::string& err)
     {
         ++m_stats.pushed;
+        m_lastDup = false;
+        if (m_dedup && contiguous && m_curSlot >= 0) {   // held frames: a repeat of the last distinct frame keeps the pair
+            pmvs::gpu::DedupStats ds;
+            if (!m_e.Duplicate(m_curSlot, slot, ds, err)) { m_e.ReleaseSlot(slot); return false; }
+            if (ds.duplicate) { m_e.ReleaseSlot(slot); m_lastDup = true; return true; }
+        }
         const int oldPair = m_pair;
         m_pair = -1;
         m_cut = false;
@@ -159,6 +167,8 @@ public:
         return true;
     }
     void Forget() override { ReleaseAll(); }
+    void SetDedup(bool on) override { m_dedup = on; m_lastDup = false; }
+    bool LastDup() const override { return m_lastDup; }
     EngineStats Stats() const override { return m_stats; }
     bool Layout(OutLayout& l) const override
     {
@@ -225,6 +235,7 @@ private:
     int m_curSlot = -1, m_prevSlot = -1, m_prevPrevPending = -1, m_pair = -1;
     bool m_cut = false;
     EngineStats m_stats;
+    bool m_dedup = false, m_lastDup = false;   // held frames (SetDedup)
 };
 bool GpuBuilt() { return true; }
 #else

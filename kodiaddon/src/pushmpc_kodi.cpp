@@ -891,6 +891,8 @@ public:
         m_sw = av_frame_alloc();
         m_pkt = av_packet_alloc();
         m_k = std::max(1, m_in->K());
+        // held frames (animation on twos, threes, fours: cadence.h HeldCadence); PUSHMPC_DEDUP=0 turns it off
+        if (m_engine) m_engine->SetDedup(m_k > 1 && !(std::getenv("PUSHMPC_DEDUP") && std::getenv("PUSHMPC_DEDUP")[0] == '0'));
         m_frameUs = m_in->VideoFrameUs();
         m_test2x = m_in->Config().upscale == 2;
         m_toneMap = m_in->ToneMap();
@@ -943,7 +945,7 @@ public:
             }
             // end of the drained stream (or an error): the last held frame goes out alone, then the end
             if (m_havePrev) {
-                m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true});
+                for (const pmk::Slot& s : m_held.Drain()) m_queue.push_back(Out{s, m_prevSlot, true});   // with held repeats
                 m_havePrev = false;
                 continue;
             }
@@ -964,7 +966,7 @@ public:
             bool eof = false;
             if (m_ahb->Receive(buf, pts, eof)) { OnGpuFrame(buf, pts); continue; }
             if (drain && !eof && spin < 200) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
-            if (m_havePrev) { m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true}, m_prevSlot, true}); m_havePrev = false; continue; }
+            if (m_havePrev) { for (const pmk::Slot& s : m_held.Drain()) m_queue.push_back(Out{s, m_prevSlot, true}); m_havePrev = false; continue; }
             return drain ? VC_EOF : VC_BUFFER;
         }
     }
@@ -980,11 +982,12 @@ public:
         }, contiguous, err);
         m_ahb->Release();
         if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine (hardware buffer): %s", err.c_str()); m_warned = true; }
-        if (m_havePrev) {
+        const bool dup = pushed && m_engine->LastDup();   // held frames: a repeat keeps the pair (cadence.h HeldCadence)
+        {
             const bool pair = pushed && m_engine->HavePair();
-            for (const pmk::Slot& s : pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair)) m_queue.push_back(Out{s, m_prevSlot, false});
+            for (const pmk::Slot& s : m_held.Next(pts, dup, contiguous, m_k, pair)) m_queue.push_back(Out{s, m_prevSlot, s.newest});
         }
-        m_prevSlot = m_havePrev ? 1 - m_prevSlot : 0;
+        if (!dup) m_prevSlot = m_havePrev ? 1 - m_prevSlot : 0;
         m_prevPts = pts;
         m_havePrev = true;
     }
@@ -1003,6 +1006,7 @@ public:
         m_drained = false;
         m_queue.clear();
         m_havePrev = false;
+        m_held.Reset();
         if (m_engine) m_engine->Forget();
     }
 
@@ -1084,11 +1088,12 @@ private:
             pushed = m_engine->Push(src, contiguous, err);
             if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
         }
-        if (m_havePrev) {
+        const bool dup = pushed && m_engine->LastDup();   // held frames: a repeat keeps the pair and m_pic[m_prevSlot]
+        {
             const bool pair = pushed && m_engine->HavePair();
-            for (const pmk::Slot& s : pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair)) m_queue.push_back(Out{s, m_prevSlot, false});
+            for (const pmk::Slot& s : m_held.Next(pts, dup, contiguous, m_k, pair)) m_queue.push_back(Out{s, m_prevSlot, s.newest});
         }
-        m_prevSlot = cur;
+        if (!dup) m_prevSlot = cur;
         m_prevPts = pts;
         m_havePrev = true;
     }
@@ -1506,6 +1511,8 @@ private:
 
     void Teardown()
     {
+        if (m_held.Repeats()) Log(ADDON_LOG_INFO, "held frames: %llu repeats waited for the next drawing, %llu stills",
+                                  static_cast<unsigned long long>(m_held.Repeats()), static_cast<unsigned long long>(m_held.Stills()));
         if (m_zeroCopied) Log(ADDON_LOG_INFO, "zero copy: %llu pictures written in place", static_cast<unsigned long long>(m_zeroCopied));
         ReleaseImports();
 #if defined(__ANDROID__) && defined(PM_AHB)
@@ -1567,6 +1574,7 @@ private:
     int m_prevSlot = 0;
     int64_t m_prevPts = 0;
     bool m_havePrev = false;
+    pmk::HeldCadence m_held;   // held frames: the pictures per source frame (cadence.h)
     std::deque<Out> m_queue;
     unsigned long long m_emitted = 0, m_generated = 0;
     int m_packets = 0;
