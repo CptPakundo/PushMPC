@@ -87,7 +87,7 @@ jobs:
           @("DEPS=$deps", "BUILD=$(Join-Path $env:RUNNER_TEMP 'b')", "PUSHFPS_REPO=$($pin.pushfps.repository)", "PUSHFPS_TAG=$($pin.pushfps.tag)",
             "PUSHFPS_COMMIT=$($pin.pushfps.commit)", "PUSHFPS_PATCH=$($pin.pushfps.patch)", "PUSHFPS_DISPLAY_VERSION=$($pin.pushfps.displayVersion)") | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756   # v1, pinned by commit
         with: { arch: x64 }
 
       - name: auto_test (Auto rules, Intel rows)

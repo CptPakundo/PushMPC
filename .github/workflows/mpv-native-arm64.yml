@@ -137,7 +137,7 @@ jobs:
           $t = Get-ChildItem build-pure -Recurse -Filter nvl_test.exe | Select-Object -First 1
           & $t.FullName
           if ($LASTEXITCODE) { throw 'nvl_test failed' }
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c   # v2, pinned by commit
         with:
           msystem: CLANGARM64
           update: false

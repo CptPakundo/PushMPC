@@ -1034,10 +1034,10 @@ jobs:
     defaults: { run: { shell: pwsh } }
     env:
       GH_TOKEN: ${{ github.token }}
-      OUT: ${{ runner.temp }}\dshow
+      OUT: ${{ github.workspace }}\dshow-out   # job env: the runner context is not available here
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756   # v1, pinned by commit
         with: { arch: x64 }
       - uses: actions/download-artifact@v4
         with: { name: pushmpc-release, path: '${{ runner.temp }}/release', run-id: '${{ needs.release-artifact.outputs.run }}', github-token: '${{ github.token }}' }
@@ -1159,4 +1159,4 @@ jobs:
           if ($env:MPCBE_FILTER -ne 'True') { Write-Host '::error::MPC-BE did not create the filter'; exit 1 }
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: dshow-players-logs, path: "${{ runner.temp }}/dshow" }
+        with: { name: dshow-players-logs, path: "${{ github.workspace }}/dshow-out" }
