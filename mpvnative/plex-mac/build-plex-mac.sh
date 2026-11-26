@@ -89,6 +89,19 @@ echo "libMoltenVK.dylib $3 ($(lipo -archs "$out/libMoltenVK.dylib"))"
 # the self-test host (loads Plex's libmpv in its own process)
 clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$here/../hook/libmpv_host.c" -o "$out/pushmpc-plex-selftest"
 codesign -f -s - "$out/pushmpc-plex-selftest"
-# the installer next to its files: this folder is the whole Plex for Mac bundle (Setup / Homebrew run it from here)
-cp "$here/../install/pushmpc-plex-mac.sh" "$here/../ci/SOURCES.txt" "$out/"
+# the libmpv stand-in for Stremio / Jellyfin Desktop (pushmpc-apps-mac.sh): re-exports the app's original libmpv
+# (renamed pushmpc-orig-libmpv.dylib; the link-time stub has only that install name) and loads PushMPC's mpv bridge
+# from its own mpv_initialize. current_version is the highest there is, so no app's recorded version can refuse it.
+mkdir -p "$out/apps"
+: > "$work/empty.c"
+clang -dynamiclib -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$work/empty.c" \
+    -install_name '@rpath/pushmpc-orig-libmpv.dylib' -o "$work/pushmpc-orig-libmpv.dylib"
+clang -dynamiclib -arch arm64 -arch x86_64 -O2 -Wall -mmacosx-version-min=$min "$here/mpv_proxy_mac.c" \
+    -install_name '@rpath/libmpv.2.dylib' -compatibility_version 1.0.0 -current_version 65535.255.255 \
+    -Wl,-rpath,@loader_path -Wl,-reexport_library,"$work/pushmpc-orig-libmpv.dylib" -o "$out/apps/libmpv-proxy.dylib"
+codesign -f -s - "$out/apps/libmpv-proxy.dylib"
+nm -gU "$out/apps/libmpv-proxy.dylib" | grep -E ' _(mpv_initialize|pushmpc_mpv_proxy_status)$'
+echo "apps/libmpv-proxy.dylib ($(lipo -archs "$out/apps/libmpv-proxy.dylib")): $(otool -L "$out/apps/libmpv-proxy.dylib" | sed 1,2d | awk '{print $1}' | tr '\n' ' ')"
+# the installers next to their files: this folder is the whole Mac bundle (Setup / Homebrew run them from here)
+cp "$here/../install/pushmpc-plex-mac.sh" "$here/../install/pushmpc-apps-mac.sh" "$here/../ci/SOURCES.txt" "$out/"
 ls -la "$out"

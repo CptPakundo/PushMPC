@@ -7,6 +7,8 @@
  * PUSHMPC_HOST_SCRIPT=<pushmpc_hook.so>: the C-plugin route instead of the preload: the host loads the hook as an mpv
  * script (script-opts pushmpc-vf=smoother=2) and sets no vf itself; the hook appends the filter (Snap Plex).
  * PUSHMPC_HOST_TMP=<dir>: where the Y4M and the logs go (default /tmp; a Snap's /tmp is private anyway).
+ * PUSHMPC_HOST_VF='' sets no filter (a PushMPC libmpv stand-in on macOS adds it inside mpv_initialize);
+ * PUSHMPC_HOST_ACCEPT_EOF=1: playing to the end is enough (the filter reports in its own log).
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -107,7 +109,8 @@ int main(int argc, char **argv)
             if (strstr(line, "frames") && strstr(line, " -> ") && strstr(line, ", x2;")) { seen = 1; printf("host: %s", line); }
         printf("host: %s: vf %s; end of file reason %d (0 = eof)\n", strrchr(files[f], '/') ? strrchr(files[f], '/') + 1 : files[f],
                vfrc >= 0 ? "accepted" : (errstr ? errstr(vfrc) : "refused"), reason);
-        ok = vfrc >= 0 && seen && reason == 0;
+        /* PUSHMPC_HOST_ACCEPT_EOF: the filter reports elsewhere (the IINA bridge: its own log), played to the end is enough */
+        ok = vfrc >= 0 && reason == 0 && (seen || getenv("PUSHMPC_HOST_ACCEPT_EOF"));
         if (lf && !ok) {
             rewind(lf);
             while (fgets(line, sizeof(line), lf) && shown < 6)

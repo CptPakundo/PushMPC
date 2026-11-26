@@ -1,6 +1,10 @@
 # players.yml: PushMPC routes into the players that bundle their own mpv (Snap Plex, Flathub Stremio and Jellyfin
 # Desktop, Emby Theater on Linux; Stremio, Jellyfin Desktop and the MPV shims on macOS). Dispatch only.
 #   jobs: spike = inspect the players' bundles and try each route once (what the routes are built on)
+#         linux = apps-linux: the stub test, then pushmpc-apps-linux.sh install / status / uninstall with the real Snap
+#                 Plex, Flathub Stremio and Jellyfin Desktop (self-test x2 through each one's libmpv; exact undo)
+#         macos = apps-macos: the libmpv stand-in and the bridge built here, pushmpc-apps-mac.sh against Stremio 5 and
+#                 Jellyfin Desktop (self-test frames out > in; exact undo) and the shims' conf.json round trip
 name: players
 on:
   push:
@@ -25,7 +29,7 @@ permissions:
 
 jobs:
   spike-linux:
-    if: contains(inputs.jobs || 'spike', 'spike')
+    if: inputs.jobs == 'all' || contains(inputs.jobs || 'spike', 'spike')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -110,7 +114,7 @@ jobs:
           grep -rn -E 'config_dir|mpv_ext|Application Support|def confdir|input_conf|config=' x --include=*.py | grep -vE 'tests?/' | head -60
 
   spike-macos:
-    if: contains(inputs.jobs || 'spike', 'spike')
+    if: inputs.jobs == 'all' || contains(inputs.jobs || 'spike', 'spike')
     runs-on: macos-15
     timeout-minutes: 40
     steps:
@@ -135,3 +139,116 @@ jobs:
           curl -fsSL --retry 3 -o jd.zip https://github.com/jellyfin/jellyfin-desktop/releases/download/v2.1.0-pre2/jellyfin-desktop-v2.1.0-pre2-macos-arm64.zip && mkdir jd && (cd jd && unzip -q ../jd.zip) && find jd -maxdepth 3 | head
           find /tmp/apps/jd -name '*.dmg' | while IFS= read -r d; do hdiutil attach -nobrowse -readonly -mountpoint /tmp/m3 "$d" >/dev/null && for a in /tmp/m3/*.app; do probe "$a"; done; done
           find /tmp/apps/jd -maxdepth 3 -name '*.app' | while IFS= read -r a; do probe "$a"; done
+
+  apps-linux:
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'linux')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: mpvnative-hook-ubuntu-24.04, path: '${{ runner.temp }}/h', run-id: "${{ inputs.hook_run || '45799363716' }}", github-token: '${{ github.token }}' }
+      - name: Build the hook, the preload and the self-test host (compile check first)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libmpv-dev flatpak >/dev/null
+          K="$RUNNER_TEMP/kit"; F="$RUNNER_TEMP/from"; mkdir -p "$K" "$F"
+          cp "$RUNNER_TEMP"/h/hook/libpushmpc-avfilter-*.so "$RUNNER_TEMP"/h/hook/libpushmpc_engine.so "$F/"
+          cc -shared -fPIC -O2 -Wall -Werror=implicit-function-declaration mpvnative/hook/pushmpc_hook.c -o "$F/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          cc -shared -fPIC -O2 -Wall -Werror=implicit-function-declaration mpvnative/hook/pushmpc_preload.c -o "$K/pushmpc_preload.so" -ldl -lpthread
+          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$K/pushmpc-plex-selftest" -ldl
+          nm -D --defined-only "$F/pushmpc_hook.so" | grep -E ' (mpv_open_cplugin|pfn_mpv_command)$'
+          nm -D --defined-only "$K/pushmpc_preload.so" | grep -E ' (mpv_initialize|avfilter_get_by_name)$'
+      - name: Stub test (fake Snap / Flatpak / Emby / Stremio installs)
+        run: sh mpvnative/install/test-apps-linux.sh "$RUNNER_TEMP/from"
+      - name: Real players (Snap Plex, Flathub Stremio and Jellyfin Desktop)
+        timeout-minutes: 30
+        run: |
+          sudo snap install plex-desktop >/dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub com.stremio.Stremio org.jellyfin.JellyfinDesktop >/dev/null
+          sums() { (cd "$HOME" && find snap .var .local/share/flatpak/overrides .config -type f 2>/dev/null | grep -v -e '/cache/' -e '\.lock$' | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(cksum < "$f")" "$f"; done); }
+          sums > /tmp/before.txt
+          I="sh mpvnative/install/pushmpc-apps-linux.sh"
+          $I install --from "$RUNNER_TEMP/from" --kit "$RUNNER_TEMP/kit" --json 2> /tmp/install.log | tee /tmp/install.json; cat /tmp/install.log
+          bad=0
+          for t in plex-snap stremio-flatpak jellyfin-desktop-flatpak; do
+            if grep "\"target\":\"$t\"" /tmp/install.json | grep -q '"state":"installed".*x2'; then echo "ok: $t"; else echo "::error::$t not installed with x2"; bad=1; fi
+          done
+          $I status --json
+          $I uninstall --json
+          sums > /tmp/after.txt
+          if diff /tmp/before.txt /tmp/after.txt; then echo "ok: uninstall left every file as it was"; else echo "::error::uninstall left differences"; bad=1; fi
+          exit $bad
+
+  apps-macos:
+    if: inputs.jobs == 'all' || contains(inputs.jobs, 'macos')
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the libmpv stand-in, the self-test host and the bridge
+        run: |
+          O="$RUNNER_TEMP/bundle"; W="$RUNNER_TEMP/w"; mkdir -p "$O/apps" "$W"
+          : > "$W/empty.c"
+          clang -dynamiclib -arch arm64 -arch x86_64 -mmacosx-version-min=11.0 "$W/empty.c" -install_name '@rpath/pushmpc-orig-libmpv.dylib' -o "$W/pushmpc-orig-libmpv.dylib"
+          clang -dynamiclib -arch arm64 -arch x86_64 -O2 -Wall -Werror -mmacosx-version-min=11.0 mpvnative/plex-mac/mpv_proxy_mac.c \
+            -install_name '@rpath/libmpv.2.dylib' -compatibility_version 1.0.0 -current_version 65535.255.255 \
+            -Wl,-rpath,@loader_path -Wl,-reexport_library,"$W/pushmpc-orig-libmpv.dylib" -o "$O/apps/libmpv-proxy.dylib"
+          codesign -f -s - "$O/apps/libmpv-proxy.dylib"
+          clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=11.0 mpvnative/hook/libmpv_host.c -o "$O/pushmpc-plex-selftest"
+          codesign -f -s - "$O/pushmpc-plex-selftest"
+          cp mpvnative/install/pushmpc-apps-mac.sh "$O/"
+          brew install --quiet ffmpeg mpv vapoursynth >/dev/null
+          cmake -S vsplugin -B "$W/vs" -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON \
+            -DFFMPEG_INCLUDE="$(brew --prefix ffmpeg)/include" -DMPV_INCLUDE="$(brew --prefix mpv)/include" \
+            -DVAPOURSYNTH_SDK="$(dirname "$(find "$(brew --prefix vapoursynth)/" -name VapourSynth4.h | head -n 1)")" > "$W/vs.log" 2>&1 \
+            && cmake --build "$W/vs" --target pushmpc_iina --parallel >> "$W/vs.log" 2>&1 || { tail -40 "$W/vs.log"; exit 1; }
+          cp "$W/vs/pushmpc-iina.so" "$O/"
+      - name: Stremio 5 and Jellyfin Desktop (install, self-test, exact undo)
+        timeout-minutes: 25
+        run: |
+          O="$RUNNER_TEMP/bundle"; mkdir -p "$RUNNER_TEMP/m"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/stremio.dmg" https://dl.strem.io/stremio-shell-macos/v5.1.26/Stremio_arm64.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/m/s" "$RUNNER_TEMP/stremio.dmg" >/dev/null && ditto "$(find "$RUNNER_TEMP/m/s" -maxdepth 1 -name '*.app' | head -n 1)" /Applications/Stremio.app
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/jd.zip" https://github.com/jellyfin/jellyfin-desktop/releases/download/v2.1.0-pre2/jellyfin-desktop-v2.1.0-pre2-macos-arm64.zip
+          mkdir -p "$RUNNER_TEMP/jd" && (cd "$RUNNER_TEMP/jd" && unzip -q ../jd.zip)
+          d=$(find "$RUNNER_TEMP/jd" -name '*.dmg' | head -n 1)
+          if [ -n "$d" ]; then hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/m/j" "$d" >/dev/null; a=$(find "$RUNNER_TEMP/m/j" -maxdepth 1 -name '*.app' | head -n 1)
+          else a=$(find "$RUNNER_TEMP/jd" -maxdepth 3 -name '*.app' | head -n 1); fi
+          ditto "$a" "/Applications/Jellyfin Desktop.app"
+          sums() { for x in /Applications/Stremio.app "/Applications/Jellyfin Desktop.app"; do (cd "$x" && find . -type f | LC_ALL=C sort | xargs shasum -a 256); done; }
+          sums > "$RUNNER_TEMP/before.txt"
+          I="sh $O/pushmpc-apps-mac.sh"
+          $I install --from "$O" --bridge "$O/pushmpc-iina.so" --json 2> "$RUNNER_TEMP/install.log" | tee "$RUNNER_TEMP/install.json"; cat "$RUNNER_TEMP/install.log"
+          tail -n 30 ~/Library/Logs/PushMPC/apps-mac.log ~/Library/Logs/PushMPC/iina-bridge.log 2>/dev/null
+          bad=0
+          for t in stremio jellyfin-desktop; do
+            if grep "\"target\":\"$t\"" "$RUNNER_TEMP/install.json" | grep -q '"state":"installed".*frames in'; then echo "ok: $t"; else echo "::error::$t: not installed (see the detail)"; bad=1; fi
+          done
+          $I status --json
+          $I uninstall --from "$O" --json
+          sums > "$RUNNER_TEMP/after.txt"
+          if diff "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt" >/dev/null; then echo "ok: both apps as they were"; else echo "::error::an app differs after uninstall"; bad=1; fi
+          exit $bad
+      - name: The shims' conf.json round trip (Jellyfin MPV Shim, Plex-MPV-Shim)
+        run: |
+          O="$RUNNER_TEMP/bundle"; S="$HOME/Library/Application Support"
+          mkdir -p "$S/jellyfin-mpv-shim" "$S/plex-mpv-shim"
+          printf '{\n    "mpv_ext": false,\n    "mpv_ext_path": null,\n    "player_name": "test",\n    "sync_max_delay_speed": 50\n}' > "$S/jellyfin-mpv-shim/conf.json"
+          printf '{\n    "mpv_ext": false,\n    "fullscreen": true\n}' > "$S/plex-mpv-shim/conf.json"
+          printf 'volume=80\n' > "$S/plex-mpv-shim/mpv.conf"
+          sums() { (cd "$S" && find jellyfin-mpv-shim plex-mpv-shim -type f | LC_ALL=C sort | xargs shasum -a 256); }
+          sums > "$RUNNER_TEMP/b.txt"
+          : > "$RUNNER_TEMP/p.vpy"
+          I="sh $O/pushmpc-apps-mac.sh"
+          $I install --from "$O" --mpv "$(brew --prefix)/bin/mpv" --integration integrations/mpv/mpv-integration.sh --vpy "$RUNNER_TEMP/p.vpy" --vsscript /tmp/vs.lua --json | tee "$RUNNER_TEMP/s.json"
+          bad=0
+          for s in jellyfin-mpv-shim plex-mpv-shim; do
+            grep -q "\"target\":\"$s\".*\"state\":\"installed\"" "$RUNNER_TEMP/s.json" || { echo "::error::$s not installed"; bad=1; }
+            if ! grep -q '"mpv_ext": true' "$S/$s/conf.json" || ! grep -q "\"mpv_ext_path\": \"$(brew --prefix)/bin/mpv\"" "$S/$s/conf.json"; then echo "::error::$s conf.json"; cat "$S/$s/conf.json"; bad=1; fi
+            grep -q 'scripts-append=/tmp/vs.lua' "$S/$s/mpv.conf" || { echo "::error::$s mpv.conf"; bad=1; }
+          done
+          $I uninstall --integration integrations/mpv/mpv-integration.sh --json
+          sums > "$RUNNER_TEMP/a.txt"
+          if diff "$RUNNER_TEMP/b.txt" "$RUNNER_TEMP/a.txt"; then echo "ok: the shims' files as they were"; else echo "::error::shim files differ after uninstall"; bad=1; fi
+          exit $bad

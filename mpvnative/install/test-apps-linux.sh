@@ -87,6 +87,7 @@ done
 [ "$rc" = 0 ] && ok "install exit 0" || bad "install exit $rc"
 grep -q "scripts-append=$HOME/snap/plex-desktop/common/pushmpc/pushmpc_hook.so" "$HOME/snap/plex-desktop/current/.local/share/plex/mpv.conf" && ok "Snap Plex mpv.conf loads the hook" || bad "Snap Plex mpv.conf"
 grep -q "sub-font-size=40" "$HOME/snap/plex-desktop/current/.local/share/plex/mpv.conf" && ok "user line kept" || bad "user line lost"
+grep -q "scripts-append=$HOME/snap/plex-desktop/common/pushmpc/pushmpc_hook.so" "$HOME/snap/plex-desktop/common/mpv.conf" && ok "Snap Plex common/mpv.conf loads the hook" || bad "Snap Plex common/mpv.conf"
 [ -f "$HOME/snap/plex-desktop/common/pushmpc/libpushmpc-avfilter-10.4.100.so" ] && ok "the matching build copied" || bad "build not copied"
 [ "$(ls "$HOME/snap/plex-desktop/common/pushmpc"/libpushmpc-avfilter-*.so | wc -l)" = 1 ] && ok "only that build" || bad "more than one build copied"
 grep -q "^LD_PRELOAD=$HOME/.var/app/com.stremio.Stremio/pushmpc/pushmpc_preload.so$" "$HOME/.local/share/flatpak/overrides/com.stremio.Stremio" \

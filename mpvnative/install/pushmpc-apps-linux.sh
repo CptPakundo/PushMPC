@@ -16,8 +16,11 @@
 # undone again by install itself, with the reason):
 #   plex-snap, plex-htpc-snap   Snap plex-desktop / plex-htpc. LD_PRELOAD cannot work there (snap-confine is setuid), so
 #        the hook goes in as an mpv C plugin from Plex's own mpv.conf: files in ~/snap/<name>/common/pushmpc (a Snap may
-#        map and run files from its own common folder), a marked block in ~/snap/<name>/current/.local/share/plex/mpv.conf
-#        (scripts-append=<hook>). The self-test runs inside the Snap's confinement (snap run --shell).
+#        map and run files from its own common folder), a marked block (scripts-append=<hook>) in ~/snap/<name>/common/
+#        mpv.conf (where Plex's Snaps keep their data; Plex's own documentation for Plex HTPC) and, when that folder
+#        exists, in ~/snap/<name>/current/.local/share/plex/mpv.conf (the layout of Plex's Flatpak); the hook adds the
+#        filter only once. The Snap is started once (snap run --shell) when its user folder does not exist yet.
+#        The self-test runs inside the Snap's confinement (snap run --shell).
 #   stremio-flatpak             Flathub com.stremio.Stremio,
 #   jellyfin-desktop-flatpak    Flathub org.jellyfin.JellyfinDesktop,
 #   emby-flatpak                an Emby Theater Flatpak (any installed app id containing "emby"):
@@ -25,6 +28,7 @@
 #        --env=PUSHMPC_PRELOAD_VF=auto`: the preload adds the filter after the program's mpv_initialize and puts it back
 #        whenever the program replaces the filter list. Refused when the app already has another LD_PRELOAD override.
 #   emby-snap                   Snap emby-theater: as Snap Plex, mpv.conf ~/snap/emby-theater/current/.config/mpv/mpv.conf
+#        (inside a Snap, HOME is ~/snap/<name>/current)
 #   emby                        Emby Theater from its .deb / .rpm: its player plugin starts libmpv with config=yes, so it
 #        reads ~/.config/mpv/mpv.conf; a marked block there loads the hook (files in ~/.local/share/pushmpc/emby). When
 #        PushMPC's native hook block for mpv is already in that file, Emby Theater shares it and nothing more is written.
@@ -36,11 +40,15 @@
 # Tests (test-apps-linux.sh): PUSHMPC_SNAP_ROOT (default /snap), PUSHMPC_EMBY_DIR, PUSHMPC_STREMIO_BIN / _LIB and
 # PUSHMPC_APPS_DESKTOP_DIRS point at fake installs; PUSHMPC_PRELOAD_VAR renames LD_PRELOAD for the self-test.
 # Exit: 0 done, 1 error, 2 usage, 3 nothing to do here (none of these players found) or a target not supported.
+# shellcheck disable=SC2329  # the do_* functions run through run_t
 set -u
 
 action=${1:-}; [ $# -gt 0 ] && shift
 from=''; kit=''; target=auto; opts=''; dry=0; json=0
 while [ $# -gt 0 ]; do
+    case $1 in
+        --from|--kit|--target|--opts) [ $# -ge 2 ] || { echo "pushmpc-apps-linux.sh: $1 needs a value" >&2; exit 2; } ;;
+    esac
     case $1 in
         --from) from=$2; shift 2 ;;
         --kit) kit=$2; shift 2 ;;
@@ -76,6 +84,9 @@ conf_add() {   # conf_add <mpv.conf> <begin> <end> <body lines>
 conf_remove() {   # conf_remove <mpv.conf> <begin> <end>
     c=$1; [ -f "$c" ] || { rm -f "$c.pushmpc-apps-absent"; return 0; }
     conf_strip "$c" "$2" "$3" > "$c.pushmpc-tmp" && mv "$c.pushmpc-tmp" "$c"
+    # awk ends every line with a newline: an original without a final one is the same file once read that way
+    if [ -f "$c.pushmpc-apps-backup" ] && ! cmp -s "$c" "$c.pushmpc-apps-backup" \
+        && awk -v BINMODE=3 1 "$c.pushmpc-apps-backup" | cmp -s - "$c"; then cp "$c.pushmpc-apps-backup" "$c"; fi
     if [ -f "$c.pushmpc-apps-backup" ] && cmp -s "$c" "$c.pushmpc-apps-backup"; then rm -f "$c.pushmpc-apps-backup"
     elif [ -f "$c.pushmpc-apps-absent" ] && [ ! -s "$c" ]; then rm -f "$c" "$c.pushmpc-apps-absent"
     else rm -f "$c.pushmpc-apps-backup" "$c.pushmpc-apps-absent"; fi
@@ -118,19 +129,33 @@ selftest() {
 
 # ---------------------------------------------------------------------------------------------- Snap: C plugin
 snap_has() { command -v snap >/dev/null 2>&1 && snap list "$1" >/dev/null 2>&1; }
-do_snap() {   # do_snap <target> <snap> <mpv.conf below ~/snap/<snap>/current> <label>
-    name=$1; sn=$2; rel=$3; label=$4
-    S=${PUSHMPC_SNAP_ROOT:-/snap}/$sn/current; dest=$HOME/snap/$sn/common/pushmpc; conf=$HOME/snap/$sn/current/$rel
+do_snap() {   # do_snap <target> <snap> <label> <mpv.conf below ~/snap/<snap>/>...: the first always, the others when their folder exists
+    name=$1; sn=$2; label=$3; shift 3
+    S=${PUSHMPC_SNAP_ROOT:-/snap}/$sn/current; U=$HOME/snap/$sn; dest=$U/common/pushmpc
     bm="# >>> PushMPC ($label): do not edit between these lines (PushMPC uninstall removes them)"; em="# <<< PushMPC ($label)"
     case $action in
-    status) if conf_has "$conf" "$bm" && [ -f "$dest/pushmpc_hook.so" ]; then emit "$name" installed "$conf"; else emit "$name" not-installed "snap $sn"; fi ;;
+    status)
+        st=not-installed; where="snap $sn"
+        for rel in "$@"; do if conf_has "$U/$rel" "$bm" && [ -f "$dest/pushmpc_hook.so" ]; then st=installed; where=$U/$rel; break; fi; done
+        emit "$name" "$st" "$where" ;;
     install)
         files_ok || { emit "$name" error "the files are not in $from / $kit"; return 1; }
         lib=$(find -L "$S" -name 'libmpv.so*' 2>/dev/null | sort | head -n 1)
         [ -n "$lib" ] || { emit "$name" unsupported "no libmpv.so in snap $sn"; return 3; }
-        [ "$dry" = 1 ] && { emit "$name" would-install "$dest; $conf"; return 0; }
+        [ "$dry" = 1 ] && { emit "$name" would-install "$dest; $U/$1"; return 0; }
+        # snapd makes ~/snap/<name>/<revision>, common and the "current" link on the first start: never make them ourselves
+        [ -e "$U/current" ] || snap run --shell "$sn" -c true >/dev/null 2>&1
+        [ -d "$U/common" ] || { emit "$name" error "snap $sn has no user folder $U/common (start it once)"; return 1; }
         copy_base "$dest" || { emit "$name" error "cannot write $dest"; return 1; }
-        conf_add "$conf" "$bm" "$em" "$(hook_body "$dest")" || { emit "$name" error "cannot write $conf"; return 1; }
+        confs=''; first=1
+        for rel in "$@"; do
+            c=$U/$rel
+            if [ "$first" = 1 ] || { [ -e "$U/current" ] && [ -d "$(dirname "$c")" ]; }; then
+                conf_add "$c" "$bm" "$em" "$(hook_body "$dest")" || { emit "$name" error "cannot write $c"; return 1; }
+                confs="$confs${confs:+, }$c"
+            fi
+            first=0
+        done
         # inside the Snap's confinement, with Plex's own libmpv; a second try puts every library folder of the Snap on
         # the search path, for a libmpv that relies on its launcher's LD_LIBRARY_PATH
         selftest "$dest" snap run --shell "$sn" -c "PUSHMPC_HOST_TMP=\"\$SNAP_USER_COMMON\" PUSHMPC_HOST_SCRIPT='$dest/pushmpc_hook.so' '$dest/pushmpc-selftest' '$lib'"; s=$?
@@ -138,12 +163,12 @@ do_snap() {   # do_snap <target> <snap> <mpv.conf below ~/snap/<snap>/current> <
             ldp=$(find -L "$S" -name '*.so*' -type f 2>/dev/null | sed 's|/[^/]*$||' | sort -u | tr '\n' ':')
             selftest "$dest" snap run --shell "$sn" -c "LD_LIBRARY_PATH='$ldp'\"\${LD_LIBRARY_PATH:-}\" PUSHMPC_HOST_TMP=\"\$SNAP_USER_COMMON\" PUSHMPC_HOST_SCRIPT='$dest/pushmpc_hook.so' '$dest/pushmpc-selftest' '$lib'"; s=$?
         fi
-        if [ "$s" = 0 ]; then emit "$name" installed "snap $sn: $conf; selftest: $st_detail"; return 0; fi
-        conf_remove "$conf" "$bm" "$em"; remove_files "$dest"
+        if [ "$s" = 0 ]; then emit "$name" installed "snap $sn: $confs; selftest: $st_detail"; return 0; fi
+        for rel in "$@"; do conf_remove "$U/$rel" "$bm" "$em"; done; remove_files "$dest"
         emit "$name" not-active "snap $sn: undone; ${st_detail:-the self-test could not run}"; return 3 ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$dest"; return 0; }
-        conf_remove "$conf" "$bm" "$em"; remove_files "$dest"; emit "$name" uninstalled "snap $sn" ;;
+        for rel in "$@"; do conf_remove "$U/$rel" "$bm" "$em"; done; remove_files "$dest"; emit "$name" uninstalled "snap $sn" ;;
     esac
 }
 
@@ -250,7 +275,7 @@ do_stremio() {
         if [ "$s" != 0 ]; then remove_files "$dest"; emit stremio not-active "not changed ($lib): ${st_detail:-the self-test could not run}"; return 3; fi
         vfo=auto; [ -n "$opts" ] && vfo=$opts
         mkdir -p "$(dirname "$dst")"
-        awk -v p="env LD_PRELOAD=$pre PUSHMPC_PRELOAD_VF=$vfo " '/^Exec=/ { sub(/^Exec=/, "Exec=" p) } { print } /^\[Desktop Entry\]/ { print "X-PushMPC=PushMPC uninstall removes this copy of the menu entry" }' "$src" > "$dst" \
+        awk -v p="env LD_PRELOAD=$pre PUSHMPC_PRELOAD_VF=$vfo " '/^Exec=/ { $0 = "Exec=" p substr($0, 6) } { print } /^\[Desktop Entry\]/ { print "X-PushMPC=PushMPC uninstall removes this copy of the menu entry" }' "$src" > "$dst" \
             || { remove_files "$dest"; emit stremio error "cannot write $dst"; return 1; }
         emit stremio installed "$dst ($lib); selftest: $st_detail" ;;
     uninstall)
@@ -262,9 +287,9 @@ do_stremio() {
 
 rc=0; found=0
 run_t() { found=1; "$@" || { r=$?; [ "$r" = 3 ] && [ "$rc" = 0 ] && rc=3; [ "$r" = 1 ] && rc=1; }; return 0; }
-want plex-snap && snap_has plex-desktop && run_t do_snap plex-snap plex-desktop .local/share/plex/mpv.conf 'Plex Snap'
-want plex-htpc-snap && snap_has plex-htpc && run_t do_snap plex-htpc-snap plex-htpc .local/share/plex/mpv.conf 'Plex HTPC Snap'
-want emby-snap && snap_has emby-theater && run_t do_snap emby-snap emby-theater .config/mpv/mpv.conf 'Emby Theater Snap'
+want plex-snap && snap_has plex-desktop && run_t do_snap plex-snap plex-desktop 'Plex Snap' common/mpv.conf current/.local/share/plex/mpv.conf
+want plex-htpc-snap && snap_has plex-htpc && run_t do_snap plex-htpc-snap plex-htpc 'Plex HTPC Snap' common/mpv.conf current/.local/share/plex/mpv.conf
+want emby-snap && snap_has emby-theater && run_t do_snap emby-snap emby-theater 'Emby Theater Snap' current/.config/mpv/mpv.conf
 want stremio-flatpak && fp_has com.stremio.Stremio && run_t do_flatpak stremio-flatpak com.stremio.Stremio
 want jellyfin-desktop-flatpak && fp_has org.jellyfin.JellyfinDesktop && run_t do_flatpak jellyfin-desktop-flatpak org.jellyfin.JellyfinDesktop
 if want emby-flatpak && command -v flatpak >/dev/null 2>&1; then
