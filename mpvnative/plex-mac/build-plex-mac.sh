@@ -21,10 +21,9 @@ for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in
     libs=()
     for arch in arm64 x86_64; do
         (
-            cd "$src"
-            [ ! -f config.mak ] || make distclean >/dev/null 2>&1 || true
+            b="$work/build-$arch"; rm -rf "$b"; mkdir -p "$b"; cd "$b"   # out of tree: one build folder per architecture
             cross=''; [ "$arch" = "$(uname -m)" ] || cross='--enable-cross-compile'
-            ./configure --cc="clang -arch $arch" --arch="$arch" --target-os=darwin $cross \
+            "$src/configure" --cc="clang -arch $arch" --arch="$arch" --target-os=darwin $cross \
                 --disable-everything --enable-filter=pushmpc --enable-shared --disable-static --disable-programs \
                 --disable-doc --disable-avdevice --disable-avformat --disable-avcodec --disable-swresample --disable-swscale \
                 --disable-postproc --disable-asm --install-name-dir='@rpath' \
@@ -33,7 +32,7 @@ for commit in $(python3 -c "import json,sys; print(' '.join(c['commit'] for c in
             grep -qs 'CONFIG_PUSHMPC_FILTER 1' config_components.h config.h
             make -j"$(sysctl -n hw.ncpu)" >/dev/null
         )
-        cp "$src/libavfilter/libavfilter.8.dylib" "$work/avfilter-$arch.dylib"
+        cp "$work/build-$arch/libavfilter/libavfilter.8.dylib" "$work/avfilter-$arch.dylib"
         libs+=("$work/avfilter-$arch.dylib")
     done
     vdir="$src/libavfilter/"
