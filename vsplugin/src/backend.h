@@ -147,15 +147,50 @@ inline BackendChoice SelectBackend(std::string requested, const BackendProbe& p)
 inline constexpr double kCpuShare = 0.6;
 inline constexpr int kAutoMaxHeightFull = 1080;
 struct PortableK { int k = 1; double costMs = 0, budgetMs = 0; std::string why; };
+// The player's own work per shown frame on the GPU (its scaling and presentation, a window's desktop composition):
+// PushMpcAuto.h measured 0.33 ms per shown 4K frame for the composition on an RTX 5090; the GPUs these engines run on
+// are taken as about 3x slower (prior). It counts against the GPU engine's budget only (the CPU engine's budget is CPU time).
+inline constexpr double kPortableShowMs4k = 1.0;
+// One new frame on every refresh of a fixed refresh rate (refresh / output fps < 1.5) has no slack for a late frame
+// (PushMpcAuto.h kFixedRefreshSpareMs)
+inline constexpr double kPortableSpareMs = 1.0;
+// The multiplier up to maxK (all of which fit) that shows frames shortest at a fixed refresh (PushMpcAuto.h's rule: the
+// shortest longest hold, a tie going to the even cadence, then to the larger); displayHz <= 0: maxK as it is
+inline int CadenceK(int maxK, double srcFps, double displayHz)
+{
+    if (maxK <= 1 || displayHz <= 0 || srcFps <= 0) return maxK;
+    int best = 1; double bestHold = 1e9; bool bestEven = true;
+    for (int k = 1; k <= maxK; ++k) {
+        const double q = displayHz / (srcFps * k), n = std::round(q);
+        const bool even = n >= 1 && std::fabs(q - n) / n <= 0.02;
+        const double hold = std::max(1.0, even ? n : std::ceil(q)) * 1000.0 / displayHz;
+        if (k == 1 || hold < bestHold - 0.05 || (std::fabs(hold - bestHold) <= 0.05 && (even || !bestEven))) { best = k; bestHold = hold; bestEven = even; }
+    }
+    return best;
+}
 // smoother: 0 Auto, 1 off, 2..8 fixed (the same words as the registry's Smoother); displayHz <= 0: unknown (Auto then
 // aims at x2)
 // gpu: the GPU engine (no cap at 2 above 1080p: its costs are measured the same way, the cap was the CPU's)
-inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, int height, double meMs, double genMs, bool gpu = false)
+// showMs: the player's GPU work per shown frame (< 0: the prior kPortableShowMs4k at a 16:9 picture of this height)
+// These routes cannot see VRR or whether the player is full screen: a fixed refresh and a window are assumed, so Auto
+// takes the multiplier with the shortest longest hold on screen, a tie going to the even cadence, then to the larger
+// (PushMpcAuto.h's rule; 240 Hz: 5x rather than an uneven 6x-9x).
+inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, int height, double meMs, double genMs, bool gpu = false, double showMs = -1)
 {
     PortableK r;
     if (srcFps <= 0) srcFps = 23.976;
     r.budgetMs = 1000.0 / srcFps * kCpuShare;
-    auto cost = [&](int k) { return k <= 1 ? 0.0 : meMs + (k - 1) * genMs; };
+    if (showMs < 0) showMs = kPortableShowMs4k * (double(height) * double(height) * 16.0 / 9.0) / (3840.0 * 2160.0);
+    auto cost = [&](int k) { return k <= 1 ? 0.0 : meMs + (k - 1) * genMs + (gpu ? k * showMs : 0.0); };
+    auto hold = [&](int k) {
+        const double out = srcFps * k;
+        if (displayHz <= 0) return 1000.0 / out;
+        const double q = displayHz / out, n = std::round(q);
+        const bool even = n >= 1 && std::fabs(q - n) / n <= 0.02;
+        return std::max(1.0, even ? n : std::ceil(q)) * 1000.0 / displayHz;
+    };
+    auto evenAt = [&](int k) { const double q = displayHz / (srcFps * k), n = std::round(q); return displayHz > 0 && n >= 1 && std::fabs(q - n) / n <= 0.02; };
+    auto spare = [&](int k) { return displayHz > 0 && displayHz / (srcFps * k) < 1.5 ? kPortableSpareMs : 0.0; };
     char b[256];
     if (smoother == 1) { r.k = 1; r.why = "Smoother off: no frame generation"; return r; }
     if (smoother >= 2) {
@@ -168,13 +203,22 @@ inline PortableK DecidePortableK(int smoother, double srcFps, double displayHz, 
     const int displayK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8) : 2;
     const int cap = !gpu && height > kAutoMaxHeightFull ? 2 : 8;
     const int want = std::min(displayK, cap);
-    int k = 1;
-    for (int c = want; c >= 2; --c) if (cost(c) <= r.budgetMs) { k = c; break; }
+    int k = 1, lastFit = 1;
+    double bestHold = hold(1);
+    bool bestEven = true;
+    for (int c = 2; c <= want; ++c) {
+        if (cost(c) + spare(c) > r.budgetMs) break;
+        lastFit = c;
+        const double h = hold(c);
+        const bool ev = evenAt(c);
+        if (k == 1 || h < bestHold - 0.05 || (std::fabs(h - bestHold) <= 0.05 && (ev || !bestEven))) { k = c; bestHold = h; bestEven = ev; }
+    }
     r.k = k; r.costMs = cost(k);
     if (want <= 1) snprintf(b, sizeof(b), "Auto: the display (%.2f Hz) is not faster than the source (%.3f fps): x1", displayHz, srcFps);
     else if (k == 1) snprintf(b, sizeof(b), gpu ? "Auto: the GPU path is too slow here (x2 needs %.1f ms per source frame, budget %.1f ms): x1" : "Auto: the CPU is too slow here (x2 needs %.1f ms per source frame, budget %.1f ms): x1", cost(2), r.budgetMs);
-    else snprintf(b, sizeof(b), "Auto: x%d (display x%d%s; %.1f ms per source frame of %.1f ms; motion %.1f ms, each generated frame %.1f ms)", k, displayK,
-                  cap < displayK ? ", capped at x2 above 1080p" : "", r.costMs, r.budgetMs, meMs, genMs);
+    else snprintf(b, sizeof(b), "Auto: x%d (display x%d%s%s; %.1f ms per source frame of %.1f ms; motion %.1f ms, each generated frame %.1f ms%s)", k, displayK,
+                  cap < displayK ? ", capped at x2 above 1080p" : "", lastFit > k ? ", the even cadence at a fixed refresh (assumed)" : "", r.costMs, r.budgetMs, meMs, genMs,
+                  gpu ? ", the player's share per shown frame included" : "");
     r.why = b;
     return r;
 }

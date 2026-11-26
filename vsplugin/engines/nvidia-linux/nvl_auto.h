@@ -78,6 +78,10 @@ struct Costs {
     double nvofPair1080 = 3.0, warp4k = 0.35;
     double flowMeasured = 0, warpMeasured = 0;      // ms at the measured source / output size (as is)
     double guardFlow = 1.0;                         // the guard's flow measures on top of VFG (Windows: +1.0 ms at 1080p)
+    // the player's work per SHOWN frame at 4K on the same GPU (PushMpcAuto.h ShowCost, RTX 5090 priors): a window's
+    // desktop composition, and mpv's HDR to SDR tone map (this route hands HDR sources on as HDR; mpv maps them for an SDR
+    // display)
+    double compose4k = 0.33, rendererTm4k = 0.38;
 };
 // the optical-flow tier's cost per source frame at multiplier m (src = source pixels / 1080p, out = output pixels / 4K)
 inline double NvofCost(const Costs& c, int m, double srcPix1080, double pixOut)
@@ -90,6 +94,9 @@ inline double NvofCost(const Costs& c, int m, double srcPix1080, double pixOut)
 // NVIDIA VFG up to 16x (the SDK multiplier mode to 8x, its timestep mode above; nvl_engine.cpp); the optical-flow tier to 8x
 inline constexpr int kVfgMaxK = 16;
 inline constexpr double kBudgetShare = 0.85, kRefreshSlack = 1.02, kCadenceTolerance = 0.02, kHighSpareMs = 3.0;
+// a fixed refresh (no VRR) with one new frame on every refresh (refresh / fps < 1.5): a late frame repeats a whole
+// refresh, so the plan needs this much more to spare (PushMpcAuto.h kFixedRefreshSpareMs)
+inline constexpr double kFixedRefreshSpareMs = 1.0;
 
 inline bool CadenceEven(double refresh, double outFps)
 {
@@ -150,7 +157,9 @@ struct Settings {
     bool hdrPeakSet = false;    // the user chose it (else the display's peak when mpv reports one)
 };
 struct Source { int w = 1920, h = 1080; double fps = 23.976; bool hdr = false; bool tenBit = false; double bpp = -1; };
-struct Display { double refreshHz = 0; bool vrr = false; bool hdr = false; };   // refreshHz <= 0: unknown
+// refreshHz <= 0: unknown. vrr: not detectable on Linux (fixed refresh assumed). fullscreen: mpv's fullscreen property
+// (display_fs from pushmpc-display.lua); unknown = a window
+struct Display { double refreshHz = 0; bool vrr = false; bool hdr = false; bool fullscreen = false; };
 
 struct Plan {
     int k = 1, vfgQuality = 1;
@@ -193,7 +202,9 @@ inline Plan Decide(const Settings& s, const Source& src, const Display& d, const
     const double pixOut = Pix(outW, outH);
     const double base = (r.hdr ? c.hdr4k * pixOut * c.card : 0.0);
     auto vsr = [&](int level) { return wantVsr ? VsrCost(c, level, style, pixOut) : 0.0; };
-    auto over = [&](int m) { return c.overheadPerOutput4k * pixOut * c.card * m; };
+    // per shown frame: this route's conversion and readback, the window's composition, mpv's tone map of an HDR source
+    const double showPer = (d.fullscreen ? 0.0 : c.compose4k) + (src.hdr && !d.hdr ? c.rendererTm4k : 0.0);
+    auto over = [&](int m) { return (c.overheadPerOutput4k + showPer) * pixOut * c.card * m; };
     int level = wantVsr ? (s.sharper >= 1 ? s.sharper : 1) : 0;
     // --- frame generation
     const double refresh = d.refreshHz > 1 ? d.refreshHz : fps * 2;   // unknown display: aim at x2
@@ -215,6 +226,11 @@ inline Plan Decide(const Settings& s, const Source& src, const Display& d, const
                 if (out > refresh * kRefreshSlack) { snprintf(b, sizeof(b), "refresh %.2f Hz (%dx would be %.1f fps)", refresh, m, out); why = b; break; }
                 const double cost = base + vsr(level) + fgCost(quality, m) + over(m);
                 if (cost > r.budgetMs) { snprintf(b, sizeof(b), "GPU budget (%dx would take %.1f of %.1f ms)", m, cost, r.budgetMs); why = b; break; }
+                if (!d.vrr && refresh / out < 1.5 && cost + kFixedRefreshSpareMs > r.budgetMs) {
+                    snprintf(b, sizeof(b), "GPU budget (%dx would take %.1f of %.1f ms; a new frame on every refresh of a fixed %.2f Hz needs %.0f ms spare)",
+                             m, cost, r.budgetMs, refresh, kFixedRefreshSpareMs);
+                    why = b; break;
+                }
                 lastFit = m;
                 const double h = HoldMs(refresh, d.vrr, out);
                 const bool even = d.vrr || CadenceEven(refresh, out);

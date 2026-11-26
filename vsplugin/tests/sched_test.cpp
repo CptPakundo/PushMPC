@@ -228,6 +228,18 @@ static void TestAuto()
         f = ResolveDisplay(w, true, pm::VrrMode::Auto, 240, -1, 0);
         CHECK(!f.vrr && f.vrrHow.find(L"not full screen when PushMPC started") != std::wstring::npos);
     }
+    {   // full screen for the renderer's share per shown frame: display_fs / --fs with a window; none known = a window
+        pm::Display w = q; w.fullscreen = false;
+        CHECK(ResolveDisplay(w, true, pm::VrrMode::Auto, 240, -1, 1).fullscreen && !ResolveDisplay(w, true, pm::VrrMode::Auto, 240, -1, 0).fullscreen);
+        CHECK(!ResolveDisplay(w, false, pm::VrrMode::Auto, 240, -1).fullscreen && ResolveDisplay(w, false, pm::VrrMode::Auto, 240, -1, 1).fullscreen);
+        // who tone-maps is the route's: pushcore (mpv routes) or the player (VLC); the player's map costs per shown frame
+        CHECK(WithToneMapBy(s, true).hdrToSdr == pm::HdrToSdr::PushMpc && WithToneMapBy(s, false).hdrToSdr == pm::HdrToSdr::Player);
+        pm::Source hdrSrc; hdrSrc.w = 3840; hdrSrc.h = 2160; hdrSrc.fps = 24000.0 / 1001; hdrSrc.hdr = true; hdrSrc.tenBit = true;
+        pm::Display sdr = ResolveDisplay(w, true, pm::VrrMode::Auto, 239.96, 0, 0);
+        const pm::Choice core = pm::Decide(WithToneMapBy(s, true), hdrSrc, sdr, costs, g), player = pm::Decide(WithToneMapBy(s, false), hdrSrc, sdr, costs, g);
+        CHECK(core.coreToneMap && !player.coreToneMap && player.multiplier <= core.multiplier);
+        std::printf("  4K HDR on an SDR 240 Hz window: pushcore tone map x%d, the player's x%d\n", core.multiplier, player.multiplier);
+    }
     // display_hdr forces the HDR flag
     d = ResolveDisplay(q, false, pm::VrrMode::Auto, 0, 1); CHECK(d.hdr && d.refreshHz == 60);
     // the user's Smoother setting caps it

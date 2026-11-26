@@ -402,8 +402,8 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     d->src.fps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     d->src.hdr = IsHdrTransfer(col.transfer); d->src.tenBit = f.bitsPerSample > 8; d->src.bppEq = -1;
     const HWND wnd = MpvWindow();
-    d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg);
-    d->choice = pm::Decide(s, d->src, d->disp, costs, g);
+    d->disp = ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdrArg, int(ArgInt(in, a, "display_fs", -1)));
+    d->choice = pm::Decide(WithToneMapBy(s, true), d->src, d->disp, costs, g);   // pushcore tone-maps for an SDR display (displayHdr 0)
     const pm::Choice& c = d->choice;
 
     Log(std::format("script instance: {}x{} {}-bit, {}/{} fps, {} frames; colour {} (matrix {} transfer {} primaries {} range {}); settings from the registry{}",
@@ -585,7 +585,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "chroma:data:opt;adapter:data:opt;core_dir:data:opt;runtime_dir:data:opt;display_fps:float:opt;display_hdr:int:opt;"
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
-        "display_w:int:opt;display_h:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
+        "display_w:int:opt;display_h:int:opt;display_fs:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);

@@ -266,7 +266,7 @@ public:
         const double displayFps = std::atof(Opt(o, "display_fps", "0").c_str());
         const int displayHdr = Opt(o, "display_hdr").empty() ? -1 : std::atoi(Opt(o, "display_hdr").c_str());
         m_disp = pmvs::ResolveDisplay(pm::QueryDisplay(wnd, s.vrr, g.nvidia()), wnd != nullptr, s.vrr, displayFps, displayHdr);
-        m_choice = pm::Decide(s, m_src, m_disp, costs, g);
+        m_choice = pm::Decide(pmvs::WithToneMapBy(s, true), m_src, m_disp, costs, g);   // pushcore tone-maps for an SDR display (displayHdr 0)
         m_settings = s;
         std::wstring note;
         m_ps = pmvs::ToCore(s, m_choice, m_disp, m_src.w, m_src.h, m_src.hdr, m_disp.hdr, &note);

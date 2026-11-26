@@ -19,7 +19,9 @@ require("mp.options").read_options(opts, "pushmpc-display")
 if not opts.enable then return end
 
 local msg = require "mp.msg"
-local KEYS = { display_hdr = true, display_peak = true, display_w = true, display_h = true }
+-- display_fs: mpv's fullscreen property (Auto counts a window's composition per shown frame, and the even cadence of a
+-- fixed refresh; a toggle re-applies the filter like a display change)
+local KEYS = { display_hdr = true, display_peak = true, display_w = true, display_h = true, display_fs = true }
 
 -- user-data "k=v,k=v" <-> table (order kept for the keys we do not own)
 local function parse(ud)
@@ -36,7 +38,7 @@ end
 local function join(t, order)
     local out = {}
     for _, k in ipairs(order) do if t[k] ~= nil then out[#out + 1] = k .. "=" .. t[k] end end
-    for _, k in ipairs({ "display_hdr", "display_peak", "display_w", "display_h" }) do
+    for _, k in ipairs({ "display_hdr", "display_peak", "display_w", "display_h", "display_fs" }) do
         local seen = false
         for _, o in ipairs(order) do if o == k then seen = true end end
         if not seen and t[k] ~= nil then out[#out + 1] = k .. "=" .. t[k] end
@@ -54,6 +56,7 @@ local function display()
     if hdr == 1 and tonumber(tp["max-luma"]) and tonumber(tp["max-luma"]) >= 100 then d.display_peak = string.format("%d", math.floor(tonumber(tp["max-luma"]) + 0.5)) end
     local w, h = mp.get_property_number("display-width"), mp.get_property_number("display-height")
     if w and h and w > 0 and h > 0 then d.display_w = string.format("%d", w); d.display_h = string.format("%d", h) end
+    d.display_fs = mp.get_property_native("fullscreen") and "1" or "0"
     return d
 end
 
@@ -61,7 +64,7 @@ local last = nil
 local function apply()
     local d = display()
     if not d then return end
-    local key = (d.display_hdr or "") .. "/" .. (d.display_peak or "") .. "/" .. (d.display_w or "") .. "x" .. (d.display_h or "")
+    local key = (d.display_hdr or "") .. "/" .. (d.display_peak or "") .. "/" .. (d.display_w or "") .. "x" .. (d.display_h or "") .. "/" .. d.display_fs
     if key == last then return end
     local vf = mp.get_property_native("vf")
     if type(vf) ~= "table" then return end
@@ -101,4 +104,5 @@ end
 mp.observe_property("video-target-params", "native", later)
 mp.observe_property("display-width", "number", later)
 mp.observe_property("display-height", "number", later)
+mp.observe_property("fullscreen", "bool", later)
 mp.register_event("file-loaded", function() last = nil; later() end)

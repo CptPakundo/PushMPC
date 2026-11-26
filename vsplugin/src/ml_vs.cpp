@@ -176,7 +176,7 @@ int MlMeasuredMultiplier(const std::string& runtimeDir, int width, int height, d
     if (fps <= 1) fps = 23.976;
     const int wantK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, 8) : 2;
     const auto c = pmml::choose(results, fps, wantK);
-    return c.ok ? c.multiplier : 0;
+    return c.ok ? CadenceK(c.multiplier, fps, displayHz) : 0;   // the even cadence at a fixed refresh (VRR is not known here)
 }
 
 bool MlRuntimePresent(const std::string& dir)
@@ -253,7 +253,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const auto results = CachedResults(rt + "/pmml-autobench.json", w, h);
     if (reqBackend.empty() && !results.empty()) {
         const auto c = pmml::choose(results, srcFps, wantK);
-        if (c.ok) { o.backend = c.candidate.backend; o.tier = c.candidate.tier; flowOnce = c.candidate.flowOnce; k = fixedK >= 2 ? wantK : c.multiplier; decision = "Auto (measured): " + c.why; }
+        if (c.ok) { o.backend = c.candidate.backend; o.tier = c.candidate.tier; flowOnce = c.candidate.flowOnce; k = fixedK >= 2 ? wantK : CadenceK(c.multiplier, srcFps, err ? 0.0 : displayHz); decision = "Auto (measured): " + c.why + (k < c.multiplier ? std::format("; x{}, the even cadence at {:.2f} Hz (fixed refresh assumed)", k, displayHz) : std::string()); }
     }
     if (decision.empty()) {
         if (!reqBackend.empty() && !pmml::Backend::parse(reqBackend, &o.backend)) return fail("ml_backend '" + reqBackend + "' is not a pmml backend");

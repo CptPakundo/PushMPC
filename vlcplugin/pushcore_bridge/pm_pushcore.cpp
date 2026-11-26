@@ -248,10 +248,13 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfg, ID3D11Device* device, HANDLE mutex,
     src.w = cfg->width; src.h = cfg->height;
     src.fps = cfg->fps_num > 0 && cfg->fps_den > 0 ? double(cfg->fps_num) / cfg->fps_den : 23.976;
     src.hdr = IsHdrTransfer(cfg->transfer); src.tenBit = cfg->bits > 8;
-    pm::Display disp = pm::QueryDisplay(nullptr, s.vrr, g.nvidia());
-    if (cfg->display_hz > 1) disp.refreshHz = cfg->display_hz;
+    // the display: VLC's window is not known here (the primary monitor; VRR as for a windowed player), full screen from
+    // VLC's own "fullscreen" option (cfg->fullscreen), which also lets G-SYNC fullscreen-only count (ResolveDisplay)
+    const pm::Display real = ResolveDisplay(pm::QueryDisplay(nullptr, s.vrr, g.nvidia()), true, s.vrr, cfg->display_hz, -1, cfg->fullscreen ? 1 : 0);
+    pm::Display disp = real;
     disp.hdr = src.hdr;   // HDR sources stay HDR10 (VLC presents them); SDR stays SDR
-    pm::Choice c = pm::Decide(s, src, disp, costs, g);
+    // Auto's costs: VLC tone-maps an HDR source for an SDR display itself, once per shown frame (PushMpcAuto.h ShowCost)
+    pm::Choice c = pm::Decide(WithToneMapBy(s, false), src, real, costs, g);
     c.sr = false; c.nr = false; c.deband = false; c.hdr = false;
     PushCoreSettings ps = ToCore(s, c, disp, src.w, src.h, src.hdr, disp.hdr, nullptr);
     ps.sr = 0; ps.nr = 0; ps.deband = 0; ps.videoHdr = 0;

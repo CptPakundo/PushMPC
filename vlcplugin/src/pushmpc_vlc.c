@@ -1070,6 +1070,7 @@ static int Open(vlc_object_t *obj)
             if (zhz <= 0) zhz = pm_display_hz();
             pm_pc_cfg pcc;
             FillPcc(&pcc, v, v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B ? 10 : 8, smoother, zhz, OptInt(f, CFG "warp", 0) ? 1 : 0);
+            pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
             int pk = 1;
             char err[300] = "";
             sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
@@ -1120,6 +1121,7 @@ static int Open(vlc_object_t *obj)
     if (!sys->hw && !sys->zc && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         FillPcc(&pcc, v, bits, smoother, hz, OptInt(f, CFG "warp", 0) ? 1 : 0);
+        pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
         int pk = 1;
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));

@@ -141,9 +141,19 @@ static void TestAuto()
     Caps c5090; c5090.gpu = GpuClass::Rtx50; c5090.vsr = c5090.hdr = c5090.vfg = true;
     Costs costs; costs.card = CardFactor("NVIDIA GeForce RTX 5090", GpuClass::Rtx50);
     Settings s; Source src; src.w = 1920; src.h = 1080; src.fps = 24000.0 / 1001;
-    Display d; d.refreshHz = 240;
+    Display d; d.refreshHz = 240; d.fullscreen = true;   // mpv full screen (display_fs); VRR is never known here: fixed refresh
     Plan p = Decide(s, src, d, c5090, costs);
     CHECK(p.k == 10 && p.vfgQuality == 1 && p.vsr && p.vsrLevel >= 1 && p.outW == 3840 && p.outH == 2160 && !p.hdr, "5090 1080p24 at 240 Hz: x10 (one new frame per refresh): %s", p.why.c_str());
+    {   // the player's share per shown frame: a window's composition (10 x 0.33 ms more at 4K) leaves no 1 ms spare for x10 at a
+        // fixed 240 Hz: x5, the even cadence; an HDR source on an SDR display adds mpv's tone map per shown frame
+        Display w = d; w.fullscreen = false;
+        const Plan pw = Decide(s, src, w, c5090, costs);
+        CHECK(pw.k == 5 && pw.why.find("spare") != std::string::npos, "windowed 240 Hz at the budget edge: x5 (even cadence): %s", pw.why.c_str());
+        Source hs = src; hs.hdr = true;
+        Settings f5 = s; f5.smoother = 5;
+        const Plan sdr5 = Decide(f5, src, d, c5090, costs), hdr5 = Decide(f5, hs, d, c5090, costs);
+        CHECK(hdr5.predictedMs > sdr5.predictedMs + 5 * 0.38 * 0.99 - 0.01 || hdr5.vsrLevel < sdr5.vsrLevel, "an HDR source on an SDR display: mpv's tone map counts per shown frame: %.2f vs %.2f ms", hdr5.predictedMs, sdr5.predictedMs);
+    }
     { Source s15 = src; s15.fps = 15.0; const Plan p15 = Decide(s, s15, d, c5090, costs); CHECK(p15.k == 16, "15 fps at 240 Hz: x16 VFG (timestep mode above x8): %s", p15.why.c_str()); }
     { Settings f16 = s; f16.smoother = 16; const Plan pf = Decide(f16, src, d, c5090, costs); CHECK(pf.k == 16, "Smoother 16 is honoured: %s", pf.why.c_str()); }
     d.refreshHz = 0;

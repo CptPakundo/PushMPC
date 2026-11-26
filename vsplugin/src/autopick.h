@@ -5,6 +5,10 @@
 //  - VRR: the NVIDIA scope logic needs the player's window; without one (SMPlayer embeds mpv, MPC-QT is libmpv, vspipe)
 //    a fixed refresh is assumed, and said so;
 //  - plugin arguments override the HKCU\Software\PushMPC values;
+//  - full screen (the renderer's share per shown frame, PushMpcAuto.h ShowCost): mpv's window covering its monitor, or
+//    mpv started with --fs, or display_fs from pushmpc-display.lua (mpv's own fullscreen property); else a window;
+//  - who tone-maps an HDR source on an SDR display (WithToneMapBy): pushcore on these routes (displayHdr 0), the player
+//    on VLC (HDR10 stays HDR10 there);
 //  - the mapping onto PushCoreSettings (the filter's ToCore without the filter-only parts: PushMPC's own SDR-to-HDR
 //    curve and deband-by-renderer bookkeeping live in the filter).
 #pragma once
@@ -81,6 +85,9 @@ inline pm::Display ResolveDisplay(const pm::Display& queried, bool haveWindow, p
     pm::Display d = queried;
     if (displayFps > 1) d.refreshHz = displayFps;
     if (displayHdr >= 0) d.hdr = displayHdr != 0;
+    // full screen: the window covers its monitor (QueryDisplay), or mpv is told / was started full screen
+    if (haveWindow && !d.fullscreen) d.fullscreen = startsFullscreen >= 0 ? startsFullscreen != 0 : MpvStartsFullscreen(GetCommandLineW());
+    else if (!haveWindow && startsFullscreen >= 0) d.fullscreen = startsFullscreen != 0;
     if (!haveWindow && vrr == pm::VrrMode::Auto) {
         d.vrr = false; d.vrrKnown = false;
         d.vrrHow = L"the player's window is not known to the plugin (embedded or headless): fixed refresh assumed";
@@ -99,6 +106,10 @@ inline pm::Display ResolveDisplay(const pm::Display& queried, bool haveWindow, p
     }
     return d;
 }
+
+// Who tone-maps an HDR source on an SDR display, for Auto's cost (PushMpcAuto.h ShowCost): the route decides it, not Auto
+// (core = true: pushcore, displayHdr 0; false: the player, HDR10 kept)
+inline pm::Settings WithToneMapBy(pm::Settings s, bool core) { s.hdrToSdr = core ? pm::HdrToSdr::PushMpc : pm::HdrToSdr::Player; return s; }
 
 // ------------------------------------------------------------------------------------------------ PushCoreSettings
 inline uint32_t CoreFg(pm::FgMethod m) { return m == pm::FgMethod::Auto ? PUSHCORE_FG_VFG : uint32_t(int(m) - 1); }
@@ -139,12 +150,12 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     return p;
 }
 
-// the learned costs the filter stores (HKCU\Software\PushMPC\Learned, model 2) for this GPU, read-only here
+// the learned costs the filter stores (HKCU\Software\PushMPC\Learned, model 3) for this GPU, read-only here
 inline void LoadLearned(pm::Costs& c, const std::wstring& gpuName)
 {
     HKEY k = nullptr;
     if (gpuName.empty() || RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PushMPC\\Learned", 0, KEY_READ, &k) != ERROR_SUCCESS) return;
-    if (pm::RegReadStr(k, L"Gpu") == gpuName && pm::RegReadStr(k, L"Model") == L"2") {
+    if (pm::RegReadStr(k, L"Gpu") == gpuName && pm::RegReadStr(k, L"Model") == L"3") {
         auto num = [&](const std::wstring& n, double& v, bool* flag, double lo, double hi) {
             const std::wstring s = pm::RegReadStr(k, n.c_str());
             const double x = s.empty() ? -1 : _wtof(s.c_str());

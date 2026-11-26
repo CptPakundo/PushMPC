@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define PM_PC_ABI 1u
+#define PM_PC_ABI 2u   /* 2: pm_pc_cfg.fullscreen appended */
 
 typedef struct pm_pc pm_pc;
 
@@ -31,6 +31,7 @@ typedef struct pm_pc_cfg {
     double display_hz;            /* 0 = the primary display */
     int warp;                     /* 1 = WARP adapter (CI with the stub core) */
     const wchar_t *core_dir;      /* folder with pushcore.dll; NULL = the PushMPC install (%LOCALAPPDATA%\PushMPC\core) */
+    int fullscreen;               /* 1 = VLC plays full screen (its "fullscreen" option), 0 = windowed or not known (appended) */
 } pm_pc_cfg;
 
 typedef struct pm_pc_planes { const uint8_t *data[3]; ptrdiff_t stride[3]; } pm_pc_planes;
