@@ -70,6 +70,10 @@ conf_remove() {
     rm -f "$c.pushmpc-native-backup" "$c.pushmpc-native-absent"
 }
 
+# our proxy (any version) exports pushmpc_proxy_status; names Plex never ships are ours
+is_our_proxy() { [ -f "$1" ] && grep -aq pushmpc_proxy_status "$1"; }
+is_ours() { case $1 in pushmpc-avfilter-8.*.dylib|libpushmpc_engine.dylib|libpushmpc_engine_apple.dylib) return 0 ;; esac; return 1; }
+
 st_detail=''
 selftest() {   # selftest <Frameworks dir>: 0 active, 3 not, 2 no test possible
     [ -x "$from/pushmpc-plex-selftest" ] || { st_detail='no self-test (pushmpc-plex-selftest not shipped)'; return 2; }
@@ -101,39 +105,49 @@ do_app() {   # do_app <name> <bundle> <mpv.conf>
         [ -f "$from/libavfilter.8.dylib" ] && [ -f "$from/libpushmpc_engine.dylib" ] && ls "$from"/pushmpc-avfilter-8.*.dylib >/dev/null 2>&1 \
             || { emit "$name" error "the files are not in $from"; return 1; }
         [ "$dry" = 1 ] && { emit "$name" "$([ "$installed" = 1 ] && echo installed || echo would-install)" "$bundle"; return 0; }
-        if [ "$installed" = 1 ]; then
-            conf_add "$conf"; selftest "$fw"; s=$?
-            report "$name" $s "already in place in $bundle; $conf"; return $?
-        fi
         pkill -x Plex 2>/dev/null; pkill -x 'Plex HTPC' 2>/dev/null
         if ! touch "$fw/.pushmpc-write-test" 2>/dev/null; then
             emit "$name" refused "macOS does not allow writing into $bundle: allow this terminal (or Setup) in System Settings > Privacy & Security > App Management, or run as the user who installed Plex"
             return 1
         fi
         rm -f "$fw/.pushmpc-write-test"
-        rm -rf "$bk"; mkdir -p "$bk" || { emit "$name" error "cannot write $bk"; return 1; }
-        rm -f "$fw/libavfilter.8-plex.dylib"   # stale, from before a Plex update
-        cp -p "$fw/libavfilter.8.dylib" "$bk/libavfilter.8.dylib" && sha "$fw/libavfilter.8.dylib" > "$bk/libavfilter.8.dylib.sha256" \
-            && mv "$fw/libavfilter.8.dylib" "$fw/libavfilter.8-plex.dylib" && cp "$from/libavfilter.8.dylib" "$fw/libavfilter.8.dylib" \
-            || { emit "$name" error "cannot replace $fw/libavfilter.8.dylib"; return 1; }
+        mkdir -p "$bk" || { emit "$name" error "cannot write $bk"; return 1; }
+        prev=''; [ ! -f "$bk/added.txt" ] || prev=$(cat "$bk/added.txt")
+        if is_our_proxy "$fw/libavfilter.8.dylib"; then
+            # a proxy of ours (this version or an older one): Plex's original is libavfilter.8-plex.dylib already
+            [ -f "$fw/libavfilter.8-plex.dylib" ] || { emit "$name" error "$fw/libavfilter.8.dylib is a PushMPC proxy but Plex's original libavfilter.8-plex.dylib is missing (reinstall Plex)"; return 1; }
+            [ -f "$bk/libavfilter.8.dylib" ] || { cp -p "$fw/libavfilter.8-plex.dylib" "$bk/libavfilter.8.dylib" && sha "$fw/libavfilter.8-plex.dylib" > "$bk/libavfilter.8.dylib.sha256"; }
+            cmp -s "$from/libavfilter.8.dylib" "$fw/libavfilter.8.dylib" || cp "$from/libavfilter.8.dylib" "$fw/libavfilter.8.dylib" \
+                || { emit "$name" error "cannot replace $fw/libavfilter.8.dylib"; return 1; }
+        else
+            # Plex's own libavfilter.8.dylib (a first install, or an updated Plex app): back it up, rename it, the proxy in its place
+            rm -f "$fw/libavfilter.8-plex.dylib"   # the original from before the update
+            cp -p "$fw/libavfilter.8.dylib" "$bk/libavfilter.8.dylib" && sha "$fw/libavfilter.8.dylib" > "$bk/libavfilter.8.dylib.sha256" \
+                && mv "$fw/libavfilter.8.dylib" "$fw/libavfilter.8-plex.dylib" && cp "$from/libavfilter.8.dylib" "$fw/libavfilter.8.dylib" \
+                || { emit "$name" error "cannot replace $fw/libavfilter.8.dylib"; return 1; }
+        fi
         sha "$fw/libavfilter.8.dylib" > "$bk/proxy.sha256"
-        echo libavfilter.8-plex.dylib > "$bk/added.txt"
+        # our files: listed before stays listed; ours by name are replaced with what we ship now; anything else is Plex's
+        { echo libavfilter.8-plex.dylib; [ -z "$prev" ] || printf '%s\n' "$prev"; } > "$bk/added.new"
         for f in "$from"/pushmpc-avfilter-8.*.dylib "$from/libpushmpc_engine.dylib" "$from/libpushmpc_engine_apple.dylib" "$from/libMoltenVK.dylib" "$from/MoltenVK-LICENSE.txt"; do
             [ -f "$f" ] || continue   # the GPU engines are optional (Auto: VideoToolbox, then Vulkan on MoltenVK, then CPU)
-            b=${f##*/}; [ -e "$fw/$b" ] && continue   # never overwrite Plex's own files
-            cp "$f" "$fw/$b" && echo "$b" >> "$bk/added.txt"
+            b=${f##*/}
+            if [ -e "$fw/$b" ] && ! is_ours "$b" && ! printf '%s\n' "$prev" | grep -qxF "$b"; then continue; fi   # never overwrite Plex's own files
+            cmp -s "$f" "$fw/$b" || cp "$f" "$fw/$b" || { emit "$name" error "cannot write $fw/$b"; return 1; }
+            echo "$b" >> "$bk/added.new"
         done
+        awk '!seen[$0]++' "$bk/added.new" > "$bk/added.txt" && rm -f "$bk/added.new"
         # files that came through a browser carry quarantine; ours are ad-hoc signed and need none of it
         while read -r b; do xattr -d com.apple.quarantine "$fw/$b" 2>/dev/null; done < "$bk/added.txt"
         xattr -d com.apple.quarantine "$fw/libavfilter.8.dylib" 2>/dev/null
         conf_add "$conf"
         selftest "$fw"; s=$?
-        report "$name" $s "$bundle; $conf"; return $? ;;
+        report "$name" $s "$([ "$installed" = 1 ] && echo "already in place in ")$bundle; $conf"; return $? ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$bundle"; return 0; }
         pkill -x Plex 2>/dev/null; pkill -x 'Plex HTPC' 2>/dev/null
         detail=''
-        if [ -f "$fw/libavfilter.8-plex.dylib" ] && { [ "$installed" = 1 ] || [ ! -f "$fw/libavfilter.8.dylib" ]; }; then
+        if [ -f "$fw/libavfilter.8-plex.dylib" ] && { [ "$installed" = 1 ] || is_our_proxy "$fw/libavfilter.8.dylib" || [ ! -f "$fw/libavfilter.8.dylib" ]; }; then
             rm -f "$fw/libavfilter.8.dylib" && mv "$fw/libavfilter.8-plex.dylib" "$fw/libavfilter.8.dylib" || { emit "$name" error "cannot write $fw"; return 1; }
             if [ -f "$bk/libavfilter.8.dylib.sha256" ] && [ "$(sha "$fw/libavfilter.8.dylib")" = "$(cat "$bk/libavfilter.8.dylib.sha256")" ]; then detail='original libavfilter.8.dylib back (SHA-256 matches the backup)'
             else detail='original libavfilter.8.dylib back (no backup hash to compare)'; fi

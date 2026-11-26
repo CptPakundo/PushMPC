@@ -170,9 +170,15 @@ function SelfTest($a) {
 function ProxyHash($a) { $p = Join-Path (BackupDir $a) 'proxy.sha256'; if (Test-Path $p) { (Get-Content $p).Trim() } else { Hash (Join-Path $From 'avfilter-8.dll') } }
 function Installed($a) { (Test-Path (Join-Path $a.Dir 'avfilter-8-plex.dll')) -and ((Hash (Join-Path $a.Dir 'avfilter-8.dll')) -eq (ProxyHash $a)) }
 
+function IsOurProxy([string]$p) {   # our proxy avfilter-8.dll (any version): it exports pushmpc_proxy_status
+    if (-not (Test-Path -LiteralPath $p)) { return $false }
+    return [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($p)).Contains('pushmpc_proxy_status')
+}
+function IsOurs([string]$name) { $name -like 'pushmpc-avfilter-8.*.dll' -or $name -eq 'pushmpc_engine.dll' }   # names Plex never ships
+
 function Install($a) {
     $d = $a.Dir; $bk = BackupDir $a
-    $orig = Join-Path $d 'avfilter-8.dll'
+    $orig = Join-Path $d 'avfilter-8.dll'; $plexOrig = Join-Path $d 'avfilter-8-plex.dll'
     if (-not (Test-Path $orig)) { Emit $a 'unsupported' 'no avfilter-8.dll next to its libmpv (not a separate-FFmpeg build)'; return 3 }
     foreach ($f in 'avfilter-8.dll', 'pushmpc_engine.dll') { if (-not (Test-Path (Join-Path $From $f))) { Emit $a 'error' "$f is not in $From"; return 1 } }
     $builds = @(Get-ChildItem $From -Filter 'pushmpc-avfilter-8.*.dll')
@@ -180,33 +186,43 @@ function Install($a) {
     if (-not $AllowBoth) {
         if ((Test-Path $a.Conf) -and ((Get-Content $a.Conf) -match [regex]::Escape($vsMark))) { Emit $a 'refused' "Plex's mpv.conf holds the VapourSynth route's block (pass -AllowBoth)"; return 1 }
     }
-    if ($DryRun) { Emit $a $(if (Installed $a) { 'installed' } else { 'would-install' }) $d; return 0 }
-    if (Installed $a) {   # idempotent: the proxy stays, the conf block is made sure of, the self-test runs again
-        EnsureConf $a
-        $st = SelfTest $a
-        if (-not $st.ok) { Emit $a 'installed-inactive' "already in place; $($st.text)"; return 3 }
-        Emit $a 'installed' "already in place; $($st.text)"; return 0
-    }
+    $was = Installed $a
+    if ($DryRun) { Emit $a $(if ($was) { 'installed' } else { 'would-install' }) $d; return 0 }
     Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     try {
         New-Item -ItemType Directory -Force $bk | Out-Null
-        if (Test-Path (Join-Path $d 'avfilter-8-plex.dll')) { Remove-Item (Join-Path $d 'avfilter-8-plex.dll') -Force }   # stale, from before a Plex update
-        Copy-Item $orig (Join-Path $bk 'avfilter-8.dll') -Force
-        Set-Content (Join-Path $bk 'avfilter-8.dll.sha256') (Hash $orig)
-        Move-Item $orig (Join-Path $d 'avfilter-8-plex.dll')
-        $added = @('avfilter-8-plex.dll')
-        Copy-Item (Join-Path $From 'avfilter-8.dll') $orig
+        $prev = @(); if (Test-Path (Join-Path $bk 'added.txt')) { $prev = @(Get-Content (Join-Path $bk 'added.txt') | Where-Object { $_ }) }
+        if (IsOurProxy $orig) {
+            # a proxy of ours is in place (this version or an older one): Plex's original is avfilter-8-plex.dll already
+            if (-not (Test-Path $plexOrig)) { Emit $a 'error' "$orig is a PushMPC proxy but Plex's original avfilter-8-plex.dll is missing (reinstall Plex)"; return 1 }
+            if (-not (Test-Path (Join-Path $bk 'avfilter-8.dll'))) { Copy-Item $plexOrig (Join-Path $bk 'avfilter-8.dll') -Force; Set-Content (Join-Path $bk 'avfilter-8.dll.sha256') (Hash $plexOrig) }
+            if ((Hash $orig) -ne (Hash (Join-Path $From 'avfilter-8.dll'))) { Copy-Item (Join-Path $From 'avfilter-8.dll') $orig -Force }
+        } else {
+            # Plex's own avfilter-8.dll (a first install, or Plex updated it): back it up, rename it, the proxy in its place
+            if (Test-Path $plexOrig) { Remove-Item $plexOrig -Force }   # the original from before the update
+            Copy-Item $orig (Join-Path $bk 'avfilter-8.dll') -Force
+            Set-Content (Join-Path $bk 'avfilter-8.dll.sha256') (Hash $orig)
+            Move-Item $orig $plexOrig
+            Copy-Item (Join-Path $From 'avfilter-8.dll') $orig
+        }
         Set-Content (Join-Path $bk 'proxy.sha256') (Hash $orig)
+        # our files: the ones listed before stay listed; ours by name are replaced with what we ship now (an older
+        # build or engine, left by a Plex update, is ours too); anything else of that name is Plex's and stays untouched
+        $added = New-Object System.Collections.Generic.List[string]
+        foreach ($f in @('avfilter-8-plex.dll') + $prev) { if (-not $added.Contains($f)) { $added.Add($f) } }
         foreach ($f in @($builds.Name) + 'pushmpc_engine.dll') {
-            if (Test-Path (Join-Path $d $f)) { continue }   # never overwrite Plex's own files
-            Copy-Item (Join-Path $From $f) (Join-Path $d $f); $added += $f
+            $t = Join-Path $d $f
+            if ((Test-Path $t) -and -not (IsOurs $f) -and -not ($prev -contains $f)) { continue }   # never overwrite Plex's own files
+            if (-not (Test-Path $t) -or (Hash $t) -ne (Hash (Join-Path $From $f))) { Copy-Item (Join-Path $From $f) $t -Force }
+            if (-not $added.Contains($f)) { $added.Add($f) }
         }
         $added | Set-Content (Join-Path $bk 'added.txt')
     } catch { Emit $a 'error' "cannot write $d ($($_.Exception.Message)); run elevated"; return 1 }
     EnsureConf $a
     $st = SelfTest $a
-    if (-not $st.ok) { Emit $a 'installed-inactive' $st.text; return 3 }
-    Emit $a 'installed' $st.text
+    $pre = if ($was) { 'already in place; ' } else { '' }
+    if (-not $st.ok) { Emit $a 'installed-inactive' "$pre$($st.text)"; return 3 }
+    Emit $a 'installed' "$pre$($st.text)"
     return 0
 }
 
@@ -217,7 +233,7 @@ function Uninstall($a) {
     $detail = ''
     $cur = Join-Path $d 'avfilter-8.dll'; $plex = Join-Path $d 'avfilter-8-plex.dll'
     $want = if (Test-Path (Join-Path $bk 'avfilter-8.dll.sha256')) { (Get-Content (Join-Path $bk 'avfilter-8.dll.sha256')).Trim() } else { '' }
-    if ((Test-Path $plex) -and ((Hash $cur) -eq (ProxyHash $a) -or -not (Test-Path $cur))) {
+    if ((Test-Path $plex) -and ((Hash $cur) -eq (ProxyHash $a) -or (IsOurProxy $cur) -or -not (Test-Path $cur))) {
         if (Test-Path $cur) { Remove-Item $cur -Force }
         Move-Item $plex $cur
         $detail = if ($want -and (Hash $cur) -eq $want) { 'original avfilter-8.dll back (SHA-256 matches the backup)' } else { 'original avfilter-8.dll back (no backup hash to compare)' }

@@ -505,6 +505,32 @@ jobs:
             $ok = @($out | ConvertFrom-Json | Where-Object { $_.state -eq 'installed' -and $_.detail -match ', x2' }).Count
             if ($rc -ne 0 -or $ok -ne @($dirs).Count) { Write-Host "::error::$hostExe`: install/self-test failed (exit $rc, $ok of $(@($dirs).Count) apps active)"; $fails++ }
           }
+          # after a Plex update (Plex writes its own avfilter-8.dll again; our builds and engine stay in the folder) and
+          # after a PushMPC upgrade (an older proxy of ours in place): reapply / install, then uninstall must give the
+          # stock folder back bit for bit (powershell.exe 5.1, as Setup runs it)
+          foreach ($case in 'plex-update', 'pushmpc-upgrade') {
+            Write-Host "===== $case"
+            $before = Snap
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" install -From $p -NoConf -Json | Out-Null
+            foreach ($d in $dirs) {
+              $key = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
+              if ($case -eq 'plex-update') { Copy-Item "$env:ProgramData\PushMPC\plex-native\$key\avfilter-8.dll" "$d\avfilter-8.dll" -Force }
+              else { [IO.File]::AppendAllText("$d\avfilter-8.dll", 'older-proxy') }   # still our proxy, another version
+            }
+            $verb = if ($case -eq 'plex-update') { 'reapply' } else { 'install' }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" $verb -From $p -NoConf -Json | ForEach-Object { Write-Host "$verb`: $_" }
+            foreach ($d in $dirs) {
+              $key = if ($d -like '*HTPC') { 'htpc' } else { 'desktop' }
+              $listed = @(Get-Content "$env:ProgramData\PushMPC\plex-native\$key\added.txt")
+              foreach ($f in @(Get-ChildItem $p -Filter 'pushmpc-avfilter-8.*.dll').Name + 'pushmpc_engine.dll') {
+                if ($listed -notcontains $f) { Write-Host "::error::$case`: $key added.txt lacks $f"; $fails++ }
+              }
+            }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$p\pushmpc-plex-native.ps1" uninstall -From $p -Json | ForEach-Object { Write-Host "uninstall: $_" }
+            $diff = Compare-Object $before (Snap)
+            if ($diff) { $diff | Select-Object -First 20 | Out-String | Write-Host; Write-Host "::error::$case`: the Plex folders are not stock after uninstall"; $fails++ }
+            else { Write-Host "$case`: Plex folders bit for bit stock after uninstall" }
+          }
           if (Test-Path $env:PUSHMPC_PROXY_LOG) { Get-Content $env:PUSHMPC_PROXY_LOG | Select-Object -First 4 | ForEach-Object { Write-Host "proxy log: $_" } }
           if ($fails) { exit 1 }
           Write-Host 'plex: all checks passed under Windows PowerShell 5.1 and PowerShell 7'
@@ -642,5 +668,20 @@ jobs:
             echo "uninstall: $(sh "$p/pushmpc-plex-mac.sh" uninstall --app $n --app-path "$a" --from "$p" --json)"
             after=$(snap)
             [ "$after" = "$before" ] && echo "$n: bundle and mpv.conf restored bit for bit" || { echo "$before"; echo "$after"; echo "::error::$n: bundle or mpv.conf differ after uninstall"; fails=$((fails + 1)); }
+            # a Plex update writing its own libavfilter.8.dylib again, and a PushMPC upgrade over an older proxy of ours:
+            # install again, then uninstall must give the stock bundle back bit for bit
+            for case in plex-update pushmpc-upgrade; do
+              fw="$a/Contents/Frameworks"; bk="$HOME/Library/Application Support/PushMPC/plex-native/$n"
+              before=$(snap)
+              sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json > /dev/null
+              if [ $case = plex-update ]; then cp "$bk/libavfilter.8.dylib" "$fw/libavfilter.8.dylib"; else printf 'older-proxy' >> "$fw/libavfilter.8.dylib"; fi
+              echo "$case install: $(sh "$p/pushmpc-plex-mac.sh" install --app $n --app-path "$a" --from "$p" --no-conf --json | cut -c1-200)"
+              for f in "$p"/pushmpc-avfilter-8.*.dylib "$p/libpushmpc_engine.dylib" "$p/libpushmpc_engine_apple.dylib" "$p/libMoltenVK.dylib"; do
+                [ -f "$f" ] || continue
+                grep -qxF "${f##*/}" "$bk/added.txt" || { echo "::error::$n $case: added.txt lacks ${f##*/}"; fails=$((fails + 1)); }
+              done
+              sh "$p/pushmpc-plex-mac.sh" uninstall --app $n --app-path "$a" --from "$p" --json > /dev/null
+              [ "$(snap)" = "$before" ] && echo "$n $case: bundle bit for bit stock after uninstall" || { echo "::error::$n $case: bundle not stock after uninstall"; fails=$((fails + 1)); }
+            done
           done
           [ "$fails" = 0 ] && echo "plex-macos: all checks passed" || exit 1
