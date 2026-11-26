@@ -28,7 +28,7 @@ on:
         type: boolean
         default: false
       plex_linux:
-        description: 'also run the Plex on Linux job (unfinished)'
+        description: 'also run the Plex on Linux Flatpak job (Flathub installs; the tarball job runs on every push)'
         type: boolean
         default: false
       plex_macos:
@@ -708,6 +708,72 @@ jobs:
           done
           [ "$tested" -gt 0 ] || { echo "::error::no Plex Flatpak installed"; exit 1; }
           [ "$fails" = 0 ] && echo "plex-linux: all checks passed" || exit 1
+
+  # Plex HTPC / Plex desktop as plain files (the tarball target): Plex ships no Linux tarball any more (its downloads
+  # list Windows and macOS only), so the distros' packages (the AUR's) unpack Plex's own Snap into a folder. The same
+  # here: `snap download` + unsquashfs, a Plex.sh where the Snap has none, then pushmpc-plex-linux.sh --target tarball:
+  # the self-test through Plex's libmpv with the preload (x2), status, uninstall bit-exact (folder and fake HOME).
+  plex-linux-tarball:
+    if: ${{ !inputs.release }}
+    needs: hook-libs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hooklib-x64-*
+          path: ${{ runner.temp }}/hooklibs
+      - name: The preload, the engine (Debian 12 build), the self-test host
+        run: |
+          d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
+          for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
+          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
+          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
+          docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
+          cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
+          ls "$d" | tr '\n' ' '
+      - name: Plex's Snaps unpacked into folders (the AUR's route)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get install -y -q --no-install-recommends squashfs-tools >/dev/null
+          cd "$RUNNER_TEMP"
+          for s in plex-htpc plex-desktop; do
+            snap download "$s" > "$s.dl.txt" 2>&1 || { echo "$s: no Snap ($(tail -1 "$s.dl.txt"))"; continue; }
+            f=$(ls "$s"_*.snap | head -1); t="$RUNNER_TEMP/tar-$s"
+            unsquashfs -q -d "$t" "$f" >/dev/null && rm -f "$s"_*.snap "$s"_*.assert
+            echo "$s: $(sed -n 's/^version: *//p' "$t/meta/snap.yaml" | head -1)"
+            find "$t" -maxdepth 2 \( -name 'Plex*' -o -name '*.sh' \) | head -10
+            find "$t" -name 'libmpv.so*' -o -name 'libavfilter.so*' | head -4
+            if [ ! -f "$t/Plex.sh" ]; then
+              # the Snap starts Plex through its own command chain: a plain launcher with the bundled libraries first
+              bin=$(find "$t" -type f -name Plex -perm -u+x | head -1)
+              [ -n "$bin" ] || { echo "::error::$s: no Plex binary in the Snap"; exit 1; }
+              libs=$(find "$t" -name '*.so*' -type f -printf '%h\n' | sort -u | tr '\n' ':')
+              printf '#!/bin/sh\nLD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "%s" "$@"\n' "$libs" "$bin" > "$t/Plex.sh"
+              chmod +x "$t/Plex.sh"
+            fi
+          done
+          ls -d "$RUNNER_TEMP"/tar-* >/dev/null 2>&1 || { echo "::error::no Plex Snap could be downloaded"; exit 1; }
+      - name: Install (self-test through Plex's libmpv with the preload), status, uninstall bit-exact
+        timeout-minutes: 10
+        run: |
+          set +e; d="$RUNNER_TEMP/plexlin"; fails=0
+          for t in "$RUNNER_TEMP"/tar-*; do
+            export HOME="$RUNNER_TEMP/home-$(basename "$t")"; mkdir -p "$HOME"
+            # the libraries Plex's libmpv needs from its own folders (what Plex.sh / the Snap's launcher sets)
+            export LD_LIBRARY_PATH=$(find "$t" -name '*.so*' -type f -printf '%h\n' | sort -u | tr '\n' ':' | sed 's/:$//')
+            snap() { (cd "$t" && find . -type f -print0 | sort -z | xargs -0r sha256sum); (cd "$HOME" && find . -type f -print0 | sort -z | xargs -0r sha256sum); }
+            before=$(snap)
+            out=$(sh mpvnative/install/pushmpc-plex-linux.sh install --from "$d" --target tarball --tarball-dir "$t" --json); rc=$?; echo "install: $out"
+            echo "$out" | grep -q '"state":"installed"' && echo "$out" | grep -q 'selftest: .*x2' && [ "$rc" = 0 ] \
+              && echo "$t: vf_pushmpc active through Plex's libmpv" || { echo "::error::$(basename "$t"): install/self-test failed (exit $rc)"; fails=$((fails + 1)); }
+            [ -x "$HOME/.local/bin/plex-pushmpc" ] && cat "$HOME/.local/bin/plex-pushmpc" || { echo "::error::no launcher"; fails=$((fails + 1)); }
+            echo "status: $(sh mpvnative/install/pushmpc-plex-linux.sh status --target tarball --tarball-dir "$t" --json)"
+            echo "uninstall: $(sh mpvnative/install/pushmpc-plex-linux.sh uninstall --target tarball --tarball-dir "$t" --json)"
+            after=$(snap); [ "$after" = "$before" ] && echo "$t: uninstall restored the folder and HOME exactly" || { diff <(echo "$before") <(echo "$after") | head -20; echo "::error::$(basename "$t"): files differ after uninstall"; fails=$((fails + 1)); }
+          done
+          [ "$fails" = 0 ] && echo "plex-linux-tarball: all checks passed" || exit 1
 
   # Plex for Mac / Plex HTPC for Mac: hardened runtime with disable-library-validation, FFmpeg 5.x as separate universal
   # dylibs (libavfilter.8.dylib = 8.29.100). Proxy libavfilter.8.dylib in Contents/Frameworks; self-test through Plex's

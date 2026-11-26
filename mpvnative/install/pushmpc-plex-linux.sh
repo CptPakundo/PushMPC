@@ -9,7 +9,9 @@
 #
 #   --from     folder with pushmpc_preload.so, libpushmpc-avfilter-*.so and libpushmpc_engine.so (default: here)
 #   --target   desktop  Flathub tv.plex.PlexDesktop    htpc  Flathub tv.plex.PlexHTPC
-#              tarball  Plex's official Linux tarball in --tarball-dir (where Plex.sh is)
+#              tarball  Plex as plain files in --tarball-dir (where Plex.sh is: Plex's former tarball, or its Snap
+#                       unpacked as distro packages do); files in <dir>/pushmpc, or in ~/.local/share/pushmpc/plex-tarball
+#                       when that folder is not the user's
 #              auto     every Flatpak one installed, plus the tarball when --tarball-dir is given (default)
 #   --opts     vf_pushmpc options for the mpv.conf line (default none: the engine's Auto)
 #   --json     one JSON object per target on stdout ({"target","action","state","detail"}), the log on stderr
@@ -138,7 +140,12 @@ do_flatpak() {   # do_flatpak <target name> <app id>
 
 do_tarball() {
     [ -n "$tdir" ] && [ -f "$tdir/Plex.sh" ] || { emit tarball unsupported "no Plex.sh in '${tdir}' (pass --tarball-dir)"; return 3; }
+    # the files next to Plex when that folder is the user's; else (a package in /opt) in the user's own data folder
     dest=$tdir/pushmpc; launcher=$HOME/.local/bin/plex-pushmpc; conf=$HOME/.local/share/plex/mpv.conf
+    if [ ! -f "$dest/pushmpc_preload.so" ] && { [ "$action" != install ] || [ ! -w "$tdir" ]; }; then
+        udest=${XDG_DATA_HOME:-$HOME/.local/share}/pushmpc/plex-tarball
+        if [ "$action" = install ] || [ -f "$udest/pushmpc_preload.so" ]; then dest=$udest; fi
+    fi
     case $action in
     status) if [ -f "$dest/pushmpc_preload.so" ] && [ -f "$launcher" ]; then emit tarball installed "$launcher"; else emit tarball not-installed "$tdir"; fi ;;
     install)

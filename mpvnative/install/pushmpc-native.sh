@@ -118,9 +118,7 @@ probe() {   # probe <mpv command...>
 hwdec_ok() {   # hwdec_ok <mpv command...>
     if [ -n "$probe_base" ]; then t=$probe_base/pushmpc-hwprobe.$$; else t=$(mktemp -d 2>/dev/null || echo "/tmp/pushmpc-hwprobe.$$"); fi
     mkdir -p "$t" || return 1
-    { printf 'YUV4MPEG2 W16 H16 F24:1 Ip A1:1 C420jpeg
-FRAME
-'; head -c 384 /dev/zero; } > "$t/p.y4m"
+    { printf 'YUV4MPEG2 W16 H16 F24:1 Ip A1:1 C420jpeg\nFRAME\n'; head -c 384 /dev/zero; } > "$t/p.y4m"
     "$@" --no-config --hwdec=vulkan,auto-safe --gpu-api=vulkan --vo=null --ao=null --frames=1 "$t/p.y4m" >/dev/null 2>&1; r=$?
     rm -rf "$t"
     return $r

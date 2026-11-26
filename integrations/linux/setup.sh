@@ -175,14 +175,15 @@ list_players() {
     [ -d /Applications/IINA.app ] && add IINA
     [ -d /Applications/VLC.app ] && add 'VLC (macOS)'
     if have flatpak; then
-        for a in org.videolan.VLC tv.kodi.Kodi com.stremio.Stremio tv.plex.PlexDesktop org.jellyfin.JellyfinDesktop; do flatpak info "$a" >/dev/null 2>&1 && add "$a (Flathub)"; done
+        for a in org.videolan.VLC tv.kodi.Kodi com.stremio.Stremio tv.plex.PlexDesktop tv.plex.PlexHTPC org.jellyfin.JellyfinDesktop; do flatpak info "$a" >/dev/null 2>&1 && add "$a (Flathub)"; done
     fi
+    pt=$(plex_tarball_dir) && add "Plex ($pt)"
     have snap && snap list vlc >/dev/null 2>&1 && add 'vlc (Snap)'
     say "Players found: ${found:-none}"
-    # players with no PushMPC route here (Stremio and Plex desktop ship their own mpv without a filter slot on Linux)
+    # players with no PushMPC route here (Stremio ships its own mpv without a filter slot on Linux)
     none=''
     for p in stremio totem clapper dragon; do have "$p" && none="$none${none:+, }$p"; done
-    if have flatpak; then for a in com.stremio.Stremio tv.plex.PlexDesktop; do flatpak info "$a" >/dev/null 2>&1 && none="$none${none:+, }$a"; done; fi
+    if have flatpak && flatpak info com.stremio.Stremio >/dev/null 2>&1; then none="$none${none:+, }com.stremio.Stremio"; fi
     [ -n "$none" ] && say "No PushMPC route yet for: $none (play through mpv instead; capture mode is Windows only)"
     return 0
 }
@@ -336,31 +337,47 @@ PY
         say "  measuring PushFlow's options on this GPU in the background (a few minutes; log: $pm/pmml/pmml-autobench-1920x1080.log)"
     fi
 }
-# Plex desktop / Plex HTPC from Flathub: PushMPC's filter inside Plex's own player through LD_PRELOAD (plex/, the
-# installer self-tests it through Plex's libmpv in its sandbox). A target that does not pass is undone again. Snap Plex
-# cannot take LD_PRELOAD: it is left as it is (capture mode is Windows-only; the OBS workaround in the user guide).
+# Plex desktop / Plex HTPC from Flathub, or as plain files (Plex's Snap unpacked by a distro package into /opt, or a
+# folder given in PUSHMPC_PLEX_TARBALL_DIR; it needs Plex.sh there): PushMPC's filter inside Plex's own player through
+# LD_PRELOAD (plex/, the installer self-tests it through Plex's libmpv). A target that does not pass is undone again.
+# Snap Plex itself cannot take LD_PRELOAD: it is left as it is (capture mode is Windows-only; the OBS workaround in the
+# user guide).
+plex_tarball_dir() {
+    for d in "${PUSHMPC_PLEX_TARBALL_DIR:-}" /opt/plex-htpc /opt/plex-desktop /opt/plexhtpc /opt/plex /usr/lib/plex-htpc /usr/lib/plex-desktop; do
+        [ -n "$d" ] && [ -f "$d/Plex.sh" ] && { printf '%s\n' "$d"; return 0; }
+    done
+    return 1
+}
 do_plex() {
     pi=$here/plex/pushmpc-plex-linux.sh
-    [ -f "$pi" ] && have flatpak || return 0
-    flatpak info tv.plex.PlexDesktop >/dev/null 2>&1 || flatpak info tv.plex.PlexHTPC >/dev/null 2>&1 || return 0
-    say "Plex (Flathub):"
-    if [ "$dry" = 1 ]; then say "  would: sh plex/pushmpc-plex-linux.sh install"; return 0; fi
+    [ -f "$pi" ] || return 0
+    tdir=$(plex_tarball_dir) || tdir=''
+    fp=0
+    if have flatpak && { flatpak info tv.plex.PlexDesktop >/dev/null 2>&1 || flatpak info tv.plex.PlexHTPC >/dev/null 2>&1; }; then fp=1; fi
+    [ "$fp" = 1 ] || [ -n "$tdir" ] || return 0
+    say "Plex${tdir:+ ($tdir)}:"
+    if [ "$dry" = 1 ]; then say "  would: sh plex/pushmpc-plex-linux.sh install${tdir:+ --tarball-dir $tdir}"; return 0; fi
     # set up before (an earlier download): out first, so this download's files go in (its installer keeps what is there)
-    if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall >/dev/null 2>&1; fi
+    if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then plex_uninstall >/dev/null 2>&1; fi
     mkdir -p "$pm/plex-installer"; cp "$pi" "$pm/plex-installer/pushmpc-plex-linux.sh"
-    out=$(sh "$pi" install --from "$here/plex" --json 2>"$pm/plex-installer/install.log"); rc=$?
+    if [ -n "$tdir" ]; then printf '%s\n' "$tdir" > "$pm/plex-installer/tarball-dir"; else rm -f "$pm/plex-installer/tarball-dir"; fi
+    out=$(sh "$pi" install --from "$here/plex" ${tdir:+--tarball-dir "$tdir"} --json 2>"$pm/plex-installer/install.log"); rc=$?
     sed 's/^/  /' "$pm/plex-installer/install.log" | tail -n 5
     on=0
-    for t in desktop htpc; do
-        st=$(printf '%s\n' "$out" | sed -n "s/.*\"target\":\"$t\".*\"state\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1)
+    for t in desktop htpc tarball; do
+        st=$(printf '%s\n' "$out" | sed -n "s/.*\"target\":\"$t\".*\"state\":\"\([^\"]*\)\".*/\1/p" | head -n 1)
         [ -n "$st" ] || continue
         case $st in
-            installed) on=1; say "  Plex ($t): smoother motion inside Plex's own player" ;;
+            installed) on=1; say "  Plex ($t): smoother motion inside Plex's own player${tdir:+$( [ "$t" = tarball ] && echo "; start it with plex-pushmpc")}" ;;
             refused|unsupported) say "  Plex ($t): not changed ($st)" ;;
-            *) say "  Plex ($t): the self-test did not pass ($st): undone"; sh "$pi" uninstall --target "$t" >/dev/null 2>&1 ;;
+            *) say "  Plex ($t): the self-test did not pass ($st): undone"; sh "$pi" uninstall --target "$t" ${tdir:+--tarball-dir "$tdir"} >/dev/null 2>&1 ;;
         esac
     done
     if [ "$on" = 1 ]; then record plex; else [ "$rc" = 0 ] || say "  Plex is not changed (exit $rc)"; rm -rf "$pm/plex-installer"; fi
+}
+plex_uninstall() {   # every target, the folder Plex recorded at install
+    td=''; [ -f "$pm/plex-installer/tarball-dir" ] && td=$(cat "$pm/plex-installer/tarball-dir")
+    sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall ${td:+--tarball-dir "$td"}
 }
 do_kodi_addon() {
     [ -f "$here/kodi/install.sh" ] || return 0
@@ -414,7 +431,7 @@ case $action in
         if recorded native && [ -f "$pm/mpvnative-installer/pushmpc-native.sh" ]; then say "mpv (native hook):"; sh "$pm/mpvnative-installer/pushmpc-native.sh" uninstall --target native 2>&1 | sed 's/^/  /'; fi
         [ "$dry" = 1 ] || rm -rf "$pm/mpvnative-installer"
         if recorded vlc && [ -f "$pm/pushmpc-vlc.sh" ]; then say "VLC:"; sh "$pm/pushmpc-vlc.sh" uninstall | sed 's/^/  /'; fi
-        if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then say "Plex (Flathub):"; sh "$pm/plex-installer/pushmpc-plex-linux.sh" uninstall 2>&1 | sed 's/^/  /'; fi
+        if recorded plex && [ -f "$pm/plex-installer/pushmpc-plex-linux.sh" ]; then say "Plex:"; plex_uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded kodi-addon && [ -f "$pm/kodi-installer/install.sh" ]; then say "Kodi add-on:"; PUSHMPC_KODI_DIR="$pm/kodi-installer" sh "$pm/kodi-installer/install.sh" uninstall 2>&1 | sed 's/^/  /'; fi
         if recorded brew-setup && have pushmpc-setup; then pushmpc-setup uninstall | sed 's/^/  /'; fi
         if [ "$dry" = 0 ] && recorded pmml; then rm -rf "$pm/pmml"; say "PushFlow runtime removed"; fi

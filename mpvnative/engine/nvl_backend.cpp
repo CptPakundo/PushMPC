@@ -108,7 +108,7 @@ public:
         Caps caps = g.caps;
         if (m_bits == 8 && !src.hdr && caps.hdr) { caps.hdr = false; if (disp.hdr || s.sdrToHdr == 1) notes = "; RTX Video HDR needs a 10-bit stream here (8-bit frames)"; }
         Costs costs; costs.card = CardFactor(g.name, g.cls);
-        Plan plan = Decide(s, src, disp, caps, costs);
+        nvl::Plan plan = Decide(s, src, disp, caps, costs);
         Log("nvidia: Auto: " + plan.why + notes + (overrides.empty() ? std::string() : "; overridden:" + overrides));
         if (plan.k <= 1 && !plan.vsr && !plan.hdr) { why = "nothing to do here (" + plan.why + ")"; return false; }
 
@@ -141,7 +141,7 @@ public:
         m_token = ++w.next;
         w.owner = m_token;
         m_k = std::max(1, m_eng->Config().plan.k);
-        const Plan& ep = m_eng->Config().plan;
+        const nvl::Plan& ep = m_eng->Config().plan;
         m_outW = ep.vsr ? ep.outW : m_w; m_outH = ep.vsr ? ep.outH : m_h;
         m_guard.Configure(m_w, m_h);
         if (yuv::Semi(m_fmt)) m_src.Resize(m_w, m_h, m_bits);
@@ -222,7 +222,7 @@ public:
     int Write(const pmeng_image& dst) override
     {
         if (m_q.empty()) { err = "write without an output"; return PMENG_ERROR; }
-        const Pending q = m_q.front();
+        const Queued q = m_q.front();
         m_q.pop_front();
         if (dst.mem != PMENG_MEM_CPU || dst.fmt != m_fmt) { m_eng->Release(q.slot); err = "nvidia: unexpected output memory / format"; return PMENG_ERROR; }
         const OutView o = m_eng->View(q.slot);
@@ -251,7 +251,7 @@ public:
     }
 
 private:
-    struct Pending { pmeng_out_info info; int slot; };
+    struct Queued { pmeng_out_info info; int slot; };
     std::shared_ptr<Engine> m_eng;
     uint64_t m_token = 0;
     CutGuard m_guard;
@@ -260,7 +260,7 @@ private:
     uint32_t m_fmt = 0;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_outW = 0, m_outH = 0;
     uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0;
-    std::deque<Pending> m_q;
+    std::deque<Queued> m_q;
 };
 
 } // namespace

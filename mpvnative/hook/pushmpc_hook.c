@@ -305,17 +305,14 @@ int mpv_open_cplugin(mpv_handle *h)
     if (ok && append) {
         const char *args[] = { "vf", "append", cmd, NULL };
         const int r = mpv_command(h, args);
-        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s
-", g_log, cmd, mpv_error_string(r));
+        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, mpv_error_string(r));
         /* the display's rate is known once the video output runs: then the filter is set again with it (one rebuild) */
         if (!own_fps)
             mpv_observe_property(h, 1, "display-fps", MPV_FORMAT_DOUBLE);
     } else if (ok) {
-        fprintf(stderr, "[pushmpc_hook] %s(no vf append)
-", g_log);
+        fprintf(stderr, "[pushmpc_hook] %s(no vf append)\n", g_log);
     } else {
-        fprintf(stderr, "[pushmpc_hook] not active: %s
-", g_log);
+        fprintf(stderr, "[pushmpc_hook] not active: %s\n", g_log);
     }
     for (;;) {
         mpv_event *ev = mpv_wait_event(h, -1);
@@ -332,8 +329,7 @@ int mpv_open_cplugin(mpv_handle *h)
                 mpv_command(h, rm);
                 r = mpv_command(h, add);
                 applied = fps;
-                fprintf(stderr, "[pushmpc_hook] display %.3f Hz: vf append %s -> %s
-", fps, cur, mpv_error_string(r));
+                fprintf(stderr, "[pushmpc_hook] display %.3f Hz: vf append %s -> %s\n", fps, cur, mpv_error_string(r));
             }
         }
     }
