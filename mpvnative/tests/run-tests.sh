@@ -52,8 +52,9 @@ if PUSHMPC_ENGINE=/nonexistent "$FF" -v info -y -i "$T/clip.mkv" -vf "pushmpc=en
 grep -i "passes through" "$T/ff-pass.log" | head -2
 
 # 4. Vulkan frames (lavapipe on Linux): hwupload -> pushmpc -> hwdownload; the module has no Vulkan engine yet, so this
-#    goes into the portable GPU engine on the same device (zero copy); the copy fallback when that cannot open
-if [ "$OS" = linux ]; then
+#    goes into the portable GPU engine on the same device (zero copy); the copy fallback when that cannot open.
+#    PM_TEST_VULKAN=1: also on Windows (Windows on Arm CI: Mesa's lavapipe for arm64)
+if [ "$OS" = linux ] || [ "${PM_TEST_VULKAN:-0}" = 1 ]; then
     if "$FF" -v info -y -init_hw_device vulkan=vk -filter_hw_device vk -i "$T/clip.mkv" \
         -vf "format=nv12,hwupload,pushmpc=smoother=2,hwdownload,format=nv12" -c:v ffv1 "$T/ff-vk.mkv" > "$T/ff-vk.log" 2>&1; then
         grep -i "pushmpc\|lavapipe\|llvmpipe" "$T/ff-vk.log" | head -4

@@ -127,6 +127,10 @@ param(
     # checkbox, off by default)
     [string]$MpvBuildZip = '',
     [string]$MpvBuildUrl = '',
+    # its Windows on Arm build (mpv-native-arm64.yml): stage: zip + URL -> filter\mpvbuild-arm64.json; install: taken
+    # instead of the x64 build when the OS is ARM64 (also under Prism)
+    [string]$MpvBuildArm64Zip = '',
+    [string]$MpvBuildArm64Url = '',
     [ValidateSet('No', 'Yes')]
     [string]$MpvBuild = 'No',
     # capture mode, the fallback for players without a native route: Auto = on only when such a player is found
@@ -1610,6 +1614,15 @@ function Invoke-Stage {
         Write-Manifest $f @{ component = 'filter'; version = $filterVersion; repo = $PushMpcRepo; clsid = $FilterClsid }
         Info "PushMPC's mpv build: $(Split-Path $MpvBuildZip -Leaf) (an optional download; mpvbuild.json in the filter component)"
     }
+    if ($MpvBuildArm64Zip -and (Test-Path -LiteralPath $MpvBuildArm64Zip) -and $MpvBuildArm64Url) {
+        # the Windows on Arm build: the same, as mpvbuild-arm64.json (Install-MpvBuild takes it on an ARM64 OS)
+        [ordered]@{ asset = (Split-Path $MpvBuildArm64Zip -Leaf); url = $MpvBuildArm64Url; sha256 = (Get-Sha256 $MpvBuildArm64Zip); size = (Get-Item -LiteralPath $MpvBuildArm64Zip).Length } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $f 'mpvbuild-arm64.json') -Encoding ASCII
+        $ni = Join-Path $repo 'mpvnative\install\pushmpc-native.ps1'; if (Test-Path -LiteralPath $ni) { Copy-Item -LiteralPath $ni $f }
+        Copy-Item -LiteralPath $MpvBuildArm64Zip (Join-Path $StageDir (Split-Path $MpvBuildArm64Zip -Leaf))
+        Write-Manifest $f @{ component = 'filter'; version = $filterVersion; repo = $PushMpcRepo; clsid = $FilterClsid }
+        Info "PushMPC's mpv build for Windows on Arm: $(Split-Path $MpvBuildArm64Zip -Leaf) (mpvbuild-arm64.json in the filter component)"
+    }
     Step 'Staged'
     foreach ($n in $Components) {
         if ($n -eq 'runtime' -and -not $WithRuntime) { Info ("{0,-8} not staged: a release never contains it (Veyra's package at install time)" -f $n); continue }
@@ -2884,11 +2897,50 @@ function Uninstall-KodiRoute($state) {
 # mpvnative\install\pushmpc-native.ps1 into <InstallDir>\mpv-native, with a Start menu entry "PushMPC mpv". The user's own
 # mpv keeps the VapourSynth route.
 $MpvLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'PushMPC\PushMPC mpv.lnk'
+# The OS's own architecture (ARM64 / AMD64 / x86), also from an emulated process: an x64 process under Prism sees
+# PROCESSOR_ARCHITECTURE=AMD64 and no PROCESSOR_ARCHITEW6432, so IsWow64Process2 first, then the variables, then WMI
+function Get-NativeArch {
+    try {
+        if (-not ('PushMpcArch.Native' -as [type])) {
+            Add-Type -Namespace PushMpcArch -Name Native -MemberDefinition '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);' -ErrorAction Stop
+        }
+        [uint16]$pm = 0; [uint16]$nm = 0
+        if ([PushMpcArch.Native]::IsWow64Process2([Diagnostics.Process]::GetCurrentProcess().Handle, [ref]$pm, [ref]$nm)) {
+            switch ($nm) { 0xAA64 { return 'ARM64' } 0x8664 { return 'AMD64' } 0x014C { return 'x86' } }
+        }
+    } catch {}
+    $a = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($a -eq 'ARM64') { return 'ARM64' }
+    try { if (@(Get-CimInstance Win32_Processor -ErrorAction Stop)[0].Architecture -eq 12) { return 'ARM64' } } catch {}
+    return $a
+}
+# NVIDIA's Video Effects runtime for the ARM64 mpv's NVIDIA engine (RTX Spark): the pinned win_arm64 wheel's files
+# (nvidia-vfx-fetch.ps1, next to this installer) in the folder that engine reads; only with an NVIDIA GPU
+$MpvVfxDir = Join-Path $env:LOCALAPPDATA 'PushMPC\runtime\nvidia-vfx'
+function Install-MpvVfxArm64($state) {
+    $nv = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'NVIDIA' -or $_.AdapterCompatibility -match 'NVIDIA' })
+    if (-not $nv.Count) { Info "PushMPC's mpv: no NVIDIA GPU, so no NVIDIA runtime (the portable GPU engine runs on this GPU's Vulkan driver)"; return }
+    $fetch = Join-Path $PSScriptRoot 'nvidia-vfx-fetch.ps1'
+    if (-not (Test-Path -LiteralPath $fetch)) { Warn "PushMPC's mpv: nvidia-vfx-fetch.ps1 is not next to the installer: no NVIDIA runtime"; return }
+    if ($DryRun) { Dry "would fetch NVIDIA's win_arm64 Video Effects runtime into $MpvVfxDir"; return }
+    Step "NVIDIA Video Effects runtime for Windows on Arm (NVIDIA's PyPI wheel, pinned SHA-256)"
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $out = @(& $fetch -Dest $MpvVfxDir -Platform win_arm64 -Layout wheel -Cache (Join-Path $InstallDir 'download') -AcceptNvidiaLicense 2>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE
+    $ErrorActionPreference = $eap
+    foreach ($l in $out) { if ($l.Trim()) { Info "nvidia-vfx: $l" } }
+    if ($rc -ne 0) { Warn "PushMPC's mpv: the NVIDIA runtime was not installed (exit $rc): the portable GPU engine runs instead"; return }
+    Set-StateValue $state 'mpvBuildVfx' $MpvVfxDir
+}
 function Install-MpvBuild($state) {
     if ($MpvBuild -ne 'Yes') { return }
-    $fd = @((Join-Path $StageDir 'filter'), (Join-Path $InstallDir 'filter')) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'mpvbuild.json') } | Select-Object -First 1
+    $arm = (Get-NativeArch) -eq 'ARM64'
+    $fd = @((Join-Path $StageDir 'filter'), (Join-Path $InstallDir 'filter')) | Where-Object { (Test-Path -LiteralPath (Join-Path $_ 'mpvbuild.json')) -or (Test-Path -LiteralPath (Join-Path $_ 'mpvbuild-arm64.json')) } | Select-Object -First 1
     if (-not $fd -or -not (Test-Path -LiteralPath (Join-Path $fd 'pushmpc-native.ps1'))) { Warn "PushMPC's mpv: this build has none"; return }
-    $mb = Get-Content -LiteralPath (Join-Path $fd 'mpvbuild.json') -Raw | ConvertFrom-Json
+    # Windows on Arm: the native ARM64 build when the release has it (else the x64 build under Prism)
+    $mbName = if ($arm -and (Test-Path -LiteralPath (Join-Path $fd 'mpvbuild-arm64.json'))) { 'mpvbuild-arm64.json' } else { 'mpvbuild.json' }
+    if (-not (Test-Path -LiteralPath (Join-Path $fd $mbName))) { Warn "PushMPC's mpv: this build has none for this Windows"; return }
+    if ($arm) { Info "Windows on Arm: $(if ($mbName -eq 'mpvbuild-arm64.json') { "PushMPC's native ARM64 mpv" } else { "the x64 mpv build (emulated): this release has no ARM64 build" })" }
+    $mb = Get-Content -LiteralPath (Join-Path $fd $mbName) -Raw | ConvertFrom-Json
     $zip = Join-Path $InstallDir "download\$($mb.asset)"
     if ($DryRun) { Dry "would download $($mb.url) (SHA-256 $($mb.sha256)) and install it into $InstallDir\mpv-native"; return }
     New-Item -ItemType Directory -Force (Split-Path $zip) | Out-Null
@@ -2924,6 +2976,7 @@ function Install-MpvBuild($state) {
     }
     Set-StateValue $state 'mpvBuild' (Get-Date).ToString('s')
     Info "PushMPC's mpv is installed (Start menu: PushMPC mpv)"
+    if ($mbName -eq 'mpvbuild-arm64.json') { Install-MpvVfxArm64 $state }
 }
 function Uninstall-MpvBuild($state) {
     if (-not (Get-StateValue $state 'mpvBuild') -and -not (Test-Path -LiteralPath (Join-Path $InstallDir 'mpv-native'))) { return }
@@ -2941,6 +2994,12 @@ function Uninstall-MpvBuild($state) {
     if (Test-Path -LiteralPath $MpvLink) { Remove-Item -LiteralPath $MpvLink -Force }
     $smd = Split-Path $MpvLink; if ((Test-Path -LiteralPath $smd) -and -not @(Get-ChildItem -LiteralPath $smd -Force).Count) { Remove-Item -LiteralPath $smd -Force }
     if ($state.PSObject.Properties['mpvBuild']) { $state.PSObject.Properties.Remove('mpvBuild') }
+    # the ARM64 build's NVIDIA runtime, when this installer put it there
+    if ($vd = Get-StateValue $state 'mpvBuildVfx') {
+        Remove-Item -LiteralPath $vd -Recurse -Force -ErrorAction SilentlyContinue
+        $rd = Split-Path $vd; if ((Test-Path -LiteralPath $rd) -and -not @(Get-ChildItem -LiteralPath $rd -Force).Count) { Remove-Item -LiteralPath $rd -Force }
+        $state.PSObject.Properties.Remove('mpvBuildVfx')
+    }
 }
 
 # ------------------------------------------------------------------------------------------------ capture mode (fallback)

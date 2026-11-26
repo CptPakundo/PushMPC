@@ -1,0 +1,291 @@
+# PushMPC's own mpv for Windows on Arm (Snapdragon X with Adreno, NVIDIA N1X / RTX Spark), built and tested on the
+# hosted windows-11-arm runner:
+#   nvl-fatbin  ubuntu-24.04: the NVIDIA engine's CUDA kernels (nvcc, build time only) and the GPU cut guard (Slang, pinned)
+#               as fatbins; cached by their sources, so CUDA is installed only when the kernels change
+#   windows     windows-11-arm: the engine module with MSVC ARM64 (CPU engine, the portable GPU engine for Adreno's Vulkan
+#               driver, NVIDIA's engine for RTX Spark; no pushcore: x64 only), engine_test; FFmpeg 9.1 + vf_pushmpc and
+#               mpv 0.42 in MSYS2 CLANGARM64 (mpvnative/ci/build-unix.sh msys2-arm64); the portable folder; the headless
+#               checks (run-tests.sh: CPU engine, and Vulkan frames on Mesa's lavapipe for arm64), the ARM64 engine routes
+#               (software and D3D11 frames into the portable GPU engine, NVIDIA's engine refusing cleanly without a GPU),
+#               every binary ARM64, Setup's entry point (install, playback through its config, uninstall) and its OS check
+# No hosted runner has Adreno or an NVIDIA GPU: tests/arm64-mpv-manual.ps1 is the tester's script for real hardware.
+# release.yml calls this workflow (artifact mpvnative-windows-arm64: the portable folder, a release asset).
+name: mpv-native-arm64
+
+on:
+  push:
+    branches: ['track/vendor-arm64', 'track/vendor-arm64-*']
+    paths: ['mpvnative/**', 'vsplugin/engines/**', 'vsplugin/src/**', 'scripts/pushmpc-install.ps1', 'scripts/nvidia-vfx-*', '.github/workflows/mpv-native-arm64.yml']
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: mpv-native-arm64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nvl-fatbin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CUDA_PKG_VERSION: '12-8'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: fatbin
+          key: nvl-fatbin-${{ hashFiles('vsplugin/engines/nvidia-linux/nvl_kernels.cu', 'vsplugin/engines/nvidia-linux/nvl_colour.h', 'vsplugin/engines/nvidia-linux/shaders/**', 'vsplugin/engines/nvidia-linux/nvl.cmake', 'scripts/slang-pin.json') }}
+      - name: CUDA toolkit (nvcc, NVIDIA's apt repository; build time only) and Slang (pinned)
+        if: steps.cache.outputs.cache-hit != 'true'
+        timeout-minutes: 12
+        run: |
+          set -eux
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-${CUDA_PKG_VERSION} cuda-cudart-dev-${CUDA_PKG_VERSION}
+          echo "NVCC=/usr/local/cuda-${CUDA_PKG_VERSION/-/.}/bin/nvcc" >> "$GITHUB_ENV"
+          url=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['url'])")
+          sha=$(python3 -c "import json; print(json.load(open('scripts/slang-pin.json'))['linux_x86_64']['sha256'])")
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/slang.tgz" "$url"
+          [ "$(sha256sum "$RUNNER_TEMP/slang.tgz" | cut -d' ' -f1 | tr a-f A-F)" = "$sha" ]
+          mkdir -p "$RUNNER_TEMP/slang" && tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
+          echo "SLANG=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
+      - name: Kernels and cut guard fatbins (the -gencode list of nvl.cmake)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          n=vsplugin/engines/nvidia-linux; mkdir -p fatbin
+          gc=$(sed -n 's/.*set(PMVS_CUDA_GENCODE "\([^"]*\)".*/\1/p' $n/nvl.cmake | tr ';' ' ')
+          [ -n "$gc" ]
+          "$NVCC" -fatbin -O3 -std=c++17 -I $n $gc -o fatbin/nvl_kernels.fatbin $n/nvl_kernels.cu
+          for g in sc fm; do
+            src=$n/shaders/VfgShotChange.hlsl; [ $g = fm ] && src=$n/shaders/VfgFourierMellin.hlsl
+            "$SLANG/bin/slangc" -lang slang "$src" -entry main -stage compute -target cuda -o "$RUNNER_TEMP/nvl_guard_$g.cu"
+            "$NVCC" -fatbin -O3 -std=c++17 -include cuda_fp16.h -I "$SLANG/include" $gc -o fatbin/nvl_guard_$g.fatbin "$RUNNER_TEMP/nvl_guard_$g.cu"
+          done
+      - run: ls -la fatbin
+      - uses: actions/upload-artifact@v4
+        with: { name: nvl-fatbin-winarm64, path: fatbin, retention-days: 7, if-no-files-found: error }
+
+  windows:
+    needs: nvl-fatbin
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: nvl-fatbin-winarm64, path: '${{ runner.temp }}/fatbin' }
+      - name: Engine module, stub pushcore and engine_test (MSVC ARM64, D3D11 on WARP)
+        shell: pwsh
+        run: |
+          $pins = Get-Content vsplugin/engines/gpu/gpu-pins.json -Raw | ConvertFrom-Json
+          $zip = Join-Path $env:RUNNER_TEMP 'glslang.zip'
+          Invoke-WebRequest -Uri $pins.glslang.windows.url -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pins.glslang.windows.sha256.ToUpperInvariant()) { throw 'glslang SHA-256 mismatch' }
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'glslang') -Force
+          $g = (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'glslang') -Recurse -Filter glslang*.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1).FullName
+          $fb = "$env:RUNNER_TEMP\fatbin"
+          cmake -S mpvnative/engine -B build-engine -A ARM64 -DPME_FETCH_GPU_DEPS=ON "-DPME_GLSLANG=$g" "-DPME_NVL_FATBIN=$fb\nvl_kernels.fatbin" "-DPME_NVL_GUARD_DIR=$fb" 2>&1 | Tee-Object -Variable cfg | Out-Host
+          if ($LASTEXITCODE) { throw 'configure' }
+          if (-not ($cfg -match 'the NVIDIA engine \(Windows on Arm\), GPU cut guard ON')) { throw 'the NVIDIA engine (with the GPU cut guard) is not in the build' }
+          if ($cfg -match 'no Vulkan engine') { throw 'the portable GPU engine is not in the build' }
+          cmake --build build-engine --config Release --parallel
+          if ($LASTEXITCODE) { throw 'build' }
+          ./build-engine/out/engine_test.exe
+          if ($LASTEXITCODE) { throw 'engine_test failed' }
+      - name: The NVIDIA engine's pure parts (nvl_test, MSVC ARM64)
+        shell: pwsh
+        run: |
+          cmake -S vsplugin -B build-pure -A ARM64 -DPMVS_NVIDIA_WINARM64=OFF
+          if ($LASTEXITCODE) { throw 'configure' }
+          cmake --build build-pure --config Release --target nvl_test --parallel
+          if ($LASTEXITCODE) { throw 'build' }
+          $t = Get-ChildItem build-pure -Recurse -Filter nvl_test.exe | Select-Object -First 1
+          & $t.FullName
+          if ($LASTEXITCODE) { throw 'nvl_test failed' }
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: false
+          cache: true
+          install: >-
+            make git diffutils bc
+            mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-llvm mingw-w64-clang-aarch64-pkgconf
+            mingw-w64-clang-aarch64-meson mingw-w64-clang-aarch64-ninja mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-aarch64-python mingw-w64-clang-aarch64-python-jinja mingw-w64-clang-aarch64-vulkan-loader
+            mingw-w64-clang-aarch64-shaderc mingw-w64-clang-aarch64-spirv-cross mingw-w64-clang-aarch64-spirv-headers
+            mingw-w64-clang-aarch64-glslang mingw-w64-clang-aarch64-libplacebo mingw-w64-clang-aarch64-libass
+            mingw-w64-clang-aarch64-luajit mingw-w64-clang-aarch64-lcms2 mingw-w64-clang-aarch64-libjpeg-turbo
+            mingw-w64-clang-aarch64-uchardet mingw-w64-clang-aarch64-zlib
+      - name: ccache, and Mesa's lavapipe for arm64 (pinned package; test driver only)
+        shell: msys2 {0}
+        run: |
+          pacman -S --needed --noconfirm mingw-w64-clang-aarch64-ccache >/dev/null 2>&1 && echo "ccache: $(ccache --version | head -1)" || echo "::notice::no ccache package for CLANGARM64: building without it"
+          url=$(python3 -c "import json; print(json.load(open('mpvnative/ci/winarm64-pins.json'))['mesa']['url'])")
+          sha=$(python3 -c "import json; print(json.load(open('mpvnative/ci/winarm64-pins.json'))['mesa']['sha256'])")
+          f="$(cygpath -u "$RUNNER_TEMP")/$(basename "$url")"
+          if curl -fsSL --retry 3 -o "$f" "$url" && [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$sha" ]; then
+            pacman -U --needed --noconfirm "$f" > /dev/null && echo "mesa: the pinned package $(basename "$url") (SHA-256 $sha)"
+          else
+            echo "::warning::the pinned Mesa package is not available or differs (got $(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)): MSYS2's current one (signature-checked by pacman)"
+            pacman -S --needed --noconfirm mingw-w64-clang-aarch64-mesa > /dev/null
+          fi
+          pacman -Q mingw-w64-clang-aarch64-mesa
+          ls /clangarm64/share/vulkan/icd.d/
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/pm-ccache
+            ${{ runner.temp }}/pm-src
+            ${{ runner.temp }}/pm-prefix
+          key: mpvnative-winarm64-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-${{ github.run_id }}
+          restore-keys: mpvnative-winarm64-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/build-unix.sh') }}-
+      - name: Build FFmpeg + vf_pushmpc and mpv (MSYS2 CLANGARM64)
+        shell: msys2 {0}
+        timeout-minutes: 100
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pm-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          ccache -z 2>/dev/null || true
+          bash mpvnative/ci/build-unix.sh $R/pm-prefix $R/pm-src msys2-arm64
+          ccache -s 2>/dev/null | head -12 || true
+      - name: Portable mpv folder (mpv + our FFmpeg + engine + the CLANGARM64 runtime DLLs they import)
+        shell: msys2 {0}
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          d=$R/PushMPC-mpv-windows-arm64; rm -rf "$d"; mkdir -p "$d"
+          cp $R/pm-prefix/bin/mpv.exe $R/pm-prefix/bin/mpv.com $R/pm-prefix/bin/ffmpeg.exe $R/pm-prefix/bin/ffprobe.exe $R/pm-prefix/bin/*.dll "$d/"
+          # every DLL they import from /clangarm64/bin, recursively (from the PE import tables: no loader run needed)
+          todo=("$d"/*.exe "$d"/*.dll)
+          while [ ${#todo[@]} -gt 0 ]; do
+            f=${todo[0]}; todo=("${todo[@]:1}")
+            for n in $(llvm-objdump -p "$f" 2>/dev/null | awk '/DLL Name:/ {print $3}'); do
+              if [ -f "/clangarm64/bin/$n" ] && [ ! -f "$d/$n" ]; then cp "/clangarm64/bin/$n" "$d/"; todo+=("$d/$n"); fi
+            done
+          done
+          cp build-engine/out/pushmpc_engine.dll "$d/"
+          cp mpvnative/ci/SOURCES.txt LICENSE "$d/"
+          ls "$d" | tr '\n' ' '; echo; du -sh "$d"
+      - name: Every binary is ARM64 (no emulated x64 piece)
+        shell: pwsh
+        run: |
+          $bad = @()
+          foreach ($f in Get-ChildItem "$env:RUNNER_TEMP\PushMPC-mpv-windows-arm64" -File | Where-Object Extension -in '.exe', '.dll', '.com') {
+            $b = [IO.File]::ReadAllBytes($f.FullName); $pe = [BitConverter]::ToInt32($b, 0x3C); $m = [BitConverter]::ToUInt16($b, $pe + 4)
+            if ($m -ne 0xAA64) { $bad += "$($f.Name) (machine 0x$('{0:X4}' -f $m))" }
+          }
+          if ($bad) { throw "not ARM64: $($bad -join ', ')" }
+          Write-Host "all binaries of the portable folder are ARM64"
+      - name: Headless checks (CPU engine; Vulkan frames on lavapipe)
+        shell: msys2 {0}
+        timeout-minutes: 30
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP")
+          t="$R/t"; mkdir -p "$t"
+          export PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")" PME_STUB_DIR="$PWD/build-engine/stub"
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine.log"
+          lvp=$(ls /clangarm64/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          export VK_DRIVER_FILES="$(cygpath -w "$lvp")" VK_ICD_FILENAMES="$(cygpath -w "$lvp")" PM_TEST_VULKAN=1
+          rm -rf $R/pm-portable-prefix; mkdir -p $R/pm-portable-prefix; cp -r $R/PushMPC-mpv-windows-arm64 $R/pm-portable-prefix/bin
+          bash mpvnative/tests/run-tests.sh $R/pm-portable-prefix "$t" msys2
+      - name: The ARM64 engine routes (Auto; portable GPU engine on software and D3D11 frames; NVIDIA's engine without a GPU)
+        if: success() || failure()
+        shell: msys2 {0}
+        timeout-minutes: 15
+        run: |
+          R=$(cygpath -u "$RUNNER_TEMP"); t="$R/t"; B=$R/PushMPC-mpv-windows-arm64; fails=0
+          export PATH="$B:$PATH" PUSHMPC_ENGINE="$(cygpath -m "$PWD/build-engine/out/pushmpc_engine.dll")"
+          lvp=$(ls /clangarm64/share/vulkan/icd.d/lvp_icd*.json | head -1); export VK_DRIVER_FILES="$(cygpath -w "$lvp")" VK_ICD_FILENAMES="$(cygpath -w "$lvp")"
+          N=$("$B/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$t/clip.mkv" | tr -d '\r')
+          ok() { echo "check $1: PASS"; }; bad() { echo "check $1: FAIL"; fails=$((fails + 1)); }
+          frames() { "$B/ffprobe" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1" | tr -d '\r'; }
+          noone=$(cygpath -m "$R/no-pushcore"); mkdir -p "$R/no-pushcore"
+          # 1. Auto on software frames, nothing but lavapipe: NVIDIA's engine says why not (no driver), lavapipe is
+          #    refused as a software rasteriser, the CPU engine runs
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine-auto.log"
+          "$B/ffmpeg" -v info -y -i "$t/clip.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$t/auto.mkv" > "$t/auto.log" 2>&1
+          cat "$t/engine-auto.log" | cut -c1-300
+          grep -q "software frames: nvidia not used: .*nvcuda.dll" "$t/engine-auto.log" && grep -q "open: portable-cpu" "$t/engine-auto.log" && [ "$(frames "$t/auto.mkv")" = $((1 + (N - 1) * 2)) ] && ok auto-nvidia-refuses-cpu-runs || bad auto-nvidia-refuses-cpu-runs
+          # 2. software frames into the portable GPU engine on its own device (lavapipe allowed for the test)
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine-host.log"
+          "$B/ffmpeg" -v info -y -i "$t/clip.mkv" -vf "pushmpc=smoother=2:extra=vulkan_allow_cpu\=1" -c:v ffv1 "$t/host.mkv" > "$t/host.log" 2>&1
+          grep -i "pushmpc" "$t/host.log" | head -3
+          grep -q "open: portable-vulkan" "$t/engine-host.log" && [ "$(frames "$t/host.mkv")" = $((1 + (N - 1) * 2)) ] && ok software-frames-portable-vulkan || { tail -8 "$t/host.log"; bad software-frames-portable-vulkan; }
+          # 3. D3D11 frames with no pushcore (as on every ARM64 PC): the copy fallback into the portable GPU engine
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine-d3d11.log"
+          if "$B/ffmpeg" -v info -y -init_hw_device d3d11va=dx -filter_hw_device dx -i "$t/clip.mkv" \
+              -vf "format=nv12,hwupload,pushmpc=smoother=2:core_dir='$noone':extra=vulkan_allow_cpu\=1,hwdownload,format=nv12" -c:v ffv1 "$t/d3d11.mkv" > "$t/d3d11.log" 2>&1; then
+            grep -i "pushmpc" "$t/d3d11.log" | head -3
+            grep -q "portable-vulkan.*through the copy fallback" "$t/d3d11.log" && [ "$(frames "$t/d3d11.mkv")" = $((1 + (N - 1) * 2)) ] && ok d3d11-frames-portable-vulkan || bad d3d11-frames-portable-vulkan
+          elif grep -q "Device creation failed" "$t/d3d11.log"; then echo "check d3d11-frames-portable-vulkan: SKIP (no D3D11 video device on the runner)"
+          else tail -10 "$t/d3d11.log"; bad d3d11-frames-portable-vulkan; fi
+          # 4. backend=nvidia without an NVIDIA GPU: a clean refusal with the reason; the video passes through
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine-nv.log"
+          "$B/ffmpeg" -v info -y -i "$t/clip.mkv" -vf "pushmpc=backend=nvidia" -c:v ffv1 "$t/nv.mkv" > "$t/nv.log" 2>&1
+          grep -iE "pushmpc|engine" "$t/nv.log" | head -3
+          grep -q "backend=nvidia" "$t/nv.log" && [ "$(frames "$t/nv.mkv")" = "$N" ] && ok nvidia-refuses-cleanly || { tail -8 "$t/nv.log"; bad nvidia-refuses-cleanly; }
+          # 5. NVIDIA's engine with a runtime folder present but no driver: still the driver's reason
+          mkdir -p "$R/vfx/nvvfx/libs"; : > "$R/vfx/nvvfx/libs/NVVideoEffects.dll"; : > "$R/vfx/nvvfx/libs/NVCVImage.dll"
+          export PUSHMPC_ENGINE_LOG="$(cygpath -m "$t")/engine-nv2.log" PUSHMPC_NVVFX_DIR="$(cygpath -w "$R/vfx")"
+          "$B/ffmpeg" -v info -y -i "$t/clip.mkv" -frames:v 24 -vf "pushmpc=smoother=2" -f null - > "$t/nv2.log" 2>&1
+          grep -q "nvidia not used: .*nvcuda.dll" "$t/engine-nv2.log" && ok nvidia-no-driver-with-runtime || { cat "$t/engine-nv2.log"; bad nvidia-no-driver-with-runtime; }
+          [ $fails = 0 ] || exit 1
+      - name: Setup's entry point (pushmpc-native.ps1) into a temporary folder; Setup's OS check; the NVIDIA runtime pin
+        if: success() || failure()
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $from = Join-Path $env:RUNNER_TEMP 'PushMPC-mpv-windows-arm64'; $dest = Join-Path $env:RUNNER_TEMP 'native-install'
+          $work = Join-Path $env:RUNNER_TEMP 'native-src'; Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item $from $work -Recurse; Copy-Item mpvnative/install/pushmpc-native.ps1 $work
+          $env:PUSHMPC_ENGINE = ''
+          # Setup runs it with Windows PowerShell 5.1 (native ARM64 on Windows on Arm)
+          $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $r = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $work 'pushmpc-native.ps1') install -From $work -Dest $dest -Opts 'smoother=2' -Hwdec no -Json | ConvertFrom-Json
+          Write-Host "install: $($r | ConvertTo-Json -Compress)"
+          if ($r.state -ne 'installed') { throw 'install failed' }
+          $clip = Join-Path $env:RUNNER_TEMP 't\clip12.mkv'
+          Get-Content (Join-Path $dest 'portable_config/mpv.conf') | Write-Host
+          $log = & (Join-Path $dest 'mpv.com') --vo=null --ao=null --vo-null-fps=47.952 "--script=$((Resolve-Path mpvnative/tests/sync.lua).Path)" $clip 2>&1 | Out-String
+          $log -split "`n" | Select-String 'pushmpc' | Select-Object -First 4 | Write-Host
+          if ($log -notmatch 'after-seek: estimated-vf-fps=4[78]\.') { throw 'the installed config did not double the frame rate' }
+          $s = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $work 'pushmpc-native.ps1') status -Dest $dest -Json | ConvertFrom-Json
+          Write-Host "status: $($s | ConvertTo-Json -Compress)"
+          & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $work 'pushmpc-native.ps1') uninstall -Dest $dest -Json
+          if (Test-Path $dest) { Get-ChildItem $dest -Recurse | Select-Object -First 10 | Out-String | Write-Host; throw 'uninstall left files behind' }
+          Write-Host 'install / playback / uninstall: OK, nothing left behind'
+          # Setup's OS check (Get-NativeArch in pushmpc-install.ps1) from a native process and from an emulated x86 one
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/pushmpc-install.ps1).Path, [ref]$null, [ref]$null)
+          $fn = $ast.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'Get-NativeArch' }, $true)
+          $fx = Join-Path $env:RUNNER_TEMP 'gna.ps1'; Set-Content $fx ($fn.Extent.Text + "`nGet-NativeArch")
+          $hosts = @{ 'pwsh (native)' = 'pwsh'; 'Windows PowerShell (native)' = $ps; 'Windows PowerShell x86 (emulated)' = (Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe') }
+          $failed = 0
+          foreach ($k in $hosts.Keys) {
+            if (-not (Get-Command $hosts[$k] -ErrorAction SilentlyContinue)) { Write-Host "$k`: not on this runner"; continue }
+            $a = (& $hosts[$k] -NoProfile -ExecutionPolicy Bypass -File $fx | Select-Object -Last 1)
+            $pa = (& $hosts[$k] -NoProfile -Command '$env:PROCESSOR_ARCHITECTURE')
+            Write-Host "$k (PROCESSOR_ARCHITECTURE=$pa): Get-NativeArch = $a"
+            if ($a -ne 'ARM64') { $failed++ }
+          }
+          if ($failed) { throw 'Get-NativeArch did not report ARM64 on Windows on Arm' }
+          # the NVIDIA runtime Setup fetches for this build on an NVIDIA GPU (dry run: the pin and its file list)
+          & pwsh -File scripts/nvidia-vfx-fetch.ps1 -Dest (Join-Path $env:RUNNER_TEMP 'vfx-dry') -Platform win_arm64 -Layout wheel -AcceptNvidiaLicense -DryRun | Select-Object -First 4
+          if ($LASTEXITCODE) { throw 'nvidia-vfx-fetch.ps1 -Platform win_arm64 dry run failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mpvnative-windows-arm64
+          path: ${{ runner.temp }}/PushMPC-mpv-windows-arm64/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpvnative-windows-arm64-logs
+          path: |
+            ${{ runner.temp }}/t/*.log
+            ${{ runner.temp }}/t/*.txt
+          retention-days: 7

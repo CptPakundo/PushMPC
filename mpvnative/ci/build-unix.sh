@@ -1,15 +1,17 @@
 #!/bin/bash
-# build-unix.sh <prefix> <src dir> [linux|macos|msys2]: Vulkan-Headers, libplacebo (when the system one is too old),
+# build-unix.sh <prefix> <src dir> [linux|macos|msys2|msys2-arm64]: Vulkan-Headers, libplacebo (when the system one is too old),
 # FFmpeg with vf_pushmpc, mpv, all from the tags pinned in mpvnative/pins.json (commits checked), into <prefix>.
 # ccache is used when present (CI caches its folder). Idempotent: finished steps leave a stamp in <prefix>/stamps.
 set -euo pipefail
 P=$1; S=$2; OS=${3:-linux}
+# msys2-arm64: Windows on Arm in MSYS2 CLANGARM64 (clang, aarch64-w64-mingw32); otherwise as msys2
+ARCH=""; [ "$OS" = msys2-arm64 ] && { OS=msys2; ARCH=arm64; }
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 J=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 mkdir -p "$P/stamps" "$S"
 export PKG_CONFIG_PATH="$P/lib/pkgconfig:$P/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export CFLAGS="-I$P/include ${CFLAGS:-}" CPPFLAGS="-I$P/include ${CPPFLAGS:-}" LDFLAGS="-L$P/lib ${LDFLAGS:-}"
-BASECC=cc; [ "$OS" = msys2 ] && BASECC=gcc
+BASECC=cc; [ "$OS" = msys2 ] && BASECC=gcc; [ "$ARCH" = arm64 ] && BASECC=clang
 CC="$BASECC"; command -v ccache >/dev/null && CC="ccache $BASECC"
 pin() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])" "$ROOT/mpvnative/pins.json" "$1" "$2"; }
 . "$ROOT/mpvnative/ci/fetch-commit.sh"
@@ -51,7 +53,9 @@ sh "$ROOT/mpvnative/ffmpeg/add-to-ffmpeg.sh" "$S/ffmpeg"
 cfg=(--prefix="$P" --libdir="$P/lib" --enable-gpl --enable-version3 --enable-shared --disable-static --disable-doc
      --disable-debug --enable-vulkan --cc="$CC" --extra-cflags="-I$P/include" --extra-ldflags="-L$P/lib")
 case $OS in
-    msys2) cfg+=(--enable-d3d11va --enable-dxva2 --disable-libplacebo) ;;
+    msys2) cfg+=(--enable-d3d11va --enable-dxva2 --disable-libplacebo)
+           # the MSYS2 shell runs x64 (emulated) on Windows on Arm: name the target instead of uname's
+           if [ "$ARCH" = arm64 ]; then cfg+=(--arch=aarch64 --target-os=mingw32); fi ;;
     macos) cfg+=(--enable-videotoolbox) ;;
     linux) cfg+=(--disable-libplacebo) ;;
 esac
