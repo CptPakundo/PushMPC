@@ -173,6 +173,8 @@ typedef struct PushCoreSettings {
 #define PUSHCORE_FG_VPL 7u         /* PUSHCORE_FEATURE_VPL_FI: Intel VPL AI frame interpolation (Intel Arc / Xe with the driver's VPL
                                       runtime) after the graph, on a D3D11 device beside it; multipliers as the runtime accepts
                                       (Query, up to 4); fallback VPL -> PushFlow -> FSR FG */
+#define PUSHCORE_FG_HELIXFG 8u     /* PUSHCORE_FEATURE_HELIXSR: HelixSR's frame generation (community, FidelityFX-based, 2x-6x) as a
+                                      direct DLSS-G provider on GPUs without DLSS-G / VFG (GTX, Radeon, Intel); Setup fetches it */
 #define PUSHCORE_FG_NONE 255u      /* (reported only) no frame generation could start */
 #define PUSHCORE_SR_METHOD_RTX 0u  /* RTX Video Super Resolution (srQuality / srFamily) */
 #define PUSHCORE_SR_METHOD_FSR 1u  /* AMD FSR upscaler (FSR 4.1 / INT8 where the driver offers it, else FSR 3.1) */
@@ -344,6 +346,10 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_VFG16 65536u /* NVIDIA VFG up to PUSHCORE_MAX_MULTIPLIER (16x; above 8x in the SDK timestep mode); older cores stop at 8x */
 #define PUSHCORE_MAX_MULTIPLIER 16u
 #define PUSHCORE_FEATURE_PUSHFLOW16 16384u /* PushFlow up to PUSHCORE_MAX_MULTIPLIER (flow once above 4x: one network run per pair, every subframe rebuilt from its grids); older cores stop at 4x */
+#define PUSHCORE_FEATURE_HELIXSR (1u << 26) /* PUSHCORE_FG_HELIXFG, PUSHCORE_CAP_HELIX_FG / PUSHCORE_CAP_HLX_FSR4 */
+#define PUSHCORE_FEATURE_TURING_DLSSG (1u << 17) /* PUSHCORE_FG_DLSSG on RTX 20 through the community port (Setup fetches it;
+                                                    self-tested on the first DLSS-G open, unlock TuringDlssg); PUSHCORE_CAP_DLSSG says
+                                                    whether it is usable on this card */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_XEFG (1u << 20)    /* fgBackend = PUSHCORE_FG_XEFG, PUSHCORE_CAP_XEFG, PUSHCORE_SELFTEST_XEFG */
 #define PUSHCORE_FEATURE_VPL_FI (1u << 21)  /* fgBackend = PUSHCORE_FG_VPL, PUSHCORE_CAP_VPL_FI, PUSHCORE_SELFTEST_VPL_FI */
@@ -399,6 +405,9 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 /* Self-test id (one global bit space with the pushcore_selfTest export of PUSHCORE_FEATURE_XEFG / XESS_SR; report key
    "zludavsr", registered in PushCoreGpu.cpp, calls pushmpc::zludaVsrSelfTestNow): the ZludaVsr self-test, synchronously */
 #define PUSHCORE_SELFTEST_ZLUDA_VSR 32u
+#define PUSHCORE_CAP_HELIX_FG 19u    /* PUSHCORE_FG_HELIXFG: the HelixSR files + its self-test pending or passed (unlock HelixFg) */
+#define PUSHCORE_CAP_HLX_FSR4 20u    /* FSR upscaling runs HelixSR's HLX FSR 4 (AMD's FSR 4 network as compute shaders) here: RX 5000
+                                        (Full) and GTX 16 / 10 (Lite), after its self-test (unlock HlxFsr4); else FSR 3.1 */
 #define PUSHCORE_CAP_COUNT 22u       /* set at the v1 merge: 0-20 used, 21 = PUSHCORE_CAP_ANIME_SR (Anime, merged later); PushCoreCaps.reason[] has this many rows */
 typedef struct PushCoreCaps {
     uint32_t structSize;       /* sizeof(PushCoreCaps) */

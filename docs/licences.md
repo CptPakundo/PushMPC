@@ -42,6 +42,14 @@ The licence texts of these two are installed with pushcore in `core\licenses\` (
 - **Intel XeSS** 3.0.2 runtime (XeSS super resolution, XeSS frame generation, XeLL), from Intel's GitHub repository, on
   Intel graphics cards: Intel Simplified Software License. Intel's licence and third-party notices are installed with
   the files in `runtime\licenses\intel-xess\`.
+- **DLSS frame generation on older GeForce cards** (RTX 20, GTX 16 and RTX 30 only): the community port sdli1995/dlssg_for_sm86 0.4.2
+  from its GitHub release, checked against fixed hashes. Its code is MIT; it carries NVIDIA's unmodified DLSS frame
+  generation runtime (under NVIDIA's terms) and its own RTX 30 and Turing kernels (the Turing ones from Coldwood1026/dlssg_for_sm75; binary only).
+  Its `LICENSE.md` and `THIRD_PARTY_NOTICES.txt` are installed with it.
+- **HelixSR** 3.4.1 (on GTX, Radeon and Intel cards): frame generation and, on RX 5000 and GTX cards, HLX FSR 4 upscaling,
+  from HelixSR's GitHub release, checked against fixed hashes, unmodified. HelixSR is free to use under the HelixSR Freeware
+  License (its source is not published); it contains AMD FidelityFX code and AMD's FSR 4 network under AMD's MIT licence.
+  Its `LICENSE`, `THIRD_PARTY_NOTICES.md` and `SOURCE.md` are installed with it. PushMPC does not use its DLSS part.
 - **VapourSynth** R82 portable (LGPL-2.1) and Python's embeddable package (PSF licence), for the mpv route on Windows.
 - **mpv** for Plex, when Plex's own player can't take PushMPC's filter: shinchiro's libmpv build (GPL/LGPL).
 - **ArtCNN** weights (MIT), for the Mac's Homebrew package.

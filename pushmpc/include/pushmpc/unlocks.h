@@ -20,10 +20,11 @@ namespace pmu {
 // the registry root of the unlock values (tests point it at a scratch key so the user's settings stay untouched)
 inline std::wstring& RegBase() { static std::wstring b = L"Software\\PushMPC"; return b; }
 
-enum class Unlock : int { Gtx16Vsr, ZludaVsr, XessFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, XessSr, IntelVsr, Count };
+enum class Unlock : int { Gtx16Vsr, ZludaVsr, XessFg, VplFi, VplSr, NvofWarp, Fsr4Int8, SubtitleHoldAuto, XessSr, IntelVsr, TuringDlssg, AmpereDlssg, HelixFg, HlxFsr4, Count };
 inline const wchar_t* UnlockName(Unlock u)
 {
-    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XessFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"XessSr", L"IntelVsr" };
+    static const wchar_t* n[] = { L"Gtx16Vsr", L"ZludaVsr", L"XessFg", L"VplFi", L"VplSr", L"NvofWarp", L"Fsr4Int8", L"SubtitleHoldAuto", L"XessSr", L"IntelVsr", L"TuringDlssg", L"AmpereDlssg", L"HelixFg", L"HlxFsr4" };
+    static_assert(std::size(n) == size_t(Unlock::Count), "one name per unlock");
     const int i = int(u);
     return i >= 0 && i < int(Unlock::Count) ? n[i] : L"?";
 }
@@ -33,7 +34,11 @@ inline const wchar_t* UnlockLabel(Unlock u)
     static const wchar_t* n[] = { L"RTX VSR on GTX 16 (Turing kernels, NGX gate bypass)", L"RTX VSR + RTX Video HDR on RX 7000 / 9000 (ZLUDA)",
         L"XeSS frame generation (headless swap chain)", L"Intel VPL AI frame interpolation", L"Intel VPL AI super resolution",
         L"NVIDIA optical flow + PushMPC warp frame generation", L"FSR 4.1 INT8 upscaling (RX 6000 / 7000)", L"Subtitle Hold on while burned-in text is found",
-        L"Intel XeSS super resolution", L"Intel Video Super Resolution (driver video processor)" };
+        L"Intel XeSS super resolution", L"Intel Video Super Resolution (driver video processor)",
+        L"DLSS frame generation on RTX 20 / GTX 16 (community port sdli1995/dlssg_for_sm86, SM75 kernels)",
+        L"DLSS frame generation on RTX 30 (community port sdli1995/dlssg_for_sm86)",
+        L"HelixSR frame generation (community; GTX, Radeon, Intel)", L"HelixSR HLX FSR 4 upscaling (community; RX 5000, GTX 16 / 10)" };
+    static_assert(std::size(n) == size_t(Unlock::Count), "one label per unlock");
     const int i = int(u);
     return i >= 0 && i < int(Unlock::Count) ? n[i] : L"?";
 }

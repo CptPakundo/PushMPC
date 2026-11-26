@@ -2,6 +2,7 @@
 #include "../src/PushMpcAuto.h"
 #include "../src/PushMpcExtras.h"
 #include "../../pushmpc/include/pushmpc/unlocks.h"
+#include "../../pushmpc/include/pushmpc/dlssg_route.h"
 #include <cstdio>
 #include <random>
 using namespace pm;
@@ -245,6 +246,77 @@ int main()
             Costs slow2060 = cold; slow2060.card = 8.0; slow2060.pfBenched = true; for (int t = 0; t < 3; ++t) { slow2060.pfFirst[t] = 70 + 10 * t; slow2060.pfNext[t] = 60 + 10 * t; }
             const Choice n3 = Decide({}, film, d60, slow2060, g2060);
             check(n3.fgMethod == FgMethod::Nvof, L"RTX 2060, PushFlow measured too slow: NVOF FG (before FSR FG)", n3.smootherNote + L" | " + n3.stoppedAt);
+            // RTX 20 with the community DLSS-G port available (self-test passed or pending): DLSS-G first, above 2x where
+            // it fits; without the port (kCapDlssg off) the order is unchanged
+            Gpu g2080 = Family(kRtx20, L"NVIDIA GeForce RTX 2080 Ti"); g2080.available |= 1u << kCapDlssg;
+            const Choice n4 = Decide({}, film, d144, cold, g2080);
+            check(n4.fgMethod == FgMethod::Dlssg && n4.multiplier >= 2, L"RTX 2080 Ti with the DLSS-G port: DLSS-G", n4.smootherNote + L" | " + n4.stoppedAt);
+            const Choice n5 = Decide({}, film, d144, cold, Family(kRtx20, L"NVIDIA GeForce RTX 2080 Ti"));
+            check(n5.fgMethod != FgMethod::Dlssg, L"RTX 2080 Ti without the DLSS-G port: not DLSS-G", n5.smootherNote);
+            // RTX 30: Transfusion or the community port per open (pmu::ChooseDlssgRoute)
+            using pmu::DlssgRoute;
+            auto route = [](auto f) { pmu::DlssgRouteInputs in; in.transfusionUsable = true; in.portUsable = true; f(in); return pmu::ChooseDlssgRoute(in); };
+            check(route([](auto& in) { in.portUsable = false; in.transfusion.runs = 3; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Transfusion, L"RTX 30 without the port: Transfusion");
+            check(route([](auto&) {}).route == DlssgRoute::Transfusion, L"RTX 30 with the port, nothing measured: Transfusion (default)");
+            check(route([](auto& in) { in.transfusion.runs = 1; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Port, L"RTX 30, Transfusion measured, port self-test pending: the port (its self-test)");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion.runs = 1; in.transfusion.msPerGen = 2.0; }).route == DlssgRoute::Port, L"RTX 30, port passed but not measured: the port (measuring it)");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 0, 1.5 }; }).route == DlssgRoute::Port, L"RTX 30, the port measured cheaper: the port");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 1.5 }; in.port = { 4, 0, 0, 2.0 }; }).route == DlssgRoute::Transfusion, L"RTX 30, Transfusion measured cheaper: Transfusion");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 0, 1.98 }; }).route == DlssgRoute::Transfusion, L"RTX 30, near tie (< 3 %): Transfusion stays");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 0, 2.0 }; in.port = { 4, 0, 1, 1.0 }; }).route == DlssgRoute::Transfusion, L"RTX 30, the port crashed once: Transfusion");
+            check(route([](auto& in) { in.portPassed = true; in.transfusion = { 4, 0, 1, 1.0 }; in.port = { 4, 0, 0, 2.0 }; }).route == DlssgRoute::Port, L"RTX 30, Transfusion crashed once: the port");
+            check(route([](auto& in) { in.transfusion = { 0, 0, 1, 0 }; }).route == DlssgRoute::Port, L"RTX 30, Transfusion crashed before any measurement: the port's self-test");
+            check(route([](auto& in) { in.transfusionUsable = false; }).route == DlssgRoute::Port, L"RTX 30, Transfusion not usable: the port");
+            { const auto c = route([](auto& in) { in.portPassed = true; in.wantLite = true; }); check(c.route == DlssgRoute::Port && c.lite, L"RTX 30, FG Lite asked for, port passed: the port with preset C"); }
+            { const auto c = route([](auto& in) { in.wantLite = true; }); check(c.route == DlssgRoute::Transfusion && !c.lite, L"RTX 30, FG Lite asked for, port not tested: Transfusion, no Lite"); }
+            { const auto c = route([](auto& in) { in.portPassed = true; in.wantLite = true; in.latch = DlssgRoute::Transfusion; }); check(c.route == DlssgRoute::Transfusion && !c.lite, L"RTX 30, process latched to Transfusion: Transfusion even for FG Lite"); }
+            check(route([](auto& in) { in.latch = DlssgRoute::Port; in.portPassed = true; in.transfusion = { 4, 0, 0, 1.0 }; in.port = { 4, 0, 0, 3.0 }; }).route == DlssgRoute::Port, L"RTX 30, process latched to the port: the port");
+            // FG Lite as an Auto tier: only where pushcore offers it, and only when it reaches a higher multiplier
+            {
+                Gpu g30 = Family(kRtx30, L"NVIDIA GeForce RTX 3060"); g30.available &= ~(1u << kCapVfg);
+                Gpu g30lite = g30; g30lite.available |= 1u << kCapDlssgLite;
+                bool liteSeen = false, liteBad = false, liteWithoutCap = false;
+                for (double card = 1.0; card <= 40.0; card += 0.5) {
+                    Costs k = cold; k.card = card;
+                    const Choice std2 = Decide({}, film, d144, k, g30);
+                    const Choice lite2 = Decide({}, film, d144, k, g30lite);
+                    if (std2.fgMethod == FgMethod::Dlssg && std2.fgQuality == kDlssgLiteQ) liteWithoutCap = true;
+                    if (lite2.fgMethod == FgMethod::Dlssg && lite2.fgQuality == kDlssgLiteQ) {
+                        liteSeen = true;
+                        if (!(lite2.multiplier > (std2.fgMethod == FgMethod::Dlssg ? std2.multiplier : 1))) liteBad = true;
+                    }
+                }
+                check(liteSeen && !liteBad, L"RTX 30 with FG Lite: Auto takes it on weaker cards, only for a higher multiplier");
+                check(!liteWithoutCap, L"RTX 30 without FG Lite (no port self-test): never FG Lite");
+                check(FgKeyOf(FgMethod::Dlssg, kDlssgLiteQ) == kKeyDlssgLite && FgKeyOf(FgMethod::Dlssg, 0) == kKeyDlssg, L"FG Lite has its own learned cost key");
+            }
+            {   // FSR 4.1 INT8 upscaling: RX 6000 (SDK 2.4.0 / upscaler 4.1.2) gets the same INT8 prior as RX 7000
+                Costs k = cold; k.card = 3.0;
+                const Source sd{ 1280, 720, 23.976, false, 0.5 };
+                const Choice r6 = Decide({}, sd, d144, k, Family(kRdna2, L"AMD Radeon RX 6800 XT"));
+                const Choice r7 = Decide({}, sd, d144, k, Family(kRdna3, L"AMD Radeon RX 7800 XT"));
+                check(r6.sr == r7.sr && std::abs(r6.predictedMs - r7.predictedMs) < 0.01, L"RX 6000 and RX 7000: the same FSR 4.1 INT8 prior", std::format(L"{:.2f} vs {:.2f} ms", r6.predictedMs, r7.predictedMs));
+            }
+            {   // HelixSR frame generation (kCapHelixFg): only where pushcore offers it; after PushFlow, before FSR FG; up to 6x
+                const Source sd{ 1920, 1080, 23.976, false, 0.5 };
+                Costs slow = cold; slow.card = 3.0; slow.pfBenched = true; for (int t = 0; t < 3; ++t) { slow.pfFirst[t] = 90; slow.pfNext[t] = 80; }
+                Gpu rx = Family(kRdna2, L"AMD Radeon RX 6600"); Gpu rxH = rx; rxH.available |= 1u << kCapHelixFg;
+                const Choice h0 = Decide({}, sd, d144, slow, rx), h1 = Decide({}, sd, d144, slow, rxH);
+                check(h0.fgMethod != FgMethod::HelixFg, L"RX 6600 without HelixSR: never HelixSR FG", h0.smootherNote);
+                check(h1.fgMethod == FgMethod::HelixFg && h1.multiplier >= 2, L"RX 6600, PushFlow measured too slow, HelixSR offered: HelixSR FG", h1.smootherNote + L" | " + h1.stoppedAt);
+                check(h1.multiplier >= h0.multiplier, L"HelixSR FG reaches at least FSR FG's multiplier", std::format(L"{} vs {}", h1.multiplier, h0.multiplier));
+                Costs fast = cold; fast.card = 0.5;
+                check(Decide({}, sd, d144, fast, rxH).fgMethod == FgMethod::PushFlow, L"RX 6600 where PushFlow fits: PushFlow stays first", L"");
+                check(MaxMultiplier(FgMethod::HelixFg) == 6 && FgKeyOf(FgMethod::HelixFg, 1) == kKeyHelixFg && CapOf(FgMethod::HelixFg) == kCapHelixFg, L"HelixSR FG: up to 6x, own cost key, own capability bit");
+                check(FgMethodStr(FgMethod::HelixFg) == std::wstring(L"HELIXFG") && int(FgMethod::HelixFg) - 1 == 8, L"HelixSR FG maps to PUSHCORE_FG_HELIXFG (8)");
+                // HLX FSR 4 on RX 5000: a higher FSR upscaler prior until measured, only where pushcore offers it
+                const Source sd720{ 1280, 720, 23.976, false, 0.5 };
+                Gpu r5 = Family(kRdna1, L"AMD Radeon RX 5700 XT"); Gpu r5h = r5; r5h.available |= 1u << kCapHlxFsr4;
+                Costs k5 = cold; k5.card = 2.0; k5.pfBenched = true;
+                const Choice s0 = Decide({}, sd720, d144, k5, r5), s1 = Decide({}, sd720, d144, k5, r5h);
+                check(s0.sr && s1.sr && s1.srMethod == Upscaler::Fsr && s1.predictedMs >= s0.predictedMs, L"RX 5700 XT with HLX FSR 4: FSR upscaling, costed higher until measured",
+                      std::format(L"{:.2f} vs {:.2f} ms", s1.predictedMs, s0.predictedMs));
+            }
             Settings fm; fm.fgMethod = FgMethod::Nvof;
             check(CoreFgFor(FgMethod::Nvof) == 5u, L"FgMethod::Nvof maps to PUSHCORE_FG_NVOF (5)");
             (void)fm;

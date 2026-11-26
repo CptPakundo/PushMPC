@@ -1404,6 +1404,8 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
     Add-FidelityFxSdk $dest
     Add-XessSdk $dest
     Add-ZludaVsrFile $dest
+    Add-DlssgPort $dest
+    Add-HelixSr $dest
     $pf = Add-PushFlow $dest
     Write-RuntimeManifest $dest $pkg $extraNote $pf
     Info 'Licences: the package''s licence texts are in the runtime folder (LICENSE, THIRD_PARTY_NOTICES.md, licenses\).'
@@ -1475,6 +1477,66 @@ function Add-ZludaVsrFile([string]$dest) {
     if ($LASTEXITCODE -ne 0) { Warn "RTX VSR on AMD not installed (nvidia-vfx-fetch.ps1 exit $LASTEXITCODE): FSR upscaling stays" }
     else { $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + nvngx_vsr (ZLUDA VSR)" }
 }
+# DLSS frame generation through the community port sdli1995/dlssg_for_sm86 on RTX 20 and GTX 16 (TU116 / TU117; unlock
+# TuringDlssg) and on RTX 30 (unlock AmpereDlssg: next to DlssgTransfusion, pushcore picks one per open from what it
+# measured; also FG Lite): downloaded from its GitHub release, pinned and hashed (scripts\dlssg-port-fetch.ps1), into
+# runtime\experimental\community\dlssg-sm75, where pushcore looks for it. pushcore's first DLSS-G open on the port is the
+# self-test; a failure falls back to the next method. Off: -ExperimentalExtras No, PUSHMPC_DISABLE_TURINGDLSSG=1 /
+# PUSHMPC_DISABLE_AMPEREDLSSG=1, or HKCU\Software\PushMPC\Unlocks TuringDlssg / AmpereDlssg = 0.
+function Add-DlssgPort([string]$dest) {
+    if ($GpuVendor -ne 'NVIDIA') { return }
+    # RTX 20, the GTX 16 chips (TU116 / TU117: the same Turing instruction set; pushcore's self-test decides) and RTX 30
+    $gi = Get-GpuInfo
+    $fam = Get-GpuFamily $gi
+    $tu11x = ($gi.Device -ge 0x2180 -and $gi.Device -le 0x21DF) -or ($gi.Device -ge 0x1F80 -and $gi.Device -le 0x1FBF)
+    if ($fam -ne 'RTX 20' -and $fam -ne 'RTX 30' -and -not $tu11x) { return }
+    $unlock = if ($fam -eq 'RTX 30') { 'AmpereDlssg' } else { 'TuringDlssg' }
+    $off = $ExperimentalExtras -eq 'No' -or [Environment]::GetEnvironmentVariable("PUSHMPC_DISABLE_$($unlock.ToUpperInvariant())") -match '^(1|true|yes|on)$'
+    try { if ((Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $unlock -ErrorAction Stop).$unlock -eq 0) { $off = $true } } catch {}
+    if ($off) { Info "DLSS-G port: switched off (unlock $unlock or -ExperimentalExtras No)"; return }
+    $fetch = Join-Path $PSScriptRoot 'dlssg-port-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'dlssg-port-fetch.ps1 is not next to the installer: no DLSS-G on this card'; return }
+    $target = Join-Path $dest 'runtime\experimental\community\dlssg-sm75'
+    if ($DryRun) { Dry "would add the community DLSS-G port (sdli1995/dlssg_for_sm86 0.4.2, pinned) in $target (dlssg-port-fetch.ps1)"; return }
+    Step 'DLSS frame generation for RTX 20 / GTX 16 / RTX 30 (community port sdli1995/dlssg_for_sm86 0.4.2), from its GitHub release, pinned'
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'dlssg-port-0.4.2' } else { Join-Path $InstallDir 'download\dlssg-port-0.4.2' }
+    & $fetch -Dest $target -Cache $cache
+    if ($LASTEXITCODE -ne 0) { Warn "Community DLSS-G port not installed (dlssg-port-fetch.ps1 exit $LASTEXITCODE): the other frame generation methods stay" }
+    else {
+        Info 'The community DLSS-G port turns on after a self-test on your card (during the first videos with DLSS-G)'
+        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + community DLSS-G port 0.4.2"
+    }
+}
+# HelixSR 3.4.1 (community, HelixSR Freeware License: free use; PushMPC does not redistribute it, Setup fetches the official
+# release on this PC, pinned and hashed, scripts\helixsr-fetch.ps1) into runtime_local\community\helixsr:
+#   its frame generation (2x-6x) on GPUs without DLSS-G / VFG (GTX, Radeon, Intel; unlock HelixFg);
+#   HLX FSR 4 (AMD's FSR 4 network as compute shaders) as the FSR upscaler on RX 5000 (Full) and GTX (Lite; unlock HlxFsr4).
+# pushcore runs each only after its self-test on the card; a failure falls back (FSR FG / PushFlow; AMD's FSR 3.1).
+# Off: -ExperimentalExtras No, PUSHMPC_DISABLE_HELIXFG=1 / PUSHMPC_DISABLE_HLXFSR4=1, or HKCU\Software\PushMPC\Unlocks HelixFg / HlxFsr4 = 0.
+function Add-HelixSr([string]$dest) {
+    if ($ExperimentalExtras -eq 'No') { return }
+    $gi = Get-GpuInfo
+    $fam = Get-GpuFamily $gi
+    $isOff = { param($u) ([Environment]::GetEnvironmentVariable("PUSHMPC_DISABLE_$($u.ToUpperInvariant())") -match '^(1|true|yes|on)$') -or
+                         ($(try { (Get-ItemProperty 'HKCU:\Software\PushMPC\Unlocks' -Name $u -ErrorAction Stop).$u -eq 0 } catch { $false })) }
+    $parts = @()
+    if ($fam -in 'GTX', 'RX 9000', 'RX 7000', 'RX 6000', 'RX 5000', 'Radeon', 'Intel', 'other' -and -not (& $isOff 'HelixFg')) { $parts += 'Fg' }
+    if (-not (& $isOff 'HlxFsr4')) { if ($fam -eq 'RX 5000') { $parts += 'Fsr4Full' } elseif ($fam -eq 'GTX') { $parts += 'Fsr4Lite' } }
+    if (-not $parts.Count) { return }
+    $fetch = Join-Path $PSScriptRoot 'helixsr-fetch.ps1'
+    if (-not (Test-Path $fetch)) { Warn 'helixsr-fetch.ps1 is not next to the installer: HelixSR is not set up'; return }
+    $target = Join-Path $dest 'runtime_local\community\helixsr'
+    $loader = Join-Path $dest 'runtime_local\amd\fidelityfx\amd_fidelityfx_loader_dx12.dll'
+    if ($DryRun) { Dry "would add HelixSR 3.4.1 ($($parts -join ', '); pinned) in $target (helixsr-fetch.ps1)"; return }
+    Step "HelixSR 3.4.1 ($($parts -join ', ')), community work, from its GitHub release, pinned"
+    $cache = if ($PackageCache) { Join-Path $PackageCache 'helixsr-3.4.1' } else { Join-Path $InstallDir 'download\helixsr-3.4.1' }
+    & $fetch -Dest $target -Parts $parts -Loader $loader -Cache $cache
+    if ($LASTEXITCODE -ne 0) { Warn "HelixSR not installed (helixsr-fetch.ps1 exit $LASTEXITCODE): the other methods stay" }
+    else {
+        Info 'HelixSR turns on after a self-test on your card (during the first videos that use it)'
+        $script:RuntimeSource = "$(if ($script:RuntimeSource) { $script:RuntimeSource } else { $Runtime.Asset }) + HelixSR 3.4.1"
+    }
+}
 function Write-RuntimeManifest([string]$dest, $pkg, [string]$extraNote, [string]$pushflow) {
     $src = if ($script:RuntimeSource) { $script:RuntimeSource } else { $pkg.Asset }
     $pfNote = if ($pushflow) { $pushflow } else { 'not installed' }
@@ -1522,6 +1584,8 @@ function Prepare-Runtime($pkg = $Runtime) {
         Add-FidelityFxSdk $dest
         Add-XessSdk $dest
         Add-ZludaVsrFile $dest
+        Add-DlssgPort $dest
+        Add-HelixSr $dest
         Write-RuntimeManifest $dest $pkg 'none (from an existing install)' (Add-PushFlow $dest)
         return $dest
     }
@@ -1628,7 +1692,7 @@ function Invoke-Stage {
     Copy-Item (Join-Path $FilterBin 'PushMpcFilter.ax'), (Join-Path $FilterBin 'PushMpcExit.dll') $f
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $f   # the installer travels with the filter (uninstall, update)
     # its helpers for NVIDIA's wheel and AMD's FSR SDK 2.4.0 (fetched at install, pinned) travel with it
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1', 'pushmpc-libmpv.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1', 'dlssg-port-fetch.ps1', 'helixsr-fetch.ps1', 'pushmpc-capture.ps1', 'pmml-fetch.ps1', 'ml-runtime-pin.json', 'pushmpc-plex.ps1', 'pushmpc-libmpv.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $f } }
     # the updater travels with the filter too (install copies it to <InstallDir>\PushMpcUpdater.exe; it updates itself from here)
     if (-not $UpdaterExe) { $script:UpdaterExe = Join-Path $repo 'updater\bin\PushMpcUpdater.exe' }
     if (-not (Test-Path $UpdaterExe)) { Fail "Build output missing: $UpdaterExe (run updater\build.cmd)" }
@@ -1790,7 +1854,7 @@ function Invoke-Package {
     Copy-Item (Join-Path $here 'pushmpc-install.ps1') $out
     # PushMPC's own mpv build (an optional release asset, not in Setup's payload)
     foreach ($z in @(Get-ChildItem -LiteralPath $StageDir -Filter 'PushMPC-mpv-windows-*.zip' -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $z.FullName $ReleaseDir -Force }
-    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
+    foreach ($x in 'nvidia-vfx-fetch.ps1', 'nvidia-vfx-pin.json', 'fidelityfx-fetch.ps1', 'xess-fetch.ps1', 'dlssg-port-fetch.ps1', 'helixsr-fetch.ps1') { if (Test-Path (Join-Path $here $x)) { Copy-Item (Join-Path $here $x) $out } }
     $cmd = @('@echo off', 'rem PushMPC: installs for this Windows user (no administrator rights). Veyra''s runtime package is downloaded from Veyra''s GitHub release.',
              'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pushmpc-install.ps1" install %*', 'pause')
     [IO.File]::WriteAllText((Join-Path $out 'Install-PushMPC.cmd'), ($cmd -join "`r`n") + "`r`n")
@@ -2720,7 +2784,7 @@ function Get-AutoPlan {
         'GTX' { if (Test-Gtx16 $g) { 'RTX Video Super Resolution on GTX 16 (unlock, after its self-test), else NIS' } else { 'NIS' } }
         'RX 9000' { 'FSR 4.1 (RTX VSR through ZLUDA after its self-test)' }
         'RX 7000' { 'FSR 4.1 INT8 (RTX VSR through ZLUDA after its self-test)' }
-        'RX 6000' { 'FSR 4.1 INT8 through AMD FSR SDK 2.4 (offered by Setup), else FSR' }
+        'RX 6000' { 'FSR 4.1 INT8 through AMD FSR SDK 2.4 (offered by Setup) with AMD driver 26.10.1 or newer; FSR 3.1 with an older driver or without the SDK' }
         { $_ -in 'RX 5000', 'Radeon' } { 'FSR' }
         'Intel' { 'NIS (Intel VPL super resolution after its self-test)' }
         'other' { 'NIS' }

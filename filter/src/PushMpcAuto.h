@@ -1,7 +1,8 @@
 // PushMPC "Auto": the upgrade ladder.
 //
 //  1. Frame generation first. The method by GPU family (RTX 50/40/30: NVIDIA VFG, then DLSS-G, PushFlow, FSR FG;
-//     RTX 20 and GTX: PushFlow, then FSR FG; Radeon: PushFlow, then FSR FG (FSR 4 ML on RX 9000), then AMD FRC; Intel:
+//     RTX 20: DLSS-G through the community port once its self-test passed, then PushFlow, NVOF FG, FSR FG; GTX: the same
+//     port on GTX 16, then PushFlow, FSR FG; Radeon: PushFlow, then FSR FG (FSR 4 ML on RX 9000), then AMD FRC; Intel:
 //     PushFlow, then FSR FG), the next one only when the method is not available on this GPU or cannot reach 2x
 //     within the budget. The multiplier with the method's base quality (VFG Medium, PushFlow Balanced): the largest M
 //     whose output fits the display (fps x M <= refresh x 1.02) and whose predicted p95 GPU cost fits the budget
@@ -70,7 +71,8 @@ struct Source {
 // The GPU (pushcore_capabilities): family and what it can run with the installed files. Bit numbers = PUSHCORE_CAP_*.
 enum GpuFamily : uint32_t { kFamUnknown = 0, kRtx50, kRtx40, kRtx30, kRtx20, kGtx, kRdna4, kRdna3, kRdna2, kRdna1, kAmdOther, kIntel, kOtherGpu };
 enum Cap : uint32_t { kCapVfg = 0, kCapDlssg, kCapPushFlow, kCapFsrFg, kCapFsr4Fg, kCapFrc, kCapRtxVsr, kCapVsrFamilies, kCapFsrSr, kCapNis, kCapRtxHdr, kCapNr, kCapDlssgLite, kCapNvofFg,
-                     kCapXefg, kCapVplFi, kCapXessSr, kCapIvsr, kCapCount };   // = PUSHCORE_CAP_* (18 ZLUDA VSR, 19-20 community: at merge)
+                     kCapXefg = 14, kCapVplFi = 15, kCapXessSr = 16, kCapIvsr = 17, kCapZludaVsr = 18, kCapHelixFg = 19, kCapHlxFsr4 = 20,
+                     kCapCount };   // = PUSHCORE_CAP_* (21 = Anime SR, added with the Anime merge; PUSHCORE_CAP_COUNT 22 leaves it room)
 struct Gpu {
     uint32_t family = kRtx50;          // default for the headless test: this machine
     uint32_t available = 0xFFFFFFFFu;  // bit per Cap
@@ -121,7 +123,11 @@ inline bool IsWeakGpu(uint32_t family, const std::wstring& name)
 }
 
 // Frame generation methods as Auto sees them (index = FgMethod - 1 = PUSHCORE_FG_*)
-enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof, kKeyVpl, kKeyXefg, kFgKeys };
+enum FgKey : int { kKeyVfgLow = 0, kKeyVfgMed, kKeyVfgHigh, kKeyDlssg, kKeyPfFast, kKeyPfBal, kKeyPfQual, kKeyFsr, kKeyFrc, kKeyNvof,
+                   kKeyVpl = 10, kKeyXefg = 11, kKeyDlssgLite = 12, kKeyHelixFg = 13, kFgKeys };
+// DLSS-G's quality values: 0 = standard, kDlssgLiteQ = FG Lite (RTX 50's performance mode; RTX 30's community port
+// preset C), offered where pushcore reports PUSHCORE_CAP_DLSSG_LITE
+inline constexpr int kDlssgLiteQ = 1;
 
 // Measured costs (RTX 5090), ms per source frame at p95 for a
 // 4K output; refined by measurement (fgScale per method and quality, PushFlow's own speed test).
@@ -136,6 +142,12 @@ struct Costs {
     double vfgLowShare = 0.40;                      // VFG Low ~0.35-0.4 x Medium (1080p quality runs)
     // DLSS-G with FidelityFX flow: flow + refine per source frame, then per generated frame (2x 1.47, 4x 3.87 p95)
     double dlssgFlow = 1.8, dlssgPerFrame = 1.2;
+    // FG Lite: each generated frame skips the second network (the port's RTX 3070 figures: -29..-34 % per generated
+    // frame at 2x, -45 % at 4x); a prior until measured (fgScale[kKeyDlssgLite])
+    double dlssgLiteShare = 0.62;
+    // HelixSR frame generation (FidelityFX frame interpolation + its own work): the 2x frame about FSR FG's cost, each further
+    // generated frame ~0.3 of it (HelixSR's BC-250 1080p figures: 2.1 ms for 2x, 3.2 ms for all three of 4x); a prior
+    double helixNextShare = 0.3;
     // PushFlow (4K p95, gpu-best 4b): first generated frame of a pair, each further one; Fast, Balanced, Quality
     double pfFirst[3] = { 4.49, 5.68, 11.96 }, pfNext[3] = { 3.15, 3.93, 11.40 };
     bool pfBenched = false;                         // replaced by PushFlowBench on this card (already absolute)
@@ -187,7 +199,7 @@ struct Costs {
     double card = 1.0;                              // CardFactor for the priors (or the measured one, ApplyMeasuredCard)
     bool cardMeasured = false;                      // card comes from this GPU's own speed test, not the name table
     double vsrScale = 1.0;                          // learned measured/prior ratio for VSR
-    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
+    double fgScale[kFgKeys] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };   // learned measured/prior ratio per method and quality
     bool fgLearned[kFgKeys] = {};
     bool learnedVsr = false, learnedNr = false, learnedHdr = false, learnedDeband = false;
     bool learnedBase = false;                       // base4k from the measured graph minus its stages (LearnCosts)
@@ -282,13 +294,14 @@ inline int FgKeyOf(FgMethod m, int quality)
 {
     switch (m) {
     case FgMethod::Vfg: return quality <= 0 ? kKeyVfgLow : quality >= 2 ? kKeyVfgHigh : kKeyVfgMed;
-    case FgMethod::Dlssg: return kKeyDlssg;
+    case FgMethod::Dlssg: return quality == kDlssgLiteQ ? kKeyDlssgLite : kKeyDlssg;
     case FgMethod::PushFlow: return kKeyPfFast + std::clamp(quality, 0, 2);
     case FgMethod::Fsr: return kKeyFsr;
     case FgMethod::AmdFrc: return kKeyFrc;
     case FgMethod::Nvof: return kKeyNvof;
     case FgMethod::Vpl: return kKeyVpl;
     case FgMethod::XeFg: return kKeyXefg;
+    case FgMethod::HelixFg: return kKeyHelixFg;
     default: return kKeyVfgMed;
     }
 }
@@ -343,7 +356,7 @@ struct DeliveryCap {
         return true;
     }
 };
-inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg ? 6 : m == FgMethod::PushFlow ? PushFlowCeiling() : m == FgMethod::Vpl || m == FgMethod::XeFg ? 4 : 2; }
+inline int MaxMultiplier(FgMethod m) { return m == FgMethod::Vfg ? VfgCeiling() : m == FgMethod::Dlssg || m == FgMethod::HelixFg ? 6 : m == FgMethod::PushFlow ? PushFlowCeiling() : m == FgMethod::Vpl || m == FgMethod::XeFg ? 4 : 2; }
 // The prior (before fgScale): p95 GPU ms per source frame of the frame generation group at multiplier m.
 // pix = output pixels / 4K. VFG and DLSS-G barely depend on the size (2.2-2.8 ms per Medium frame from 1080p to 4K).
 inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, double pix)
@@ -356,7 +369,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
         const double v = quality >= 2 ? high : quality <= 0 ? med * c.vfgLowShare : med;
         return v * sizeVfg * c.card;
     }
-    case FgMethod::Dlssg: return (c.dlssgFlow * pix + c.dlssgPerFrame * (m - 1) * sizeVfg) * c.card;
+    case FgMethod::Dlssg: return (c.dlssgFlow * pix + c.dlssgPerFrame * (quality == kDlssgLiteQ ? c.dlssgLiteShare : 1.0) * (m - 1) * sizeVfg) * c.card;
     case FgMethod::PushFlow: {
         const int t = std::clamp(quality, 0, 2);
         // up to 4x a network run per frame; above, flow once: the first frame of the pair (pack + network + rebuild), then
@@ -371,6 +384,7 @@ inline double FgPrior(const Costs& c, FgMethod method, int quality, int m, doubl
     case FgMethod::Nvof: return c.nvofEngine * (c.nvofTuring ? 2.0 : 1.0) + c.fsrFg * c.nvofInterpShare * pix * c.card;
     case FgMethod::Vpl: return c.vplFi * (pix / 0.25) * (m - 1) * (c.vplMeasured ? 1.0 : c.card);
     case FgMethod::XeFg: return (c.xefgFlow * c.card + c.xefgPerFrame * (m - 1) * (c.xefgMeasured ? 1.0 : c.card)) * pix;
+    case FgMethod::HelixFg: return c.fsrFg * pix * c.card * (1.0 + c.helixNextShare * (m - 2));
     default: return 0;
     }
 }
@@ -413,7 +427,8 @@ inline bool ApplyMeasuredCard(Costs& c)
 // fixed table).
 inline std::vector<FgMethod> FgOrder(const Gpu& g, const Costs& c)
 {
-    if (IsWeakGpu(g.family, g.name) && !c.pfBenched) return { FgMethod::Nvof, FgMethod::Fsr, FgMethod::Vpl, FgMethod::XeFg, FgMethod::PushFlow, FgMethod::AmdFrc };
+    // HelixSR frame generation (where pushcore offers it: kCapHelixFg) before FSR FG: the same FidelityFX interpolation, 2x-6x
+    if (IsWeakGpu(g.family, g.name) && !c.pfBenched) return { FgMethod::Nvof, FgMethod::HelixFg, FgMethod::Fsr, FgMethod::Vpl, FgMethod::XeFg, FgMethod::PushFlow, FgMethod::AmdFrc };
     return FgOrder(g);
 }
 inline std::vector<FgMethod> FgOrder(const Gpu& g)
@@ -424,18 +439,19 @@ inline std::vector<FgMethod> FgOrder(const Gpu& g)
     // RTX 5090, T5b), and its flow costs no shader time; Decide takes it only where it fits (else FSR FG)
     case kRtx50: case kRtx40: case kRtx30: return { FgMethod::Vfg, FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
     case kRtx20: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::Nvof, FgMethod::Fsr };
+    // HelixSR FG (community, 2x-6x, where pushcore offers it: kCapHelixFg) after the vendor and PushFlow candidates, before FSR FG
     // GTX 10 / 16, RX 5000 and older Radeons, other GPUs: XeSS FG (any Shader Model 6.4 GPU since XeSS 2.1, after its self-test
     // passed on this card) right after PushFlow, before the 2x-only methods; Decide takes the first that reaches 2x in budget
-    case kGtx: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Nvof, FgMethod::Fsr };
+    case kGtx: return { FgMethod::Dlssg, FgMethod::PushFlow, FgMethod::XeFg, FgMethod::HelixFg, FgMethod::Nvof, FgMethod::Fsr };   // DLSS-G: GTX 16 with the port only (kCapDlssg)
     // Intel: VPL AI frame interpolation first where it passed its default-on gate (discrete Arc: quality margin over a blend like
     // PushFlow Fast's on the probe material, <= 20.8 ms per source frame), then XeSS FG (Intel's own frame generation on the
     // XMX engines, the graph's flow as its motion; after its self-test), PushFlow, VPL as a candidate; Decide takes the first
     // that reaches 2x within the budget (costs: the self-tests' measurements, then live)
-    case kIntel: return g.vplGate ? std::vector<FgMethod>{ FgMethod::Vpl, FgMethod::XeFg, FgMethod::PushFlow, FgMethod::Fsr }
-                                  : std::vector<FgMethod>{ FgMethod::XeFg, FgMethod::PushFlow, FgMethod::Vpl, FgMethod::Fsr };
-    case kOtherGpu: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Fsr };
-    case kRdna1: case kAmdOther: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::Fsr, FgMethod::AmdFrc };
-    default: return { FgMethod::PushFlow, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon RX 6000+
+    case kIntel: return g.vplGate ? std::vector<FgMethod>{ FgMethod::Vpl, FgMethod::XeFg, FgMethod::PushFlow, FgMethod::HelixFg, FgMethod::Fsr }
+                                  : std::vector<FgMethod>{ FgMethod::XeFg, FgMethod::PushFlow, FgMethod::Vpl, FgMethod::HelixFg, FgMethod::Fsr };
+    case kOtherGpu: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::HelixFg, FgMethod::Fsr };
+    case kRdna1: case kAmdOther: return { FgMethod::PushFlow, FgMethod::XeFg, FgMethod::HelixFg, FgMethod::Fsr, FgMethod::AmdFrc };
+    default: return { FgMethod::PushFlow, FgMethod::HelixFg, FgMethod::Fsr, FgMethod::AmdFrc };   // Radeon RX 6000+
     }
 }
 // pushcore's numbering of the upscaler (PUSHCORE_SR_METHOD_* = Upscaler - 1; Auto never reaches pushcore: RTX)
@@ -456,12 +472,18 @@ inline void ReadMeasured(Gpu& g)
     g.vplMs1080 = num(kCapVplFi, L"ms=");
     g.vplGate = g.has(kCapVplFi) && g.reason[kCapVplFi].rfind(L"gate passed", 0) == 0;
 }
-inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : m == FgMethod::Nvof ? kCapNvofFg : m == FgMethod::Vpl ? kCapVplFi : m == FgMethod::XeFg ? kCapXefg : kCapFrc; }
+inline uint32_t CapOf(FgMethod m) { return m == FgMethod::Vfg ? kCapVfg : m == FgMethod::Dlssg ? kCapDlssg : m == FgMethod::PushFlow ? kCapPushFlow : m == FgMethod::Fsr ? kCapFsrFg : m == FgMethod::Nvof ? kCapNvofFg : m == FgMethod::Vpl ? kCapVplFi : m == FgMethod::XeFg ? kCapXefg : m == FgMethod::HelixFg ? kCapHelixFg : kCapFrc; }
 // base quality, upgrade, and the fallback when the base cannot reach 2x (VFG: Medium -> High, Low; PushFlow: Balanced ->
 // Quality, Fast); the user's FG quality fixes it (PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 struct Tiers { int base, upgrade, fallback; };
-inline Tiers TiersOf(FgMethod m, FgQuality q)
+// lite: the GPU has DLSS-G's FG Lite (PUSHCORE_CAP_DLSSG_LITE): Auto keeps standard DLSS-G and takes FG Lite when that
+// reaches a higher multiplier (a weaker card); the fixed quality Low means FG Lite, Medium / High standard
+inline Tiers TiersOf(FgMethod m, FgQuality q, bool lite = false)
 {
+    if (m == FgMethod::Dlssg && lite) {
+        if (q == FgQuality::Auto) return { 0, -1, kDlssgLiteQ };
+        return { int(q) <= 0 ? kDlssgLiteQ : 0, -1, -1 };
+    }
     if (m != FgMethod::Vfg && m != FgMethod::PushFlow) return { 0, -1, -1 };
     if (q != FgQuality::Auto) return { int(q), -1, -1 };
     return { 1, 2, 0 };
@@ -470,6 +492,7 @@ inline const wchar_t* QualityName(FgMethod m, int q)
 {
     if (m == FgMethod::PushFlow) return q <= 0 ? L"Fast" : q >= 2 ? L"Quality" : L"Balanced";
     if (m == FgMethod::Vfg) return q <= 0 ? L"Low" : q >= 2 ? L"High" : L"Medium";
+    if (m == FgMethod::Dlssg && q == kDlssgLiteQ) return L"FG Lite";
     return L"";
 }
 
@@ -481,10 +504,23 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     // rate, so its prior is 4x the RTX card factor until the running graph has measured it (vsrScale learned)
     if (g.family == kGtx && !c.learnedVsr) c.vsrScale *= 4.0;
     c.nvofTuring = g.family == kGtx || g.family == kRtx20;
+    // DLSS-G on RTX 20 runs NVIDIA's Ada kernels re-targeted to Turing by the community port (SM75 images, FP16 tensor
+    // cores, no FP8): its prior is 1.5x the card-scaled one until the running graph has measured it (fgScale learned)
+    // GTX 16 has no tensor cores (FP16 units instead): 4x, as for RTX VSR there
+    for (int k : { int(kKeyDlssg), int(kKeyDlssgLite) }) {
+        if (g.family == kRtx20 && !c.fgLearned[k]) c.fgScale[k] *= 1.5;
+        if (g.family == kGtx && !c.fgLearned[k]) c.fgScale[k] *= 4.0;
+    }
     // FSR upscaling on RX 7000 / RX 6000 is FSR 4.1 INT8 where the driver offers it (the shipped upscaler DLL carries the
     // INT8 provider): ~4.1 ms to 4K on an RX 7800 XT, about twice the FSR 3.1 prior with that card's factor; RX 9000 runs
     // the FP8 model on its matrix units. The running graph's measurement replaces it (vsrScale learned).
+    // RX 6000 (RDNA 2): FSR Upscaling 4.1 came with AMD FSR SDK 2.4.0 / upscaler 4.1.2 (October 2026; SDK release notes:
+    // "Added support for AMD FSR Upscaling 4.1 on AMD Radeon RX 6000 Series (RDNA 2 architecture) discrete GPUs") and
+    // Adrenalin 26.10.1; with an older driver the same DLL runs FSR 3.1 there, and the measurement corrects the prior.
     if ((g.family == kRdna3 || g.family == kRdna2) && !c.learnedVsr) c.fsrSr *= 2.0;
+    // HLX FSR 4 (HelixSR: AMD's FSR 4 network as compute shaders) is the FSR upscaler on RX 5000 / GTX where pushcore offers
+    // it: ~4x FSR 3.1's prior until measured (HelixSR's BC-250 figures: 8 ms to 4K for the full network)
+    if ((g.family == kRdna1 || g.family == kGtx) && g.has(kCapHlxFsr4) && !c.learnedVsr) c.fsrSr *= 4.0;
     const double fps = src.fps > 1 ? src.fps : 23.976;
     r.budgetMs = 1000.0 / fps * kBudgetShare;
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
@@ -674,11 +710,16 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
             const FgMethod m = order[i];
             if (i > 0 && m == order[0] && s.fgMethod != FgMethod::Auto) continue;
             if (!g.has(CapOf(m))) { notes += std::format(L"{} not available ({}); ", FgMethodLabel(m), g.reason[CapOf(m)]); continue; }
-            const Tiers t = TiersOf(m, s.fgQuality);
+            const Tiers t = TiersOf(m, s.fgQuality, g.has(kCapDlssgLite));
             std::wstring stop;
             int q = t.base;
             int mult = s.smoother != kAuto ? std::min(s.smoother, MaxMultiplier(m)) : pickFor(m, q, base, stop);
             if (s.smoother == kAuto && mult < 2 && t.fallback >= 0) { std::wstring s2; const int m2 = pickFor(m, t.fallback, base, s2); if (m2 >= 2) { mult = m2; q = t.fallback; stop = s2; } }
+            // DLSS-G FG Lite: taken when it reaches a higher multiplier than standard DLSS-G (a card where standard does not fit)
+            else if (s.smoother == kAuto && m == FgMethod::Dlssg && t.fallback == kDlssgLiteQ) {
+                std::wstring s2; const int m2 = pickFor(m, kDlssgLiteQ, base, s2);
+                if (m2 > mult) { mult = m2; q = kDlssgLiteQ; stop = s2; }
+            }
             if (mult >= 2) {
                 p.m = m; p.mult = mult; p.q = q; p.stop = stop.empty() ? L"fixed" : stop;
                 if (!notes.empty()) p.stop = notes + p.stop;
@@ -723,7 +764,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- the quality upgrade at the same multiplier (Auto quality only)
     if (r.multiplier >= 2 && s.fgQuality == FgQuality::Auto) {
-        const Tiers t = TiersOf(r.fgMethod, s.fgQuality);
+        const Tiers t = TiersOf(r.fgMethod, s.fgQuality, g.has(kCapDlssgLite));
         if (t.upgrade >= 0 && r.fgQuality == t.base) {
             const double now = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.base, r.multiplier, pixFg) + show(r.multiplier);
             const double up = baseCost(nr) + vsr(level) + FgCost(c, r.fgMethod, t.upgrade, r.multiplier, pixFg) + show(r.multiplier);

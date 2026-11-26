@@ -86,3 +86,5 @@ scripts/cmake-configure.cmd
 cmake/**
 scripts/test-vfg16-mpchc.ps1
 scripts/xess-fetch.ps1
+scripts/dlssg-port-fetch.ps1
+scripts/helixsr-fetch.ps1
