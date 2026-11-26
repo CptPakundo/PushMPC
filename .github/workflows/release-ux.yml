@@ -449,10 +449,10 @@ jobs:
             cc -O2 -Wall mpvnative/hook/libmpv_host.c -o /tmp/plexlin/pushmpc-plex-selftest -ldl
             export PUSHMPC_PLEX_DIR=/tmp/plexlin
           fi
-          PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 0.6.0
-          if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/plex/pushmpc-plex-linux.sh$'; fi
-          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -E '/setup.sh$|/pmml/' | head
-          tar -tzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
+          PUSHMPC_PMML_GRAPHS=/tmp/pmml-graphs sh packaging/linux/make-tarball.sh vsplugin/bin/pushmpc_vs.so dist x86_64 "$(sed -n 's/.*PUSHMPC_VERSION_STR "\([^"]*\)".*/\1/p' filter/src/version.h)"
+          if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-x86_64-*.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -q '/plex/pushmpc-plex-linux.sh$'; fi
+          tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -E '/setup.sh$|/pmml/' | head
+          tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
       - name: setup.sh into a fresh HOME (detection, engine choice, players, the pmml runtime), mpv through the installed block, uninstall
         env:
           # a Radeon without ROCm: PushFlow on ncnn (Vulkan); the runner's Vulkan device is lavapipe (Mesa, CPU)
@@ -462,8 +462,8 @@ jobs:
           export HOME=/tmp/home-ux; mkdir -p $HOME/.config/mpv $HOME/.kodi/userdata; printf 'volume=70\n' > $HOME/.config/mpv/mpv.conf
           snap() { (cd $HOME && find . -type f ! -path './.cache/dconf/*' | LC_ALL=C sort | xargs -r sha256sum); }
           snap > /tmp/before.txt
-          tar -xzf dist/pushmpc-linux-x86_64-0.6.0.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-0.6.0/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
           for want in 'Graphics card: AMD' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: not available on Linux'; do
             grep -q "$want" /tmp/setup.txt || { echo "::error::setup.sh output lacks '$want'"; exit 1; }
           done

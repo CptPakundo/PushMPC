@@ -175,6 +175,29 @@ static void list_builds(const char *dir)
     logf_(n ? "; " : " none; ");
 }
 
+/* a loaded library by its file-name stem ("libavfilter.so"), also when it sits in a private (RTLD_LOCAL) namespace:
+ * python-mpv in the shims and Emby Theater's plugin dlopen libmpv locally, so dlsym(RTLD_DEFAULT) cannot see it */
+struct pm_find { const char *stem; char path[1024]; };
+static int find_one(struct dl_phdr_info *info, size_t size, void *data)
+{
+    struct pm_find *f = data;
+    const char *n = info->dlpi_name ? info->dlpi_name : "";
+    (void)size;
+    if (!f->path[0] && strstr(n, f->stem) && !strstr(n, "libpushmpc-avfilter"))
+        snprintf(f->path, sizeof(f->path), "%s", n);
+    return 0;
+}
+static void *loaded_lib(const char *stem, const char *sym)
+{
+    struct pm_find f = { stem, "" };
+    Dl_info di;
+    void *s = dlsym(RTLD_DEFAULT, sym);
+    if (s && dladdr(s, &di) && di.dli_fname && strstr(di.dli_fname, stem))
+        return dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    dl_iterate_phdr(find_one, &f);
+    return f.path[0] ? dlopen(f.path, RTLD_NOW | RTLD_NOLOAD) : NULL;
+}
+
 static int install(void)
 {
     char dir[1024] = "", path[1200];
@@ -184,17 +207,16 @@ static int install(void)
     unsigned v;
 
     g_sys_handle = dlopen("libavfilter.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!g_sys_handle) {
-        /* the soname carries the major version: find the loaded one through the symbol */
-        void *sym = dlsym(RTLD_DEFAULT, "avfilter_version");
-        if (sym && dladdr(sym, &di) && di.dli_fname)
-            g_sys_handle = dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-    }
+    if (!g_sys_handle)
+        g_sys_handle = loaded_lib("libavfilter.so", "avfilter_version");
     if (!g_sys_handle) { logf_("this mpv has no libavfilter loaded; "); return -1; }
     g_real = (get_by_name_fn)dlsym(g_sys_handle, "avfilter_get_by_name");
     g_real_parse2 = (parse2_fn)dlsym(g_sys_handle, "avfilter_graph_parse2");
     sys_ver = (version_fn)dlsym(g_sys_handle, "avfilter_version");
-    sys_avutil = (version_fn)dlsym(RTLD_DEFAULT, "avutil_version");
+    {
+        void *u = loaded_lib("libavutil.so", "avutil_version");
+        sys_avutil = (version_fn)(u ? dlsym(u, "avutil_version") : dlsym(RTLD_DEFAULT, "avutil_version"));
+    }
     if (!g_real || !sys_ver) { logf_("missing libavfilter symbols; "); return -1; }
     v = sys_ver();
 
@@ -294,7 +316,7 @@ static char g_vfarg[1024];
 static int vf_has_ours(void *h)
 {
     char *v = pm_getstr(h, "vf");
-    const int has = v && strstr(v, "pushmpc") != NULL;
+    const int has = v && strstr(v, "@pushmpc") != NULL;
     if (v) pm_free(v);
     return has;
 }
@@ -356,9 +378,28 @@ __attribute__((visibility("default"))) int mpv_initialize(void *h)
     return r;
 }
 #else
+/* The hook calls libmpv only through these pointers and references no mpv_* symbol, so it also loads where libmpv sits
+ * in a private namespace (python-mpv in the shims, Emby Theater's plugin: dlopen RTLD_LOCAL). mpv 0.36+ fills them
+ * right after loading a C plugin (the MPV_CPLUGIN_DYNAMIC_SYM protocol: it writes &mpv_xxx into pfn_mpv_xxx); older
+ * mpv: the global namespace. */
+#define PM_SYM(ret, name, args) __attribute__((visibility("default"))) ret (*pfn_##name) args = NULL;
+PM_SYM(char *, mpv_get_property_string, (mpv_handle *, const char *))
+PM_SYM(void, mpv_free, (void *))
+PM_SYM(int, mpv_command, (mpv_handle *, const char **))
+PM_SYM(const char *, mpv_error_string, (int))
+PM_SYM(mpv_event *, mpv_wait_event, (mpv_handle *, double))
+#define PM_RESOLVE(name) do { if (!pfn_##name) pfn_##name = (__typeof__(pfn_##name))dlsym(RTLD_DEFAULT, #name); } while (0)
+
 int mpv_open_cplugin(mpv_handle *h)
 {
-    char *opts = mpv_get_property_string(h, "script-opts");
+    char *opts;
+    PM_RESOLVE(mpv_get_property_string); PM_RESOLVE(mpv_free); PM_RESOLVE(mpv_command); PM_RESOLVE(mpv_error_string);
+    PM_RESOLVE(mpv_wait_event);
+    if (!pfn_mpv_get_property_string || !pfn_mpv_free || !pfn_mpv_command || !pfn_mpv_error_string || !pfn_mpv_wait_event) {
+        fprintf(stderr, "[pushmpc_hook] not active: this libmpv gives C plugins no client API (mpv older than 0.36 in a private namespace)\n");
+        return -1;
+    }
+    opts = pfn_mpv_get_property_string(h, "script-opts");
     char cmd[2048] = "@pushmpc:pushmpc";
     int append = 1;
     const int ok = install() == 0;
@@ -371,19 +412,26 @@ int mpv_open_cplugin(mpv_handle *h)
         }
         if (strstr(opts, "pushmpc-append=no"))
             append = 0;
-        mpv_free(opts);
+        pfn_mpv_free(opts);
+    }
+    if (ok && append) {   /* another copy of the hook (a second mpv.conf block) may have added it already */
+        char *vf = pfn_mpv_get_property_string(h, "vf");
+        if (vf && strstr(vf, "@pushmpc"))
+            append = 0;
+        if (vf)
+            pfn_mpv_free(vf);
     }
     if (ok && append) {
         const char *args[] = { "vf", "append", cmd, NULL };
-        const int r = mpv_command(h, args);
-        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, mpv_error_string(r));
+        const int r = pfn_mpv_command(h, args);
+        fprintf(stderr, "[pushmpc_hook] %svf append %s -> %s\n", g_log, cmd, pfn_mpv_error_string(r));
     } else if (ok) {
         fprintf(stderr, "[pushmpc_hook] %s(no vf append)\n", g_log);
     } else {
         fprintf(stderr, "[pushmpc_hook] not active: %s\n", g_log);
     }
     for (;;) {
-        mpv_event *ev = mpv_wait_event(h, -1);
+        mpv_event *ev = pfn_mpv_wait_event(h, -1);
         if (ev->event_id == MPV_EVENT_SHUTDOWN)
             break;
     }

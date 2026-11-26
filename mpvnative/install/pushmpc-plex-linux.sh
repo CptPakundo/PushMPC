@@ -18,7 +18,8 @@
 #   ~/.var/app/<id>/data/plex/mpv.conf. Uninstall: our LD_PRELOAD key out of the override keyfile (restored exactly), the files, the block (exact restore).
 # Tarball: files in <dir>/pushmpc and a launcher ~/.local/bin/plex-pushmpc (LD_PRELOAD + Plex.sh); mpv.conf in
 #   ~/.local/share/plex/mpv.conf.
-# Snap Plex is not supported: snap-confine is setuid, and glibc drops LD_PRELOAD for it.
+# Snap Plex: snap-confine is setuid, and glibc drops LD_PRELOAD for it; pushmpc-apps-linux.sh loads the hook from
+# the Snap's mpv.conf instead.
 # Exit: 0 done, 1 error, 2 usage, 3 not supported here (no Plex found).
 set -u
 
