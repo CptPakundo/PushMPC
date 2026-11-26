@@ -2751,7 +2751,9 @@ function Invoke-PlexCheck($state) {
     $refresh = (Get-PlexNativeBuild $dst) -ne (Get-StateValue $state 'plexNativeBuild')
     if (-not $refresh -and (Test-PlexNativeInPlace)) { return }
     if (@(Get-Process -Name 'Plex', 'Plex HTPC' -ErrorAction SilentlyContinue).Count) { Info 'Plex is running: the proxy is set up again at the next sign-in'; return }
-    $r = Invoke-PlexNative $dst $(if ($refresh) { 'refresh' } else { 'reapply' }) @('-AllowBoth')
+    # refresh (uninstall, then install) rather than reapply: after a Plex update its installer's record of what it added
+    # would otherwise miss the builds still in the folder, and uninstall would leave them
+    $r = Invoke-PlexNative $dst 'refresh' @('-AllowBoth')
     if ($r.rc -eq -1) { return }
     $active = @($r.rows | Where-Object { $_.state -eq 'installed' })
     $other = @($r.rows | Where-Object { $_.state -notin 'installed', 'unsupported' })
@@ -2787,7 +2789,7 @@ function Install-PlexRoute($state) {
         # -AllowBoth: the swap is not in place (checked above); the guard would otherwise trip over a block that
         # mpv-integration wrote for Plex earlier (with the proxy in place mpv-integration leaves Plex alone)
         # a repair keeps it (reapply), an update with other proxy files puts the new ones in (refresh)
-        $verb = if (-not (Get-StateValue $state 'plexNative')) { 'install' } elseif ((Get-PlexNativeBuild $dst) -ne (Get-StateValue $state 'plexNativeBuild')) { 'refresh' } else { 'reapply' }
+        $verb = if (-not (Get-StateValue $state 'plexNative')) { 'install' } elseif ((Get-PlexNativeBuild $dst) -ne (Get-StateValue $state 'plexNativeBuild') -or -not (Test-PlexNativeInPlace)) { 'refresh' } else { 'reapply' }
         $r = Invoke-PlexNative $dst $verb @('-AllowBoth')
         if ($r.rc -eq -1) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; return }
         if (@($r.rows | Where-Object { $_.state -eq 'unsupported' -and $_.target -notin 'htpc', 'desktop' }).Count) {

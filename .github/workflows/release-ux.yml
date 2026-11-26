@@ -247,6 +247,8 @@ jobs:
           $dirs = @("$env:ProgramFiles\Plex\Plex HTPC", "$env:ProgramFiles\Plex\Plex") | Where-Object { Test-Path "$_\avfilter-8-plex.dll" }
           foreach ($d in $dirs) { Copy-Item "$d\avfilter-8-plex.dll" "$d\avfilter-8.dll" -Force }
           $t = Get-ScheduledTask -TaskPath '\PushMPC\' -TaskName 'Plex proxy check' -ErrorAction SilentlyContinue
+          # a run on an earlier release build (release_run): this commit's installer script runs the logon check
+          if ('${{ inputs.release_run }}') { Copy-Item scripts/pushmpc-install.ps1 "$env:LOCALAPPDATA\PushMPC\filter\pushmpc-install.ps1" -Force; 'logon check: this commit''s pushmpc-install.ps1 (release_run)' | Tee-Object -Append $log }
           # as at a sign-in: Windows PowerShell 5.1 without pwsh's module path (5.1 would load 7's modules and fail)
           if ($t) { $a = $t.Actions[0]; "logon check: $($a.Execute) $($a.Arguments)" | Tee-Object -Append $log; $keep = $env:PSModulePath; Remove-Item Env:PSModulePath; $p = Start-Process $a.Execute -ArgumentList $a.Arguments -Wait -PassThru; $env:PSModulePath = $keep; "logon check exit $($p.ExitCode)" | Tee-Object -Append $log }
           Get-Content "$env:LOCALAPPDATA\PushMPC\logs\plex-check.log" -ErrorAction SilentlyContinue | Select-Object -Last 25 | Tee-Object -Append $log
