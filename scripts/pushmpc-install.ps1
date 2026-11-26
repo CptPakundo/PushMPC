@@ -167,6 +167,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# A registry key, created only when it is missing: New-Item -Force on an existing key replaces it with an EMPTY key
+# (every value and subkey goes; R-REG1 wiped HKCU\Software\PushMPC this way). Never call New-Item -Force on a key directly.
+function New-RegKey([string]$Key) { if (-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null } }
 $ProgressPreference = 'SilentlyContinue'
 
 # ------------------------------------------------------------------------------------------------ constants
@@ -1846,7 +1849,8 @@ function Set-MpcHcEntry($state) {
         # MPC-HC's Filters keys this entry creates: uninstall removes them again while they are empty
         $made = @(@((Split-Path $MpcFiltersKey), $MpcFiltersKey) | Where-Object { -not (Test-Path $_) })
         if ($made.Count -and -not (Get-StateValue $state 'mpcCreatedKeys')) { Set-StateValue $state 'mpcCreatedKeys' ($made -join '|') }
-        New-Item -Path $key -Force | Out-Null
+        if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }   # our own entry: rewritten whole
+        New-RegKey $key
         New-ItemProperty $key -Name SourceType -PropertyType DWord -Value 0 -Force | Out-Null
         New-ItemProperty $key -Name Enabled -PropertyType DWord -Value 1 -Force | Out-Null
         New-ItemProperty $key -Name Name -PropertyType String -Value 'PushMPC Filter' -Force | Out-Null
@@ -1900,9 +1904,9 @@ $MpcVrBackupKey = 'HKCU:\Software\PushMPC\MpcVrBackup'
 $MpcVrValues = @('HdrLocalToneMapping', 'HdrLocalToneMappingType', 'HdrDisplayNits')
 function Set-MpcVrHdr {
     if ($DryRun) { Dry "would set $MpcVrKey HdrLocalToneMapping=1, HdrLocalToneMappingType=7 (Spline), keeping the old values in $MpcVrBackupKey"; return }
-    if (-not (Test-Path $MpcVrKey)) { New-Item -Path $MpcVrKey -Force | Out-Null }
+    if (-not (Test-Path $MpcVrKey)) { New-RegKey $MpcVrKey }
     if (-not (Test-Path $MpcVrBackupKey)) {
-        New-Item -Path $MpcVrBackupKey -Force | Out-Null
+        New-RegKey $MpcVrBackupKey
         foreach ($n in $MpcVrValues) {
             $v = (Get-ItemProperty -Path $MpcVrKey -Name $n -ErrorAction SilentlyContinue).$n
             if ($null -ne $v) { New-ItemProperty -Path $MpcVrBackupKey -Name $n -Value ([int]$v) -PropertyType DWord -Force | Out-Null }
@@ -1992,7 +1996,8 @@ function Set-MpcBeEntry($state) {
     $types = @("$vids{3231564E-0000-0010-8000-00AA00389B71}", "$vids{30313050-0000-0010-8000-00AA00389B71}")   # NV12, P010
     if ($DryRun) { Dry "would write $key (PushMPC Filter, Prefer, NV12/P010)" }
     else {
-        New-Item -Path $key -Force | Out-Null
+        if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }   # our own entry: rewritten whole
+        New-RegKey $key
         New-ItemProperty $key -Name Name -PropertyType String -Value 'PushMPC Filter' -Force | Out-Null
         New-ItemProperty $key -Name SourceType -PropertyType DWord -Value 0 -Force | Out-Null
         New-ItemProperty $key -Name Enabled -PropertyType DWord -Value 1 -Force | Out-Null
@@ -2015,11 +2020,11 @@ function Set-MpcBeDecoder {
     $cur = (Get-ItemProperty -Path $MpcBeDecoderKey -Name HwDecoder -ErrorAction SilentlyContinue).HwDecoder
     if ($DryRun) { Dry "would set $MpcBeDecoderKey HwDecoder=2 (D3D11 copy-back; now $(if ($null -ne $cur) { $cur } else { 'absent' })), keeping the old value in $MpcBeBackupKey"; return }
     if (-not (Test-Path $MpcBeBackupKey)) {
-        New-Item -Path $MpcBeBackupKey -Force | Out-Null
+        New-RegKey $MpcBeBackupKey
         if ($null -ne $cur) { New-ItemProperty -Path $MpcBeBackupKey -Name HwDecoder -Value ([int]$cur) -PropertyType DWord -Force | Out-Null }
         else { New-ItemProperty -Path $MpcBeBackupKey -Name HwDecoder -Value 'absent' -PropertyType String -Force | Out-Null }
     }
-    if (-not (Test-Path $MpcBeDecoderKey)) { New-Item -Path $MpcBeDecoderKey -Force | Out-Null }
+    if (-not (Test-Path $MpcBeDecoderKey)) { New-RegKey $MpcBeDecoderKey }
     New-ItemProperty -Path $MpcBeDecoderKey -Name HwDecoder -Value 2 -PropertyType DWord -Force | Out-Null
     Info 'MPC-BE: MPC Video Decoder set to D3D11 copy-back (HwDecoder 2; the previous value is kept for uninstall)'
 }
@@ -2141,7 +2146,7 @@ function Set-PotPlayerEntry($state) {
             $n = 0; while ($entries | Where-Object { $_.Name -eq ('{0:D4}' -f $n) }) { $n++ }
             $name = '{0:D4}' -f $n; $key = Join-Path $PotOverride $name; $endName = '{0:D4}' -f ($n + 1)
             if ($DryRun) { Dry "would write the end marker $endName" }
-            else { $ek = Join-Path $PotOverride $endName; New-Item -Path $ek -Force | Out-Null; New-ItemProperty $ek -Name Type -PropertyType DWord -Value $PotEndType -Force | Out-Null }
+            else { $ek = Join-Path $PotOverride $endName; New-RegKey $ek; New-ItemProperty $ek -Name Type -PropertyType DWord -Value $PotEndType -Force | Out-Null }
         }
         Info "PotPlayer filter priority: adding entry $name"
     }
@@ -2150,7 +2155,7 @@ function Set-PotPlayerEntry($state) {
     if ($DryRun) { Dry "would write $key (PushMPC Filter, file $ax, Prefer, NV12/P010)" }
     else {
         if (Test-Path $key) { Remove-Item $key -Recurse -Force }
-        New-Item -Path $key -Force | Out-Null
+        New-RegKey $key
         New-ItemProperty $key -Name Type -PropertyType DWord -Value 1 -Force | Out-Null           # a filter file
         New-ItemProperty $key -Name Disabled -PropertyType DWord -Value 0 -Force | Out-Null
         New-ItemProperty $key -Name Name -PropertyType String -Value 'PushMPC Filter' -Force | Out-Null
@@ -2201,7 +2206,7 @@ function Set-PotPlayerLav($state) {
     if (Test-Path (Join-Path $PotOverride $endName)) { Remove-Item (Join-Path $PotOverride $endName) -Recurse -Force }
     Rename-Item -Path $key -NewName $endName
     $key = Join-Path $PotOverride $name
-    New-Item -Path $key -Force | Out-Null
+    New-RegKey $key
     New-ItemProperty $key -Name Type -PropertyType DWord -Value 1 -Force | Out-Null
     New-ItemProperty $key -Name Disabled -PropertyType DWord -Value 0 -Force | Out-Null
     New-ItemProperty $key -Name Name -PropertyType String -Value 'LAV Video Decoder' -Force | Out-Null
@@ -2603,7 +2608,7 @@ function Write-PmmlChoice($p, $state) {
     # the mpv route's ml backend finds the same runtime (vsplugin ReadSetting MlRuntime)
     if (-not $NoRegister) {
         $cur = (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -ErrorAction SilentlyContinue).MlRuntime
-        if (-not $cur) { New-Item 'HKCU:\Software\PushMPC' -Force | Out-Null; Set-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -Value $p.pmmlRuntime; Set-StateValue $state 'mlRuntimeSet' $p.pmmlRuntime }
+        if (-not $cur) { New-RegKey 'HKCU:\Software\PushMPC'; Set-ItemProperty 'HKCU:\Software\PushMPC' -Name MlRuntime -Value $p.pmmlRuntime; Set-StateValue $state 'mlRuntimeSet' $p.pmmlRuntime }
     }
 }
 function Save-AutoPlan($p) {
@@ -3286,6 +3291,12 @@ switch ($Action) {
             if (Test-Path $p) { if ($DryRun) { Dry "would remove $p" } else { Remove-Item $p -Recurse -Force } }
         }
         foreach ($f in @('state.json', 'pending.json', 'auto-plan.json')) { $p = Join-Path $InstallDir $f; if ((Test-Path $p) -and -not $DryRun) { Remove-Item $p -Force } }
+        # U-1: early builds (2026-11-22) kept a copy of MPC Video Renderer's file in backup\; nothing uses it any more
+        $bk = Join-Path $InstallDir 'backup'
+        if (Test-Path -LiteralPath $bk) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $bk -Filter 'MpcVideoRenderer*.ax' -File -ErrorAction SilentlyContinue)) { if ($DryRun) { Dry "would remove $($f.FullName)" } else { Remove-Item -LiteralPath $f.FullName -Force } }
+            if (-not $DryRun -and -not @(Get-ChildItem -LiteralPath $bk -Force).Count) { Remove-Item -LiteralPath $bk -Force }
+        }
         Progress 100 'Removed'
         Info "Removed (logs are kept in $InstallDir\logs)."
     }
