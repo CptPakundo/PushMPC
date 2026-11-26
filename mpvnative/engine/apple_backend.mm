@@ -5,6 +5,7 @@
 // needs macOS 13.3 to load and VTFrameProcessor (macOS 15.4+) to run: the engine dlopen()s it from its own folder and
 // asks it for a backend; Configure's self-test decides on this Mac (a Mac or VM that lists an effect but cannot run it
 // fails here, and Auto moves on to the Vulkan engine, then the CPU engine).
+#import <CoreVideo/CoreVideo.h>
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -204,3 +205,61 @@ extern "C" PMENG_EXPORT pme::Backend* pme_apple_open(const pmeng_stream* st, con
     if (!b->Init(*st, *o, *out, *why)) { delete b; return nullptr; }
     return b;
 }
+
+// ---- CVPixelBuffers in and out (VLC's VideoToolbox pictures, zero copy): a plain C interface, so the VLC module needs
+// no C++ type from here. Opaque handle; every call is guarded by the caller's own checks of the buffers.
+namespace {
+struct CvpxEngine {
+    apple::Engine eng;
+    apple::Colour col;
+    int k = 1;
+    std::string info;
+};
+void SetC(char* d, size_t n, const std::string& s) { if (d && n) std::snprintf(d, n, "%s", s.c_str()); }
+} // namespace
+
+// w, h, bits (8 / 10) of the stream; smoother 0 Auto, 2..8 fixed; colour as FFmpeg / H.273 codes. *k: the multiplier.
+// NULL with the reason when VideoToolbox cannot run this stream here (the caller then uses its copy path)
+extern "C" PMENG_EXPORT void* pme_apple_cvpx_open(int w, int h, int bits, int smoother, double fps, double hz, int fullRange,
+                                                  int matrix, int transfer, int primaries, int* k, char* why, size_t whyn)
+{
+    const apple::Caps& caps = apple::Probe();
+    if (!caps.AnyInterpolation()) { SetC(why, whyn, "no VideoToolbox interpolator on this Mac: " + caps.detail); return nullptr; }
+    const apple::AppleK ak = apple::DecideAppleK(smoother, fps > 0 ? fps : 23.976, hz);
+    if (ak.k <= 1) { SetC(why, whyn, "x1: nothing to do"); return nullptr; }
+    auto* c = new CvpxEngine();
+    apple::Config cfg;
+    cfg.width = w; cfg.height = h; cfg.bits = bits; cfg.k = ak.k; cfg.srcFps = fps > 0 ? fps : 23.976; cfg.sr = "off";
+    c->col.matrix = matrix > 0 && matrix != 2 ? matrix : 1; c->col.transfer = transfer > 0 && transfer != 2 ? transfer : 1;
+    c->col.primaries = primaries > 0 && primaries != 2 ? primaries : 1; c->col.fullRange = fullRange != 0;
+    cfg.colour = c->col;
+    std::string err;
+    if (!c->eng.Configure(cfg, err, c->info)) { SetC(why, whyn, err); delete c; return nullptr; }
+    c->k = std::max(1, c->eng.K());
+    c->info = "VideoToolbox on " + caps.chip + " (" + caps.os + "), CVPixelBuffers in and out: " + c->info;
+    if (k) *k = c->k;
+    return c;
+}
+// one source buffer; gen receives up to maxGen retained buffers (the caller releases them), *ngen how many, *havePair
+// whether they lie between the previous source and this one. 0 = ok
+extern "C" PMENG_EXPORT int pme_apple_cvpx_process(void* h, void* pb, int64_t pts100ns, int contiguous, void** gen, int maxGen,
+                                                   int* ngen, int* havePair, char* err, size_t errn)
+{
+    auto* c = static_cast<CvpxEngine*>(h);
+    *ngen = 0; *havePair = 0;
+    std::vector<void*> g;
+    void* cur = nullptr;
+    bool pair = false;
+    std::string e;
+    if (!c->eng.ProcessBuffer(pb, c->col, pts100ns, contiguous != 0, g, cur, pair, e)) { SetC(err, errn, e); return -1; }
+    if (cur) CVPixelBufferRelease(static_cast<CVPixelBufferRef>(cur));   // the real frame: the caller shows its own picture
+    for (size_t i = 0; i < g.size(); ++i) {
+        if (int(i) < maxGen) gen[(*ngen)++] = g[i];
+        else CVPixelBufferRelease(static_cast<CVPixelBufferRef>(g[i]));
+    }
+    *havePair = pair ? 1 : 0;
+    return 0;
+}
+extern "C" PMENG_EXPORT void pme_apple_cvpx_forget(void* h) { static_cast<CvpxEngine*>(h)->eng.Forget(); }
+extern "C" PMENG_EXPORT const char* pme_apple_cvpx_describe(void* h) { return static_cast<CvpxEngine*>(h)->info.c_str(); }
+extern "C" PMENG_EXPORT void pme_apple_cvpx_close(void* h) { delete static_cast<CvpxEngine*>(h); }

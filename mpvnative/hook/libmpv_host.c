@@ -101,6 +101,7 @@ int main(int argc, char **argv)
                 set(ctx, "script-opts", "pushmpc-append=no");
             }
         }
+        if (getenv("PUSHMPC_HOST_SCRIPTS")) set(ctx, "scripts", getenv("PUSHMPC_HOST_SCRIPTS"));   /* a C plugin (the IINA bridge) */
         if (init(ctx) < 0) { printf("host: mpv_initialize failed\n"); return 2; }
         {
             const char *args[] = { "loadfile", files[f], NULL };

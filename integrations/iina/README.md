@@ -8,7 +8,9 @@ PushMPC filter (`pushmpc.Enhance`). Two tiers:
   validation off, so the plugin loads it with `load-script`. It patches libmpv's imports of a few public libavfilter
   functions (`av_buffersrc_add_frame`, `av_buffersink_get_frame_flags`, ...) so that one marked no-op filter,
   `vf=@pushmpc:lavfi=[null@pushmpc]`, runs PushMPC's apple engine: VideoToolbox interpolation and super resolution, or
-  ArtCNN on Metal, zero copy on IINA's VideoToolbox frames. IINA.app is not modified (no re-signing, IINA's updates
+  ArtCNN on Metal, zero copy on IINA's VideoToolbox frames; where VideoToolbox cannot run, PushMPC's engine module from
+  the Mac bundle (`pushmpc-setup install` unpacks it): VideoToolbox on downloaded frames, then the GPU engine on
+  MoltenVK, then the CPU. `pushmpc-setup install` also installs this plugin into IINA and switches it on. IINA.app is not modified (no re-signing, IINA's updates
   keep working). When the bridge cannot run (IINA's FFmpeg major changed, an arm64e build, no Homebrew package), the
   filter passes frames through unchanged and the shader tier below applies. Log: `~/Library/Logs/PushMPC/iina-bridge.log`.
   Status: built and smoke-tested in CI inside IINA's own libmpv on a VM (portable engine); the VideoToolbox path

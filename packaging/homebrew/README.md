@@ -21,8 +21,10 @@ What the formula does:
   (`--no-artcnn` leaves it out);
 - on macOS builds `pushmpc-apple` (probe, Apple's one-time super-resolution model download, benchmarks) and the IINA
   bridge `lib/pushmpc/pushmpc-iina.so`;
-- on macOS keeps the Plex for Mac archive (resource `plex-mac`), which `pushmpc-setup install` puts into Plex for Mac and
-  Plex HTPC (`mpvnative/install/pushmpc-plex-mac.sh`, with a LaunchAgent that re-applies it after Plex updates).
+- on macOS keeps the Mac bundle (resource `plex-mac`): `pushmpc-setup install` puts it into Plex for Mac and Plex HTPC
+  (`mpvnative/install/pushmpc-plex-mac.sh`, with a LaunchAgent that re-applies it after Plex updates), IINA (the PushMPC
+  plugin, which loads the bridge) and VLC (the frame generation module and the FSR output;
+  `mpvnative/install/pushmpc-mac-players.sh`), each with a self-test.
 
 Its `url` / `version` / `sha256` and the `pmml-graphs` and `plex-mac` resources point at a release's assets. The
 release fills them in: `release.yml` builds the source tarball (`pushmpc-<version>-src.tar.gz`), and after a stable

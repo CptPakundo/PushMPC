@@ -427,6 +427,8 @@ jobs:
           if [ -f plexmac/pushmpc-plex-mac.sh ] && [ -f plexmac/libavfilter.8.dylib ]; then
             chmod +x plexmac/pushmpc-plex-selftest plexmac/pushmpc-plex-mac.sh   # artifacts drop the exec bits
             tar -czf "dist/pushmpc-plex-mac-$ver.tar.gz" -C plexmac .
+            # the IINA plugin on its own too (IINA can install it by double-click), from the same bundle
+            for g in plexmac/iina/*.iinaplgz; do [ -f "$g" ] && cp "$g" "dist/PushMPC-$ver.iinaplgz"; done
             tar -tzvf "dist/pushmpc-plex-mac-$ver.tar.gz"
             shasum -a 256 "dist/pushmpc-plex-mac-$ver.tar.gz"
           else

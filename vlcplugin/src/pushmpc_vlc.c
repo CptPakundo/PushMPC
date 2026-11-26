@@ -46,6 +46,12 @@
 #include "pm_engine.h"
 #include "engine_pushcore.h"
 #include "pm_hw.h"
+#ifdef __APPLE__
+#include "pm_cvpx.h"   /* VideoToolbox pictures zero copy into the apple engine and back (guarded, see pm_cvpx.h) */
+#define PM_CVPX_ON(s) ((s)->cvpx != NULL)
+#else
+#define PM_CVPX_ON(s) false
+#endif
 
 #ifdef _WIN32
 # include <stdatomic.h>
@@ -311,7 +317,7 @@ vlc_module_begin()
              "has until its display time (needs pushmpc_out after postproc).", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
-    add_bool(CFG "zerocopy", true, "Zero copy with Direct3D 11 decoding", "Windows, pushcore: hardware-decoded "
+    add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
              "pictures stay on the GPU (pushcore works on VLC's own D3D11 device); off = they are copied to the CPU "
              "and back, as before.", true)
     add_bool(CFG "zerocopy-ring", true, "Own output pictures with zero copy", "Generated pictures come from textures "
@@ -374,6 +380,11 @@ struct filter_sys_t {
     pm_job *active;             /* the last job submitted (the worker may still run it) */
     int bps_w;
     video_format_t wfmt;
+#ifdef __APPLE__
+    pm_cvpx_eng *cvpx;          /* the apple engine on VLC's CVPX pictures, zero copy (else the one-copy path) */
+    bool cvpx_off;              /* a picture failed the checks: pass-through from there on */
+    uint64_t cvpx_gen, cvpx_err;
+#endif
 };
 
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
@@ -801,10 +812,69 @@ static picture_t *HwIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
     return c;
 }
 
+#ifdef __APPLE__
+/* VideoToolbox pictures through the apple engine with no copy: the real frame is VLC's own picture, the generated ones
+ * are CVPX pictures that own the engine's CVPixelBuffers. A picture that fails the checks turns this off for good:
+ * the frames then pass through unchanged (playback never breaks). */
+static picture_t *FilterCvpx(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
+{
+    void *pb = NULL;
+    if (!sys->cvpx_off) {
+        const char *why = "";
+        pb = pm_cvpx_in(cur, &f->fmt_in.video, &why);
+        if (!pb) { sys->cvpx_off = true; msg_Warn(f, "PushMPC: CVPX zero copy stopped (%s): pass-through", why); }
+    }
+    if (sys->cvpx_off) {
+        picture_t *p = sys->prev;
+        sys->prev = NULL;
+        cur->p_next = NULL;
+        if (p) { p->p_next = cur; sys->out += 2; return p; }
+        sys->out++;
+        return cur;
+    }
+    picture_t *prev = sys->prev;
+    sys->prev = cur;
+    const mtime_t dt = prev ? cur->date - prev->date : 0;
+    const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+    void *gen[8];
+    int ngen = 0;
+    bool pair = false;
+    char err[200] = "";
+    if (pm_cvpx_eng_process(sys->cvpx, pb, (int64_t)cur->date * 10, contiguous, gen, 7, &ngen, &pair, err, sizeof(err)) != 0) {
+        if (sys->cvpx_err++ == 0) msg_Warn(f, "PushMPC: apple engine: %s (this pair shows the real frames)", err);
+        pm_cvpx_eng_forget(sys->cvpx);
+        ngen = 0;
+    }
+    if (!prev) { for (int i = 0; i < ngen; i++) pm_cvpx_release(gen[i]); return NULL; }
+    picture_t *head = prev, *tail = prev;
+    prev->p_next = NULL;
+    sys->out++;
+    if (!contiguous) sys->restarts++;
+    for (int i = 0; i < ngen; i++) {
+        if (!contiguous || !pair) { pm_cvpx_release(gen[i]); continue; }
+        picture_t *o = pm_cvpx_out(&f->fmt_out.video, gen[i]);   /* owns gen[i] from here */
+        if (!o) { sys->alloc_fail++; continue; }
+        picture_CopyProperties(o, prev);
+        o->date = prev->date + dt * (i + 1) / sys->k;
+        o->b_force = false;
+        o->p_next = NULL;
+        tail->p_next = o;
+        tail = o;
+        sys->out++;
+        sys->generated++;
+        sys->cvpx_gen++;
+    }
+    return head;
+}
+#endif
+
 static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
     sys->in++;
+#ifdef __APPLE__
+    if (sys->cvpx) return FilterCvpx(f, sys, cur);
+#endif
     if (sys->download) {        /* our own converter in front, so our extra pictures reach the static chain intact */
         cur = filter_chain_VideoFilter(sys->download, cur);
         if (!cur) return NULL;
@@ -975,6 +1045,9 @@ static void Flush(filter_t *f)
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
     if (sys->download) filter_chain_VideoFlush(sys->download);
+#ifdef __APPLE__
+    if (sys->cvpx) pm_cvpx_eng_forget(sys->cvpx);
+#endif
 }
 
 static picture_t *DownloadBufferNew(filter_t *inner)
@@ -1104,12 +1177,37 @@ static int Open(vlc_object_t *obj)
         }
     }
 #endif
+#ifdef __APPLE__
+    {   /* VideoToolbox pictures with Apple's interpolation: zero copy when this VLC's CVPX layout is the tested one and
+         * the apple engine runs here; else VLC's converter in front of the engine (one copy) */
+        const int cbits = pm_cvpx_bits(v->i_chroma);
+        const int engine = (int)OptInt(f, CFG "engine", 0), smoother = (int)OptInt(f, CFG "smoother", 0);
+        if (cbits && engine == 0 && smoother != 1 && OptInt(f, CFG "zerocopy", 1) && !getenv("PUSHMPC_VLC_NO_APPLE")) {
+            char why[300] = "";
+            if (pm_cvpx_vlc_ok(why, sizeof(why))) {
+                double zhz = OptFloat(f, CFG "display-hz", 0.0);
+                if (zhz <= 0) zhz = pm_display_hz();
+                const double zfps = (v->i_frame_rate && v->i_frame_rate_base) ? (double)v->i_frame_rate / v->i_frame_rate_base : 0.0;
+                int pk = 1;
+                sys->cvpx = pm_cvpx_eng_open(v, cbits, smoother, zfps, zhz, &pk, why, sizeof(why));
+                if (sys->cvpx && pk > 1) {
+                    sys->k = pk > 8 ? 8 : pk;
+                    bits = cbits;
+                    snprintf(sys->why, sizeof(sys->why), "apple engine (VideoToolbox), zero copy on CVPX: %s", pm_cvpx_eng_describe(sys->cvpx));
+                } else if (sys->cvpx) {
+                    pm_cvpx_eng_close(sys->cvpx); sys->cvpx = NULL; snprintf(why, sizeof(why), "x1 here");
+                }
+            }
+            if (!sys->cvpx) msg_Info(f, "PushMPC: CVPX zero copy not used (%s): the one-copy path", why);
+        }
+    }
+#endif
     /* Linux VA-API / VDPAU pictures: kept as they are on both sides (pm_hw.h); the converter route is the fallback */
-    if (!sys->zc && pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
+    if (!sys->zc && !PM_CVPX_ON(sys) && pm_hw_chroma(v->i_chroma, &bits) && OptInt(f, CFG "hw", 0) == 0)
         sys->hw = pm_hw_new(obj, v, 18);   /* up to 16x: 15 generated frames of a source frame in flight, plus 3 */
     if (sys->hw) {
         msg_Dbg(f, "PushMPC: %4.4s kept as it is (generated frames go into PushMPC's own surfaces)", (const char *)&v->i_chroma);
-    } else if (!sys->zc && !Supported(v->i_chroma, &bits)) {
+    } else if (!sys->zc && !PM_CVPX_ON(sys) && !Supported(v->i_chroma, &bits)) {
         /* NV12 and hardware surfaces: convert in front of the engine with VLC's own converters (SetupDownload) */
         if (!SetupDownload(f, sys, &bits)) {
             msg_Dbg(f, "PushMPC: no converter from %4.4s", (const char *)&v->i_chroma);
@@ -1136,7 +1234,7 @@ static int Open(vlc_object_t *obj)
     sys->wfmt = sys->hw ? *pm_hw_work_format(sys->hw) : f->fmt_out.video;
     sys->bps_w = sys->bps;
     const int engine = (int)OptInt(f, CFG "engine", 0);
-    if (!sys->hw && !sys->zc && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
+    if (!sys->hw && !sys->zc && !PM_CVPX_ON(sys) && (engine == 0 || engine == 2)) {   /* pushcore first (Windows, PushMPC's core installed); else the portable engines */
         pm_pc_cfg pcc;
         FillPcc(&pcc, v, bits, smoother, hz, OptInt(f, CFG "warp", 0) ? 1 : 0);
         pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
@@ -1153,7 +1251,7 @@ static int Open(vlc_object_t *obj)
             msg_Dbg(f, "PushMPC: pushcore not used (%s): portable engine", err);
         }
     }
-    if (!sys->pc && smoother != 1) {
+    if (!sys->pc && !PM_CVPX_ON(sys) && smoother != 1) {
         /* the portable engines: the GPU one (Vulkan) when a device answers, else the CPU one; Auto then measures the
          * engine that runs */
         pm_engine_cfg c = { w, h, bits, threads, quality, engine == 1 ? PM_ENGINE_CPU : engine == 3 ? PM_ENGINE_GPU : PM_ENGINE_AUTO };
@@ -1170,7 +1268,7 @@ static int Open(vlc_object_t *obj)
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
         }
-    } else if (!sys->pc) {
+    } else if (!sys->pc && !PM_CVPX_ON(sys)) {   /* (the CVPX zero-copy path set k and why above) */
         sys->k = 1;
         snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
@@ -1196,7 +1294,7 @@ static int Open(vlc_object_t *obj)
     f->pf_flush = Flush;
     msg_Info(f, "PushMPC %s: %4.4s %dx%d %d-bit %.3f fps, display %.2f Hz -> x%d (%s)%s", PUSHMPC_VLC_VERSION,
              (const char *)&v->i_chroma, w, h, bits, fps, hz, sys->k, sys->why,
-             (sys->eng || sys->pc) ? "" : " [pass-through]");
+             (sys->eng || sys->pc || PM_CVPX_ON(sys)) ? "" : " [pass-through]");
     return VLC_SUCCESS;
 }
 
@@ -1242,6 +1340,13 @@ static void Close(vlc_object_t *obj)
         pm_hw_release(sys->hw);
     }
     if (sys->download) filter_chain_Delete(sys->download);
+#ifdef __APPLE__
+    if (sys->cvpx) {
+        msg_Info(f, "PushMPC: CVPX zero copy %s: %" PRIu64 " generated CVPX pictures, %" PRIu64 " engine errors",
+                 sys->cvpx_off ? "stopped (pass-through)" : "used", sys->cvpx_gen, sys->cvpx_err);
+        pm_cvpx_eng_close(sys->cvpx);
+    }
+#endif
     free(sys);
 }
 
@@ -1289,7 +1394,12 @@ static int OpenOut(vlc_object_t *obj)
     filter_t *f = (filter_t *)obj;
     const vlc_chroma_description_t *d = vlc_fourcc_GetChromaDescription(f->fmt_in.video.i_chroma);
     int hwbits;
-    const bool opaque = pm_hw_chroma(f->fmt_in.video.i_chroma, &hwbits);   /* VA-API / VDPAU: passed on, not copied */
+    bool opaque = pm_hw_chroma(f->fmt_in.video.i_chroma, &hwbits);   /* VA-API / VDPAU: passed on, not copied */
+#ifdef __APPLE__
+    /* CVPX pictures (the zero-copy VideoToolbox path hands them on as they are): passed on too. Refusing them would make
+     * VLC's "chain" fallback put a CVPX -> software converter in front of this stage and the vout */
+    if (pm_cvpx_bits(f->fmt_in.video.i_chroma)) opaque = true;
+#endif
     if ((!opaque && (!d || d->plane_count == 0)) || f->fmt_in.video.i_chroma != f->fmt_out.video.i_chroma)
         return VLC_EGENERIC;
     out_sys_t *s = calloc(1, sizeof(*s));

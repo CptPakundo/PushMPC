@@ -78,7 +78,7 @@ below, for example `Smoother=Auto` (or `Off`, or `2` to `8`).
 
 ## Installing on a Mac
 
-PushMPC on the Mac is a preview. It works in mpv and in Plex (Plex for Mac and Plex HTPC). You need
+PushMPC on the Mac is a preview. It works in mpv, IINA, VLC and Plex (Plex for Mac and Plex HTPC). You need
 [Homebrew](https://brew.sh). Open Terminal and run:
 
 ```sh
@@ -87,19 +87,25 @@ brew install CptPakundo/pushmpc/pushmpc
 pushmpc-setup install
 ```
 
-`pushmpc-setup install` adds PushMPC to mpv. If Plex for Mac or Plex HTPC is in your Applications folder, it adds
-PushMPC to Plex's own player too, checks with a short test picture that it works, and keeps a copy of what it changed.
-When Plex updates itself, PushMPC sets itself up again by itself.
+`pushmpc-setup install` adds PushMPC to mpv, and to every other player it finds in your Applications folder. Each one
+gets a short test picture to check that PushMPC really makes extra frames there:
+
+- **Plex for Mac and Plex HTPC:** PushMPC goes into Plex's own player, and Setup keeps a copy of what it changed. When
+  Plex updates itself, PushMPC sets itself up again by itself.
+- **IINA:** Setup adds the PushMPC plugin to IINA and switches it on. Inside IINA it makes extra frames for smoother
+  motion, and upscales with shaders picked for your Mac's chip. IINA itself isn't changed, so its updates keep PushMPC.
+  The plugin has a **PushMPC** menu in IINA's **Plugin** menu.
+- **VLC:** Setup adds PushMPC's frame generation to VLC, plus a video output that upscales with FSR. VLC itself isn't
+  changed. PushMPC's settings are in VLC's preferences (*Show All*), under **Video > Filters > PushMPC**.
 
 - If macOS says Terminal isn't allowed to change Plex, open **System Settings > Privacy & Security > App Management**,
   turn Terminal on, and run `pushmpc-setup install` again.
-- On a Mac with macOS 15.4 or newer, PushMPC uses Apple's own frame interpolation when your Mac can run it. Otherwise
-  it uses the graphics chip, and if that isn't possible, the processor.
-- To remove everything: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. Plex and your mpv settings go back
-  exactly as they were.
+- In mpv, IINA, VLC and Plex, PushMPC uses Apple's own frame interpolation (macOS 15.4 or newer) when your Mac can run
+  it. Otherwise it uses the graphics chip, and if that isn't possible, the processor.
+- To remove everything: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. Plex, IINA, VLC and your mpv
+  settings go back exactly as they were.
 - To update: `brew upgrade pushmpc`, then `pushmpc-setup install` again.
 
-IINA and VLC on the Mac are coming later.
 
 ## Players
 
@@ -112,7 +118,8 @@ PushMPC needs nothing from you in most players: Setup sets them up and Auto does
 | mpv, mpv.net, SMPlayer, MPC-QT | ✅ | ✅ | 🧪 mpv | see [mpv and mpv-based players](players-mpv.md) for details |
 | PushMPC's own mpv | ✅ | – | – | optional box in Setup; on Linux, your distribution's mpv gets the same built-in route |
 | Celluloid, Haruna | – | ✅ | – | |
-| VLC 3 | ✅ | ✅ | 🔜 | see [VLC](#vlc) |
+| VLC 3 | ✅ | ✅ | 🧪 | see [VLC](#vlc) |
+| IINA | – | – | 🧪 | see [Installing on a Mac](#installing-on-a-mac) |
 | Kodi 21 and 22 | ✅ | ✅ | – | see [Kodi](#kodi) |
 | Plex for Windows, Plex HTPC, Plex for Mac | ✅ | ✅ | 🧪 | on Linux from Flathub; see [Plex](#plex) |
 | Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – | the shims play through mpv |
@@ -154,7 +161,8 @@ If PotPlayer keeps its settings in an INI file, add PushMPC yourself: Preference
 
 Setup adds PushMPC to VLC 3 and checks that it loads. Its settings are under **Tools > Preferences**, *Show settings:
 All*, **Video > Filters > PushMPC**. On Linux, Setup also tests VLC's hardware decoding with PushMPC and keeps the
-fastest setting that works.
+fastest setting that works. On a Mac, `pushmpc-setup install` sets VLC up (preview), see
+[Installing on a Mac](#installing-on-a-mac).
 
 ### Kodi
 

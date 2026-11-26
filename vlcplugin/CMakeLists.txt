@@ -34,6 +34,11 @@ target_include_directories(pm_pushfps_portable PUBLIC "${VS}/third_party/pushfps
 add_library(pm_engine_portable STATIC "${VS}/engines/portable/portable_engine.cpp" src/engine_portable.cpp)
 target_include_directories(pm_engine_portable PUBLIC "${VS}/engines/portable" "${VS}/src" src)
 target_link_libraries(pm_engine_portable PUBLIC pm_pushfps_portable Threads::Threads)
+# macOS: Auto tries the apple engine (VideoToolbox) first, through libpushmpc_engine_apple.dylib next to the plugin
+if(APPLE)
+  target_include_directories(pm_engine_portable PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../mpvnative/include" "${CMAKE_CURRENT_SOURCE_DIR}/../mpvnative/engine")
+  target_compile_definitions(pm_engine_portable PRIVATE PM_APPLE_MODULE)
+endif()
 
 # the portable GPU engine (vsplugin/engines/gpu: Vulkan 1.2 compute, the Vulkan library loaded at run time through volk;
 # MoltenVK on macOS). Vulkan-Headers and volk at the commits engines/gpu/gpu-pins.json pins (-DPM_FETCH_GPU_DEPS=ON, CI),
@@ -131,7 +136,9 @@ if(WIN32)
   target_link_libraries(pushmpc_plugin PRIVATE user32)
 elseif(APPLE)
   target_link_options(pushmpc_plugin PRIVATE -undefined dynamic_lookup)
-  target_link_libraries(pushmpc_plugin PRIVATE "-framework CoreGraphics")
+  # VideoToolbox pictures zero copy into the apple engine and back (guarded: src/pm_cvpx.h)
+  target_sources(pushmpc_plugin PRIVATE src/pm_cvpx.c)
+  target_link_libraries(pushmpc_plugin PRIVATE "-framework CoreGraphics" "-framework CoreVideo" "-framework CoreFoundation")
 else()
   target_link_options(pushmpc_plugin PRIVATE -static-libstdc++ -static-libgcc)
   if(VLC_CORE_LIB)

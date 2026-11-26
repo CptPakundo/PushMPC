@@ -44,8 +44,8 @@ In our tests on a GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps, 
 | mpv.net | ✅ | – | – |
 | SMPlayer, MPC-QT | ✅ | ✅ | – |
 | Celluloid, Haruna | – | ✅ | – |
-| IINA | – | – | 🔜 |
-| VLC 3 | ✅ | ✅ | 🔜 |
+| IINA | – | – | 🧪 |
+| VLC 3 | ✅ | ✅ | 🧪 |
 | Kodi 21 and 22 | ✅ | ✅ | – |
 | Plex (Plex for Windows, Plex HTPC, Plex for Mac; on Linux from Flathub) | ✅ | ✅ | 🧪 |
 | Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – |
@@ -107,7 +107,7 @@ effects. VLC and the Kodi add-on are in the x86_64 download.
 
 ### Mac
 
-Preview, for mpv and Plex (Plex for Mac and Plex HTPC). You need [Homebrew](https://brew.sh). In Terminal:
+Preview, for mpv, IINA, VLC and Plex (Plex for Mac and Plex HTPC). You need [Homebrew](https://brew.sh). In Terminal:
 
 ```sh
 brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
@@ -199,7 +199,6 @@ uninstalling turns it back on.
 
 ## Roadmap
 
-- On the Mac: IINA and VLC.
 - Capture mode on Linux and Mac (for now, there's a [workaround with OBS](docs/user-guide.md#capture-mode-on-linux-and-mac)).
 - Faster AI frame generation on more graphics cards, including AMD Radeon and Snapdragon on Windows.
 

@@ -944,10 +944,12 @@ jobs:
             vsplugin
             pushmpc/include
             filter/src
+            vlcplugin
+            integrations/iina
           persist-credentials: false
       - name: Key (everything the bundle is built from)
         id: key
-        run: echo "key=mpvnative-plexmac-out-v1-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/fetch-commit.sh', 'mpvnative/ci/ffbuild-cache.sh', 'mpvnative/ci/SOURCES.txt', 'mpvnative/plex-mac/**', 'mpvnative/ffmpeg/**', 'mpvnative/include/**', 'mpvnative/engine/**', 'mpvnative/hook/libmpv_host.c', 'mpvnative/install/pushmpc-plex-mac.sh', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/third_party/nis/**', 'vsplugin/src/**', 'vsplugin/stub/**', 'pushmpc/include/**', 'filter/src/*.h') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=mpvnative-plexmac-out-v2-${{ hashFiles('mpvnative/pins.json', 'mpvnative/ci/fetch-commit.sh', 'mpvnative/ci/ffbuild-cache.sh', 'mpvnative/ci/SOURCES.txt', 'mpvnative/plex-mac/**', 'mpvnative/ffmpeg/**', 'mpvnative/include/**', 'mpvnative/engine/**', 'mpvnative/hook/libmpv_host.c', 'mpvnative/install/pushmpc-plex-mac.sh', 'vsplugin/engines/**', 'vsplugin/third_party/pushfps-portable/**', 'vsplugin/third_party/nis/**', 'vsplugin/src/**', 'vsplugin/stub/**', 'pushmpc/include/**', 'filter/src/*.h', 'vlcplugin/**', 'integrations/iina/**', 'mpvnative/install/pushmpc-mac-players.sh') }}" >> "$GITHUB_OUTPUT"
       # only with tests off (a test run always builds and tests on macOS) and never for a tag build
       - uses: actions/cache/restore@v4
         if: ${{ format('{0}', inputs.tests) == 'false' && !inputs.fresh }}
@@ -963,10 +965,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # release.yml: macOS 15 only (its bundle is the release's)
-        runner: ${{ fromJSON(format('{0}', inputs.tests) != 'false' && '["macos-15", "macos-26"]' || '["macos-15"]') }}   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
+        # release.yml: macOS 15 only (its bundle is the release's); Intel: MoltenVK on an Intel Mac
+        runner: ${{ fromJSON(format('{0}', inputs.tests) != 'false' && '["macos-15", "macos-26", "macos-15-intel"]' || '["macos-15"]') }}   # macOS 15: no VideoToolbox interpolator in the VM; macOS 26: low-latency interpolation
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache/restore@v4
@@ -981,6 +983,8 @@ jobs:
         run: |
           [ "${{ inputs.fresh }}" = true ] || export FFB_CACHE="$RUNNER_TEMP/ffb"
           bash mpvnative/plex-mac/build-plex-mac.sh "$RUNNER_TEMP/ffmpeg5" "$RUNNER_TEMP/plexmac"
+          # IINA and VLC (the plugin, the VLC module with FSR) into the same Mac bundle: the release's copy comes from macos-15
+          if [ "${{ matrix.runner }}" = macos-15 ]; then bash mpvnative/plex-mac/build-mac-extras.sh "$RUNNER_TEMP/plexmac"; fi
           rm -rf plexmac-out && cp -R "$RUNNER_TEMP/plexmac" plexmac-out
       - uses: actions/cache/save@v4
         if: ${{ !inputs.fresh && steps.trees.outputs.cache-hit != 'true' && matrix.runner == 'macos-15' }}
