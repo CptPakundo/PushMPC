@@ -93,6 +93,8 @@ class Pushmpc < Formula
     plugin = Dir["vsplugin/bin/pushmpc_vs.*"].reject { |f| f.end_with?(".pdb") }.first
     (prefix/vs_site_packages/"vapoursynth/plugins").install plugin
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
+    # pushmpc.lua adds the filter at run time (the mpv.conf block names it, next to pushmpc.vpy)
+    pkgshare.install "integrations/mpv/pushmpc.lua"
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
     (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
     libexec.install "integrations/mpv/mpv-integration.sh"
