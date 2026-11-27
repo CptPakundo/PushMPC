@@ -336,13 +336,13 @@ jobs:
           key: ncnn-static-${{ matrix.arch }}-${{ hashFiles('scripts/ml-runtime-pin.json', 'scripts/build-ncnn-static.sh') }}
       # capture mode (capture/capture.cmake): pushmpc-capture for the players PushMPC cannot plug into (X11 capture, the
       # screen-capture portal + PipeWire, the X11 / Wayland overlay) on the portable GPU engine (Vulkan-Headers and volk by
-      # their pins). Its own build folder; a failure leaves capture/ out of the tarball, nothing else
+      # their pins). Its two shaders: the checked-in SPIR-V (capture/spv, the pinned glslang 16.6.0's; AlmaLinux 8 / EPEL 8
+      # have no glslang package). Its own build folder; a failure leaves capture/ out of the tarball, nothing else
       - name: Capture mode (pushmpc-capture)
         continue-on-error: true
         run: |
           set -eu
           dnf install -y libX11-devel libXcomposite-devel libXdamage-devel libXext-devel libXrandr-devel dbus-devel pipewire-devel wayland-devel wayland-protocols-devel
-          dnf install -y glslang || { dnf install -y epel-release && dnf install -y glslang; }
           cmake -S vsplugin -B build-capture -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
           cmake --build build-capture --target pushmpc_capture --parallel
           ls -la build-capture/pushmpc-capture

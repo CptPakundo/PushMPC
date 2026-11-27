@@ -10,7 +10,8 @@
 #                     Engines: gpu always (NVIDIA optical flow as a candidate where the device has it); ml when pmml
 #                     is built (PMML_ORT_INCLUDE); nvl on Linux when the nvidia backend is (pmvs_nvl); apple on macOS.
 #   pmc_vk_check      every OS with PMVS_GPU_ON (Windows included; by name): cap_vk.cpp and cap_gpu.cpp compiled (not linked) so
-#                     a Windows build checks the Vulkan code too; stub shader headers when glslang is missing.
+#                     a Windows build checks the Vulkan code too. Shaders: made by glslang when it is there, else the
+#                     checked-in SPIR-V (capture/spv, the pinned glslang 16.6.0's output; vsplugin-gpu.yml compares it).
 # Ubuntu / Debian packages: libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev
 #   libpipewire-0.3-dev libwayland-dev wayland-protocols glslang-tools; Fedora / Alma: libX11-devel libXcomposite-devel
 #   libXdamage-devel libXext-devel libXrandr-devel dbus-devel pipewire-devel wayland-devel wayland-protocols-devel glslang
@@ -71,6 +72,11 @@ if(PMC_GLSLANG)
     list(APPEND _pmc_spv_out "${PMC_SPV}/pmc_${s}.h")
   endforeach()
   add_custom_target(pmc_spv DEPENDS ${_pmc_spv_out})
+elseif(EXISTS "${PMC_DIR}/spv/pmc_rgb2yuv.h" AND EXISTS "${PMC_DIR}/spv/pmc_present.h")
+  # no glslang here (manylinux_2_28 has no package of it): the checked-in SPIR-V of the same shaders
+  set(PMC_SHADERS_REAL ON)
+  set(PMC_SPV "${PMC_DIR}/spv")
+  message(STATUS "capture mode: the checked-in SPIR-V (capture/spv; no glslang here)")
 else()
   set(PMC_SPV "${CMAKE_BINARY_DIR}/pmc_spv_stub")
   file(MAKE_DIRECTORY "${PMC_SPV}")

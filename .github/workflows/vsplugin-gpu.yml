@@ -14,7 +14,7 @@ name: vsplugin-gpu
 
 on:
   push:
-    paths: ['vsplugin/**', '.github/workflows/vsplugin-gpu.yml']
+    paths: ['vsplugin/**', 'capture/shaders/**', 'capture/spv/**', '.github/workflows/vsplugin-gpu.yml']
   workflow_dispatch:
     inputs:
       macos:
@@ -105,11 +105,20 @@ jobs:
             n=$(basename "$f")
             if ! cmp -s "$f" "vsplugin/engines/gpu/spv/$n"; then echo "::error::vsplugin/engines/gpu/spv/$n differs from the pinned glslang's output (commit the spv artifact)"; bad=1; fi
           done
+          # capture mode's two shaders (capture/spv: builds without glslang, e.g. the release's manylinux container)
+          for s in rgb2yuv present; do
+            "$GLSLANG" -V --target-env vulkan1.2 --vn kSpv_pmc_$s -o "build/pmc_$s.h" "capture/shaders/$s.comp" > /dev/null
+            if ! cmp -s "build/pmc_$s.h" "capture/spv/pmc_$s.h"; then echo "::error::capture/spv/pmc_$s.h differs from the pinned glslang's output (commit the spv artifact)"; bad=1; fi
+          done
           echo "SPV_STALE=$bad" >> "$GITHUB_ENV"
           [ "$bad" = 0 ] || echo "::error::stale SPIR-V: this build used fresh shaders, builds without glslang would not (the job fails at its end)"
 
       - uses: actions/upload-artifact@v4
-        with: { name: spv, path: build/spv/*.h }
+        with:
+          name: spv
+          path: |
+            build/spv/*.h
+            build/pmc_*.h
 
       - name: portable_test
         timeout-minutes: 5
