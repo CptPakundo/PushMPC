@@ -71,6 +71,8 @@ inline void UnpackRange(void* p, int64_t& from, int64_t& to)
     const uintptr_t v = reinterpret_cast<uintptr_t>(p);
     from = int64_t(v & 0xffffffffu); to = from + int64_t(v >> 32);
 }
+// the error of an output at or past the end found while playing (VapourSynth needs one with every output not returned)
+inline std::string PastEnd(int n) { return "pushmpc.Enhance: the stream ended before output " + std::to_string(n); }
 // the first flagged frame among those requested (-1: none)
 inline int64_t ScanEnd(const VSAPI* a, VSNode* node, VSFrameContext* fc, int64_t from, int64_t to)
 {
