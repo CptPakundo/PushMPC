@@ -126,6 +126,46 @@ static void Run(ID3D11Device* dev, ID3D11DeviceContext* ctx, HANDLE mutex, ID3D1
     close_(pc);
 }
 
+// an SD source (BT.601): pushcore takes it and the YUV handed back is in BT.601 too, so a coloured picture comes back with
+// its own codes (with BT.709 coefficients on the way back, Y would be off by about 8 and U / V by about 10 here)
+static void RunSd(ID3D11Device* dev, ID3D11DeviceContext* ctx, HANDLE mutex, const wchar_t* stub)
+{
+    std::printf("== BT.601 (SD) source, x2: colours kept\n");
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 2; td.Format = DXGI_FORMAT_NV12; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    std::vector<uint8_t> f(size_t(W) * H * 3 / 2);
+    memset(f.data(), 120, size_t(W) * H);
+    for (size_t i = size_t(W) * H; i < f.size(); i += 2) { f[i] = 90; f[i + 1] = 170; }   // a strong red-orange
+    D3D11_SUBRESOURCE_DATA init[2] = { { f.data(), W, 0 }, { f.data(), W, 0 } };
+    ComPtr<ID3D11Texture2D> src;
+    if (FAILED(dev->CreateTexture2D(&td, init, &src))) { std::printf("FAIL: SD source texture\n"); fails++; return; }
+    pm_pc_cfg cfg = {};
+    cfg.abi = PM_PC_ABI; cfg.struct_size = sizeof(cfg); cfg.anime_model = PM_PC_ANIME_NONE;
+    cfg.width = W; cfg.height = H; cfg.bits = 8; cfg.fps_num = 24; cfg.fps_den = 1;
+    cfg.matrix = 6; cfg.transfer = 6; cfg.primaries = 6; cfg.range = 1; cfg.smoother = 2; cfg.warp = 1; cfg.core_dir = stub;
+    cfg.display_hz = 240;
+    int k = 0; char err[512] = "";
+    pm_pc* pc = open_(&cfg, dev, mutex, &k, err, sizeof(err));
+    CHECK(pc != nullptr, "an SD (BT.601) source opens pushcore: %s", err);
+    if (!pc) return;
+    Dest d;
+    ComPtr<ID3D11Texture2D> arr;
+    CHECK(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &arr)), "SD destination array");
+    d.tex.push_back(arr.Get()); d.slice.push_back(0);
+    CHECK(push_(pc, src.Get(), 0, 0, 1, err, sizeof(err)) == 0, "SD push 0: %s", err);
+    CHECK(push_(pc, src.Get(), 1, 417083, 0, err, sizeof(err)) == 0, "SD push 1: %s", err);
+    for (int i = 0; i < 40 && d.done < 1; ++i) { if (poll_(pc, 100, DestFn, DoneFn, &d, err, sizeof(err)) < 0) break; }
+    CHECK(d.done >= 1, "SD: no generated frame arrived: %s", err);
+    if (d.done >= 1) {
+        double y, u, v;
+        Measure(dev, ctx, d.tex[0], d.slice[0], y, u, v);
+        std::printf("SD generated: Y %.2f U %.2f V %.2f (source 120 90 170)\n", y, u, v);
+        CHECK(std::fabs(y - 120) < 2 && std::fabs(u - 90) < 2 && std::fabs(v - 170) < 2, "SD round trip: Y %.2f U %.2f V %.2f, want 120 90 170", y, u, v);
+    }
+    close_(pc);
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 3) { std::printf("usage: pm_pc_zc_test <pm_pushcore.dll> <stub core folder>\n"); return 2; }
@@ -159,6 +199,7 @@ int wmain(int argc, wchar_t** argv)
 
     Run(dev.Get(), ctx.Get(), mutex, src.Get(), argv[2], 2, false);
     Run(dev.Get(), ctx.Get(), mutex, src.Get(), argv[2], 8, true);
+    RunSd(dev.Get(), ctx.Get(), mutex, argv[2]);
     CloseHandle(mutex);
     std::printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
     return fails ? 1 : 0;

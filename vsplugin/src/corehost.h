@@ -72,7 +72,9 @@ public:
     bool RecallColour(uint32_t w, uint32_t h, int bits, int64_t fn, int64_t fd, Colour& c) const { auto it = m_colours.find({ w, h, bits, fn, fd }); if (it == m_colours.end()) return false; c = it->second; return true; }
 
     // per output stream: the VapourSynth format and the 4:2:0 conversion
-    bool ConfigureEgress(OutFmt fmt, bool hdrMatrix, std::string& err);
+    // hdrMatrix: BT.2020 coefficients (HDR output); else sdMatrix: BT.601 (an SD source's own matrix, so its round trip
+    // through pushcore keeps its colours), else BT.709
+    bool ConfigureEgress(OutFmt fmt, bool hdrMatrix, std::string& err, bool sdMatrix = false);
 
     // set by the instance around Pipeline::Produce (under Lock)
     std::function<bool(int64_t s, PlaneView& v)> source;   // the VapourSynth frame for source s
@@ -145,7 +147,7 @@ private:
     struct Up { ComPtr<ID3D11Texture2D> staging, tex; };
     std::vector<Up> m_up; size_t m_upNext = 0; uint32_t m_upW = 0, m_upH = 0; bool m_upP010 = false;
     // egress
-    OutFmt m_fmt = OutFmt::Rgb24; bool m_hdrMatrix = false;
+    OutFmt m_fmt = OutFmt::Rgb24; bool m_hdrMatrix = false, m_sdMatrix = false;
     ComPtr<ID3D11Texture2D> m_stage; DXGI_FORMAT m_stageFmt = DXGI_FORMAT_UNKNOWN; uint32_t m_stageW = 0, m_stageH = 0;
     ComPtr<ID3D11ComputeShader> m_cs; ComPtr<ID3D11Buffer> m_cb;
     ComPtr<ID3D11Texture2D> m_plane[3], m_planeStage[3]; ComPtr<ID3D11UnorderedAccessView> m_uav[3]; uint32_t m_planeW = 0, m_planeH = 0;

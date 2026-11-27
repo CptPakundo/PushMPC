@@ -970,7 +970,7 @@ private:
     // the picture is not drawn, the anime upscaler while it is: win_anime_route.h), also at x1 (Smoother off or nothing
     // to gain) since that is the only place it can run without losing Video Super Resolution. With the bridge's ABI 3
     // Auto's drawn treatment (held frames, line art, sign hold, the anime deband preset) follows the measured class too.
-    // What it cannot take (SD / BT.601, Kodi 21 HDR tone-mapped to SDR, a shader upscaler chosen, the CPU / GPU engine
+    // What it cannot take (Kodi 21 HDR tone-mapped to SDR, a shader upscaler chosen, the CPU / GPU engine
     // chosen) goes to the engines below.
     bool TryPushcore(const AVStream* st, int bits, double hz, std::string& engWhy)
     {

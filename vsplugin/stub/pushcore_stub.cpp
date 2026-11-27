@@ -91,8 +91,8 @@ static bool ToRgb(PushCore* c, ID3D11Texture2D* src, uint32_t slice)
     const uint8_t* base = static_cast<const uint8_t*>(m.pData);
     const uint8_t* uvBase = base + size_t(m.RowPitch) * d.Height;
     const bool p010 = c->inFmt == DXGI_FORMAT_P010;
-    const bool bt2020 = c->si.matrix == 9;
-    const float kr = bt2020 ? 0.2627f : 0.2126f, kb = bt2020 ? 0.0593f : 0.0722f, kg = 1 - kr - kb;
+    const bool bt2020 = c->si.matrix == 9, bt601 = c->si.matrix == 5 || c->si.matrix == 6;   // as pushcore's YUV pass
+    const float kr = bt2020 ? 0.2627f : bt601 ? 0.299f : 0.2126f, kb = bt2020 ? 0.0593f : bt601 ? 0.114f : 0.0722f, kg = 1 - kr - kb;
     c->cur.resize(size_t(w) * h);
     for (uint32_t y = 0; y < h; ++y) for (uint32_t x = 0; x < w; ++x) {
         float Y, U, V;

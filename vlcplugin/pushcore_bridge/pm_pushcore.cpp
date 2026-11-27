@@ -69,7 +69,7 @@ struct Zc {
     ComPtr<ID3D11RenderTargetView> rtvY, rtvUV;
     std::map<ID3D11Texture2D*, ComPtr<ID3D11ShaderResourceView>> srv;
     DXGI_FORMAT fmt = DXGI_FORMAT_NV12;
-    bool hdrMatrix = false;
+    bool hdrMatrix = false, sdMatrix = false;   // BT.2020 (HDR output) / BT.601 (an SD source's own) coefficients, else BT.709
     // the frame being submitted, and where generated frames go during a poll
     ID3D11Texture2D* curTex = nullptr; uint32_t curSlice = 0;
     pm_pc_dest_tex_fn dest = nullptr;
@@ -203,7 +203,7 @@ static bool ZcOut(pm_pc* pc, const PushCoreFrame& fr, std::string& e)
     }
     const bool ten = z.fmt == DXGI_FORMAT_P010;
     struct { float kr, kb, scale, maxCode, outDiv; uint32_t w, h, pad; } cbv = {
-        z.hdrMatrix ? 0.2627f : 0.2126f, z.hdrMatrix ? 0.0593f : 0.0722f, ten ? 4.0f : 1.0f, ten ? 1023.0f : 255.0f,
+        z.hdrMatrix ? 0.2627f : z.sdMatrix ? 0.299f : 0.2126f, z.hdrMatrix ? 0.0593f : z.sdMatrix ? 0.114f : 0.0722f, ten ? 4.0f : 1.0f, ten ? 1023.0f : 255.0f,
         ten ? 65535.0f / 64.0f : 255.0f, pc->ow, pc->oh, 0 };
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) { e = "no ID3D11DeviceContext1"; return false; }
@@ -449,12 +449,17 @@ static void Prepare(pm_pc* pc, const pm_pc_cfg* cfg)
     Build(pc, *cfg, true, pc->c, pc->ps);
 }
 
+// an SD source (BT.601 matrix) gets its YUV back in BT.601 (an SDR output; HDR output is BT.2020)
+static bool Sd601(int matrix) { return matrix == 5 || matrix == 6; }
+
 // the configuration's checks and the host's load (the open's first steps; pm_pc_decide stops after them)
 static bool LoadFor(const pm_pc_cfg* cfgIn, pm_pc_cfg& cfgv, std::string& e)
 {
     if (!ReadCfg(cfgIn, cfgv, e)) return false;
-    if (!(cfgv.matrix == 1 || cfgv.matrix == 9 || cfgv.matrix == 10)) {
-        e = std::format("pm_pushcore: matrix {} (SD / BT.601 sources stay on the portable engine)", cfgv.matrix);
+    // BT.709, BT.2020 and BT.601 (5 / 6: pushcore decodes it, PushCoreGpu.cpp's matrix switch; the YUV handed back is
+    // made with the source's own coefficients, Sd601 below, so the player's reading of it stays right)
+    if (!(cfgv.matrix == 1 || cfgv.matrix == 9 || cfgv.matrix == 10 || cfgv.matrix == 5 || cfgv.matrix == 6)) {
+        e = std::format("pm_pushcore: matrix {} (not BT.709, BT.2020 or BT.601: the portable engine)", cfgv.matrix);
         return false;
     }
     CoreHost& host = CoreHost::Get();
@@ -516,10 +521,11 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfgIn, ID3D11Device* device, HANDLE mute
         pc->zc = new Zc();
         pc->zc->mutex = mutex;
         pc->zc->hdrMatrix = oi.hdrOutput != 0;
+        pc->zc->sdMatrix = !pc->zc->hdrMatrix && Sd601(cfg->matrix);
         if (!ZcSetup(*pc->zc, device, pc->ow, pc->oh, cfg->bits > 8, e)) {
             host.Release(pc->token); SetErr(err, errsize, "zero copy: " + e); delete pc->zc; delete pc; return nullptr;
         }
-    } else if (!host.ConfigureEgress(cfg->bits > 8 || oi.hdrOutput ? OutFmt::Yuv420P10 : OutFmt::Yuv420P8, oi.hdrOutput != 0, e)) {
+    } else if (!host.ConfigureEgress(cfg->bits > 8 || oi.hdrOutput ? OutFmt::Yuv420P10 : OutFmt::Yuv420P8, oi.hdrOutput != 0, e, Sd601(cfg->matrix))) {
         host.Release(pc->token); SetErr(err, errsize, "egress: " + e); delete pc; return nullptr;
     }
     pc->k = int(std::clamp<uint32_t>(oi.multiplier ? oi.multiplier : pc->ps.multiplier, 1, PUSHCORE_MAX_MULTIPLIER));
@@ -585,7 +591,7 @@ extern "C" int pm_pc_update(pm_pc* pc, const pm_pc_cfg* cfgIn, char* err, size_t
     }
     if (!pc->zc) {   // the egress format is per stream; set again (the core may have been reopened)
         const PushCoreOutputInfo& oi = host.OutInfo();
-        host.ConfigureEgress(pc->bits > 8 || oi.hdrOutput ? OutFmt::Yuv420P10 : OutFmt::Yuv420P8, oi.hdrOutput != 0, e);
+        host.ConfigureEgress(pc->bits > 8 || oi.hdrOutput ? OutFmt::Yuv420P10 : OutFmt::Yuv420P8, oi.hdrOutput != 0, e, Sd601(pc->cfg.matrix));
     }
     pc->updates++;
     Describe(pc, ReuseName(how), ms, pc->zc != nullptr);

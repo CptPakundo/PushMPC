@@ -438,9 +438,9 @@ void main(uint3 id : SV_DispatchThreadID)
     outV[id.xy] = (uint)clamp(round((128.0 + 224.0 * cr * 0.25) * scale), 0, maxCode);
 }
 )";
-bool CoreHost::ConfigureEgress(OutFmt fmt, bool hdrMatrix, std::string& err)
+bool CoreHost::ConfigureEgress(OutFmt fmt, bool hdrMatrix, std::string& err, bool sdMatrix)
 {
-    m_fmt = fmt; m_hdrMatrix = hdrMatrix;
+    m_fmt = fmt; m_hdrMatrix = hdrMatrix; m_sdMatrix = !hdrMatrix && sdMatrix;
     if (!OutIs420(fmt) || m_cs) return true;
     ComPtr<ID3DBlob> code, errs;
     HRESULT hr = D3DCompile(kCs, sizeof(kCs) - 1, "pushmpc_420", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errs);
@@ -509,7 +509,8 @@ bool CoreHost::Readback(PushCore* core, const PushCoreFrame& fr, OutImage& img, 
         }
         const bool tenBit = m_fmt == OutFmt::Yuv420P10;
         struct { float kr, kb, scale, maxCode; uint32_t w, h, p0, p1; } cb = {
-            m_hdrMatrix ? 0.2627f : 0.2126f, m_hdrMatrix ? 0.0593f : 0.0722f, tenBit ? 4.0f : 1.0f, tenBit ? 1023.0f : 255.0f, w, h, 0, 0 };
+            m_hdrMatrix ? 0.2627f : m_sdMatrix ? 0.299f : 0.2126f, m_hdrMatrix ? 0.0593f : m_sdMatrix ? 0.114f : 0.0722f,
+            tenBit ? 4.0f : 1.0f, tenBit ? 1023.0f : 255.0f, w, h, 0, 0 };
         m_ctx->UpdateSubresource(m_cb.Get(), 0, nullptr, &cb, 0, 0);
         ID3D11ShaderResourceView* srvs[1] = { srv.Get() };
         ID3D11UnorderedAccessView* uavs[3] = { m_uav[0].Get(), m_uav[1].Get(), m_uav[2].Get() };
