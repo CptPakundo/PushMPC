@@ -610,6 +610,13 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
     const bool xessFamily = g.family == kIntel || g.family == kGtx || g.family == kRdna1 || g.family == kAmdOther || g.family == kOtherGpu;
     const bool xessAuto = g.has(kCapXessSr) && xessFamily;
     if (s.upscaler == Upscaler::Auto && !g.has(kCapRtxVsr) && (xessAuto || g.has(kCapIvsr))) {
+        // no driver Video Super Resolution here (XeSS SR is a shader upscaler): Auto's anime upscaler comes first on
+        // drawn animation, as on every GPU without one (content_detect.h AutoAnimeSrBesideVsr, every player)
+        if (!g.has(kCapIvsr) && g.has(kCapAnimeSr)) {
+            Gpu ga = g; ga.available &= ~(1u << kCapXessSr);
+            Choice ca = Decide(s, src, d, c, ga);
+            if (ca.srMethod == Upscaler::Anime) return ca;
+        }
         Settings sf = s; sf.upscaler = g.has(kCapFsrSr) ? Upscaler::Fsr : Upscaler::Nis;
         Choice cf = Decide(sf, src, d, c, g);
         std::wstring why;
@@ -650,18 +657,22 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
 
     // --- anime upscalers (PushMpcAnimeSr.h): animation only, and only when the picture is enlarged (they are 2x / 4x
     // models, no artifact reduction at the output size). Asked for (Upscaler Anime): the setting's model or Auto's; Auto:
-    // the best fitting one where RTX VSR is not available (and before RTX VSR once the verdict sets kAnimeSrBeforeRtxVsr)
+    // the best fitting one where the driver's Video Super Resolution (RTX VSR, ZLUDA VSR, Intel VSR) is not available, and
+    // before it once the verdict sets kAnimeSrBeforeDriverVsr (content_detect.h, every player); HDR by AutoAnimeSrTakesTransfer
+    // (pushcore feeds the model its SDR-like proxy: allowed)
     r.animeModel = -1;
     c.animeSrMs = 0;
     if (g.has(kCapAnimeSr) && r.animation && r.policy.animeUpscaler && !atOutput && src.h <= 1080) {
         const bool asked = s.upscaler == Upscaler::Anime;
-        const bool autoWants = s.upscaler == Upscaler::Auto && (!g.has(kCapRtxVsr) || kAnimeSrBeforeRtxVsr);
+        const bool driverVsr = g.has(kCapRtxVsr) || g.has(kCapIvsr);   // the driver VSRs this Auto runs (RTX VSR, Intel VSR)
+        const bool autoWants = s.upscaler == Upscaler::Auto && pushmpc::content::AutoAnimeSrBesideVsr(driverVsr) &&
+                               pushmpc::content::AutoAnimeSrTakesTransfer(pushmpc::content::AnimeSrFeed::PushcoreProxy, src.hdr ? 16 : 1);
         // the _DS (denoise + sharpen) variants only where the policy allows them (hand-drawn): on rendered CG they are
         // further from the master than the default scaler (measured), so the plain model even at a low bitrate
         const AnimeSrPick pick = PickAnimeSr(src.w, src.h, upW, upH, src.fps, lowBitrate && r.policy.animeUpscalerDs, c.card, c.animeSrLearned, asked ? AnimeSrModelIndex(s.animeModel) : -1);
         r.animeSrNote = pick.note;
         if ((asked || autoWants) && pick.model >= 0) { method = Upscaler::Anime; r.animeModel = pick.model; c.animeSrMs = pick.ms; }
-        else if (!asked && !autoWants && pick.model >= 0) r.animeSrNote = L"candidate " + pick.note + L"; RTX VSR stays first until the verdict";
+        else if (!asked && !autoWants && pick.model >= 0) r.animeSrNote = L"candidate " + pick.note + L"; the driver's Video Super Resolution stays first until the verdict";
     } else if (s.upscaler == Upscaler::Anime) {
         r.animeSrNote = !g.has(kCapAnimeSr) ? L"not available" : !r.animation ? L"not used: not animation" : L"not used: the picture is not enlarged";
     }

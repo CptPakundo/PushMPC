@@ -269,6 +269,7 @@ bool PushcoreRoute::Open(const PcConfig& c, std::string& why)
         if (b.output(m->pc, &info) == 0) {
             m_ow = int(info.width); m_oh = int(info.height);
             m_sr = info.sr != 0; m_allOut = info.real_out != 0; m_held = info.held_frames > 0; m_anime = info.anime_model;
+            m_srMethod = info.sr_method;
         }
     }
     m_desc = std::string(b.describe(m->pc)) + "; " + (m->hw ? "hardware decoding on its device" : "software decoding, frames uploaded") +

@@ -289,7 +289,19 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     { int e1 = 0, e2 = 0; dispW = int(a->mapGetInt(in, "display_w", 0, &e1)); dispH = int(a->mapGetInt(in, "display_h", 0, &e2)); if (e1 || e2) dispW = dispH = 0; }
     int animeModel = -1;
     std::string animeNote;
-    if (animeAsked || animeAuto) {
+    // Auto on HDR (PQ / HLG, the first frame's _Transfer): this plugin feeds the model the decoded planes, i.e. PQ / HLG
+    // code values, not the SDR pictures it is trained on: left out (content_detect.h AutoAnimeSrTakesTransfer)
+    bool hdrOut = false;
+    if (animeAuto && !animeAsked) {
+        if (const VSFrame* f0 = a->getFrame(0, node, nullptr, 0)) {
+            int e = 0;
+            const int64_t t = a->mapGetInt(a->getFramePropertiesRO(f0), "_Transfer", 0, &e);
+            hdrOut = !e && !pushmpc::content::AutoAnimeSrTakesTransfer(pushmpc::content::AnimeSrFeed::CodedPlanes, int(t));
+            a->freeFrame(f0);
+        }
+    }
+    if (hdrOut) animeNote = "not used: an HDR source (Auto: the model would see PQ / HLG code values)";
+    else if (animeAsked || animeAuto) {
         const double scale = dispW > 0 && dispH > 0 ? std::min(double(dispW) / w, double(dispH) / h) : (animeAsked ? 2.0 : 0.0);
         if (scale > 1.05 && h <= 1080) {
             const int forced = modelArg.empty() ? -1 : pm::AnimeSrModelIndex(std::wstring(modelArg.begin(), modelArg.end()));

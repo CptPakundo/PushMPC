@@ -72,6 +72,8 @@ public:
     bool Held() const { return m_held; }
     int Lag() const { return m_held ? 14 : 0; }
     int AnimeModel() const { return m_anime; }
+    // PUSHCORE_SR_METHOD_* pushcore's upscaler runs (with ABI 3; meaningful while Upscales())
+    unsigned SrMethod() const { return m_srMethod; }
     // new measured content / anime model for the running stream (pm_pc_update: setSettings + reload, warm); false with
     // the reason when the bridge refused or cannot (the open settings keep running)
     // drawn: Auto's drawn treatment (held frames, the anime holds and deband) on or off; turning it on also makes every
@@ -120,6 +122,7 @@ private:
     int m_k = 1, m_bits = 8, m_w = 0, m_h = 0, m_ow = 0, m_oh = 0;
     bool m_sr = false, m_allOut = false, m_held = false;
     int m_anime = -1;
+    unsigned m_srMethod = 0;
     PcConfig m_cfg;
     std::string m_desc;
     uint64_t m_delivered = 0, m_missed = 0;

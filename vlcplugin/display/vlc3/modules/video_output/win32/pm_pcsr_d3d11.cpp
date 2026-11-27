@@ -136,7 +136,7 @@ struct pm_pcsr {
 };
 
 pm_pcsr *PM_PcsrCreate(vlc_object_t *o, d3d11_device_t *d, const video_format_t *src, vlc_fourcc_t chroma,
-                       unsigned dispW, unsigned dispH, HWND window, int mode)
+                       unsigned dispW, unsigned dispH, HWND window, int mode, int driverSr)
 {
     std::string why;
     const bool anime = mode == PM_PCSR_ANIME;
@@ -161,7 +161,7 @@ pm_pcsr *PM_PcsrCreate(vlc_object_t *o, d3d11_device_t *d, const video_format_t 
     else if (w < 16 || h < 16 || (w & 1) || (h & 1) || src->i_x_offset || src->i_y_offset) why = "a cropped or odd-sized picture";
     else if (matrix != 1 && matrix != 9) why = "an SD (BT.601) source: pushcore's bridge takes HD and UHD sources";
     else if (h > 1080) why = "the source is taller than 1080 lines";
-    else if (!anime && hdr) why = "an HDR source (the anime models are made for SDR pictures): the driver's Super Resolution";
+    else if (!anime && !(why = pmpc::PcsrAutoRefusal(driverSr != 0, src->transfer == TRANSFER_FUNC_SMPTE_ST2084 ? 16 : hdr ? 18 : 1)).empty()) {}
     else if (ow <= w * 11 / 10 && oh <= h * 11 / 10) why = "the screen is not larger than the video";
     else if (!PmmlRuntime()) why = "the anime models are not installed (pmml)";
     else {

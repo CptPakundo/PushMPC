@@ -374,7 +374,7 @@
 +        return false;
 +    }
 +#endif
-+    scaleProc->pcsr = PM_PcsrCreate(vd, d3d_dev, source, chroma, display_width, display_height, wnd, mode);
++    scaleProc->pcsr = PM_PcsrCreate(vd, d3d_dev, source, chroma, display_width, display_height, wnd, mode, scaleProc->nis == nullptr);
 +    scaleProc->pcsr_dev = scaleProc->pcsr ? d3d_dev : nullptr;
 +    return scaleProc->pcsr != nullptr;
 +}

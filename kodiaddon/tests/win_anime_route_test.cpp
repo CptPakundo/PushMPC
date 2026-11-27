@@ -139,6 +139,16 @@ static void Windows()
     CHECK(pmk::PlanWindowsAnime(x).route == pmk::WinUpscale::KodiScaler);
     x = in; x.screenW = 0;
     CHECK(pmk::PlanWindowsAnime(x).route == pmk::WinUpscale::KodiScaler);
+    // after pushcore opened: its SR method decides whether the anime model is armed (content_detect.h, every player):
+    // the driver's Video Super Resolution (RTX VSR 0, Intel VSR 4, ZLUDA VSR 5) stays first until the verdict; FSR (1),
+    // NIS (2) and XeSS (3) are no driver VSR, so the anime model takes over while drawn
+    for (unsigned m : {0u, 4u, 5u}) CHECK(pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m) == kAnimeSrBeforeDriverVsr);
+    for (unsigned m : {1u, 2u, 3u}) CHECK(!pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m));
+    CHECK(!pmk::PushcoreSrDriverVsr(false, 0));
+    // HDR: allowed where pushcore feeds the model (its SDR-like proxy), left out where the decoded planes would be fed
+    CHECK(AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 16) && AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 18));
+    CHECK(!AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 16) && !AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 18));
+    CHECK(AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 1));
 }
 
 // the pushcore route's updates (pm_pc_update) from the measured class: the anime model through AnimeAutoSwitch (30 s),

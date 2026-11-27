@@ -4,6 +4,9 @@
 //                     its DrawnPolicy (pushmpc/content_detect.h), never from names; the route is changed at most once per
 //                     30 s and never to a denoise + sharpen (_DS) model unless the policy allows it.
 //   PlanWindowsAnime  Windows: where Auto's anime upscaler can run without losing Video Super Resolution.
+// Next to the driver's Video Super Resolution (RTX / Intel VSR) Auto's anime upscaler waits for the phase-4 verdict, as
+// in every player (content_detect.h kAnimeSrBeforeDriverVsr / AutoAnimeSrBesideVsr). Which upscaler pushcore runs is
+// known once it is open: where that is a driver VSR the model is not armed (PushcoreAnimeAllowed, the add-on's TryPushcore).
 //
 // Why Windows differs. Kodi's DXVA renderer runs RTX / Intel Video Super Resolution only on a picture at most 2560 wide
 // and narrower than its back buffer, decided when the renderer is configured for the stream (Kodi's
@@ -128,6 +131,12 @@ inline WinAnimePlan PlanWindowsAnime(const WinAnimeIn& in)
             ": Video Super Resolution, the anime upscaler " + p.autoModel + " once the picture is measured as drawn animation";
     return p;
 }
+
+// pushcore's SR method (pm_pc_info.sr_method, PUSHCORE_SR_METHOD_*) is the driver's Video Super Resolution: RTX VSR (0),
+// Intel VSR (4), RTX VSR through ZLUDA (5)
+inline bool PushcoreSrDriverVsr(bool sr, unsigned method) { return sr && (method == 0 || method == 4 || method == 5); }
+// after pushcore opened its upscaler: whether Auto's anime model may be armed beside what it runs (the shared rule)
+inline bool PushcoreAnimeAllowed(bool sr, unsigned method) { return pushmpc::content::AutoAnimeSrBesideVsr(PushcoreSrDriverVsr(sr, method)); }
 
 // the pushcore route is worth opening: for frame generation, or for its upscaler (then also at x1, Smoother off: it is the
 // only place the anime upscaler runs without taking Video Super Resolution away)

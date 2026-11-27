@@ -70,6 +70,24 @@ inline constexpr SignGate kSignGateDrawnCg = SignGate::Strict;
 inline constexpr SignGate kSignGateNotDrawn = SignGate::Strict;
 inline constexpr SignGate SignGateFor(int cls, bool cg) { return cls == kDrawn ? (cg ? kSignGateDrawnCg : kSignGateHandDrawn) : kSignGateNotDrawn; }
 
+// Auto's anime upscaler next to the GPU driver's Video Super Resolution (RTX VSR, also through ZLUDA; Intel VSR), the
+// same in every player (MPC-HC / BE, Kodi, VLC, the VapourSynth plugin): until the phase-4 fidelity verdict (test plan
+// V8 / V9) the driver's VSR stays first wherever it runs, and Auto picks the anime model only where there is none.
+// The verdict flips this one constant for all of them. Asked for by name ("anime"), the anime model runs regardless.
+inline constexpr bool kAnimeSrBeforeDriverVsr = false;
+inline constexpr bool AutoAnimeSrBesideVsr(bool driverVsr) { return !driverVsr || kAnimeSrBeforeDriverVsr; }
+
+// HDR (PQ / HLG) and the anime models, which are trained on SDR pictures. Where they run in pushcore's graph (MPC, the
+// Kodi pushcore route, VLC's output) they take the picture RTX VSR would: an HDR source arrives as the graph's SDR-like
+// proxy (linear light with 203-nit diffuse white at SDR reference white, highlights soft-compressed, sRGB coded:
+// PushFPS ScaleBlit.hlsl encodeSrgb 3 / HdrColor.hlsli HdrProxy) and the result goes back onto the HDR picture as a detail
+// delta (HdrVideoSrRestore.hlsl / HdrRestore), so Auto allows HDR there. Where they read the decoded planes directly
+// (pmml's Yuv420 input: the Kodi add-on's own engines, the VapourSynth plugin) they would see PQ / HLG code values, so
+// Auto leaves HDR sources out there. transfer: H.273 (16 PQ, 18 HLG).
+enum class AnimeSrFeed : uint8_t { PushcoreProxy, CodedPlanes };
+inline constexpr bool IsHdrTransfer(int transfer) { return transfer == 16 || transfer == 18; }
+inline constexpr bool AutoAnimeSrTakesTransfer(AnimeSrFeed feed, int transfer) { return !IsHdrTransfer(transfer) || feed == AnimeSrFeed::PushcoreProxy; }
+
 // ------------------------------------------------------------------------------------------------ cell grid
 // Cell means of one frame: luma in full-range 8-bit codes (0..255), Cb / Cr centred on 0 (8-bit codes).
 struct Cells {

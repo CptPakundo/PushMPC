@@ -9,7 +9,8 @@
 //   4x, DVD anime: R8F64 twice +3.3, C4F32 twice +2.2, CuNNy 8x32 twice +1.9, AnimeSR v2 -2.0 (a restoration GAN: it
 //   redraws, which a fidelity score cannot credit; the user's verdict pairs decide it);
 //   the _DS (denoise + sharpen) variants cost 0.1-0.6 dB on clean sources: only for low-bitrate sources.
-// The user's verdict (side-by-side pairs at the local test) may reorder kAnimeSrRank and set kAnimeSrBeforeRtxVsr.
+// The user's verdict (side-by-side pairs at the local test) may reorder kAnimeSrRank and set kAnimeSrBeforeDriverVsr
+// (pushmpc/content_detect.h: one constant for every player).
 //
 // Cost: a prior per input megapixel on an RTX 5090-class card (calibrated on a published RealESRGAN-compact speed figure; DirectML /
 // TensorRT-RTX FP16) times the card factor, plus the host round trip of this version (readback of the source picture,
@@ -59,7 +60,6 @@ inline int AnimeSrModelIndex(const std::wstring& id) {
 }
 // best first (offline evidence above); the DS / DN variants are chosen from their base, never ranked themselves
 constexpr int kAnimeSrRank[] = {6, 3, 0, 9, 8, 7, 10};
-constexpr bool kAnimeSrBeforeRtxVsr = false;   // RTX VSR stays Auto's first on RTX cards until the verdict (V8 / V9)
 constexpr double kAnimeSrShare = 0.35;         // the most of a source frame's time the upscaler may take
 constexpr double kAnimeSrTransferMsPerMpx = 0.35;   // host round trip per megapixel (source in + output out), PCIe 4/5
 constexpr unsigned kDvdClassLines = 576;

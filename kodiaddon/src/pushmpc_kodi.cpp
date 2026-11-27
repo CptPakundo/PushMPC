@@ -578,11 +578,17 @@ private:
         // MEASURES drawn animation (ContentDetect and its DrawnPolicy; prepared here as animeAutoModel, switched by the decoder) when the
         // picture is enlarged; the engine then runs at its output size (anime_sr_engine.h)
         const bool autoAnime = mode == 0;
+        std::string hdrNote;
         if (mode == 5 || autoAnime) {
             const std::string rt = PmmlRuntime();
             const AVCodecParameters* q = st->codecpar;
             const bool bigger = m_screenW > q->width * 11 / 10 || m_screenH > q->height * 11 / 10;
-            if (!rt.empty() && bigger && q->height <= 1080) {
+            // Auto on HDR: the add-on's engines feed the model the decoded planes (PQ / HLG code values, not the SDR
+            // pictures it is trained on): left out there (content_detect.h AutoAnimeSrTakesTransfer)
+            const int tr = m_trc == AVCOL_TRC_SMPTE2084 ? 16 : m_trc == AVCOL_TRC_ARIB_STD_B67 ? 18 : 1;
+            const bool hdrOut = autoAnime && !pushmpc::content::AutoAnimeSrTakesTransfer(pushmpc::content::AnimeSrFeed::CodedPlanes, tr);
+            if (hdrOut && !rt.empty()) hdrNote = "; no anime upscaler on an HDR source here (it would see PQ / HLG code values)";
+            if (!rt.empty() && bigger && q->height <= 1080 && !hdrOut) {
                 const auto pick = pm::PickAnimeSr(unsigned(q->width), unsigned(q->height), unsigned(std::max(m_screenW, q->width)), unsigned(std::max(m_screenH, q->height)),
                                                   m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
 #if defined(_WIN32)
@@ -624,7 +630,7 @@ private:
             if (mode == 5) mode = 0;
         }
 #if defined(_WIN32)
-        if (mode == 0) { if (why.empty()) why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)"; return; }
+        if (mode == 0) { if (why.empty()) why = "upscaling: Kodi's video scaler (Windows: RTX / Intel Video Super Resolution when enabled in Kodi)" + hdrNote; return; }
 #endif
         if (mode == 0) mode = 3;
         if (mode == 1 || mode == 2) { why = mode == 1 ? "upscaling: Kodi's video scaler (your setting)" : "upscaling: x2 in the add-on (test)"; return; }
@@ -639,7 +645,7 @@ private:
         // square pixels at the output: the upscaler also undoes anamorphic storage
         c.outWidth = ow; c.outHeight = oh;
         why = std::string("upscaling: ") + (mode == 4 ? "FSR1" : "NIS") + " to " + std::to_string(ow) + "x" + std::to_string(oh) +
-              (m_settings.upscale == 0 ? " (Auto)" : " (your setting)");
+              (m_settings.upscale == 0 ? " (Auto)" : " (your setting)") + hdrNote;
     }
 
     // pmml's model id of an anime upscaler (PushMpcAnimeSr.h's table)
@@ -1013,14 +1019,26 @@ private:
             Log(ADDON_LOG_INFO, "pushcore not used: %s", why.c_str());
             return false;
         }
+        std::string upNote;
+        if (sr && !pmk::PushcoreAnimeAllowed(pc->Upscales(), pc->SrMethod())) {
+            // pushcore's upscaler is the driver's Video Super Resolution here: it stays first until the verdict (the
+            // rule every player follows, content_detect.h); the anime model is not armed. Opened only for it (Smoother
+            // off): Kodi's own renderer runs the same Video Super Resolution, so pushcore is not needed
+            upNote = "; the anime upscaler " + plan.autoModel + " is a candidate: Video Super Resolution stays first until the verdict";
+            if (m_settings.smoother == 1) {
+                engWhy = "pushcore: only its upscaler was wanted" + upNote;
+                Log(ADDON_LOG_INFO, "pushcore not used:%s", upNote.c_str() + 1);
+                return false;
+            }
+        }
         m_pc = std::move(pc);
         m_k = m_pc->K();
         m_outW = m_pc->OutWidth(); m_outH = m_pc->OutHeight();
-        m_pcAnimeModel = sr ? plan.autoModel : std::string();
+        m_pcAnimeModel = sr && upNote.empty() ? plan.autoModel : std::string();
         Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz, screen %dx%d", avcodec_get_name(p->codec_id), p->width,
             p->height, bits, m_fps, hz, m_screenW, m_screenH);
         Log(ADDON_LOG_INFO, "engine: pushcore: %s", m_pc->Describe().c_str());
-        const std::string upWhy = up == 1 ? std::string("upscaling: Kodi's video scaler (your setting)") : plan.why;
+        const std::string upWhy = up == 1 ? std::string("upscaling: Kodi's video scaler (your setting)") : plan.why + upNote;
         Log(ADDON_LOG_INFO, "%s; output %dx%d", upWhy.c_str(), m_outW, m_outH);
         Log(ADDON_LOG_INFO, "multiplier: x%d (pushcore, PushMPC's Auto and settings)%s", m_k,
             m_pc->Held() ? "; held drawings re-timed by pushcore (its pictures come up to 14 frames later)" : "");

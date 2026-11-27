@@ -464,6 +464,21 @@ int main()
             check(e.srMethod != Upscaler::Anime, L"anime SR: not on a source at the output size (2x / 4x models only)");
             const Choice f = Decide({}, bd, d, {}, rtx50);
             check(f.srMethod == Upscaler::Rtx && f.animeSrNote.find(L"candidate") == 0, L"anime SR: RTX VSR stays first on RTX until the verdict; the candidate is named", f.animeSrNote);
+            {   // the same rule for every driver Video Super Resolution (content_detect.h kAnimeSrBeforeDriverVsr): Intel VSR too
+                Gpu ivsr = rdna3; ivsr.available |= 1u << kCapIvsr; ivsr.reason[kCapIvsr].clear();
+                const Choice iv = Decide({}, bd, d, {}, ivsr);
+                check(iv.srMethod != Upscaler::Anime && iv.animeSrNote.find(L"candidate") == 0, L"anime SR: Intel VSR stays first until the verdict (the shared rule)", iv.animeSrNote);
+                // an Intel GPU with XeSS SR but no Intel VSR: no driver VSR, so the anime model on drawn animation (as on AMD)
+                Gpu xe = withAnime(Family(kIntel, L"Intel Arc A770")); xe.available |= 1u << kCapXessSr; xe.reason[kCapXessSr].clear();
+                const Choice xa = Decide({}, bd, d, {}, xe), xl = Decide({}, live, d, {}, xe);
+                check(xa.srMethod == Upscaler::Anime && xl.srMethod != Upscaler::Anime, L"anime SR: XeSS-only GPU: the anime model on drawn, XeSS / FSR on live action", xa.animeSrNote + L" | " + xl.sharperNote);
+                Gpu xv = xe; xv.available |= 1u << kCapIvsr; xv.reason[kCapIvsr].clear();
+                check(Decide({}, bd, d, {}, xv).srMethod != Upscaler::Anime, L"anime SR: with Intel VSR too: the driver's VSR stays first");
+                // HDR: pushcore feeds the model its SDR-like proxy (AnimeSrFeed::PushcoreProxy): allowed
+                Source hdrBd = bd; hdrBd.hdr = true; hdrBd.tenBit = true;
+                const Choice hv = Decide({}, hdrBd, d, {}, rdna3);
+                check(hv.srMethod == Upscaler::Anime, L"anime SR: an HDR source in pushcore (SDR-like proxy, restored onto HDR) keeps the anime model", hv.animeSrNote);
+            }
             Settings asked; asked.upscaler = Upscaler::Anime;
             Settings askedSr = asked; askedSr.animeModel = L"animesr-v2";
             const Choice g1 = Decide(asked, bd, d, {}, rtx50), g2 = Decide(askedSr, dvd, d, {}, rtx50);

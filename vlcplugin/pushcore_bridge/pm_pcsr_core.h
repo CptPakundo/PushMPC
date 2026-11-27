@@ -7,7 +7,8 @@
 //   Auto  (the output's default): the scaler is the GPU driver's Super Resolution (RTX / Intel VSR), else NIS, for every
 //         picture; pushcore runs only with the anime model, and only while ContentDetect measures the picture as drawn
 //         animation (DrawnPolicy.animeUpscaler; Kodi's AnimeAutoSwitch: the first switch at once, then at most one per
-//         30 s). Rule: fidelity to the source. For anything else the driver's upscaler on the decoder's picture is closer
+//         30 s), and only on the NIS scaler: next to the driver's Super Resolution the anime model waits for the
+//         phase-4 verdict, as in every player (PcsrAutoRefusal, content_detect.h). Rule: fidelity to the source. For anything else the driver's upscaler on the decoder's picture is closer
 //         to the source than pushcore's (whose output takes one more 4:2:0 round trip and a bilinear step to the window).
 //         The class is measured without pushcore (pm_pc_measure_open: ContentDetect alone on the output's device).
 //   Anime (asked for): pushcore's upscaler for every picture (its Video Super Resolution until the picture is measured
@@ -94,6 +95,18 @@ struct BridgeFns {
 inline int AnimeModelIndexOf(const std::string& id)
 {
     return id.empty() ? -1 : pm::AnimeSrModelIndex(std::wstring(id.begin(), id.end()));
+}
+
+// Auto's anime upscaler in the output, by the rules every player shares (content_detect.h): "" when it may run, else
+// why not. driverSr: the output's scaler is the driver's Super Resolution (RTX / Intel VSR; not NIS): it stays first
+// until the verdict. transfer (H.273): HDR is allowed, pushcore feeds the model its SDR-like proxy.
+inline std::string PcsrAutoRefusal(bool driverSr, int transfer)
+{
+    if (!pushmpc::content::AutoAnimeSrBesideVsr(driverSr))
+        return "the driver's Super Resolution stays first until the anime upscaler's verdict";
+    if (!pushmpc::content::AutoAnimeSrTakesTransfer(pushmpc::content::AnimeSrFeed::PushcoreProxy, transfer))
+        return "an HDR source (the anime models are made for SDR pictures): the driver's Super Resolution";
+    return {};
 }
 
 // ---------------------------------------------------------------------------------------------------- the draw

@@ -6,8 +6,9 @@
 // drawn into that texture instead (at the texture's own bit depth: RGB10A2 for 10-bit sources).
 //   Auto  (the default): the scaler for every picture; pushcore with the anime model only while ContentDetect measures
 //         the picture as drawn animation (measured on the output's device without pushcore), switched as the Kodi
-//         add-on does (the first switch at once, then at most one per 30 s). SDR sources only (the anime models are
-//         made for SDR pictures; HDR keeps the driver's Super Resolution).
+//         add-on does (the first switch at once, then at most one per 30 s). On the NIS scaler only: next to the
+//         driver's Super Resolution the anime model waits for the phase-4 verdict (the rule of every player,
+//         content_detect.h). HDR included (pushcore feeds the model its SDR-like proxy and restores onto HDR).
 //   Anime (asked for): pushcore's upscaler for every picture (its Video Super Resolution until the picture is measured
 //         as drawn, then the anime model), on the NIS scaler.
 // The logic is VLC-free (vlcplugin/pushcore_bridge/pm_pcsr_core.h, tested on WARP with the stub core: pm_pcsr_test):
@@ -30,11 +31,12 @@ struct pm_pcsr;
 
 /* NULL when pushcore's upscaler cannot run for this stream (the reason is logged: no bridge or an older one, an older
  * bridge with PushMPC's frame generation filter in the chain, a software-decoded or SD / BT.601 or cropped source, a
- * screen not larger than the video, no anime model, HDR in Auto). source: the stream's format (vd->source); chroma: the
- * pictures' (opaque D3D11 only); display_width / display_height: the window now; window: the video window (its screen
- * sets pushcore's output size); mode: PM_PCSR_AUTO or PM_PCSR_ANIME (logged as a warning when it cannot run) */
+ * screen not larger than the video, no anime model, the driver's Super Resolution in Auto). source: the stream's format
+ * (vd->source); chroma: the pictures' (opaque D3D11 only); display_width / display_height: the window now; window: the
+ * video window (its screen sets pushcore's output size); mode: PM_PCSR_AUTO or PM_PCSR_ANIME (logged as a warning when
+ * it cannot run); driver_sr: the output's scaler is the driver's Super Resolution (not NIS) */
 struct pm_pcsr *PM_PcsrCreate(vlc_object_t *, d3d11_device_t *, const video_format_t *source, vlc_fourcc_t chroma,
-                              unsigned display_width, unsigned display_height, HWND window, int mode);
+                              unsigned display_width, unsigned display_height, HWND window, int mode, int driver_sr);
 void PM_PcsrDestroy(struct pm_pcsr *);
 /* Without VLC's context lock held (the bridge takes it itself and waits outside it): measures the picture, hands it to
  * pushcore while pushcore runs, and waits a little (at most 50 ms) for its upscaled picture. date: the picture's (a
