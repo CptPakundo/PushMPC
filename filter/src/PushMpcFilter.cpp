@@ -236,6 +236,16 @@ static std::string SampleThreadStack(DWORD tid)
     return out.empty() ? std::string("(no frames)") : out;
 }
 struct TeardownWatch { HANDLE done = nullptr; DWORD tid = 0; HMODULE self = nullptr; };
+static std::string DescribePhase(PushCore* c);   // pushcore's step (pushcore_debugPhase), below
+// the thread that owns the process's loader lock now (0 = free): PEB->LoaderLock (x64 offset 0x110), a CRITICAL_SECTION
+static DWORD LoaderLockOwner()
+{
+    __try {
+        const auto* peb = reinterpret_cast<const BYTE*>(__readgsqword(0x60));   // TEB->ProcessEnvironmentBlock (x64)
+        const auto* cs = *reinterpret_cast<RTL_CRITICAL_SECTION* const*>(peb + 0x110);
+        return cs ? DWORD(ULONG_PTR(cs->OwningThread)) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static HANDLE StartTeardownWatch()
 {
     auto* w = new TeardownWatch;
@@ -252,10 +262,14 @@ static HANDLE StartTeardownWatch()
             done = WaitForSingleObject(w->done, 3000) == WAIT_OBJECT_0;
             if (!done) Log(std::format("teardown watchdog: not done {:.0f} ms after the input disconnect; teardown thread {} at {}", QpcMs(Qpc() - q0), w->tid, SampleThreadStack(w->tid)));
         }
-        if (done && WaitForSingleObject(w->done, 0) == WAIT_OBJECT_0) {
+        // F-T1 follow-up: after the teardown the player may still not exit (one run: 8.7 s, ending when a detached pushcore
+        // close ended); up to 5 samples 2.5 s apart while its window is hidden or gone: the UI thread, the teardown (graph)
+        // thread, the loader lock's owner, our pushcore work on threads of its own and pushcore's graph lock
+        for (int n = 0; n < 5 && done && WaitForSingleObject(w->done, 0) == WAIT_OBJECT_0; ++n) {
             Sleep(2500);
             HWND wnd = pm::PlayerWindow();
-            if (!wnd || !IsWindowVisible(wnd)) {
+            if (wnd && IsWindowVisible(wnd)) break;   // still playing (another file): not an exit
+            {
                 // the player is closing (its window gone or hidden) but the process still runs: where its threads are
                 DWORD ui = wnd ? GetWindowThreadProcessId(wnd, nullptr) : 0;
                 if (!ui) {   // the window is destroyed: the process's first thread (the UI thread of MFC players)
@@ -269,8 +283,13 @@ static HANDLE StartTeardownWatch()
                     }
                     if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
                 }
-                if (ui) Log(std::format("exit watchdog: the player window is {} 2.5 s after the teardown and the process still runs; UI thread {} at {}",
-                                        wnd ? "hidden" : "gone", ui, SampleThreadStack(ui)));
+                const DWORD ll = LoaderLockOwner();
+                Log(std::format("exit watchdog: the player window is {} {:.1f} s after the teardown and the process still runs; UI thread {} at {}; teardown thread {} at {}; "
+                                "loader lock: {}; our pushcore work: {} close(s), {} reload(s) {}; pushcore graph lock: {}",
+                                wnd ? "hidden" : "gone", 2.5 * (n + 1), ui, ui ? SampleThreadStack(ui) : std::string("(not found)"), w->tid, SampleThreadStack(w->tid),
+                                ll ? std::format("thread {}{}", ll, ll == ui ? " (the UI thread)" : ll == w->tid ? " (the teardown thread)" : "") : std::string("free"),
+                                pm::reload::Busy().Closes(), pm::reload::Busy().Reloads(), pm::reload::Busy().Threads(), DescribePhase(nullptr)));
+                if (pm::reload::Busy().Idle() && n >= 1) break;   // nothing of ours runs: two samples are enough
             }
         }
         CloseHandle(w->done);

@@ -213,6 +213,7 @@ int main()
         Check(f.maxGapMs.load() < 200, std::format("reload blocked: the longest wait for the core lock was {:.0f} ms (< 200)", f.maxGapMs.load()));
         // the player's close and the next file while the stuck reload still runs
         Check(!rl::Busy().Idle(), "reload blocked: Busy() reports it (CloseCore closes on its own thread instead of waiting)");
+        Check(rl::Busy().Threads().find("pushcore_reload") != std::string::npos, "reload blocked: the exit watchdog can name the thread (" + rl::Busy().Threads() + ")");
         StubCore next; next.id = 9;
         Filter g; g.core = P(next);
         rl::Limits lim; lim.timeoutMs = 2000;
@@ -223,6 +224,7 @@ int main()
         Check(!full.closed.load(), "reload blocked: the abandoned instance is not closed under the stuck call");
         SetEvent(g_release);
         Check(WaitIdle(3000) && full.closed.load(), "reload blocked: once pushcore returns, the job's thread closes the abandoned instance");
+        Check(rl::Busy().Threads() == "(none)", "reload blocked: no thread listed once the work ended");
     }
     {   // 6. a slow reload past the timeout: abandoned (source frames stay), closed by its thread when it returns
         Reset();
