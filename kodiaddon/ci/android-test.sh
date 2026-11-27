@@ -58,8 +58,13 @@ adb shell ls -l "$dev/clips"
 before="adb shell mkdir -p $dev/.kodi && adb push '$home/.' '$dev/.kodi/' >/dev/null"
 after="mkdir -p '$home/userdata' '$home/temp'; adb pull '$dev/.kodi/userdata/Database' '$home/userdata/' >/dev/null 2>&1; adb pull '$dev/.kodi/temp/kodi.log' '$home/temp/kodi.log' >/dev/null 2>&1; true"
 export PM_KODI_MAX=100
+# the CPU engine on 2 of the emulator's 4 cores: the emulator draws Kodi's GL on the same CPUs (SwiftShader), which a
+# phone does on its GPU. Kodi 22 alone renders 47.6 of 48/s here (native48, run 45976736780, 0 dropped); with the engine
+# on all 4 cores the x2 case's render loop fell to 42.9-51.9/s and Kodi dropped 14-38 pictures (40.4 and 40.7 of the
+# 40.8/s needed in runs 45965854931 and 45971594219; a pass at 37.2 of 36.5 only because the loop fell). On 2 threads
+# the engine still keeps its budget (19.9 of 25 ms, run 45960712431)
 python3 "$here/run_cases.py" --kodi "sh $here/android-kodi.sh" --kill "adb shell am force-stop org.xbmc.kodi" \
-  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" \
+  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" --threads 2 \
   --home "$home" --addon "$addon" --clips "$clips" --major "$major" --out "$out" --cases "$cases"
 rc=$?
 adb logcat -d > "$out/logcat.txt" 2>&1 || true
