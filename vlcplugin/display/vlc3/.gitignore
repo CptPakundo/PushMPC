@@ -5,6 +5,7 @@
 !/modules/video_output/
 !/modules/video_output/win32/
 !/modules/video_output/win32/pm_nis_d3d11.*
+!/modules/video_output/win32/pm_pcsr_d3d11.*
 /include/
 !/modules/video_output/win32/pm_sensors_stub.c
 !/modules/video_output/opengl/

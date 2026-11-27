@@ -188,11 +188,16 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/display/vlc3/modules/video_outp
     ${D3}/video_output/win32/pm_sensors_stub.c ${D3}/video_output/win32/win32touch.c ${D3}/video_output/win32/d3d11_quad.c
     ${D3}/video_output/win32/d3d11_shaders.c ${D3}/video_output/win32/d3d11_scaler.cpp
     ${D3}/video_output/win32/d3d11_tonemap.cpp ${D3}/video_output/win32/pm_nis_d3d11.cpp
+    ${D3}/video_output/win32/pm_pcsr_d3d11.cpp
     ${D3}/video_chroma/d3d11_fmt.c ${D3}/video_chroma/dxgi_fmt.c ${D3}/video_chroma/copy.c)
   add_library(pushmpc_d3d11_plugin SHARED ${D3D11_FORK_SOURCES})
   set_target_properties(pushmpc_d3d11_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "pushmpc_d3d11_plugin")
   target_include_directories(pushmpc_d3d11_plugin PRIVATE "${VLC_PLUGIN_INCLUDE}" "${D3}/../include" "${D3}/video_output" "${D3}/video_output/win32"
-                             "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen")
+                             "${NISDIR}" "${CMAKE_CURRENT_BINARY_DIR}/gen"
+                             # pushcore's upscaler (pm_pcsr_d3d11): the bridge's C header (loaded at run time), the anime
+                             # models and Auto's pick, and the Kodi add-on's switch that follows the measured class
+                             "${CMAKE_CURRENT_SOURCE_DIR}/pushcore_bridge" "${CMAKE_CURRENT_SOURCE_DIR}/../filter/src"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/../kodiaddon/src/engine")
   target_compile_definitions(pushmpc_d3d11_plugin PRIVATE __PLUGIN__ MODULE_STRING="pushmpc_d3d11" MODULE_NAME_IS_direct3d11
                              _WIN32_WINNT=0x0601 WINVER=0x0601 COBJMACROS "gettext_noop(s)=s" "N_(s)=s" "_(s)=vlc_gettext(s)")
   # what VLC's own config.h sets for this module (without HAVE_ID3D11VIDEODECODER the output never creates its staging

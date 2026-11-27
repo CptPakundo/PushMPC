@@ -315,3 +315,66 @@ int PM_NisProcess(vlc_object_t *o, pm_nis *n, d3d11_device_t *d, ID3D11ShaderRes
     (void)o;
     return VLC_SUCCESS;
 }
+
+int PM_NisConvert(vlc_object_t *o, pm_nis *n, d3d11_device_t *d, ID3D11ShaderResourceView *const planes[], int count,
+                  const video_format_t *src, const vout_display_place_t *place)
+{
+    if (!n->out || count < 1 || count > 3 || !planes[0] || place->width == 0 || place->height == 0) return VLC_EGENERIC;
+    for (int i = 0; i < count; i++) if (!planes[i]) return VLC_EGENERIC;
+    if (place->x + place->width > n->outW || place->y + place->height > n->outH) return VLC_EGENERIC;
+    ID3D11Device *dev = d->d3ddevice;
+    ID3D11DeviceContext *ctx = d->d3dcontext;
+    // the placement-size texture (as NIS's pass B uses it), then copied into the window texture at the placement
+    if (!n->nisOut || n->nisW != place->width || n->nisH != place->height) {
+        n->nisOut.Reset(); n->nisUAV.Reset();
+        D3D11_TEXTURE2D_DESC t = {};
+        t.Width = place->width; t.Height = place->height; t.MipLevels = 1; t.ArraySize = 1;
+        t.Format = DXGI_FORMAT_R8G8B8A8_UNORM; t.SampleDesc.Count = 1; t.Usage = D3D11_USAGE_DEFAULT;
+        t.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        if (FAILED(dev->CreateTexture2D(&t, nullptr, n->nisOut.GetAddressOf())) ||
+            FAILED(dev->CreateUnorderedAccessView(n->nisOut.Get(), nullptr, n->nisUAV.GetAddressOf())))
+            return VLC_EGENERIC;
+        n->nisW = place->width; n->nisH = place->height;
+    }
+    ComPtr<ID3D11Resource> res;
+    planes[0]->GetResource(res.GetAddressOf());
+    ComPtr<ID3D11Texture2D> tex;
+    if (FAILED(res.As(&tex))) return VLC_EGENERIC;
+    D3D11_TEXTURE2D_DESC td;
+    tex->GetDesc(&td);
+
+    ConvertCB c = {};
+    Matrix(src, c);
+    c.srcOrigin[0] = (float)src->i_x_offset; c.srcOrigin[1] = (float)src->i_y_offset;
+    c.srcSize[0] = (float)src->i_visible_width; c.srcSize[1] = (float)src->i_visible_height;
+    c.texSize[0] = (float)td.Width; c.texSize[1] = (float)td.Height;
+    c.dstSize[0] = (float)place->width; c.dstSize[1] = (float)place->height;
+    c.planes = (uint32_t)count;
+
+    d3d11_device_lock(d);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ctx->Map(n->convertCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) { memcpy(m.pData, &c, sizeof(c)); ctx->Unmap(n->convertCB.Get(), 0); }
+    if (memcmp(&n->lastPlace, place, sizeof(*place)) != 0) {   // letterbox bars: clear once per new placement
+        const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+        ctx->ClearUnorderedAccessViewFloat(n->outUAV.Get(), black);
+        n->lastPlace = *place;
+    }
+    ID3D11SamplerState *smp = n->linear.Get();
+    ID3D11ShaderResourceView *nullSRV[3] = {};
+    ID3D11UnorderedAccessView *nullUAV = nullptr;
+    ID3D11ShaderResourceView *in[3] = { planes[0], count > 1 ? planes[1] : planes[0], count > 2 ? planes[2] : planes[0] };
+    ctx->CSSetShader(n->convert.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, n->convertCB.GetAddressOf());
+    ctx->CSSetSamplers(0, 1, &smp);
+    ctx->CSSetShaderResources(0, 3, in);
+    ctx->CSSetUnorderedAccessViews(0, 1, n->nisUAV.GetAddressOf(), nullptr);
+    ctx->Dispatch((place->width + 15) / 16, (place->height + 15) / 16, 1);
+    ctx->CSSetShaderResources(0, 3, nullSRV);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+    ctx->CSSetShader(nullptr, nullptr, 0);
+    const D3D11_BOX box = { 0, 0, 0, place->width, place->height, 1 };
+    ctx->CopySubresourceRegion(n->out.Get(), 0, place->x, place->y, 0, n->nisOut.Get(), 0, &box);
+    d3d11_device_unlock(d);
+    (void)o;
+    return VLC_SUCCESS;
+}

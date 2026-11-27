@@ -24,6 +24,10 @@ int PM_NisResize(vlc_object_t *, struct pm_nis *, d3d11_device_t *, unsigned out
  * (space / range); returns VLC_SUCCESS, or VLC_EGENERIC to fall back to the plain quad */
 int PM_NisProcess(vlc_object_t *, struct pm_nis *, d3d11_device_t *, ID3D11ShaderResourceView *const planes[],
                   int plane_count, const video_format_t *src, const vout_display_place_t *place, float sharpness);
+/* the colour conversion alone (bilinear to the placement size, up or down) into the same output: for a picture that is
+ * already upscaled (pushcore's, pm_pcsr_d3d11.h) */
+int PM_NisConvert(vlc_object_t *, struct pm_nis *, d3d11_device_t *, ID3D11ShaderResourceView *const planes[],
+                  int plane_count, const video_format_t *src, const vout_display_place_t *place);
 
 #ifdef __cplusplus
 }

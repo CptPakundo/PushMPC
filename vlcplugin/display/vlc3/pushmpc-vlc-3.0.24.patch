@@ -11,23 +11,26 @@
  DEFINE_GUID(GUID_SWAPCHAIN_WIDTH,  0xf1b59347, 0x1643, 0x411a, 0xad, 0x6b, 0xc7, 0x80, 0x17, 0x7a, 0x06, 0xb6);
  DEFINE_GUID(GUID_SWAPCHAIN_HEIGHT, 0x6ea976a0, 0x9d60, 0x4bb7, 0xa5, 0xa9, 0x7d, 0xd1, 0x18, 0x7f, 0xc9, 0xbd);
  
-@@ -74,10 +78,13 @@
+@@ -74,10 +78,16 @@
  #define UPSCALE_MODE_TEXT N_("Video Upscaling Mode")
  #define UPSCALE_MODE_LONGTEXT N_("Select the upscaling mode for video.")
  
-+/* PushMPC: "auto" = the GPU's own Super Resolution (RTX / Intel VSR) where the driver has it, else NIS; "nis" = NVIDIA
-+ * Image Scaling on any GPU (compute shaders) */
++/* PushMPC: "auto" = pushcore's upscaler with the anime upscaler where it can run, else the GPU's own Super Resolution
++ * (RTX / Intel VSR) where the driver has it, else NIS; "nis" = NVIDIA Image Scaling on any GPU (compute shaders);
++ * "anime" = pushcore's upscaler (the anime upscaler while the picture is measured as drawn, Video Super Resolution
++ * otherwise), else NIS */
  static const char *const ppsz_upscale_mode[] = {
 -    "linear", "point", "processor", "super" };
-+    "linear", "point", "processor", "super", "nis", "auto" };
++    "linear", "point", "processor", "super", "nis", "auto", "anime" };
  static const char *const ppsz_upscale_mode_text[] = {
 -    N_("Linear Sampler"), N_("Point Sampler"), N_("Video Processor"), N_("Super Resolution") };
 +    N_("Linear Sampler"), N_("Point Sampler"), N_("Video Processor"), N_("Super Resolution"),
-+    N_("NVIDIA Image Scaling (any GPU)"), N_("Auto (Super Resolution, else NIS)") };
++    N_("NVIDIA Image Scaling (any GPU)"), N_("Auto (anime upscaler, else Super Resolution, else NIS)"),
++    N_("Anime upscaler (pushcore), else NIS") };
  
  #define HDR_MODE_TEXT N_("HDR Output Mode")
  #define HDR_MODE_LONGTEXT N_("Use HDR output even if the source is SDR.")
-@@ -87,28 +94,28 @@
+@@ -87,28 +97,28 @@
  static const char *const ppsz_hdr_mode_text[] = {
      N_("Auto"), N_("Never out HDR"), N_("Always output HDR"), N_("Generate HDR from SDR") };
  
@@ -68,16 +71,17 @@
      set_callbacks(Open, Close)
  vlc_module_end ()
  
-@@ -118,6 +125,8 @@
+@@ -118,6 +128,9 @@
      upscale_PointSampler,
      upscale_VideoProcessor,
      upscale_SuperResolution,
 +    upscale_Nis,       /* PushMPC */
-+    upscale_Auto,      /* PushMPC: Super Resolution, else NIS */
++    upscale_Auto,      /* PushMPC: the anime upscaler, else Super Resolution, else NIS */
++    upscale_Anime,     /* PushMPC: pushcore's upscaler on the NIS output, else NIS */
  };
  
  enum d3d11_hdr
-@@ -352,7 +361,7 @@
+@@ -352,7 +365,7 @@
      vd->info.has_double_click     = true;
      vd->info.has_pictures_invalid = vd->info.is_slow;
  
@@ -86,7 +90,7 @@
          vd->sys->d3dregion_format != NULL)
      {
          vd->sys->pSubpictureChromas[0] = vd->sys->d3dregion_format->fourcc;
-@@ -637,7 +646,7 @@
+@@ -637,7 +650,7 @@
      ID3D11Texture2D* pDepthStencil;
      ID3D11Texture2D* pBackBuffer;
      UINT window_width, window_height;
@@ -95,7 +99,7 @@
      if ((sys->sys.pf_GetWindowSize != GetWinRTSize && !proc_upscale)
      || !sys->sys.pf_GetWindowSize(&sys->sys, &window_width, &window_height))
      {
-@@ -921,7 +930,7 @@
+@@ -921,7 +934,7 @@
      RECT before_dest_clipped = sys->sys.rect_dest_clipped;
      RECT before_dest         = sys->sys.rect_dest;
  
@@ -104,18 +108,54 @@
          switch (query) {
          case VOUT_DISPLAY_CHANGE_DISPLAY_FILLED:
          case VOUT_DISPLAY_CHANGE_ZOOM:
-@@ -1669,12 +1678,35 @@
+@@ -1101,6 +1114,10 @@
+     {
+         picture_sys_t *p_sys = ActivePictureSys(picture);
+ 
++        /* PushMPC: pushcore's upscaler takes the picture before the context lock (its bridge takes the lock itself) */
++        if (sys->scaleProc && D3D11_UpscalerUsed(sys->scaleProc))
++            D3D11_UpscalerFeed(VLC_OBJECT(vd), sys->scaleProc, p_sys, picture->date);
++
+         if (is_d3d11_opaque(picture->format.i_chroma))
+             d3d11_device_lock( &sys->d3d_dev );
+ 
+@@ -1669,12 +1686,60 @@
  static void InitScaleProcessor(vout_display_t *vd)
  {
      vout_display_sys_t *sys = vd->sys;
 -    if (sys->upscaleMode != upscale_VideoProcessor && sys->upscaleMode != upscale_SuperResolution)
 +    if (sys->upscaleMode != upscale_VideoProcessor && sys->upscaleMode != upscale_SuperResolution &&
-+        sys->upscaleMode != upscale_Nis && sys->upscaleMode != upscale_Auto)
++        sys->upscaleMode != upscale_Nis && sys->upscaleMode != upscale_Auto && sys->upscaleMode != upscale_Anime)
          return;
  
 -    sys->scaleProc = D3D11_UpscalerCreate(VLC_OBJECT(vd), &sys->d3d_dev, sys->quad_fmt.i_chroma,
 -                                          sys->upscaleMode == upscale_SuperResolution,
 -                                          &sys->picQuad.formatInfo);
++    /* PushMPC: pushcore's upscaler (the anime upscaler on drawn pictures, Video Super Resolution otherwise) into the NIS
++     * scaler's output, NIS for any picture it misses; Auto tries it first, and without it the rest of Auto */
++    if ((sys->upscaleMode == upscale_Anime || sys->upscaleMode == upscale_Auto) && is_d3d11_opaque(sys->quad_fmt.i_chroma))
++    {
++        const d3d_format_t *keep = sys->picQuad.formatInfo;
++        sys->scaleProc = D3D11_UpscalerCreateNis(VLC_OBJECT(vd), &sys->d3d_dev,
++                                                 var_InheritFloat(vd, "pushmpc-d3d11-sharpness"),
++                                                 &sys->picQuad.formatInfo);
++        if (sys->scaleProc != NULL &&
++            !D3D11_UpscalerAddPushcore(VLC_OBJECT(vd), sys->scaleProc, &vd->source, sys->quad_fmt.i_chroma,
++                                       vd->cfg->display.width, vd->cfg->display.height, sys->sys.hvideownd,
++                                       sys->upscaleMode == upscale_Anime) &&
++            sys->upscaleMode == upscale_Auto)
++        {
++            D3D11_UpscalerDestroy(sys->scaleProc);
++            sys->scaleProc = NULL;
++        }
++        if (sys->scaleProc == NULL)
++            sys->picQuad.formatInfo = keep;
++        else
++            sys->upscaleMode = upscale_Nis;   /* the NIS scaler's window-size output, drawn 1:1 */
++    }
++    if (sys->upscaleMode == upscale_Anime)
++        sys->upscaleMode = upscale_Nis;
++
 +    /* PushMPC: Auto tries the driver's Super Resolution first (RTX VSR, Intel VSR), then NIS */
 +    if (sys->upscaleMode != upscale_Nis)
 +    {
@@ -144,7 +184,7 @@
      if (sys->scaleProc == NULL)
          sys->upscaleMode = upscale_LinearSampler;
  
-@@ -1687,7 +1719,7 @@
+@@ -1687,7 +1752,7 @@
      vout_display_sys_t *sys = vd->sys;
      IDXGIFactory2 *dxgifactory;
  
@@ -153,7 +193,7 @@
      sys->hdrMode = HdrModeFromString(VLC_OBJECT(vd), psz_hdr);
      free(psz_hdr);
  
-@@ -1758,7 +1790,7 @@
+@@ -1758,7 +1823,7 @@
  
      D3D11SetColorSpace(vd);
  
@@ -162,7 +202,7 @@
      if (strcmp("linear", psz_upscale) == 0)
          sys->upscaleMode = upscale_LinearSampler;
      else if (strcmp("point", psz_upscale) == 0)
-@@ -1767,6 +1799,10 @@
+@@ -1767,6 +1832,12 @@
          sys->upscaleMode = upscale_VideoProcessor;
      else if (strcmp("super", psz_upscale) == 0)
          sys->upscaleMode = upscale_SuperResolution;
@@ -170,10 +210,12 @@
 +        sys->upscaleMode = upscale_Nis;
 +    else if (strcmp("auto", psz_upscale) == 0)
 +        sys->upscaleMode = upscale_Auto;
++    else if (strcmp("anime", psz_upscale) == 0)
++        sys->upscaleMode = upscale_Anime;
      else
      {
          msg_Warn(vd, "unknown upscale mode %s, using linear sampler", psz_upscale);
-@@ -1801,7 +1837,7 @@
+@@ -1801,7 +1872,7 @@
              return err;
      }
  
@@ -184,15 +226,16 @@
      if ( sys->picQuad.formatInfo->formatTexture != DXGI_FORMAT_R8G8B8A8_UNORM &&
 --- a/modules/video_output/win32/d3d11_scaler.cpp
 +++ b/modules/video_output/win32/d3d11_scaler.cpp
-@@ -16,6 +16,7 @@
+@@ -16,6 +16,8 @@
  #include <assert.h>
  
  #include "d3d11_scaler.h"
 +#include "pm_nis_d3d11.h"   /* PushMPC: NIS for every GPU */
++#include "pm_pcsr_d3d11.h"  /* PushMPC: pushcore's upscaler (the anime upscaler) */
  #ifdef HAVE_AMF_SCALER
  #include "../../hw/amf/amf_helper.h"
  #include <AMF/components/HQScaler.h>
-@@ -41,6 +42,11 @@
+@@ -41,6 +43,12 @@
      ComPtr<ID3D11VideoProcessorOutputView>  outputView;
      ID3D11ShaderResourceView                *SRVs[D3D11_MAX_SHADER_VIEW] = {};
      picture_sys_t                           picsys{};
@@ -201,10 +244,11 @@
 +    float                           sharpness = 0.5f;
 +    d3d11_device_t                  *nis_dev = nullptr;
 +    video_format_t                  srcfmt{};
++    struct pm_pcsr                  *pcsr = nullptr;   /* pushcore's upscaler into the NIS output */
  
  #ifdef HAVE_AMF_SCALER
      vlc_amf_context                 amf = {};
-@@ -276,6 +282,42 @@
+@@ -276,6 +284,42 @@
  
      scaleProc->usable = false;
  
@@ -247,10 +291,15 @@
  #ifdef HAVE_AMF_SCALER
      if (!scaleProc->amf_scaler)
  #endif
-@@ -634,6 +676,11 @@
+@@ -634,6 +678,16 @@
  void D3D11_UpscalerDestroy(d3d11_scaler *scaleProc)
  {
      ReleaseSRVs(scaleProc);
++    if (scaleProc->pcsr)
++    {
++        PM_PcsrDestroy(scaleProc->pcsr);
++        scaleProc->pcsr = nullptr;
++    }
 +    if (scaleProc->nis)
 +    {
 +        PM_NisDestroy(scaleProc->nis);
@@ -259,7 +308,7 @@
  
      // D3D11_UpscalerUpdate() AddRefs the context stored in picsys.
      // Release the final retained reference when destroying the scaler.
-@@ -689,10 +736,57 @@
+@@ -689,10 +743,81 @@
      return VLC_SUCCESS;
  }
  
@@ -295,12 +344,36 @@
 +    return scaleProc->nis != nullptr;
 +}
 +
++/* PushMPC: pushcore's upscaler into the NIS scaler's window-size output (the same quad contract) */
++bool D3D11_UpscalerAddPushcore(vlc_object_t *vd, d3d11_scaler *scaleProc, const video_format_t *source, vlc_fourcc_t chroma,
++                               unsigned display_width, unsigned display_height, HWND wnd, bool forced)
++{
++    if (!scaleProc->nis || scaleProc->pcsr)
++        return scaleProc->pcsr != nullptr;
++    scaleProc->pcsr = PM_PcsrCreate(vd, scaleProc->nis_dev, source, chroma, display_width, display_height, wnd, forced);
++    return scaleProc->pcsr != nullptr;
++}
++
++/* PushMPC: outside the context lock (pushcore's bridge takes it itself); on a failure NIS stays for the stream */
++void D3D11_UpscalerFeed(vlc_object_t *vd, d3d11_scaler *scaleProc, picture_sys_t *p_sys, mtime_t date)
++{
++    if (scaleProc->pcsr && PM_PcsrFeed(vd, scaleProc->pcsr, scaleProc->nis_dev, p_sys, date) != VLC_SUCCESS)
++    {
++        PM_PcsrDestroy(scaleProc->pcsr);
++        scaleProc->pcsr = nullptr;
++    }
++}
++
  int D3D11_UpscalerScale(vlc_object_t *vd, d3d11_scaler *scaleProc, picture_sys_t *p_sys)
  {
      HRESULT hr;
  
 +    if (scaleProc->nis)
 +    {
++        /* PushMPC: pushcore's picture when it has one for this picture, else NIS */
++        if (scaleProc->pcsr &&
++            PM_PcsrDraw(vd, scaleProc->pcsr, scaleProc->nis, scaleProc->nis_dev, &scaleProc->place) == VLC_SUCCESS)
++            return VLC_SUCCESS;
 +        int count = 0;
 +        if (p_sys->formatTexture == DXGI_FORMAT_NV12 || p_sys->formatTexture == DXGI_FORMAT_P010 ||
 +            p_sys->formatTexture == DXGI_FORMAT_P016)
@@ -319,13 +392,17 @@
      {
 --- a/modules/video_output/win32/d3d11_scaler.h
 +++ b/modules/video_output/win32/d3d11_scaler.h
-@@ -27,6 +27,9 @@
+@@ -27,6 +27,13 @@
                           const vout_display_cfg_t *);
  int D3D11_UpscalerScale(vlc_object_t *, struct d3d11_scaler *, picture_sys_t *);
  bool D3D11_UpscalerUsed(const struct d3d11_scaler *);
 +/* PushMPC: NIS (any GPU) */
 +struct d3d11_scaler *D3D11_UpscalerCreateNis(vlc_object_t *, d3d11_device_t *, float sharpness, const d3d_format_t **);
 +bool D3D11_UpscalerIsNis(const struct d3d11_scaler *);
++/* PushMPC: pushcore's upscaler (the anime upscaler on drawn pictures) on a NIS scaler, NIS for any picture it misses */
++bool D3D11_UpscalerAddPushcore(vlc_object_t *, struct d3d11_scaler *, const video_format_t *source, vlc_fourcc_t chroma,
++                               unsigned display_width, unsigned display_height, HWND, bool forced);
++void D3D11_UpscalerFeed(vlc_object_t *, struct d3d11_scaler *, picture_sys_t *, mtime_t date);
  struct picture_sys_t *D3D11_UpscalerGetOutput(struct d3d11_scaler *);
  void D3D11_UpscalerGetSRV(const struct d3d11_scaler *, ID3D11ShaderResourceView *SRV[D3D11_MAX_SHADER_VIEW]);
  void D3D11_UpscalerGetSize(const struct d3d11_scaler *, unsigned *i_width, unsigned *i_height);
