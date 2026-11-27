@@ -21,12 +21,16 @@ check '10de:1b80:NVIDIA GeForce GTX 1080' 'NVIDIA GeForce GTX 1080' 1 Linux 'fam
 check '1002:744c:AMD Radeon RX 7900 XTX' 'AMD Radeon RX 7900 XTX (RADV NAVI31)' 0 Linux 'family RX 7000' 'portable: the GPU engine on AMD Radeon RX 7900 XTX'
 check '1002:73bf:AMD Radeon RX 6800 XT' '' 0 Linux 'family RX 6000' 'portable: the CPU engine'
 check '8086:56a0:Intel Arc A770' 'Intel(R) Arc(tm) A770 Graphics (DG2)' 0 Linux 'family Intel' 'portable: the GPU engine on Intel'
-check '106b:0:Apple M4' '' 0 Darwin 'family Apple' 'apple: VideoToolbox frame interpolation' 'Capture mode: not available on macOS'
-check 'none' '' 0 Linux 'family none' 'portable: the CPU engine' 'Capture mode: not available on Linux'
+check '106b:0:Apple M4' '' 0 Darwin 'family Apple' 'apple: VideoToolbox frame interpolation' "Capture mode: comes with Homebrew's pushmpc"
+check 'none' '' 0 Linux 'family none' 'portable: the CPU engine' 'Capture mode: not in this download'
 # the pmml runtime installed: ml before portable
 mkdir -p "$home/.local/share/pushmpc/pmml/graphs"; : > "$home/.local/share/pushmpc/pmml/graphs/synth-yuv.onnx"
 check '1002:744c:AMD Radeon RX 7900 XTX' 'AMD Radeon RX 7900 XTX (RADV NAVI31)' 0 Linux 'ml: PushFlow (RIFE) through pmml'
 check '10de:1e84:NVIDIA GeForce RTX 2070 SUPER' 'NVIDIA GeForce RTX 2070 SUPER' 1 Linux 'frame generation by ml (PushFlow through pmml'
+# capture mode ships on Linux (the tarball's capture/, release.yml requires it): installed, it is offered
+mkdir -p "$home/.local/share/pushmpc/capture"; printf '#!/bin/sh
+' > "$home/.local/share/pushmpc/capture/pushmpc-capture"; chmod 755 "$home/.local/share/pushmpc/capture/pushmpc-capture"
+check 'none' '' 0 Linux 'Capture mode: available for players with no other route'
 rm -rf "$home"
 echo "setup.sh plan: $pass passed, $fail failed"
 [ "$fail" = 0 ]

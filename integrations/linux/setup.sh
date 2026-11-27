@@ -197,7 +197,6 @@ list_players() {
     # players with no PushMPC route here
     none=''
     for p in totem clapper dragon; do have "$p" && none="$none${none:+, }$p"; done
-    [ -n "$none" ] && say "No PushMPC route yet for: $none (play through mpv instead; capture mode is Windows only)"
     [ -n "$none" ] && say "No plug-in route for: $none (capture mode covers them; or play through mpv)"
     return 0
 }
@@ -478,8 +477,7 @@ PY
 # Plex desktop / Plex HTPC from Flathub, or as plain files (Plex's Snap unpacked by a distro package into /opt, or a
 # folder given in PUSHMPC_PLEX_TARBALL_DIR; it needs Plex.sh there): PushMPC's filter inside Plex's own player through
 # LD_PRELOAD (plex/, the installer self-tests it through Plex's libmpv). A target that does not pass is undone again.
-# Snap Plex itself cannot take LD_PRELOAD: it is left as it is (capture mode is Windows-only; the OBS workaround in the
-# user guide).
+# Snap Plex itself cannot take LD_PRELOAD: do_apps' C-plugin route, else capture mode's menu entry (do_capture).
 plex_tarball_dir() {
     for d in "${PUSHMPC_PLEX_TARBALL_DIR:-}" /opt/plex-htpc /opt/plex-desktop /opt/plexhtpc /opt/plex /usr/lib/plex-htpc /usr/lib/plex-desktop; do
         [ -n "$d" ] && [ -f "$d/Plex.sh" ] && { printf '%s\n' "$d"; return 0; }
