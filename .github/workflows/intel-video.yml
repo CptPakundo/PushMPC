@@ -95,9 +95,12 @@ jobs:
         run: |
           cl /nologo /std:c++20 /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX repo\filter\tools\auto_test.cpp /Fe:auto_test.exe /link user32.lib advapi32.lib shell32.lib
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $out = .\auto_test.exe 2>&1 | Out-String
+          $out = .\auto_test.exe 2>&1 | Out-String; $rc = $LASTEXITCODE
           $out -split "`n" | Select-String -Pattern 'intel video|vendor paths|FAIL' | ForEach-Object { $_.Line }
           if ($out -notmatch 'intel video: 0 failed' -or $out -notmatch 'vendor paths: 0 failed') { Write-Host '::error::auto_test failed'; exit 1 }
+          # stated, not left to the step's implicit last exit code: any failing auto_test row fails the step, as before
+          if ($rc -ne 0) { Write-Host "::error::auto_test exit $rc (a failing row outside the Intel ones; see FAIL above)"; exit 1 }
+          exit 0
 
       - name: Tester scripts parse
         run: |
@@ -239,7 +242,10 @@ jobs:
           Copy-Item "$env:BUILD\shaders\*.dxil" "$root\shaders" -ErrorAction SilentlyContinue
           & "$env:BUILD\pushmpc\pushcore_selftest.exe" --core "$env:BUILD\pushmpc\pushcore.dll" --root $root --warp --all --json "$env:RUNNER_TEMP\selftest.json" 2>&1 | Tee-Object -Variable log
           $code = $LASTEXITCODE
-          "exit $code"
+          # the self-test's own exit counts WARP's refusals (Intel VSR, VPL) as failures: informational here, the
+          # checks below decide (a pwsh step otherwise ends with the last native exit code: run 45953530419 printed
+          # WARP CHECKS PASS and failed with this exit 1)
+          "pushcore_selftest exit $code (informational; the JSON checks below decide)"
           $j = Get-Content "$env:RUNNER_TEMP\selftest.json" -Raw | ConvertFrom-Json
           $j | ConvertTo-Json -Depth 5
           $fail = 0
@@ -262,6 +268,7 @@ jobs:
           "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           if ($fail) { exit 1 }
           "WARP CHECKS PASS"
+          exit 0
 
       - name: Tester bundle (pushcore + pushcore_selftest + FFmpeg)
         if: always()

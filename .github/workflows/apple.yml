@@ -544,8 +544,7 @@ jobs:
           ls "$(brew --prefix pushmpc)/share/pushmpc/shaders" "$(brew --prefix pushmpc)/share/pushmpc/mpv"
           src=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,r_frame_rate,width,height -of csv=p=0 "$clip")
           echo "source: $src"
-          # mpv's encode mode did not apply ~/.config/mpv/mpv.conf in run 45593276787 (no vf): include the block's file
-          # explicitly, so the test checks what pushmpc-setup wrote, and print the active filter chain. There is no
+          # the active filter chain is printed (PUSHMPC_VF) and must hold the block's vapoursynth filter. There is no
           # VSSCRIPT_PATH in the environment: the global Lua helper provides it inside mpv.
           # mpv's encode mode (--o) does not run scripts (its built-in "encoding" profile; --load-scripts=yes did not
           # change that in run 45611166441), so the Lua helper cannot act here: the probe above checks it in playback
@@ -554,7 +553,12 @@ jobs:
           echo "VSSCRIPT_PATH from the helper: $VSSCRIPT_PATH"
           # x2 fixed: Auto's CPU budget can pick x1 on a slow 3-core VM (the portable fallback runs here)
           mkdir -p "$HOME/.config/pushmpc"; printf 'Smoother=2\n' >> "$HOME/.config/pushmpc/settings.ini"
-          MPV_HOME="$HOME/.config/mpv" mpv "$clip" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v 2>&1 | tail -40
+          # mpv.conf read once, as a user's mpv reads it (its config folder): with --include as well, the block was read
+          # twice (scripts-append twice: pushmpc.lua loaded twice, each adding the filter again; run 45951785336)
+          rc=0; MPV_HOME="$HOME/.config/mpv" mpv "$clip" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v > "$RUNNER_TEMP/encode.txt" 2>&1 || rc=$?
+          tail -40 "$RUNNER_TEMP/encode.txt"
+          [ "${rc:-0}" = 0 ] || { echo "::error::mpv's encode exited ${rc}"; exit 1; }
+          grep -q '^PUSHMPC_VF=.*vapoursynth' "$RUNNER_TEMP/encode.txt" || { echo "::error::mpv did not apply the mpv.conf block in encode mode (no vapoursynth filter)"; exit 1; }
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"
           srcn=$(echo "$src" | awk -F, '{print $NF}'); outn=$(echo "$out" | awk -F, '{print $NF}')
