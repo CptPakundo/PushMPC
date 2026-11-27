@@ -536,7 +536,8 @@ jobs:
             echo "::endgroup::"
             echo "::error::brew test failed (the formula's vspipe test; details above)"; exit 1
           fi
-          brew audit --formula cptpakundo/pushmpc/pushmpc || echo "::warning::brew audit reported issues (see log)"
+          # strict: the tap formula stays clean (0 problems; 28 were only warned about before, apple run 46004200809)
+          brew audit --formula cptpakundo/pushmpc/pushmpc || { echo "::error::brew audit found problems in the formula (see above)"; exit 1; }
           brew list --verbose CptPakundo/pushmpc/pushmpc | sed -n 1,30p
           # without the Plex for Mac archive the script leaves the resource out (a release whose macOS asset is missing)
           cp Formula/pushmpc.rb "$RUNNER_TEMP/noplex.rb"
