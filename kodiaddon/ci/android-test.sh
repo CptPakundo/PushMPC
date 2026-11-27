@@ -22,6 +22,13 @@ esac
 # its translation layer
 adb install -r --abi "$abi" "$apk" || adb install -r "$apk"
 adb shell pm grant org.xbmc.kodi android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
+# Kodi's Splash (21 / 22, Splash.java.in CheckPermissions) wants "All files access" on Android 11+ phones
+# (Environment.isExternalStorageManager(), API >= 30 and not Android TV); without it a first start stops on its Info
+# dialog and waits for a tap, so Kodi never starts (run 45953088584: Splash shown, no further Kodi line in 180 s).
+# Granted here as a user would in Settings; RECORD_AUDIO too (the Splash asks for it on the same path).
+adb shell appops set --uid org.xbmc.kodi MANAGE_EXTERNAL_STORAGE allow || adb shell appops set org.xbmc.kodi MANAGE_EXTERNAL_STORAGE allow
+adb shell pm grant org.xbmc.kodi android.permission.RECORD_AUDIO 2>/dev/null || true
+echo "Kodi's all-files access: $(adb shell appops get org.xbmc.kodi MANAGE_EXTERNAL_STORAGE | tr -d '\r')"
 # Android 11+ (scoped storage): only the app itself can create its folder under /sdcard/Android/data (adb's push and
 # mkdir fail with "secure_mkdirs failed: Permission denied" otherwise); the shell may write into it once it exists.
 # Kodi creates it (files/.kodi) on its first start: start Kodi once, wait for the folder, stop it.
@@ -29,7 +36,11 @@ echo "adb shell: $(adb shell id | tr -d '\r')"
 adb shell ls -ld /sdcard/Android/data "$dev" 2>&1 | tr -d '\r'
 if ! adb shell ls -d "$dev/.kodi" >/dev/null 2>&1; then
   adb shell am start -W -n org.xbmc.kodi/.Splash >/dev/null
-  i=0; until adb shell ls -d "$dev/.kodi" >/dev/null 2>&1 || [ "$i" -ge 180 ]; do sleep 3; i=$((i + 3)); done
+  i=0; until adb shell ls -d "$dev/.kodi" >/dev/null 2>&1 || [ "$i" -ge 240 ]; do sleep 3; i=$((i + 3)); done
+  if ! adb shell ls -d "$dev/.kodi" >/dev/null 2>&1; then   # what Kodi shows while it waits (before it is stopped)
+    adb exec-out screencap -p > "$out/first-start.png" 2>/dev/null || true
+    adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 && adb shell cat /sdcard/ui.xml | grep -o 'text="[^"]*"' | grep -v 'text=""' | head -20
+  fi
   sleep 5; adb shell am force-stop org.xbmc.kodi
   echo "Kodi's first start: ${i} s until its folder was there"
 fi
