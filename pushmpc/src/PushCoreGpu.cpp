@@ -1681,6 +1681,10 @@ struct PushCore {
         signsOn = haveSettings && (settings.holdFlags & PUSHCORE_HOLD_SIGNS) != 0 && settings.heldFrames != 0;
 #ifdef PUSHFPS_ANIME_SIGNS
         veyra::pipeline::overlay::setSignsWanted(signsOn);
+#ifdef PUSHFPS_SIGN_GATE_CHOICE
+        // which text gate (patch pushfps-4.5.4-contentdetect-signgate): the caller's per-class choice
+        veyra::pipeline::overlay::setSignsStrict((settings.holdFlags & PUSHCORE_HOLD_SIGNS_STRICT) != 0);
+#endif
 #else
         signsOn = false;   // a PushFPS without the anime signs hunks: no sign zone
 #endif

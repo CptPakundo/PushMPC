@@ -57,6 +57,18 @@ inline constexpr DrawnPolicy kPolicyHandDrawn{ true, true, kAnimeUpscalerDsAuto,
 inline constexpr DrawnPolicy kPolicyDrawnCg{ true, true, false, false, false, false };
 inline constexpr DrawnPolicy kPolicyNotDrawn{ false, false, false, false, false, false };
 inline const DrawnPolicy& PolicyFor(int cls, bool cg) { return cls == kDrawn ? (cg ? kPolicyDrawnCg : kPolicyHandDrawn) : kPolicyNotDrawn; }
+// The sign hold's text gate, per measured class (pushcore: PUSHCORE_HOLD_SIGNS_STRICT). Both gates hold typeset text
+// standing over a moving picture. The strict gate also asks for glyph strokes and a surround that moves several
+// times more than the text: it holds far fewer outlines and patterns that are no text (cel-shaded CG, textured
+// scenery), but it lets go of more real text that stands over a still or slowly moving picture (hardsubs, chat
+// overlays). The first gate (dense strokes only) keeps that text. Hand-drawn pictures run the first gate: there the
+// false holds it allows were rare in replay while real signs are common; drawn CG and everything not drawn (also a
+// stream not measured yet, where the user turned the animation treatment on) run the strict one.
+enum class SignGate : uint8_t { First = 0, Strict = 1 };
+inline constexpr SignGate kSignGateHandDrawn = SignGate::First;
+inline constexpr SignGate kSignGateDrawnCg = SignGate::Strict;
+inline constexpr SignGate kSignGateNotDrawn = SignGate::Strict;
+inline constexpr SignGate SignGateFor(int cls, bool cg) { return cls == kDrawn ? (cg ? kSignGateDrawnCg : kSignGateHandDrawn) : kSignGateNotDrawn; }
 
 // ------------------------------------------------------------------------------------------------ cell grid
 // Cell means of one frame: luma in full-range 8-bit codes (0..255), Cb / Cr centred on 0 (8-bit codes).

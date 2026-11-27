@@ -590,7 +590,10 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         const bool trans = s.holdTransients == kOff ? false : s.holdTransients == kAuto ? kHoldTransientsAuto : true;
         const bool line = s.lineArt == kOff ? false : s.lineArt == kAuto ? (kLineArtAuto && r.animation && r.policy.lineArt) : true;
         const bool signs = kSignsAuto && r.animation && r.policy.signHold && s.lineArt != kOff;   // follows the line-art switch (no page control of its own)
-        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (signs ? 4u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u);
+        // the sign hold's text gate follows the measured class (content_detect.h SignGateFor), not the treatment asked for
+        const bool strict = pushmpc::content::SignGateFor(src.contentClass, src.contentClass == 1 && src.contentCg) == pushmpc::content::SignGate::Strict;
+        r.holdFlags = (trans ? 1u : 0u) | (line ? 2u : 0u) | (signs ? 4u : 0u) | (trans && (s.holdTransients != kAuto || kHoldLiveTransientsAuto) ? 8u : 0u) |
+                      (signs && strict ? 32u : 0u);
     }
     const bool lowBitrate = src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp;
     const std::wstring rateNote = src.bppEq < 0 ? L"bitrate unknown" : std::format(L"{} bitrate ({:.2f} bits per pixel)", lowBitrate ? L"low" : L"high", src.bppEq);

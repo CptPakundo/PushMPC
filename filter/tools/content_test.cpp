@@ -151,6 +151,9 @@ int main()
               "drawn CG policy: hold repair and the plain anime upscaler on; _DS, sign hold, line art and the anime deband preset off");
         for (int i = 0; i < 40; ++i, t += 0.5) { g.SetImageEvidence(0.995, t, 0.05); g.Classify(x, t, 0); }
         Check(g.Current().cls == kDrawn && !g.Current().cg, "the CG flag turns off with steady hand-drawn evidence", std::to_string(g.Current().cgLogOdds));
+        Check(SignGateFor(kDrawn, false) == SignGate::First && SignGateFor(kDrawn, true) == SignGate::Strict && SignGateFor(kLive, false) == SignGate::Strict &&
+              SignGateFor(kUnknown, false) == SignGate::Strict && SignGateFor(kGame, false) == SignGate::Strict,
+              "sign gate: the first gate on hand-drawn, the strict one on drawn CG, everything not drawn and before a measurement");
         const DrawnPolicy& ph = PolicyFor(kDrawn, false);
         Check(ph.holdRepair && ph.animeUpscaler && !ph.animeUpscalerDs && ph.signHold && ph.lineArt && ph.animeDeband, "hand-drawn policy: everything on except an automatic _DS upscaler (by hand only)");
         ContentDetector k; for (int i = 0; i < 30; ++i, t += 0.5) { k.SetImageEvidence(0.995, t, i < 26 ? 0.3 : 0.9); k.Classify(x, t, 0); }

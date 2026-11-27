@@ -486,9 +486,13 @@ int main()
                 const Choice r1 = Decide({}, cg8, d, {}, rdna3), r2 = Decide({}, hd8, d, {}, rdna3);
                 check(r1.debandStrength != 3 && r2.debandStrength == 3, L"drawn CG: the normal deband rule, hand-drawn the anime preset", r1.debandNote + L" | " + r2.debandNote);
                 check((r2.holdFlags & 6u) == 6u && !r2.drawnCg, L"hand-drawn: line art and sign hold on", r2.animNote);
+                check(!(r2.holdFlags & 32u), L"hand-drawn: the sign hold's first text gate (not the strict one)", std::to_wstring(r2.holdFlags));
                 Source liveCg = live; liveCg.contentCg = true;   // a stale flag on non-drawn content changes nothing
                 const Choice r3 = Decide({}, liveCg, d, {}, rdna3);
                 check(!r3.animation && r3.srMethod != Upscaler::Anime && (r3.holdFlags & 6u) == 0, L"not drawn: no drawn treatment whatever the CG flag");
+                Settings animOn; animOn.animation = 1;   // the user's Animation On over live action: the sign hold runs with the strict gate
+                const Choice r4 = Decide(animOn, live, d, {}, rdna3);
+                check((r4.holdFlags & 4u) && (r4.holdFlags & 32u), L"Animation On over live action: the sign hold's strict text gate (measured class)", std::to_wstring(r4.holdFlags));
             }
             Costs learned; learned.animeSrLearned[3] = 40.0; learned.animeSrLearned[0] = 40.0;   // measured slow on this card
             const Choice m = Decide({}, bd, d, learned, rdna3);
