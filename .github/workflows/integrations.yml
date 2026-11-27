@@ -1093,7 +1093,7 @@ jobs:
         timeout-minutes: 8
         run: |
           $logs = "$env:LOCALAPPDATA\PushMPC\logs"
-          $gate = @{}
+          $gate = @{}; $said = @{}
           foreach ($r in 'evr', 'mpcvr', 'vmr9', 'madvr', 'null') {
             Remove-Item "$logs\filter-*.log" -ErrorAction SilentlyContinue
             $line = & "$env:RUNNER_TEMP\dshow_graph_test.exe" "$env:RUNNER_TEMP\clip.mp4" $r 8 2>&1 | Out-String
@@ -1103,10 +1103,16 @@ jobs:
             "$r (exit $code): $($line.Trim()) | filter: $key" | Tee-Object -Append "$env:OUT\run.txt"
             Write-Host "::notice title=graph + $r::exit $code $($line.Trim())"
             $gate[$r] = $code -eq 0
+            $said[$r] = $line
             if ($f.Count) { Copy-Item $f[0].FullName "$env:OUT\filter-graph-$r.log" }
           }
           "GRAPH_EVR=$($gate['evr'])" >> $env:GITHUB_ENV
           "GRAPH_MPCVR=$($gate['mpcvr'])" >> $env:GITHUB_ENV
+          # VMR-9 is required only where it plays behind the decoder alone: when the filter's connection fails, the tool's
+          # "control (no PushMPC)" line gives the decoder's own choice; a failed HRESULT there (0x8...) = this runner's VMR-9
+          # shows nothing at all (integrations 45956590495: not even the decoder's own choice connected)
+          $vmr9 = if ($gate['vmr9']) { 'True' } elseif ($said['vmr9'] -match "decoder's own choice -> 0x8[0-9A-Fa-f]{7}") { 'NoControl' } else { 'False' }
+          "GRAPH_VMR9=$vmr9" >> $env:GITHUB_ENV
       - name: MPC-BE plays the clip with Setup's entry; the filter must be created
         timeout-minutes: 5
         run: |
@@ -1156,6 +1162,8 @@ jobs:
           @('## dshow-players', '', '```') + (Get-Content "$env:OUT\run.txt" -ErrorAction SilentlyContinue) + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           if ($env:GRAPH_EVR -ne 'True') { Write-Host '::error::the filter did not play in front of EVR (KMPlayer / GOM / Zoom Player route)'; exit 1 }
           if ($env:GRAPH_MPCVR -ne 'True') { Write-Host '::error::the filter did not play in front of MPC Video Renderer in a plain graph'; exit 1 }
+          if ($env:GRAPH_VMR9 -eq 'False') { Write-Host '::error::the filter did not play in front of VMR-9, although VMR-9 plays behind the decoder alone'; exit 1 }
+          if ($env:GRAPH_VMR9 -eq 'NoControl') { Write-Host '::notice::VMR-9 not gated: it plays nothing on this runner, not even behind the decoder alone' }
           if ($env:MPCBE_FILTER -ne 'True') { Write-Host '::error::MPC-BE did not create the filter'; exit 1 }
       - uses: actions/upload-artifact@v4
         if: always()
