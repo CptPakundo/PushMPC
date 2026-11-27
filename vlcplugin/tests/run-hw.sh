@@ -43,6 +43,8 @@ run() {
   [ -s "$log" ] || cp "$OUT/$name.stdout" "$log" 2>/dev/null
   echo "== $name ($api, $quirks): exit $rc"
   grep -hE "for hardware decoding|PushMPC|pmnull|using hw decoder|using glconv|zero copy|Failed to|compensate" "$log" | sed 's/^[^:]*: //' | sort | uniq -c | head -12
+  # the zero-copy verdict and the repair (sorted last, cut off above)
+  grep -hE "PushMPC: (zero copy|held-drawing repair)" "$log" | sed 's/^[^:]*: //' | sort | uniq -c | head -4
   # shellcheck disable=SC2086
   "$PY" "$here/hwcheck.py" "$name" "$csv" "$OUTABS/$name.log" --expect "$expect" --mult "$mult" --src-frames "$srcn" ${CHECK:-} || fails=$((fails + 1))
   [ "$rc" = 0 ] || [ "$rc" = 124 ] || { echo "::error::$name: VLC exit $rc"; fails=$((fails + 1)); }

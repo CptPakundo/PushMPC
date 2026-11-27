@@ -536,6 +536,7 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
     const char *why = "";
     if (!sys->eng || !OptInt(f, CFG "zerocopy", 1)) return;
     if (!pm_engine_dmabuf_ok(sys->eng, &why)) { msg_Info(f, "PushMPC: zero copy unavailable (%s): the hardware path copies", why); return; }
+    pm_engine_plain(sys->eng, 1);   /* the round trip pushes one picture twice: no held-frame test, no repair lag */
     picture_t *a = pm_hw_new_picture(sys->hw), *b = pm_hw_new_picture(sys->hw);
     picture_t *ca = pm_hw_cpu_picture(sys->hw), *cb = pm_hw_cpu_picture(sys->hw);
     char err[200] = "";
@@ -594,7 +595,7 @@ static void ZcProbe(filter_t *f, struct filter_sys_t *sys)
     if (b) picture_Release(b);
     if (ca) picture_Release(ca);
     if (cb) picture_Release(cb);
-    pm_engine_forget(sys->eng);
+    pm_engine_plain(sys->eng, 0);   /* forgets the probe's frames */
     sys->zc_hw = ok;
     if (ok) msg_Info(f, "PushMPC: zero copy on (VA-API surfaces as dmabufs into the GPU engine and back)");
     else msg_Info(f, "PushMPC: zero copy not used (%s): the hardware path copies", err);

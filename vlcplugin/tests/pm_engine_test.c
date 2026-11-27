@@ -162,6 +162,20 @@ static int TestRepair(void)
     dupOk = dupOk && pm_engine_pairs_ready(e) == 2;
     printf("repeat while lagged: %s\n", dupOk ? "as expected" : "WRONG");
     if (!dupOk) fails++;
+
+    /* the zero-copy probe (pm_engine_plain): one picture pushed twice gives a pair at once, then the lag is back */
+    pm_engine_plain(e, 1);
+    RepairFrame(7, Yb, Ub, Vb);
+    int probeOk = pm_engine_repair_lag(e) == 0 && pm_engine_push(e, &in, 0, err, sizeof(err)) == 0 && pm_engine_push(e, &in, 1, err, sizeof(err)) == 0
+                  && pm_engine_have_pair(e) && pm_engine_pairs_ready(e) == 0;
+    if (probeOk) pm_engine_generate(e, 0.5f, &out);
+    pm_engine_plain(e, 0);
+    probeOk = probeOk && pm_engine_repair_lag(e) == 3 && !pm_engine_have_pair(e) && pm_engine_pairs_ready(e) == 0;
+    RepairFrame(0, Yb, Ub, Vb);   /* held frames are back: a repeat is a repeat again */
+    probeOk = probeOk && pm_engine_check_dup(e, &in, 0, err, sizeof(err)) == 0 && pm_engine_push(e, &in, 0, err, sizeof(err)) == 0
+              && pm_engine_check_dup(e, &in, 1, err, sizeof(err)) == 1;
+    printf("zero-copy probe while lagged: %s\n", probeOk ? "pair at once, lag and held frames back" : "WRONG");
+    if (!probeOk) fails++;
     pm_engine_close(e);
     free(Yb); free(Ub); free(Vb); free(OYb); free(OUb); free(OVb);
     return fails;
