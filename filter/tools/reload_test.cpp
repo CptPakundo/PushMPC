@@ -22,13 +22,15 @@ using namespace std::chrono_literals;
 namespace rl = pm::reload;
 
 static int g_fail = 0, g_checks = 0;
+static std::string g_failed;   // repeated just before the RESULT line (CI shows only the last lines)
 static void Check(bool ok, const std::string& what)
 {
     ++g_checks;
-    if (!ok) ++g_fail;
+    if (!ok) { ++g_fail; g_failed += (g_failed.empty() ? "" : " | ") + what; }
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
     std::fflush(stdout);
 }
+static bool g_coarse = false;
 static std::mutex g_logLock;
 static void Log(const std::string& s) { std::lock_guard<std::mutex> lk(g_logLock); std::printf("     log: %s\n", s.c_str()); std::fflush(stdout); }
 
@@ -110,7 +112,9 @@ struct Filter {
                 last = rl::Clock::now();
                 double m = maxGapMs.load();
                 while (gap > m && !maxGapMs.compare_exchange_weak(m, gap)) {}
-                Sleep(periodMs);
+                // PUSHMPC_TEST_COARSE_TIMER=1: as on a CI runner, where nothing raised the timer resolution and Sleep(2)
+                // lasts one 15.6 ms tick (the counts below are judged against that)
+                Sleep(g_coarse ? std::max(periodMs, 16) : periodMs);
             }
         };
         threads.emplace_back(loop, 2, true);
@@ -140,6 +144,7 @@ static void Reset() { ResetEvent(g_release); g_overlap = 0; }
 int main()
 {
     g_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    { char b[8] = {}; g_coarse = GetEnvironmentVariableA("PUSHMPC_TEST_COARSE_TIMER", b, sizeof(b)) > 0 && b[0] == '1'; }
 
     {   // 1. a fast reload: the same instance back in the slot, quickly, as before
         Reset();
@@ -189,7 +194,9 @@ int main()
         const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), rl::Limits{});
         Check(r.how == rl::Outcome::Done && r.reinstalled && g_overlap.load() == 0, std::format("earlier close in flight: the reload waited {:.0f} ms for it, then ran alone", r.waitMs));
         Check(r.waitMs >= 250, "earlier close in flight: the wait covered the close");
-        Check(f.sourceFrames.load() - before > 20, std::format("earlier close in flight: source frames shown meanwhile ({})", f.sourceFrames.load() - before));
+        // at least one per 32 ms (twice a 15.6 ms timer tick: the "Receive" thread sleeps 2 ms, which is one tick on a
+        // runner); the property itself, that nothing waits for the reload, is the lock-wait check in case 5
+        Check(f.sourceFrames.load() - before > int(r.waitMs / 32), std::format("earlier close in flight: source frames shown meanwhile ({} in {:.0f} ms)", f.sourceFrames.load() - before, r.waitMs));
         f.Stop();
         Check(WaitIdle(2000), "earlier close in flight: nothing left running");
     }
@@ -208,7 +215,9 @@ int main()
         Check(r.how == rl::Outcome::Stopped, "reload blocked: Stop abandons it");
         Check(afterQuit < 1500, std::format("reload blocked: Stop returned {:.0f} ms after it was asked (grace 1000, bound 1500)", afterQuit));
         Check(f.core == nullptr, "reload blocked: the filter no longer holds the instance");
-        Check(f.sourceFrames.load() - s0 > 1000 && f.delivered.load() - d0 > 500,
+        // 11 s: at least one per 32 ms each (twice a 15.6 ms timer tick; 1000 assumed a 1 ms timer, which a CI runner does
+        // not have: the "Receive" thread's Sleep(2) lasts 15.6 ms there, ~700 in 11 s); the lock-wait check below is the property
+        Check(f.sourceFrames.load() - s0 > 11000 / 32 && f.delivered.load() - d0 > 11000 / 32,
               std::format("reload blocked: source frames {} and deliverer ticks {} kept flowing for 11 s", f.sourceFrames.load() - s0, f.delivered.load() - d0));
         Check(f.maxGapMs.load() < 200, std::format("reload blocked: the longest wait for the core lock was {:.0f} ms (< 200)", f.maxGapMs.load()));
         // the player's close and the next file while the stuck reload still runs
@@ -286,6 +295,7 @@ int main()
         Check(WaitIdle(3000) && quick.closed.load() && full.closed.load() && full.reloads == 0, "Stop during the quick graph's close: both closed, no rebuild started");
     }
 
+    if (g_fail) std::printf("FAILED: %s\n", g_failed.c_str());
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }
