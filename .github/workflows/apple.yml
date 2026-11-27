@@ -427,6 +427,13 @@ jobs:
             /bin/sh -n "$f" && /bin/bash -n "$f" || { echo "::error file=$f::does not parse with macOS's /bin/sh or /bin/bash (bash 3.2)"; bad=1; }
           done
           exit $bad
+      # the VLC installer's vlcrc handling on synthetic files with macOS's own sh, bash 3.2, dash and awk
+      - name: pushmpc-vlc.sh's vlcrc cases (macOS sh, bash, dash)
+        run: |
+          set -e
+          /bin/sh vlcplugin/install/pushmpc-vlc-test.sh
+          /bin/bash vlcplugin/install/pushmpc-vlc-test.sh
+          if [ -x /bin/dash ]; then /bin/dash vlcplugin/install/pushmpc-vlc-test.sh; fi
       # Homebrew's downloaded bottles and resources (ArtCNN files), the test clip; keyed on the formula, falling back to
       # the newest cache of any formula version
       - uses: actions/cache@v4
