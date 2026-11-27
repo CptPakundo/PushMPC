@@ -245,10 +245,18 @@ static void upscaleRun() {
     const char* graphs = std::getenv("PMML_TEST_GRAPHS");
     if (!rt || !graphs || !*rt || !*graphs) { std::printf("upscale run: skipped (PMML_TEST_RUNTIME / PMML_TEST_GRAPHS not set)\n"); return; }
     const int w = 64, h = 48;
+    // PMML_TEST_BACKEND (e.g. ort:core:trt-rtx:0, ort:directml:dml:0): a GPU EP for every case (one ORT flavor a process);
+    // pushcore's RGBA8 route must then land every node of its three graphs on that EP (a CPU EP node stalled DVD sizes
+    // for 20 s a frame under TensorRT-RTX)
+    const char* gpu = std::getenv("PMML_TEST_BACKEND");
+    pmml::Backend backend;
+    const bool onGpu = gpu && *gpu;
+    if (onGpu && !pmml::Backend::parse(gpu, &backend)) { std::printf("FAIL PMML_TEST_BACKEND %s\n", gpu); ++failures; return; }
     for (const auto& m : pmml::upscaleModels()) {
         for (int bits : {8, 10}) {
             pmml::UpscaleOptions o;
             o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.width = w; o.height = h;
+            if (onGpu) o.backend = backend;
             o.colour = pmml::Colour::limited(bits);
             std::string err;
             auto up = pmml::Upscaler::create(o, &err);
@@ -288,9 +296,14 @@ static void upscaleRun() {
         pmml::UpscaleOptions o;
         o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.io = pmml::UpscaleIo::Rgba8; o.width = w; o.height = h; o.outWidth = 150; o.outHeight = 100;
         o.inPitchPx = 72; o.outPitchPx = 160;   // D3D12-style padded rows (the zero-copy layout): cropped in, padded out
+        if (onGpu) o.backend = backend;
         std::string err;
         auto up = pmml::Upscaler::create(o, &err);
         if (!up) { std::printf("FAIL upscale rgba8 %s: %s\n", m.id, err.c_str()); ++failures; continue; }
+        if (onGpu) {
+            std::printf("upscale %-16s rgba8 on %s: %s\n", m.id, gpu, up->describe().c_str());
+            CHECK(up->describe().find("SLOW:") == std::string::npos);
+        }
         CHECK(up->outWidth() == 150 && up->outHeight() == 100);
         std::vector<uint8_t> src(size_t(72) * 4 * h), dst(size_t(160) * 4 * 100, 7);
         for (size_t i = 0; i < src.size(); i += 4) { src[i] = 200; src[i + 1] = 100; src[i + 2] = 50; src[i + 3] = 255; }
