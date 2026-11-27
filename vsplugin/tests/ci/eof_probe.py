@@ -23,7 +23,7 @@ def blank(w, h, y):
 
 frames = []
 for i in range(48):
-    x = 20 + 6 * i
+    x = 20 + 4 * i   # 20 .. 208: the right strip stays at least 64 px wide (and even, for 4:2:0)
     row = core.std.StackHorizontal([blank(x, B, 40), blank(B, B, 220), blank(W - x - B, B, 40)])
     frames.append(core.std.StackVertical([blank(W, 96, 40), row, blank(W, H - 96 - B, 40)]))
 base = core.std.SetFrameProps(core.std.Splice(frames), _Matrix=1, _Transfer=1, _Primaries=1, _Range=0)
@@ -45,7 +45,7 @@ def count(clip, cap):
     while n < cap:
         try:
             clip.get_frame(n)
-        except vs.Error:
+        except (vs.Error, IndexError, ValueError):   # a failed frame, or past a known length
             break
         n += 1
     return n
