@@ -317,8 +317,18 @@ static void epNames() {
     CHECK(!epDeviceMatches(nullptr, "NvTensorRTRTXExecutionProvider", "trt-rtx") && !epDeviceMatches("", "", ""));
 }
 
+// the Rgba8 binding's size: whole rows, the last one too (F-T2c: 720x480 under TensorRT-RTX)
+static void rgbaBytes() {
+    // a D3D12 copyable footprint of 720x480 RGBA8: pitch 3072 bytes (768 px), total = 479 whole rows + one row of the width
+    const size_t footprintTotal = size_t(3072) * 479 + 720 * 4;
+    CHECK(pmml::rgbaTensorBytes(768, 480) == size_t(768) * 480 * 4);
+    CHECK(pmml::rgbaTensorBytes(768, 480) > footprintTotal);           // the footprint's total alone is too small
+    CHECK(pmml::rgbaTensorBytes(1920, 1080) == size_t(7680) * 1080);   // pitch = width: the two agree (why 1080p worked)
+}
+
 int main() {
     epNames();
+    rgbaBytes();
     sizes();
     affine();
     parsing();

@@ -84,4 +84,9 @@ public:
 // The files a model needs that are not there ("" = all present): the weights, the model graph, the wrappers.
 std::string upscaleFilesMissing(const UpscaleOptions& o);
 
+// The bytes pmml binds for an Rgba8 picture of `height` rows at `pitchPx` pixels a row: every row whole, the last one
+// too. A buffer given to runRgba / runRgbaDevice must hold this many; a D3D12 copyable footprint's total does not (its
+// last row stops at the width), which TensorRT-RTX refused at 720 wide (pitch 768): cudaMemcpy "invalid argument".
+inline size_t rgbaTensorBytes(int pitchPx, int height) { return size_t(pitchPx) * size_t(height) * 4; }
+
 }  // namespace pmml

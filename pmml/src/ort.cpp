@@ -1143,9 +1143,9 @@ public:
         std::vector<OrtValue*> tmp;
         const int64_t inShape[4] = {1, u_.height, inPw_, 4}, outShape[4] = {1, outH_, outPw_, 4};
         OrtValue *iv = nullptr, *ov = nullptr;
-        PMML_TRY(ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, in, size_t(u_.height) * inPw_ * 4, inShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &iv));
+        PMML_TRY(ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, in, rgbaTensorBytes(inPw_, u_.height), inShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &iv));
         tmp.push_back(iv);
-        OrtStatus* s = ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, out, size_t(outH_) * outPw_ * 4, outShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &ov);
+        OrtStatus* s = ort->api->CreateTensorWithDataAsOrtValue(choice_.deviceMemory, out, rgbaTensorBytes(outPw_, outH_), outShape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &ov);
         bool ok = !failed(s, "output tensor", err);
         if (ok) { tmp.push_back(ov); ok = chain({{"in_rgba", iv}}, {{"out_rgba", ov}}, err); }
         if (ok && deviceKind() == "cuda") ok = !failed(ort->api->SynchronizeBoundOutputs(bind_[2]), "sync", err);   // written when it returns

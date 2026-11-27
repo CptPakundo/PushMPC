@@ -131,6 +131,12 @@ public:
         };
         footprint(inW, inH, &inFp_, &inBytes_);
         footprint(outW, outH, &outFp_, &outBytes_);
+#if defined(PUSHMPC_HAVE_PMML) && PUSHMPC_HAVE_PMML
+        // pmml binds whole rows, the last one too (pmml::rgbaTensorBytes); a footprint's total stops the last row at the
+        // width: at 720 wide (pitch 768) the bound tensor ran 192 bytes past the shared buffer and TensorRT-RTX refused it
+        inBytes_ = std::max<UINT64>(inBytes_, inFp_.Offset + pmml::rgbaTensorBytes(int(inFp_.Footprint.RowPitch / 4), int(inH)));
+        outBytes_ = std::max<UINT64>(outBytes_, outFp_.Offset + pmml::rgbaTensorBytes(int(outFp_.Footprint.RowPitch / 4), int(outH)));
+#endif
         const auto rt = animeSrRuntime();
         pmml::UpscaleOptions o;
         o.runtimeDir = rt.string();
