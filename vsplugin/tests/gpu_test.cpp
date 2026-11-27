@@ -312,18 +312,17 @@ static void TestRegionRepair(int bits)
     CHECK(e.Cells(s, a, g, err), "Cells: %s", err.c_str());
     const int f = std::max(2, W / 480);
     CHECK(g.cell == f && g.w == W / f && g.h == H / f, "cell grid %dx%d of %d px (expected %dx%d of %d)", g.w, g.h, g.cell, W / f, H / f, f);
+    // the CPU twin the other routes use (HeldRepair.h CellsFromPlanes: a sample x 255 / (2^bits - 1), as cells.comp and
+    // the HLSL CS_Held; not >> (bits - 8)); the Cb the GPU packs is rounded to 1/8 code
+    const pushmpc::held::CellGrid ref = pushmpc::held::CellsFromPlanes(S.p[0].data(), S.w, S.p[1].data(), S.p[2].data(), S.PW(1), nullptr, W, H, bits);
+    CHECK(ref.ok() && int(ref.w) == g.w && int(ref.h) == g.h, "CPU cell grid %ux%u (GPU %dx%d)", ref.w, ref.h, g.w, g.h);
+    if (!ref.ok() || int(ref.w) != g.w || int(ref.h) != g.h) return;
     double worstMean = 0, worstCb = 0;
     for (int cy = 0; cy < g.h; cy += 7)
         for (int cx = 0; cx < g.w; cx += 7) {
-            double m = 0, cb = 0;
-            for (int y = 0; y < f; ++y) for (int x = 0; x < f; ++x) m += S.At(0, cx * f + x, cy * f + y);
-            m = m / (f * f) / s8;
-            const int cs = std::max(1, f / 2);
-            for (int y = 0; y < cs; ++y) for (int x = 0; x < cs; ++x) cb += S.At(1, cx * f / 2 + x, cy * f / 2 + y);
-            cb = cb / (cs * cs) / s8;
             const size_t i = size_t(cy) * size_t(g.w) + size_t(cx);
-            worstMean = std::max(worstMean, std::fabs(m - g.v[i]));
-            worstCb = std::max(worstCb, std::fabs(cb - double((g.aux[i] >> 10) & 2047u) / 8.0));
+            worstMean = std::max(worstMean, std::fabs(double(ref.v[i]) - g.v[i]));
+            worstCb = std::max(worstCb, std::fabs(double(ref.cb[i]) - double((g.aux[i] >> 10) & 2047u) / 8.0));
         }
     CHECK(worstMean <= 0.05 && worstCb <= 0.125 + 1e-6, "cell means vs the CPU (%d-bit): worst %.3f codes, Cb %.3f", bits, worstMean, worstCb);
     // the part: the sprite's sweep plus 16 px (sx - 16 .. sx + 12 + SW + 16, sy - 16 .. sy + SW + 16) in cells
