@@ -107,6 +107,22 @@ struct Late {
     double reloadMs = 0;
 };
 
+// The adoption veto: every reason the file has to stay on the source frames (a runtime fallback for any reason, a lost
+// device, an interlaced verdict) bumps the generation. A late reload is kept at the timeout only when the timeout's own
+// fallback was the only veto during the reload, and adopted only while nothing vetoed since (critic of 4e0563f: a plain
+// flag cannot tell "PassD3D because of the timeout" from "PassD3D because the file is interlaced").
+class Veto {
+public:
+    uint32_t Bump() { return ++gen_; }
+    uint32_t Now() const { return gen_.load(); }
+    // at the timeout: before = Now() before the reload, timeoutFallback = the timeout's Bump()
+    static bool KeepAtTimeout(uint32_t before, uint32_t timeoutFallback, bool deviceLost) { return !deviceLost && timeoutFallback == before + 1; }
+    // at adoption: kept = the timeout's Bump()
+    bool StillValid(uint32_t kept) const { return gen_.load() == kept; }
+private:
+    std::atomic<uint32_t> gen_{ 0 };
+};
+
 struct Job {
     std::mutex lock;
     std::condition_variable cv;
@@ -116,8 +132,8 @@ struct Job {
     PushCoreOutputInfo oi = {};
     std::string err;
     double retiredMs = 0, waitMs = 0, reloadMs = 0;
-    const char* stage = "starting";
-    std::shared_ptr<Late> late;      // set when the caller abandons after the timeout: a later success goes there  // where the job's thread is: the quick graph's close, the wait for closes, pushcore_reload
+    const char* stage = "starting";  // where the job's thread is: the quick graph's close, the wait for closes, pushcore_reload
+    std::shared_ptr<Late> late;      // set when the caller abandons after the timeout: a later success goes there
 };
 
 // Starts the reload of `core` on its own thread: first `retired` is closed (if any), then it waits up to closesWaitMs

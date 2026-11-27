@@ -354,6 +354,7 @@ struct Config {
     int simulateLostSec = 0, simulateLostMode = 1;
     int fullOpenDelayMs = 700;   // FullOpenDelayMs: quick start, the full graph opens this long after the quick one
     int simulateNoOutputSec = 0; // debug SimulateNoOutput: the copier stops taking pushcore's frames this long after activation (tests the no-output guard)
+    int reloadTimeoutMs = 0;     // debug ReloadTimeoutMs: the settings reload's bound instead of 20 s (e.g. 200: every rebuild is taken over late)
     std::wstring forceFallback; // debug: pass-through with this reason
     bool forceP010 = false;     // debug ForceP010: skip Y416/Y410 (tests the P010 HDR output)
     bool skipY416 = false;      // debug SkipY416: no Y416 at all
@@ -418,6 +419,7 @@ static Config ReadConfig()
     ReadS(k, L"DataDir", c.dataDir);
     ReadDw(k, L"SimulateDeviceLost", c.simulateLostSec);
     ReadDw(k, L"SimulateNoOutput", c.simulateNoOutputSec);
+    ReadDw(k, L"ReloadTimeoutMs", c.reloadTimeoutMs);
     ReadDw(k, L"FullOpenDelayMs", c.fullOpenDelayMs);
     ReadDw(k, L"SimulateDeviceLostMode", c.simulateLostMode);
     ReadS(k, L"ForceFallback", c.forceFallback);
@@ -2516,7 +2518,7 @@ private:
     void DrainCore(bool flush);
     void CloseCore();
     bool TryActivate(REFERENCE_TIME pts);
-    void Fallback(const std::wstring& why);
+    uint32_t Fallback(const std::wstring& why);   // returns the adoption veto's generation it set (always bumps it)
     void RequestOutFmt(const OutFmt& want, const char* why);
     bool DeviceGone();
     void DeviceLost(int where, const std::string& what);
@@ -2549,7 +2551,11 @@ private:
     void DoReload(bool forced);
     // F-T1 follow-up: a reload abandoned after 20 s that later succeeds is adopted (AdoptLate, on the copier) while this
     // file still plays on the source frames; given up at Stop, close and a lost device
+    // m_late and m_lateGen belong to the copier (and to whoever runs after the copier was joined)
     std::shared_ptr<pm::reload::Late> m_late;
+    uint32_t m_lateGen = 0;                       // the adoption veto's generation the late slot was kept with
+    pm::reload::Veto m_veto;                      // bumped by every fallback, a lost device, an interlaced verdict
+    std::atomic<int64_t> m_lateAdoptQpc = 0;      // when a late reload was taken over (Auto re-arms its upgrade check)
     pm::reload::Hooks ReloadHooks();
     void AdoptLate();
     void ReleaseLate() { if (m_late) { pm::reload::ReleaseLate(m_late, m_api, ReloadHooks()); m_late.reset(); } }
@@ -3789,7 +3795,8 @@ void CPushMpcFilter::DrainCore(bool flush)
 }
 void CPushMpcFilter::CloseCore()
 {
-    ReleaseLate();
+    // m_late is the copier's: touched here only once it was joined; while it runs, the veto makes it give the late reload up
+    if (!m_threadsRunning) ReleaseLate(); else m_veto.Bump();
     bool quickPending = false;
     if (m_job) {
         std::lock_guard<std::mutex> lk(m_job->lock);
@@ -3882,15 +3889,17 @@ bool CPushMpcFilter::TryActivate(REFERENCE_TIME pts)
     SetStatus(L"active: " + Widen(m_oi.description));
     return true;
 }
-void CPushMpcFilter::Fallback(const std::wstring& why)
+uint32_t CPushMpcFilter::Fallback(const std::wstring& why)
 {
-    if (m_mode == Mode::PassD3D) return;
+    const uint32_t g = m_veto.Bump();   // a late reload is not taken over after this (also when already on the source frames)
+    if (m_mode == Mode::PassD3D) return g;
     // The established output type is kept: the source frames are converted into it on our device (as during the
     // warm-up). A live switch to NV12 D3D11 samples is NOT done: stock MPC-VR 2638 crashed on it (access violation in
     // d3d11.dll under its D3D11 VP input setup, 2026-11-22 19:46, pid 71616), although its QueryAccept said S_OK.
     LogW(L"runtime fallback: no PushFPS, the source frames are converted into the current output type: " + why);
     m_mode = Mode::PassD3D;
     SetStatus(L"no PushFPS (source frames converted by the filter, at the source rate): " + why);
+    return g;
 }
 bool CPushMpcFilter::DeviceGone()
 {
@@ -3899,6 +3908,7 @@ bool CPushMpcFilter::DeviceGone()
 // where: 1 = pushcore reported it, 2 = our device (shared with MPC-VR) is gone
 void CPushMpcFilter::DeviceLost(int where, const std::string& what)
 {
+    m_veto.Bump();
     if (m_deviceLostSeen.exchange(true)) return;   // a late reload (m_late) is not adopted after this (AdoptLate), released at the stop
     const bool gone = where == 2 || DeviceGone();
     Log(std::format("device lost ({}); the shared D3D11 device {}", what, gone ? "is gone: MPC-HC is asked to reopen the file" : "still works: source format"));
@@ -4310,7 +4320,7 @@ void CPushMpcFilter::CopierLoop()
             WaitForSingleObject(m_hWake, 1);
             continue;
         }
-        if (m_late && m_mode == Mode::PassD3D) AdoptLate();
+        if (m_late && m_mode == Mode::PassD3D && !m_stopReq) AdoptLate();
         if (m_mode != Mode::Active || m_faulted) { WaitForSingleObject(m_hSubmit, 5); continue; }
         if (!m_quickPhase && m_settingsPending.exchange(false)) {
             PushCoreSettings ps;
@@ -5285,9 +5295,13 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
     if (!file.empty()) { std::lock_guard<std::mutex> lk(g_ilLock); g_interlacedFiles.insert(file); }
     const std::wstring why = std::format(L"interlaced input (field combing measured on {} of {} moving frames)", m_comb.combed(), m_comb.measured());
     LogW(L"interlaced: " + why);
+    m_veto.Bump();   // never taken over again by a late reload, whatever the mode now
     if (m_mode == Mode::Warmup || m_mode == Mode::Active) {
         CloseCore();
         Fallback(why + (file.empty() || !pm::HostCanReopen(pm::HostPlayer()) ? std::wstring() : std::wstring(L"; ") + pm::HostName() + L" reopens the file so that MPC Video Renderer deinterlaces it"));
+        if (!file.empty() && !RequestReopen()) SetStatus(L"no PushFPS (source frames converted by the filter, not deinterlaced): " + why);
+    } else if (m_mode == Mode::PassD3D) {
+        // already on the source frames (a fallback, a reload past its bound): the reopen still lets the renderer deinterlace
         if (!file.empty() && !RequestReopen()) SetStatus(L"no PushFPS (source frames converted by the filter, not deinterlaced): " + why);
     }
 }
@@ -5560,6 +5574,8 @@ void CPushMpcFilter::AutoLoop()
             std::lock_guard<std::mutex> lk(m_autoLock);
             cur = m_applied; appliedS = m_appliedSettings; appliedD = m_appliedDisplay; appliedFps = m_appliedFps;
         }
+        // a late reload of this upgrade was taken over: its "did not hold" window starts at the take-over, not at the decision
+        if (const int64_t ad = m_lateAdoptQpc.load(); m_lastUpgradeQpc && ad > m_lastUpgradeQpc && GraphKey(cur) == m_lastUpgradeKey) m_lastUpgradeQpc = ad;
         // an upgrade the GPU could not hold: back, and blocked for 5 minutes
         if (m_lastUpgradeQpc && QpcMs(q - m_lastUpgradeQpc) < 10000.0 && QpcMs(q - m_lastUpgradeQpc) > 2500.0 && m_fgLevel > 0) {
             m_failedUpgrades[m_lastUpgradeKey] = q;
@@ -5676,6 +5692,11 @@ pm::reload::Hooks CPushMpcFilter::ReloadHooks()
 // graph takes over (as a reload that finished in time would have), for the rest of this file
 void CPushMpcFilter::AdoptLate()
 {
+    if (!m_veto.StillValid(m_lateGen)) {   // a fallback, a lost device or an interlaced verdict since the timeout
+        Log("settings reload: the file has to stay on the source frames (vetoed since the timeout): a late reload is not taken over");
+        ReleaseLate();
+        return;
+    }
     PushCoreOutputInfo oi = {};
     double ms = 0;
     PushCore* c = pm::reload::TakeLate(*m_late, &oi, &ms);
@@ -5697,6 +5718,8 @@ void CPushMpcFilter::AdoptLate()
     m_admHistN = 0; m_admGrace = 2;
     m_waitOutQpc = 0; m_activeQpc = Qpc();   // the no-output guard counts from now
     { std::lock_guard<std::mutex> al(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
+    if (LegacyMode()) { std::lock_guard<std::mutex> lk(m_sigLock); m_settingsSig = SettingsSignature(m_rt.dataDir); }
+    m_lateAdoptQpc = Qpc();   // Auto re-arms its "upgrade did not hold" window from here (its own thread)
     m_faulted = false;
     m_mode = Mode::Active;
     Log(std::format("settings reload: the late reload ({:.0f} ms) is taken over: {}; output {}x{} x{}", ms, oi.description, oi.width, oi.height, oi.multiplier));
@@ -5737,8 +5760,10 @@ void CPushMpcFilter::DoReload(bool forced)
     // The reload runs on its own thread with the core lock released (the source frames are shown meanwhile; Receive,
     // the deliverer, EndFlush and Stop never wait for it); a Stop gives it 1 s, then abandons it (its thread closes the
     // instance); after 20 s it is abandoned too and the source frames stay (no frozen picture, no hung player).
-    ReleaseLate();   // an older late reload is not wanted any more
-    const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, ReloadHooks(), pm::reload::Limits{});
+    const uint32_t veto0 = m_veto.Now();   // a late reload is kept only when nothing but the timeout vetoes it
+    pm::reload::Limits limits;
+    if (m_cfg.reloadTimeoutMs > 0) { limits.timeoutMs = m_cfg.reloadTimeoutMs; Log(std::format("settings reload: bound {} ms (debug ReloadTimeoutMs)", m_cfg.reloadTimeoutMs)); }
+    const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, ReloadHooks(), limits);
     { std::lock_guard<std::mutex> lk(m_coreLock); m_coreDisc = true; m_lastSubmitPts = INT64_MIN; }
     int r = rr.r;
     const PushCoreOutputInfo oi = rr.oi;
@@ -5749,8 +5774,12 @@ void CPushMpcFilter::DoReload(bool forced)
             stopped ? "; its thread closes the instance when pushcore returns" : "; should it still succeed, its graph is taken over then (this file)"));
         m_reloading = false;
         m_faulted = true;
-        Fallback(stopped ? L"stopped during a settings reload (the reload was abandoned)" : L"the settings reload did not finish in 20 s (abandoned; taken over should it still succeed)");
-        if (!stopped) m_late = rr.late;
+        const uint32_t veto1 = Fallback(stopped ? L"stopped during a settings reload (the reload was abandoned)" : L"the settings reload did not finish in its bound (abandoned; taken over should it still succeed)");
+        if (!stopped && rr.late && pm::reload::Veto::KeepAtTimeout(veto0, veto1, m_deviceLostSeen)) { m_late = rr.late; m_lateGen = veto1; }
+        else if (rr.late) {
+            if (!stopped) Log("settings reload: another fallback happened during the reload: a late success is not taken over");
+            pm::reload::ReleaseLate(rr.late, m_api, ReloadHooks());
+        }
         return;
     }
     if (rr.hadCore && r != PUSHCORE_OK) Log(std::format("pushcore_reload -> {} {}", r, rr.err));

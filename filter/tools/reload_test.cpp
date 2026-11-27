@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <random>
 #include <vector>
 
 #include "PushMpcReload.h"
@@ -40,6 +41,7 @@ struct StubCore {
     int id = 0;
     Mode reload = Mode::Fast, close = Mode::Fast;
     int slowMs = 300;
+    int result = PUSHCORE_OK;          // what reload returns
     std::atomic<bool> closed{ false };
     std::atomic<int> reloads{ 0 };
 };
@@ -65,7 +67,7 @@ static int StubReload(PushCore* c)
     S(c)->reloads++;
     Behave(S(c)->reload, S(c)->slowMs, other);
     --g_inReload;
-    return PUSHCORE_OK;
+    return S(c)->result;
 }
 static void StubClose(PushCore* c)
 {
@@ -344,6 +346,60 @@ int main()
         const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
         stopper.join();
         Check(r.how == rl::Outcome::Stopped && r.late == nullptr && WaitIdle(3000) && full.closed.load(), "Stop: no late hand-over, closed by its own thread");
+    }
+
+    {   // 14. a late reload that fails after the timeout: never handed over, closed by its own thread
+        Reset();
+        Filter f;
+        StubCore full; full.id = 20; full.reload = Mode::Slow; full.slowMs = 300; full.result = PUSHCORE_ERROR;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 80;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        Check(r.how == rl::Outcome::TimedOut && r.late != nullptr, "late failure: abandoned at the timeout");
+        Check(WaitIdle(3000) && full.closed.load() && rl::TakeLate(*r.late, nullptr) == nullptr, "late failure: closed by its own thread, nothing to take over");
+    }
+    {   // 15. stress: random reload times and bounds, a thread taking or giving up the late slot at a random moment;
+        //     every instance ends exactly once: back in the slot (in time), taken over, or closed
+        Reset();
+        std::mt19937 rng(12345);
+        int bad = 0, inTime = 0, taken = 0, closed = 0;
+        const int kIter = 400;
+        for (int i = 0; i < kIter; ++i) {
+            Filter f;
+            auto* c = new StubCore; c->id = 1000 + i; c->reload = Mode::Slow; c->slowMs = int(rng() % 12); c->close = Mode::Fast;
+            f.core = P(*c);
+            rl::Limits lim; lim.timeoutMs = double(rng() % 10);
+            const bool take = rng() % 2 == 0; const int delay = int(rng() % 15);
+            const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+            bool tookIt = false;
+            if (r.late) {
+                std::thread t([&] {
+                    Sleep(delay);
+                    if (take) { PushCore* got = rl::TakeLate(*r.late, nullptr); if (got) { if (got != P(*c)) ++bad; tookIt = true; } }
+                    rl::ReleaseLate(r.late, &g_api, f.Hooks());   // the filter gives up whatever is left
+                });
+                t.join();
+            }
+            if (!WaitIdle(3000)) ++bad;
+            const bool back = f.core == P(*c), cl = c->closed.load();
+            if (int(back) + int(tookIt) + int(cl) != 1) { ++bad; std::printf("     iteration %d: back %d taken %d closed %d (slow %d, bound %.0f)\n", i, back, tookIt, cl, c->slowMs, lim.timeoutMs); }
+            inTime += back; taken += tookIt; closed += cl;
+            delete c;
+        }
+        Check(bad == 0, std::format("stress, {} reloads: each instance once (in time {}, taken over {}, closed {})", kIter, inTime, taken, closed));
+        Check(taken > 0 && closed > 0 && inTime > 0, "stress: all three endings occurred");
+    }
+    {   // 16. the adoption veto (the filter's rule, PushMpcReload.h Veto)
+        rl::Veto v;
+        const uint32_t g0 = v.Now();
+        const uint32_t g1 = v.Bump();   // the timeout's own fallback
+        Check(rl::Veto::KeepAtTimeout(g0, g1, false) && v.StillValid(g1), "veto: only the timeout's fallback: kept and adoptable");
+        v.Bump();                        // interlaced verdict / another fallback after the timeout
+        Check(!v.StillValid(g1), "veto: a fallback or an interlaced verdict after the timeout: not adopted");
+        rl::Veto w; const uint32_t h0 = w.Now(); w.Bump(); /* interlace during the reload */ const uint32_t h1 = w.Bump();
+        Check(!rl::Veto::KeepAtTimeout(h0, h1, false), "veto: a fallback during the reload (before the timeout): not kept");
+        rl::Veto d; const uint32_t d0 = d.Now(); const uint32_t d1 = d.Bump();
+        Check(!rl::Veto::KeepAtTimeout(d0, d1, true), "veto: a lost device: not kept");
     }
 
     if (g_fail) std::printf("FAILED: %s\n", g_failed.c_str());
