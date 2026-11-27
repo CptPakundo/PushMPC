@@ -19,6 +19,7 @@
 //   confirm the handover from the engine log).
 #include <cmath>
 #include <cstddef>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -639,6 +640,62 @@ static void TestStill(const pmeng_api* api, int k)
     api->close(h);
 }
 
+// The Mac self-test's stream through the host-memory Vulkan engine, driven as vf_pushmpc drives it (submit, BUSY ->
+// take what is ready with a 20 ms wait and submit again, at the end finish() then take until nothing is pending):
+// libmpv_host's 48-frame moving ramp (320x180, wrapping every 256 px) at x2 must play to its end, every output
+// delivered, well within the host's 120 s. On a software Vulkan device (lavapipe) here; on the Mac VMs this is the
+// path that never reached the end of the clip.
+static void TestVulkanHostToEof(const pmeng_api* api, bool allowCpu)
+{
+    const int W = 320, H = 180, N = 48, k = 2;
+    pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = PMENG_FMT_YUV420P; st.fps_num = 24; st.fps_den = 1;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = std::string("smoother=2\nbackend=portable-vulkan\n") + (allowCpu ? "vulkan_allow_cpu=1\n" : "");
+    void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
+    if (!h || std::strcmp(out.engine, "portable-vulkan") != 0) {
+        std::printf("vulkan host to EOF: not run: %s\n", h ? out.engine : err);
+        if (h) api->close(h);
+        return;
+    }
+    std::printf("vulkan host to EOF: %s\n", out.description);
+    const auto t0 = std::chrono::steady_clock::now();
+    auto secs = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+    int outputs = 0, busy = 0, errors = 0;
+    auto take = [&](uint32_t timeoutMs, bool untilEmpty) {   // vf_pushmpc.c drain()
+        pmeng_out_info oi{};
+        for (int n = 0;; ++n) {
+            const int r = api->peek(h, &oi, n == 0 || untilEmpty ? timeoutMs : 0);
+            if (r < 0) { ++errors; return; }
+            if (r == 0) return;
+            Pic dst(W, H, PMENG_FMT_YUV420P);
+            pmeng_image di = dst.Img();
+            if (api->write(h, &di) != PMENG_OK) { ++errors; return; }
+            ++outputs;
+        }
+    };
+    for (int s = 0; s < N && secs() < 60; ++s) {
+        Pic src(W, H, PMENG_FMT_YUV420P);
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) src.SetY(x, y, (x + y / 2 + s * 4) & 255);   // libmpv_host.c write_y4m
+        src.FillChroma(128);
+        pmeng_image im = src.Img();
+        int r;
+        for (int tries = 0; (r = api->submit(h, &im, int64_t(s) * 41667, 0)) == PMENG_BUSY && tries * 20 <= 10000; ++tries) { ++busy; take(20, false); }
+        if (r != PMENG_OK) { ++errors; std::printf("vulkan host to EOF: submit %d -> %d %s\n", s, r, api->last_error(h)); break; }
+        take(0, false);
+    }
+    if (api->struct_size >= sizeof(pmeng_api) && api->finish) api->finish(h);
+    take(10000, true);
+    const double t = secs();
+    std::printf("vulkan host to EOF: %d outputs of %d in %.1f s (%d busy retries), pending %u, %d errors\n", outputs, 1 + (N - 1) * k, t,
+                busy, api->pending(h), errors);
+    CHECK(errors == 0 && api->pending(h) == 0, "vulkan host to EOF: %d errors, %u pending at the end", errors, api->pending(h));
+    CHECK(outputs == 1 + (N - 1) * k, "vulkan host to EOF: %d outputs, expected %d", outputs, 1 + (N - 1) * k);
+    CHECK(t < 60, "vulkan host to EOF: %.1f s for a 2 s clip", t);
+    api->close(h);
+}
+
 int main()
 {
     // CPU / WARP test runs never pick a GPU on their own: every Vulkan driver hidden unless PUSHMPC_TEST_GPU=1 or
@@ -667,6 +724,7 @@ int main()
         TestVulkanHost(api, PMENG_FMT_YUV420P10, "yuv420p10", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_NV12, "nv12", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_P010, "p010", vulkanAsked);
+        TestVulkanHostToEof(api, vulkanAsked);
 #ifdef PME_TEST_VULKAN_ZC
         TestVulkanZeroCopy(api, vulkanAsked);
 #endif
