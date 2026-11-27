@@ -27,9 +27,11 @@ public:
     bool Push(const pm_yuv& src, bool contiguous, std::string& err) override
     {
         if (!contiguous && m_up) m_up->reset();   // a seek or a gap: AnimeSR's carry starts again
-        std::swap(m_prev, m_cur);
-        if (!Upscale(src, m_cur)) Resize(src, m_cur);
-        return m_in->Push(View(m_cur), contiguous, err);
+        if (!Upscale(src, m_new)) Resize(src, m_new);
+        const bool ok = m_in->Push(View(m_new), contiguous, err);
+        // held frames: a repeat leaves the pair (and so our copies of it) as it was; else the new frame becomes current
+        if (ok && !m_in->LastDup()) { std::swap(m_prev, m_cur); std::swap(m_cur, m_new); }
+        return ok;
     }
     bool HavePair() const override { return m_in->HavePair(); }
     bool PairIsCut() const override { return m_in->PairIsCut(); }
@@ -49,6 +51,11 @@ public:
     void Forget() override { if (m_up) m_up->reset(); m_in->Forget(); }
     EngineStats Stats() const override { return m_in->Stats(); }
     double AnimeMs() const override { return m_up ? m_ms : -1; }
+    // the multiplier and held-frame repair are the inner engine's (the anime upscaler only changes the picture size)
+    int FixedK() const override { return m_in->FixedK(); }
+    int MaxK() const override { return m_in->MaxK(); }
+    void SetDedup(bool on) override { m_in->SetDedup(on); }
+    bool LastDup() const override { return m_in->LastDup(); }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         // the upscaler's own time comes off the frame budget the inner engine measures against
@@ -105,7 +112,7 @@ private:
     std::unique_ptr<pmml::Upscaler> m_up;
     std::unique_ptr<IEngine> m_in;
     int m_w, m_h, m_bits;
-    Planes m_prev, m_cur;
+    Planes m_prev, m_cur, m_new;
     std::vector<uint16_t> m_in16[3], m_out16[3];
     double m_ms = 0;
 };

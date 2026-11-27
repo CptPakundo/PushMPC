@@ -54,17 +54,27 @@ public:
 
     // the model prepared for this stream ("" = no automatic anime upscaler); lowBitrate: the source's measured bits per
     // pixel are low (the _DS variant may then run on hand-drawn pictures)
-    void Arm(const std::string& autoModel, bool lowBitrate = false) { m_auto = AnimeModelPlain(autoModel); m_low = lowBitrate; m_running.clear(); m_next.clear(); m_paused.clear(); m_switched = false; }
-    void Disarm() { m_auto.clear(); m_next = m_running; }
-    // the anime model stopped for the stream (it could not keep up, nothing cheaper fits): nothing runs, nothing is armed
-    void Stop() { m_auto.clear(); m_running.clear(); m_next.clear(); m_paused.clear(); }
-    // ... for a while (a transient trip, PushMpcAnimeKeepUp.h): the plain route runs; Resume arms the same model again,
-    // and the next measured state switches it back at once (the back-off is longer than kMinGapS)
-    void Pause() { if (!m_auto.empty()) m_paused = m_auto; m_auto.clear(); m_running.clear(); m_next.clear(); }
-    bool Paused() const { return !m_paused.empty(); }
-    void Resume() { if (m_paused.empty()) return; const std::string m = m_paused; Arm(m, m_low); }
-    // a cheaper model runs from now on in place of the one armed (a real trip: PushMpcAnimeKeepUp.h AnimeSrStepDown)
-    void StepDown(const std::string& model, double nowS) { m_auto = AnimeModelPlain(model); m_running = m_next = model; m_switched = true; m_at = nowS; }
+    void Arm(const std::string& autoModel, bool lowBitrate = false)
+    {
+        m_auto = m_orig = AnimeModelPlain(autoModel); m_low = lowBitrate; m_running.clear(); m_next.clear(); m_paused = m_stepped = false; m_switched = false;
+    }
+    void Disarm() { m_auto.clear(); m_next = m_running; m_orig.clear(); m_paused = m_stepped = false; }
+    // the anime model stopped for the stream (nothing may run it here): nothing runs, nothing is armed
+    void Stop() { m_auto.clear(); m_running.clear(); m_next.clear(); m_orig.clear(); m_paused = m_stepped = false; }
+    // the plain route for a while after a trip (PushMpcAnimeKeepUp.h); Resume then arms the stream's own model again
+    void Pause() { if (m_orig.empty()) return; m_auto.clear(); m_running.clear(); m_next.clear(); m_paused = true; m_stepped = false; }
+    // a cheaper model runs for a while after a real trip (AnimeSrStepDown) in place of the stream's own
+    void StepDown(const std::string& model, double nowS)
+    {
+        if (m_orig.empty()) return;
+        m_auto = AnimeModelPlain(model); m_running = m_next = model; m_switched = true; m_at = nowS; m_paused = false; m_stepped = true;
+    }
+    // paused or stepped down: waiting for the back-off to run out
+    bool Paused() const { return m_paused || m_stepped; }
+    bool SteppedDown() const { return m_stepped; }
+    // the back-off ran out: the stream's own model is armed again; the next measured state switches to it at once (from
+    // the plain route or from the cheaper model), or to the plain route when the picture is not drawn now
+    void Resume() { if (!Paused()) return; m_auto = m_orig; m_paused = m_stepped = false; m_switched = false; }
     bool Armed() const { return !m_auto.empty(); }
     const std::string& Running() const { return m_running; }
     const std::string& Next() const { return m_next; }
@@ -81,8 +91,8 @@ public:
     void Commit(double nowS) { m_running = m_next; m_switched = true; m_at = nowS; }
 
 private:
-    std::string m_auto, m_running, m_next, m_paused;
-    bool m_low = false, m_switched = false;
+    std::string m_auto, m_running, m_next, m_orig;
+    bool m_low = false, m_switched = false, m_paused = false, m_stepped = false;
     double m_at = 0;
 };
 

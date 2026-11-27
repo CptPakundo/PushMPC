@@ -13,6 +13,8 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 #include "VapourSynth4.h"
 #include "backend.h"
 #include "ml_backend.h"
@@ -55,22 +57,36 @@ struct MInst {
     std::vector<uint16_t> upIn[3];
     double upMs = 0;
     // the output size stays the upscaler's for the clip: when the model failed, or Auto's pick does not keep up in
-    // playback (PushMpcAnimeKeepUp.h; only with display_fps, never in an encode, where slower than real time is normal),
-    // a bicubic resize to that size runs instead: for a while (transient), or for the clip when no cheaper model of the
-    // same scale fits (a real trip steps down to one first)
+    // playback (PushMpcAnimeKeepUp.h; only with playback=1, which mpv's script passes, never in an encode, where slower
+    // than real time is normal), a bicubic resize to that size runs instead for the back-off (a real trip: a cheaper model
+    // of the same scale when one fits), then the clip's own model again
     int upW = 0, upH = 0;
     bool upAuto = false, upRealtime = false, upPaused = false;
-    int upModel = -1;
+    int upModel = -1, upOwn = -1;              // the model running, the clip's own (Auto's pick)
     pmml::UpscaleOptions upOpts;
+    std::unique_ptr<pmml::Upscaler> upOwnUp;   // the clip's own model while a cheaper one runs (kept for the retry)
     pm::AnimeKeepUp upGuard;
+    std::vector<float> upRows;                 // the bicubic's intermediate rows, kept across frames
 };
 
 double MNowS() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
+// rows [0, n) through fn(begin, end), split over up to 8 threads (one when small)
+template <class Fn> void MRows(int n, int perRow, Fn fn)
+{
+    const int hw = int(std::max(1u, std::thread::hardware_concurrency()));
+    const int t = std::clamp(int((int64_t(n) * perRow) / 262144), 1, std::min(8, hw));
+    if (t <= 1) { fn(0, n); return; }
+    std::vector<std::thread> th;
+    for (int i = 1; i < t; ++i) th.emplace_back(fn, n * i / t, n * (i + 1) / t);
+    fn(0, n / t);
+    for (auto& x : th) x.join();
+}
+
 // a plane resized with a separable bicubic (Catmull-Rom), 16-bit samples in and out, clamped to maxV. leftSited: the
 // 4:2:0 chroma of MPEG-2 / H.264 / HEVC (horizontally co-sited with the left luma sample, vertically centred), else
-// centre-aligned (luma)
-void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t* dst, int dw, int dh, bool leftSited, int maxV)
+// centre-aligned (luma). rows: the intermediate buffer, reused across calls
+void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t* dst, int dw, int dh, bool leftSited, int maxV, std::vector<float>& rows)
 {
     struct Tap { int i[4]; float w[4]; };
     auto taps = [](int sn, int dn, bool left) {
@@ -85,22 +101,27 @@ void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t*
         return t;
     };
     const std::vector<Tap> tx = taps(sw, dw, leftSited), ty = taps(sh, dh, false);
-    std::vector<float> rows(size_t(sh) * dw);
-    for (int y = 0; y < sh; ++y) {
-        const uint16_t* r = src + y * sstride;
-        float* o = rows.data() + size_t(y) * dw;
-        for (int x = 0; x < dw; ++x) { const Tap& t = tx[size_t(x)]; o[x] = t.w[0] * r[t.i[0]] + t.w[1] * r[t.i[1]] + t.w[2] * r[t.i[2]] + t.w[3] * r[t.i[3]]; }
-    }
-    for (int y = 0; y < dh; ++y) {
-        const Tap& t = ty[size_t(y)];
-        const float* r0 = rows.data() + size_t(t.i[0]) * dw; const float* r1 = rows.data() + size_t(t.i[1]) * dw;
-        const float* r2 = rows.data() + size_t(t.i[2]) * dw; const float* r3 = rows.data() + size_t(t.i[3]) * dw;
-        uint16_t* o = dst + size_t(y) * dw;
-        for (int x = 0; x < dw; ++x) {
-            const float v = t.w[0] * r0[x] + t.w[1] * r1[x] + t.w[2] * r2[x] + t.w[3] * r3[x];
-            o[x] = uint16_t(std::clamp(int(std::lround(v)), 0, maxV));
+    if (rows.size() < size_t(sh) * dw) rows.resize(size_t(sh) * dw);
+    float* const R = rows.data();
+    MRows(sh, dw, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const uint16_t* r = src + y * sstride;
+            float* o = R + size_t(y) * dw;
+            for (int x = 0; x < dw; ++x) { const Tap& t = tx[size_t(x)]; o[x] = t.w[0] * r[t.i[0]] + t.w[1] * r[t.i[1]] + t.w[2] * r[t.i[2]] + t.w[3] * r[t.i[3]]; }
         }
-    }
+    });
+    MRows(dh, dw, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const Tap& t = ty[size_t(y)];
+            const float* r0 = R + size_t(t.i[0]) * dw; const float* r1 = R + size_t(t.i[1]) * dw;
+            const float* r2 = R + size_t(t.i[2]) * dw; const float* r3 = R + size_t(t.i[3]) * dw;
+            uint16_t* o = dst + size_t(y) * dw;
+            for (int x = 0; x < dw; ++x) {
+                const float v = t.w[0] * r0[x] + t.w[1] * r1[x] + t.w[2] * r2[x] + t.w[3] * r3[x];
+                o[x] = uint16_t(std::clamp(int(std::lround(v)), 0, maxV));
+            }
+        }
+    });
 }
 
 std::string MArg(const VSMap* in, const VSAPI* a, const char* key)
@@ -123,9 +144,9 @@ void MSetProps(MInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
 }
 
-// Auto's pick in playback that does not keep up (PushMpcAnimeKeepUp.h; its cost was a prior, card 1.0): a transient trip
-// pauses the model (the bicubic resize, then the model again), a real one steps down to a cheaper model of the same
-// scale that fits, else the bicubic resize for the clip
+// Auto's pick in playback that does not keep up (PushMpcAnimeKeepUp.h; its cost was a prior, card 1.0): a trip pauses
+// the model for the back-off (the bicubic resize; a real trip: a cheaper model of the same scale when one fits and
+// opens), then the clip's own model runs again
 void MKeepUp(MInst* d, int64_t s, int srcW, int srcH)
 {
     const double fps = d->inVi.fpsNum > 0 && d->inVi.fpsDen > 0 ? double(d->inVi.fpsNum) / double(d->inVi.fpsDen) : 23.976, frameMs = 1000.0 / fps;
@@ -135,29 +156,30 @@ void MKeepUp(MInst* d, int64_t s, int srcW, int srcH)
     const std::string was(wasW.begin(), wasW.end());
     const std::string counts = std::format("{} of the last {} frames ({:.1f} s) over a source frame (median of those {:.1f} ms of {:.1f})", d->upGuard.LastLate(), d->upGuard.LastSeen(),
                                            d->upGuard.LastWindowS(), d->upGuard.LastMedianMs(), frameMs);
-    if (trip == pm::AnimeKeepUp::Trip::Transient) {
-        d->upPaused = true;
-        Log("ml: anime upscaler (Auto) " + was + ": " + counts + std::format(": a bicubic resize for {:.0f} s, then the model again (trip {} of {})", d->upGuard.LastWaitS(),
-                                                                         d->upGuard.Trips(), pm::AnimeKeepUp::kMaxTrips));
-        return;
-    }
-    const int next = pm::AnimeSrStepDown(d->upModel, d->upGuard.LastMedianMs(), unsigned(srcW), unsigned(srcH), unsigned(d->upW), unsigned(d->upH), fps);
-    if (next >= 0) {
-        pmml::UpscaleOptions u = d->upOpts;
-        const std::wstring id = pm::AnimeSrModel(next).id;
-        u.model.assign(id.begin(), id.end());
-        std::string ue;
-        auto up = pmml::Upscaler::create(u, &ue);
-        if (up && up->outWidth() == d->upW && up->outHeight() == d->upH) {
-            d->up = std::move(up); d->upModel = next; d->upOpts = u;
-            d->upGuard.NewModel();
-            Log("ml: anime upscaler (Auto) " + was + ": " + counts + ": the cheaper " + u.model + " from here");
-            return;
+    const std::string kind = std::format("trip {}, {}", d->upGuard.Trips(), trip == pm::AnimeKeepUp::Trip::Real ? "the long wait" : "transient");
+    const double wait = d->upGuard.LastWaitS();
+    std::string note = "no cheaper model fits";
+    if (trip == pm::AnimeKeepUp::Trip::Real) {
+        const int next = pm::AnimeSrStepDown(d->upModel, d->upGuard.OnTimeMs(), unsigned(srcW), unsigned(srcH), unsigned(d->upW), unsigned(d->upH), fps);
+        if (next >= 0) {
+            pmml::UpscaleOptions u = d->upOpts;
+            const std::wstring id = pm::AnimeSrModel(next).id;
+            u.model.assign(id.begin(), id.end());
+            std::string ue;
+            auto up = pmml::Upscaler::create(u, &ue);
+            if (up && up->outWidth() == d->upW && up->outHeight() == d->upH) {
+                if (d->upModel == d->upOwn) d->upOwnUp = std::move(d->up);   // the clip's own model, kept for the retry
+                d->up = std::move(up); d->upModel = next;
+                d->upGuard.ModelChanged();
+                Log("ml: anime upscaler (Auto) " + was + ": " + counts + std::format(": the cheaper {} for {:.0f} s, then the clip's own model again ({})", u.model, wait, kind));
+                return;
+            }
+            note = "the cheaper " + u.model + " did not open (" + (up ? std::string("another output size") : ue) + ")";
         }
-        Log("ml: anime upscaler (Auto): the cheaper " + u.model + " did not open (" + (up ? std::string("another output size") : ue) + ")");
     }
-    d->up.reset();
-    Log("ml: anime upscaler (Auto) " + was + " off for this clip: " + counts + ", and no cheaper model fits: a bicubic resize from now on");
+    d->upPaused = true;
+    Log("ml: anime upscaler (Auto) " + was + ": " + counts + std::format(": a bicubic resize for {:.0f} s{}, then the clip's own model again ({})", wait,
+                                                                     trip == pm::AnimeKeepUp::Trip::Real ? " (" + note + ")" : std::string(), kind));
 }
 
 // the source frame through the anime upscaler; v then points at the upscaled planes (same bit depth, scale x the size)
@@ -185,9 +207,10 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
         bool ran = false;
-        if (d->up && d->upPaused && d->upGuard.RetryDue(MNowS())) {
+        if ((d->up || d->upOwnUp) && (d->upPaused || d->upModel != d->upOwn) && d->upGuard.RetryDue(MNowS())) {
             d->upPaused = false;
-            d->up->reset();
+            if (d->upOwnUp) { d->up = std::move(d->upOwnUp); d->upModel = d->upOwn; d->upGuard.ModelChanged(); }   // back from the cheaper model
+            if (d->up) d->up->reset();
             Log("ml: anime upscaler (Auto): tried again after the wait (trip " + std::to_string(d->upGuard.Trips()) + " of " + std::to_string(pm::AnimeKeepUp::kMaxTrips) + " so far)");
         }
         if (d->up && !d->upPaused) {
@@ -197,7 +220,7 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
         if (!ran)   // a bicubic resize at the same output size (the clip's size is fixed)
             for (int i = 0; i < 3; ++i) {
                 const int sw = i ? v.width / 2 : v.width, sh = i ? v.height / 2 : v.height;
-                MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh, i > 0, (1 << v.bits) - 1);
+                MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh, i > 0, (1 << v.bits) - 1, d->upRows);
             }
         d->upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (ran && d->upAuto && d->upRealtime) MKeepUp(d, s, v.width, v.height);
@@ -382,8 +405,10 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     int err = 0;
     const double displayHz = a->mapGetFloat(in, "display_fps", 0, &err);
-    // playback (mpv's script passes display_fps): Auto's anime pick is checked against real time; an encode never is
-    const bool realtime = !err && displayHz > 0;
+    // playback (mpv's script passes playback=1): Auto's anime pick is checked against real time; an encode never is (an
+    // encode may pass display_fps for its frame rate)
+    int errPlayback = 0;
+    const bool realtime = a->mapGetInt(in, "playback", 0, &errPlayback) != 0 && !errPlayback;
     const std::string smoother = MArg(in, a, "smoother");
     const int fixedK = smoother.empty() ? 0 : std::atoi(smoother.c_str());
     const int wantK = fixedK >= 2 ? std::min(fixedK, kPortableMaxK) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2);
@@ -500,7 +525,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = k;
     d->vi = *vi;
-    if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; d->upRealtime = realtime; d->upModel = animeModel; d->upOpts = upOpts;
+    if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; d->upRealtime = realtime; d->upModel = d->upOwn = animeModel; d->upOpts = upOpts;
               d->upGuard.NewModel(); }
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, k);
     d->vi.fpsNum = outFps.num; d->vi.fpsDen = outFps.den;

@@ -73,6 +73,9 @@ for _kv in str(_ud).split(","):
         elif _k:
             _args[_k] = _v
 
+# this script runs only inside mpv (video_in): playback, so Auto's anime upscaler is checked against real time (an
+# encode script never passes it)
+_args["playback"] = 1
 _dfps = globals().get("display_fps", 0) or 0
 if _dfps > 1 and "display_fps" not in _args:
     _args["display_fps"] = float(_dfps)

@@ -1150,9 +1150,9 @@ public:
         m_frame = av_frame_alloc();
         m_sw = av_frame_alloc();
         m_pkt = av_packet_alloc();
-        m_k = std::max(1, m_in->K());
+        m_k = m_kOpen = std::max(1, m_in->K());
         // held frames (animation on twos, threes, fours: cadence.h HeldCadence); PUSHMPC_DEDUP=0 turns it off
-        if (m_engine) m_engine->SetDedup(m_k > 1 && !(std::getenv("PUSHMPC_DEDUP") && std::getenv("PUSHMPC_DEDUP")[0] == '0'));
+        if (m_engine) m_engine->SetDedup(DedupWanted());
         m_frameUs = m_in->VideoFrameUs();
         AnimeKeepUpOpen();
         m_test2x = m_in->Config().upscale == 2;
@@ -1279,6 +1279,7 @@ public:
         m_held.Reset();
         if (m_engine) m_engine->Forget();
         m_animeLate.Restart();   // a seek: the warm-up again (PushMpcAnimeKeepUp.h)
+        m_lastPushed = false;    // ... and no pre-seek time fed with a post-seek timestamp
 #if defined(_WIN32)
         if (m_pc) { m_pc->Flush(); m_animeMiss.Restart(PcGrace()); }
         m_pend.clear();
@@ -1442,12 +1443,12 @@ private:
             m_queue.push_back(Out{p.s, p.pic, false, p.pc >= 0 ? p.pc : p.fallback});
         }
     }
-    // Auto's anime upscaler inside pushcore that does not keep up (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h,
-    // VLC's rule): the pictures expected from pushcore, over 3 s of source time, with a grace after the open, every
-    // settings update (a warm reload drops the pictures in flight: pushcore's lag + 3 source frames of pictures) and a
-    // flush. A transient trip: Video Super Resolution for a while, then the model again; a real one: VSR for the stream
-    // (no step down here: the bridge reports no time for the model, and a missed picture carries none). When pushcore
-    // does not take the change, the model keeps running and the check waits the same back-off.
+    // Auto's anime upscaler inside pushcore that does not keep up (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h):
+    // the pictures expected from pushcore over 3 s of source time; the grace after an update (a warm reload drops the
+    // pictures in flight, the model may load on the first frames) starts at pushcore's first delivered picture and lasts
+    // pushcore's lag + 3 source frames of pictures. A trip: Video Super Resolution, then the model again after the
+    // back-off (a picture carries no time, so trips are transient until the kMaxTrips-th; no step down here: the bridge
+    // reports no model time). When pushcore does not take the change, the trip does not count and the model keeps running.
     int PcGrace() const { return (m_pc->Lag() + 3) * std::max(1, m_pc->AllOut() ? m_k : m_k - 1); }
     void AnimeMissCheck(bool delivered, int64_t ptsUs)
     {
@@ -1467,15 +1468,9 @@ private:
             return;
         }
         m_animeMiss.Restart(PcGrace());
-        if (trip == pm::AnimeKeepUp::Trip::Transient) {
-            m_animeAuto.Pause();
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: Video Super Resolution for %.0f s, then the model again (trip %d of %d); %s", was.c_str(), counts,
-                m_animeMiss.LastWaitS(), m_animeMiss.Trips(), pm::AnimeKeepUp::kMaxTrips, m_pc->Describe().c_str());
-        } else {
-            m_animeAuto.Stop();
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %s (trip %d, %s); %s", was.c_str(), counts, m_animeMiss.Trips(),
-                m_animeMiss.WasOnTime() ? "the last one allowed" : "never on time here", m_pc->Describe().c_str());
-        }
+        m_animeAuto.Pause();
+        Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: Video Super Resolution for %.0f s, then the model again (trip %d, %s); %s", was.c_str(), counts,
+            m_animeMiss.LastWaitS(), m_animeMiss.Trips(), trip == pm::AnimeKeepUp::Trip::Real ? "the long wait" : "transient", m_pc->Describe().c_str());
     }
     pm::AnimeKeepUp m_animeMiss;
     // ContentDetect on the decoder's texture, on the GPU (pushcore_route.h MeasureTexture: only the cells and the image
@@ -1506,7 +1501,7 @@ private:
         std::string why;
         const bool ok = m_pc->Update(cls, cg, model, a.drawn, why);
         m_pcGate.Done(a, ok, now, m_animeAuto);
-        if (ok) m_animeMiss.Restart(PcGrace());   // the reload dropped the pictures in flight
+        if (ok) m_animeMiss.Restart(PcGrace(), true);   // the reload dropped the pictures in flight; the model may load on the first frames
         if (ok && a.drawnChanged)
             Log(ADDON_LOG_INFO, "pushcore: held drawings %s (measured %s)%s", m_pc->Held() ? "re-timed from here (pictures up to 14 frames later)" : "no longer re-timed",
                 pushmpc::content::ClassName(cls), m_pc->Held() ? "" : "; every picture stays pushcore's");
@@ -1610,6 +1605,7 @@ private:
 #endif
         const double now = NowS();
         if (!Pc() && m_animeAuto.Paused() && m_animeLate.RetryDue(now)) {
+            if (m_animeAuto.SteppedDown()) m_animeLate.ModelChanged();   // back from the cheaper model
             m_animeAuto.Resume();
             Log(ADDON_LOG_INFO, "anime upscaler (Auto): tried again after the wait (trip %d of %d so far)", m_animeLate.Trips(), pm::AnimeKeepUp::kMaxTrips);
         }
@@ -1635,7 +1631,8 @@ private:
     void SwapEngine(std::unique_ptr<pmk::IEngine> e, const pmk::EngineCfg& c2)
     {
         m_engine = std::move(e); m_cfg = c2;
-        m_k = std::clamp(m_k, 1, std::max(1, m_engine->MaxK()));
+        m_k = std::clamp(m_kOpen, 1, std::max(1, m_engine->MaxK()));   // from the open's k: a swap back restores it
+        m_engine->SetDedup(DedupWanted());                              // held-frame repair on the new engine too
         m_upscaled = m_engine->OutWidth() != m_w || m_engine->OutHeight() != m_h;
         m_outW = (m_upscaled ? m_engine->OutWidth() : m_w) * (m_test2x ? 2 : 1);
         m_outH = (m_upscaled ? m_engine->OutHeight() : m_h) * (m_test2x ? 2 : 1);
@@ -1644,10 +1641,11 @@ private:
         m_animeLate.Restart();
     }
 
-    // Auto's anime upscaler that does not keep up here (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h, VLC's
-    // rule): fed the model's time on each source frame. A transient trip: the plain route at the same output size for a
-    // while, then the model again; a real one: a cheaper model that fits at the measured speed, else the plain route for
-    // the stream. When neither opens at the same size, the model keeps running and the check waits the same back-off.
+    // Auto's anime upscaler that does not keep up here (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h): fed the
+    // model's time on each source frame. A trip: the plain route at the same output size (a real one: a cheaper ranked
+    // model priced on the model's on-time speed, when one fits and opens), then the stream's own model again after the
+    // back-off. When nothing else opens at the same size, the trip does not count and the model keeps running.
+    bool DedupWanted() const { return m_k > 1 && !(std::getenv("PUSHMPC_DEDUP") && std::getenv("PUSHMPC_DEDUP")[0] == '0'); }
     void AnimeLateCheck(int64_t ptsUs)
     {
         if (!m_engine || m_animeAuto.Running().empty() || m_frameUs <= 0) return;
@@ -1660,7 +1658,7 @@ private:
                       m_animeLate.LastSeen(), m_animeLate.LastWindowS(), m_animeLate.LastMedianMs(), frameMs);
         int next = -1;
         if (trip == pm::AnimeKeepUp::Trip::Real)
-            next = pm::AnimeSrStepDown(pm::AnimeSrModelIndex(std::wstring(was.begin(), was.end())), m_animeLate.LastMedianMs(), unsigned(m_w), unsigned(m_h),
+            next = pm::AnimeSrStepDown(pm::AnimeSrModelIndex(std::wstring(was.begin(), was.end())), m_animeLate.OnTimeMs(), unsigned(m_w), unsigned(m_h),
                                        unsigned(m_engine->OutWidth()), unsigned(m_engine->OutHeight()), 1000.0 / frameMs);
         // the cheaper model, else (or when it does not open) the plain route, at the same output size
         std::string why;
@@ -1675,9 +1673,8 @@ private:
             std::string w;
             e = pmk::OpenEngine(c2, w);
             if (e && (e->OutWidth() != m_engine->OutWidth() || e->OutHeight() != m_engine->OutHeight())) { e.reset(); w = "another output size"; }
-            if (e) { next = m; break; }
+            if (e) break;
             why += (why.empty() ? "" : "; ") + (m >= 0 ? c2.animeModel : std::string("the plain route")) + ": " + w;
-            if (m < 0) break;
         }
         if (!e) {
             m_animeLate.Defer(now);
@@ -1686,17 +1683,17 @@ private:
             return;
         }
         SwapEngine(std::move(e), c2);
-        if (next >= 0) {
+        const char* kind = trip == pm::AnimeKeepUp::Trip::Real ? "the long wait" : "transient";
+        if (!c2.animeModel.empty()) {
             m_animeAuto.StepDown(c2.animeModel, now);
-            m_animeLate.NewModel();
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the cheaper %s from here", was.c_str(), counts, c2.animeModel.c_str());
-        } else if (trip == pm::AnimeKeepUp::Trip::Transient) {
-            m_animeAuto.Pause();
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the plain route for %.0f s, then the model again (trip %d of %d)", was.c_str(), counts,
-                m_animeLate.LastWaitS(), m_animeLate.Trips(), pm::AnimeKeepUp::kMaxTrips);
+            m_animeLate.ModelChanged();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the cheaper %s for %.0f s, then %s again (trip %d, %s)", was.c_str(), counts, c2.animeModel.c_str(),
+                m_animeLate.LastWaitS(), was.c_str(), m_animeLate.Trips(), kind);
         } else {
-            m_animeAuto.Stop();
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %s, and no cheaper model fits", was.c_str(), counts);
+            m_animeAuto.Pause();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the plain route for %.0f s (%s), then the model again (trip %d, %s)", was.c_str(), counts,
+                m_animeLate.LastWaitS(), next >= 0 ? ("the cheaper " + PmmlModelId(next) + " did not open: " + why).c_str() : "no cheaper model fits",
+                m_animeLate.Trips(), kind);
         }
     }
 
@@ -2241,6 +2238,7 @@ private:
 #endif
     bool m_upscaled = false, m_test2x = false, m_warned = false;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1, m_outW = 0, m_outH = 0;
+    int m_kOpen = 1;   // the multiplier as decided at the open: a swapped engine is clamped from it (a swap back restores it)
     bool m_force8 = false;
     double m_frameUs = 0;
     Planes m_pic[2];
