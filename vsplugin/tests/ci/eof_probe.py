@@ -45,7 +45,7 @@ def count(clip, cap):
     while n < cap:
         try:
             clip.get_frame(n)
-        except vs.Error:
+        except (vs.Error, IndexError, ValueError):   # a failed frame, or past a known length
             break
         n += 1
     return n
