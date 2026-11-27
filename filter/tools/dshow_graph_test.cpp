@@ -82,6 +82,48 @@ double PinFps(IPin* pin)
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
+std::string SubtypeName(const GUID& g)
+{
+    if (g == MEDIASUBTYPE_NV12) return "NV12";
+    if (g == MEDIASUBTYPE_YV12) return "YV12";
+    if (g == MEDIASUBTYPE_YUY2) return "YUY2";
+    if (g == MEDIASUBTYPE_RGB32) return "RGB32";
+    if (g == MEDIASUBTYPE_ARGB32) return "ARGB32";
+    char b[16]; std::snprintf(b, sizeof(b), "%08lX", g.Data1); return b;
+}
+
+// When the filter's output does not connect to the renderer: the same renderer straight behind the decoder, to tell the
+// filter's fault from the renderer's on this machine. (1) the decoder's type the filter passes through (what the filter
+// offered), (2) that type marked progressive (no AMINTERLACE_IsInterlaced), (3) the decoder's own choice (Intelligent
+// Connect: other formats, converters). Printed as one "control ..." line.
+std::string Control(IGraphBuilder* graph, IPin* pmIn, IPin* rIn)
+{
+    Com<IPin> up;
+    if (!pmIn || FAILED(pmIn->ConnectedTo(&up))) return "control: no upstream pin";
+    AM_MEDIA_TYPE mt{};
+    if (FAILED(pmIn->ConnectionMediaType(&mt))) return "control: no upstream type";
+    graph->Disconnect(up.p); graph->Disconnect(pmIn);
+    char b[400];
+    const HRESULT h1 = graph->ConnectDirect(up.p, rIn, &mt);
+    if (SUCCEEDED(h1)) { graph->Disconnect(up.p); graph->Disconnect(rIn); }
+    HRESULT h2 = E_NOTIMPL; DWORD il = 0;
+    if (mt.formattype == FORMAT_VideoInfo2 && mt.cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        auto* v = reinterpret_cast<VIDEOINFOHEADER2*>(mt.pbFormat);
+        il = v->dwInterlaceFlags;
+        v->dwInterlaceFlags = 0;
+        h2 = graph->ConnectDirect(up.p, rIn, &mt);
+        if (SUCCEEDED(h2)) { graph->Disconnect(up.p); graph->Disconnect(rIn); }
+    }
+    const HRESULT h3 = graph->Connect(up.p, rIn);
+    std::string chosen = "-";
+    if (SUCCEEDED(h3)) { AM_MEDIA_TYPE m3{}; if (SUCCEEDED(rIn->ConnectionMediaType(&m3))) { chosen = SubtypeName(m3.subtype); if (m3.cbFormat) CoTaskMemFree(m3.pbFormat); if (m3.pUnk) m3.pUnk->Release(); } }
+    std::snprintf(b, sizeof(b), "control (no PushMPC): decoder %s type (interlace 0x%lX) direct -> 0x%08lX; same type progressive -> 0x%08lX; decoder's own choice -> 0x%08lX (%s)",
+                  SubtypeName(mt.subtype).c_str(), il, h1, h2, h3, chosen.c_str());
+    if (mt.cbFormat) CoTaskMemFree(mt.pbFormat);
+    if (mt.pUnk) mt.pUnk->Release();
+    return b;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -102,6 +144,7 @@ int wmain(int argc, wchar_t** argv)
     double inFps = 0, outFps = 0, avgFps = 0;
     int framesDrawn = -1;
     bool connected = false;
+    std::string control;
     {
         // a window for the renderers that need one (EVR's video window; VMR-9 and madVR make their own otherwise)
         WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"PushMpcGraphTest";
@@ -150,6 +193,7 @@ int wmain(int argc, wchar_t** argv)
             pmOut.p = FindPin(pm.p, PINDIR_OUTPUT, true);
             rIn.p = FindPin(renderer.p, PINDIR_INPUT, true);
             ok = pmOut && rIn && step(graph->Connect(pmOut.p, rIn.p), "PushMPC Filter -> renderer");
+            if (!ok && pmOut && rIn) control = Control(graph.p, pmIn.p, rIn.p);
         }
         // the remaining source pins (audio): rendered, so the graph has its clock and plays as a player's would
         // (no audio device on a hosted runner: a failed audio render leaves the pin open and the graph plays on its clock)
@@ -180,6 +224,7 @@ int wmain(int argc, wchar_t** argv)
     }
     const double k = inFps > 0 && outFps > 0 ? outFps / inFps : 0;
     if (code == 0 && expectFg && k < 1.8 && !(inFps > 0 && avgFps >= 1.8 * inFps)) code = 2;
+    if (!control.empty()) std::printf("%s\n", control.c_str());
     std::printf("result renderer=%ls connected=%d in_fps=%.3f out_fps=%.3f multiplier=%.2f frames_drawn=%d avg_fps=%.2f state=%s\n",
                 rname.c_str(), connected ? 1 : 0, inFps, outFps, k, framesDrawn, avgFps, state.c_str());
     CoUninitialize();
