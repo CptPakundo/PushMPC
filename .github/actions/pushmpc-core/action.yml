@@ -506,6 +506,9 @@ runs:
         # ContentDetect: content class, interlacing and frame interval measured from pictures and timestamps (CPU)
         & "$env:RUNNER_TEMP\filter-build\content_test.exe" | Tee-Object -Variable cdt | Select-Object -Last 6
         if ($LASTEXITCODE -ne 0) { Write-Host "::error::content_test failed: $(($cdt | Select-String '^FAIL').Line -join '; ')"; exit 1 }
+        # the settings reload beside pushcore's open / close: its own thread, bounded, never beside a close (F-T1)
+        & "$env:RUNNER_TEMP\filter-build\reload_test.exe" | Tee-Object -Variable rlt | Select-Object -Last 6
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error::reload_test failed: $(($rlt | Select-String '^RESULT').Line)"; exit 1 }
         cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc -DPUSHMPC_UPDATER_DEV=OFF
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build "$env:RUNNER_TEMP\updater-build" --parallel
