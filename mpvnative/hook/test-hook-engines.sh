@@ -32,6 +32,7 @@ run() {
     PUSHMPC_ENGINE_LOG="$T/$name.engine.log" mpv --no-config --script="$H/pushmpc_hook.so" --script-opts="pushmpc-vf=$vf" "$@" "$clip" \
         --o="$T/$name.mkv" --of=matroska --ovc=ffv1 --no-audio --msg-level=all=v > "$T/$name.log" 2>&1
     echo "-- $name ($vf):"
+    grep -m1 "pushmpc_hook\]" "$T/$name.log" | sed 's/^/   /'   # the vf append's own result ("error running command": options mpv could not parse)
     grep -E "^(open|open failed|software frames)" "$T/$name.engine.log" 2>/dev/null | sed 's/^/   /' | head -8
 }
 frames_ok() {   # frames_ok <name> <k>
@@ -45,7 +46,7 @@ if [ "$mode" = software ]; then
     ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=3" -pix_fmt yuv420p -c:v ffv1 "$clip"
     n=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$clip")
     # 1. the Vulkan engine on the runner's lavapipe (a CPU device: only with vulkan_allow_cpu=1)
-    run vk 2 "smoother=2:extra=vulkan_allow_cpu=1"
+    run vk 2 "smoother=2:extra=[vulkan_allow_cpu=1]"
     opened vk portable-vulkan || fail "Auto with vulkan_allow_cpu=1 did not open the Vulkan engine ($(grep -m1 'portable-vulkan not used' "$T/vk.engine.log" 2>/dev/null))"
     frames_ok vk 2 || fail "Vulkan engine: frames"
     # 2. Auto as users get it: lavapipe is a CPU, so the CPU engine, and the log says why the Vulkan engine was not used
@@ -54,7 +55,7 @@ if [ "$mode" = software ]; then
     grep -q "portable-vulkan not used: " "$T/auto.engine.log" || fail "Auto: no reason for leaving the Vulkan engine out"
     frames_ok auto 2 || fail "Auto (CPU engine): frames"
     # 3. backend=nvidia here (no NVIDIA engine in this folder, or no NVIDIA GPU): a reason, then the next engine
-    run nv 2 "smoother=2:backend=nvidia:extra=vulkan_allow_cpu=1"
+    run nv 2 "smoother=2:backend=nvidia:extra=[vulkan_allow_cpu=1]"
     grep -q "nvidia not used: " "$T/nv.engine.log" || fail "backend=nvidia: no reason logged"
     grep -q "^open: " "$T/nv.engine.log" || fail "backend=nvidia: no engine opened after the fallback"
     frames_ok nv 2 || fail "backend=nvidia fallback: frames"
@@ -64,7 +65,7 @@ if [ "$mode" = software ]; then
     ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=8" -pix_fmt yuv420p -c:v ffv1 "$T/clip8.mkv"
     rm -f "$T/depth.engine.log"
     PUSHMPC_ENGINE_LOG="$T/depth.engine.log" timeout 120 mpv --no-config --script="$H/pushmpc_hook.so" \
-        --script-opts="pushmpc-vf=smoother=2:extra=test_want_out_depth=10" --vo=null --ao=null --msg-level=all=v "$T/clip8.mkv" > "$T/depth.log" 2>&1
+        --script-opts="pushmpc-vf=smoother=2:extra=[test_want_out_depth=10]" --vo=null --ao=null --msg-level=all=v "$T/clip8.mkv" > "$T/depth.log" 2>&1
     echo "-- 10-bit request:"
     grep -E "pushmpc_hook|want_depth|would do more|frames.*x2" "$T/depth.log" | head -8 | sed 's/^/   /'
     grep -q "10-bit stream for the engine" "$T/depth.log" || fail "the hook did not answer the engine's 10-bit request"
@@ -78,7 +79,7 @@ if [ "$mode" = vulkan ]; then
     ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=3" -pix_fmt yuv420p -c:v ffv1 "$clip"
     rm -f "$T/vkframes.engine.log"
     PUSHMPC_ENGINE_LOG="$T/vkframes.engine.log" timeout 300 xvfb-run -a -s "-screen 0 1280x720x24" mpv --no-config \
-        --script="$H/pushmpc_hook.so" --script-opts="pushmpc-vf=smoother=2:extra=vulkan_allow_cpu=1" \
+        --script="$H/pushmpc_hook.so" --script-opts="pushmpc-vf=smoother=2:extra=[vulkan_allow_cpu=1]" \
         --vo=gpu-next --gpu-api=vulkan --hwdec=vulkan --hwdec-codecs=all --ao=null --untimed --frames=60 \
         --msg-level=all=v "$clip" > "$T/vkframes.log" 2>&1
     echo "-- Vulkan frames:"
@@ -101,21 +102,21 @@ if [ "$mode" = sidecars ]; then
     n=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$clip")
     for f in libpushmpc_engine_ml.so libpushmpc_engine_nvl.so; do [ -f "$H/$f" ] || fail "$f is not in $H"; done
     # 1. PushFlow through pmml on ncnn (Vulkan, lavapipe)
-    run ml-ncnn 2 "smoother=2:backend=ml:extra=ml_runtime=$RT|ml_backend=ncnn"
+    run ml-ncnn 2 "smoother=2:backend=ml:extra=[ml_runtime=$RT|ml_backend=ncnn]"
     if opened ml-ncnn ml; then frames_ok ml-ncnn 2 || fail "PushFlow (ncnn): frames"
     else fail "backend=ml with ncnn did not open PushFlow: $(grep -m1 'ml not used' "$T/ml-ncnn.engine.log" 2>/dev/null)"; fi
     # 2. ONNX Runtime's WebGPU EP (Dawn on Vulkan): best effort, Dawn may refuse a CPU adapter
-    run ml-webgpu 2 "smoother=2:backend=ml:extra=ml_runtime=$RT|ml_backend=webgpu"
+    run ml-webgpu 2 "smoother=2:backend=ml:extra=[ml_runtime=$RT|ml_backend=webgpu]"
     if opened ml-webgpu ml; then frames_ok ml-webgpu 2 || fail "PushFlow (WebGPU EP): frames"
     else echo "NOTE: the WebGPU EP did not run here: $(grep -m1 'ml not used' "$T/ml-webgpu.engine.log" 2>/dev/null)"; fi
     # 3. Auto: PushFlow measured against the Vulkan engine (or the reason PushFlow was left out)
-    run auto-ml 2 "smoother=2:extra=ml_runtime=$RT|vulkan_allow_cpu=1"
+    run auto-ml 2 "smoother=2:extra=[ml_runtime=$RT|vulkan_allow_cpu=1]"
     if grep -q "PushFlow reaches" "$T/auto-ml.engine.log"; then grep -m1 "PushFlow reaches" "$T/auto-ml.engine.log"
     elif grep -q "ml not used: " "$T/auto-ml.engine.log"; then echo "Auto left PushFlow out: $(grep -m1 'ml not used: ' "$T/auto-ml.engine.log")"
     else fail "Auto: neither a PushFlow-versus-Vulkan choice nor a reason in the log"; fi
     grep -q "^open: " "$T/auto-ml.engine.log" && frames_ok auto-ml 2 || fail "Auto (sidecars present): no engine or wrong frames"
     # 4. the NVIDIA sidecar without an NVIDIA GPU: refuses with the reason, the next engine runs
-    run nv-sc 2 "smoother=2:backend=nvidia:extra=vulkan_allow_cpu=1"
+    run nv-sc 2 "smoother=2:backend=nvidia:extra=[vulkan_allow_cpu=1]"
     grep -q "nvidia not used: " "$T/nv-sc.engine.log" || fail "backend=nvidia: no reason logged"
     grep -m1 "nvidia not used: " "$T/nv-sc.engine.log"
     frames_ok nv-sc 2 || fail "backend=nvidia fallback: frames"
