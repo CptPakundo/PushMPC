@@ -64,6 +64,7 @@
 #include <fstream>
 #include "PushMpcExtras.h"
 #include "PushMpcFastStart.h"
+#include "PushMpcReload.h"          // F-T1: the settings reload on its own thread, bounded, never beside a close
 #include <VersionHelpers.h>
 #include <IVideoRenderer.h>   // MPC Video Renderer's settings interface (live HDR settings)
 #include <sstream>
@@ -2701,10 +2702,11 @@ private:
     bool QuickStartWanted(const PushCoreSettings& ps, std::string& why);
     void TryHandover(REFERENCE_TIME pts, const PushCoreSubmitTiming& t);   // under m_coreLock
     void RetireOld(const char* why);                                       // under m_coreLock
+    static pm::reload::SpawnFn DetachSpawn() { return [](std::function<void()> f) { fs::Detach(std::move(f)); }; }
     static void CloseAsync(const PushCoreApi* api, PushCore* core, const char* what, DWORD delayMs = 0)
     {
-        if (!api || !core) return;
-        fs::Detach([api, core, what, delayMs] { if (delayMs) Sleep(delayMs); const int64_t q0 = Qpc(); SehClose(api, core); Log(std::format("{} closed in {:.0f} ms (on its own thread)", what, QpcMs(Qpc() - q0))); });
+        // counted (pm::reload::Busy): a settings reload waits until no close runs (F-T1: a close beside a reload hung both)
+        pm::reload::CloseDetached(DetachSpawn(), api, core, &SehClose, &Log, what, delayMs);
     }
     bool m_openStarted = false;
     // fast start (PushMpcFastStart.h): work that every connection needs, started at the input connection on other threads
@@ -3816,7 +3818,18 @@ void CPushMpcFilter::CloseCore()
             std::lock_guard<std::mutex> nl(g_ngxLock); g_lastNgx = NgxKeyOf(a); g_haveNgx = true;
         }
     }
+    // An abandoned reload still runs (pushcore stuck), or a close started above / earlier outlives 5 s: either may hold
+    // pushcore's graph lock for a long time, so the player does not wait for this close either (F-T1). Otherwise the
+    // close is synchronous, as before (the warm NGX cache is free again for the next file's open).
+    bool detach = false;
+    { bool have = false; { std::lock_guard<std::mutex> l0(m_coreLock); have = m_core != nullptr; }
+      if (have) detach = pm::reload::Busy().Reloads() > 0 || !pm::reload::Busy().WaitNoClose(5000.0); }
     std::lock_guard<std::mutex> lk(m_coreLock);
+    if (m_core && detach) {
+        Log(std::format("pushcore closes on its own thread ({} close(s), {} reload(s) still running)", pm::reload::Busy().Closes(), pm::reload::Busy().Reloads()));
+        CloseAsync(m_api, m_core, "pushcore");
+        m_core = nullptr;
+    }
     if (m_core) { const int64_t q0 = Qpc(); SehClose(m_api, m_core); m_core = nullptr; Log(std::format("pushcore closed in {:.0f} ms", QpcMs(Qpc() - q0))); }
     { std::lock_guard<std::mutex> l2(m_srvLock); m_srvs.clear(); }
 }
@@ -4481,7 +4494,10 @@ void CPushMpcFilter::DelivererLoop()
             const double el = QpcMs(Qpc() - statQpc);
             const uint64_t d = m_delivered - statDelivered;
             PushCoreStats st = { sizeof(st) };
-            { std::lock_guard<std::mutex> lk(m_coreLock); if (m_core && !m_faulted) m_api->stats(m_core, &st); }
+            {   // try-lock: the delivery thread never waits for pushcore (F-T1: a stuck reload held this lock and froze the picture)
+                std::unique_lock<std::mutex> lk(m_coreLock, std::try_to_lock);
+                if (lk.owns_lock() && m_core && !m_faulted) m_api->stats(m_core, &st);
+            }
             const int64_t qn = m_qN.exchange(0), ql = m_qLateSum.exchange(0);
             Log(std::format("stats: {:.2f} fps delivered over {:.1f} s; delivered real {} gen {} source {}; dropped late gen {} real {}; delivered late {}; "
                 "skipped late source {}; FG level {} (pairs full {} reduced {} none {}); MPC-VR quality: mean lateness vs its -8 ms target {:.2f} ms over {} samples; "
@@ -4646,7 +4662,9 @@ void CPushMpcFilter::AdmissionTick()
     int level = m_fgLevel;
     PushCoreStats st = { sizeof(st) };
     {
-        std::lock_guard<std::mutex> lk(m_coreLock);
+        // try-lock: runs on the delivery thread, which never waits for pushcore; busy -> this tick is skipped
+        std::unique_lock<std::mutex> lk(m_coreLock, std::try_to_lock);
+        if (!lk.owns_lock()) return;
         if (!m_core || m_api->stats(m_core, &st) != PUSHCORE_OK) st.fullCostRecentMs = st.reducedCostRecentMs = st.fullCostWindowMs = st.reducedCostWindowMs = -1;
     }
     const double budget = (m_ptsStepMs > 0 ? m_ptsStepMs.load() : double(m_atpf) / 1e4) * 0.92;
@@ -5631,16 +5649,37 @@ void CPushMpcFilter::DoReload(bool forced)
         }
         for (auto& it : drop) if (it.sample) it.sample->Release();
     }
+    // F-T1: the idle quick graph is taken out here and closed BEFORE the reload, on the reload's thread (DrainCore would
+    // close it on another thread at the same moment: in 4 of 5 rebuilds neither that close nor the reload returned)
+    PushCore* retired = nullptr;
+    { std::lock_guard<std::mutex> lk(m_coreLock); retired = m_retired; m_retired = nullptr; m_coreDisc = true; m_lastSubmitPts = INT64_MIN; }
+    if (retired) Log("quick start: the idle quick graph closes first, then the reload (one after the other)");
     DrainCore(false);
     { std::lock_guard<std::mutex> sl(m_sideLock); m_sideByPts.clear(); }
-    int r = PUSHCORE_ERROR;
-    PushCoreOutputInfo oi = {};
-    {
-        std::lock_guard<std::mutex> lk(m_coreLock);
-        if (m_core) { r = m_api->reload(m_core); if (r == PUSHCORE_OK) r = m_api->outputInfo(m_core, &oi); else Log(std::format("pushcore_reload -> {} {}", r, m_api->lastError(m_core))); }
-        m_coreDisc = true;
-        m_lastSubmitPts = INT64_MIN;
+    // The reload runs on its own thread with the core lock released (the source frames are shown meanwhile; Receive,
+    // the deliverer, EndFlush and Stop never wait for it); a Stop gives it 1 s, then abandons it (its thread closes the
+    // instance); after 20 s it is abandoned too and the source frames stay (no frozen picture, no hung player).
+    pm::reload::Hooks hooks;
+    hooks.close = &SehClose; hooks.log = &Log; hooks.spawn = DetachSpawn();
+    hooks.quit = [this] { return m_quit.load(); };
+    hooks.tick = [this] { if (m_flushing) m_copierAck = m_flushGen.load(); };   // the copier's flush acknowledgement (EndFlush waits for it)
+    hooks.keep = [this] { return !m_faulted && m_mode == Mode::Active; };       // under m_coreLock
+    const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, hooks, pm::reload::Limits{});
+    { std::lock_guard<std::mutex> lk(m_coreLock); m_coreDisc = true; m_lastSubmitPts = INT64_MIN; }
+    int r = rr.r;
+    const PushCoreOutputInfo oi = rr.oi;
+    if (rr.how == pm::reload::Outcome::Stopped || rr.how == pm::reload::Outcome::TimedOut) {
+        const bool stopped = rr.how == pm::reload::Outcome::Stopped;
+        Log(std::format("settings reload {} after {:.0f} ms: abandoned, its thread closes the instance when pushcore returns; the source frames are shown",
+            stopped ? "still running at Stop" : "did not finish", rr.totalMs));
+        m_reloading = false;
+        m_faulted = true;
+        Fallback(stopped ? L"stopped during a settings reload (the reload was abandoned)" : L"the settings reload did not finish in 20 s (abandoned)");
+        return;
     }
+    if (rr.hadCore && r != PUSHCORE_OK) Log(std::format("pushcore_reload -> {} {}", r, rr.err));
+    if (rr.retiredMs > 0 || rr.waitMs >= 100) Log(std::format("settings reload: quick graph closed first in {:.0f} ms, waited {:.0f} ms for other closes, rebuild {:.0f} ms", rr.retiredMs, rr.waitMs, rr.reloadMs));
+    if (r == PUSHCORE_OK && !rr.reinstalled) r = PUSHCORE_ERROR;   // stopped or faulted meanwhile: the instance was closed
     if (r == PUSHCORE_OK) {
         m_oi = oi;
         m_mult = oi.multiplier ? oi.multiplier : 1;
@@ -5652,7 +5691,7 @@ void CPushMpcFilter::DoReload(bool forced)
         SetStatus(L"active: " + Widen(oi.description) + std::format(L" (settings reloaded {}x)", m_reloads));
         if (LegacyMode()) { std::lock_guard<std::mutex> lk(m_sigLock); m_settingsSig = SettingsSignature(m_rt.dataDir); }
         m_reloading = false;
-    } else if (r == PUSHCORE_DEVICE_LOST) {
+    } else if (r == PUSHCORE_DEVICE_LOST && rr.reinstalled) {
         m_reloading = false;
         DeviceLost(1, "pushcore_reload");
     } else {

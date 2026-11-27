@@ -62,3 +62,11 @@ target_include_directories(held_test PRIVATE "${CMAKE_SOURCE_DIR}/../pushmpc/src
 target_compile_definitions(held_test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(held_test PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(held_test PRIVATE d3d11 dxgi d3dcompiler)
+
+# The settings reload (src/PushMpcReload.h, CPushMpcFilter::DoReload) against a stub pushcore API whose reload / close
+# are slow, blocked or hang beside each other (F-T1): frames keep flowing, Stop returns in bound (CPU only)
+add_executable(reload_test tools/reload_test.cpp)
+set_target_properties(reload_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(reload_test PRIVATE "${PUSHMPC_CORE_INCLUDE}" "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(reload_test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(reload_test PRIVATE /W3 /EHsc /O2 /utf-8)
