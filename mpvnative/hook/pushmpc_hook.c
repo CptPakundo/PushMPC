@@ -506,7 +506,10 @@ int mpv_open_cplugin(mpv_handle *h)
                 want = 0;   /* a new file: its own depth; the engine asks again when it needs it */
                 change = 1;
             }
-            if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART || ev->event_id == MPV_EVENT_VIDEO_RECONFIG || ev->event_id == MPV_EVENT_FILE_LOADED)
+            /* only once frames have gone through the filter (playback restarted): mpv 0.37 (Ubuntu 24.04) crashes in
+               vf-metadata asked for between file-loaded / video-reconfig and the first filtered frame (CI: SIGSEGV in
+               mpv_get_property_string under the hook's thread) */
+            if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART)
                 checks = 12;
             else if (ev->event_id == MPV_EVENT_NONE && checks > 0)
                 checks--;
