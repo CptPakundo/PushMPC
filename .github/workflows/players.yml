@@ -218,7 +218,7 @@ jobs:
           if [ -n "$d" ]; then hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/m/j" "$d" >/dev/null; a=$(find "$RUNNER_TEMP/m/j" -maxdepth 1 -name '*.app' | head -n 1)
           else a=$(find "$RUNNER_TEMP/jd" -maxdepth 3 -name '*.app' | head -n 1); fi
           ditto "$a" "/Applications/Jellyfin Desktop.app"
-          sums() { for x in /Applications/Stremio.app "/Applications/Jellyfin Desktop.app"; do (cd "$x" && find . -type f | LC_ALL=C sort | xargs shasum -a 256); done; }
+          sums() { for x in /Applications/Stremio.app "/Applications/Jellyfin Desktop.app"; do (cd "$x" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256); done; }
           sums > "$RUNNER_TEMP/before.txt"
           I="sh $O/pushmpc-apps-mac.sh"
           $I install --from "$O" --bridge "$O/pushmpc-iina.so" --json 2> "$RUNNER_TEMP/install.log" | tee "$RUNNER_TEMP/install.json"; cat "$RUNNER_TEMP/install.log"
@@ -230,7 +230,7 @@ jobs:
           $I status --json
           $I uninstall --from "$O" --json
           sums > "$RUNNER_TEMP/after.txt"
-          if diff "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt" >/dev/null; then echo "ok: both apps as they were"; else echo "::error::an app differs after uninstall"; bad=1; fi
+          if diff "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt" >/dev/null; then echo "ok: both apps as they were ($(wc -l < "$RUNNER_TEMP/before.txt") files)"; else echo "::error::an app differs after uninstall"; diff "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt" | head -20; bad=1; fi
           exit $bad
       - name: The shims' conf.json round trip (Jellyfin MPV Shim, Plex-MPV-Shim)
         run: |
@@ -239,7 +239,7 @@ jobs:
           printf '{\n    "mpv_ext": false,\n    "mpv_ext_path": null,\n    "player_name": "test",\n    "sync_max_delay_speed": 50\n}' > "$S/jellyfin-mpv-shim/conf.json"
           printf '{\n    "mpv_ext": false,\n    "fullscreen": true\n}' > "$S/plex-mpv-shim/conf.json"
           printf 'volume=80\n' > "$S/plex-mpv-shim/mpv.conf"
-          sums() { (cd "$S" && find jellyfin-mpv-shim plex-mpv-shim -type f | LC_ALL=C sort | xargs shasum -a 256); }
+          sums() { (cd "$S" && find jellyfin-mpv-shim plex-mpv-shim -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256); }
           sums > "$RUNNER_TEMP/b.txt"
           : > "$RUNNER_TEMP/p.vpy"
           I="sh $O/pushmpc-apps-mac.sh"

@@ -7,16 +7,22 @@
 #                 the overlay window must be mapped over mpv's with the player's size, and the screen there not black.
 #   linux-nvl     ubuntu-24.04: pushmpc-capture with the nvl engine (NVIDIA Video Effects) compiled in, the kernels'
 #                 fatbin from a green run's artifact (else nvcc); the self-test's probe must refuse cleanly (no GPU).
-#   linux-portal  ubuntu-24.04, informational: a headless Sway (pixman) with PipeWire, WirePlumber and
-#                 xdg-desktop-portal-wlr (no picker: the headless output) inside a private session bus: pushmpc-capture
-#                 --monitor through the ScreenCast portal (shared memory there), --no-present to a dump; then the
-#                 layer-shell overlay on lavapipe's Wayland WSI for a few seconds.
-#   macos         macos-15: the build (ScreenCaptureKit, AppKit, MoltenVK), capture_test, --list (no permission
-#                 needed), the self-test (informational: the runner's Metal device through MoltenVK), and a start
-#                 without the Screen Recording permission: the plain message and exit code 3.
+#   linux-portal  informational: the binary built on ubuntu-24.04, run in an Arch Linux container: a headless Sway
+#                 (pixman) with PipeWire, WirePlumber and xdg-desktop-portal-wlr (no picker: the headless output)
+#                 inside a private session bus: pushmpc-capture --monitor through the ScreenCast portal (shared memory
+#                 there), --no-present to a dump; then the layer-shell overlay on lavapipe's Wayland WSI for a few
+#                 seconds. Not on Ubuntu 24.04 itself: its xdg-desktop-portal-wlr 0.7.1 refuses a screencopy without a
+#                 dma-buf format ("unable to receive a valid format from wlr_screencopy"), and a renderer without a
+#                 render node (pixman, the runner has no /dev/dri) offers none; xdg-desktop-portal-wlr 0.8+ with Sway
+#                 1.11+ captures through ext-image-copy-capture, which takes shared memory.
+#   macos         macos-15: the build (ScreenCaptureKit, AppKit, MoltenVK), capture_test, --list, the self-test
+#                 (informational: the runner's Metal device through MoltenVK); then a window of a moving square
+#                 (a small AppKit program): without the Screen Recording permission the plain message and exit code
+#                 3; with it (the hosted runner grants it) the window captured through ScreenCaptureKit, dumped at
+#                 60 Hz, and check_motion.py as on Linux.
 # Not coverable here (a real desktop is needed): the portal's window picker and restore token, dma-buf zero copy, real
-# compositor timing, lip sync by ear, GNOME's full-screen fallback, ScreenCaptureKit frames (TCC), black copy-protected
-# video, a MoltenVK swapchain over a full-screen player. Pins: vsplugin/engines/gpu/gpu-pins.json.
+# compositor timing, lip sync by ear, GNOME's full-screen fallback, black copy-protected video, a MoltenVK swapchain
+# over a full-screen player. Pins: vsplugin/engines/gpu/gpu-pins.json.
 name: capture
 
 on:
@@ -72,16 +78,23 @@ jobs:
           sleep 1
           ./vsplugin/build-capture/pushmpc-capture --list
           b=./vsplugin/build-capture/pushmpc-capture
-          $b --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
-          $b --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log
-          $b --player mpv --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log
+          # 300 frames at 60 Hz take 5 s: 120 s means the run hangs (runs 45938409156 to 45946207451 hung after the engine
+          # line until the job's timeout); every run gets its own verdict, then the step fails if any did
+          bad=0
+          run() { name=$1; shift; s=$(date +%s); rc=0; timeout -k 5 120 "$b" "$@" || rc=$?
+            echo "$name: exit $rc after $(( $(date +%s) - s )) s, $(stat -c %s "/tmp/$name.y4m" 2>/dev/null || echo 0) bytes dumped"
+            if [ "$rc" != 0 ]; then bad=1; [ "$rc" = 124 ] && echo "::error::capture ($name) did not finish in 120 s: it hangs"; tail -5 "/tmp/capture-$name.log" 2>/dev/null || true; fi; }
+          run auto --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
+          run off --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
+          run cpu --player mpv --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
+          [ "$bad" = 0 ] || exit 1
           echo "GPU engine:"; python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed 96 --hz 60
           echo "CPU engine:"; python3 -I capture/tests/check_motion.py /tmp/cpu.y4m /tmp/off.y4m --speed 96 --hz 60
       - name: Presented run (the X11 overlay over mpv)
         env: { DISPLAY: ':99' }
         run: |
           set -eu
-          ./vsplugin/build-capture/pushmpc-capture --player mpv --allow-cpu-vulkan --display-hz 60 --seconds 8 --log /tmp/capture-present.log -v &
+          timeout -k 5 90 ./vsplugin/build-capture/pushmpc-capture --player mpv --allow-cpu-vulkan --display-hz 60 --seconds 8 --log /tmp/capture-present.log -v &
           cap=$!
           sleep 5
           xwininfo -root -tree | grep -E 'pmc-square|PushMPC capture' | tee /tmp/tree.txt
@@ -173,10 +186,9 @@ jobs:
         timeout-minutes: 8
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools mesa-vulkan-drivers \
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config glslang-tools \
             libx11-dev libxcomposite-dev libxdamage-dev libxext-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
-            libwayland-dev wayland-protocols sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr dbus mpv ffmpeg grim >/dev/null
-          dpkg-query -W sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr
+            libwayland-dev wayland-protocols ffmpeg >/dev/null
       - uses: actions/cache@v4
         with:
           path: vsplugin/build-capture/_deps
@@ -185,38 +197,54 @@ jobs:
         run: |
           cmake -S vsplugin -B vsplugin/build-capture -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON
           cmake --build vsplugin/build-capture --target pushmpc_capture
-      - name: Portal capture on a headless Sway
+      # Ubuntu 24.04's portal stack cannot screencast here (runs 45938409156 to 45946207451): xdg-desktop-portal-wlr
+      # 0.7.1 ends the session with "unable to receive a valid format from wlr_screencopy" because Sway 1.9 on pixman
+      # (no render node on the runner) offers no dma-buf format. Arch Linux (a container on the same runner) has Sway
+      # 1.11+ and xdg-desktop-portal-wlr 0.8+, which capture through ext-image-copy-capture into shared memory.
+      - name: Portal capture on a headless Sway (Arch Linux container)
+        timeout-minutes: 12
         run: |
           ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=640x360:r=24" -f lavfi -i "color=c=white:s=64x64:r=24" \
             -filter_complex "[0][1]overlay=x='mod(t*96,560)':y=148,format=yuv420p" -t 40 -c:v libx264 -crf 12 /tmp/square.mkv
+          cat > /tmp/run.sh <<'EOF'
+          set -eu
           mkdir -p ~/.config/xdg-desktop-portal-wlr ~/.config/xdg-desktop-portal ~/.config/sway
           printf '[screencast]\noutput_name=HEADLESS-1\nchooser_type=none\nmax_fps=60\n' > ~/.config/xdg-desktop-portal-wlr/config
           printf '[preferred]\ndefault=wlr;gtk\n' > ~/.config/xdg-desktop-portal/sway-portals.conf
           printf 'output HEADLESS-1 resolution 1280x720\n' > ~/.config/sway/config
-          cat > /tmp/run.sh <<'EOF'
-          set -eu
           export XDG_RUNTIME_DIR=$(mktemp -d); chmod 700 "$XDG_RUNTIME_DIR"
           export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
-          sway -c ~/.config/sway/config > /tmp/capture-sway.log 2>&1 &
-          for i in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && break; sleep 0.1; done
-          export WAYLAND_DISPLAY=wayland-1
+          sway -c ~/.config/sway/config > /out/capture-sway.log 2>&1 &
+          for i in $(seq 1 100); do ls "$XDG_RUNTIME_DIR"/wayland-[0-9] >/dev/null 2>&1 && break; sleep 0.1; done
+          WAYLAND_DISPLAY=$(basename "$(ls "$XDG_RUNTIME_DIR"/wayland-[0-9] | head -n 1)"); export WAYLAND_DISPLAY
+          echo "Wayland display $WAYLAND_DISPLAY"
           dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR XDG_SESSION_TYPE || true
-          pipewire > /tmp/capture-pipewire.log 2>&1 &
-          sleep 1; wireplumber > /tmp/capture-wireplumber.log 2>&1 &
-          /usr/libexec/xdg-desktop-portal-wlr -l DEBUG > /tmp/capture-xdpw.log 2>&1 &
-          sleep 1; /usr/libexec/xdg-desktop-portal -r > /tmp/capture-xdp.log 2>&1 &
+          pipewire > /out/capture-pipewire.log 2>&1 &
+          sleep 1; wireplumber > /out/capture-wireplumber.log 2>&1 &
+          /usr/lib/xdg-desktop-portal-wlr -l DEBUG > /out/capture-xdpw.log 2>&1 &
+          sleep 1; /usr/lib/xdg-desktop-portal -r > /out/capture-xdp.log 2>&1 &
           sleep 2
-          mpv --vo=wlshm --no-audio --loop=inf --fs --really-quiet /tmp/square.mkv &
+          mpv --vo=wlshm --no-audio --loop=inf --fs --really-quiet /out/square.mkv &
           sleep 2
-          b=$GITHUB_WORKSPACE/vsplugin/build-capture/pushmpc-capture
-          $b --monitor --no-present --display-hz 60 --engine cpu --frames 240 --dump /tmp/portal.y4m --log /tmp/capture-portal.log -v
-          grep -E 'portal|shared memory|dma-buf' /tmp/capture-portal.log | head -5
+          b=/w/vsplugin/build-capture/pushmpc-capture
+          timeout -k 5 120 $b --monitor --no-present --display-hz 60 --engine cpu --frames 240 --dump /out/portal.y4m --log /out/capture-portal.log -v
+          grep -E 'portal|shared memory|dma-buf' /out/capture-portal.log | head -5
           # the layer-shell overlay through lavapipe's Wayland WSI, a few seconds
-          $b --monitor --allow-cpu-vulkan --seconds 6 --log /tmp/capture-overlay.log -v || true
-          grep -E 'layer-shell|frames shown' /tmp/capture-overlay.log || true
-          grim /tmp/screen.png || true
+          timeout -k 5 60 $b --monitor --allow-cpu-vulkan --seconds 6 --log /out/capture-overlay.log -v || true
+          grep -E 'layer-shell|frames shown' /out/capture-overlay.log || true
+          grim /out/screen.png || true
           EOF
-          dbus-run-session -- sh /tmp/run.sh
+          cat > /tmp/container.sh <<'EOF'
+          set -eu
+          pacman -Syu --noconfirm --needed sway xdg-desktop-portal xdg-desktop-portal-wlr pipewire wireplumber mpv grim dbus \
+            vulkan-swrast vulkan-icd-loader libx11 libxcomposite libxdamage libxext libxrandr wayland >/dev/null
+          pacman -Q sway wlroots0.19 xdg-desktop-portal xdg-desktop-portal-wlr pipewire 2>/dev/null || pacman -Q sway xdg-desktop-portal xdg-desktop-portal-wlr pipewire
+          if ldd /w/vsplugin/build-capture/pushmpc-capture | grep 'not found'; then echo "::error::pushmpc-capture misses libraries in the container"; exit 1; fi
+          useradd -m pm
+          runuser -u pm -- dbus-run-session -- sh /out/run.sh
+          EOF
+          chmod 644 /tmp/run.sh /tmp/square.mkv
+          docker run --rm -v "$GITHUB_WORKSPACE:/w:ro" -v /tmp:/out archlinux:latest bash /out/container.sh
           ls -la /tmp/portal.y4m
           python3 -I capture/tests/check_motion.py /tmp/portal.y4m --speed 96 --hz 60 || echo "::warning::portal capture: motion check did not pass (headless timing)"
       - uses: actions/upload-artifact@v4
@@ -241,11 +269,51 @@ jobs:
       - name: Self-test (MoltenVK; informational)
         continue-on-error: true
         run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
-      - name: Without the Screen Recording permission
+      # a window to capture: the hosted runner's session has no normal window on screen (--list printed none and
+      # "--player Finder" found none, run 45946207451), so a small AppKit program shows the moving square (24 fps,
+      # 96 points a second, borderless: no title bar in the capture)
+      - name: A window of a moving square
+        run: |
+          set -eu
+          cat > /tmp/pmc_square.swift <<'EOF'
+          import AppKit
+          final class V: NSView {
+              let t0 = Date()
+              override func draw(_ r: NSRect) {
+                  NSColor(calibratedWhite: 0.235, alpha: 1).setFill(); bounds.fill()
+                  let t = Date().timeIntervalSince(t0), f = (t * 24).rounded(.down) / 24
+                  NSColor.white.setFill(); NSRect(x: (f * 96).truncatingRemainder(dividingBy: 560), y: 148, width: 64, height: 64).fill()
+              }
+          }
+          let app = NSApplication.shared
+          app.setActivationPolicy(.regular)
+          let w = NSWindow(contentRect: NSRect(x: 40, y: 200, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+          w.title = "pmc-square"
+          let v = V(frame: NSRect(x: 0, y: 0, width: 640, height: 360)); w.contentView = v
+          w.orderFrontRegardless()
+          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.needsDisplay = true }
+          app.activate(ignoringOtherApps: true)
+          app.run()
+          EOF
+          swiftc -O -o /tmp/pmc-square /tmp/pmc_square.swift
+          /tmp/pmc-square > /tmp/capture-square.log 2>&1 &
+          for i in $(seq 1 50); do ./vsplugin/build-capture/pushmpc-capture --list | grep -q pmc-square && break; sleep 0.2; done
+          ./vsplugin/build-capture/pushmpc-capture --list
+          ./vsplugin/build-capture/pushmpc-capture --list | grep -q pmc-square || { echo "::error::the square's window is not on screen"; exit 1; }
+      - name: Capture the window (ScreenCaptureKit), or the plain message without the permission
         run: |
           set +e
-          out=$(./vsplugin/build-capture/pushmpc-capture --player Finder --no-present --frames 30 2>&1); rc=$?
+          b=./vsplugin/build-capture/pushmpc-capture
+          out=$(perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v 2>&1); rc=$?
           echo "$out"; echo "exit $rc"
-          if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "the plain message: ok"; exit 0; fi
-          if printf '%s' "$out" | grep -q 'capturing'; then echo "::notice::this runner grants screen capture: the capture ran instead"; exit 0; fi
-          echo "::error::neither the permission message nor a capture"; exit 1
+          if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "::notice::no Screen Recording permission on this runner: the plain message and exit code 3"; exit 0; fi
+          [ "$rc" = 0 ] || { echo "::error::capture failed (exit $rc)"; exit 1; }
+          perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log || { echo "::error::capture with --smoother off failed"; exit 1; }
+          head -c 80 /tmp/auto.y4m | head -n 1
+          w=$(head -n 1 /tmp/auto.y4m | tr ' ' '\n' | sed -n 's/^W//p')
+          speed=$(( 96 * w / 640 ))   # the window's points at the capture's pixel scale
+          echo "dump width $w: $speed px a second"
+          python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed "$speed" --hz 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capture-macos-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
