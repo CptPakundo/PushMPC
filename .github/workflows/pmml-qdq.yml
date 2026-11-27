@@ -13,7 +13,17 @@ name: pmml-qdq
 on:
   # called by mpv-native-arm64.yml (the int8 networks travel in the ARM64 mpv build, pinned with it); by hand to rerun
   workflow_call:
+    inputs:
+      extra_variants:
+        description: 'also the record-only variants (percentile calibration, A16W16), after a pass too: slow, more memory'
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      extra_variants:
+        description: 'also the record-only variants (percentile calibration, A16W16), after a pass too: slow, more memory'
+        type: boolean
+        default: false
 
 concurrency:
   group: pmml-qdq-${{ github.ref }}-${{ github.workflow }}
@@ -85,10 +95,14 @@ jobs:
           set -uo pipefail
           mkdir -p out
           clips=$(for n in $(jq -r '.clips.names[]' "$PIN"); do printf '%s ' qdq-data/clips/$n.y4m; done)
+          # the first passing variant per role ends that role (each costs about 2.3 minutes); extra_variants adds the
+          # record-only ones (the percentile run took the runner down after a pass, release run 45960732290)
+          extra='${{ inputs.extra_variants && '--extra-variants' || '' }}'
           for role in fast quality; do
-            rc=0
+            rc=0; t0=$SECONDS
             ~/q/bin/python -I pmml/scripts/quantize_qnn.py --models qdq-data/models --graphs qdq-data/graphs --clips $clips \
-              --role $role --out out --calib-frames "$CALIB" --frames "$FRAMES" --gate-db 0.3 2>&1 | tee out/$role.log || rc=$?
+              --role $role --out out --calib-frames "$CALIB" --frames "$FRAMES" --gate-db 0.3 $extra 2>&1 | tee out/$role.log || rc=$?
+            echo "role $role: exit $rc after $(( (SECONDS - t0) / 60 )) min $(( (SECONDS - t0) % 60 )) s"
             [ $rc -eq 0 ] || [ $rc -eq 1 ] || { echo "::error::quantize_qnn.py $role: exit $rc"; exit 1; }
             [ $rc -eq 0 ] || echo "::warning title=O4 $role::no int8 variant within the 0.3 dB gate: qnn-split stays off for the $role model"
           done
