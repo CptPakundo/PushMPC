@@ -559,7 +559,7 @@ jobs:
     needs: linux-build
     runs-on: ubuntu-24.04
     container: archlinux:latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -638,6 +638,73 @@ jobs:
           rm -r $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           { echo '## linux-arch'; echo; echo '```'; cat /tmp/versions.txt; echo "mpv encode: ${ARCH_FRAMES:-}"; cat $res; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # DIAGNOSTIC (never fails the job): does the installed block add the filter with the stream's colour, and before
+      # or after frame 0? Four tagged clips, each 3x as an encode (--o) and 3x as a playback-shaped run (vo=null), with
+      # mpv's own debug log (--log-file is at least -v -v: every "Run command: vf ..." with its user-data, the decoder's
+      # format line and vf_vapoursynth's "initializing", in order). The portable backend logs no colour, so the colour
+      # source is the first vf append's user-data: transfer=... = from the arguments, none = the plugin guesses.
+      # Frames: encode vs one mpv-alone control (--no-config) per clip; playback: the plugin's "instance closed after N".
+      - name: DIAGNOSTIC colour source and first frame (tagged clips, encode and playback, 3x each)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          set -u
+          export HOME=/tmp/home-diag; mkdir -p $HOME/.config/mpv
+          tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no > /tmp/install-diag.txt 2>&1 || { tail -5 /tmp/install-diag.txt; exit 0; }
+          mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -E ' libx26[45] ' || true
+          mk() {   # mk <name> <size> <pix_fmt> <primaries> <trc> <matrix>: 1 s at 24 fps, colour in the bitstream (VUI) when x264 / x265 exist
+            local n=$1 sz=$2 pf=$3 pr=$4 tr=$5 mx=$6 c
+            local col="-color_primaries $pr -color_trc $tr -colorspace $mx -color_range tv"
+            for c in "-c:v libx265 -preset ultrafast -x265-params log-level=error:colorprim=$pr:transfer=$tr:colormatrix=$mx" "-c:v libx264 -preset ultrafast" "-c:v ffv1"; do
+              case "$pf:$c" in *p10le:*libx264*) continue;; esac
+              ffmpeg -v error -y -f lavfi -i testsrc2=size=$sz:rate=24:duration=1 -pix_fmt $pf $col $c /tmp/diag-$n.mkv && { echo "clip $n: $c"; return 0; }
+            done
+            return 1
+          }
+          mk hdr10   1920x1080 yuv420p10le bt2020 smpte2084    bt2020nc
+          mk hlg     1920x1080 yuv420p10le bt2020 arib-std-b67 bt2020nc
+          mk uhdsdr  3840x2160 yuv420p10le bt709  bt709        bt709
+          mk sdr8    1920x1080 yuv420p     bt709  bt709        bt709
+          sum=/tmp/diag-summary.txt; : > $sum
+          for n in hdr10 hlg uhdsdr sdr8; do
+            f=/tmp/diag-$n.mkv; [ -f $f ] || { echo "clip $n: NOT MADE" | tee -a $sum; continue; }
+            src=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 $f)
+            ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,color_primaries,color_transfer,color_space,color_range -of compact=p=0 $f | sed "s/^/clip $n ffprobe: /"
+            timeout 120 mpv --no-config --no-audio --o=/tmp/diag-ctl.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1 || true
+            ctl=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/diag-ctl.mkv 2>/dev/null)
+            echo "clip $n: source $src frames, mpv-alone encode $ctl"
+            for mode in encode play; do for r in 1 2 3; do
+              id=$n-$mode-$r; L=/tmp/diag-mpv-$id.log; export PUSHMPC_VS_LOG_DIR=/tmp/vslog-diag-$id; rm -f /tmp/diag-out.mkv
+              if [ $mode = encode ]; then
+                timeout 180 mpv --no-audio --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1 || true
+                out=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/diag-out.mkv 2>/dev/null)
+              else
+                timeout 180 mpv --no-audio --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1 || true
+                out=-
+              fi
+              echo "=== $id: raw lines (mpv log order)"
+              grep -E 'Run command: vf|Decoder format|vapoursynth.*initializ|Frame requested during init|PushMPC|Disabling filter' $L 2>/dev/null | cut -c1-400 | head -20
+              grep -h 'backend: \|portable: output\|instance closed' $PUSHMPC_VS_LOG_DIR/*.log 2>/dev/null | head -6
+              first=$(grep -m1 'Run command: vf.*append' $L 2>/dev/null)
+              ud=$(printf '%s' "$first" | grep -o 'user-data=\[[^]]*\]' | head -1); [ -n "$ud" ] || ud="none"
+              tr=$(printf '%s' "$ud" | grep -o 'transfer=[0-9]*' | head -1); [ -n "$tr" ] || tr="none (plugin guesses)"
+              # order: was the decoder's first frame format logged before the first vf append?
+              la=$(grep -n -m1 'Run command: vf.*append' $L 2>/dev/null | cut -d: -f1); ld=$(grep -n -m1 'Decoder format' $L 2>/dev/null | cut -d: -f1)
+              order="append ${la:-?} / decoder format ${ld:-?}"
+              inst=$(grep -ho 'instance closed after [0-9]*' $PUSHMPC_VS_LOG_DIR/*.log 2>/dev/null | grep -o '[0-9]*$' | tr '\n' ',')
+              adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
+              line="clip=$n run=$mode#$r first-add-user-data=$ud colour-source-transfer=$tr adds=$adds log-lines($order) out=$out control=$ctl source=$src plugin-instances-frames=${inst:-none}"
+              echo "$line" | tee -a $sum
+              echo "::notice title=colour diag $n $mode#$r::$line"
+            done; done
+          done
+          echo "--- summary"; cat $sum
+          { echo '## colour diagnostic (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          rm -r $HOME/.config/pushmpc; sh $HOME/.local/share/pushmpc/install.sh uninstall > /dev/null 2>&1 || true
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: linux-arch-logs, path: "/tmp/vslog-*\n/tmp/*.txt\n/tmp/*.out" }
