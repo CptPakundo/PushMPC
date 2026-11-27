@@ -4,7 +4,8 @@
 #   release       (dispatch with build_release) the release.yml build of this commit, which makes PushMPC-Setup.exe
 #   win-setup     PushMPC-Setup.exe /S on windows-2025 with players installed from their packages (MPC-HC, VLC, KMPlayer):
 #                 detection, the engine choice in the log, auto-plan.json, pmml.txt from a simulated RTX 4090 with the
-#                 TensorRT-RTX EP, capture mode for the players without a native route, then the uninstall leaves
+#                 TensorRT-RTX EP, capture mode for the players without a native route, a sandbox dry run of Repair and
+#                 Update that writes nothing (U-1), then the uninstall leaves
 #                 nothing behind (registry, Start menu, files) and the players' settings as they were
 #   linux-setup   setup.sh in Arch with mpv, VLC, Kodi, Celluloid, SMPlayer from pacman: the plugin built from this
 #                 commit, detection, the engine choice, auto-plan.txt, mpv playing through the installed block, then
@@ -324,6 +325,36 @@ jobs:
           $bad += Check 'repair'
           if ($p.ExitCode -ne 0) { Write-Host "::error::repair exit $($p.ExitCode)"; exit 1 }
           if ($bad) { Write-Host "::error::Setup dropped or changed $bad of the earlier PushMPC settings (R-REG1)"; exit 1 }
+          exit 0
+      # U-1: a sandbox dry run of Repair and of Update over the real install writes nothing: no
+      # HKCU\Software\PushMPC-Sandbox (a dry run once left Update\Enabled=1 there), no updater run, no logs\setup.log
+      # entry; its log goes to %TEMP%\PushMPC-Setup-dry-run.log. The quiet command line, not the maintenance page's
+      # checkbox (a GUI path), which the same fix (setup.cpp OnNext) guards.
+      - name: Setup's sandbox dry run (Repair, Update) changes nothing (U-1)
+        timeout-minutes: 10
+        run: |
+          $log = "$env:RUNNER_TEMP\ux.txt"; $bad = @()
+          $inst = "$env:LOCALAPPDATA\PushMPC"; $sk = 'HKCU:\Software\PushMPC-Sandbox'; $dl = "$env:TEMP\PushMPC-Setup-dry-run.log"
+          # every file and folder of the install, with size and write time
+          function Snap { Get-ChildItem $inst -Recurse -Force | ForEach-Object { '{0}|{1}|{2}' -f $_.FullName.Substring($inst.Length), $(if ($_.PSIsContainer) { 'dir' } else { $_.Length }), $_.LastWriteTimeUtc.Ticks } | Sort-Object }
+          if (Test-Path $sk) { Write-Host "::error::precondition: $sk exists before the dry runs"; exit 1 }
+          $before = @(Snap)
+          foreach ($op in '--repair', '--update') {
+            Remove-Item $dl -Force -ErrorAction SilentlyContinue
+            $keep = $env:PSModulePath; Remove-Item Env:PSModulePath
+            $p = Start-Process "$inst\PushMpcSetup.exe" -ArgumentList '--sandbox', '--dry-run', '--quiet', $op -PassThru
+            $env:PSModulePath = $keep
+            if (-not $p.WaitForExit(600000)) { $p.Kill(); $bad += "$op dry run timed out"; continue }
+            "dry run $op`: exit $($p.ExitCode); its log in %TEMP%: $(Test-Path $dl)" | Tee-Object -Append $log
+            Get-Content $dl -ErrorAction SilentlyContinue | Select-Object -Last 6 | Tee-Object -Append $log
+            if ($p.ExitCode -ne 0) { $bad += "$op dry run exit $($p.ExitCode)" }
+            if (-not (Test-Path $dl)) { $bad += "$op dry run: no $dl (did it run, and where did it log?)" }
+            if (Test-Path $sk) { $bad += "$op dry run left $sk behind: $((reg query 'HKCU\Software\PushMPC-Sandbox' /s) -join ' | ')" }
+          }
+          $diff = @(Compare-Object $before @(Snap) | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" })
+          "install folder: $($before.Count) entries, $($diff.Count) changed by the dry runs" | Tee-Object -Append $log
+          if ($diff) { $diff | Select-Object -First 20 | Tee-Object -Append $log; $bad += "the dry runs changed the install folder ($($diff.Count) entries; logs\setup.log among them: $([bool]($diff -match '\\logs\\setup')))" }
+          if ($bad) { foreach ($b in $bad) { Write-Host "::error::$b" }; exit 1 }
           exit 0
       - name: A Plex update simulated (Plex's own avfilter-8.dll back), then the logon check sets the proxy up again
         timeout-minutes: 10
