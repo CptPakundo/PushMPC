@@ -465,7 +465,22 @@ jobs:
           brew tap CptPakundo/pushmpc "$RUNNER_TEMP/tap-src"
           brew install --build-from-source --verbose CptPakundo/pushmpc/pushmpc   # the full name: Homebrew 6 trusts this formula
           brew info CptPakundo/pushmpc/pushmpc | sed -n 1,3p
-          brew test --verbose CptPakundo/pushmpc/pushmpc
+          if ! brew test --verbose CptPakundo/pushmpc/pushmpc; then
+            # brew test keeps vspipe's stderr and the plugin's log to itself (run 45942725916, macos-15-intel: exit 250
+            # and nothing else): the formula's test clip again through the same vspipe, with both, then fail
+            echo "::group::brew test failed: the formula's vspipe test, run directly"
+            printf '%s\n' 'import vapoursynth as vs' 'core = vs.core' \
+              'clip = core.std.BlankClip(format=vs.YUV420P8, width=320, height=240, length=24, fpsnum=24000, fpsden=1001)' \
+              'clip = core.pushmpc.Enhance(clip, backend="portable", smoother="2")' 'clip.set_output()' > "$RUNNER_TEMP/t.vpy"
+            export PUSHMPC_VS_LOG_DIR="$RUNNER_TEMP/brewlogs"; mkdir -p "$PUSHMPC_VS_LOG_DIR"
+            rc=0; "$(brew --prefix vapoursynth)/bin/vspipe" --info "$RUNNER_TEMP/t.vpy" 2>&1 || rc=$?
+            echo "vspipe exit $rc"
+            tail -n 60 "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | cut -c1-400 || true
+            find "$(brew --prefix pushmpc)" -name '*.dylib' -path '*vapoursynth*' -exec file {} \; 2>/dev/null | head -5
+            for f in $(ls -t ~/Library/Logs/DiagnosticReports/*vspipe* ~/Library/Logs/DiagnosticReports/*python* 2>/dev/null | head -n 2); do echo "== $f"; head -c 6000 "$f"; echo; done
+            echo "::endgroup::"
+            echo "::error::brew test failed (the formula's vspipe test; details above)"; exit 1
+          fi
           brew audit --formula cptpakundo/pushmpc/pushmpc || echo "::warning::brew audit reported issues (see log)"
           brew list --verbose CptPakundo/pushmpc/pushmpc | sed -n 1,30p
           # without the Plex for Mac archive the script leaves the resource out (a release whose macOS asset is missing)
@@ -490,9 +505,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clip"; clip="$RUNNER_TEMP/clip/bbb.mp4"
           [ -f "$clip" ] || curl -fsSL --retry 3 --max-time 120 -o "$clip" "$CLIP_URL"
-          got=$(shasum -a 256 "$clip" | cut -d' ' -f1 | tr a-f A-F)
+          got=$(shasum -a 256 "$clip" | cut -d' ' -f1 | tr A-F a-f)   # both sides lower case (the pin is)
           case "$CLIP_SHA256" in TODO*) echo "::warning::test clip not pinned yet: sha256 $got ($(wc -c < "$clip") bytes)";;
-            *) [ "$got" = "$CLIP_SHA256" ] || { echo "::error::clip SHA-256 $got != $CLIP_SHA256"; exit 1; };; esac
+            *) [ "$got" = "$(printf '%s' "$CLIP_SHA256" | tr A-F a-f)" ] || { echo "::error::clip SHA-256 $got != $CLIP_SHA256"; exit 1; };; esac
           export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
           unset VSSCRIPT_PATH
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install
