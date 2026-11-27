@@ -720,6 +720,10 @@ jobs:
           iina_enabled() { defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina 2>/dev/null || echo absent; }
           enabled0=$(iina_enabled)
           export HOME="$RUNNER_TEMP/home-players"; mkdir -p "$HOME"
+          # a user's own VLC settings before install: VLC's post-processing filter and an output of their choice; both
+          # must come back after uninstall, also when VLC rewrote vlcrc in between (it does when it runs below)
+          mkdir -p "$HOME/Library/Preferences/org.videolan.vlc"
+          printf '[core]\nvout=caopengllayer\nvideo-filter=postproc\n' > "$HOME/Library/Preferences/org.videolan.vlc/vlcrc"
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-players.txt" | sed -n '/IINA and VLC:/,$p' | cut -c1-400
           iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
           vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
@@ -748,18 +752,19 @@ jobs:
           [ "$enabled1" = "$enabled0" ] && echo "IINA's settings as they were" || { echo "::error::IINA's PluginEnabled setting not restored"; echo "  before: $enabled0"; echo "  after:  $enabled1"; defaults read com.colliderli.iina 2>&1 | head -n 12 | sed 's/^/  domain now: /'; fails=$((fails + 1)); }
           [ ! -e "$HOME/Library/LaunchAgents/io.github.pushmpc.vlc-env.plist" ] && [ ! -e "$HOME/Library/Application Support/PushMPC/vlc" ] \
             && echo "VLC: the LaunchAgent and the plugin folder gone" || { echo "::error::VLC: the LaunchAgent or the plugin folder is left behind"; fails=$((fails + 1)); }
-          # vlcrc (none before install): gone, or kept by uninstall only for VLC's own settings (VLC rewrites it as its
-          # whole configuration when it runs); no active PushMPC key may be left in it (a leading BOM skipped)
+          # vlcrc (the user's, seeded above): their vout and video-filter back, no active PushMPC key left (VLC may have
+          # rewritten the file as its whole configuration; a leading BOM and "[core] # ..." headers handled)
           if [ -f "$rc" ]; then
             act=$(awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$rc")
-            printf '%s\n' "$act" | sed '/^$/d; s/^/  vlcrc kept, active line: /'
-            if printf '%s\n' "$act" | grep -qE '^pushmpc-|^vout=.*pushmpc|^video-filter=.*(pushmpc_out|postproc)'; then
+            printf '%s\n' "$act" | sed '/^$/d; s/^/  vlcrc after uninstall, active line: /'
+            if printf '%s\n' "$act" | grep -qE '^pushmpc-|^vout=.*pushmpc|^video-filter=.*pushmpc_out'; then
               echo "::error::VLC: vlcrc still holds PushMPC settings after uninstall"; fails=$((fails + 1))
-            else
-              echo "VLC: vlcrc kept with VLC's own settings only (no PushMPC key)"
             fi
+            printf '%s\n' "$act" | grep -qx 'vout=caopengllayer' && printf '%s\n' "$act" | grep -qx 'video-filter=postproc' \
+              && echo "VLC: the user's own vout and video-filter are back" \
+              || { echo "::error::VLC: the user's own vout=caopengllayer / video-filter=postproc did not come back"; fails=$((fails + 1)); }
           else
-            echo "VLC: vlcrc gone (none was there before)"
+            echo "::error::VLC: the user's vlcrc is gone after uninstall"; fails=$((fails + 1))
           fi
           [ -z "$(launchctl getenv VLC_PLUGIN_PATH)" ] || { echo "::error::VLC_PLUGIN_PATH is still set"; fails=$((fails + 1)); }
           [ "$fails" = 0 ] || exit 1

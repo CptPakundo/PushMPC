@@ -123,6 +123,24 @@ function Join-Filters([string]$cur, [bool]$add) {
     if ($add) { $list += 'postproc', 'pushmpc_out' }
     return ($list -join ':')
 }
+# the pre-install entries, then those added since install that are not PushMPC's; an entry of $ours counts as
+# PushMPC's only when it was not in the pre-install list (a user's own postproc stays)
+function Merge-List($pre, $cur, [string[]]$ours) {
+    $preList = @(); if ($pre) { $preList = @("$pre".Split(':') | Where-Object { $_ }) }
+    $mine = @($ours | Where-Object { $preList -notcontains $_ })
+    $out = New-Object Collections.Generic.List[string]
+    foreach ($e in $preList) { if (-not $out.Contains($e)) { $out.Add($e) } }
+    if ($cur) { foreach ($e in "$cur".Split(':')) { if ($e -and -not $out.Contains($e) -and $mine -notcontains $e) { $out.Add($e) } } }
+    return ($out -join ':')
+}
+# a key install set: while it still holds one of PushMPC's values ('*': any), back to the pre-install value ($null:
+# the key was absent, so it goes); a value the user set since install stays
+function Restore-Value([string[]]$lines, [string]$sec, [string]$key, [string[]]$ours, $pre) {
+    $cur = Get-RcValue $lines $sec $key
+    if ($null -eq $cur) { return , $lines }
+    if ($ours -notcontains '*' -and $ours -notcontains $cur) { return , $lines }
+    return , (Set-RcValue $lines $sec $key $pre)
+}
 function Set-UserPluginPath([string]$dir, [bool]$add) {
     if ($NoEnvironment) { return }
     $cur = [Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User')
@@ -173,6 +191,7 @@ switch ($Action) {
             'video-filter' = Get-RcValue $lines 'core' 'video-filter'
             'd3d11-upscale-mode' = Get-RcValue $lines 'direct3d11' 'd3d11-upscale-mode'
             'vout' = Get-RcValue $lines 'core' 'vout'
+            'pushmpc-smoother' = Get-RcValue $lines 'pushmpc' 'pushmpc-smoother'
             # no vlcrc yet (VLC never ran): uninstall removes the one this install wrote
             'vlcrc-absent' = $(if (Test-Path $VlcRc) { 'no' } else { 'yes' })
             'vlcdir-absent' = $(if (Test-Path (Split-Path $VlcRc)) { 'no' } else { 'yes' })
@@ -203,14 +222,21 @@ switch ($Action) {
             $dir = Split-Path $VlcRc
             if ("$($state['vlcdir-absent'])" -eq 'yes' -and (Test-Path $dir) -and -not (Get-ChildItem $dir -Force)) { Remove-Item $dir }
         } elseif (Test-Path $VlcRc) {
+            # VLC rewrote vlcrc since install (or the user changed it): each key install changed goes back by its rule:
+            # the pre-install value (the state file), plus what the user added since, minus PushMPC's own entries; a
+            # key absent before with only PushMPC's entries left goes (pushmpc-vlc-test.ps1 checks the cases)
             $lines = Read-Rc $VlcRc
-            $rest = Join-Filters (Get-RcValue $lines 'core' 'video-filter') $false
-            $lines = Set-RcValue $lines 'core' 'video-filter' $(if ($rest) { $rest } else { $null })
-            $orig = if ($state) { $state['d3d11-upscale-mode'] } else { $null }
-            $lines = Set-RcValue $lines 'direct3d11' 'd3d11-upscale-mode' $orig
-            $lines = Set-RcValue $lines 'pushmpc' 'pushmpc-smoother' $null
-            if ((Get-RcValue $lines 'core' 'vout') -eq 'pushmpc_d3d11') { $lines = Set-RcValue $lines 'core' 'vout' $(if ($state) { $state['vout'] } else { $null }) }
+            $pre = if ($state) { $state } else { @{} }
+            $vf = Get-RcValue $lines 'core' 'video-filter'
+            if ($null -ne $vf) {
+                $final = Merge-List $pre['video-filter'] $vf @('postproc', 'pushmpc_out')
+                $lines = Set-RcValue $lines 'core' 'video-filter' $(if ($final) { $final } elseif ($null -ne $pre['video-filter']) { '' } else { $null })
+            }
+            $lines = Restore-Value $lines 'direct3d11' 'd3d11-upscale-mode' @('super') $pre['d3d11-upscale-mode']
+            $lines = Restore-Value $lines 'pushmpc' 'pushmpc-smoother' @('*') $pre['pushmpc-smoother']
+            $lines = Restore-Value $lines 'core' 'vout' @('pushmpc_d3d11') $pre['vout']
             Write-Rc $VlcRc $lines
+            Remove-Item -Force -ErrorAction SilentlyContinue "$VlcRc.pushmpc-backup"
             # a vlcrc this install created and VLC never filled holds no setting now: removed again (and VLC's folder)
             if ($state -and "$($state.'vlcrc-absent')" -eq 'yes' -and -not @(Get-Content $VlcRc | Where-Object { $_.Trim() -and $_ -notmatch '^\s*(\[|#)' }).Count) {
                 Remove-Item -Force $VlcRc

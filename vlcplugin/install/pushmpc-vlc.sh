@@ -88,6 +88,51 @@ vlcrc_del() {
     { s = secname($0) } s != "" { insec = (s == sec) }
     insec && index($0, key "=") == 1 { print "#" $0; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
+# vlcrc_has <file> <section> <key>: exit 0 when the key is active (set, even to nothing) in that section
+vlcrc_has() {
+  [ -f "$1" ] || return 1
+  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+    BEGIN { found = 0 } { s = secname($0) } s != "" { insec = (s == sec); next }
+    insec && index($0, key "=") == 1 { found = 1; exit } END { exit !found }' "$1"
+}
+# The pre-install vlcrc: $RC.pushmpc-backup (install found one), or none (install created vlcrc)
+pre_has() { [ -f "$RC.pushmpc-backup" ] && vlcrc_has "$RC.pushmpc-backup" "$1" "$2"; }
+pre_get() { [ -f "$RC.pushmpc-backup" ] && vlcrc_get "$RC.pushmpc-backup" "$1" "$2"; }
+# list_merge <pre> <cur> <ours>: the pre-install entries, then the entries added since install that are not PushMPC's
+# (an entry of <ours>, space separated, counts as PushMPC's only when it was not in the pre-install list)
+list_merge() {
+  awk -v pre="$1" -v cur="$2" -v ours="$3" 'BEGIN {
+    n = split(pre, p, ":"); for (i = 1; i <= n; i++) if (p[i] != "") inpre[p[i]] = 1
+    m = split(ours, o, " "); for (i = 1; i <= m; i++) if (!(o[i] in inpre)) mine[o[i]] = 1
+    out = ""
+    for (i = 1; i <= n; i++) if (p[i] != "" && !(p[i] in seen)) { out = out (out == "" ? "" : ":") p[i]; seen[p[i]] = 1 }
+    k = split(cur, c, ":")
+    for (i = 1; i <= k; i++) if (c[i] != "" && !(c[i] in seen) && !(c[i] in mine)) { out = out (out == "" ? "" : ":") c[i]; seen[c[i]] = 1 }
+    print out }'
+}
+# restore_list <section> <key> <ours>: a list key install extended (video-filter, extraintf) back to the rule above;
+# absent before install and nothing but PushMPC's entries left: the key goes (commented out)
+restore_list() {
+  vlcrc_has "$RC" "$1" "$2" || return 0
+  final="$(list_merge "$(pre_get "$1" "$2")" "$(vlcrc_get "$RC" "$1" "$2")" "$3")"
+  if [ -n "$final" ] || pre_has "$1" "$2"; then vlcrc_set "$RC" "$1" "$2" "$final"; else vlcrc_del "$RC" "$1" "$2"; fi
+}
+# restore_value <section> <key> <ours>: a key install set to one of <ours> (space separated; "*" any value): while it
+# still holds PushMPC's value, back to the pre-install value, or out when it was absent; a value the user set since
+# install stays
+restore_value() {
+  vlcrc_has "$RC" "$1" "$2" || return 0
+  cur="$(vlcrc_get "$RC" "$1" "$2")"
+  case " $3 " in *" * "*|*" $cur "*) ;; *) return 0 ;; esac
+  if pre_has "$1" "$2"; then vlcrc_set "$RC" "$1" "$2" "$(pre_get "$1" "$2")"; else vlcrc_del "$RC" "$1" "$2"; fi
+}
+# vlcrc_del_pushmpc_unrecorded: pushmpc-* keys VLC may have written outside [pushmpc]: out unless the backup has them
+vlcrc_del_pushmpc_unrecorded() {
+  [ -f "$RC" ] || return 0
+  if [ -f "$RC.pushmpc-backup" ]; then keep="$(vlcrc_active "$RC.pushmpc-backup" | sed -n 's/^\(pushmpc-[A-Za-z0-9_-]*=.*\)$/\1/p')"; else keep=''; fi
+  KEEP="$keep" awk 'BEGIN { n = split(ENVIRON["KEEP"], k, "\n"); for (i = 1; i <= n; i++) ok[k[i]] = 1 }
+    /^pushmpc-[A-Za-z0-9_-]*=/ && !($0 in ok) { print "#" $0; next } { print }' "$RC" > "$RC.tmp" && mv "$RC.tmp" "$RC"
+}
 # vlcrc_del_pushmpc <file>: comment out every active pushmpc-* key, in any section (PushMPC's module options)
 vlcrc_del_pushmpc() {
   [ -f "$1" ] || return 0
@@ -364,9 +409,8 @@ uninstall_one() {
       rm -f "$DIR/pushmpc_boot.lua" "$DIR/pushmpc.conf"; rmdir "$DIR" 2>/dev/null || true
       for d in "$HOME"/snap/vlc/*/.local/share/vlc/lua/intf; do rm -f "$d/pushmpc_boot.lua"; done
       if [ -f "$RC" ]; then
-        rest="$(vlcrc_get "$RC" core extraintf | tr ':' '\n' | grep -v '^luaintf$' | paste -s -d: - || true)"
-        if [ -n "$rest" ]; then vlcrc_set "$RC" core extraintf "$rest"; else vlcrc_del "$RC" core extraintf; fi
-        vlcrc_del "$RC" core lua-intf
+        restore_list core extraintf luaintf
+        restore_value core lua-intf pushmpc_boot
       fi ;;
     macos)   rm -f "$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"; launchctl unsetenv VLC_PLUGIN_PATH 2>/dev/null || true ;;
   esac
@@ -380,20 +424,18 @@ uninstall_one() {
   fi
   created=0; [ -f "$RC.pushmpc-absent" ] && created=1
   rm -f "$RC.pushmpc-installed" "$RC.pushmpc-absent"
+  # VLC rewrote vlcrc since install (or the user changed it): each key install changed goes back by its rule: the
+  # pre-install value (from $RC.pushmpc-backup), plus what the user added since, minus PushMPC's own entries; a key
+  # absent before with only PushMPC's entries left is taken out (pushmpc-vlc-test.sh checks the cases)
   if [ -f "$RC" ]; then
-    [ "$tgt" = macos ] && [ "$(vlcrc_get "$RC" core vout)" = "pushmpc_macosx,any" ] && vlcrc_del "$RC" core vout
-    rest="$(filters_del "$(vlcrc_get "$RC" core video-filter)")"
-    if [ -n "$rest" ]; then vlcrc_set "$RC" core video-filter "$rest"; else vlcrc_del "$RC" core video-filter; fi
-    vlcrc_del "$RC" pushmpc pushmpc-smoother
-    vlcrc_del_pushmpc "$RC"
-    if [ "$(vlcrc_get "$RC" core vout)" = pushmpc_gl ]; then
-      old="$(vlcrc_get "$RC.pushmpc-backup" core vout)"
-      if [ -n "$old" ] && [ "$old" != pushmpc_gl ]; then vlcrc_set "$RC" core vout "$old"; else vlcrc_del "$RC" core vout; fi
-    fi
-    if [ "$tgt" != macos ]; then
-      old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
-      if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi
-    fi
+    restore_list core video-filter "postproc pushmpc_out"
+    restore_value core vout "pushmpc_macosx,any pushmpc_gl"
+    restore_value pushmpc pushmpc-smoother "*"
+    # avcodec-hw: install and the hardware self-test set it (Linux; macOS leaves it alone)
+    [ "$tgt" = macos ] || restore_value avcodec avcodec-hw "*"
+    # any other PushMPC module option: the pre-install value where there was one, else out
+    for k in $(vlcrc_active "$RC" | sed -n 's/^\(pushmpc-[A-Za-z0-9_-]*\)=.*/\1/p' | sort -u); do restore_value pushmpc "$k" "*"; done
+    vlcrc_del_pushmpc_unrecorded
   fi
   rm -f "$RC.pushmpc-backup"
   # install created vlcrc and VLC rewrote it since (VLC writes its whole configuration, every option a commented
@@ -415,6 +457,8 @@ uninstall_one() {
   say "PushMPC for VLC removed ($tgt)"
 }
 
+# PUSHMPC_VLC_LIB=1: sourced for its functions only (pushmpc-vlc-test.sh)
+if [ "${PUSHMPC_VLC_LIB:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 if [ "$TARGET" = auto ]; then TARGETS="$(detect_targets)"; else TARGETS="$TARGET"; fi
 case "$ACTION" in
   install)   [ -n "$TARGETS" ] || { echo "no supported VLC found (distro VLC, Flathub org.videolan.VLC, VLC.app)" >&2; exit 1; }
