@@ -438,6 +438,22 @@ end
 local spec = "@pushmpc:vapoursynth=file=" .. quote(opts.vpy) .. ":buffered-frames=" .. opts.buffered ..
              ":concurrent-frames=" .. opts.concurrent
 
+-- the stream's colour for the plugin (user-data matrix / transfer / range, in VapourSynth's codes; the range as
+-- _ColorRange, 0 full and 1 limited): the plugin must not read a frame while the script loads (mpv answers with a black
+-- dummy, which then reached the output: Homebrew Intel), so it opens with these and checks them at the first real frame
+local MATRIX = { ["bt.709"] = 1, ["bt.601"] = 6, ["bt.2020-ncl"] = 9, ["bt.2020-cl"] = 10, ["smpte-240m"] = 7, ["ycgco"] = 8, ["rgb"] = 0 }
+local TRANSFER = { ["bt.1886"] = 1, ["srgb"] = 13, ["linear"] = 8, ["pq"] = 16, ["hlg"] = 18, ["gamma2.2"] = 4, ["gamma2.8"] = 5 }
+local function colour_data()
+    local p = mp.get_property_native("video-params")
+    if type(p) ~= "table" then return nil end
+    local t = {}
+    if MATRIX[p.colormatrix] then t[#t + 1] = "matrix=" .. MATRIX[p.colormatrix] end
+    if TRANSFER[p.gamma] then t[#t + 1] = "transfer=" .. TRANSFER[p.gamma] end
+    if p.colorlevels == "full" then t[#t + 1] = "range=0" elseif p.colorlevels == "limited" then t[#t + 1] = "range=1" end
+    if #t == 0 then return nil end
+    return table.concat(t, ",")
+end
+
 -- the native filter's list: vf_pushmpc with the display rate when mpv knows it, and on software frames an upload to
 -- the player's D3D11 device first
 local function native_specs()
@@ -541,7 +557,8 @@ local function ensure()
             msg.info("PushMPC's native filter added: " .. want)
         end
     elseif not ours then
-        local ok, err = mp.commandv("vf", "append", spec)
+        local cd = colour_data()
+        local ok, err = mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
         if not ok then
             failed_for = path
             msg.warn("PushMPC's filter could not start (" .. tostring(err) .. "): playing without it")
