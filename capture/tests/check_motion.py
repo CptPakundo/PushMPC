@@ -6,7 +6,12 @@
 # with.y4m: frame generation on (Smoother Auto); without.y4m: --smoother off. Passes when, on the frames where the
 # square moves (wrap-arounds left out), the step's spread with frame generation is below 0.75 px and below half the spread
 # without it, the mean step is within 25 % of speed / hz, and no step goes backwards by more than 0.5 px.
+# Every result also prints what the steps are made of, for both dumps: stalls (a step under a quarter of the wanted
+# one), jumps (over one and a half source frames' worth: a frame the source skipped), backward steps, the extremes and
+# the most common step sizes; then which rule failed. A failure then says whether the source (the off dump shows it
+# too) or frame generation made it. --fps: the clip's frame rate (24).
 # Python 3, stdlib only.
+import collections
 import statistics
 import sys
 
@@ -56,6 +61,17 @@ def steps(c):
     return s
 
 
+def describe(name, s, want, src_step):
+    stall = sum(1 for d in s if abs(d) < 0.25 * want)
+    jump_at = 1.5 * max(want, src_step)
+    jumps = sum(1 for d in s if d > jump_at)
+    back = sum(1 for d in s if d < -0.5)
+    common = collections.Counter(round(d * 2) / 2 for d in s).most_common(6)
+    print(f"  {name}: {stall} stalls (under {0.25 * want:.2f} px), {jumps} jumps (over {jump_at:.2f} px), {back} backward "
+          f"(under -0.5 px); largest {max(s):.3f}, lowest {min(s):.3f}; most common (px: count) "
+          + ", ".join(f"{k:g}: {n}" for k, n in common))
+
+
 def main(argv):
     args, opt, i = [], {}, 1
     while i < len(argv):
@@ -67,7 +83,9 @@ def main(argv):
             i += 1
     speed = float(opt.get("--speed", "96"))
     hz = float(opt.get("--hz", "60"))
+    fps = float(opt.get("--fps", "24"))
     want = speed / hz
+    src_step = speed / fps
     on = steps(centres(args[0]))
     if len(on) < 30:
         print(f"FAIL: only {len(on)} usable steps in {args[0]}")
@@ -77,14 +95,26 @@ def main(argv):
     mean_on = statistics.mean(on)
     back = min(on)
     print(f"with frame generation: {len(on)} steps, mean {mean_on:.3f} px (want {want:.3f}), spread {sd_on:.3f} px, lowest {back:.3f}")
-    ok = sd_on < 0.75 and abs(mean_on - want) <= 0.25 * want and back > -0.5
+    describe("with", on, want, src_step)
+    failed = []
+    if not sd_on < 0.75:
+        failed.append(f"spread {sd_on:.3f} not under 0.75 px")
+    if not abs(mean_on - want) <= 0.25 * want:
+        failed.append(f"mean {mean_on:.3f} more than 25 % from {want:.3f}")
+    if not back > -0.5:
+        failed.append(f"a step goes back {back:.3f} px")
     if len(args) > 1:
         off = steps(centres(args[1]))[10:]
         sd_off = statistics.pstdev(off) if off else 0
         print(f"without: {len(off)} steps, spread {sd_off:.3f} px")
-        ok = ok and sd_on < 0.5 * sd_off
-    print("PASS" if ok else "FAIL")
-    return 0 if ok else 1
+        if off:
+            describe("without", off, want, src_step)
+        if not sd_on < 0.5 * sd_off:
+            failed.append(f"spread {sd_on:.3f} not under half the spread without ({0.5 * sd_off:.3f})")
+    for f in failed:
+        print(f"  failed: {f}")
+    print("FAIL" if failed else "PASS")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

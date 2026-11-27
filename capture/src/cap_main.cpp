@@ -332,6 +332,10 @@ int Run(const Options& o)
     Protected prot;
     I420 hostPic, outPic;
     uint64_t lastPrint = 0, inFrames = 0, dupFrames = 0, shown = 0, presented = 0, drainCuts = 0;
+    // new pictures as they arrive (repeats left out): the source's real cadence, which the timeline's fitted rate does
+    // not show (a frame the player dropped is just a gap in the fit). CI's capture runs check it before the motion check.
+    uint64_t newPics = 0;
+    double firstNew = 0, lastNew = 0;
     uint64_t lastFp = 0;
     bool haveFp = false, hidden = false;
     double start = Now(), lastStats = start, audioAt = 0, reopenAt = 0, nextTick = start;
@@ -411,6 +415,8 @@ int Run(const Options& o)
                 if (pr == -1 && pres) { pres->SetVisible(true); hidden = false; }
                 if (told) Log("%s", kProtectedMessage);
             }
+            if (newPics++ == 0) firstNew = Now();
+            lastNew = Now();
             bool disc = false;
             const uint64_t idx = tl.Add(f.time, disc, Now());   // its time, and when it got here (the delay covers both)
             if (eng.gpu) {
@@ -484,8 +490,9 @@ int Run(const Options& o)
         if ((o.frames > 0 && long(shown) >= o.frames) || (o.seconds > 0 && now - start >= o.seconds)) break;
     }
     if (!o.audioConf.empty() && audioMs >= 0) ClearAudioDelay(o.audioConf);
-    Log("done: %llu frames shown (%llu presented), %llu generated", static_cast<unsigned long long>(shown), static_cast<unsigned long long>(presented),
-        static_cast<unsigned long long>(eng.Generated()));
+    Log("done: %llu frames shown (%llu presented), %llu generated; source: %llu new pictures in %.1f s (%.2f a second)",
+        static_cast<unsigned long long>(shown), static_cast<unsigned long long>(presented), static_cast<unsigned long long>(eng.Generated()),
+        static_cast<unsigned long long>(newPics), lastNew - firstNew, newPics > 1 && lastNew > firstNew ? double(newPics - 1) / (lastNew - firstNew) : 0.0);
     // the order matters: frames lent by the source go back before it closes; the swapchain before its surface; the
     // surface before the instance; the window last
     eng = Engines{};

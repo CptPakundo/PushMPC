@@ -76,9 +76,13 @@ jobs:
           Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
           for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
           b=./vsplugin/build-capture/pushmpc-capture
+          # mpv must draw every frame of the clip: on the loaded 4-core runner it dropped some (run 45965850826: about 21
+          # new pictures a second of 24, and even the smoother-off dump had about 1.2 px of step noise over a clean 24 fps
+          # cadence). --framedrop=no draws a late frame late instead of leaving it out; one decoding thread leaves the
+          # cores to the engine. clean_source() then checks what capture got, before the motion check measures it.
           player() {   # player <clip> <WxH>: the one mpv window capture takes (--player mpv picks the largest)
             pkill -x mpv 2>/dev/null || true; sleep 0.5
-            mpv --vo=x11 --no-audio --loop=inf --geometry=$2+40+40 --no-border --title=pmc-square --really-quiet "$1" &
+            mpv --vo=x11 --no-audio --loop=inf --framedrop=no --vd-lavc-threads=1 --geometry=$2+40+40 --no-border --title=pmc-square --really-quiet "$1" &
             for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
             sleep 1; "$b" --list; }
           # 300 frames take 5-10 s: 120 s means the run hangs (runs 45938409156 to 45946207451 hung after the engine line
@@ -92,6 +96,15 @@ jobs:
             shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
             [ -n "$shown" ] && awk -v s="$shown" -v h="$hz" 'BEGIN { exit !(s < 0.9 * h) }' && { echo "::error::capture ($name) showed $shown of $hz refreshes a second: the engine falls behind on this runner"; bad=1; }
             if [ "$rc" != 0 ]; then bad=1; [ "$rc" = 124 ] && echo "::error::capture ($name) did not finish in 120 s: it hangs"; tail -5 "/tmp/capture-$name.log" 2>/dev/null || true; fi; }
+          # a clean source first: at least 95 % of the clip's 24 pictures a second reached capture (the done line counts
+          # new pictures as they arrive, repeats left out). Below that the motion check would measure the player's dropped
+          # frames, not frame generation: the step fails by name, and the motion check still prints its numbers.
+          clean_source() { for n in "$@"; do
+              d=$(grep ' done: ' "/tmp/capture-$n.log" 2>/dev/null | tail -1); echo "$n source: ${d#*source: }"
+              r=$(printf '%s' "$d" | sed -n 's/.*(\([0-9.]*\) a second).*/\1/p')
+              if [ -z "$r" ] || awk -v r="$r" 'BEGIN { exit !(r < 0.95 * 24) }'; then
+                echo "::error::capture ($n) got ${r:-no} new pictures a second of the clip's 24: the player dropped them or capture missed them, and the motion check below measures that"; bad=1; fi
+            done; }
           motion() { echo "$1:"; python3 -I capture/tests/check_motion.py "/tmp/$2.y4m" "/tmp/$3.y4m" --speed "$4" --hz "$5" || bad=1; }
           # the GPU engine on llvmpipe (a software rasteriser: block matching about 65 ms a pair at 640x360, run 45953079462)
           # at half size and 30 Hz, where every refresh gets its frame; the CPU engine at full size and 60 Hz
@@ -101,6 +114,7 @@ jobs:
           player /tmp/square.mkv 640x360   # stays for the presented run
           run cpu 60 --player mpv --no-present --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
           run cpuoff 60 --player mpv --no-present --engine cpu --smoother off --frames 300 --dump /tmp/cpuoff.y4m --log /tmp/capture-cpuoff.log -v
+          clean_source auto off cpu cpuoff
           motion "GPU engine (320x180, 30 Hz)" auto off 48 30
           motion "CPU engine (640x360, 60 Hz)" cpu cpuoff 96 60
           [ "$bad" = 0 ]
@@ -296,25 +310,53 @@ jobs:
           set -eu
           cat > /tmp/pmc_square.swift <<'EOF'
           import AppKit
+          import CoreVideo
           import QuartzCore
+          // a 24 fps clip as a player shows it: frame k (48 points a second: 2 points a frame) goes up at the first display
+          // refresh at or after k / 24 s. The display link names the refresh each callback is for (its output time), so the
+          // picture matches the time the screen shows it; a 24 Hz timer computing the position when it fired did not: on the
+          // 3-core VM it fired about 12 times a second, late by varying amounts, and the smoother-off dump carried that noise
+          // (run 45965850826: spread 2.5 px off, 1.76 px with frame generation)
           final class V: NSView {
-              // the position from the clock (48 points a second, whole points), not from the number of timer ticks: on the
-              // runner's VM the 24 Hz timer fired about 14 times a second, so a per-tick step moved the square at 55 points
-              // a second and the motion check measured that (run 45953079462: mean 0.93 px, want 1.6)
-              let t0 = CACurrentMediaTime()
+              var k = 0
               override func draw(_ r: NSRect) {
                   NSColor(calibratedWhite: 0.235, alpha: 1).setFill(); bounds.fill()
-                  let x = Int((CACurrentMediaTime() - t0) * 48) % 280
-                  NSColor.white.setFill(); NSRect(x: CGFloat(x), y: 74, width: 32, height: 32).fill()
+                  NSColor.white.setFill(); NSRect(x: CGFloat((k * 2) % 280), y: 74, width: 32, height: 32).fill()
               }
           }
+          setvbuf(stdout, nil, _IOLBF, 0)
           let app = NSApplication.shared
           app.setActivationPolicy(.regular)
           let w = NSWindow(contentRect: NSRect(x: 40, y: 200, width: 320, height: 180), styleMask: [.borderless], backing: .buffered, defer: false)
           w.title = "pmc-square"
           let v = V(frame: NSRect(x: 0, y: 0, width: 320, height: 180)); w.contentView = v
           w.orderFrontRegardless()
-          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.needsDisplay = true }
+          let t0 = CACurrentMediaTime()
+          let freq = CVGetHostClockFrequency()
+          var shownK = -1, frames = 0, skipped = 0
+          var dl: CVDisplayLink?
+          if CVDisplayLinkCreateWithActiveCGDisplays(&dl) == kCVReturnSuccess, let link = dl {
+              CVDisplayLinkSetCurrentCGDisplay(link, CGMainDisplayID())
+              CVDisplayLinkSetOutputHandler(link) { _, _, out, _, _ in
+                  let k = Int(((Double(out.pointee.hostTime) / freq - t0) * 24).rounded(.down))
+                  if k != shownK {
+                      if shownK >= 0 && k > shownK + 1 { skipped += k - shownK - 1 }
+                      shownK = k; frames += 1
+                      if frames % 240 == 0 { print("display link: \(frames) frames up, \(skipped) skipped") }
+                      DispatchQueue.main.async { v.k = k; v.needsDisplay = true }
+                  }
+                  return kCVReturnSuccess
+              }
+              CVDisplayLinkStart(link)
+              print("display link: refresh period \(CVDisplayLinkGetActualOutputVideoRefreshPeriod(link)) s")
+          } else {
+              // no display link (not seen; would show in capture-square.log): the clock decides the frame at each tick
+              print("no display link: a 240 Hz timer")
+              Timer.scheduledTimer(withTimeInterval: 1.0 / 240, repeats: true) { _ in
+                  let k = Int(((CACurrentMediaTime() - t0) * 24).rounded(.down))
+                  if k != v.k { v.k = k; v.needsDisplay = true }
+              }
+          }
           app.activate(ignoringOtherApps: true)
           app.run()
           EOF
@@ -337,6 +379,7 @@ jobs:
           perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 30 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
           for n in auto off; do
             last=$(grep ' shown ' /tmp/capture-$n.log | tail -1); echo "$n: $last"
+            d=$(grep ' done: ' /tmp/capture-$n.log | tail -1); echo "$n source: ${d#*source: }"   # of the window's 24 a second
             shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
             [ -n "$shown" ] && awk -v s="$shown" 'BEGIN { exit !(s < 27) }' && { echo "::error::capture ($n) showed $shown of 30 refreshes a second: the engine falls behind on this runner"; exit 1; }
           done
