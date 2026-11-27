@@ -118,7 +118,14 @@ foreach ($ep in $Eps) {
     $pat = if ($spec.extract) { @($spec.extract) } else { @($entry.extract) }
     $dest = Join-Path $part "eps\$ep"
     $files = @(Expand-Pinned $arc $pat $dest (Join-Path $part 'licenses'))
-    $lib = $files | Where-Object { $f = $_; ($f -match '\.(dll|so|dylib)$') -and @($entry.library | Where-Object { $f -like $_ }).Count } | Select-Object -First 1
+    # the pin's library patterns in priority order (pattern first, then file): in file order a dependency whose name
+    # fits a later pattern wins (onnxruntime-qnn 2.8.0: QnnHtpPrepare.dll fitted *qnn*ep* before
+    # onnxruntime_providers_qnn.dll fitted the first pattern; pmml then found no CreateEpFactories, CI run 45940733396)
+    $lib = $null
+    foreach ($lp in @($entry.library)) {
+        $lib = $files | Where-Object { ($_ -match '\.(dll|so|dylib)$') -and ($_ -like $lp) } | Select-Object -First 1
+        if ($lib) { break }
+    }
     if (-not $lib) {
         # name the archive's libraries so the pin can be corrected from the log alone
         $z = [IO.Compression.ZipFile]::OpenRead($arc)
