@@ -809,11 +809,6 @@ static int LagStageGpu(pm_engine *e, int slot, int contiguous, char *err, size_t
     if (q > e->lagB) {   // never a picture already handed out
         if (!e->gpuRep.RepairUpTo(*e->g, q, e->lagSlot, e->srcMs, [](int64_t) {}, why)) e->repFailed++;
         if (e->gpuRep.Repaired(q)) e->lagRepaired.insert(q);
-#ifdef PMVS_REGION_REPAIR
-        // RepairUpTo passes over a duplicate before planning it, but a wholly held frame is the animation gate's
-        // evidence (HeldRepair.h Plan): planned here for that alone (Dedup re-times the frame whole)
-        if (e->gpuRep.on && q >= 0 && !e->lagSlot.count(q)) (void)e->gpuRep.sched.Plan(q, 0.5 * e->srcMs);
-#endif
     }
     return LagChecked(e, dup);
 }

@@ -69,6 +69,8 @@ public:
         ++stats.frames; stats.parts += parts; stats.ms += ms;
     }
     RepairStats stats;
+    // the live-action gate as the last Plan left it (open: animation)
+    bool Gate() const { return m_evidence.Open(); }
 
 private:
     std::map<int64_t, CellGrid> m_grids;

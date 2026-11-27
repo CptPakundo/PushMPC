@@ -26,6 +26,8 @@
 #endif
 #include <functional>
 #include "veyra/portable/Interpolate.h"
+#define PMVS_REGION_REPAIR_NO_ENGINE 1   // the repair's planning loop with a CPU stand-in for the Vulkan engine
+#include "region_repair.h"
 
 using namespace pmvs;
 using namespace pmvs::portable;
@@ -420,6 +422,61 @@ static std::map<int64_t, pmvs::gpu::Shot> RunCadence(int k, int look, int64_t fr
     }
     return out;
 }
+// The held-drawing repair's planning loop as the GPU routes run it (region_repair.h RepairUpTo: VapourSynth's GPU
+// engine, the mpv Vulkan engines, VLC's portable GPU engine): a stream on twos must open the animation gate within the
+// gate's 48 frames of evidence plus the lookahead, because its wholly held frames (Dedup duplicates, never repaired)
+// are that evidence. A pan drawn on ones (live-action-like) keeps it shut.
+#ifdef PMVS_REGION_REPAIR
+struct RepairStandIn {
+    struct CellGridOut { int w = 0, h = 0, cell = 0; std::vector<float> v; std::vector<uint32_t> aux; };
+    struct RepairPart { int slotA = -1, slotB = -1; float t = 0.5f, shiftX = 0, shiftY = 0; const std::vector<uint8_t>* mask = nullptr; };
+    struct Config { int width = 960; } cfg;
+    std::map<int, int> drawing;   // slot -> the drawing it shows
+    int repaired = 0;
+    const Config& Cfg() const { return cfg; }
+    bool Cells(int slot, int, CellGridOut& o, std::string&)
+    {
+        const int d = drawing[slot];
+        o.w = 60; o.h = 34; o.cell = 16;
+        o.v.resize(size_t(o.w) * o.h); o.aux.assign(o.v.size(), 0u | (1024u << 10) | (1024u << 21));   // sub 0, Cb = Cr = 128
+        for (int y = 0; y < o.h; ++y)
+            for (int x = 0; x < o.w; ++x) o.v[size_t(y) * o.w + x] = float(128.0 + 60.0 * std::sin((x + 3 * d) * 0.4) * std::cos(y * 0.3));
+        return true;
+    }
+    bool RepairSlot(int, const RepairPart*, int, float, bool, std::string&) { ++repaired; return true; }
+};
+// the first frame pushed at which the gate is open (-1: never within frames); onTwos: every drawing shown twice
+static int GateOpensAt(bool onTwos, int frames)
+{
+    pmvs::gpu::RegionRepair rr;
+    rr.on = true;
+    RepairStandIn e;
+    std::map<int64_t, int> slotOf;
+    std::string err;
+    int lastDistinct = -1;
+    for (int s = 0; s < frames; ++s) {
+        const bool dup = onTwos && (s % 2 == 1);
+        e.drawing[s] = onTwos ? s / 2 : s;
+        if (!rr.Classify(e, s, s, lastDistinct, dup, err)) return -2;
+        if (!dup) { slotOf[s] = s; lastDistinct = s; }
+        if (!rr.RepairUpTo(e, s - pushmpc::held::kLookahead, slotOf, 41.7, [](int64_t) {}, err)) return -2;
+        if (rr.sched.Gate()) return s;
+    }
+    return -1;
+}
+static void TestRepairGate()
+{
+    // Plan pushes evidence from frame 1 on, kLookahead frames behind the newest: 48 pushes are complete at frame 48 + 3
+    const int bound = 48 + pushmpc::held::kLookahead + 1;
+    const int twos = GateOpensAt(true, 120);
+    CHECK(twos >= 0 && twos <= bound, "a stream on twos opens the repair's animation gate by frame %d (opened at %d)", bound, twos);
+    const int ones = GateOpensAt(false, 240);
+    CHECK(ones == -1, "a pan on ones keeps the gate shut (opened at %d)", ones);
+}
+#else
+static void TestRepairGate() {}
+#endif
+
 static void TestCadence()
 {
     using pmvs::gpu::Shot;
@@ -544,6 +601,7 @@ int main()
     TestHeldSpan(3, 2);
     TestHeldStill();
     TestCadence();
+    TestRepairGate();
     TestTransitions();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);

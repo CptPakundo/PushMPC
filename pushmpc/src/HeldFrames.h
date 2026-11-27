@@ -815,6 +815,7 @@ public:
         m_open = m_open ? r >= kClose : r >= kOpen;
         return m_open;
     }
+    bool Open() const { return m_open; }   // as the last Animation() decided
 private:
     size_t m_window;
     std::deque<bool> m_v;
