@@ -902,8 +902,10 @@ jobs:
               [ -n "$miss" ] || break
               [ -n "$base" ] || { echo "::warning::$s: libmpv misses $miss and the Snap names no base"; break; }
               if [ ! -d "$RUNNER_TEMP/base-$base" ]; then
-                snap download "$base" > "$base.dl.txt" 2>&1 && unsquashfs -q -d "$RUNNER_TEMP/base-$base" "$base"_*.snap >/dev/null && rm -f "$base"_*.snap "$base"_*.assert \
-                  || { echo "::warning::$s: base $base not downloaded ($(tail -1 "$base.dl.txt"))"; break; }
+                # only its library folders: a full unsquash fails without root on the base's device nodes (run 45972019513)
+                snap download "$base" > "$base.dl.txt" 2>&1 || { echo "::warning::$s: base $base not downloaded ($(tail -1 "$base.dl.txt"))"; break; }
+                unsquashfs -q -d "$RUNNER_TEMP/base-$base" "$base"_*.snap lib usr/lib > "$base.unsq.txt" 2>&1 || true; rm -f "$base"_*.snap "$base"_*.assert
+                [ -d "$RUNNER_TEMP/base-$base/usr/lib" ] || { echo "::warning::$s: base $base not unpacked ($(tail -1 "$base.unsq.txt"))"; break; }
               fi
               mkdir -p "$t/base-libs"
               for l in $miss; do p=$(find "$RUNNER_TEMP/base-$base" -name "$l" | head -1); [ -n "$p" ] && cp -L "$p" "$t/base-libs/" && echo "$s: $l from its base $base"; done

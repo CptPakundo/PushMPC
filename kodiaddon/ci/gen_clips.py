@@ -29,6 +29,10 @@ run(src + ["-i", srt, "-i", meta, "-map", "0:v", "-map", "1:a", "-map", "2:s", "
            os.path.join(out, "h264.mkv")])
 # H.264 in mp4
 run(src[:4] + ["-t", "15", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", os.path.join(out, "h264.mp4")])
+# H.264 + AAC at 48000/1001 (run_cases native48: Kodi alone at the rate of an x2 output)
+run(["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=48000/1001:duration=15", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=15",
+     "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-g", "96", "-c:a", "aac", "-b:a", "96k",
+     os.path.join(out, "h264_48.mkv")])
 # HEVC 8-bit (Kodi 21's add-on API has no HEVC: announced under another name)
 run(src[:4] + ["-t", "15", "-c:v", "libx265", "-preset", "fast", "-pix_fmt", "yuv420p", "-x265-params", "log-level=error",
                os.path.join(out, "hevc.mkv")])

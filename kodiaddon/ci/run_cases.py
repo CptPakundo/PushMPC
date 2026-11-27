@@ -65,7 +65,10 @@ EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2,
          ("hdr10_noalloc", "hdr10.mkv", {"smoother": 2, "_noalloc": 1}, 2, kodi22, "640x360", "play"),
          ("browse_noalloc", None, {"smoother": 2, "_noalloc": 1}, 1, False, "*", "browse"),
          # Windows: pushcore (engine 3) through pm_pushcore.dll with the stub core on WARP ($PUSHMPC_CORE_DIR)
-         ("pushcore_x2", "h264.mp4", {"smoother": 2, "engine": 3, "upscale": 0}, 2, True, "640x360", "play")]
+         ("pushcore_x2", "h264.mp4", {"smoother": 2, "engine": 3, "upscale": 0}, 2, True, "640x360", "play"),
+         # Kodi alone on a 48 fps clip: its own output at the rate the x2 cases ask of it (a baseline for their render
+         # check on slow renderers: the Android emulator's software GL)
+         ("native48", "h264_48.mkv", {"enabled": "false"}, 1, False, "640x360", "play")]
 if a.cases:
     keep = set(a.cases.split(","))
     CASES = [c for c in CASES + EXTRA if c[0] in keep]
@@ -192,7 +195,7 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
     else:
         write(lp, "")
     r = subprocess.run([sys.executable, os.path.join(here, "analyze.py"), lp, drive_out, name, str(k), "1" if decode else "0",
-                        str(24000 / 1001), size, summary])
+                        str((48000 if clip and "_48" in clip else 24000) / 1001), size, summary])
     if r.returncode:
         failed.append(name)
 # the HDR file through Kodi alone is the reference: when Kodi itself cannot show it on this runner (no 10-bit / HDR path
