@@ -234,6 +234,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem "$root\runtime_local\intel\experimental" | Format-Table Name, Length
 
+      - name: fidelityfx-fetch.ps1 (Setup's FSR step, pinned) for the FSR upscaler probe
+        if: hashFiles('repo/scripts/fidelityfx-fetch.ps1') != ''
+        timeout-minutes: 10
+        run: |
+          $root = "$env:RUNNER_TEMP\core-root"
+          ./repo/scripts/fidelityfx-fetch.ps1 -Dest "$root\runtime_local\amd\fidelityfx" -Cache "$env:RUNNER_TEMP\ffx-cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem "$root\runtime_local\amd\fidelityfx" | Format-Table Name, Length
+
       - name: WARP checks (bridge round trip, Intel VSR and VPL refusals, XeSS FG and SR self-tests)
         timeout-minutes: 15
         run: |
@@ -266,10 +275,13 @@ jobs:
             # the probe's numbers (WARP-functional, never a quality claim): reported, not judged; they must be there
             foreach ($k in 'pan', 'static', 'staticReset') { if ($j."xesssr.$k" -notmatch '^f0 psnr') { Write-Host "::error::XeSS SR probe ($k) did not report: $($j."xesssr.$k")"; $fail++ } }
           }
+          # the FSR upscaler probe (WARP-functional numbers, both modes): it must run or say why it cannot, never crash
+          if ($j.fsrsr -match 'exception' -or -not $j.fsrsr) { Write-Host "::error::FSR SR probe: $($j.fsrsr)"; $fail++ }
           $want = $(if ($xs) { (1 -shl 20) -bor (1 -shl 22) } else { 0 }) -bor $(if ($vp) { (1 -shl 21) -bor (1 -shl 23) } else { 0 })
           if (([uint32]$j.features -band $want) -ne $want) { Write-Host "::error::pushcore_features lacks an Intel bit: $($j.features) (want $want)"; $fail++ }
           if ($j.capsNoDevice -notmatch 'no hardware adapter|ok') { Write-Host "::error::capabilities without a GPU: $($j.capsNoDevice)"; $fail++ }
-          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |`n| XeSS SR pan (WARP-functional) | $($j.'xesssr.pan') |`n| XeSS SR still, history | $($j.'xesssr.static') |`n| XeSS SR still, reset each frame | $($j.'xesssr.staticReset') |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |`n| XeSS SR pan (WARP-functional) | $($j.'xesssr.pan') |`n| XeSS SR still, history | $($j.'xesssr.static') |`n| XeSS SR still, reset each frame | $($j.'xesssr.staticReset') |`n| FSR SR | $($j.fsrsr) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          foreach ($m in 'single', 'temporal') { foreach ($s in 'pan', 'static', 'static-reset') { "| FSR SR $m, $s | $($j."fsrsr.$m.$s") |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY } }
           if ($fail) { exit 1 }
           "WARP CHECKS PASS"
           exit 0

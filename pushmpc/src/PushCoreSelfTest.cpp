@@ -4,6 +4,7 @@
 #include "pushmpc/pushcore_abi.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/Log.h"
+#include "veyra/gfx/FsrSrBackend.h"
 
 #include <wrl/client.h>
 
@@ -282,6 +283,58 @@ std::string upscaleSummary(const UpscaleRun& run, bool warp) {
     s += std::format("{:.1f} ms a frame{}", run.msPerFrame, warp ? " (WARP-functional: a software adapter, not a quality claim for any GPU)" : "");
     return s;
 }
+
+// ---------------------------------------------------------------------------------------------------- FSR SR probe
+// PUSHCORE_SELFTEST_FSR_SR ("fsrsr"): the graph's FSR upscaler (PushFPS's FsrSrBackend with the FidelityFX loader and
+// provider of the runtime root, runtime_local\amd\fidelityfx or PUSHMPC_FSR_SR_DIR) in the upscaler probe, in both of its
+// modes for video (PUSHMPC_FSR_SR_SINGLE_FRAME = 1: every frame a new sample; 0: temporal) on each scene. Numbers only:
+// passes when FSR starts and every run produces a picture; "unavailable" without the FidelityFX files or when no FSR
+// provider runs on this adapter.
+namespace {
+uint32_t envFrames() {
+    wchar_t v[16]{};
+    const DWORD n = GetEnvironmentVariableW(L"PUSHMPC_SELFTEST_FRAMES", v, 16);
+    const uint32_t f = n && n < 16 ? uint32_t(_wtoi(v)) : 16u;
+    return std::clamp(f, 4u, 240u);
+}
+Result testFsrSr(const Context& ctx) {
+    Result o;
+    ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; std::string why;
+    if (!probeDevice(ctx, device, queue, why)) { o.verdict = "fail: " + why; return o; }
+    const uint32_t W = 1280, H = 720, w = W / 2, h = H / 2, frames = envFrames();
+    wchar_t saved[8]{};
+    const DWORD hadMode = GetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", saved, 8);
+    std::string provider;
+    bool allOk = true;
+    for (const wchar_t* mode : {L"1", L"0"}) {
+        SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", mode);   // read at initialize
+        for (const UpscaleScene scene : {UpscaleScene::Pan, UpscaleScene::Static, UpscaleScene::StaticReset}) {
+            veyra::gfx::FsrSrBackend fsr;
+            if (!fsr.initialize(device.Get(), w, h, W, H, false)) {
+                if (hadMode && hadMode < 8) SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", saved); else SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", nullptr);
+                o.verdict = "unavailable: FSR did not start on this adapter (the FidelityFX files in runtime_local\\amd\\fidelityfx, or no provider for it; see the log)";
+                return o;
+            }
+            if (fsr.providerVersion() && *fsr.providerVersion()) provider = fsr.providerVersion();
+            const UpscaleRun run = upscaleProbe(device.Get(), queue.Get(), W, H, frames, scene,
+                [&](ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* out,
+                    uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, bool reset) {
+                    return fsr.evaluate(list, color, motion, depth, out, iw, ih, ow, oh, reset, 33.3f);
+                });
+            allOk = allOk && run.ok;
+            const std::string key = std::string(mode[0] == L'1' ? "single." : "temporal.") + sceneName(scene);
+            o.fields.push_back({key, upscaleSummary(run, ctx.warp)});
+        }
+    }
+    if (hadMode && hadMode < 8) SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", saved); else SetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", nullptr);
+    o.fields.push_back({"provider", provider.empty() ? "unknown" : provider});
+    o.pass = allOk;
+    o.verdict = std::format("{}; FSR {} {}x{} -> {}x{}, {} frames, single-frame and temporal on pan / still / still reset{}", allOk ? "pass" : "fail: a run produced no picture",
+                            provider.empty() ? "?" : provider, w, h, W, H, frames, ctx.warp ? " (WARP-functional numbers)" : "");
+    return o;
+}
+const Registrar kFsrSr({PUSHCORE_SELFTEST_FSR_SR, "fsrsr", 0, &testFsrSr});
+}  // namespace
 
 }  // namespace pushmpc::selftest
 

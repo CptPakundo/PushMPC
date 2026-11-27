@@ -549,6 +549,7 @@ typedef int (*PushCorePrewarmReleaseFn)(void);
 #define PUSHCORE_SELFTEST_IVSR 4u
 #define PUSHCORE_SELFTEST_VPL_FI 8u
 #define PUSHCORE_SELFTEST_BRIDGE 16u   /* the D3D11 <-> D3D12 bridge round trip (pixels compared) */
+#define PUSHCORE_SELFTEST_FSR_SR 512u  /* "fsrsr": the FSR upscaler in the upscaler probe, single-frame and temporal (numbers) */
 #define PUSHCORE_SELFTEST_FLAG_WARP 1u
 #define PUSHCORE_SELFTEST_FLAG_RECORD 2u
 PUSHCORE_API int pushcore_selfTest(uint64_t adapterLuid, const wchar_t* rootDir, uint32_t which, uint32_t flags, char* report, uint32_t reportSize);
