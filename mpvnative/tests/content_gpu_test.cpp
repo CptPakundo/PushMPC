@@ -37,8 +37,28 @@ static void Case(ID3D11Device* dev, ID3D11DeviceContext* ctx, int w, int h, bool
     std::vector<T> init(size_t(w) * h * 3 / 2);
     std::copy(y.begin(), y.end(), init.begin()); std::copy(uv.begin(), uv.end(), init.begin() + ptrdiff_t(y.size()));
     D3D11_SUBRESOURCE_DATA sd[2] = { { init.data(), UINT(w * sizeof(T)), 0 }, { init.data(), UINT(w * sizeof(T)), 0 } };
+    // older WARP builds (windows-2022's) have no P010 textures: ask first and skip the case with a clear line there
+    UINT fs = 0;
+    const UINT need = D3D11_FORMAT_SUPPORT_TEXTURE2D | (srv ? D3D11_FORMAT_SUPPORT_SHADER_LOAD : 0);
+    if (FAILED(dev->CheckFormatSupport(td.Format, &fs)) || (fs & need) != need) {
+        std::printf("SKIP  %s  -- this adapter has no %s textures%s (format support 0x%x): not covered here\n", name,
+                    p010 ? "P010" : "NV12", srv ? " with shader access" : "", fs);
+        return;
+    }
     ComPtr<ID3D11Texture2D> tex;
-    if (FAILED(dev->CreateTexture2D(&td, sd, &tex))) { Check(false, name, "CreateTexture2D failed"); return; }
+    UINT slice = 1;
+    HRESULT hr = dev->CreateTexture2D(&td, sd, &tex);
+    if (FAILED(hr)) {
+        // some WARP builds create a planar texture but no planar array: test the same picture as a single texture (the
+        // array-slice path is covered by the NV12 1080p case)
+        std::printf("NOTE  %s: the 2-slice array failed (hr 0x%08lx); testing a single-slice texture\n", name, (unsigned long)hr);
+        td.ArraySize = 1; slice = 0;
+        hr = dev->CreateTexture2D(&td, sd, &tex);
+    }
+    if (FAILED(hr)) {
+        char e[96]; std::snprintf(e, sizeof(e), "CreateTexture2D failed (hr 0x%08lx, format support 0x%x)", (unsigned long)hr, fs);
+        Check(false, name, e); return;
+    }
     pme::D3D11ContentTap tap; std::string why;
     if (!tap.Init(dev, UINT(w), UINT(h), p010, true, why)) { Check(false, name, why); return; }
     const auto refC = pushmpc::content::PackedCellsRef(y.data(), ys, uv.data(), static_cast<const T*>(nullptr), cs, w, h, bits);
@@ -59,7 +79,7 @@ static void Case(ID3D11Device* dev, ID3D11DeviceContext* ctx, int w, int h, bool
         }
     };
     pme::ContentTap ct; ct.alwaysClip = true;
-    for (int f = 0; f < 6; ++f) tap.Record(ctx, tex.Get(), 1, f / 24.0, f == 0, ct);
+    for (int f = 0; f < 6; ++f) tap.Record(ctx, tex.Get(), slice, f / 24.0, f == 0, ct);
     tap.Drain(ctx, ct);
     char b[256];
     std::snprintf(b, sizeof(b), "%dx%d %s%s: %d frames read back (%d with the thumbnail), luma worst %d/256 code, chroma %d, thumbnail luma %d/256; GPU copies %llu",
