@@ -51,28 +51,28 @@ class Pushmpc < Formula
     depends_on "ffmpeg@8" => :build if IINA_FFMPEG_EXTRA.include?("ffmpeg@8")
     depends_on "glslang" => :build
     depends_on "molten-vk"
-  end
 
-  # PushMPC for Plex for Mac / Plex HTPC (mpv-native.yml builds it, release.yml attaches it): the universal proxy
-  # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the self-test
-  # and pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into Plex);
-  # pushmpc-setup unpacks it and puts it into the Plex apps. A release without that asset leaves this block out.
-  # (on_macos blocks come before the resources)
-  on_macos do
+    # (one on_macos block per formula, before the resources: the Mac-only archives sit here too; update-formula.py
+    # replaces or removes each part between its >>> / <<< markers)
+    # >>> plex-mac
+    # PushMPC for Plex for Mac / Plex HTPC (mpv-native.yml builds it, release.yml attaches it): the universal proxy
+    # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the
+    # self-test and pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into
+    # Plex); pushmpc-setup unpacks it and puts it into the Plex apps. A release without that asset leaves it out
     resource "plex-mac" do
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
-  end
-
-  # PushMPC for Kodi on the Mac (kodi-addon.yml builds it, release.yml attaches it): the add-on inputstream.pushmpc
-  # (universal, for Kodi 21 and 22) and its installer. Kept as the archive; pushmpc-setup unpacks it and puts the
-  # add-on into Kodi. A release without that asset leaves this block out
-  on_macos do
+    # <<< plex-mac
+    # >>> kodi-mac
+    # PushMPC for Kodi on the Mac (kodi-addon.yml builds it, release.yml attaches it): the add-on
+    # inputstream.pushmpc (universal, for Kodi 21 and 22) and its installer. Kept as the archive; pushmpc-setup
+    # unpacks it and puts the add-on into Kodi. A release without that asset leaves it out
     resource "kodi-mac" do
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-kodi-macos-0.6.0.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
+    # <<< kodi-mac
   end
 
   # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release
