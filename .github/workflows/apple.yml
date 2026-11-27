@@ -103,7 +103,7 @@ jobs:
           grep -E 'define LIBAVUTIL_VERSION_MAJOR|define LIBAVFILTER_VERSION_MAJOR' "$ffi"/libavutil/version_major.h "$ffi"/libavfilter/version_major.h || true
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$ffi" -DMPV_INCLUDE="$mpvi" \
             -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@4)/include;$(brew --prefix ffmpeg@6)/include;$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include"
-          cmake --build build --target pushmpc_iina --parallel
+          cmake --build build --target pushmpc_iina pushmpc_iina_extras --parallel
           clang -O2 -I"$mpvi" -Wl,-rpath,"$IINA_FW" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
           ls build/pushmpc-iina*.so
           for f in build/pushmpc-iina*.so; do nm -gU "$f" | grep -q mpv_open_cplugin || { echo "::error::$f exports no mpv_open_cplugin"; exit 1; }; done

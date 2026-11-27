@@ -215,7 +215,7 @@ jobs:
             -DFFMPEG_INCLUDE="$(brew --prefix ffmpeg)/include" -DMPV_INCLUDE="$(brew --prefix mpv)/include" \
             -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@4)/include;$(brew --prefix ffmpeg@6)/include;$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include" \
             -DVAPOURSYNTH_SDK="$(dirname "$(find "$(brew --prefix vapoursynth)/" -name VapourSynth4.h | head -n 1)")" > "$W/vs.log" 2>&1 \
-            && cmake --build "$W/vs" --target pushmpc_iina --parallel >> "$W/vs.log" 2>&1 || { tail -40 "$W/vs.log"; exit 1; }
+            && cmake --build "$W/vs" --target pushmpc_iina pushmpc_iina_extras --parallel >> "$W/vs.log" 2>&1 || { tail -40 "$W/vs.log"; exit 1; }
           grep 'IINA bridge: builds for' "$W/vs.log"
           cp "$W"/vs/pushmpc-iina*.so "$O/"; ls "$O"/pushmpc-iina*.so
       - name: Stremio 5 and Jellyfin Desktop (install, self-test, exact undo)

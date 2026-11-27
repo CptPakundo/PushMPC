@@ -142,6 +142,15 @@ class Pushmpc < Formula
            *bridge, *gpu_args, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
+    # the bridge for each older FFmpeg major, one target each: one that does not build is skipped (a warning), the
+    # default bridge and the rest install anyway (CI requires them all: pushmpc_iina_extras)
+    if OS.mac? && File.exist?("build/iina-bridge-majors.txt")
+      File.read("build/iina-bridge-majors.txt").split.each do |m|
+        next if quiet_system "cmake", "--build", "build", "--target", "pushmpc_iina_av#{m}", "--parallel"
+
+        opoo "PushMPC's IINA bridge for libavutil #{m} did not build: apps with that FFmpeg major get no frame generation"
+      end
+    end
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
