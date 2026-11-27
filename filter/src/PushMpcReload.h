@@ -163,7 +163,13 @@ inline std::shared_ptr<Job> Start(const PushCoreApi* api, PushCore* core, PushCo
         const double waitMs = MsSince(tw);
         double reloadMs = 0;
         bool gaveUp = false;
-        { std::lock_guard<std::mutex> lk(job->lock); gaveUp = job->abandoned; }
+        // given up at a Stop: no rebuild. Abandoned at the timeout with a late slot (job->late): the rebuild still runs, its
+        // success is handed over (the live run with a 200 ms bound: the quick graph's close alone took 211 ms)
+        {
+            std::shared_ptr<Late> late;
+            { std::lock_guard<std::mutex> lk(job->lock); gaveUp = job->abandoned; late = job->late; }
+            if (gaveUp && late) { std::lock_guard<std::mutex> ll(late->lock); gaveUp = !late->wanted; }
+        }
         if (!closesDone) {
             err = std::format("an earlier pushcore close still runs after {:.0f} ms: the reload was not started", waitMs);
         } else if (gaveUp) {

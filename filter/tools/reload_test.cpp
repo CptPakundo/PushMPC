@@ -402,6 +402,22 @@ int main()
         Check(!rl::Veto::KeepAtTimeout(d0, d1, true), "veto: a lost device: not kept");
     }
 
+    {   // 17. the timeout passes while the idle quick graph still closes (live run, 200 ms bound: the close took 211 ms):
+        //     the rebuild still runs after the close and its success is handed over (before: "returned -1 after 0 ms")
+        Reset();
+        Filter f;
+        StubCore quick; quick.id = 21; quick.close = Mode::Slow; quick.slowMs = 300;
+        StubCore full; full.id = 22; full.reload = Mode::Fast;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, P(quick), f.Hooks(), lim);
+        PushCore* got = nullptr;
+        const auto t = rl::Clock::now();
+        while (r.late && !got && rl::MsSince(t) < 3000) { got = rl::TakeLate(*r.late, nullptr); if (!got) Sleep(10); }
+        Check(r.how == rl::Outcome::TimedOut && got == P(full) && full.reloads == 1 && !full.closed.load() && quick.closed.load(),
+              "timeout during the quick graph's close: the rebuild still runs and is handed over");
+        Check(WaitIdle(3000), "timeout during the quick graph's close: nothing left running");
+    }
     if (g_fail) std::printf("FAILED: %s\n", g_failed.c_str());
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;

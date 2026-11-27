@@ -170,14 +170,17 @@ int wmain(int argc, wchar_t** argv)
     // the filter's own log of this process
     const std::wstring log = FilterLog();
     std::map<std::string, int> count;
-    const char* keys[] = { "debug ReloadTimeoutMs", "did not finish", "its graph is handed to the filter", "is taken over", "is not taken over",
-                           "settings reloaded", "runtime fallback", "no-output guard", "device lost", "Stop done" };
+    // one marker per event, each the exact text of one filter log line kind (the fallback's status line also says "taken
+    // over should it still succeed": the first host counted that as a take-over)
+    const char* kBound = "settings reload: bound ", *kAbandoned = "settings reload did not finish after ", *kHanded = "its graph is handed to the filter",
+              *kTaken = ") is taken over: ", *kVetoed = "is not taken over", *kReloaded = "settings reloaded in ", *kFallback = "runtime fallback: ",
+              *kGuard = "no-output guard: ", *kLost = "device lost (", *kStop = "Stop done in ", *kClosedLate = "the abandoned reload returned ";   // abandoned and closed (failed, given up, or no rebuild)
+    const char* keys[] = { kBound, kAbandoned, kHanded, kTaken, kVetoed, kReloaded, kFallback, kGuard, kLost, kStop, kClosedLate };
     if (!log.empty()) {
         std::ifstream f(log);
         for (std::string line; std::getline(f, line);) {
-            for (const char* k : keys) if (line.find(k) != std::string::npos) ++count[k];
-            if (line.find("taken over") != std::string::npos || line.find("handed to the filter") != std::string::npos || line.find("did not finish") != std::string::npos)
-                std::printf("  log: %s\n", line.substr(0, 300).c_str());
+            bool shown = false;
+            for (const char* k : keys) if (line.find(k) != std::string::npos) { ++count[k]; if (!shown && k != kStop) { std::printf("  log: %s\n", line.substr(0, 300).c_str()); shown = true; } }
         }
     }
     std::printf("result played=%d state=%s log=%ls", played ? 1 : 0, state.c_str(), log.empty() ? L"(not found)" : log.c_str());
@@ -185,5 +188,6 @@ int wmain(int argc, wchar_t** argv)
     std::printf("\n");
     CoUninitialize();
     if (!played || state == "error abort") return 1;
-    return count["is taken over"] > 0 ? 0 : 2;
+    // taken over: every take-over had its hand-over before it (and at least one happened)
+    return count[kTaken] > 0 && count[kTaken] <= count[kHanded] ? 0 : 2;
 }
