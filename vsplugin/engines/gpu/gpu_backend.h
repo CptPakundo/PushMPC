@@ -157,6 +157,17 @@ public:
 
     // the lookahead the Pipeline must request (schedule.h SetLookahead)
     int Lookahead() const { return cadence.Lookahead(); }
+    // the stream ends before frame e (an unknown-length source, eof_guard.h): what waits is settled as at a known end
+    bool End(int64_t e, std::string& err)
+    {
+        cadence.SetEnd(e);
+        if (m_last < e - 1) return true;   // the rest settles as it is pushed
+        std::vector<Settled> settled;
+        cadence.Settle(settled);
+        for (const Settled& st : settled) if (!Emit(st, err)) return false;
+        Prune();
+        return Collect(false, err);
+    }
 
     bool CanSubmit() override { return true; }
     bool Submit(int64_t s, int64_t pts, bool discontinuity, std::string& err) override

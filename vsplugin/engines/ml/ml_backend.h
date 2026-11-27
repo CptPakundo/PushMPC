@@ -100,6 +100,16 @@ public:
     int64_t frames = 0;
     static constexpr int kRepairLookahead = 3;
     int RepairLookahead() const { return regionRepair ? kRepairLookahead : 0; }
+    // the stream ends before frame e (an unknown-length source, eof_guard.h): the repair's waiting frames go out
+    bool End(int64_t e, std::string& err)
+    {
+        if (e > 0 && (frames <= 0 || e < frames)) frames = e;
+#ifdef PMVS_ML_REGION_REPAIR
+        if (regionRepair && m_last >= e - 1) return EmitUpTo(m_last, err);
+#endif
+        (void)err;
+        return true;
+    }
     struct RepairCounts { uint64_t frames = 0, parts = 0, pairs = 0, mapRuns = 0, gated = 0, overBudget = 0; double ms = 0; } repairCounts;
 
     bool CanSubmit() override { return true; }

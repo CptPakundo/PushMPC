@@ -33,6 +33,15 @@ public:
     int64_t srcFrames = 0;      // the clip's length: a run held at its end is shown as it is
     uint64_t repeats = 0;
     int Lookahead() const { return dedup ? held::kLookahead : 0; }
+    // the stream ends before frame e (an unknown-length source, eof_guard.h): a held run waiting at the end is shown as it is
+    bool End(int64_t e, std::string& err)
+    {
+        if (e > 0 && (srcFrames <= 0 || e < srcFrames)) srcFrames = e;
+        if (m_last < e - 1 || m_pending.empty()) return true;
+        for (int64_t p : m_pending) if (!Hold(p, err)) return false;
+        m_pending.clear();
+        return true;
+    }
 
     bool CanSubmit() override { return true; }
     bool Submit(int64_t s, int64_t pts, bool discontinuity, std::string& err) override

@@ -156,30 +156,21 @@ jobs:
           "$vsp" vsplugin/tests/ci/portable_clip.vpy -- > /dev/null
           cat $RUNNER_TEMP/vslog/*.log | tail -20
 
-      - name: The end of a stream of unknown length (mpv's source; probe, not judged yet)
+      # the end guard (eof_guard.h): mpv's unknown-length source must give the known-length output, frame for frame, on
+      # both routes, with and without Dedup; at 1 thread too (its synchronous fetch must not deadlock), under a timeout
+      - name: The end of a stream of unknown length (mpv's source) gives the known-length output (1 thread and the default)
         if: ${{ !cancelled() }}
         timeout-minutes: 10
         env: { PUSHMPC_VK_ALLOW_CPU: '1' }
         run: |
           set -uo pipefail
           export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_VS_LOG_DIR=$RUNNER_TEMP/vslog-eof
-          python vsplugin/tests/ci/eof_probe.py
-          grep -h "failed: a source frame it requested\|instance closed" $RUNNER_TEMP/vslog-eof/*.log | head -20 || true
-
-      # a probe for the unknown-length fix (not judged): may a filter fetch its source synchronously inside its getFrame
-      # without deadlocking a small pool (1 thread is the decisive case), and what the pinned core does there and on arError
-      - name: VapourSynth R82, a synchronous getFrame inside a filter at 1 and 2 threads, and the core's source on it
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        timeout-minutes: 6
-        run: |
-          set -uo pipefail
-          for t in 1 2; do rc=0; timeout 60 python vsplugin/tests/ci/sync_probe.py $t || rc=$?; [ $rc = 0 ] || echo "sync $t: exit $rc (124: timed out, a deadlock)"; done
-          d="$RUNNER_TEMP/vs-src"
-          git clone -q --depth 1 -b R82 https://github.com/vapoursynth/vapoursynth "$d" || exit 0
-          cd "$d/src/core"
-          echo "--- getFrame (vsapi.cpp)"; grep -n -A30 "^static const VSFrame \*VS_CC getFrame(" vsapi.cpp | head -45
-          echo "--- worker threads waiting, arError"; grep -n "releaseThread\|reserveThread\|isWorkerThread\|arError\|error was also set\|outstanding requests" vscore.cpp vscore.h vsapi.cpp | head -60
+          rc=0
+          timeout 240 python vsplugin/tests/ci/eof_probe.py --require --threads 1 || rc=$?
+          timeout 240 python vsplugin/tests/ci/eof_probe.py --require || rc=$?
+          [ $rc = 124 ] && echo "::error::the end-of-stream probe timed out (a deadlock?)"
+          grep -h "the end of the stream\|stream ends after\|failed: a source frame it requested\|instance closed" $RUNNER_TEMP/vslog-eof/*.log | head -24 || true
+          exit $rc
 
       - uses: actions/cache@v4
         if: ${{ !cancelled() }}
