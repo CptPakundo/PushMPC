@@ -501,11 +501,14 @@ jobs:
             if file -b "$real" | grep -q Mach-O; then
               set -- lldb --batch --source "$RUNNER_TEMP/lldb.cmds" --source-on-crash "$RUNNER_TEMP/lldb-crash.cmds" -- "$real"
             else
-              echo "the wrapper:"; sed -n 1,20p "$real"
-              grep -q '^ *exec ' "$real" || echo "::warning::the vspipe wrapper has no exec line: lldb cannot be put in front of the program"
-              sed "s|^\( *\)exec |\1exec lldb --batch --source $RUNNER_TEMP/lldb.cmds --source-on-crash $RUNNER_TEMP/lldb-crash.cmds -- |" "$real" > "$RUNNER_TEMP/vspipe-lldb"
-              chmod +x "$RUNNER_TEMP/vspipe-lldb"; grep -n 'exec ' "$RUNNER_TEMP/vspipe-lldb" | head -3
-              set -- "$RUNNER_TEMP/vspipe-lldb"
+              # VapourSynth R79's vspipe is a Python script (#!.../libexec/bin/python; sys.exit(vapoursynth.vspipe())):
+              # lldb runs its interpreter with the script (run 45957116784)
+              echo "the script:"; sed -n 1,20p "$real"
+              interp=$(sed -n '1s/^#![[:space:]]*//p' "$real" | awk '{print $1}')
+              echo "interpreter: $interp -> $(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$interp"): $(file -b "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$interp")")"
+              # what vspipe() itself returns (exit 250 = a return of -6 or 250, or the process ended under it)
+              perl -e 'alarm shift; exec @ARGV' 300 "$interp" -X faulthandler -c 'import sys; from vapoursynth import vspipe; sys.argv = ["vspipe", "--info", sys.argv[1]]; r = vspipe(); print("vspipe() returned", r, flush=True); sys.exit(0)' "$RUNNER_TEMP/t.vpy" 2>&1 | tail -n 20 || true
+              set -- lldb --batch --source "$RUNNER_TEMP/lldb.cmds" --source-on-crash "$RUNNER_TEMP/lldb-crash.cmds" -- "$interp" "$real"
             fi
             MVK_CONFIG_LOG_LEVEL=3 perl -e 'alarm shift; exec @ARGV' 300 "$@" --info "$RUNNER_TEMP/t.vpy" 2>&1 | grep -v '^\s*$' | tail -n 150 | cut -c1-300 || true
             echo "::endgroup::"
@@ -567,10 +570,12 @@ jobs:
           echo "VSSCRIPT_PATH from the helper: $VSSCRIPT_PATH"
           # x2 fixed: Auto's CPU budget can pick x1 on a slow 3-core VM (the portable fallback runs here)
           mkdir -p "$HOME/.config/pushmpc"; printf 'Smoother=2\n' >> "$HOME/.config/pushmpc/settings.ini"
-          # mpv.conf read once, as a user's mpv reads it (its config folder): with --include as well, the block was read
-          # twice (scripts-append twice: pushmpc.lua loaded twice, each adding the filter again; run 45951785336)
-          rc=0; MPV_HOME="$HOME/.config/mpv" mpv "$clip" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v > "$RUNNER_TEMP/encode.txt" 2>&1 || rc=$?
+          # mpv's encode mode does not read mpv.conf from its config folder (run 45957116784 without --include: no
+          # [pushmpc] line, PUSHMPC_VF empty; also run 45593276787): --include is the one read of the block here, as the
+          # config folder is in playback (run 45951785336's two "filter added again" were ContentDetect's two reloads)
+          rc=0; MPV_HOME="$HOME/.config/mpv" mpv "$clip" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$RUNNER_TEMP/out.mkv" --ovc=ffv1 --of=matroska --term-playing-msg='PUSHMPC_VF=${vf}' --msg-level=all=info,vapoursynth=v > "$RUNNER_TEMP/encode.txt" 2>&1 || rc=$?
           tail -40 "$RUNNER_TEMP/encode.txt"
+          echo "ContentDetect on this clip:"; grep -E 'why=|measured on the frames' "$RUNNER_TEMP/encode.txt" | cut -c1-600 || echo "  (no measurement line)"
           [ "${rc:-0}" = 0 ] || { echo "::error::mpv's encode exited ${rc}"; exit 1; }
           grep -q '^PUSHMPC_VF=.*vapoursynth' "$RUNNER_TEMP/encode.txt" || { echo "::error::mpv did not apply the mpv.conf block in encode mode (no vapoursynth filter)"; exit 1; }
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
