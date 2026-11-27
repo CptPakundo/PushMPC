@@ -74,7 +74,7 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew/downloads
             ${{ runner.temp }}/iina-dmg
-          key: iina-bridge-${{ runner.os }}-v1
+          key: iina-bridge-${{ runner.os }}-v2   # v2: ffmpeg@7 / ffmpeg@8 bottles too
       - name: IINA release facts (spike)
         timeout-minutes: 8
         shell: bash
@@ -93,28 +93,34 @@ jobs:
           nm -m -u "$fw/libmpv.2.dylib" | grep -E 'av_buffersrc|av_buffersink|avfilter_graph_(parse2|alloc_filter|create_filter|free)' || true
           otool -L "$fw/libmpv.2.dylib" | grep -E 'avfilter|avutil'
           otool -l "$fw/libmpv.2.dylib" | grep -E -A1 'LC_DYLD_CHAINED_FIXUPS|sectname __got|sectname __auth_got' | head -12
-      - name: Bridge built against Homebrew's FFmpeg / mpv headers
+      - name: Bridge built against Homebrew's FFmpeg / mpv headers (one build per FFmpeg major)
         timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
-          brew install mpv ffmpeg > /dev/null
+          brew install mpv ffmpeg ffmpeg@7 ffmpeg@8 > /dev/null
           ffi=$(brew --prefix ffmpeg)/include; mpvi=$(brew --prefix mpv)/include
           grep -E 'define LIBAVUTIL_VERSION_MAJOR|define LIBAVFILTER_VERSION_MAJOR' "$ffi"/libavutil/version_major.h "$ffi"/libavfilter/version_major.h || true
-          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$ffi" -DMPV_INCLUDE="$mpvi"
+          cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$ffi" -DMPV_INCLUDE="$mpvi" \
+            -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include"
           cmake --build build --target pushmpc_iina --parallel
           clang -O2 -I"$mpvi" -Wl,-rpath,"$IINA_FW" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
-          nm -gU build/pushmpc-iina.so | grep mpv_open_cplugin
+          ls build/pushmpc-iina*.so
+          for f in build/pushmpc-iina*.so; do nm -gU "$f" | grep -q mpv_open_cplugin || { echo "::error::$f exports no mpv_open_cplugin"; exit 1; }; done
+          # the build for IINA's own FFmpeg major (its bundled libavutil.<N>.dylib), as pushmpc-apps-mac.sh picks it
+          m=$(ls "$IINA_FW" | sed -n 's/^libavutil\.\([0-9][0-9]*\)\.dylib$/\1/p' | head -n 1)
+          b="$PWD/build/pushmpc-iina.so"; [ -n "$m" ] && [ -f "build/pushmpc-iina-av$m.so" ] && b="$PWD/build/pushmpc-iina-av$m.so"
+          echo "IINA's libavutil ${m:-?}: $b"; echo "IINA_BRIDGE=$b" >> "$GITHUB_ENV"
       - name: The bridge inside IINA's libmpv (headless)
         timeout-minutes: 5
         shell: bash
         run: |
           set +e -o pipefail
-          ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 | tee "$RUNNER_TEMP/bridge.txt"; r=$?
+          ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$IINA_BRIDGE" 12 | tee "$RUNNER_TEMP/bridge.txt"; r=$?
           echo "--- bridge log"; cat "$HOME/Library/Logs/PushMPC/iina-bridge.log" || true
           if [ "$r" -ge 128 ]; then
             echo "--- crashed (exit $r): backtrace"
-            lldb --batch -o run -o "bt all" -o "register read" -k "bt all" -k quit -- ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$PWD/build/pushmpc-iina.so" 12 2>&1 | tail -120
+            lldb --batch -o run -o "bt all" -o "register read" -k "bt all" -k quit -- ./build/iina_bridge_host "$IINA_FW/libmpv.2.dylib" "$IINA_BRIDGE" 12 2>&1 | tail -120
           fi
           line=$(grep -h "graph closed:" "$HOME/Library/Logs/PushMPC/iina-bridge.log" | tail -1)
           echo "::notice title=IINA bridge::$(grep -h 'bridge:\|IINA_BRIDGE_RESULT' "$RUNNER_TEMP/bridge.txt" | tr '\n' ' ') $line"
@@ -126,7 +132,7 @@ jobs:
         with:
           name: iina-bridge
           path: |
-            build/pushmpc-iina.so
+            build/pushmpc-iina*.so
             ~/Library/Logs/PushMPC/iina-bridge.log
 
   mac-runtime:
@@ -424,7 +430,7 @@ jobs:
           set -euo pipefail
           brew --version
           # everything the formula needs, as bottles, before the formula itself (so its build step only builds PushMPC)
-          brew install mpv ffmpeg vapoursynth cmake pkgconf onnxruntime
+          brew install mpv ffmpeg ffmpeg@7 ffmpeg@8 vapoursynth cmake pkgconf onnxruntime   # ffmpeg@7 / @8: the IINA bridge's other FFmpeg majors
           brew deps mpv | grep -x vapoursynth
           brew info --json=v2 vapoursynth | python3 -c "import json,sys; f=json.load(sys.stdin)['formulae'][0]; print('vapoursynth', f['versions']['stable'], 'deps', f['dependencies'])"
           mpv --version | head -2
