@@ -491,6 +491,12 @@ Result DoUpdate() {
     if (!FileExists(upd)) upd = JoinPath(g_installDir, L"filter\\PushMpcUpdater.exe");
     if (!FileExists(upd)) { res.message = L"The updater is missing: use Repair first."; return res; }
     std::wstring base = QuoteArg(upd) + L" --machine --install-dir " + QuoteArg(g_installDir) + (opt.sandbox ? L" --no-register --reg-key " + QuoteArg(UpdateKey()) : L"");
+    if (opt.dryRun) {   // even the updater's --check records LastCheck / Status and writes its log: a dry run runs nothing
+        UiLine(L"[dry run] would run " + base + L" --download --force, then --apply");
+        res.ok = true; res.message = L"Dry run finished: nothing was changed.";
+        UiProgress(100, L"Done");
+        return res;
+    }
     std::wstring status, message;
     auto onLine = [&](const std::string& raw) {
         std::wstring l = Widen(raw);
@@ -543,7 +549,8 @@ Result DoUninstall() {
 }
 
 Result RunOp(Op op, bool autoUpdates) {
-    Log::Open(JoinPath(JoinPath(g_installDir, L"logs"), L"setup.log"));   // the uninstall too (it keeps logs\)
+    // the uninstall too (it keeps logs\); a dry run leaves the install folder alone: its log goes to %TEMP%
+    Log::Open(opt.dryRun ? JoinPath(TempDir(), L"PushMPC-Setup-dry-run.log") : JoinPath(JoinPath(g_installDir, L"logs"), L"setup.log"));
     Log::Writef(L"PushMPC setup %s: %s, install folder %s%s%s", PUSHMPC_SETUP_VERSION_W,
                 op == Op::Install ? L"install" : op == Op::Repair ? L"repair" : op == Op::Update ? L"update" : L"uninstall", g_installDir.c_str(),
                 opt.sandbox ? L" (sandbox)" : L"", opt.dryRun ? L" (dry run)" : L"");
@@ -837,8 +844,9 @@ void OnNext() {
             g_op = Op::Uninstall;
         } else if (Button_GetCheck(C(IDC_R_UPDATE)) == BST_CHECKED) g_op = Op::Update;
         else g_op = Op::Repair;
-        if (g_op == Op::Repair) RegSetDword(HKEY_CURRENT_USER, UpdateKey(), L"Enabled", Button_GetCheck(C(IDC_AUTOUPD)) == BST_CHECKED ? 1 : 0);
-        if (g_op == Op::Update) RegSetDword(HKEY_CURRENT_USER, UpdateKey(), L"Enabled", Button_GetCheck(C(IDC_AUTOUPD)) == BST_CHECKED ? 1 : 0);
+        // the maintenance page's update checkbox; a dry run writes nothing (it left Update\Enabled=1 behind, U-1)
+        if ((g_op == Op::Repair || g_op == Op::Update) && !opt.dryRun)
+            RegSetDword(HKEY_CURRENT_USER, UpdateKey(), L"Enabled", Button_GetCheck(C(IDC_AUTOUPD)) == BST_CHECKED ? 1 : 0);
         StartOp();
         break;
     }
