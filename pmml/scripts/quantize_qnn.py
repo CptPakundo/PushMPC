@@ -100,6 +100,52 @@ def make_reader(base, inputs, name):
     return Reader()
 
 
+def constants_to_initializers(src: Path, dst: Path) -> int:
+    """Constant nodes -> initializers. The quantiser treats a Constant node's output as an activation and puts a
+    QuantizeLinear/DequantizeLinear pair on it. For RIFE's Resize scales that breaks the model: /block0/Resize_1's scales
+    [1, 1, 32, 32] go through uint8 with the range [0, 32] (step 32/255), so 1.0 comes back as 1.0039 (uint16: 1.000015),
+    and ONNX Runtime's CPU Resize rejects 'linear' with outer scales != 1 (upsamplebase.h ScalesValidation); smaller
+    scales ([1, 1, 1/32, 1/32]) survive the round trip only by luck and are still shifted. As initializers the Resize
+    parameters stay exact (the QDQ Resize handler quantises only the data input), and the QNN HTP needs them static."""
+    import onnx
+    from onnx import helper, numpy_helper
+    m = onnx.load(str(src))
+    g = m.graph
+    keep, n = [], 0
+    for node in g.node:
+        if node.op_type != "Constant" or node.domain not in ("", "ai.onnx"):
+            keep.append(node)
+            continue
+        a = node.attribute[0]
+        v = helper.get_attribute_value(a)
+        if a.name == "value":
+            arr = numpy_helper.to_array(v)
+        elif a.name in ("value_float", "value_floats"):
+            arr = np.array(v, np.float32)
+        elif a.name in ("value_int", "value_ints"):
+            arr = np.array(v, np.int64)
+        else:  # sparse / string constants: leave the node
+            keep.append(node)
+            continue
+        g.initializer.append(numpy_helper.from_array(arr, node.output[0]))
+        n += 1
+    del g.node[:]
+    g.node.extend(keep)
+    onnx.save(m, str(dst))
+    return n
+
+
+def check_static_params(path: Path) -> None:
+    """the quantised model keeps every Resize roi / scales / sizes exact: no DequantizeLinear produces them"""
+    import onnx
+    m = onnx.load(str(path))
+    dq = {o for nd in m.graph.node if nd.op_type == "DequantizeLinear" for o in nd.output}
+    bad = [nd.name for nd in m.graph.node if nd.op_type == "Resize" and any(i in dq for i in nd.input[1:] if i)]
+    if bad:   # exit 2 (environment / tool error), not 1 (gate not passed): CI fails the job on it
+        print(f"{path.name}: quantised Resize parameters (roi/scales/sizes) in {', '.join(bad)}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def evaluate(models, graphs, clips, tier, net):
     """mean PSNR-Y per clip (2x and 4x per t) of the pipeline with this network on the held-out frames, and a repeat"""
     out = {}
@@ -184,6 +230,7 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--gate-db", type=float, default=0.3)
     a = ap.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)  # CI tees this: keep the progress lines in order with ORT's stderr
     try:
         from onnxruntime.quantization import CalibrationDataReader, QuantType, quantize
         from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config, qnn_preprocess_model
@@ -223,7 +270,9 @@ def main() -> int:
     # 2. quantise (A8W8, then A16W8)
     work = Path(tempfile.mkdtemp(prefix="pmml-qdq-"))
     pre = work / "pre.onnx"
-    src = pre if qnn_preprocess_model(str(fp32), str(pre)) else fp32
+    src = work / "static.onnx"
+    folded = constants_to_initializers(pre if qnn_preprocess_model(str(fp32), str(pre)) else fp32, src)
+    print(f"{folded} Constant nodes made initializers (Resize scales and other parameters stay exact)", flush=True)
     variants = [("A8W8", QuantType.QUInt8, QuantType.QUInt8), ("A16W8", QuantType.QUInt16, QuantType.QUInt8)]
 
     # 3. the gate
@@ -238,6 +287,7 @@ def main() -> int:
         qdq = work / f"{vname}.onnx"
         cfg = get_qnn_qdq_config(str(src), make_reader(CalibrationDataReader, inputs, name), activation_type=act, weight_type=wt)
         quantize(str(src), str(qdq), cfg)
+        check_static_params(qdq)
         res = evaluate(models, graphs, clips, gate_tier, qdq)
         losses = {c: base[c]["psnr"] - res[c]["psnr"] for c in res}
         overall = float(np.mean([base[c]["psnr"] for c in res]) - np.mean([res[c]["psnr"] for c in res]))

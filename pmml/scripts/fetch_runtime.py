@@ -237,10 +237,12 @@ def main() -> int:
         dest = out / "eps" / ep
         files = extract(arc, spec.get("extract", entry["extract"]), dest)
         files += soname_links(dest, files)
-        lib = next((f for f in files for pat in entry["library"] if fnmatch.fnmatch(f.lower(), pat.lower()) and
+        # the pin's patterns in priority order (pattern first, then file): in file order a dependency fitting a later
+        # pattern wins (onnxruntime-qnn 2.8.0: QnnHtpPrepare.dll fitted *qnn*ep*, CI run 45940733396)
+        lib = next((f for pat in entry["library"] for f in files if fnmatch.fnmatch(f.lower(), pat.lower()) and
                     f.lower().endswith((".dll", ".so", ".dylib"))), None)
         if not lib:
-            lib = next((f for f in files for pat in entry["library"] if fnmatch.fnmatch(f.lower(), pat.lower())), None)
+            lib = next((f for pat in entry["library"] for f in files if fnmatch.fnmatch(f.lower(), pat.lower())), None)
         (dest / "ep.json").write_text(json.dumps({"name": ep, "epName": entry["epName"], "library": lib, "version": entry["version"]}, indent=2), encoding="utf-8")
         record["eps"][ep] = {"version": entry["version"], "sha256": digest, "library": lib, "files": files}
         print(f"ok      eps/{ep} {entry['version']}: library {lib}; {len(files)} files")

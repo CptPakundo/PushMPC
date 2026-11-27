@@ -194,9 +194,9 @@
       ],
       "library": [
         "*onnxruntime*providers*qnn*",
-        "*qnn*ep*"
+        "*onnxruntime*qnn*ep*"
       ],
-      "note": "The win_amd64 wheel carries both amd64 and arm64ec libraries under libs/<arch>/: only the platform's own folder is extracted (a flat extract let arm64ec overwrite amd64, CI run 45603367125). The win-arm64 wheel (onnxruntime-qnn v2.8.0 setup.py: package_data of onnxruntime_qnn, flat): onnxruntime_providers_qnn.dll, Genie.dll, HtpPrepare.dll, Qnn*.dll, libQnnHtpV68/73/81Skel.so, libqnnhtpv73/81.cat in the package folder (the first patterns, libs/arm64/* + capi/*.dll, matched nothing in run 45934374176); libs/arm64/* stays for a wheel laid out as the win_amd64 one. Each flat pattern starts with a name, so no libs/<arch> file matches it. Not yet confirmed by a run; pmml-fetch lists the archive's libraries when nothing matches."
+      "note": "The win_amd64 wheel carries both amd64 and arm64ec libraries under libs/<arch>/: only the platform's own folder is extracted (a flat extract let arm64ec overwrite amd64, CI run 45603367125). The win-arm64 wheel (onnxruntime-qnn v2.8.0 setup.py: package_data of onnxruntime_qnn, flat): onnxruntime_providers_qnn.dll, Genie.dll, HtpPrepare.dll, Qnn*.dll, libQnnHtpV68/73/81Skel.so, libqnnhtpv73/81.cat in the package folder (the first patterns, libs/arm64/* + capi/*.dll, matched nothing in run 45934374176); libs/arm64/* stays for a wheel laid out as the win_amd64 one. Each flat pattern starts with a name, so no libs/<arch> file matches it. Run 45940733396 extracted 17 files with these patterns, but the old second library pattern '*qnn*ep*' (matched file first) picked QnnHtpPrepare.dll, which has no CreateEpFactories: the library patterns are now tried in order (pattern first), and the second names onnxruntime. pmml-fetch lists the archive's libraries when nothing matches."
     },
     "amdgpu": {
       "what": "AMD's AMDGPUExecutionProvider exists only through the Windows ML ExecutionProviderCatalog (Windows 11 24H2+, Adrenalin 24.12.1+); PyPI has a 0.0.0 placeholder only. pmml registers whatever EP library the catalog reports (PMML_EP_LIBRARY / eps/amdgpu/ep.json written by the installer); until then AMD on Windows runs DirectML.",
