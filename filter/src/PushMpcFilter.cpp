@@ -4972,8 +4972,8 @@ static void WriteLearnedValues(const pm::learned::Values& v)
 // speed test) takes only the speed test's values, the costs learned in this session stay.
 void CPushMpcFilter::LoadLearned()
 {
+    if (m_gpuName.empty()) return;   // the adapter is not known yet (a connect-time decision): again at the next one
     m_learnedLoaded = true;
-    if (m_gpuName.empty()) return;
     std::unique_lock<std::mutex> gl(g_learnedLock);
     pm::learned::Values v = ReadLearnedValues();
     const bool first = m_learnSession == 0;
@@ -4983,15 +4983,17 @@ void CPushMpcFilter::LoadLearned()
             Narrow(pm::learned::Get(v, L"Model")), Narrow(pm::learned::Get(v, L"Gpu"))));
         pm::learned::Reset(v, m_gpuName);
         m_learnSession = pm::learned::BeginSession(v);
-        WriteLearnedValues(v);
     }
-    gl.unlock();
     std::lock_guard<std::mutex> lk(m_autoLock);
     const bool bench = pm::learned::LoadBench(v, m_learnSession, m_costs);
     m_benchStale = pm::learned::BenchStale(v, m_learnSession);
     if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
     if (!first) return;
     const int n = pm::learned::LoadCosts(v, m_learnSession, m_costs);
+    // the plain values as of this session (expired / untrusted ones removed): what vsplugin's reader sees too
+    pm::learned::SaveSession(v, m_learnSession, {}, m_costs);
+    WriteLearnedValues(v);
+    gl.unlock();
     Log(std::format("learned GPU costs for {} (session {}, {} values trusted): VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K{}), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
         Narrow(m_gpuName), m_learnSession, n, m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
         m_costs.pfFirst[1], m_costs.pfNext[1], m_benchStale && bench ? "; speed test due again" : "", m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080, m_costs.base4k, m_costs.learnedBase ? "" : " (prior)"));

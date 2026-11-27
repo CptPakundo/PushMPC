@@ -68,9 +68,10 @@ inline std::wstring Encode(const std::vector<Entry>& e)
 inline bool Fresh(const Entry& e, uint32_t session) { return e.session + kStaleSessions > session; }   // newer (another process) too
 // this session's value into the history: replaces this session's entry (periodic saves), else appended; stale entries
 // and all but the newest kKeepSessions go
-inline void Record(std::vector<Entry>& h, uint32_t session, double v)
+// (age false: the speed test's results never expire, only the newest kKeepSessions runs count; staleness only makes it due)
+inline void Record(std::vector<Entry>& h, uint32_t session, double v, bool age = true)
 {
-    h.erase(std::remove_if(h.begin(), h.end(), [&](const Entry& e) { return !Fresh(e, session); }), h.end());
+    if (age) h.erase(std::remove_if(h.begin(), h.end(), [&](const Entry& e) { return !Fresh(e, session); }), h.end());
     auto it = std::find_if(h.begin(), h.end(), [&](const Entry& e) { return e.session == session; });
     if (it != h.end()) it->v = v; else h.push_back({ session, v });
     std::sort(h.begin(), h.end(), [](const Entry& a, const Entry& b) { return a.session < b.session; });
@@ -78,10 +79,10 @@ inline void Record(std::vector<Entry>& h, uint32_t session, double v)
 }
 // the saved value: the lowest fresh entry of the last kKeepSessions; untrusted (false) when none is fresh, or when it is
 // slower than the prior (neutral) and fewer than kKeepSessions sessions measured it (trustFirst: the speed test)
-inline bool Resolve(const std::vector<Entry>& h, uint32_t session, double neutral, double& out, bool trustFirst = false)
+inline bool Resolve(const std::vector<Entry>& h, uint32_t session, double neutral, double& out, bool trustFirst = false, bool age = true)
 {
     double m = 0; int n = 0;
-    for (const auto& e : h) if (Fresh(e, session)) { m = n ? std::min(m, e.v) : e.v; ++n; }
+    for (const auto& e : h) if (!age || Fresh(e, session)) { m = n ? std::min(m, e.v) : e.v; ++n; }
     if (!n) return false;
     if (!trustFirst && neutral > 0 && m > neutral && n < kKeepSessions) return false;
     out = m;
@@ -132,9 +133,9 @@ inline bool LoadBench(const Values& v, uint32_t session, Costs& c)
     bool bench = true, rebuild = true;
     for (int t = 0; t < 3; ++t) {
         double x = 0;
-        if (Resolve(Decode(Get(v, std::format(L"PfFirst{}.h", t))), session, 0, x, true)) c.pfFirst[t] = x; else bench = false;
-        if (Resolve(Decode(Get(v, std::format(L"PfNext{}.h", t))), session, 0, x, true)) c.pfNext[t] = x; else bench = false;
-        if (Resolve(Decode(Get(v, std::format(L"PfRebuild{}.h", t))), session, 0, x, true)) c.pfRebuild[t] = x; else rebuild = false;
+        if (Resolve(Decode(Get(v, std::format(L"PfFirst{}.h", t))), session, 0, x, true, false)) c.pfFirst[t] = x; else bench = false;
+        if (Resolve(Decode(Get(v, std::format(L"PfNext{}.h", t))), session, 0, x, true, false)) c.pfNext[t] = x; else bench = false;
+        if (Resolve(Decode(Get(v, std::format(L"PfRebuild{}.h", t))), session, 0, x, true, false)) c.pfRebuild[t] = x; else rebuild = false;
     }
     c.pfBenched = bench;
     c.pfRebuildBenched = bench && rebuild;
@@ -155,10 +156,10 @@ inline void RecordBench(Values& v, uint32_t session, const double first[3], cons
         for (const auto& it : items) {
             const std::wstring name = std::format(L"{}{}", it.n, t);
             auto h = Decode(Get(v, name + L".h"));
-            if (it.x > 0) Record(h, session, it.x);
+            if (it.x > 0) Record(h, session, it.x, false);
             v[name + L".h"] = Encode(h);
             double r = 0;
-            if (Resolve(h, session, 0, r, true)) v[name] = std::format(L"{:.3f}", r); else v.erase(name);
+            if (Resolve(h, session, 0, r, true, false)) v[name] = std::format(L"{:.3f}", r); else v.erase(name);
         }
     }
     v[L"PfBenchVersion"] = L"2";
