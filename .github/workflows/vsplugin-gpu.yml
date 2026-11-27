@@ -166,9 +166,11 @@ jobs:
           set -uo pipefail
           export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_VS_LOG_DIR=$RUNNER_TEMP/vslog-eof
           rc=0
-          timeout 240 python vsplugin/tests/ci/eof_probe.py --require --threads 1 || rc=$?
-          timeout 240 python vsplugin/tests/ci/eof_probe.py --require || rc=$?
-          [ $rc = 124 ] && echo "::error::the end-of-stream probe timed out (a deadlock?)"
+          run() { local r=0; timeout 240 python vsplugin/tests/ci/eof_probe.py --require "$@" || r=$?
+                  case $r in 0) ;; 124) echo "::error::eof_probe $*: timed out (a deadlock?)";; 134|139) echo "::error::eof_probe $*: the process aborted (exit $r: VapourSynth fatal error or crash)";; *) echo "::error::eof_probe $*: exit $r";; esac
+                  [ $r = 0 ] || rc=$r; }
+          run --threads 1
+          run
           grep -h "the end of the stream\|stream ends after\|failed: a source frame it requested\|instance closed" $RUNNER_TEMP/vslog-eof/*.log | head -24 || true
           exit $rc
 

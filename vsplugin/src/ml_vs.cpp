@@ -276,7 +276,11 @@ const VSFrame* VS_CC MGetFrame(int n, int reason, void* inst, void** frameData, 
     auto* d = static_cast<MInst*>(inst);
     if (reason == arInitial) {
         int64_t from, to;
-        { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
+        int64_t ends = 0;
+        { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); ends = d->pipe.SrcFrames() * d->k; }
+        // past the end found while playing (eof_guard.h): nothing to request, so the output fails here; a getFrame that
+        // returns nothing without an error and without requests is fatal to VapourSynth (vsplugin-gpu 46008569437)
+        if (n >= ends || from > to) { a->setFilterError(PastEnd(n).c_str(), fc); return nullptr; }
         frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
@@ -299,7 +303,7 @@ const VSFrame* VS_CC MGetFrame(int n, int reason, void* inst, void** frameData, 
     }
     if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
         for (const VSFrame* f : d->held) a->freeFrame(f); d->held.clear(); d->fc = nullptr; d->curSrc = nullptr;
-        a->setFilterError("pushmpc.Enhance: past the end of the stream", fc);
+        a->setFilterError(PastEnd(n).c_str(), fc);
         return nullptr;
     }
     auto r = d->pipe.Produce(n, requestedFrom, d->be, 10000);
