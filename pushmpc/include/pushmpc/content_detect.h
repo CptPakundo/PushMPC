@@ -309,6 +309,14 @@ inline float Median(std::vector<float> v) { if (v.empty()) return 0.f; std::nth_
 // window features in the offline evaluation's order (sorted names): the appearance of the current picture (a_*, on
 // a 256-wide thumbnail of the cell picture) and the cadence of the last 2 s
 enum Feature { fAEdge, fAEnt, fAFlat, fAFlat2, fAHf, fALine, fAMid, fANoise, fAOrient, fAPal16, fAPal64, fAQerr, fASat, fASat90, fASatent, fASatlo, fASharp, fAStep, fActive, fBactive, fBhold, fBstep2, fCam, fChgm, fDup, fDup6, fFps, fHold, fRun1, fRun2, fRun3, fRun4, fStep, fTnoise, fTwos, kFeatureCount };
+// the feature names (logs, bug reports)
+inline const char* FeatureName(int i)
+{
+    static const char* const n[kFeatureCount] = { "aEdge", "aEnt", "aFlat", "aFlat2", "aHf", "aLine", "aMid", "aNoise", "aOrient", "aPal16", "aPal64", "aQerr",
+                                                  "aSat", "aSat90", "aSatent", "aSatlo", "aSharp", "aStep", "active", "bactive", "bhold", "bstep2", "cam", "chgm",
+                                                  "dup", "dup6", "fps", "hold", "run1", "run2", "run3", "run4", "step", "tnoise", "twos" };
+    return i >= 0 && i < kFeatureCount ? n[i] : "?";
+}
 
 struct State {
     int cls = kUnknown;            // decided class (kUnknown while measuring)

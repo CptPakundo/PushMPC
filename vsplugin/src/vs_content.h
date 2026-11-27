@@ -125,6 +125,12 @@ private:
             const bool cls = m.cls != 0 && ((m.cls == pushmpc::content::kDrawn) != (m_createdClass == pushmpc::content::kDrawn) ||
                                             (m.cls == pushmpc::content::kDrawn && m.cg != m_createdCg));   // only what changes Auto
             std::fprintf(f, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=%d\n", m.fps, m_declared, m.cls, pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, (rate || cls) ? 1 : 0);
+            // why: the last window's drawn probability, the integrator, the image model's part and the window's features
+            // (pushmpc.lua logs the file on a re-add; bug reports)
+            const pushmpc::content::State& st = m_det.Current();
+            std::fprintf(f, "why=pd %.3f logodds %.2f image %d cgshare %.2f windows %u;", st.drawnShare, st.logOdds, st.imageEvidence ? 1 : 0, st.cgShare, unsigned(st.windows));
+            for (int i = 0; i < pushmpc::content::kFeatureCount; ++i) std::fprintf(f, " %s=%.4g", pushmpc::content::FeatureName(i), st.feat[i]);
+            std::fprintf(f, "\n");
             std::fclose(f);
         }
     }

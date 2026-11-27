@@ -17,6 +17,20 @@ local mp = require 'mp'
 local msg = require 'mp.msg'
 local options = require 'mp.options'
 
+-- one copy per mpv: mpv.conf read twice (an --include of the default config, a second scripts-append) loads this script
+-- twice, and two copies would each add the filter and re-add it after a measurement. The first copy claims a shared
+-- property (user-data, mpv 0.36+); a later copy sees the claim and stays idle. On an older mpv without user-data the
+-- claim cannot be made and every copy runs (the status file's rename claim still keeps the re-add single).
+do
+    local me = mp.get_script_name()
+    local owner = mp.get_property("user-data/pushmpc/script", "")
+    if owner ~= nil and owner ~= "" and owner ~= me then
+        msg.info("PushMPC: this script already runs in this mpv (as " .. owner .. "); this copy (" .. me .. ") stays idle")
+        return
+    end
+    mp.set_property("user-data/pushmpc/script", me)
+end
+
 -- Upscaling shaders (pushmpc-shaders, ";" between paths; PushMPC ships ArtCNN fragment shaders): shaders-when=always
 -- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
@@ -461,15 +475,22 @@ local function vs_status_path()
     local sep = package.config:sub(1, 1)
     return dir .. (dir:sub(-1) == sep and "" or sep) .. "pushmpc-vs-" .. tostring(mp.get_property_number("pid", 0)) .. ".txt"
 end
-mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; os.remove(vs_status_path()); os.remove(vs_status_path() .. ".taken") end)
+mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; vs_watch.logged = nil; os.remove(vs_status_path()); os.remove(vs_status_path() .. ".taken") end)
 function vs_status_watch()
     if vs_watch.timer then vs_watch.timer:kill() end
     vs_watch.timer = mp.add_periodic_timer(2, function()
         local f = io.open(vs_status_path(), "r")
         if not f then return end
         local t = f:read("*a"); f:close()
-        if not t:find("reload=1", 1, true) or vs_watch.reloads >= 2 then return end
-        if (mp.get_property("o", "") or "") ~= "" then return end   -- encoding: keep every frame
+        local encoding = (mp.get_property("o", "") or "") ~= ""
+        local reload = t:find("reload=1", 1, true) and vs_watch.reloads < 2 and not encoding
+        if not reload then   -- a new measurement is logged once (its why= line: the features, for bug reports)
+            if t ~= vs_watch.logged then
+                vs_watch.logged = t
+                msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. (encoding and "(encoding: the filter keeps its instance)" or ""))
+            end
+            return
+        end
         -- claimed by renaming (atomic): with the script loaded twice (mpv.conf read twice), only one copy re-adds
         local taken = vs_status_path() .. ".taken"
         os.remove(taken)
