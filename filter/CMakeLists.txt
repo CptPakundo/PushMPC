@@ -77,3 +77,11 @@ set_target_properties(logs_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BIN
 target_include_directories(logs_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(logs_test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(logs_test PRIVATE /W3 /EHsc /O2 /utf-8)
+
+# Live check of the late reload take-over (needs the GPU and an installed MPC Video Renderer; run only through
+# tools/late_reload_live.ps1, holding the GPU lock): loads bin\PushMpcFilter.ax directly, no registration
+add_executable(late_reload_host tools/late_reload_host.cpp)
+set_target_properties(late_reload_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_compile_definitions(late_reload_host PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(late_reload_host PRIVATE /W3 /EHsc /O2 /utf-8)
+target_link_libraries(late_reload_host PRIVATE strmiids ole32 user32 advapi32 shell32)
