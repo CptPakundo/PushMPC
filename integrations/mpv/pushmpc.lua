@@ -617,7 +617,7 @@ end)
 -- added again with the stream's colour (Auto's HDR rules: RTX Video HDR, the anime upscaler). Playback only: the re-add
 -- drops the few frames in flight at the start; an encode keeps the instance it started with (every frame counts).
 local function guess_hdr(p)
-    local f = tostring(p.pixelformat or "")
+    local f = tostring(p["hw-pixelformat"] or p.pixelformat or "")   -- hwdec: the software format underneath
     local deep = f:match("^p01[026]") ~= nil or f:match("p1[026][lb]?e?$") ~= nil
     return deep and ((tonumber(p.w) or 0) >= 3200 or (tonumber(p.h) or 0) >= 1800)
 end

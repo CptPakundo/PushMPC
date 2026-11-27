@@ -250,7 +250,16 @@ bool CheckColour(Enhance* d, CoreHost& h, int64_t s, std::string& err)
     if (!hm) m = PropInt(p, d->api, "_ColorSpace", 2, &hm);   // mpv's vf_vapoursynth: _ColorSpace (AVColorSpace = H.273), no _Matrix
     d->api->freeFrame(f);
     const Colour c = ColourFromProps(d->colour, m, hm, t, ht, pr, hp, r, hr);
-    h.RememberColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample, d->inVi.fpsNum, d->inVi.fpsDen, c);
+    // kept for the next instance of the stream: only what the frame showed. mpv's frames carry no transfer or
+    // primaries, so those stay the format's guess there (pushmpc.lua compares mpv's transfer with that guess and re-adds
+    // the filter with the arguments when they differ; an echo of this instance's own would hide the mismatch)
+    Colour mem = c;
+    {
+        const Colour g = GuessColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample);
+        if (!ht || t == 2) mem.transfer = g.transfer;
+        if (!hp || pr == 2) mem.primaries = g.primaries;
+    }
+    h.RememberColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample, d->inVi.fpsNum, d->inVi.fpsDen, mem);
     if (c == d->colour) { Log("first frame: the colour matches what the core was opened with"); return true; }
     Log(std::format("first frame: matrix {} transfer {} primaries {} range {} (opened with {} {} {} {}): reopening the core", c.matrix, c.transfer, c.primaries, c.range,
         d->colour.matrix, d->colour.transfer, d->colour.primaries, d->colour.range));
