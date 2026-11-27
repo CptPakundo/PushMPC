@@ -7,20 +7,23 @@ LGPL-2.1-or-later). Its sources are not kept in this repository: `fetch-vlc-sour
 
 PushMPC's changes (the patch, marked "PushMPC" in the code):
 - `video_output/win32/direct3d11.c`: module name `pushmpc_d3d11` (score 0, chosen with `vout=pushmpc_d3d11`), its own
-  option names (`pushmpc-d3d11-*`), upscale modes `nis`, `anime` (pushcore's upscaler, else NIS) and `auto` (pushcore's
-  upscaler where the anime upscaler can run, else the driver's Super Resolution, else NIS); `Prepare` hands each picture
-  to pushcore before it takes the context lock.
-- `video_output/win32/d3d11_scaler.{cpp,h}`: a NIS path next to the video processor's, and pushcore's upscaler on it.
+  option names (`pushmpc-d3d11-*`), upscale modes `nis`, `anime` (pushcore's upscaler for every picture, NIS while
+  pushcore is busy) and `auto` (the driver's Super Resolution, else NIS, with pushcore's anime upscaler while the picture
+  is measured as drawn animation); `Prepare` hands each picture to pushcore before it takes the context lock.
+- `video_output/win32/d3d11_scaler.{cpp,h}`: a NIS path next to the video processor's (RGB10A2 output for 10-bit
+  sources), and pushcore's picture drawn into either scaler's output.
 
 PushMPC's own files (GPL-3.0-or-later):
 - `modules/video_output/win32/pm_nis_d3d11.{cpp,h}`: NVIDIA Image Scaling 1.0.3 (MIT, `vsplugin/third_party/nis`) on the
-  decoder's textures, in compute shaders; its colour conversion alone for pictures that are already upscaled.
+  decoder's textures, in compute shaders.
 - `modules/video_output/win32/pm_pcsr_d3d11.{cpp,h}`: pushcore's upscaler through `pm_pushcore.dll` (loaded at run time
-  from the plugin's folder, ABI 3): the decoder's texture slices in on the output's own device, pushcore's picture at the
-  screen size out (Video Super Resolution; the anime upscaler while ContentDetect measures the picture as drawn, switched
-  at most once per 30 s as in the Kodi add-on), converted into NIS's window-size texture. NIS draws every picture
-  pushcore does not deliver in time, and the rest of the stream when pushcore fails. Not used while PushMPC's frame
-  generation filter is in VLC's chain with a pushcore engine (one pushcore per player), nor for SD (BT.601) sources.
+  from the plugin's folder): the decoder's texture slices in on the output's own device, pushcore's picture at the
+  screen size out, drawn into the scaler's window-size texture at its own bit depth. Its decisions are in
+  `vlcplugin/pushcore_bridge/pm_pcsr_core.h`: Auto measures the picture (ContentDetect, without pushcore) and runs the
+  anime upscaler only on drawn animation, switched at most once per 30 s as in the Kodi add-on; pushcore is shared with
+  PushMPC's frame generation filter (which wins it whenever it generates frames), opened only while it is free and
+  tried again later when it was taken. The scaler draws every picture pushcore does not deliver in time. Not used for
+  SD (BT.601) sources, nor for HDR sources in Auto.
 
 ## The OpenGL output fork (Linux)
 

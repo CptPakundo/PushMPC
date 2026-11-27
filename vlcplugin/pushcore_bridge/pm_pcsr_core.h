@@ -25,6 +25,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -57,7 +58,7 @@ private:
 struct BridgeFns {
     pm_pc_open_d3d11_fn open = nullptr;
     pm_pc_push_d3d11_fn push = nullptr;
-    pm_pc_poll_d3d11_fn poll = nullptr;
+    pm_pc_poll_d3d11_fn pollTex = nullptr;   // not "poll": VLC's vlc_threads.h defines poll() as a macro
     pm_pc_close_fn close = nullptr;
     pm_pc_describe_fn describe = nullptr;
     pm_pc_update_fn update = nullptr;
@@ -75,7 +76,7 @@ struct BridgeFns {
         auto sym = [dll](const char* n) { return reinterpret_cast<void*>(GetProcAddress(dll, n)); };
         b.open = reinterpret_cast<pm_pc_open_d3d11_fn>(sym("pm_pc_open_d3d11"));
         b.push = reinterpret_cast<pm_pc_push_d3d11_fn>(sym("pm_pc_push_d3d11"));
-        b.poll = reinterpret_cast<pm_pc_poll_d3d11_fn>(sym("pm_pc_poll_d3d11"));
+        b.pollTex = reinterpret_cast<pm_pc_poll_d3d11_fn>(sym("pm_pc_poll_d3d11"));
         b.close = reinterpret_cast<pm_pc_close_fn>(sym("pm_pc_close"));
         b.describe = reinterpret_cast<pm_pc_describe_fn>(sym("pm_pc_describe"));
         b.update = reinterpret_cast<pm_pc_update_fn>(sym("pm_pc_update"));
@@ -243,7 +244,7 @@ public:
         m_b = b; m_s = s; m_log = std::move(log);
         m_s.cfg.sr = 1; m_s.cfg.measure = 0; m_s.cfg.held_frames = 0; m_s.cfg.deband = 0; m_s.cfg.held_wait = 0; m_s.cfg.real_out = 1;
         m_s.cfg.smoother = 1;          // x1: one picture out per picture
-        if (!b.open || !b.push || !b.poll || !b.close || !b.output || !b.update) { why = "the bridge has no zero-copy path or no settings update"; return false; }
+        if (!b.open || !b.push || !b.pollTex || !b.close || !b.output || !b.update) { why = "the bridge has no zero-copy path or no settings update"; return false; }
         if (!m_draw.Init(m_s.dev, why)) return false;
         if (b.Measures()) {
             char err[300] = "";
@@ -295,11 +296,11 @@ public:
         if (m_b.push(m_pc, tex, slice, pts100, disc ? 1 : 0, err, sizeof(err)) != 0) { Lost("pushcore refused a picture", err, nowS); return Done(t0); }
         const ULONGLONG deadline = t0 + ULONGLONG(std::clamp(1.5 * m_s.frameMs, 12.0, 50.0));
         for (;;) {
-            if (m_b.poll(m_pc, 2, Dest, Doneb, this, err, sizeof(err)) < 0) { Lost("pushcore failed", err, nowS); return Done(t0); }
+            if (m_b.pollTex(m_pc, 2, Dest, Doneb, this, err, sizeof(err)) < 0) { Lost("pushcore failed", err, nowS); return Done(t0); }
             if (m_got || GetTickCount64() >= deadline) break;
         }
         for (int guard = 0; guard < 64; ++guard)
-            if (m_b.poll(m_pc, 0, Dest, Doneb, this, err, sizeof(err)) <= 0) break;
+            if (m_b.pollTex(m_pc, 0, Dest, Doneb, this, err, sizeof(err)) <= 0) break;
         m_pending = false;
         // late pictures: the scaler draws them; when most are late, pushcore does not keep up here
         if (m_grace > 0) m_grace--;

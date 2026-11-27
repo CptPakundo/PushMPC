@@ -2,7 +2,8 @@
 // pm_nis_test: the Direct3D 11 output fork's NIS upscaler on WARP, without VLC. An NV12 test picture (sharp squares, a
 // thin diagonal, a gradient, a red block) is scaled 4x (bilinear pre-scale + NIS 2x) and 1.5x (NIS only) into a
 // window-size texture with a letterbox placement, read back and checked against a CPU bilinear reference: same mean
-// level, the red block stays red, the bars stay black, and NIS's edges are sharper than bilinear.
+// level, the red block stays red, the bars stay black, and NIS's edges are sharper than bilinear. A P010 picture into an
+// RGB10A2 output keeps 10-bit steps.
 #include <windows.h>
 #include <d3d11.h>
 #include <cmath>
@@ -137,6 +138,59 @@ static void RunCase(ID3D11Device *dev, ID3D11DeviceContext *ctx, int sw, int sh,
     rb->Release(); PM_NisDestroy(n); srv[0]->Release(); srv[1]->Release(); src->Release();
 }
 
+// 10-bit: a P010 picture (left half luma code 500, right half 501, chroma neutral) scaled 1.5x into an RGB10A2 output
+// keeps the one-code step (an RGBA8 output, as before, could not); the levels are the exact 10-bit limited-range ones
+static void RunTenBit(ID3D11Device *dev, ID3D11DeviceContext *ctx)
+{
+    std::printf("== 10-bit: P010 -> RGB10A2\n");
+    const int sw = 128, sh = 64, ow = 192, oh = 96;
+    std::vector<uint16_t> p010(size_t(sw) * sh * 3 / 2, uint16_t(512 << 6));
+    for (int r = 0; r < sh; r++) for (int c = 0; c < sw; c++) p010[size_t(r) * sw + c] = uint16_t((c < sw / 2 ? 500 : 501) << 6);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = sw; td.Height = sh; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_P010;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init = { p010.data(), UINT(sw * 2), 0 };
+    ID3D11Texture2D *src = nullptr;
+    CHECK(SUCCEEDED(dev->CreateTexture2D(&td, &init, &src)), "P010 texture");
+    if (!src) return;
+    ID3D11ShaderResourceView *srv[3] = {};
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = 1;
+    sd.Format = DXGI_FORMAT_R16_UNORM; dev->CreateShaderResourceView(src, &sd, &srv[0]);
+    sd.Format = DXGI_FORMAT_R16G16_UNORM; dev->CreateShaderResourceView(src, &sd, &srv[1]);
+    d3d11_device_t d = {};
+    d.d3ddevice = dev; d.d3dcontext = ctx; d.context_mutex = INVALID_HANDLE_VALUE;
+    CHECK(PM_NisFormatOk(&d, DXGI_FORMAT_R10G10B10A2_UNORM), "RGB10A2 written by a compute shader");
+    pm_nis *n = PM_NisCreateFormat(nullptr, &d, DXGI_FORMAT_R10G10B10A2_UNORM);
+    CHECK(n != nullptr, "PM_NisCreateFormat RGB10A2");
+    if (!n) return;
+    ID3D11Texture2D *out = nullptr; ID3D11ShaderResourceView *outSrv = nullptr;
+    CHECK(PM_NisResize(nullptr, n, &d, ow, oh, &out, &outSrv) == VLC_SUCCESS, "PM_NisResize");
+    D3D11_TEXTURE2D_DESC od = {};
+    out->GetDesc(&od);
+    CHECK(od.Format == DXGI_FORMAT_R10G10B10A2_UNORM, "output format %d", int(od.Format));
+    video_format_t f = {};
+    f.i_width = f.i_visible_width = sw; f.i_height = f.i_visible_height = sh;
+    f.space = COLOR_SPACE_BT2020; f.b_color_range_full = false;
+    vout_display_place_t place = {};
+    place.width = ow; place.height = oh;
+    CHECK(PM_NisProcess(nullptr, n, &d, srv, 2, &f, &place, 0.0f) == VLC_SUCCESS, "PM_NisProcess");
+    od.Usage = D3D11_USAGE_STAGING; od.BindFlags = 0; od.CPUAccessFlags = D3D11_CPU_ACCESS_READ; od.MiscFlags = 0;
+    ID3D11Texture2D *rb = nullptr;
+    dev->CreateTexture2D(&od, nullptr, &rb);
+    ctx->CopyResource(rb, out);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(rb, 0, D3D11_MAP_READ, 0, &m))) { CHECK(false, "readback"); return; }
+    auto G = [&](int x, int y) { return double((((const uint32_t *)((const uint8_t *)m.pData + size_t(y) * m.RowPitch))[x] >> 10) & 1023); };
+    const double l = G(ow / 8, oh / 2), r = G(ow - ow / 8, oh / 2);
+    ctx->Unmap(rb, 0);
+    const double wl = (500.0 - 64) / 876 * 1023, wr = (501.0 - 64) / 876 * 1023;
+    std::printf("left %.0f (want %.1f), right %.0f (want %.1f)\n", l, wl, r, wr);
+    CHECK(std::fabs(l - wl) <= 1 && std::fabs(r - wr) <= 1, "10-bit levels");
+    CHECK(r - l >= 1, "the one-code 10-bit step kept (%.0f -> %.0f)", l, r);
+    rb->Release(); PM_NisDestroy(n); srv[0]->Release(); srv[1]->Release(); src->Release();
+}
+
 int main()
 {
     ID3D11Device *dev = nullptr; ID3D11DeviceContext *ctx = nullptr;
@@ -146,6 +200,7 @@ int main()
     if (FAILED(hr)) { std::printf("no WARP device (0x%08lX)\n", hr); return 1; }
     RunCase(dev, ctx, 320, 180, 1280, 720);   // 4x: bilinear to 640x360, then NIS 2x
     RunCase(dev, ctx, 640, 360, 960, 540);    // 1.5x: NIS alone
+    RunTenBit(dev, ctx);
     std::printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
     return fails ? 1 : 0;
 }
