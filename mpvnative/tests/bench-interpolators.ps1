@@ -46,7 +46,7 @@ $runs = [ordered]@{
 }
 if ($VpyScript) {
     $exe = if ($VsMpv) { $VsMpv } else { $Mpv }
-    $runs['vs'] = @{ exe = $exe; args = @('--hwdec=auto-copy', '--vo=gpu-next', "--vf=vapoursynth=file=[$VpyScript]:buffered-frames=4:concurrent-frames=2:user-data=[smoother=$Multiplier]") }
+    $runs['vs'] = @{ exe = $exe; args = @('--hwdec=auto-copy', '--vo=gpu-next', "--vf=vapoursynth=file=[$VpyScript]:buffered-frames=8:concurrent-frames=2:user-data=[smoother=$Multiplier]") }
 }
 $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 $results = @()

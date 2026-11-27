@@ -37,7 +37,7 @@ Check ($t.Text.StartsWith($script:PmBegin)) 'block at the very top (global secti
 $vpyP = "$($r.Replace('\','/'))/AppData/Local/PushMPC/vsplugin/pushmpc.vpy"; $luaP = $vpyP.Replace('pushmpc.vpy', 'pushmpc.lua')
 Check ($t.Text.Contains("scripts-append=$(Get-PmQuoted $luaP)`r`n")) 'scripts-append names pushmpc.lua next to pushmpc.vpy (%n% quoted), CRLF'
 Check ($t.Text.Contains("script-opts-append=pushmpc-vpy=$(Get-PmQuoted $vpyP)`r`n")) 'script-opts carry the pushmpc.vpy path'
-Check ($t.Text.Contains("script-opts-append=pushmpc-buffered=4`r`n") -and $t.Text.Contains("script-opts-append=pushmpc-concurrent=2`r`n")) 'script-opts carry the frame counts'
+Check ($t.Text.Contains("script-opts-append=pushmpc-buffered=8`r`n") -and $t.Text.Contains("script-opts-append=pushmpc-concurrent=2`r`n")) 'script-opts carry the frame counts'
 Check (-not $t.Text.Contains('vf-append=')) 'no vf= line in mpv.conf (a filter that cannot start would stop all playback)'
 foreach ($l in 'hwdec=auto-copy', 'hr-seek-framedrop=no', 'interpolation=no') { Check ($t.Text.Contains("$l`r`n")) "block has $l" }
 Check ($t.Text.EndsWith($orig)) 'original content follows unchanged'

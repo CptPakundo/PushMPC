@@ -45,7 +45,7 @@ again after installing one):
    # >>> PushMPC managed: do not edit between these lines (PushMPC uninstall removes them)
    scripts-append=<path>/pushmpc.lua
    script-opts-append=pushmpc-vpy=<path>/pushmpc.vpy
-   script-opts-append=pushmpc-buffered=4
+   script-opts-append=pushmpc-buffered=8
    script-opts-append=pushmpc-concurrent=2
    hwdec=auto-copy
    hr-seek-framedrop=no

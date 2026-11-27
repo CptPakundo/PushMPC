@@ -29,7 +29,13 @@ local options = require 'mp.options'
 -- seconds their measured render time
 -- (vo-passes) must stay within anime-share of a frame's time, else the next lighter one takes over. They are compute
 -- shaders: renderers without compute (OpenGL below 4.3) keep the fragment set.
-local opts = { vpy = "", buffered = "4", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
+-- buffered = mpv's vapoursynth buffered-frames: how far back a request may reach from the newest one (vf_vapoursynth.c:
+-- a request at or past in_frameno + buffered-frames drops the oldest decoded frames). One output asks for source s .. s + 1
+-- + 3 (the pair and the Dedup / held-drawing-repair lookahead of 3, every portable and ml route), and with
+-- concurrent-frames = 2 the next output may already ask from s + 1: s .. s + 5, 6 frames. 8 leaves 2 for a short gap the
+-- pipeline fills in (schedule.h kMaxGap). With 4, the ml route lost the last source frame (Homebrew Intel: 599 of 600).
+-- Cost: 8 decoded frames held instead of 4 (4K 10-bit: about 25 MB each); no added latency (mpv decodes on demand).
+local opts = { vpy = "", buffered = "8", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
                shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "", ["anime-shaders"] = "", ["anime-share"] = "0.35",
                ["content-helper"] = "" }
 options.read_options(opts, "pushmpc")

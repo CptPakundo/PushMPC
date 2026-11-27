@@ -2,14 +2,14 @@
   mpv-integration.ps1: puts PushMPC's VapourSynth filter (pushmpc.Enhance through pushmpc.vpy) into mpv-based players and
   takes it out again exactly. The main installer calls it; it also runs on its own:
     mpv-integration.ps1 -Action Install|Uninstall|Status [-Root <fake root>] [-ScriptPath <pushmpc.vpy>] [-MpvExe <mpv.exe>...]
-                        [-BufferedFrames 4] [-ConcurrentFrames 2] [-NoSmplayer] [-RuntimeOnPath] [-WhatIf]
+                        [-BufferedFrames 8] [-ConcurrentFrames 2] [-NoSmplayer] [-RuntimeOnPath] [-WhatIf]
   Dot-source it (. .\mpv-integration.ps1) to get the functions without running an action.
 
   What it changes (Install), each with a backup and an exact restore (Uninstall):
    - mpv.conf of every mpv found: portable_config\mpv.conf next to mpv.exe when that folder exists (shinchiro's portable
      layout), else %APPDATA%\mpv\mpv.conf. A marked block goes at the very top (before any [profile], so it is global):
        # >>> PushMPC managed ...
-       vf-append=@pushmpc:vapoursynth=file=[<pushmpc.vpy>]:buffered-frames=4:concurrent-frames=2
+       vf-append=@pushmpc:vapoursynth=file=[<pushmpc.vpy>]:buffered-frames=8:concurrent-frames=2
        hwdec=auto-copy            (VapourSynth gets CPU frames only: copy-back decoding)
        hr-seek-framedrop=no       (no dropped frames around a seek: the filter sees a continuous stream)
        interpolation=no           (mpv's own frame blending would fight the generated frames)
@@ -52,7 +52,7 @@ param(
     [string]$Root = '',
     [string]$ScriptPath = '',
     [string[]]$MpvExe = @(),
-    [int]$BufferedFrames = 4,
+    [int]$BufferedFrames = 8,   # mpv's buffered-frames: see integrations/mpv/pushmpc.lua (the request window, s .. s + 5, plus 2)
     [int]$ConcurrentFrames = 2,
     [switch]$NoSmplayer,
     [switch]$RuntimeOnPath
@@ -809,7 +809,7 @@ function Test-PmVapourSynth($E, [string]$Exe, [string]$RuntimeDir) {
 # ------------------------------------------------------------------------------------------------ actions
 function Invoke-PmMpvIntegration {
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param([string]$Action, [string]$Root, [string]$ScriptPath, [string[]]$MpvExe, [int]$BufferedFrames = 4, [int]$ConcurrentFrames = 2, [switch]$NoSmplayer, [switch]$RuntimeOnPath)
+    param([string]$Action, [string]$Root, [string]$ScriptPath, [string[]]$MpvExe, [int]$BufferedFrames = 8, [int]$ConcurrentFrames = 2, [switch]$NoSmplayer, [switch]$RuntimeOnPath)
     $E = Get-PmEnv $Root
     $script:PmRoot = $Root
     if (-not $ScriptPath) { $ScriptPath = "$($E.LocalAppData)\PushMPC\vsplugin\pushmpc.vpy" }

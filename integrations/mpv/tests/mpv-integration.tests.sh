@@ -117,10 +117,10 @@ run install --script "$HOME/my dir/push mpc.vpy" --conf "$HOME/a.conf"
 p="$HOME/my dir/push mpc.vpy"; n=$(printf '%s' "$p" | wc -c | tr -d ' ')
 check "spaces: script-opts value %n% quoted" same "$(sed -n 3p "$HOME/a.conf")" "script-opts-append=pushmpc-vpy=%$n%$p"
 run install --direct --script "$HOME/my dir/push mpc.vpy" --conf "$HOME/a2.conf"
-check "--direct: vf line, spaces quoted with []" same "$(sed -n 2p "$HOME/a2.conf")" "vf-append=@pushmpc:vapoursynth=file=[$HOME/my dir/push mpc.vpy]:buffered-frames=4:concurrent-frames=2"
+check "--direct: vf line, spaces quoted with []" same "$(sed -n 2p "$HOME/a2.conf")" "vf-append=@pushmpc:vapoursynth=file=[$HOME/my dir/push mpc.vpy]:buffered-frames=8:concurrent-frames=2"
 p="$HOME/x]y/p.vpy"; n=$(printf '%s' "$p" | wc -c | tr -d ' ')
 run install --direct --script "$p" --conf "$HOME/b.conf"
-check "--direct: ] quoted with %n%" same "$(sed -n 2p "$HOME/b.conf")" "vf-append=@pushmpc:vapoursynth=file=%$n%$p:buffered-frames=4:concurrent-frames=2"
+check "--direct: ] quoted with %n%" same "$(sed -n 2p "$HOME/b.conf")" "vf-append=@pushmpc:vapoursynth=file=%$n%$p:buffered-frames=8:concurrent-frames=2"
 
 # 7. CRLF files keep CRLF in the block and restore exactly
 fresh
