@@ -199,6 +199,13 @@ static void TestColour()
     c = ColourFromProps(f, 2, true, 2, true, 2, true, 0, true); CHECK(c.matrix == 1 && c.transfer == 1 && c.range == 2);  // unspecified keeps; VS full -> FFmpeg 2
     c = ColourFromProps(f, 0, false, 0, false, 0, false, 0, false); CHECK(c == f);
     CHECK(FfRangeFromVs(1, true) == 1 && FfRangeFromVs(0, true) == 2 && FfRangeFromVs(0, false) == 1);
+
+    // the first real frame against the opening transfer: Auto's anime model stops on HDR, a left-out one is only logged
+    CHECK(AnimeAfterFirstFrame(true, true, false, false) == AnimeOnFirstFrame::StopModel);
+    CHECK(AnimeAfterFirstFrame(true, true, false, true) == AnimeOnFirstFrame::Keep);
+    CHECK(AnimeAfterFirstFrame(false, true, false, false) == AnimeOnFirstFrame::Keep);              // asked for (upscaler=anime): kept
+    CHECK(AnimeAfterFirstFrame(false, false, true, true) == AnimeOnFirstFrame::LeftOut);
+    CHECK(AnimeAfterFirstFrame(false, false, true, false) == AnimeOnFirstFrame::Keep);
 }
 
 static void TestAuto()

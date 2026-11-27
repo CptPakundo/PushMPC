@@ -317,4 +317,18 @@ inline Colour ColourFromProps(const Colour& fallback, int64_t matrix, bool hasMa
     return c;
 }
 
+// the ml backend's Auto anime upscaler once the first real frame shows a _Transfer whose HDR-ness differs from the one
+// it was opened with (a source that tags its frames; mpv's frames carry none, and pushmpc.lua re-adds the filter with
+// mpv's transfer instead). The output size is declared at create and cannot change, so a model Auto picked on an SDR
+// assumption stops for an HDR frame (a bicubic resize to the declared size takes its place: the model never sees PQ /
+// HLG code values, and the frame count stays exact), and one Auto left out for HDR cannot start (the output is the
+// source's size). takes: AutoAnimeSrTakesTransfer for the frame's transfer (content_detect.h).
+enum class AnimeOnFirstFrame { Keep, StopModel, LeftOut };
+inline AnimeOnFirstFrame AnimeAfterFirstFrame(bool autoPick, bool modelOpen, bool leftOutForHdr, bool takes)
+{
+    if (autoPick && modelOpen && !takes) return AnimeOnFirstFrame::StopModel;
+    if (leftOutForHdr && takes) return AnimeOnFirstFrame::LeftOut;
+    return AnimeOnFirstFrame::Keep;
+}
+
 } // namespace pmvs

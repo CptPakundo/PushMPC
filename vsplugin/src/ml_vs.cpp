@@ -57,7 +57,9 @@ struct MInst {
     // first real frame (no frame is read while the script loads: mpv gives a black dummy then)
     pmml::Options mlOpts;
     int colMatrix = 1, colRange = 0, bits = 8;
+    int colTransfer = 1;               // the transfer Auto's anime decision was made with (H.273 code)
     bool colourChecked = false;
+    bool upLeftOutHdr = false;         // Auto's anime upscaler left out for an HDR transfer
     struct UpFrame { std::vector<uint16_t> p16[3]; std::vector<uint8_t> p8[3]; };
     std::map<int64_t, UpFrame> upFrames;
     int64_t upLast = -2;
@@ -286,19 +288,46 @@ void MBind(MInst* d)
 }
 
 // the colour PushFlow was made with against the first real frame's (once): made again when they differ. Under mpv the
-// colour is not read while the script loads (a frame requested then is a black dummy), so it may be a guess.
+// colour is not read while the script loads (a frame requested then is a black dummy), so it may be a guess. The
+// transfer decides only Auto's anime upscaler (HDR: left out), whose output size is fixed at create: schedule.h
+// AnimeAfterFirstFrame. Runs before the first Produce, so no output has been made with the assumed colour yet.
 void CheckColour(MInst* d, const VSAPI* a, VSFrameContext* fc, int64_t s)
 {
     d->colourChecked = true;
     const VSFrame* f = a->getFrameFilter(int(s), d->node, fc);
     if (!f) return;
     const VSMap* p = a->getFramePropertiesRO(f);
-    int e = 0, matrix = d->colMatrix, range = d->colRange;
-    const int64_t m = a->mapGetInt(p, "_Matrix", 0, &e); if (!e && m != 2) matrix = int(m);
+    int e = 0, matrix = d->colMatrix, range = d->colRange, transfer = d->colTransfer;
+    // mpv's vf_vapoursynth sets _ColorSpace (libavcodec's AVColorSpace, the same H.273 codes) and _ColorRange, not
+    // _Matrix, and no _Transfer: under mpv the transfer comes from the arguments only (pushmpc.lua re-adds the filter
+    // with them when its HDR-ness differs from the guess)
+    int64_t m = a->mapGetInt(p, "_Matrix", 0, &e);
+    if (e) m = a->mapGetInt(p, "_ColorSpace", 0, &e);
+    if (!e && m != 2) matrix = int(m);
+    const int64_t t = a->mapGetInt(p, "_Transfer", 0, &e); if (!e && t != 2) transfer = int(t);
     const int64_t r = a->mapGetInt(p, "_Range", 0, &e);   // VapourSynth R82+: 1 full, 0 limited
     if (!e) range = r == 1 ? 1 : 0;
     else { const int64_t c = a->mapGetInt(p, "_ColorRange", 0, &e); if (!e) range = c == 0 ? 1 : 0; }   // older: 0 full
     a->freeFrame(f);
+    if (transfer != d->colTransfer) {
+        using pushmpc::content::AnimeSrFeed;
+        const bool takes = pushmpc::content::AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, transfer);
+        switch (AnimeAfterFirstFrame(d->upAuto, d->up || d->upOwnUp, d->upLeftOutHdr, takes)) {
+        case AnimeOnFirstFrame::StopModel:
+            // before the matrix / range rebuild below, which would make the model again
+            d->up.reset(); d->upOwnUp.reset(); d->upFrames.clear(); d->upPaused = false;
+            Log(std::format("ml: the first frame's transfer {} is HDR (opened with {}): Auto's anime upscaler stops before its first frame (the model would see PQ / HLG code values); "
+                            "a bicubic resize to the declared {}x{} instead", transfer, d->colTransfer, d->upW, d->upH));
+            break;
+        case AnimeOnFirstFrame::LeftOut:
+            Log(std::format("ml: the first frame's transfer {} is SDR (opened with {}): Auto's anime upscaler was left out for HDR and cannot start in this instance (its output size is the source's)",
+                            transfer, d->colTransfer));
+            d->upLeftOutHdr = false;
+            break;
+        case AnimeOnFirstFrame::Keep: break;
+        }
+        d->colTransfer = transfer;
+    }
     if (matrix == d->colMatrix && range == d->colRange) return;
     const float kr = matrix == 5 || matrix == 6 ? 0.299f : matrix == 9 ? 0.2627f : 0.2126f, kb = matrix == 5 || matrix == 6 ? 0.114f : matrix == 9 ? 0.0593f : 0.0722f;
     const pmml::Colour c = range ? pmml::Colour::full(d->bits, kr, kb) : pmml::Colour::limited(d->bits, kr, kb);
@@ -504,7 +533,10 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     // first real frame (CheckColour: PushFlow is made again when it differs).
     const int64_t argMatrix = MArgI(in, a, "matrix", -1), argTransfer = MArgI(in, a, "transfer", -1), argRange = MArgI(in, a, "range", -1);
     const Colour col = ColourFromProps(GuessColour(uint32_t(w), uint32_t(h), bits), argMatrix, argMatrix >= 0, argTransfer, argTransfer >= 0, -1, false, argRange, argRange >= 0);
+    const bool transferGiven = argTransfer >= 0 && argTransfer != 2;
     bool hdrOut = animeAuto && !animeAsked && !pushmpc::content::AutoAnimeSrTakesTransfer(pushmpc::content::AnimeSrFeed::CodedPlanes, int(col.transfer));
+    const std::string transferNote = !(animeAuto && !animeAsked) ? std::string() : std::format(" (transfer {} from {})", col.transfer,
+        transferGiven ? "the arguments" : "a guess, checked against the first frame's _Transfer when it has one");
     if (hdrOut) animeNote = "not used: an HDR source (Auto: the model would see PQ / HLG code values)";
     else if (animeAsked || animeAuto) {
         const double scale = dispW > 0 && dispH > 0 ? std::min(double(dispW) / w, double(dispH) / h) : (animeAsked ? 2.0 : 0.0);
@@ -575,9 +607,9 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
         std::string ue;
         up = pmml::Upscaler::create(u, &ue);
         upOpts = u;
-        if (up) { o.width = up->outWidth(); o.height = up->outHeight(); Log("ml: anime upscaler " + animeNote + "; " + up->describe()); }
+        if (up) { o.width = up->outWidth(); o.height = up->outHeight(); Log("ml: anime upscaler " + animeNote + transferNote + "; " + up->describe()); }
         else Log("ml: anime upscaler not used (" + ue + ")");
-    } else if (!animeNote.empty()) Log("ml: anime upscaler " + animeNote);
+    } else if (!animeNote.empty()) Log("ml: anime upscaler " + animeNote + transferNote);
     auto interp = pmml::Interpolator::create(o, &e);
     if (!interp) return fail(e);
     Log("ml: " + decision);
@@ -596,6 +628,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->vi.numFrames = int(OutputFrames(vi->numFrames, k));
     d->be.interp = std::move(interp);
     d->mlOpts = o; d->colMatrix = matrix; d->colRange = range; d->bits = bits;
+    d->colTransfer = int(col.transfer); d->upLeftOutHdr = hdrOut;
     d->be.bits = bits;
     d->be.flowOnce = flowOnce;
     d->pipe.Init(k, vi->numFrames, SrcDur100ns(vi->fpsNum, vi->fpsDen));

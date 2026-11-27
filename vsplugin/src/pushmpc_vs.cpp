@@ -245,7 +245,9 @@ bool CheckColour(Enhance* d, CoreHost& h, int64_t s, std::string& err)
     if (!f) return true;
     const VSMap* p = d->api->getFramePropertiesRO(f);
     bool hm, ht, hp, hr;
-    const int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm), t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropRange(p, d->api, &hr);
+    int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm);
+    const int64_t t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropRange(p, d->api, &hr);
+    if (!hm) m = PropInt(p, d->api, "_ColorSpace", 2, &hm);   // mpv's vf_vapoursynth: _ColorSpace (AVColorSpace = H.273), no _Matrix
     d->api->freeFrame(f);
     const Colour c = ColourFromProps(d->colour, m, hm, t, ht, pr, hp, r, hr);
     h.RememberColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample, d->inVi.fpsNum, d->inVi.fpsDen, c);
@@ -566,6 +568,10 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
         || vi->width <= 0 || vi->height <= 0 || vi->numFrames <= 0) {
         a->freeNode(node);
         return fail("the clip must be YUV 4:2:0, 8 to 16 bits, constant size and format (pushmpc.vpy converts others)");
+    }
+    {   // the colour arguments (pushmpc.lua passes mpv's video-params); mpv's frames carry no _Transfer / _Primaries
+        auto arg = [&](const char* k) { int e = 0; const int64_t v = a->mapGetInt(in, k, 0, &e); return e ? std::string("-") : std::to_string(v); };
+        Log("colour arguments: matrix " + arg("matrix") + " transfer " + arg("transfer") + " primaries " + arg("primaries") + " range " + arg("range") + " (- = none: guessed from the format)");
     }
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
