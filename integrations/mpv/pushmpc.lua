@@ -508,7 +508,8 @@ function vs_status_watch()
         vs_watch.reloads = vs_watch.reloads + 1
         msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
         mp.commandv("vf", "remove", "@pushmpc")
-        mp.commandv("vf", "append", spec)
+        local cd = colour_data()   -- the re-added instance opens with the stream's colour too (as in ensure)
+        mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
     end)
 end
 local busy = false
