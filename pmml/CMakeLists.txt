@@ -55,5 +55,10 @@ add_executable(pmml_unit tests/pmml_unit.cpp)
 target_link_libraries(pmml_unit PRIVATE pmml)
 target_include_directories(pmml_unit PRIVATE src)
 target_compile_definitions(pmml_unit PRIVATE "PMML_PIN_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/../scripts/anime-models-pin.json\"")
-enable_testing()
-add_test(NAME pmml_unit COMMAND pmml_unit)
+# registered only where it is built: a parent that adds pmml with EXCLUDE_FROM_ALL (the Kodi add-on, the mpv content
+# helper) builds the library alone, and a registered but unbuilt pmml_unit would fail its ctest
+get_property(_pmml_excluded DIRECTORY PROPERTY EXCLUDE_FROM_ALL)
+if(NOT _pmml_excluded)
+  enable_testing()
+  add_test(NAME pmml_unit COMMAND pmml_unit)
+endif()
