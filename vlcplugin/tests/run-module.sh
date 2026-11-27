@@ -36,6 +36,8 @@ run() { # name mult clip -- args
   [ -s "$log" ] || cp "$OUT/$name.stdout" "$log" 2>/dev/null
   echo "== $name: exit $rc"
   grep -hE "PushMPC|as static|as interactive|compensate|Failed to" "$log" | sed 's/^[^:]*: //' | sort | uniq -c | head -8
+  # what decides the frame count (cut off by head -8 above): the close line (worker jobs), the repair, zero copy
+  grep -hE "PushMPC: (close|held-drawing repair|zero copy)" "$log" | sed 's/^[^:]*: //' | sort | uniq -c | head -6
   local abs; abs="$(cd "$OUT" && pwd)"
   (cd "$OUT" && "$PY" "$an" "$name" "$abs/$name.csv" "$abs/$name.log" --src-frames "$SRC_FRAMES" --mult "$mult")
 }
@@ -87,8 +89,10 @@ if [ "${PUSHCORE:-0}" = 1 ] && [ -n "${CLIP720:-}" ]; then
 fi
 # the portable GPU engine (Vulkan); CI: Mesa's lavapipe (PUSHMPC_VK_ALLOW_CPU=1), so it shows the plumbing, not the speed
 if [ "${GPU_TEST:-0}" = 1 ]; then
-  want gpu_x4 && run gpu_x4 4 "$CLIP" -- $PP --pushmpc-engine=3 --pushmpc-smoother=4
-  [ -n "${CLIP720:-}" ] && want gpu_x2_720 && SRC_FRAMES="${S720:-$SRC_FRAMES}" run gpu_x2_720 2 "$CLIP720" -- $PP --pushmpc-engine=3 --pushmpc-smoother=2
+  # GPU_ALLOW_CPU=1: lavapipe for these cases only (exported for the whole run it would take the CPU engine's cases too)
+  GA="${GPU_ALLOW_CPU:-${PUSHMPC_VK_ALLOW_CPU:-}}"
+  want gpu_x4 && PUSHMPC_VK_ALLOW_CPU="$GA" run gpu_x4 4 "$CLIP" -- $PP --pushmpc-engine=3 --pushmpc-smoother=4
+  [ -n "${CLIP720:-}" ] && want gpu_x2_720 && PUSHMPC_VK_ALLOW_CPU="$GA" SRC_FRAMES="${S720:-$SRC_FRAMES}" run gpu_x2_720 2 "$CLIP720" -- $PP --pushmpc-engine=3 --pushmpc-smoother=2
 fi
 
 # real displays: no crash, and VLC's own count of displayed frames (rc interface) where available

@@ -291,10 +291,11 @@ jobs:
           sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base vlc-plugin-video-output xvfb libgl1-mesa-dri             mesa-vulkan-drivers ffmpeg python3 >/dev/null
           file art/plugin-linux-aarch64/*.so
       - name: Module cases (CPU engine) and the GPU engine on lavapipe
+        # GPU_ALLOW_CPU: lavapipe for gpu_x4 only (PUSHMPC_VK_ALLOW_CPU for the whole run put x2/x4/x8 on lavapipe too)
         run: |
           set -u
           d=~/.local/share/pushmpc/vlc; mkdir -p "$d" && cp art/plugin-linux-aarch64/*.so "$d/"
-          export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP720=art/clips/clip720.mkv OUT=res/arm                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) PUSHMPC_VK_ALLOW_CPU=1 GPU_TEST=1                  CASES="base x2 x4 x8 gpu_x4" LABEL="Linux aarch64, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
+          export VLC=$(command -v vlc) PLUGDIR="$d" CLIP=art/clips/clip.mkv CLIP720=art/clips/clip720.mkv OUT=res/arm                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) GPU_ALLOW_CPU=1 GPU_TEST=1                  CASES="base x2 x4 x8 gpu_x4" LABEL="Linux aarch64, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh | tee res-arm.txt
           for c in x2 x4 x8; do grep -q "^PASS {\"case\": \"$c\"" res-arm.txt || { echo "::error::$c failed on aarch64"; exit 1; }; done
           grep -q "GPU engine (Vulkan)" res/arm/gpu_x4.log || { echo "::error::the GPU engine did not run on aarch64"; exit 1; }

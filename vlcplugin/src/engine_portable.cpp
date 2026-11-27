@@ -83,6 +83,8 @@ struct pm_engine {
     // slots (lagSlot) and are repaired there; else 16-bit CPU copies (lagPic) repaired on the CPU.
     int lag = 0;
     bool lagGpu = false, repOn = false;
+    bool plainSaved = false, plainDedup = false;   // pm_engine_plain: lag and held frames set aside for a probe
+    int plainLag = 0;
     double srcMs = 1000.0 / 23.976;
     int64_t lagSrc = -1, lagLastDistinct = -1, lagReady = -1, lagA = -1, lagB = -1;
     struct LagItem { int64_t s; bool contig; };
@@ -1075,6 +1077,24 @@ extern "C" int pm_engine_set_repair(pm_engine *e, int on, char *why, size_t whys
 }
 
 extern "C" int pm_engine_repair_lag(const pm_engine *e) { return e->lag; }
+
+extern "C" void pm_engine_plain(pm_engine *e, int on)
+{
+    if (on) {
+        if (e->plainSaved) return;
+        LagDrop(e);
+        HeldDrop(e);
+        e->plainSaved = true; e->plainLag = e->lag; e->plainDedup = e->dedup;
+        e->lag = 0; e->dedup = false;
+        return;
+    }
+    if (!e->plainSaved) return;
+    pm_engine_forget(e);   // the probe's frames go (lag 0 here: only the pair)
+    e->plainSaved = false;
+    e->lag = e->plainLag; e->dedup = e->plainDedup;
+    LagDrop(e);
+    HeldDrop(e);
+}
 
 extern "C" int pm_engine_pairs_ready(const pm_engine *e)
 {
