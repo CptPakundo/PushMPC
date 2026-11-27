@@ -148,7 +148,7 @@ install_one() {
     else rm -f "$DIR/$x"; fi
   done
   if [ "$tgt" = macos ]; then   # the FSR output and MoltenVK, when they ship next to the plugin
-    for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib libpushmpc_engine_apple.dylib; do
+    for x in libpushmpc_macosx_plugin.dylib libMoltenVK.dylib libpushmpc_engine_apple.dylib pushmpc-vulkan-probe; do
       [ -f "$(dirname "$plug")/$x" ] || continue
       cp -f "$(dirname "$plug")/$x" "$DIR/"; xattr -d com.apple.quarantine "$DIR/$x" 2>/dev/null || true
     done
@@ -330,7 +330,7 @@ selftest_hw() {
 uninstall_one() {
   tgt="$1"; paths_for "$tgt"
   rm -f "$DIR/libpushmpc_plugin.so" "$DIR/libpushmpc_plugin.dylib" "$DIR/hw-selftest.txt" "$DIR/pushmpc-selftest.log" \
-        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/libpushmpc_engine_apple.dylib" "$DIR/pushmpc-selftest.y4m" \
+        "$DIR/libpushmpc_macosx_plugin.dylib" "$DIR/libMoltenVK.dylib" "$DIR/libpushmpc_engine_apple.dylib" "$DIR/pushmpc-vulkan-probe" "$DIR/pushmpc-selftest.y4m" \
         "$DIR/libpushmpc_content.so" "$DIR/libpushmpc_content.dylib"
   rmdir "$DIR" 2>/dev/null || true
   case "$tgt" in

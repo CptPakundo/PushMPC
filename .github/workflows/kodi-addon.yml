@@ -680,7 +680,9 @@ jobs:
           [ -z "$MVK_LICENSE" ] || cp "$MVK_LICENSE" "$a/LICENSE.MoltenVK"
           lipo -info "$a/inputstream.pushmpc.dylib"
           otool -L "$a/inputstream.pushmpc.dylib"
-          codesign -s - -f "$a/inputstream.pushmpc.dylib" "$a/libMoltenVK.dylib"   # ad-hoc: Apple silicon refuses unsigned code
+          [ -f "$a/pushmpc-vulkan-probe" ] || { echo "::error::no pushmpc-vulkan-probe in the add-on (MoltenVK's first instance outside Kodi)"; exit 1; }
+          codesign -s - -f "$a/inputstream.pushmpc.dylib" "$a/libMoltenVK.dylib" "$a/pushmpc-vulkan-probe"   # ad-hoc: Apple silicon refuses unsigned code
+          lipo -info "$a/pushmpc-vulkan-probe"; "$a/pushmpc-vulkan-probe" "$PWD/$a/libMoltenVK.dylib" | tail -4
           export PUSHMPC_VULKAN_LIBRARY="$PWD/$a/libMoltenVK.dylib"
           ctest --test-dir build --output-on-failure
           if arch -x86_64 /usr/bin/true 2>/dev/null; then

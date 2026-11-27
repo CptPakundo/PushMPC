@@ -51,6 +51,8 @@ for p in libpushmpc_plugin.dylib libpushmpc_macosx_plugin.dylib; do
     echo "vlc/$p ($(lipo -archs "$out/vlc/$p"))"
 done
 cp "$out/libMoltenVK.dylib" "$out/vlc/"   # the GPU engine finds it next to the plugin
+# MoltenVK's first instance outside VLC (vsplugin/engines/gpu/mac_vk_probe.h looks next to the plugin)
+[ -f "$out/pushmpc-vulkan-probe" ] && cp -p "$out/pushmpc-vulkan-probe" "$out/vlc/" || echo "::warning::no pushmpc-vulkan-probe: VLC opens Vulkan unchecked"
 cp "$out/libpushmpc_engine_apple.dylib" "$out/vlc/"   # VideoToolbox interpolation, tried first (engine_portable.cpp)
 cp "$root/vlcplugin/install/pushmpc-vlc.sh" "$out/vlc/"
 # ContentDetect for the VLC module (the image model with PUSHMPC_ORT_INCLUDE set: the ONNX Runtime C API headers)
