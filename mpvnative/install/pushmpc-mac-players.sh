@@ -73,6 +73,9 @@ iina_selftest() {   # IINA's own libmpv, the bridge, the engines: a generated cl
         echo "IINA: self-test: ${1} frames in, ${2} out (engine: ${eng:-unknown})"
     else
         echo "IINA: self-test: no frames generated (exit $r; $(printf '%s\n' "$new" | grep -E 'not active|pass-through|engine' | tail -3 | tr '\n' ' '))"
+        if [ "$r" -ge 128 ] || [ -z "$new" ]; then   # it died, or the bridge never wrote: the host's own account
+            printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 16 | sed 's/^/  IINA self-test host: /'
+        fi
     fi
 }
 
@@ -86,6 +89,9 @@ do_iina() {
         mkdir -p "$state" "$plugins"
         if [ ! -f "$state/iina-enabled" ]; then   # IINA's own setting, as it was before PushMPC
             defaults read com.colliderli.iina "PluginEnabled.$pid" > "$state/iina-enabled" 2>/dev/null || echo absent > "$state/iina-enabled"
+            # no IINA preferences at all yet (IINA never started): our write creates the domain; uninstall removes
+            # it again when nothing else is in it
+            defaults read com.colliderli.iina > /dev/null 2>&1 || : > "$state/iina-domain-created"
             [ -d "$plugins" ] && [ -n "$(ls -A "$plugins" 2>/dev/null)" ] || : > "$state/iina-plugins-created"
         fi
         rm -rf "$pdir.new" && mkdir -p "$pdir.new" && ditto -x -k "$pkg" "$pdir.new" && rm -rf "$pdir" && mv "$pdir.new" "$pdir" \
@@ -104,7 +110,10 @@ do_iina() {
                 *) defaults write com.colliderli.iina "PluginEnabled.$pid" -bool true ;;
             esac
             if [ -f "$state/iina-plugins-created" ]; then rmdir "$plugins" 2>/dev/null; fi
-            rm -f "$state/iina-enabled" "$state/iina-plugins-created"
+            if [ -f "$state/iina-domain-created" ] && [ "$(defaults read com.colliderli.iina 2>/dev/null | tr -d ' \t\n')" = "{}" ]; then
+                defaults delete com.colliderli.iina 2>/dev/null
+            fi
+            rm -f "$state/iina-enabled" "$state/iina-plugins-created" "$state/iina-domain-created"
         fi
         echo "IINA: PushMPC plugin removed" ;;
     status)
