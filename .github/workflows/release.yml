@@ -399,6 +399,12 @@ jobs:
           need="$need /vsplugin/pushmpc-content"
           if [ -f mpvnative-art/hook/pushmpc_hook.so ]; then need="$need /mpvnative/libpushmpc_engine_ml.so"; [ "${{ matrix.arch }}" = x86_64 ] && need="$need /mpvnative/libpushmpc_engine_nvl.so /mpvnative/pushmpc-nvvfx-selftest"; fi
           for n in $need; do grep -q "$n\$" /tmp/tarball.txt || { echo "::error::the tarball lacks $n"; exit 1; }; done
+          # every program and library in the tarball (the hook and its glue, the engines, the preload, the VLC module, the Kodi
+          # add-on, the content helper, capture mode, ...): at most GLIBC_2.35, so Ubuntu 22.04 / Snap core22 / Debian 12 load them
+          rm -rf /tmp/tb && mkdir -p /tmp/tb && tar -xzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz -C /tmp/tb
+          find /tmp/tb -type f -exec sh -c 'head -c 4 "$1" | grep -q "ELF" && echo "$1"' _ {} \; > /tmp/elf.txt
+          echo "$(wc -l < /tmp/elf.txt) ELF files in the tarball"
+          xargs sh mpvnative/hook/glibc-ceiling.sh < /tmp/elf.txt
           if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-${{ matrix.arch }}-$ver.tar.gz | grep -q '/plex/pushmpc_preload.so$'; fi
           # pmml's graphs for the Homebrew formula (its pmml-graphs resource)
           if [ "${{ matrix.arch }}" = x86_64 ]; then tar -czf dist/pmml-graphs-$ver.tar.gz -C /tmp/pmml-graphs . && ls -la dist/pmml-graphs-$ver.tar.gz; fi
