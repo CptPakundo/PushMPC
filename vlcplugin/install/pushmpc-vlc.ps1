@@ -81,10 +81,13 @@ function Write-Rc([string]$f, [string[]]$lines) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null
     [IO.File]::WriteAllLines($f, $lines, (New-Object Text.UTF8Encoding($false)))
 }
+# a section header as VLC writes it: "[core] # core program" (the name between the first [ and ]), a BOM tolerated
+# (a whole-line match missed every key of a VLC-written vlcrc)
+$rcHeader = '^\uFEFF?\s*\[([^\]]+)\]'
 function Get-RcValue([string[]]$lines, [string]$sec, [string]$key) {
     $in = $false
     foreach ($l in $lines) {
-        if ($l -match '^\[(.+)\]\s*$') { $in = ($Matches[1] -eq $sec); continue }
+        if ($l -match $rcHeader) { $in = ($Matches[1] -eq $sec); continue }
         if ($in -and $l.StartsWith("$key=")) { return $l.Substring($key.Length + 1) }
     }
     return $null
@@ -95,7 +98,7 @@ function Set-RcValue([string[]]$lines, [string]$sec, [string]$key, $value) {
     $in = $false; $done = $false; $seen = $false
     $newLine = if ($null -eq $value) { $null } else { "$key=$value" }
     foreach ($l in $lines) {
-        if ($l -match '^\[(.+)\]\s*$') {
+        if ($l -match $rcHeader) {
             if ($in -and -not $done -and $newLine) { $out.Add($newLine); $done = $true }
             $in = ($Matches[1] -eq $sec); if ($in) { $seen = $true }
             $out.Add($l); continue

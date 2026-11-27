@@ -57,26 +57,46 @@ LAUNCH_LABEL=io.github.pushmpc.vlc-env
 
 say() { printf '%s\n' "$*"; }
 
+# VLC writes its own vlcrc with section headers that carry a comment ("[core] # core program") and may start the
+# file with a UTF-8 byte order mark: a section is the name between the first [ and ], a BOM is skipped. (Matching the
+# whole header line missed every key of a VLC-written file: uninstall left vout / video-filter pointing at PushMPC,
+# apple run 46025032374.)
+VLCRC_AWK_SEC='function secname(l) { if (NR == 1) sub(/^\357\273\277/, "", l); if (l !~ /^[ \t]*\[[^]]*\]/) return ""; sub(/^[ \t]*\[/, "", l); sub(/\].*$/, "", l); return l }'
 # vlcrc_set <file> <section> <key> <value>: set key=value inside [section] (uncommenting a "#key=" default line)
 vlcrc_set() {
   f="$1"; sec="$2"; key="$3"; val="$4"
   mkdir -p "$(dirname "$f")"; [ -f "$f" ] || : > "$f"
-  awk -v sec="[$sec]" -v key="$key" -v val="$val" '
+  awk -v sec="$sec" -v key="$key" -v val="$val" "$VLCRC_AWK_SEC"'
     BEGIN { insec = 0; done = 0; seen = 0 }
-    /^\[.*\]/ { if (insec && !done) { print key "=" val; done = 1 } insec = ($0 == sec); if (insec) seen = 1; print; next }
+    { s = secname($0) }
+    s != "" { if (insec && !done) { print key "=" val; done = 1 } insec = (s == sec); if (insec) seen = 1; print; next }
     insec && !done && ($0 ~ "^#?" key "=") { print key "=" val; done = 1; next }
     { print }
-    END { if (!done) { if (!seen) print sec; print key "=" val } }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    END { if (!done) { if (!seen) print "[" sec "]"; print key "=" val } }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 # vlcrc_get <file> <section> <key>: the active value or nothing
 vlcrc_get() {
   [ -f "$1" ] || return 0
-  awk -v sec="[$2]" -v key="$3" '/^\[.*\]/ { insec = ($0 == sec); next } insec && index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"
+  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+    { s = secname($0) } s != "" { insec = (s == sec); next }
+    insec && index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"
 }
 # vlcrc_del <file> <section> <key>: comment the key out again (VLC's own default applies)
 vlcrc_del() {
   [ -f "$1" ] || return 0
-  awk -v sec="[$2]" -v key="$3" '/^\[.*\]/ { insec = ($0 == sec) } insec && index($0, key "=") == 1 { print "#" $0; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+    { s = secname($0) } s != "" { insec = (s == sec) }
+    insec && index($0, key "=") == 1 { print "#" $0; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+# vlcrc_del_pushmpc <file>: comment out every active pushmpc-* key, in any section (PushMPC's module options)
+vlcrc_del_pushmpc() {
+  [ -f "$1" ] || return 0
+  awk '/^pushmpc-[A-Za-z0-9_-]*=/ { print "#" $0; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+# vlcrc_active <file>: the active lines (not a comment, a section header or blank; a leading BOM skipped)
+vlcrc_active() {
+  [ -f "$1" ] || return 0
+  awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$1"
 }
 filters_add() { # current list -> list with postproc:pushmpc_out (kept once, in that order, after the user's own)
   printf '%s' "$1" | tr ':' '\n' | grep -v -e '^postproc$' -e '^pushmpc_out$' -e '^$' | { cat; printf 'postproc\npushmpc_out\n'; } | paste -s -d: -
@@ -365,6 +385,7 @@ uninstall_one() {
     rest="$(filters_del "$(vlcrc_get "$RC" core video-filter)")"
     if [ -n "$rest" ]; then vlcrc_set "$RC" core video-filter "$rest"; else vlcrc_del "$RC" core video-filter; fi
     vlcrc_del "$RC" pushmpc pushmpc-smoother
+    vlcrc_del_pushmpc "$RC"
     if [ "$(vlcrc_get "$RC" core vout)" = pushmpc_gl ]; then
       old="$(vlcrc_get "$RC.pushmpc-backup" core vout)"
       if [ -n "$old" ] && [ "$old" != pushmpc_gl ]; then vlcrc_set "$RC" core vout "$old"; else vlcrc_del "$RC" core vout; fi
@@ -380,7 +401,7 @@ uninstall_one() {
   # install. Any active line (a setting the user or VLC's GUI made) keeps the file.
   if [ "$created" = 1 ] && [ -f "$RC" ]; then
     # active lines: anything but comments (#, ;), section headers ([core]) and blank lines
-    active="$(grep -vE '^[[:space:]]*(#|;|\[|$)' "$RC" | head -n 8)"
+    active="$(vlcrc_active "$RC" | head -n 8)"
     if [ -z "$active" ]; then
       rm -f "$RC"; rmdir "$(dirname "$RC")" 2>/dev/null || true
       say "PushMPC for VLC removed ($tgt); $RC removed (PushMPC had created it; only VLC's defaults were left in it)"
