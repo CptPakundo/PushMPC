@@ -412,7 +412,7 @@ int Run(const Options& o)
                 if (told) Log("%s", kProtectedMessage);
             }
             bool disc = false;
-            const uint64_t idx = tl.Add(f.time, disc);
+            const uint64_t idx = tl.Add(f.time, disc, Now());   // its time, and when it got here (the delay covers both)
             if (eng.gpu) {
                 if (!eng.gpu->Add(idx, disc, f, err)) { Log("GPU engine: %s", err.c_str()); f.Release(); rc = 7; g_stop = true; break; }
             } else {

@@ -65,8 +65,11 @@ struct Timeline {
     double follow = 0.05;
 
     // a new (changed) frame captured at time t; returns its index on the line (indices skip over frames the capture
-    // missed). discontinuity: set when the line started again with this frame (no pair across it)
-    uint64_t Add(double t, bool& discontinuity);
+    // missed). discontinuity: set when the line started again with this frame (no pair across it). arrival: when the frame
+    // reached the engine (default: t). A source that stamps frames with the player's own time (the X server's damage
+    // time, ScreenCaptureKit's display time) delivers them later than that time; the delay covers that lag too, else the
+    // newest frame is not there yet when a refresh needs it and is held (uneven steps)
+    uint64_t Add(double t, bool& discontinuity, double arrival = -1);
     bool Valid() const { return n_ > 0; }
     double Interval() const { return d_; }      // seconds per source frame (the fit)
     double Fps() const { return d_ > 0 ? 1.0 / d_ : 0; }
@@ -81,6 +84,7 @@ struct Timeline {
 private:
     void Fit();
     std::deque<std::pair<double, double>> pts_;   // (index, time)
+    std::deque<double> arrivals_;                 // when each of pts_ reached the engine
     double a_ = 0, d_ = 1.0 / 24, delay_ = 0, late_ = 0, lastTime_ = 0, lastPos_ = -1e18, lastT_ = 0;
     uint64_t lastIdx_ = 0, segStart_ = 0;
     int n_ = 0;
