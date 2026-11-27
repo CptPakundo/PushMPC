@@ -252,7 +252,14 @@ static void upscaleRun() {
     pmml::Backend backend;
     const bool onGpu = gpu && *gpu;
     if (onGpu && !pmml::Backend::parse(gpu, &backend)) { std::printf("FAIL PMML_TEST_BACKEND %s\n", gpu); ++failures; return; }
+    // PMML_TEST_SKIP_MISSING=1: a model whose weights were not fetched is skipped (CI fetches the GitHub-hosted ones only)
+    const char* skipMissing = std::getenv("PMML_TEST_SKIP_MISSING");
     for (const auto& m : pmml::upscaleModels()) {
+        if (skipMissing && std::string(skipMissing) == "1") {
+            pmml::UpscaleOptions q;
+            q.graphsDir = graphs; q.model = m.id;
+            if (pmml::upscaleFilesMissing(q).find(m.file) != std::string::npos) { std::printf("upscale %s: skipped (weights not fetched)\n", m.id); continue; }
+        }
         for (int bits : {8, 10}) {
             pmml::UpscaleOptions o;
             o.runtimeDir = rt; o.graphsDir = graphs; o.model = m.id; o.width = w; o.height = h;
@@ -262,6 +269,7 @@ static void upscaleRun() {
             auto up = pmml::Upscaler::create(o, &err);
             if (!up) { std::printf("FAIL upscale %s %d-bit: %s\n", m.id, bits, err.c_str()); ++failures; continue; }
             CHECK(up->outWidth() == w * m.scale && up->outHeight() == h * m.scale);
+            if (onGpu) CHECK(up->describe().find("SLOW:") == std::string::npos);   // Kodi's own engine / VapourSynth route
             // left half flat grey, right half a smooth horizontal ramp; chroma neutral
             const int sh = bits - 8;
             std::vector<uint16_t> y(size_t(w) * h), u(size_t(w / 2) * (h / 2), uint16_t(128 << sh)), v(u);

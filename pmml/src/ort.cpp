@@ -1028,6 +1028,17 @@ public:
             PMML_TRY(ort->api->CreateIoBinding(x, &b));
             bind_.push_back(b);
         }
+        if (!rgba_) {   // YUV wrappers: float32 codes (current graphs) or uint16 planes (graphs from before)
+            OrtTypeInfo* ti = nullptr;
+            const OrtTensorTypeAndShapeInfo* tt = nullptr;
+            ONNXTensorElementDataType et = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+            PMML_TRY(ort->api->SessionGetInputTypeInfo(in_, 0, &ti));
+            OrtStatus* s = ort->api->CastTypeInfoToTensorInfo(ti, &tt);
+            if (!s && tt) s = ort->api->GetTensorElementType(tt, &et);
+            ort->api->ReleaseTypeInfo(ti);
+            if (s) { if (err) *err = std::string("sr_in input type: ") + ort->api->GetErrorMessage(s); ort->api->ReleaseStatus(s); return false; }
+            yuvFloat_ = et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+        }
         char* name = nullptr;
         PMML_TRY(ort->api->SessionGetInputName(net_, 0, alloc_, &name)); netIn_ = name; alloc_->Free(alloc_, name);
         PMML_TRY(ort->api->SessionGetOutputName(net_, 0, alloc_, &name)); netOut_ = name; alloc_->Free(alloc_, name);
@@ -1055,8 +1066,49 @@ public:
         const int w = u_.width, h = u_.height;
         std::vector<OrtValue*> tmp;
         static const char* inNames[3] = {"in_y", "in_u", "in_v"};
+        static const char* outNames[3] = {"out_y", "out_u", "out_v"};
         stagingIn_.resize(3);
         bool ok = true;
+        if (yuvFloat_) {
+            // the codes as float32 both ways (GPU EPs take no uint16; anime_sr_graphs.py _yuv_inputs): converted here, on
+            // the host, where these planes are anyway (the EP copies the tensors to the device)
+            floatIn_.resize(3); floatOut_.resize(3);
+            std::vector<std::pair<const char*, OrtValue*>> ins, outs;
+            for (int p = 0; p < 3 && ok; ++p) {
+                const int pw = p ? w / 2 : w, ph = p ? h / 2 : h;
+                auto& f = floatIn_[size_t(p)];
+                f.resize(size_t(pw) * ph);
+                for (int y = 0; y < ph; ++y) {
+                    const uint16_t* s = in.plane[p] + ptrdiff_t(y) * in.stride[p];
+                    float* d = &f[size_t(y) * pw];
+                    for (int x = 0; x < pw; ++x) d[x] = float(s[x]);
+                }
+                OrtValue* v = nullptr;
+                ok = tensor(f.data(), {1, 1, ph, pw}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, 4, &v, err);
+                if (ok) { tmp.push_back(v); ins.push_back({inNames[p], v}); }
+            }
+            OrtValue* cv = nullptr;
+            if (ok) { ok = tensor(colour_.data(), {8}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, 4, &cv, err); if (ok) { tmp.push_back(cv); ins.push_back({"colour", cv}); } }
+            for (int p = 0; p < 3 && ok; ++p) {
+                const int pw = p ? outW_ / 2 : outW_, ph = p ? outH_ / 2 : outH_;
+                floatOut_[size_t(p)].resize(size_t(pw) * ph);
+                OrtValue* v = nullptr;
+                ok = tensor(floatOut_[size_t(p)].data(), {1, 1, ph, pw}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, 4, &v, err);
+                if (ok) { tmp.push_back(v); outs.push_back({outNames[p], v}); }
+            }
+            if (ok) ok = chain(ins, outs, err);
+            for (int p = 0; p < 3 && ok; ++p) {   // already rounded and clipped to 0..max by the graph
+                const int pw = p ? outW_ / 2 : outW_, ph = p ? outH_ / 2 : outH_;
+                for (int y = 0; y < ph; ++y) {
+                    const float* s = &floatOut_[size_t(p)][size_t(y) * pw];
+                    uint16_t* d = out.plane[p] + ptrdiff_t(y) * out.stride[p];
+                    for (int x = 0; x < pw; ++x) d[x] = uint16_t(std::clamp(s[x], 0.f, 65535.f) + 0.5f);
+                }
+            }
+            for (OrtValue* v : tmp) ort->api->ReleaseValue(v);
+            return ok;
+        }
+        // graphs written before float32 I/O: 16-bit planes
         for (int p = 0; p < 3 && ok; ++p) {
             const int pw = p ? w / 2 : w, ph = p ? h / 2 : h;
             const uint16_t* src = in.plane[p];
@@ -1076,7 +1128,6 @@ public:
         for (int p = 0; p < 3 && ok; ++p) ins.push_back({inNames[p], tmp[size_t(p)]});
         if (ok) ins.push_back({"colour", cv});
         // outputs into the caller's planes when contiguous
-        static const char* outNames[3] = {"out_y", "out_u", "out_v"};
         stagingOut_.resize(3);
         uint16_t* dst[3] = {};
         std::vector<std::pair<const char*, OrtValue*>> outs;
@@ -1326,6 +1377,8 @@ private:
     std::vector<uint8_t> rgbaIn_, rgbaOut_;
     UpscaleStats stats_;
     std::string cpuFallback_;   // graphs the GPU EP did not take whole
+    bool yuvFloat_ = false;     // the YUV wrappers take / give float32 codes
+    std::vector<std::vector<float>> floatIn_, floatOut_;
 };
 
 }  // namespace

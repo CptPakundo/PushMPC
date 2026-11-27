@@ -188,9 +188,12 @@ def _scale_hw(g, x, s):
 # ---------------------------------------------------------------------------------------------------------------
 # wrappers
 
+# The YUV wrappers take and give the 16-bit codes as float32 (exact: integers below 2^24): TensorRT(-RTX) takes no
+# uint16 at all, not even as network I/O ("Unsupported data type UINT16 for input node"), so uint16 planes sent the
+# whole wrapper to the CPU EP. pmml converts the planes on the host (OrtUpscaler::run binds host memory there anyway).
 def _yuv_inputs(g):
     for n, sub in (("in_y", False), ("in_u", True), ("in_v", True)):
-        g.inputs.append(helper.make_tensor_value_info(n, TensorProto.UINT16, [1, 1, "pmml_ch" if sub else "pmml_h", "pmml_cw" if sub else "pmml_w"]))
+        g.inputs.append(helper.make_tensor_value_info(n, F32, [1, 1, "pmml_ch" if sub else "pmml_h", "pmml_cw" if sub else "pmml_w"]))
     g.inputs.append(helper.make_tensor_value_info("colour", F32, [8]))
 
 
@@ -199,9 +202,9 @@ def _k(g, i):
 
 
 def _yuv_norm(g):
-    """16-bit planes -> y (0..1), cbcr (-0.5..0.5) at their own sizes."""
+    """16-bit codes (as float) -> y (0..1), cbcr (-0.5..0.5) at their own sizes."""
     inv = g.op("Reciprocal", [_k(g, 6)])
-    y, u, v = (g.op("Mul", [g.op("Cast", [n], to=F32), inv]) for n in ("in_y", "in_u", "in_v"))
+    y, u, v = (g.op("Mul", [n, inv]) for n in ("in_y", "in_u", "in_v"))
     y = g.op("Div", [g.op("Sub", [y, _k(g, 2)]), _k(g, 3)])
     uv = g.op("Div", [g.op("Sub", [g.op("Concat", [u, v], axis=1), _k(g, 4)]), _k(g, 5)])
     return y, uv
@@ -228,9 +231,9 @@ def _rgb_to_ycc(g, rgb, kr, kb):
     return y, g.op("Concat", [cb, cr], axis=1)
 
 
-def _code(g, x, mx, name, dtype=TensorProto.UINT16):
-    q = g.op("Round", [g.op("Mul", [g.op("Clip", [x, g.const(0.0), g.const(1.0)]), mx])])
-    return g.op("Cast", [q], out=name, to=dtype)
+def _code(g, x, mx, name):
+    """0..1 -> the code 0..max, rounded, as float (pmml writes the 16-bit planes on the host)."""
+    return g.op("Round", [g.op("Mul", [g.op("Clip", [x, g.const(0.0), g.const(1.0)]), mx])], out=name)
 
 
 # The RGBA8 wrappers keep uint8 at the graph's edges only: one Cast right after in_rgba, one Cast that writes out_rgba.
@@ -301,8 +304,12 @@ def _rgba_out(g, rgb):
 
 def check_wrapper(m):
     """The rules the wrappers keep for TensorRT-RTX / DirectML (no GPU needed; write_wrappers runs it): no Resize in
-    cubic mode, and uint8 only at the edges (a graph input read by Casts only, a graph output written by a Cast)."""
+    cubic mode, no 16-bit integer tensors anywhere (TensorRT-RTX refuses them even as I/O), and uint8 only at the edges
+    (a graph input read by Casts only, a graph output written by a Cast)."""
     gr = m.graph
+    for v in list(gr.input) + list(gr.output):
+        if v.type.tensor_type.elem_type in (TensorProto.UINT16, TensorProto.INT16):
+            raise ValueError(f"{gr.name}: {v.name} is a 16-bit integer tensor (TensorRT-RTX refuses it)")
     u8_in = {i.name for i in gr.input if i.type.tensor_type.elem_type == TensorProto.UINT8}
     u8_out = {o.name for o in gr.output if o.type.tensor_type.elem_type == TensorProto.UINT8}
     for n in gr.node:
@@ -313,6 +320,8 @@ def check_wrapper(m):
             raise ValueError(f"{gr.name}: {n.name} ({n.op_type}) reads a uint8 input; only a Cast may")
         if n.op_type == "Cast" and attrs.get("to") == TensorProto.UINT8 and not all(o in u8_out for o in n.output):
             raise ValueError(f"{gr.name}: {n.name} makes an intermediate uint8 tensor")
+        if n.op_type == "Cast" and attrs.get("to") in (TensorProto.UINT16, TensorProto.INT16):
+            raise ValueError(f"{gr.name}: {n.name} makes a 16-bit integer tensor")
     return m
 
 
@@ -388,7 +397,7 @@ def sr_out(kind, fmt):
         _code(g, g.op("Slice", [uv, g.i64([0]), g.i64([1]), g.i64([1])]), mx, "out_u")
         _code(g, g.op("Slice", [uv, g.i64([1]), g.i64([2]), g.i64([1])]), mx, "out_v")
         for n, sub in (("out_y", False), ("out_u", True), ("out_v", True)):
-            g.outputs.append(helper.make_tensor_value_info(n, TensorProto.UINT16, [1, 1, "pmml_oh2c" if sub else "pmml_oh2", "pmml_ow2c" if sub else "pmml_ow2"]))
+            g.outputs.append(helper.make_tensor_value_info(n, F32, [1, 1, "pmml_oh2c" if sub else "pmml_oh2", "pmml_ow2c" if sub else "pmml_ow2"]))
     else:
         if kind == "luma":
             rgb = _ycc_to_rgb(g, "y", _resize_to(g, "cbcr", _hw(g, "y")), g.const(BT709[0]), g.const(BT709[1]))
