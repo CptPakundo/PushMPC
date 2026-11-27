@@ -245,7 +245,12 @@ def main() -> int:
         record["eps"][ep] = {"version": entry["version"], "sha256": digest, "library": lib, "files": files}
         print(f"ok      eps/{ep} {entry['version']}: library {lib}; {len(files)} files")
         if not lib:
-            print(f"::warning::eps/{ep}: no file matched {entry['library']}")
+            print(f"::warning::eps/{ep}: no file matched {entry['library']}; the archive's libraries:")
+            listing = Archive(arc)
+            for name, _, _ in listing.members:
+                if name.lower().endswith((".dll", ".so", ".dylib")) or ".so." in name:
+                    print(f"        {name}")
+            listing.close()
 
     if a.winml:
         # Windows ML's EP catalog (pmml_winml_ep.exe): AMD's AMDGPUExecutionProvider exists only through it

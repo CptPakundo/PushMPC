@@ -119,7 +119,12 @@ foreach ($ep in $Eps) {
     $dest = Join-Path $part "eps\$ep"
     $files = @(Expand-Pinned $arc $pat $dest (Join-Path $part 'licenses'))
     $lib = $files | Where-Object { $f = $_; ($f -match '\.(dll|so|dylib)$') -and @($entry.library | Where-Object { $f -like $_ }).Count } | Select-Object -First 1
-    if (-not $lib) { Fail "eps/$ep`: no file matched $($entry.library -join ', ')" }
+    if (-not $lib) {
+        # name the archive's libraries so the pin can be corrected from the log alone
+        $z = [IO.Compression.ZipFile]::OpenRead($arc)
+        try { $z.Entries | Where-Object { $_.Name -match '\.(dll|so|dylib)$' } | ForEach-Object { Write-Host "        $($_.FullName)" } } finally { $z.Dispose() }
+        Fail "eps/$ep`: no file matched $($entry.library -join ', ') (extracted: $($files -join ', ') ; the archive's libraries above)"
+    }
     [ordered]@{ name = $ep; epName = $entry.epName; library = $lib; version = $entry.version } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dest 'ep.json') -Encoding ASCII
     $record.eps[$ep] = [ordered]@{ version = $entry.version; library = $lib; files = $files.Count }
     Write-Host "ok      eps/$ep $($entry.version): library $lib; $($files.Count) files"
