@@ -80,7 +80,7 @@ for route, device in (("gpu", ""), ("cpu", "cpu")):
         un = count(core.pushmpc.Enhance(unknown, **args), N * K + 8)
         same = kn == un
         print(f"eof {route} dedup={'on' if dedup == '1' else 'off'} threads {core.num_threads}: known {len(kn)} unknown {len(un)}, "
-              f"frames {'identical' if same else 'DIFFER'} (N {N}, x{K})")
+              f"frames {'identical' if same else 'DIFFER'}, frame 0 {'identical' if kn[:1] == un[:1] and kn else 'DIFFERS'} (N {N}, x{K})")
         if not same:
             bad += 1
 if "--require" in sys.argv and bad:

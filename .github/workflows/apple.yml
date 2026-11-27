@@ -618,6 +618,8 @@ jobs:
           log=$(cat "$HOME/Library/Logs/PushMPC/"*.log 2>/dev/null || true)
           grep -q '\[vapoursynth\] using [0-9]* concurrent requests' "$RUNNER_TEMP/encode.txt" && echo "$log" | grep -qE 'instance closed after [1-9]' \
             || { echo "::error::mpv's vapoursynth filter did not run PushMPC in encode mode"; exit 1; }
+          # no frame is requested while the script loads: mpv answers that with a black dummy (it reached the output once)
+          ! grep -q 'Frame requested during init' "$RUNNER_TEMP/encode.txt" || { echo "::error::PushMPC requested a frame while mpv loaded the script (mpv's black dummy)"; exit 1; }
           echo "$log" | grep -E "backend|apple|portable:|ml:|src_frames|failed: a source frame" | cut -c1-400 | head -24
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"
