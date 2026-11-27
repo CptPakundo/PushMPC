@@ -10,6 +10,7 @@
 // the frame generation), and its reset rule already covers cuts where the flow is invalid. The self-test measures it
 // against a bilinear upscale on a moving scene with exact motion.
 #include "PushCoreXess.h"
+#include "PushCoreSelfTest.h"
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/Log.h"
@@ -318,36 +319,11 @@ bool srProviderBuilt() {
 }
 
 // ============================================================================================ SR self-test
-namespace {
-// the full-resolution ground truth at continuous coordinates: smooth shading, hard block edges and fine detail near the
-// output's Nyquist limit (thin lines, a fine diagonal grating, small dots) that a 2x2-averaged input aliases and only a
-// temporal upscaler with correct motion can bring back
-double pattern(double x, double y, int k) {
-    const double a = 0.5 + 0.2 * std::sin(x * 0.11 + k * 0.7) * std::cos(y * 0.07) + 0.1 * std::sin((x + y) * 0.031);
-    const bool block = (int(std::floor(x / 23.0)) + int(std::floor(y / 17.0))) & 1;
-    double v = a * (block ? 0.8 : 1.0) + (block ? 0.08 : 0.0);
-    const double lx = std::fmod(x, 9.0), ly = std::fmod(y, 13.0);
-    if (lx >= 0 && lx < 1.5) v = 0.25;                                   // thin vertical lines
-    if (ly >= 0 && ly < 1.5) v = 0.8;                                    // thin horizontal lines
-    if (std::fmod(x + 2.0 * y, 64.0) < 32.0) v += 0.05 * std::sin((x - y) * 1.3);   // a fine diagonal grating in half the area
-    const double dx = std::fmod(x, 6.0) - 3.0, dy = std::fmod(y, 6.0) - 3.0;
-    if (std::fmod(y, 48.0) < 24.0 && dx * dx + dy * dy < 1.2) v = 0.05;  // small dots
-    return std::clamp(v, 0.0, 1.0);
-}
-uint16_t half(float f) { uint32_t u; memcpy(&u, &f, 4); const uint32_t s = (u >> 16) & 0x8000; int e = int((u >> 23) & 0xFF) - 127 + 15; uint32_t m = u & 0x7FFFFF;
-    if (e <= 0) return uint16_t(s); if (e >= 31) return uint16_t(s | 0x7C00); return uint16_t(s | (uint32_t(e) << 10) | (m >> 13)); }
-float unhalf(uint16_t h) { const uint32_t s = (h & 0x8000u) << 16, e = (h >> 10) & 0x1F, m = h & 0x3FF; uint32_t u;
-    if (!e) u = s; else if (e == 31) u = s | 0x7F800000 | (m << 13); else u = s | ((e + 112) << 23) | (m << 13); float f; memcpy(&f, &u, 4); return f; }
-double psnrF(const std::vector<float>& a, const std::vector<float>& b) {
-    double se = 0; for (size_t i = 0; i < a.size(); ++i) { const double d = a[i] - b[i]; se += d * d; }
-    const double mse = se / double(a.size());
-    return mse <= 1e-12 ? 99.0 : 10.0 * std::log10(1.0 / mse);
-}
-}  // namespace
-
-XessSrSelfTestResult xessSrSelfTest(uint64_t luid, bool warp, uint32_t W, uint32_t H, uint32_t frames) {
+// The scene, the measurement and the frame loop are the shared upscaler probe (PushCoreSelfTest.cpp
+// selftest::upscaleProbe); XeSS runs in it through its provider functions, as the graph's FSR slot runs it.
+XessSrSelfTestResult xessSrSelfTest(uint64_t luid, bool warp, uint32_t W, uint32_t H, uint32_t frames, int scene) {
     XessSrSelfTestResult r;
-    W = std::max(64u, W) & ~1u; H = std::max(64u, H) & ~1u; frames = std::clamp(frames, 4u, 120u);
+    W = std::max(64u, W) & ~1u; H = std::max(64u, H) & ~1u; frames = std::clamp(frames, 4u, 240u);
     const uint32_t w = W / 2, h = H / 2;
     std::string why;
     if (!loadSr(why)) { r.note = why; return r; }
@@ -358,119 +334,29 @@ XessSrSelfTestResult xessSrSelfTest(uint64_t luid, bool warp, uint32_t W, uint32
     const uint32_t q = 3;
     SrContext* c = static_cast<SrContext*>(srCreate(device.Get(), w, h, W, H, false, const_cast<uint32_t*>(&q)));
     if (!c) { r.note = "XeSS SR did not start on this adapter (see the log: xessD3D12CreateContext / xessD3D12Init)"; return r; }
-    auto tex = [&](uint32_t tw, uint32_t th, DXGI_FORMAT f, D3D12_RESOURCE_FLAGS fl, ComPtr<ID3D12Resource>& t) {
-        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
-        D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = tw; rd.Height = th; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = f; rd.SampleDesc = {1, 0}; rd.Flags = fl;
-        return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&t)));
-    };
-    auto buf = [&](uint64_t size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES st, ComPtr<ID3D12Resource>& b) {
-        D3D12_HEAP_PROPERTIES hp{type};
-        D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = size; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.SampleDesc = {1, 0};
-        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, st, nullptr, IID_PPV_ARGS(&b)));
-    };
-    ComPtr<ID3D12Resource> color, motion, depth, out, upC, upM, upD, rb;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fpC{}, fpM{}, fpD{}, fpO{}; UINT64 sC = 0, sM = 0, sD = 0, sO = 0;
-    auto fp = [&](uint32_t tw, uint32_t th, DXGI_FORMAT f, D3D12_PLACED_SUBRESOURCE_FOOTPRINT& o, UINT64& s) {
-        D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = tw; rd.Height = th; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = f; rd.SampleDesc = {1, 0};
-        device->GetCopyableFootprints(&rd, 0, 1, 0, &o, nullptr, nullptr, &s);
-    };
-    fp(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, fpC, sC); fp(w, h, DXGI_FORMAT_R16G16_FLOAT, fpM, sM); fp(w, h, DXGI_FORMAT_R32_FLOAT, fpD, sD); fp(W, H, DXGI_FORMAT_R16G16B16A16_FLOAT, fpO, sO);
-    ComPtr<ID3D12CommandAllocator> alloc; ComPtr<ID3D12GraphicsCommandList> list; ComPtr<ID3D12Fence> fence; uint64_t fv = 0;
-    if (!tex(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_NONE, color) || !tex(w, h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, motion) ||
-        !tex(w, h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, depth) || !tex(W, H, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, out) ||
-        !buf(sC, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, upC) || !buf(sM, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, upM) ||
-        !buf(sD, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, upD) || !buf(sO, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, rb) ||
-        FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) ||
-        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&list))) ||
-        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) { srDestroy(c); r.note = "test resources"; return r; }
-    list->Close();
-    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    auto idle = [&] { queue->Signal(fence.Get(), ++fv); if (fence->GetCompletedValue() < fv) { fence->SetEventOnCompletion(fv, ev); WaitForSingleObject(ev, 60000); } };
-    auto bar = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
-        D3D12_RESOURCE_BARRIER br{}; br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; br.Transition = {res, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b}; list->ResourceBarrier(1, &br);
-    };
-    auto up = [&](ID3D12Resource* dst, ID3D12Resource* src, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& f) {
-        bar(dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_TEXTURE_COPY_LOCATION d{dst, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX}; d.SubresourceIndex = 0;
-        D3D12_TEXTURE_COPY_LOCATION s{src, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT}; s.PlacedFootprint = f;
-        list->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
-        bar(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    };
-    // constant depth, uniform motion: the picture pans left/up by (vx, vy) output px per frame (non-integer: new subpixel
-    // phases every frame), so a point's previous position is current + (vx, vy): the motion is +(vx, vy) / 2 input px.
-    // Diagnostics only (PUSHMPC_XESS_SELFTEST_MOTION): zero = zero motion with history, reset = zero motion and a reset
-    // every frame (the alternative to the flow for video: spatial only)
-    const double vx = 2.6, vy = 1.3;
+    // Diagnostics only (PUSHMPC_XESS_SELFTEST_MOTION): zero = the static scene with history, reset = the static scene with a
+    // reset every frame, for the verdict run too
     wchar_t mode[16]{};
     GetEnvironmentVariableW(L"PUSHMPC_XESS_SELFTEST_MOTION", mode, 16);
-    const bool zeroMotion = _wcsicmp(mode, L"zero") == 0 || _wcsicmp(mode, L"reset") == 0, resetAlways = _wcsicmp(mode, L"reset") == 0;
-    { uint8_t* m = nullptr; upD->Map(0, nullptr, reinterpret_cast<void**>(&m)); for (uint32_t y = 0; y < h; ++y) { auto* row = reinterpret_cast<float*>(m + fpD.Offset + size_t(y) * fpD.Footprint.RowPitch); for (uint32_t x = 0; x < w; ++x) row[x] = 0.5f; } upD->Unmap(0, nullptr); }
-    { uint8_t* m = nullptr; upM->Map(0, nullptr, reinterpret_cast<void**>(&m)); const uint16_t mx = half(zeroMotion ? 0.0f : float(vx / 2)), my = half(zeroMotion ? 0.0f : float(vy / 2));
-      for (uint32_t y = 0; y < h; ++y) { auto* row = reinterpret_cast<uint16_t*>(m + fpM.Offset + size_t(y) * fpM.Footprint.RowPitch); for (uint32_t x = 0; x < w; ++x) { row[2 * x] = mx; row[2 * x + 1] = my; } } upM->Unmap(0, nullptr); }
-    std::vector<double> px, pb;
-    double execMs = 0;
-    std::vector<float> truth(size_t(W) * H), got(size_t(W) * H), bil(size_t(W) * H), lowres(size_t(w) * h);
-    for (uint32_t k = 0; k < frames; ++k) {
-        const double ox = vx * k, oy = vy * k;
-        // input: 2x2 box average of the full-resolution pattern (what a downscaled source holds)
-        uint8_t* m = nullptr; upC->Map(0, nullptr, reinterpret_cast<void**>(&m));
-        for (uint32_t y = 0; y < h; ++y) {
-            auto* row = reinterpret_cast<uint16_t*>(m + fpC.Offset + size_t(y) * fpC.Footprint.RowPitch);
-            for (uint32_t x = 0; x < w; ++x) {
-                double s = 0;
-                for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) s += pattern(2.0 * x + dx + 0.5 + ox, 2.0 * y + dy + 0.5 + oy, 0);
-                const float v = float(s / 4); lowres[size_t(y) * w + x] = v;
-                row[4 * x] = row[4 * x + 1] = row[4 * x + 2] = half(v); row[4 * x + 3] = half(1.0f);
-            }
-        }
-        upC->Unmap(0, nullptr);
-        alloc->Reset(); list->Reset(alloc.Get(), nullptr);
-        up(color.Get(), upC.Get(), fpC);
-        if (k == 0) { up(motion.Get(), upM.Get(), fpM); up(depth.Get(), upD.Get(), fpD); bar(out.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); }
-        const auto t = Clock::now();
-        if (!srEvaluate(c, list.Get(), color.Get(), motion.Get(), depth.Get(), out.Get(), w, h, W, H, k == 0 || resetAlways, 33.3f)) { list->Close(); CloseHandle(ev); srDestroy(c); r.note = "xessD3D12Execute failed"; return r; }
-        bar(color.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-        const bool measure = k + 4 >= frames;
-        if (measure) {
-            bar(out.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            D3D12_TEXTURE_COPY_LOCATION d{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT}; d.PlacedFootprint = fpO;
-            D3D12_TEXTURE_COPY_LOCATION s{out.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX}; s.SubresourceIndex = 0;
-            list->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
-            bar(out.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-        list->Close();
-        ID3D12CommandList* lists[] = {list.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        idle();
-        execMs += msSince(t);
-        if (FAILED(device->GetDeviceRemovedReason())) { CloseHandle(ev); srDestroy(c); r.note = "device removed during XeSS SR"; return r; }
-        if (!measure) continue;
-        uint8_t* o = nullptr; rb->Map(0, nullptr, reinterpret_cast<void**>(&o));
-        double mean = 0;
-        for (uint32_t y = 0; y < H; ++y) {
-            auto* row = reinterpret_cast<const uint16_t*>(o + fpO.Offset + size_t(y) * fpO.Footprint.RowPitch);
-            for (uint32_t x = 0; x < W; ++x) { got[size_t(y) * W + x] = unhalf(row[4 * x]); mean += got[size_t(y) * W + x]; truth[size_t(y) * W + x] = float(pattern(x + 0.5 + ox, y + 0.5 + oy, 0)); }
-        }
-        D3D12_RANGE none{0, 0}; rb->Unmap(0, &none);
-        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) {   // bilinear upscale of the input
-            const double sx = std::clamp((x + 0.5) / 2 - 0.5, 0.0, double(w - 1)), sy = std::clamp((y + 0.5) / 2 - 0.5, 0.0, double(h - 1));
-            const uint32_t x0 = uint32_t(sx), y0 = uint32_t(sy), x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
-            const double fx = sx - x0, fy = sy - y0;
-            bil[size_t(y) * W + x] = float((lowres[y0 * w + x0] * (1 - fx) + lowres[y0 * w + x1] * fx) * (1 - fy) + (lowres[y1 * w + x0] * (1 - fx) + lowres[y1 * w + x1] * fx) * fy);
-        }
-        mean /= double(W) * H;
-        if (!(mean > 0.05 && mean < 0.95)) { CloseHandle(ev); srDestroy(c); r.note = std::format("XeSS SR output is blank or saturated (mean {:.3f})", mean); return r; }
-        px.push_back(psnrF(got, truth)); pb.push_back(psnrF(bil, truth));
-    }
-    CloseHandle(ev);
+    const selftest::UpscaleScene sc = scene == 1 || _wcsicmp(mode, L"zero") == 0 ? selftest::UpscaleScene::Static
+                                    : scene == 2 || _wcsicmp(mode, L"reset") == 0 ? selftest::UpscaleScene::StaticReset : selftest::UpscaleScene::Pan;
+    const selftest::UpscaleRun run = selftest::upscaleProbe(device.Get(), queue.Get(), W, H, frames, sc,
+        [&](ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* out,
+            uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, bool reset) {
+            return srEvaluate(c, list, color, motion, depth, out, iw, ih, ow, oh, reset, 33.3f);
+        });
     srDestroy(c);
+    r.summary = selftest::upscaleSummary(run, warp);
+    if (!run.ok) { r.note = "XeSS SR: " + run.note; return r; }
+    // the verdict as before: the median of the last 4 frames against bilinear
+    std::vector<double> px, pb;
+    for (size_t i = run.frames.size() >= 4 ? run.frames.size() - 4 : 0; i < run.frames.size(); ++i) { px.push_back(run.frames[i].psnr); pb.push_back(run.frames[i].bilinear); }
     std::sort(px.begin(), px.end()); std::sort(pb.begin(), pb.end());
     r.psnrXess = px[px.size() / 2]; r.psnrBilinear = pb[pb.size() / 2];
-    r.msPerFrame = execMs / frames;
+    r.msPerFrame = run.msPerFrame;
     r.passed = r.psnrXess >= r.psnrBilinear - 0.5;
-    r.note = std::format("{}x{} -> {}x{}, {} frames{}: PSNR XeSS {:.2f} dB, bilinear {:.2f} dB, {:.1f} ms per frame (submit + wait); {}; {}", w, h, W, H, frames, resetAlways ? " (zero motion, reset every frame)" : zeroMotion ? " (zero motion)" : "", r.psnrXess, r.psnrBilinear,
-                         r.msPerFrame, r.version, r.passed ? "PASS" : "FAIL (below bilinear)");
+    r.note = std::format("{}x{} -> {}x{}, {} frames ({}): PSNR XeSS {:.2f} dB, bilinear {:.2f} dB, {:.1f} ms per frame (submit + wait); {}; {}", w, h, W, H, frames,
+                         selftest::sceneName(sc), r.psnrXess, r.psnrBilinear, r.msPerFrame, r.version, r.passed ? "PASS" : "FAIL (below bilinear)");
     return r;
 }
 
