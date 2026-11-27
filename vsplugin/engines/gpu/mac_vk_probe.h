@@ -65,6 +65,8 @@ inline bool MacVulkanProbe(const std::string& lib, std::string& why, std::string
     if (off && std::strcmp(off, "0") == 0) { verdict = 1; return true; }
     const std::string helper = macprobe_detail::HelperPath();
     struct stat st;
+    // an archive or a copy may have dropped the exec bit (Kodi's zip install, an upload artifact): put it back
+    if (!helper.empty() && stat(helper.c_str(), &st) == 0 && !(st.st_mode & S_IXUSR)) chmod(helper.c_str(), st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
     if (helper.empty() || stat(helper.c_str(), &st) != 0 || !(st.st_mode & S_IXUSR)) {
         note = "Vulkan probe: no pushmpc-vulkan-probe next to the engine (" + helper + "): Vulkan opens in-process unchecked";
         verdict = 1;

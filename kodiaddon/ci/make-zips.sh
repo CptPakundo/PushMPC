@@ -18,7 +18,7 @@ for d in "$art"/addon-*-kodi*; do
     [ -d "$d" ] || continue
     n=${d##*/addon-}; os=${n%-kodi*}; k=${n##*-kodi}; p=$(plat "$os")
     if [ -z "$p" ] || [ ! -f "$d/inputstream.pushmpc/addon.xml" ]; then echo "::warning title=Kodi zips::skipped $d"; continue; fi
-    chmod +x "$d/inputstream.pushmpc/pushmpc-nvvfx-selftest" 2>/dev/null || true   # artifacts drop the exec bits
+    chmod +x "$d/inputstream.pushmpc/pushmpc-nvvfx-selftest" "$d/inputstream.pushmpc/pushmpc-vulkan-probe" 2>/dev/null || true   # artifacts drop the exec bits
     z="$out/inputstream.pushmpc-$ver-$p-kodi$k.zip"
     (cd "$d" && zip -qr -X "$z" inputstream.pushmpc)
     echo "$(basename "$z"): $(unzip -l "$z" | tail -1)"
