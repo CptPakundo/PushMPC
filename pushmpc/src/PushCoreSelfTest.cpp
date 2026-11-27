@@ -302,6 +302,32 @@ Result testFsrSr(const Context& ctx) {
     ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; std::string why;
     if (!probeDevice(ctx, device, queue, why)) { o.verdict = "fail: " + why; return o; }
     const uint32_t W = 1280, H = 720, w = W / 2, h = H / 2, frames = envFrames();
+    // WARP: FSR loads and creates its context, but WARP itself crashes running its work: intel-video run 45976479974,
+    // FSR 3.1.6 (AMD FSR SDK v2.4.0, Setup's pin), first single-frame dispatch: a write access violation inside
+    // d3d10warp.dll on one of WARP's own worker threads (the stack had no pushcore or FidelityFX frame; the recording
+    // had finished). The product never runs on the software adapter (PushCoreGpu skips it), so on WARP this test checks
+    // what it can (loader, provider, context) and leaves the upscaler probe to hardware.
+    // PUSHMPC_SELFTEST_FSR_ON_WARP=1 runs it anyway (to re-check a newer WARP or provider).
+    if (ctx.warp) {
+        wchar_t force[4]{};
+        const DWORD nf = GetEnvironmentVariableW(L"PUSHMPC_SELFTEST_FSR_ON_WARP", force, 4);
+        if (!(nf > 0 && nf < 4 && force[0] == L'1')) {
+            veyra::gfx::FsrSrBackend fsr;
+            if (!fsr.initialize(device.Get(), w, h, W, H, false)) {
+                o.verdict = "unavailable: FSR did not start on this adapter (the FidelityFX files in runtime_local\\amd\\fidelityfx, or no provider for it; see the log)";
+                return o;
+            }
+            const std::string provider = fsr.providerVersion() && *fsr.providerVersion() ? fsr.providerVersion() : "unknown";
+            for (const char* m : {"single.", "temporal."})
+                for (const UpscaleScene scene : {UpscaleScene::Pan, UpscaleScene::Static, UpscaleScene::StaticReset})
+                    o.fields.push_back({std::string(m) + sceneName(scene), "not run on WARP (WARP crashes running FSR's work)"});
+            o.fields.push_back({"provider", provider});
+            o.pass = true;
+            o.verdict = std::format("pass: FSR {} loads and creates its context on WARP ({}x{} -> {}x{}); its work is not run on WARP, which "
+                                    "crashes running it (intel-video run 45976479974): the upscaler probe runs on hardware", provider, w, h, W, H);
+            return o;
+        }
+    }
     wchar_t saved[8]{};
     const DWORD hadMode = GetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", saved, 8);
     std::string provider;
