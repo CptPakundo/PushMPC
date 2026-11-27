@@ -46,7 +46,7 @@ target_link_libraries(pushfps_portable PUBLIC Threads::Threads)
 # the plugin's portable engine (planar YUV interpolation, scene cuts, the CPU budget's calibration)
 add_library(pmvs_portable STATIC engines/portable/portable_engine.cpp)
 target_include_directories(pmvs_portable PUBLIC engines/portable src)
-target_link_libraries(pmvs_portable PUBLIC pushfps_portable)
+target_link_libraries(pmvs_portable PUBLIC pushfps_portable ${CMAKE_DL_LIBS})   # src/vrr_probe.h dlopens (glibc < 2.34 keeps it in libdl)
 
 add_executable(portable_test tests/portable_test.cpp)
 set_target_properties(portable_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
