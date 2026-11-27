@@ -461,7 +461,7 @@ local function vs_status_path()
     local sep = package.config:sub(1, 1)
     return dir .. (dir:sub(-1) == sep and "" or sep) .. "pushmpc-vs-" .. tostring(mp.get_property_number("pid", 0)) .. ".txt"
 end
-mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; os.remove(vs_status_path()) end)
+mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; os.remove(vs_status_path()); os.remove(vs_status_path() .. ".taken") end)
 function vs_status_watch()
     if vs_watch.timer then vs_watch.timer:kill() end
     vs_watch.timer = mp.add_periodic_timer(2, function()
@@ -470,7 +470,11 @@ function vs_status_watch()
         local t = f:read("*a"); f:close()
         if not t:find("reload=1", 1, true) or vs_watch.reloads >= 2 then return end
         if (mp.get_property("o", "") or "") ~= "" then return end   -- encoding: keep every frame
-        os.remove(vs_status_path())
+        -- claimed by renaming (atomic): with the script loaded twice (mpv.conf read twice), only one copy re-adds
+        local taken = vs_status_path() .. ".taken"
+        os.remove(taken)
+        if not os.rename(vs_status_path(), taken) then return end
+        os.remove(taken)
         vs_watch.reloads = vs_watch.reloads + 1
         msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
         mp.commandv("vf", "remove", "@pushmpc")
