@@ -509,7 +509,19 @@ jobs:
             $c/clip.mkv > res/snap/installed.log 2>&1 && rc=0 || rc=$?
           i=$(grep -a -o FRAME $c/installed.y4m 2>/dev/null | wc -l)
           echo "installed: exit $rc, $i frames"; grep -h "snap boot" res/snap/installed.log || true
-          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap; cat $c/vlcrc
+          sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap
+          # the installer created this vlcrc: after uninstall it may be gone (only VLC's defaults were left in it), or stay
+          # with no active PushMPC key (the rule apple.yml uses; a leading BOM and "[core] # ..." headers handled)
+          if [ -f $c/vlcrc ]; then
+            act=$(awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' $c/vlcrc)
+            printf '%s\n' "$act" | sed '/^$/d; s/^/  vlcrc after uninstall, active line: /'
+            if printf '%s\n' "$act" | grep -qE '^pushmpc-|^vout=.*pushmpc|^video-filter=.*pushmpc_out|^extraintf=.*luaintf|^lua-intf=pushmpc_boot'; then
+              echo "::error::vlcrc still holds PushMPC settings after uninstall (snap)"; exit 1
+            fi
+            echo "vlcrc kept after uninstall, no PushMPC key in it"
+          else
+            echo "vlcrc removed by uninstall (PushMPC had created it)"
+          fi
           [ "$i" -ge $((b * 3)) ] && echo "::notice::installer snap target: x$((i / (b > 0 ? b : 1)))" || { echo "::error::installer snap target did not run PushMPC"; exit 1; }
       - name: Snap VLC with hardware decoding through the null drivers (VA-API by environment; VDPAU through the bootstrap's test hook)
         if: always()

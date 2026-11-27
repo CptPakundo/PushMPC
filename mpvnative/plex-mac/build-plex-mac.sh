@@ -100,8 +100,10 @@ codesign -v "$out/libMoltenVK.dylib" 2>/dev/null || codesign -f -s - "$out/libMo
 lic=$(find "$work/mvk" -maxdepth 3 -name 'LICENSE*' | head -1); [ -z "$lic" ] || cp "$lic" "$out/MoltenVK-LICENSE.txt"
 echo "libMoltenVK.dylib $3 ($(lipo -archs "$out/libMoltenVK.dylib"))"
 
-# the self-test host (loads Plex's libmpv in its own process)
-clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$here/../hook/libmpv_host.c" -o "$out/pushmpc-plex-selftest"
+# the self-test host (loads Plex's or IINA's libmpv in its own process). /usr/lib/swift in its rpath: IINA's bundled
+# libswift_Concurrency.dylib asks for @rpath/libswiftCore.dylib, which IINA finds through its own rpath; without it
+# the host dies in dyld on Intel Macs (apple run 46032637113)
+clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=$min "$here/../hook/libmpv_host.c" -Wl,-rpath,/usr/lib/swift -o "$out/pushmpc-plex-selftest"
 codesign -f -s - "$out/pushmpc-plex-selftest"
 # the libmpv stand-in for Stremio / Jellyfin Desktop (pushmpc-apps-mac.sh): re-exports the app's original libmpv
 # (renamed pushmpc-orig-libmpv.dylib; the link-time stub has only that install name) and loads PushMPC's mpv bridge
