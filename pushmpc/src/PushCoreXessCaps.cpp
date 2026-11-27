@@ -92,7 +92,15 @@ selftest::Result testXessSr(const selftest::Context& ctx) {
     o.verdict = verdict(r.ran, r.passed, r.note);
     o.fields = {{"psnr", std::format("{:.2f}", r.psnrXess)}, {"psnrBilinear", std::format("{:.2f}", r.psnrBilinear)},
                 {"msPerFrame", std::format("{:.3f}", r.msPerFrame)}, {"ms4k", std::format("{:.2f}", ms4k)}, {"version", r.version},
-                {"providerSlot", srProviderBuilt() ? "yes" : "no (PushFPS without the FsrSrBackend provider slot)"}};
+                {"providerSlot", srProviderBuilt() ? "yes" : "no (PushFPS without the FsrSrBackend provider slot)"}, {"pan", r.summary}};
+    // the same probe on a still picture, with history and with a reset every frame: does XeSS collapse to the source grid
+    // without camera jitter (FSR 3.1 did, F-T3)? Numbers only: the verdict stays the pan's
+    if (r.ran) {
+        const uint32_t frames = envU(L"PUSHMPC_SELFTEST_FRAMES", 16, 4, 120);
+        const XessSrSelfTestResult s = xessSrSelfTest(ctx.luid, ctx.warp, w, h, frames, 1), z = xessSrSelfTest(ctx.luid, ctx.warp, w, h, frames, 2);
+        o.fields.push_back({"static", s.summary.empty() ? s.note : s.summary});
+        o.fields.push_back({"staticReset", z.summary.empty() ? z.note : z.summary});
+    }
     if (ctx.record && r.ran)
         pmu::WriteSelfTest(pmu::Unlock::XessSr, pmu::SelfTestKey(ctx.adapter.VendorId, ctx.adapter.DeviceId, ctx.driver), r.passed,
                            widen(std::format("{} ms4k={:.2f}", r.note, ms4k)));
