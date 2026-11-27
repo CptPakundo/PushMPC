@@ -41,7 +41,7 @@ struct MInst {
     Pipeline<void*> pipe;
     ml::MlBackend<void*> be;
     std::map<int64_t, MMeta> meta;
-    uint64_t produced = 0, lastLogged = 0;
+    uint64_t produced = 0, lastLogged = 0, srcErrors = 0;
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
@@ -278,6 +278,11 @@ const VSFrame* VS_CC MGetFrame(int n, int reason, void* inst, void** frameData, 
         { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
         frameData[0] = reinterpret_cast<void*>(intptr_t(from));
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
+        return nullptr;
+    }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(d->lock);
+        LogSourceError("ml", n, int64_t(reinterpret_cast<intptr_t>(frameData[0])), d->srcErrors);
         return nullptr;
     }
     if (reason != arAllFramesReady) return nullptr;

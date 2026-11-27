@@ -44,7 +44,7 @@ struct PInst {
     Pipeline<void*> pipe;
     portable::PortableBackend<void*> be;
     std::map<int64_t, PMeta> meta;
-    uint64_t produced = 0, lastLogged = 0;
+    uint64_t produced = 0, lastLogged = 0, srcErrors = 0;
     // per getFrame call (under lock)
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
@@ -129,6 +129,11 @@ const VSFrame* VS_CC PGetFrame(int n, int reason, void* inst, void** frameData, 
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(d->lock);
+        LogSourceError("portable (CPU)", n, int64_t(reinterpret_cast<intptr_t>(frameData[0])), d->srcErrors);
+        return nullptr;
+    }
     if (reason != arAllFramesReady) return nullptr;
     const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
     std::lock_guard<std::mutex> lk(d->lock);
@@ -196,7 +201,7 @@ struct GInst {
     pmvs::VsContent content;
     gpu::GpuBackend<void*> be;
     std::map<int64_t, PMeta> meta;
-    uint64_t produced = 0, lastLogged = 0;
+    uint64_t produced = 0, lastLogged = 0, srcErrors = 0;
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
@@ -240,6 +245,11 @@ const VSFrame* VS_CC GGetFrame(int n, int reason, void* inst, void** frameData, 
         { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
         frameData[0] = reinterpret_cast<void*>(intptr_t(from));
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
+        return nullptr;
+    }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(d->lock);
+        LogSourceError("portable (GPU)", n, int64_t(reinterpret_cast<intptr_t>(frameData[0])), d->srcErrors);
         return nullptr;
     }
     if (reason != arAllFramesReady) return nullptr;
