@@ -19,6 +19,16 @@ class Pushmpc < Formula
   license "GPL-3.0-or-later"
   head "https://github.com/CptPakundo/PushMPC.git", branch: "main"
 
+  # the FFmpeg majors Homebrew bottles besides its ffmpeg, for the IINA bridge's extra builds: only the names this
+  # Homebrew knows (a Homebrew from before ffmpeg@8, whose ffmpeg was 8, had none: apple run 45971462911 on
+  # macos-15-intel; a later one may drop ffmpeg@4). Its own ffmpeg covers the newest major either way.
+  IINA_FFMPEG_EXTRA = %w[ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8].select do |f|
+    Formulary.factory(f)
+    true
+  rescue FormulaUnavailableError
+    false
+  end.freeze
+
   depends_on "cmake" => :build
   depends_on "pkgconf" => :build
   # Homebrew's mpv is built with VapourSynth (it depends on the vapoursynth formula)
@@ -30,11 +40,9 @@ class Pushmpc < Formula
   # capture mode on macOS (pushmpc-capture: QuickTime Player, Infuse, browsers): its shaders, and Vulkan on Metal; the
   # portable GPU engine's Vulkan driver (Apple silicon and Intel Macs): the engine finds Homebrew's libMoltenVK.dylib by itself
   on_macos do
-    # the IINA bridge for apps that bundle an older FFmpeg (Stremio 5.1: FFmpeg 7): headers only, at build time
-    depends_on "ffmpeg@4" => :build
-    depends_on "ffmpeg@6" => :build
-    depends_on "ffmpeg@7" => :build
-    depends_on "ffmpeg@8" => :build
+    # the IINA bridge for apps that bundle an older FFmpeg (Stremio 5.1: FFmpeg 7): headers only, at build time; the
+    # versioned FFmpeg formulae this Homebrew knows (IINA_FFMPEG_EXTRA)
+    IINA_FFMPEG_EXTRA.each { |f| depends_on f => :build }
     depends_on "glslang" => :build
     depends_on "molten-vk"
   end
@@ -126,7 +134,7 @@ class Pushmpc < Formula
     # refuses to patch anything when the app's FFmpeg majors differ from its own, so pushmpc-apps-mac.sh picks per app
     bridge = if OS.mac?
       ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}",
-       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{%w[ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8].map { |f| Formula[f].opt_include }.join(";")}"]
+       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{IINA_FFMPEG_EXTRA.map { |f| Formula[f].opt_include }.join(";")}"]
     else
       []
     end

@@ -223,10 +223,12 @@ jobs:
           cp mpvnative/install/pushmpc-apps-mac.sh "$O/"
           # the bridge once per FFmpeg major (Homebrew's ffmpeg, ffmpeg@7, ffmpeg@8), as the formula builds it: Stremio 5.1.26
           # bundles FFmpeg 7 (libavutil 59) and gets pushmpc-iina-av59.so (run 45964178745: one bridge was "not active")
-          brew install --quiet ffmpeg ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8 mpv vapoursynth >/dev/null
+          ffx=""; for f in ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8; do if brew info --formula "$f" >/dev/null 2>&1; then ffx="$ffx $f"; fi; done   # the ones this Homebrew knows (as the formula picks them)
+          brew install --quiet ffmpeg $ffx mpv vapoursynth >/dev/null
+          ffinc=""; for f in $ffx; do ffinc="$ffinc${ffinc:+;}$(brew --prefix "$f")/include"; done; echo "extra FFmpeg formulae:${ffx:- none}"
           cmake -S vsplugin -B "$W/vs" -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON \
             -DFFMPEG_INCLUDE="$(brew --prefix ffmpeg)/include" -DMPV_INCLUDE="$(brew --prefix mpv)/include" \
-            -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@4)/include;$(brew --prefix ffmpeg@6)/include;$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include" \
+            -DPUSHMPC_IINA_FFMPEG_INCLUDES="$ffinc" \
             -DVAPOURSYNTH_SDK="$(dirname "$(find "$(brew --prefix vapoursynth)/" -name VapourSynth4.h | head -n 1)")" > "$W/vs.log" 2>&1 \
             && cmake --build "$W/vs" --target pushmpc_iina pushmpc_iina_extras --parallel >> "$W/vs.log" 2>&1 || { tail -40 "$W/vs.log"; exit 1; }
           grep 'IINA bridge: builds for' "$W/vs.log"
