@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <random>
 #include <vector>
 
 #include "PushMpcReload.h"
@@ -40,6 +41,7 @@ struct StubCore {
     int id = 0;
     Mode reload = Mode::Fast, close = Mode::Fast;
     int slowMs = 300;
+    int result = PUSHCORE_OK;          // what reload returns
     std::atomic<bool> closed{ false };
     std::atomic<int> reloads{ 0 };
 };
@@ -65,7 +67,7 @@ static int StubReload(PushCore* c)
     S(c)->reloads++;
     Behave(S(c)->reload, S(c)->slowMs, other);
     --g_inReload;
-    return PUSHCORE_OK;
+    return S(c)->result;
 }
 static void StubClose(PushCore* c)
 {
@@ -246,7 +248,8 @@ int main()
         Check(r.stuckAt.find("job at: pushcore_reload") != std::string::npos && r.stuckAt.find("stub instance 10 busy") != std::string::npos && r.stuckAt.find("stub graph lock") != std::string::npos,
               "slow reload: the log names the job's stage and pushcore's steps (" + r.stuckAt + ")");
         f.Stop();
-        Check(WaitIdle(3000) && full.closed.load() && full.reloads == 1, "slow reload: closed by its own thread after it returned");
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());   // the filter stopped meanwhile: not adopted
+        Check(WaitIdle(3000) && full.closed.load() && full.reloads == 1, "slow reload: closed by its own thread after it returned (not adopted)");
     }
     {   // 7. a close that never returns: the reload is not started beside it; bounded; the instance is not reinstalled
         Reset();
@@ -295,6 +298,126 @@ int main()
         Check(WaitIdle(3000) && quick.closed.load() && full.closed.load() && full.reloads == 0, "Stop during the quick graph's close: both closed, no rebuild started");
     }
 
+    {   // 10. F-T1 follow-up: a reload abandoned at the timeout that succeeds later is handed over (adopted), not closed
+        Reset();
+        Filter f; f.Start();
+        StubCore full; full.id = 16; full.reload = Mode::Slow; full.slowMs = 700;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 200;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        Check(r.how == rl::Outcome::TimedOut && r.late != nullptr && f.core == nullptr, "late reload: abandoned at the timeout, a hand-over slot is returned");
+        PushCore* got = nullptr; PushCoreOutputInfo oi = {};
+        const auto t = rl::Clock::now();
+        while (!got && rl::MsSince(t) < 3000) { got = rl::TakeLate(*r.late, &oi); if (!got) Sleep(10); }
+        Check(got == P(full) && !full.closed.load() && oi.width == 1920 && oi.multiplier == 4, "late reload: the successful instance arrives with its output info and is not closed");
+        Check(rl::TakeLate(*r.late, &oi) == nullptr, "late reload: taken once");
+        f.Stop();
+        Check(WaitIdle(2000) && !full.closed.load(), "late reload: nothing left running, the adopted instance stays open");
+    }
+    {   // 11. given up (Stop / close) before the late reload returns: the job's thread closes it
+        Reset();
+        Filter f;
+        StubCore full; full.id = 17; full.reload = Mode::Slow; full.slowMs = 600;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 150;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());
+        Check(r.how == rl::Outcome::TimedOut && WaitIdle(3000) && full.closed.load(), "late reload given up before it returned: closed by its own thread");
+    }
+    {   // 12. given up after it arrived (never adopted): closed then
+        Reset();
+        Filter f;
+        StubCore full; full.id = 18; full.reload = Mode::Slow; full.slowMs = 300;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        const auto t = rl::Clock::now();
+        while (rl::MsSince(t) < 3000) { { std::lock_guard<std::mutex> lk(r.late->lock); if (r.late->core) break; } Sleep(10); }
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());
+        Check(WaitIdle(3000) && full.closed.load(), "late reload given up after it arrived: closed on its own thread");
+    }
+    {   // 13. Stop (not the timeout): no hand-over, the job's thread closes it as before
+        Reset();
+        Filter f;
+        StubCore full; full.id = 19; full.reload = Mode::Slow; full.slowMs = 500;
+        f.core = P(full);
+        std::thread stopper([&] { Sleep(50); f.quit = true; });
+        rl::Limits lim; lim.quitGraceMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        stopper.join();
+        Check(r.how == rl::Outcome::Stopped && r.late == nullptr && WaitIdle(3000) && full.closed.load(), "Stop: no late hand-over, closed by its own thread");
+    }
+
+    {   // 14. a late reload that fails after the timeout: never handed over, closed by its own thread
+        Reset();
+        Filter f;
+        StubCore full; full.id = 20; full.reload = Mode::Slow; full.slowMs = 300; full.result = PUSHCORE_ERROR;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 80;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        Check(r.how == rl::Outcome::TimedOut && r.late != nullptr, "late failure: abandoned at the timeout");
+        Check(WaitIdle(3000) && full.closed.load() && rl::TakeLate(*r.late, nullptr) == nullptr, "late failure: closed by its own thread, nothing to take over");
+    }
+    {   // 15. stress: random reload times and bounds, a thread taking or giving up the late slot at a random moment;
+        //     every instance ends exactly once: back in the slot (in time), taken over, or closed
+        Reset();
+        std::mt19937 rng(12345);
+        int bad = 0, inTime = 0, taken = 0, closed = 0;
+        const int kIter = 400;
+        for (int i = 0; i < kIter; ++i) {
+            Filter f;
+            auto* c = new StubCore; c->id = 1000 + i; c->reload = Mode::Slow; c->slowMs = int(rng() % 12); c->close = Mode::Fast;
+            f.core = P(*c);
+            rl::Limits lim; lim.timeoutMs = double(rng() % 10);
+            const bool take = rng() % 2 == 0; const int delay = int(rng() % 15);
+            const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+            bool tookIt = false;
+            if (r.late) {
+                std::thread t([&] {
+                    Sleep(delay);
+                    if (take) { PushCore* got = rl::TakeLate(*r.late, nullptr); if (got) { if (got != P(*c)) ++bad; tookIt = true; } }
+                    rl::ReleaseLate(r.late, &g_api, f.Hooks());   // the filter gives up whatever is left
+                });
+                t.join();
+            }
+            if (!WaitIdle(3000)) ++bad;
+            const bool back = f.core == P(*c), cl = c->closed.load();
+            if (int(back) + int(tookIt) + int(cl) != 1) { ++bad; std::printf("     iteration %d: back %d taken %d closed %d (slow %d, bound %.0f)\n", i, back, tookIt, cl, c->slowMs, lim.timeoutMs); }
+            inTime += back; taken += tookIt; closed += cl;
+            delete c;
+        }
+        Check(bad == 0, std::format("stress, {} reloads: each instance once (in time {}, taken over {}, closed {})", kIter, inTime, taken, closed));
+        Check(taken > 0 && closed > 0 && inTime > 0, "stress: all three endings occurred");
+    }
+    {   // 16. the adoption veto (the filter's rule, PushMpcReload.h Veto)
+        rl::Veto v;
+        const uint32_t g0 = v.Now();
+        const uint32_t g1 = v.Bump();   // the timeout's own fallback
+        Check(rl::Veto::KeepAtTimeout(g0, g1, false) && v.StillValid(g1), "veto: only the timeout's fallback: kept and adoptable");
+        v.Bump();                        // interlaced verdict / another fallback after the timeout
+        Check(!v.StillValid(g1), "veto: a fallback or an interlaced verdict after the timeout: not adopted");
+        rl::Veto w; const uint32_t h0 = w.Now(); w.Bump(); /* interlace during the reload */ const uint32_t h1 = w.Bump();
+        Check(!rl::Veto::KeepAtTimeout(h0, h1, false), "veto: a fallback during the reload (before the timeout): not kept");
+        rl::Veto d; const uint32_t d0 = d.Now(); const uint32_t d1 = d.Bump();
+        Check(!rl::Veto::KeepAtTimeout(d0, d1, true), "veto: a lost device: not kept");
+    }
+
+    {   // 17. the timeout passes while the idle quick graph still closes (live run, 200 ms bound: the close took 211 ms):
+        //     the rebuild still runs after the close and its success is handed over (before: "returned -1 after 0 ms")
+        Reset();
+        Filter f;
+        StubCore quick; quick.id = 21; quick.close = Mode::Slow; quick.slowMs = 300;
+        StubCore full; full.id = 22; full.reload = Mode::Fast;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, P(quick), f.Hooks(), lim);
+        PushCore* got = nullptr;
+        const auto t = rl::Clock::now();
+        while (r.late && !got && rl::MsSince(t) < 3000) { got = rl::TakeLate(*r.late, nullptr); if (!got) Sleep(10); }
+        Check(r.how == rl::Outcome::TimedOut && got == P(full) && full.reloads == 1 && !full.closed.load() && quick.closed.load(),
+              "timeout during the quick graph's close: the rebuild still runs and is handed over");
+        Check(WaitIdle(3000), "timeout during the quick graph's close: nothing left running");
+    }
     if (g_fail) std::printf("FAILED: %s\n", g_failed.c_str());
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
