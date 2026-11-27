@@ -16,6 +16,8 @@
 // --gray W: every output's luma, box-downscaled to W pixels wide, appended to <outdir>\gray.raw (header: width,
 // height as uint32; then one byte per pixel per output, in output order; outputs.csv gives the times) for a motion
 // and judder analysis.
+// --deband off|low|medium|high|anime, --srfamily standard|highbitrate|streaming, --srtarget WxH (the target class by
+// its height: 1440 / 2160 / 2880; the source's shape is kept): test switches of the settings route
 // --subtitles 1: PushFPS's Subtitle Hold (PushCoreSettings.subtitleHold; implies the PushMPC settings route)
 // --shaders: the compiled shaders pushcore uses. Default: the build tree's own (<harness folder>\..\shaders, the
 // shaders built from the patched PushFPS source) when that folder exists, else <pushfps>\shaders. A copy of an
@@ -156,6 +158,29 @@ int wmain(int argc, wchar_t** argv) {
         if (k == L"--record") { selfTestRecord = _wtoi(v.c_str()) != 0; continue; }
         if (k == L"--target") { ps.srTarget = v == L"1440p" ? PUSHCORE_SR_TARGET_1440P : v == L"5k" ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K; continue; }
         if (k == L"--cutguard") { ps.cutGuard = _wtoi(v.c_str()); continue; }
+        // test switches (settings route): deband, the RTX VSR model family, the SR output height
+        if (k == L"--deband") {
+            useSettings = true;
+            ps.deband = v == L"off" ? 0 : 1;
+            ps.debandStrength = v == L"low" ? PUSHCORE_DEBAND_LOW : v == L"high" ? PUSHCORE_DEBAND_HIGH : v == L"anime" ? PUSHCORE_DEBAND_ANIME : PUSHCORE_DEBAND_MEDIUM;
+            continue;
+        }
+        if (k == L"--srfamily") {
+            useSettings = true;
+            ps.srFamily = v == L"highbitrate" ? PUSHCORE_SR_FAMILY_HIGH_BITRATE : v == L"streaming" ? PUSHCORE_SR_FAMILY_STREAMING : PUSHCORE_SR_FAMILY_STANDARD;
+            continue;
+        }
+        if (k == L"--srtarget") {   // WxH: pushcore's ABI takes a target class (1440p / 4K / 5K) and keeps the source's shape
+            useSettings = true;
+            const size_t x = v.find(L'x');
+            const int tw = _wtoi(v.c_str()), th = x == std::wstring::npos ? 0 : _wtoi(v.c_str() + x + 1);
+            ps.srTarget = th == 1440 ? PUSHCORE_SR_TARGET_1440P : th == 2880 ? PUSHCORE_SR_TARGET_5K : PUSHCORE_SR_TARGET_4K;
+            if (th != 1440 && th != 2160 && th != 2880)
+                std::cout << "--srtarget " << tw << "x" << th << ": no such class; 4K (2160 lines) is used\n";
+            std::cout << "--srtarget " << tw << "x" << th << ": the output is the source's shape fitted to " << (th == 1440 ? 1440 : th == 2880 ? 2880 : 2160)
+                      << " lines (a 16:9 source: exactly " << (th == 1440 ? "2560x1440" : th == 2880 ? "5120x2880" : "3840x2160") << ")\n";
+            continue;
+        }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
         if (k == L"--held") { useSettings = true; ps.heldFrames = _wtoi(v.c_str()); continue; }
         if (k == L"--gray") { grayWidth = uint32_t(_wtoi(v.c_str())); continue; }
