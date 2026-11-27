@@ -281,6 +281,8 @@ jobs:
           cmake -S vsplugin -B vsplugin/build-capture -G Ninja -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON -DPUSHMPC_APPLE=ON
           cmake --build vsplugin/build-capture --target pushmpc_capture capture_test
           ./vsplugin/build-capture/capture_test
+          # MoltenVK's first instance runs in this helper next to pushmpc-capture (mac_vk_probe.h); it must be built with it
+          [ -x vsplugin/build-capture/pushmpc-vulkan-probe ] || { echo "::error::no pushmpc-vulkan-probe next to pushmpc-capture"; exit 1; }
           ./vsplugin/build-capture/pushmpc-capture --list
       - name: Self-test (MoltenVK; informational)
         continue-on-error: true

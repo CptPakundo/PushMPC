@@ -10,6 +10,11 @@
 #include <unistd.h>
 #endif
 #include "pmc_present.h"   // kSpv_pmc_present (shaders/present.comp, built by CMake)
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <cstdio>
+#include "mac_vk_probe.h"  // MoltenVK's instance tried in a process of its own first (it can abort the process)
+#endif
 
 namespace pmc {
 namespace {
@@ -39,6 +44,17 @@ bool Vk::CreateInstance(const std::vector<const char*>& surfaceExts, std::string
 {
     std::string why;
     if (!pmvs::gpu::LoadVulkan(why)) { err = "Vulkan is not installed (" + why + ")"; return false; }
+#if defined(__APPLE__)
+    {   // MoltenVK's first instance in pushmpc-vulkan-probe (next to pushmpc-capture) first: Metal can abort the process inside
+        // vkCreateInstance on some GPUs (mac_vk_probe.h). A probe that died keeps Vulkan out: capture runs the host engines
+        Dl_info di;
+        std::string lib, note;
+        if (vkGetInstanceProcAddr && dladdr(reinterpret_cast<void*>(vkGetInstanceProcAddr), &di) && di.dli_fname) lib = di.dli_fname;
+        const bool ok = pmvs::gpu::MacVulkanProbe(lib, why, note);
+        if (!note.empty()) std::fprintf(stderr, "pushmpc-capture: %s\n", note.c_str());
+        if (!ok) { err = "Vulkan is not usable on this Mac (" + why + ")"; return false; }
+    }
+#endif
     uint32_t n = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
     std::vector<VkExtensionProperties> have(n);

@@ -183,4 +183,14 @@ target_link_libraries(pushmpc_capture PRIVATE ${PMC_LIBS})
 if(TARGET pmc_spv)   # glslang ran here; the checked-in SPIR-V needs no build step
   add_dependencies(pushmpc_capture pmc_spv)
 endif()
+# macOS: pushmpc-vulkan-probe next to pushmpc-capture (vsplugin/engines/gpu/mac_vk_probe.h): MoltenVK's first instance in
+# a process of its own, because Metal can abort the process inside vkCreateInstance on some GPUs. The probe is looked up
+# next to the module that calls it, here the pushmpc-capture executable, so it ships in PushMPC Capture.app/Contents/MacOS.
+if(APPLE)
+  add_executable(pmc_vk_probe EXCLUDE_FROM_ALL "${CMAKE_SOURCE_DIR}/engines/gpu/mac_vk_probe.c")
+  target_include_directories(pmc_vk_probe PRIVATE "${PMVS_VULKAN_HEADERS_DIR}/include")
+  target_link_libraries(pmc_vk_probe PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(pmc_vk_probe PROPERTIES OUTPUT_NAME pushmpc-vulkan-probe RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_dependencies(pushmpc_capture pmc_vk_probe)
+endif()
 message(STATUS "capture mode: pushmpc-capture with ${PMC_DEFS}")
