@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless tests of the real module (libpushmpc_plugin) with the CSV display (libpushdump_plugin, built from
 # vlcplugin/spike/pushspike.c with -DPUSHSPIKE_DUMP_ONLY), both from one VLC_PLUGIN_PATH folder.
-# env: VLC, PLUGDIR, CLIP, CLIP10 (10-bit clip, optional), CLIP422 (4:2:2 clip, optional), OUT, SRC_FRAMES, PY, LABEL, CASES, HWARGS, VLC_WRAP,
+# env: VLC, PLUGDIR, CLIP, CLIP10 (10-bit clip, optional), CLIP422 (4:2:2 clip, optional), CLIPLIVE (a clip measured as not drawn, optional), OUT, SRC_FRAMES, PY, LABEL, CASES, HWARGS, VLC_WRAP,
 #      DISPLAYS (optional: real vouts for the crash/rate check, e.g. "gl xcb_x11"), NORC=1 (no rc interface: Windows)
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -50,6 +50,15 @@ want x2        && run x2        2 "$CLIP" -- $PP --pushmpc-smoother=2
 want x4        && run x4        4 "$CLIP" -- $PP --pushmpc-smoother=4
 want x8        && run x8        8 "$CLIP" -- $PP --pushmpc-smoother=8
 want x8_noout  && run x8_noout  4 "$CLIP" -- --video-filter=postproc --pushmpc-smoother=8   # expected: capped at x4
+# the held-drawing repair's lag mode (PUSHMPC_VLC_DRAWN=1: from the open, whatever the content library says) on the
+# worker: every frame (the workflow checks "held-drawing repair on" and pairs on the worker); and a clip the content
+# library measures as not drawn: never lagged (the workflow checks that no repair was set)
+want x2_lag    && PUSHMPC_VLC_DRAWN=1 run x2_lag 2 "$CLIP" -- $PP --pushmpc-smoother=2
+want x4_lag    && PUSHMPC_VLC_DRAWN=1 run x4_lag 4 "$CLIP" -- $PP --pushmpc-smoother=4
+if [ -n "${CLIPLIVE:-}" ] && want x2_live; then
+  SLIVE=$(sed -n 's/nb_read_frames=//p' "${CLIPLIVE%.mkv}.txt" 2>/dev/null | tr -d '\r')
+  SRC_FRAMES="${SLIVE:-$SRC_FRAMES}" run x2_live 2 "$CLIPLIVE" -- $PP --pushmpc-smoother=2
+fi
 # Auto cases pass mult 0: the analyzer takes the multiplier the module picked (display x5 / x6, minus what the
 # runner's CPU cannot generate in time) from its log, and checks that VLC showed that many frames on time
 want auto120   && PUSHMPC_DISPLAY_HZ=120 run auto120 0 "$CLIP" -- $PP
