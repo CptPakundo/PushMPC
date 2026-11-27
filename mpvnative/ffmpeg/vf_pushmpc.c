@@ -129,6 +129,10 @@ typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
 
 #define PM_RING 32
 
+/* the bit depth the newest stream's engine asked for (0: none): the mpv hook reads it in-process through its private
+ * libavfilter (pushmpc_hook_glue.c avfilter_pushmpc_want_depth), not as vf-metadata (that crashed mpv 0.37) */
+volatile int ff_pushmpc_want_depth = 0;
+
 typedef struct PushMPCContext {
     const AVClass *class;
 
@@ -422,6 +426,7 @@ static void add_opt(char *buf, size_t size, const char *key, const char *val)
 static int start_passthrough(AVFilterContext *ctx, const char *why)
 {
     PushMPCContext *s = ctx->priv;
+    ff_pushmpc_want_depth = 0;   /* no engine: no request */
     if (!s->passthrough_on_error) {
         av_log(ctx, AV_LOG_ERROR, "%s\n", why);
         return AVERROR(EINVAL);
@@ -623,6 +628,7 @@ static int config_output(AVFilterLink *outlink)
     s->K = s->out.multiplier >= 1 && s->out.multiplier <= 16 ? (int)s->out.multiplier : 1;
     /* minor 1: an older module's struct ends before want_out_depth */
     s->want_depth = s->out.struct_size >= offsetof(pmeng_output, want_out_depth) + sizeof(s->out.want_out_depth) ? (int)s->out.want_out_depth : 0;
+    ff_pushmpc_want_depth = s->want_depth;
     if (s->want_depth)
         av_log(ctx, AV_LOG_INFO, "the engine would do more with a %d-bit stream (frames tagged pushmpc.want_depth=%d)\n",
                s->want_depth, s->want_depth);
@@ -863,7 +869,7 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
         }
     }
 
-    if (s->want_depth) {   /* the mpv hook reads it (vf-metadata) and converts the stream ahead of this filter */
+    if (s->want_depth) {   /* for other readers (vf-metadata); the mpv hook reads ff_pushmpc_want_depth */
         char d[16];
         snprintf(d, sizeof(d), "%d", s->want_depth);
         av_dict_set(&out->metadata, "pushmpc.want_depth", d, 0);
@@ -1037,8 +1043,15 @@ static int activate(AVFilterContext *ctx)
         ret = process(ctx, in);
         if (ret < 0)
             return ret;
-        if (ff_inlink_queued_frames(inlink) > 0)
+        if (ff_inlink_queued_frames(inlink) > 0) {
             ff_filter_set_ready(ctx, 100);
+            return 0;
+        }
+        /* the frame gave no output yet (an engine holding outputs back: Dedup's lookahead, a GPU pair): pass the
+           request on, or nothing asks the source again. mpv's lavfi wrapper feeds a frame only when the buffersrc saw
+           a failed request, and the buffersink does not ask again while its own request stands: Plex for Mac with the
+           Vulkan host engine stopped after frame 0 (mpv-native run 45948718958: 1 source, 0 outputs, 120 s) */
+        FF_FILTER_FORWARD_WANTED(outlink, inlink);
         return 0;
     }
 

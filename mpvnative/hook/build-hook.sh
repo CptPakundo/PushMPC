@@ -41,6 +41,7 @@ name="libpushmpc-avfilter-$maj.$min.$mic.so"
 cp "$so" "$out/$name"
 patchelf --set-soname "$name" "$out/$name"
 nm -D --defined-only "$out/$name" | grep -q avfilter_pushmpc_parse2 || { echo "::error::the parse2 glue is not exported"; exit 1; }
+nm -D --defined-only "$out/$name" | grep -q avfilter_pushmpc_want_depth || { echo "::error::the depth-request getter is not exported"; exit 1; }
 echo "$name: NEEDED $(readelf -d "$out/$name" | grep NEEDED | grep -o '\[.*\]' | tr '\n' ' ')"
 cd - >/dev/null
 if [ "$hook" = --hook ]; then

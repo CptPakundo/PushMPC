@@ -59,7 +59,7 @@ if [ "$mode" = software ]; then
     grep -q "^open: " "$T/nv.engine.log" || fail "backend=nvidia: no engine opened after the fallback"
     frames_ok nv 2 || fail "backend=nvidia fallback: frames"
     # 4. an engine asking for a 10-bit stream (NVIDIA's RTX Video HDR on 8-bit frames; here the test option makes the CPU
-    #    engine ask): the filter tags its frames, the hook reads vf-metadata, converts the stream to 10 bits ahead of the
+    #    engine ask): the filter records it, the hook reads it in-process (not vf-metadata), converts the stream to 10 bits ahead of the
     #    filter and sets it up again with source_depth=8 (real-time playback on vo=null: the hook looks every 0.5 s)
     ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=8" -pix_fmt yuv420p -c:v ffv1 "$T/clip8.mkv"
     rm -f "$T/depth.engine.log"
