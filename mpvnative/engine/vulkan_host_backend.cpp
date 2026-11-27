@@ -86,6 +86,15 @@ public:
         return true;
     }
 
+    // the first GPU steps of a stream in the engine log (PUSHMPC_ENGINE_LOG; one line each, written as it happens): a
+    // device that stalls or aborts (MoltenVK on the macOS runners' paravirtual GPU) shows the step it stopped in
+    void Trace(const char* step, int64_t f)
+    {
+        if (m_traced >= 48) return;
+        ++m_traced;
+        Log(std::string("vulkan-host: ") + step + " (frame " + std::to_string(f) + ")");
+    }
+
     int Submit(const pmeng_image& src, int64_t, uint32_t flags) override
     {
         if (!m_q.empty()) return PMENG_BUSY;
@@ -103,15 +112,19 @@ public:
         ToPlanar(src, pl.p);
         YuvView v; v.width = m_w; v.height = m_h; v.bits = m_bits;
         for (int i = 0; i < 3; ++i) { v.data[i] = pl.p[i].data(); v.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
+        Trace("upload", s);
         const int slot = m_eng.Upload(v, err);
         if (slot < 0) return PMENG_ERROR;
+        Trace("uploaded", s);
         bool dup = false;
         if (m_dedup && m_lastDistinctSlot >= 0) {
             DedupStats ds;
             if (!m_eng.Duplicate(m_lastDistinctSlot, slot, ds, err)) { m_eng.ReleaseSlot(slot); return PMENG_ERROR; }
             dup = ds.duplicate;
+            Trace("duplicate test done", s);
         }
         if (!m_repair.Classify(m_eng, s, slot, m_lastDistinctSlot, dup, err)) return PMENG_ERROR;
+        Trace("classified", s);
         if (dup) { m_eng.ReleaseSlot(slot); ++m_dups; }
         else {
             m_slotOf[s] = slot;
@@ -121,8 +134,10 @@ public:
         }
         m_cadence.Push(s, dup);
         if (!m_repair.RepairUpTo(m_eng, s - m_cadence.Lookahead(), m_slotOf, m_srcMs, [&](int64_t f) { ForgetPairsOf(f); }, err)) return PMENG_ERROR;
+        Trace("pairs started", s);
         Settle();
         Prune();
+        Trace("submitted", s);
         return PMENG_OK;
     }
     int Finish() override
@@ -194,7 +209,9 @@ private:
         if (pi == m_pairs.end()) { err = "Vulkan engine: the pair is gone"; return PMENG_ERROR; }
         if (pi->second.cut) return real(sh.t < 0.5f ? sh.d0 : sh.d1);   // never morph a cut
         int o = -1; uint64_t tk = 0;
+        Trace("generate", sh.d1);
         if (!m_eng.Generate(pi->second.id, sh.t, 0, o, tk, err) || !m_eng.Wait(tk, err)) return PMENG_ERROR;
+        Trace("generated", sh.d1);
         YuvOut yo;
         for (int i = 0; i < 3; ++i) { yo.data[i] = m_gen[i].data(); yo.stride[i] = ptrdiff_t(i ? m_sc : m_sy); }
         m_eng.Read(o, yo);
@@ -242,8 +259,10 @@ private:
         auto a = m_slotOf.find(d0), b = m_slotOf.find(d1);
         if (a == m_slotOf.end() || b == m_slotOf.end()) { err = "Vulkan engine: a picture of the pair is gone"; return false; }
         PairStats ps;
+        Trace("estimate", d1);
         const int id = m_eng.Estimate(a->second, b->second, m_lastPair, ps, err);
         if (id < 0) return false;
+        Trace("estimated", d1);
         PairInfo pi; pi.id = id; pi.cut = m_guard.Decide(ps) != 0;
         if (pi.cut) ++m_cuts;
         m_pairs[{ d0, d1 }] = pi;
@@ -342,6 +361,7 @@ private:
     uint32_t m_fmt = 0;
     int m_w = 0, m_h = 0, m_bits = 8, m_k = 1;
     int m_lastDistinctSlot = -1, m_lastPair = -1;
+    int m_traced = 0;
     int64_t m_prevDistinct = -1, m_last = -1000000;
     uint64_t m_seq = 0, m_written = 0, m_generated = 0, m_cuts = 0, m_dups = 0, m_holds = 0;
     size_t m_sy = 0, m_sc = 0, m_ch = 0;
