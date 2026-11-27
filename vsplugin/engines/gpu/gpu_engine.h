@@ -220,6 +220,11 @@ public:
     bool RepairAvailable() const;       // regionRepair set and this build has the shaders
     bool Cells(int slot, int prevSlot, CellGridOut& out, std::string& err);
     bool RepairSlot(int slot, const RepairPart* parts, int n, float featherCells, bool detail, std::string& err);
+    // ContentDetect's GPU tap (tap.comp, the words pushmpc/content_detect.h PackedCellsRef makes on the CPU): the packed cells
+    // of an uploaded picture, kCellsW (480) x CellsHeight words; with clip also the image model's 224 x 224 thumbnail (224 x
+    // 224 more words after them). Waits. False with no tap shader in this build (TapAvailable).
+    bool TapAvailable() const;
+    bool Tap(int slot, bool clip, std::vector<uint32_t>& words, int& cw, int& ch, std::string& err);
 
     // gpu_test: a pair's fields from / to the CPU reference's MotionField
     bool InjectFields(int pair, const veyra::portable::MotionField& f, const veyra::portable::MotionField& k, std::string& err);
