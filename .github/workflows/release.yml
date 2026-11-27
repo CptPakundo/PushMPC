@@ -337,9 +337,8 @@ jobs:
       # capture mode (capture/capture.cmake): pushmpc-capture for the players PushMPC cannot plug into (X11 capture, the
       # screen-capture portal + PipeWire, the X11 / Wayland overlay) on the portable GPU engine (Vulkan-Headers and volk by
       # their pins). Its two shaders: the checked-in SPIR-V (capture/spv, the pinned glslang 16.6.0's; AlmaLinux 8 / EPEL 8
-      # have no glslang package). Its own build folder; a failure leaves capture/ out of the tarball, nothing else
+      # have no glslang package). Its own build folder; required: without it the job fails (capture/ is part of the tarball)
       - name: Capture mode (pushmpc-capture)
-        continue-on-error: true
         run: |
           set -eu
           dnf install -y libX11-devel libXcomposite-devel libXdamage-devel libXext-devel libXrandr-devel dbus-devel pipewire-devel wayland-devel wayland-protocols-devel
@@ -349,7 +348,7 @@ jobs:
       - name: Plugin and tarball
         run: |
           set -eu
-          if [ -x build-capture/pushmpc-capture ]; then export PUSHMPC_CAPTURE_BIN=$PWD/build-capture/pushmpc-capture; else echo "::warning title=capture mode::no pushmpc-capture for ${{ matrix.arch }}: the tarball has no capture/"; fi
+          if [ -x build-capture/pushmpc-capture ]; then export PUSHMPC_CAPTURE_BIN=$PWD/build-capture/pushmpc-capture; else echo "::error title=capture mode::no pushmpc-capture for ${{ matrix.arch }}: the tarball would have no capture/"; exit 1; fi
           # the plugin with the portable GPU engine (Vulkan, pinned headers) and, on x86_64, the NVIDIA backend (prebuilt kernels);
           # the configure log must not say a backend is left out (a release without them is not a release)
           nvl=''; [ "${{ matrix.arch }}" = x86_64 ] && nvl="-DPMVS_NVL_FATBIN=$PWD/nvl-kernels/nvl_kernels.fatbin -DPMVS_NVL_GUARD_DIR=$PWD/nvl-kernels"

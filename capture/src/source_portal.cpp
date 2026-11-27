@@ -32,8 +32,16 @@
 #include <spa/pod/builder.h>
 #include <spa/utils/result.h>
 
+// The 10-bit RGB formats and the mandatory-property flag are newer than some build hosts' PipeWire headers (AlmaLinux 8
+// in the release's manylinux_2_28 container); their values are PipeWire's stable ABI (spa/param/video/raw.h enum
+// spa_video_format: xRGB_210LE 80, xBGR_210LE 81, ARGB_210LE 84, ABGR_210LE 85; spa/pod/pod.h), so the binary offers them
+// whatever headers it was built with: a newer PipeWire at run time negotiates them, an older one leaves them out
+#ifndef SPA_POD_PROP_FLAG_MANDATORY
+#define SPA_POD_PROP_FLAG_MANDATORY (1u << 3)
+#endif
 namespace pmc {
 namespace {
+constexpr uint32_t kFmtXrgb210 = 80, kFmtXbgr210 = 81, kFmtArgb210 = 84, kFmtAbgr210 = 85;
 
 constexpr const char* kDest = "org.freedesktop.portal.Desktop";
 constexpr const char* kPath = "/org/freedesktop/portal/desktop";
@@ -397,8 +405,8 @@ const spa_pod* BuildFormat(spa_pod_builder* b, bool linear, bool hdr)
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
         0);
     if (hdr) {
-        spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_xBGR_210LE,
-                            SPA_VIDEO_FORMAT_ABGR_210LE, SPA_VIDEO_FORMAT_xRGB_210LE, SPA_VIDEO_FORMAT_ARGB_210LE), 0);
+        spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, kFmtXbgr210, kFmtXbgr210,
+                            kFmtAbgr210, kFmtXrgb210, kFmtArgb210), 0);
         spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
         spa_pod_builder_id(b, SPA_VIDEO_COLOR_PRIMARIES_BT2020);
         spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
@@ -466,8 +474,8 @@ void PortalSource::OnParam(uint32_t id, const spa_pod* param)
     spa_video_info_raw info{};
     if (spa_format_video_raw_parse(param, &info) < 0) return;
     const bool dmabuf = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier) != nullptr;
-    const bool ten = info.format == SPA_VIDEO_FORMAT_xBGR_210LE || info.format == SPA_VIDEO_FORMAT_ABGR_210LE || info.format == SPA_VIDEO_FORMAT_xRGB_210LE
-                     || info.format == SPA_VIDEO_FORMAT_ARGB_210LE;
+    const bool ten = info.format == kFmtXbgr210 || info.format == kFmtAbgr210 || info.format == kFmtXrgb210
+                     || info.format == kFmtArgb210;
     const bool pq = ten && uint32_t(info.transfer_function) == kTransferPq && info.color_primaries == SPA_VIDEO_COLOR_PRIMARIES_BT2020;
     {
         std::lock_guard<std::mutex> lk(m_mx);
@@ -570,7 +578,7 @@ bool PortalSource::Next(SourceFrame& f, int timeoutMs)
     f = SourceFrame{};
     f.width = w; f.height = h;
     // xRGB_210LE = DRM XRGB2101010 (B in the low 10 bits), xBGR_210LE = XBGR2101010 (R in the low bits)
-    if (m_pq) f.fmt = m_format == SPA_VIDEO_FORMAT_xBGR_210LE || m_format == SPA_VIDEO_FORMAT_ABGR_210LE ? PixFmt::XBGR10 : PixFmt::RGB10;
+    if (m_pq) f.fmt = m_format == kFmtXbgr210 || m_format == kFmtAbgr210 ? PixFmt::XBGR10 : PixFmt::RGB10;
     else f.fmt = m_format == SPA_VIDEO_FORMAT_RGBx || m_format == SPA_VIDEO_FORMAT_RGBA ? PixFmt::RGBX : PixFmt::BGRX;
     f.pitch = stride;
     f.time = r.t;
