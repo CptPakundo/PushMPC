@@ -114,6 +114,12 @@ jobs:
           $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -PassThru; Start-Sleep 12; if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
           choco install vlc -y --no-progress --limit-output | Select-Object -Last 3
           "VLC (Chocolatey): exit $LASTEXITCODE; vlc.exe $(Test-Path "$env:ProgramFiles\VideoLAN\VLC\vlc.exe")" | Tee-Object -Append $log
+          # a VLC that has played once (as MPC-HC above has run once): VLC writes its own files into %APPDATA%\vlc on its
+          # first run, which the uninstall check (that profile byte for byte as before Setup) must not count against Setup
+          Invoke-WebRequest $env:CLIP_URL -OutFile "$env:RUNNER_TEMP\first-run.mp4"
+          $v = Start-Process "$env:ProgramFiles\VideoLAN\VLC\vlc.exe" -PassThru -ArgumentList @('-I', 'dummy', '--no-audio', '--play-and-exit', '--run-time=2', "`"$env:RUNNER_TEMP\first-run.mp4`"")
+          if (-not $v.WaitForExit(60000)) { $v.Kill() }
+          "VLC's first run: exit $($v.ExitCode); its profile: $((Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($env:APPDATA.Length) }) -join ', ')" | Tee-Object -Append $log
           choco install kodi -y --no-progress --limit-output | Select-Object -Last 3
           $kx = @("$env:ProgramFiles\Kodi\kodi.exe", "${env:ProgramFiles(x86)}\Kodi\kodi.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
           "Kodi (Chocolatey): exit $LASTEXITCODE; $(if ($kx) { "$kx $((Get-Item $kx).VersionInfo.ProductVersion)" } else { 'not found' })" | Tee-Object -Append $log
@@ -265,10 +271,10 @@ jobs:
       # on WARP, which must say "pushcore" in its log line; the real core goes back right after
       - uses: actions/download-artifact@v4
         continue-on-error: true
-        with: { name: bridge-win64, path: '${{ runner.temp }}/bridge', run-id: '${{ inputs.release_run || github.run_id }}' }
+        with: { name: bridge-win64, path: '${{ runner.temp }}/bridge', run-id: '${{ inputs.release_run || github.run_id }}', github-token: '${{ github.token }}' }
       - uses: actions/download-artifact@v4
         continue-on-error: true
-        with: { name: clips, path: '${{ runner.temp }}/vlcclips', run-id: '${{ inputs.release_run || github.run_id }}' }
+        with: { name: clips, path: '${{ runner.temp }}/vlcclips', run-id: '${{ inputs.release_run || github.run_id }}', github-token: '${{ github.token }}' }
       - name: VLC on pushcore (stub core, WARP) and PushMPC's Direct3D 11 output, from Setup's install
         timeout-minutes: 10
         run: |
