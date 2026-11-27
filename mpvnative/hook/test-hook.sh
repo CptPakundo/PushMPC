@@ -14,8 +14,9 @@ mpv --no-config --script="$H/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=
     --o="$T/hook.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/hook.log" 2>&1
 grep -E "pushmpc_hook|filter:" "$T/hook.log" | head -4
 if [ ! -s "$T/hook.mkv" ] && command -v gdb >/dev/null; then   # a crash: where
-    gdb -batch -ex run -ex bt -ex "info sharedlibrary" --args mpv --no-config --script="$H/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 "$T/clip.mkv" \
-        --o="$T/hook-gdb.mkv" --of=matroska --ovc=ffv1 --no-audio 2>&1 | grep -E "^#|SIGSEGV|pushmpc|avfilter|avutil" | head -40
+    # mpv's own frames by name: Ubuntu's debuginfod server gives gdb the symbols (the crash in mpv 0.37 showed only ???)
+    DEBUGINFOD_URLS=${DEBUGINFOD_URLS:-https://debuginfod.ubuntu.com} timeout 600 gdb -batch -ex "set debuginfod enabled on" -ex run -ex bt -ex 'x/2i $pc' -ex "info sharedlibrary" --args mpv --no-config --script="$H/pushmpc_hook.so" --script-opts=pushmpc-vf=smoother=4 "$T/clip.mkv" \
+        --o="$T/hook-gdb.mkv" --of=matroska --ovc=ffv1 --no-audio 2>&1 | grep -E "^#|^=>|SIGSEGV|pushmpc|avfilter|avutil" | head -50
 fi
 python3 "$HERE/../tests/check_frames.py" "$T/hook.mkv" $((1 + (n - 1) * 4)) 96000/1001 --tolerance 3 || fails=$((fails + 1))
 if grep -q "graph strings: unavailable" "$T/hook.log"; then echo "graph strings: not hooked with this FFmpeg (as designed below 6.0)"; else

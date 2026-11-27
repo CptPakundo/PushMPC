@@ -14,6 +14,8 @@
  * With either one it reports whether this libmpv ran the hook ("host: C plugin: loaded" / "not loaded").
  */
 #include <dlfcn.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +43,24 @@ PM_STUB(cocoa_set_istty)
 #else
 #define PM_DLOPEN_FLAGS (RTLD_NOW | RTLD_GLOBAL)
 #endif
+
+/* a crash inside the libmpv under test (an engine abort, a segfault): where, on stdout, before the default action
+ * (the macOS Intel runner aborted with exit 134 and no line of output: mpv-native run 45948718958) */
+static void on_crash(int sig)
+{
+    void *pc[64];
+    const int n = backtrace(pc, 64);
+    static const char head[] = "host: crashed (signal ";
+    char num[8];
+    int k = 0, v = sig;
+    do { num[k++] = (char)('0' + v % 10); v /= 10; } while (v && k < 7);
+    (void)!write(1, head, sizeof(head) - 1);
+    while (k) (void)!write(1, &num[--k], 1);
+    (void)!write(1, "); backtrace:\n", 14);
+    backtrace_symbols_fd(pc, n, 1);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 static int write_y4m(const char *path)
 {
@@ -71,6 +91,8 @@ int main(int argc, char **argv)
     const char *files[64];
     int nf = 0, f, ok = 0;
     if (argc < 2) { fprintf(stderr, "usage: libmpv_host <libmpv.so> [<media file>...]\n"); return 2; }
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* every line reaches the log even if the process dies */
+    signal(SIGABRT, on_crash); signal(SIGSEGV, on_crash); signal(SIGBUS, on_crash); signal(SIGILL, on_crash); signal(SIGFPE, on_crash);
     h = dlopen(argv[1], PM_DLOPEN_FLAGS);
     if (!h) { printf("host: cannot load %s: %s\n", argv[1], dlerror()); return 2; }
     create = (void *(*)(void))dlsym(h, "mpv_create");

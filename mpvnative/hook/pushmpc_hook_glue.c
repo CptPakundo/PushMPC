@@ -6,6 +6,7 @@
  *                             entries whose filter is set), then the system's apply. Only the system's public API runs
  *                             on the system's graph, through the function table the hook passes in.
  *   avfilter_pushmpc_avutil_built  the libavutil version this copy was compiled against (the hook checks the system's)
+ *   avfilter_pushmpc_want_depth    the bit depth the newest stream's engine asked for (0: none; vf_pushmpc.c sets it)
  */
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +26,10 @@ typedef struct PushmpcSysApi {
 #else
 typedef struct PushmpcSysApi PushmpcSysApi;   /* graph strings are not hooked below FFmpeg 6.0 */
 #endif
+
+extern volatile int ff_pushmpc_want_depth;   /* vf_pushmpc.c */
+int avfilter_pushmpc_want_depth(void);
+int avfilter_pushmpc_want_depth(void) { return ff_pushmpc_want_depth; }
 
 unsigned avfilter_pushmpc_avutil_built(void);
 unsigned avfilter_pushmpc_avutil_built(void) { return LIBAVUTIL_VERSION_INT; }

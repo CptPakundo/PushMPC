@@ -49,6 +49,7 @@ static parse2_fn g_real_parse2;
 static glue_parse2_fn g_glue_parse2;
 static PushmpcSysApi g_api;
 static const void *g_filter;
+static int (*g_want_depth)(void);   /* the filter's depth request, read in-process (pushmpc_hook_glue.c) */
 static void *g_priv_handle, *g_sys_handle;
 static int g_patched_name, g_patched_parse;
 static char g_log[2048];
@@ -89,18 +90,45 @@ static int hook_parse2(void *graph, const char *filters, void **inputs, void **o
 #error "pushmpc_hook: x86_64 and aarch64 only"
 #endif
 
+/* the page's protection now (/proc/self/maps), so a patched page gets back exactly what it had: forcing it read-only
+ * would make a writable page (a non-RELRO .got.plt still taking lazy bindings, .data next to an ABS64 slot) fault on
+ * the program's next write there */
+static int page_prot(uintptr_t addr)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    char line[512];
+    int prot = -1;
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long lo, hi;
+        char perm[8];
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) == 3 && addr >= lo && addr < hi) {
+            prot = (perm[0] == 'r' ? PROT_READ : 0) | (perm[1] == 'w' ? PROT_WRITE : 0) | (perm[2] == 'x' ? PROT_EXEC : 0);
+            break;
+        }
+    }
+    fclose(f);
+    return prot;
+}
+
 static int patch_slot(void **slot, void *to)
 {
     const long page = sysconf(_SC_PAGESIZE);
     uintptr_t start = (uintptr_t)slot & ~(uintptr_t)(page - 1);
+    int prot;
     if (*slot == to)
         return 0;
-    if (mprotect((void *)start, (size_t)page, PROT_READ | PROT_WRITE) != 0) {
+    prot = page_prot(start);
+    if (prot < 0)
+        prot = PROT_READ;   /* no maps (cannot happen on Linux): RELRO pages are read-only */
+    if (!(prot & PROT_WRITE) && mprotect((void *)start, (size_t)page, prot | PROT_READ | PROT_WRITE) != 0) {
         logf_("mprotect failed; ");
         return 0;
     }
     *slot = to;
-    mprotect((void *)start, (size_t)page, PROT_READ);   /* RELRO pages are read-only; others stay readable */
+    if (!(prot & PROT_WRITE))
+        mprotect((void *)start, (size_t)page, prot);   /* as it was */
     return 1;
 }
 
@@ -264,6 +292,7 @@ static int install(void)
     if (!g_filter) { logf_("%s has no pushmpc filter; ", path); return -1; }
     /* graph strings: the system's public segment API, driven by the glue */
     g_glue_parse2 = (glue_parse2_fn)dlsym(g_priv_handle, "avfilter_pushmpc_parse2");
+    g_want_depth = (int (*)(void))dlsym(g_priv_handle, "avfilter_pushmpc_want_depth");   /* older builds: none */
     g_api.segment_parse = dlsym(g_sys_handle, "avfilter_graph_segment_parse");
     g_api.segment_apply = dlsym(g_sys_handle, "avfilter_graph_segment_apply");
     g_api.segment_free = dlsym(g_sys_handle, "avfilter_graph_segment_free");
@@ -412,23 +441,13 @@ static void with_extras(char *out, size_t n, const char *base, double fps, int d
         snprintf(out + k, n - (size_t)k, "%ssource_depth=8", eq ? ":" : "=");
 }
 
-/* the engine's request for a deeper stream, from the filter's frame metadata (vf_pushmpc: pushmpc.want_depth) */
-static int wanted_depth(mpv_handle *h)
+/* the engine's request for a deeper stream: read in-process from the hook's own copy of the filter (the private
+ * libavfilter we dlopen()ed; vf_pushmpc sets it when it opens an engine). Not through mpv's vf-metadata property:
+ * reading that from this thread crashed mpv 0.37 (Ubuntu 24.04) with SIGSEGV inside mpv_get_property_string, also
+ * after playback had restarted (release run 45948184492). A private build without the getter: no request. */
+static int wanted_depth(void)
 {
-    char *v = pfn_mpv_get_property_string(h, "vf-metadata/pushmpc/by-key/pushmpc.want_depth");
-    int d = 0;
-    if (!v) {   /* older mpv: the whole map as a string */
-        char *all = pfn_mpv_get_property_string(h, "vf-metadata/pushmpc");
-        const char *q = all ? strstr(all, "pushmpc.want_depth") : NULL;
-        if (q && (q = strpbrk(q, "0123456789")))
-            d = atoi(q);
-        if (all)
-            pfn_mpv_free(all);
-        return d;
-    }
-    d = atoi(v);
-    pfn_mpv_free(v);
-    return d;
+    return g_want_depth ? g_want_depth() : 0;
 }
 
 int mpv_open_cplugin(mpv_handle *h)
@@ -506,14 +525,12 @@ int mpv_open_cplugin(mpv_handle *h)
                 want = 0;   /* a new file: its own depth; the engine asks again when it needs it */
                 change = 1;
             }
-            /* only once frames have gone through the filter (playback restarted): mpv 0.37 (Ubuntu 24.04) crashes in
-               vf-metadata asked for between file-loaded / video-reconfig and the first filtered frame (CI: SIGSEGV in
-               mpv_get_property_string under the hook's thread) */
+            /* only once frames have gone through the filter (playback restarted): the new stream's engine is open */
             if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART)
                 checks = 12;
             else if (ev->event_id == MPV_EVENT_NONE && checks > 0)
                 checks--;
-            if (checks > 0 && !depth8 && wanted_depth(h) == 10) {
+            if (checks > 0 && !depth8 && wanted_depth() == 10) {
                 want = 1;
                 change = 1;
                 checks = 0;
