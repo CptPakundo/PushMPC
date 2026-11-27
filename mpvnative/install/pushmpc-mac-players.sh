@@ -112,13 +112,17 @@ do_iina() {
             esac
             if [ -f "$state/iina-plugins-created" ]; then rmdir "$plugins" 2>/dev/null; fi
             if [ -f "$state/iina-domain-created" ]; then
-                left=$(defaults read com.colliderli.iina 2>&1)
-                if [ "$(printf '%s' "$left" | tr -d ' \t\n')" = "{}" ]; then
-                    defaults delete com.colliderli.iina 2>/dev/null
-                    echo "IINA: its preferences removed again (PushMPC had created them; empty now)"
+                # a failed read is no content: the domain is gone already (macOS drops an emptied one by itself)
+                if left=$(defaults read com.colliderli.iina 2>/dev/null); then
+                    if [ "$(printf '%s' "$left" | tr -d ' \t\n')" = "{}" ]; then
+                        defaults delete com.colliderli.iina 2>/dev/null
+                        echo "IINA: its preferences removed again (PushMPC had created them; empty now)"
+                    else
+                        echo "IINA: its preferences kept (they hold more than PushMPC put there):"
+                        printf '%s\n' "$left" | head -n 12 | sed 's/^/    /'
+                    fi
                 else
-                    echo "IINA: its preferences kept (they hold more than PushMPC put there):"
-                    printf '%s\n' "$left" | head -n 12 | sed 's/^/    /'
+                    echo "IINA: its preferences are gone again, as before install"
                 fi
             fi
             rm -f "$state/iina-enabled" "$state/iina-plugins-created" "$state/iina-domain-created"
