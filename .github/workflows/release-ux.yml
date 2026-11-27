@@ -488,7 +488,7 @@ jobs:
       - name: Players and build tools from pacman (mpv requires vapoursynth on Arch)
         timeout-minutes: 15
         run: |
-          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils unzip vulkan-icd-loader vulkan-swrast vulkan-tools >/dev/null
+          pacman -Syu --noconfirm --needed mpv vapoursynth vlc kodi celluloid smplayer ffmpeg cmake gcc make python python-pip git diffutils pciutils unzip vulkan-icd-loader vulkan-swrast vulkan-tools pkgconf libx11 libxcomposite libxdamage libxext libxrandr dbus libpipewire wayland wayland-protocols >/dev/null
           pacman -Q mpv vapoursynth vlc kodi celluloid smplayer | tee /tmp/versions.txt
           curl -fsSL --retry 3 -o /tmp/clip.mp4 "$CLIP_URL"
       - uses: actions/cache@v4
@@ -509,6 +509,10 @@ jobs:
           [ -d /tmp/ncnn/lib/cmake/ncnn ] || sh scripts/build-ncnn-static.sh /tmp/ncnn /tmp/ncnn-dl
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/tmp/pmml-rt/ort/core/include -DPMML_NCNN_DIR=/tmp/ncnn >/dev/null
           cmake --build build --target pushmpc_vs --parallel >/dev/null
+          # capture mode, as release.yml builds it (the shipped tarball has capture/; release.yml fails without it)
+          cmake -S vsplugin -B build-capture -DCMAKE_BUILD_TYPE=Release -DPMVS_FETCH_GPU_DEPS=ON >/dev/null
+          cmake --build build-capture --target pushmpc_capture --parallel >/dev/null
+          export PUSHMPC_CAPTURE_BIN=$PWD/build-capture/pushmpc-capture
           git config --global --add safe.directory "$PWD"
           [ -f /tmp/mpvnative-art/hook/pushmpc_hook.so ] && export PUSHMPC_MPVNATIVE_DIR=/tmp/mpvnative-art/hook && echo "native hook: $(ls /tmp/mpvnative-art/hook | tr '\n' ' ')"
           [ -f /tmp/kodi-art/install.sh ] && export PUSHMPC_KODI_DIR=/tmp/kodi-art && echo "Kodi add-on: $(ls /tmp/kodi-art | tr '\n' ' ')"
@@ -523,6 +527,7 @@ jobs:
           if [ -n "${PUSHMPC_PLEX_DIR:-}" ]; then tar -tzvf dist/pushmpc-linux-x86_64-*.tar.gz | grep '/plex/'; tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -q '/plex/pushmpc-plex-linux.sh$'; fi
           tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -E '/setup.sh$|/pmml/' | head
           tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -q '/pmml/graphs/synth-yuv.onnx$'
+          tar -tzf dist/pushmpc-linux-x86_64-*.tar.gz | grep -q '/capture/pushmpc-capture$'
       - name: setup.sh into a fresh HOME (detection, engine choice, players, the pmml runtime), mpv through the installed block, uninstall
         env:
           # a Radeon without ROCm: PushFlow on ncnn (Vulkan); the runner's Vulkan device is lavapipe (Mesa, CPU)
@@ -534,7 +539,7 @@ jobs:
           snap > /tmp/before.txt
           tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
           sh /tmp/pushmpc-linux-x86_64-*/setup.sh --flatpak no --nvidia-vfx no | tee /tmp/setup.txt
-          for want in 'Graphics card: AMD' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: not available on Linux'; do
+          for want in 'Graphics card: AMD' 'Players found: mpv' 'vlc' 'kodi' 'PushFlow runtime installed' 'Auto starts with: ml' 'Capture mode: available for players with no other route'; do
             grep -q "$want" /tmp/setup.txt || { echo "::error::setup.sh output lacks '$want'"; exit 1; }
           done
           cat $HOME/.local/share/pushmpc/auto-plan.txt
