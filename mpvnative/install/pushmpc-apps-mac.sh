@@ -129,16 +129,31 @@ sig_kind() {   # sig_kind <bundle>: plain (loads ad-hoc libraries) | resign (har
     tb=$(printf '%s' "$ent" | grep -o -E '<key>(com\.apple\.developer\.[^<]*|keychain-access-groups|com\.apple\.application-identifier|application-identifier)</key>' | head -n 1 | sed 's/<[^>]*>//g')
     if [ -n "$tb" ]; then echo "team:$tb"; else echo resign; fi
 }
+# bounded <seconds> <command...>: the command's output; killed after that many seconds (exit 143 then). macOS has no
+# timeout(1), and perl's alarm would run through /usr/bin/perl, which SIP starts without DYLD_* variables
+bounded() {
+    _s=$1; shift; _o=$(mktemp "${TMPDIR:-/tmp}/pushmpc-st.XXXXXX")
+    "$@" > "$_o" 2>&1 & _p=$!
+    ( sleep "$_s"; kill "$_p" 2>/dev/null ) & _w=$!
+    wait "$_p"; _r=$?
+    kill "$_w" 2>/dev/null; wait "$_w" 2>/dev/null
+    cat "$_o"; rm -f "$_o"
+    return $_r
+}
 selftest_app() {   # selftest_app <libmpv path> <bundle>: 0 frames generated, 3 not, 2 no test possible; sets st_detail
     host=$from/pushmpc-plex-selftest
     [ -x "$host" ] || { st_detail='no self-test (pushmpc-plex-selftest not in the bundle)'; return 2; }
     blog=$LOGS/iina-bridge.log; mark=0; [ -f "$blog" ] && mark=$(wc -l < "$blog")
-    out=$(PUSHMPC_HOST_VF='' PUSHMPC_HOST_ACCEPT_EOF=1 DYLD_LIBRARY_PATH="$(dirname "$1"):$2/Contents/Frameworks" "$host" "$1" 2>&1); r=$?
+    # bounded: an engine that never finishes the clip must not hold the installer (exit 143)
+    out=$(PUSHMPC_HOST_VF='' PUSHMPC_HOST_ACCEPT_EOF=1 DYLD_LIBRARY_PATH="$(dirname "$1"):$2/Contents/Frameworks" \
+        bounded "${PUSHMPC_SELFTEST_SECONDS:-60}" "$host" "$1"); r=$?
     new=''; [ -f "$blog" ] && new=$(tail -n +$((mark + 1)) "$blog")
     eng=$(printf '%s\n' "$new" | sed -n 's/^pushmpc-iina: engine: \([^:(]*\).*/\1/p' | head -n 1 | sed 's/ *$//')
     fr=$(printf '%s\n' "$new" | sed -n 's/.*graph closed: \([0-9]*\) frames in, \([0-9]*\) out.*/\1 \2/p' | tail -n 1)
     fin=${fr%% *}; fout=${fr##* }
     if [ "$r" = 0 ] && [ -n "$fr" ] && [ "${fout:-0}" -gt "${fin:-0}" ]; then st_detail="$fin frames in, $fout out (engine: ${eng:-unknown})"; return 0; fi
+    [ "$r" = 143 ] && out="$out
+host: timed out after ${PUSHMPC_SELFTEST_SECONDS:-60} s (playback never reached the end of the clip)"
     st_detail="no frames generated (exit $r; $(printf '%s\n%s\n' "$out" "$new" | grep -E 'host: |not active|pass-through|refus|engine' | tail -n 4 | tr '\n' ' '))"
     [ "$r" = 2 ] && return 2
     return 3

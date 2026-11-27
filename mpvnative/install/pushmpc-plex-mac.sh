@@ -80,11 +80,27 @@ is_our_proxy() { [ -f "$1" ] && grep -aq pushmpc_proxy_status "$1"; }
 is_ours() { case $1 in pushmpc-avfilter-8.*.dylib|libpushmpc_engine.dylib|libpushmpc_engine_apple.dylib) return 0 ;; esac; return 1; }
 
 st_detail=''
+# bounded <seconds> <command...>: the command's output; killed after that many seconds (exit 143 then). macOS has no
+# timeout(1), and perl's alarm would run through /usr/bin/perl, which SIP starts without DYLD_* variables
+bounded() {
+    _s=$1; shift; _o=$(mktemp "${TMPDIR:-/tmp}/pushmpc-st.XXXXXX")
+    "$@" > "$_o" 2>&1 & _p=$!
+    ( sleep "$_s"; kill "$_p" 2>/dev/null ) & _w=$!
+    wait "$_p"; _r=$?
+    kill "$_w" 2>/dev/null; wait "$_w" 2>/dev/null
+    cat "$_o"; rm -f "$_o"
+    return $_r
+}
 selftest() {   # selftest <Frameworks dir>: 0 active, 3 not, 2 no test possible
     [ -x "$from/pushmpc-plex-selftest" ] || { st_detail='no self-test (pushmpc-plex-selftest not shipped)'; return 2; }
-    # Plex's dylibs link each other through @rpath (the app sets it); the host (not hardened) finds them by leaf name
-    out=$(DYLD_LIBRARY_PATH="$1" "$from/pushmpc-plex-selftest" "$1/libmpv.2.dylib" 2>&1); r=$?
+    # Plex's dylibs link each other through @rpath (the app sets it); the host (not hardened) finds them by leaf name.
+    # Bounded: an engine that never finishes the 4 s clip must not hold the installer (it is then reported, not waited for)
+    out=$(DYLD_LIBRARY_PATH="$1" bounded "${PUSHMPC_SELFTEST_SECONDS:-60}" "$from/pushmpc-plex-selftest" "$1/libmpv.2.dylib"); r=$?
     st_detail=$(printf '%s\n' "$out" | sed -n 's/^host: //p' | tr '\n' ' ' | sed 's/ *$//')
+    if [ "$r" = 143 ]; then st_detail="timed out after ${PUSHMPC_SELFTEST_SECONDS:-60} s (playback never reached the end of the clip): $st_detail"
+    elif [ "$r" != 0 ] && [ -z "$st_detail" ]; then   # nothing from the host: its exit and its last lines (a crash, a loader error)
+        st_detail="exit $r: $(printf '%s\n' "$out" | tail -n 4 | tr '\n' ' ' | sed 's/ *$//')"
+    fi
     case $r in 0) return 0 ;; 2) st_detail="self-test could not use Plex's libmpv: $st_detail"; return 2 ;; *) return 3 ;; esac
 }
 report() {   # report <name> <selftest rc> <where>
