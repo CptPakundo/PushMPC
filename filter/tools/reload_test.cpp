@@ -264,6 +264,21 @@ int main()
         Check(WaitIdle(1000), "Stop during a short reload: nothing left running");
     }
 
+    {   // 9. Stop while the quick graph still closes (before the rebuild started): no rebuild for a stopped player
+        Reset();
+        Filter f; f.Start();
+        StubCore quick; quick.id = 14; quick.close = Mode::Slow; quick.slowMs = 600;
+        StubCore full; full.id = 15;
+        f.core = P(full);
+        std::thread stopper([&] { Sleep(50); f.quit = true; });
+        rl::Limits lim; lim.quitGraceMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, P(quick), f.Hooks(), lim);
+        stopper.join();
+        Check(r.how == rl::Outcome::Stopped && r.totalMs < 400, std::format("Stop during the quick graph's close: abandoned after {:.0f} ms", r.totalMs));
+        f.Stop();
+        Check(WaitIdle(3000) && quick.closed.load() && full.closed.load() && full.reloads == 0, "Stop during the quick graph's close: both closed, no rebuild started");
+    }
+
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
     return g_fail ? 1 : 0;
 }

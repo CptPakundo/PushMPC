@@ -3818,10 +3818,14 @@ void CPushMpcFilter::CloseCore()
             std::lock_guard<std::mutex> nl(g_ngxLock); g_lastNgx = NgxKeyOf(a); g_haveNgx = true;
         }
     }
+    // An abandoned reload still runs (pushcore stuck), or a close started above / earlier outlives 5 s: either may hold
+    // pushcore's graph lock for a long time, so the player does not wait for this close either (F-T1). Otherwise the
+    // close is synchronous, as before (the warm NGX cache is free again for the next file's open).
+    bool detach = false;
+    { bool have = false; { std::lock_guard<std::mutex> l0(m_coreLock); have = m_core != nullptr; }
+      if (have) detach = pm::reload::Busy().Reloads() > 0 || !pm::reload::Busy().WaitNoClose(5000.0); }
     std::lock_guard<std::mutex> lk(m_coreLock);
-    if (m_core && !pm::reload::Busy().Idle()) {
-        // another pushcore close or an abandoned reload still runs on its own thread: it may hold pushcore's graph lock
-        // for a long time, so the player does not wait for this close either (F-T1)
+    if (m_core && detach) {
         Log(std::format("pushcore closes on its own thread ({} close(s), {} reload(s) still running)", pm::reload::Busy().Closes(), pm::reload::Busy().Reloads()));
         CloseAsync(m_api, m_core, "pushcore");
         m_core = nullptr;

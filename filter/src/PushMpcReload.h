@@ -114,8 +114,12 @@ inline std::shared_ptr<Job> Start(const PushCoreApi* api, PushCore* core, PushCo
         const bool closesDone = Busy().WaitNoClose(closesWaitMs);
         const double waitMs = MsSince(tw);
         double reloadMs = 0;
+        bool gaveUp = false;
+        { std::lock_guard<std::mutex> lk(job->lock); gaveUp = job->abandoned; }
         if (!closesDone) {
             err = std::format("an earlier pushcore close still runs after {:.0f} ms: the reload was not started", waitMs);
+        } else if (gaveUp) {
+            err = "abandoned before it started: no rebuild";   // a Stop during the closes: straight to the close below
         } else {
             const auto tr = Clock::now();
             r = api->reload(core);
