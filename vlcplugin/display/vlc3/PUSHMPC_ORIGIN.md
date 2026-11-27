@@ -20,7 +20,7 @@ PushMPC's own files (GPL-3.0-or-later):
   screen size out (Video Super Resolution; the anime upscaler while ContentDetect measures the picture as drawn, switched
   at most once per 30 s as in the Kodi add-on), converted into NIS's window-size texture. NIS draws every picture
   pushcore does not deliver in time, and the rest of the stream when pushcore fails. Not used while PushMPC's frame
-  generation filter may hold pushcore (one pushcore per player), nor for SD (BT.601) sources.
+  generation filter is in VLC's chain with a pushcore engine (one pushcore per player), nor for SD (BT.601) sources.
 
 ## The OpenGL output fork (Linux)
 

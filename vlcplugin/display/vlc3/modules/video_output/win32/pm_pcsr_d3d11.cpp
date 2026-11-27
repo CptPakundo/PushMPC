@@ -81,8 +81,9 @@ bool LoadBridge(std::string &why)
 
 // ---------------------------------------------------------------------------------------------------- the checks
 // One pushcore per process (the bridge's host hands the core to the last instance that opens it): PushMPC's frame
-// generation filter in the chain may hold it for the whole stream. It does not when its Smoother is off (it closes
-// pushcore at x1) or its engine is a portable one.
+// generation filter in the chain may hold it for the whole stream. VLC opens the output before it builds the filter
+// chain, and the filter's copy path opens pushcore even with its Smoother off (it closes it again at x1, but the open has
+// taken the core from the output by then): only its portable engines (CPU, Vulkan) leave pushcore to the output.
 bool FilterMayHoldPushcore(vlc_object_t *o, std::string &why)
 {
     char *chain = var_InheritString(o, "video-filter");
@@ -100,11 +101,10 @@ bool FilterMayHoldPushcore(vlc_object_t *o, std::string &why)
         }
     }
     if (!listed) return false;
-    const int64_t smoother = config_GetType("pushmpc-smoother") ? var_InheritInteger(o, "pushmpc-smoother") : 0;
     const int64_t engine = config_GetType("pushmpc-engine") ? var_InheritInteger(o, "pushmpc-engine") : 0;
-    if (smoother == 1 || engine == 1 || engine == 3) return false;
-    why = "PushMPC's frame generation filter is in VLC's chain and may run pushcore (one pushcore per player; its Smoother "
-          "off, or a portable engine, leaves pushcore to the output)";
+    if (engine == 1 || engine == 3) return false;
+    why = "PushMPC's frame generation filter is in VLC's chain and opens pushcore (one pushcore per player; with the "
+          "filter's portable engine pushcore is the output's)";
     return true;
 }
 
