@@ -130,7 +130,7 @@ jobs:
           for f in out/linux/*.so; do
             v=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
             echo "$f: GLIBC_$v; $(objdump -p "$f" | grep NEEDED | tr -s ' ' | tr '\n' ' ')"
-            nm -D "$f" | grep -E 'vlc_entry__3_0_0f(t64)?$'
+            case "$f" in *libpushmpc_content.so) ;; *) nm -D "$f" | grep -E 'vlc_entry__3_0_0f(t64)?$' ;; esac   # the content library is no VLC module
             [ "$(printf '%s\n2.27\n' "$v" | sort -V | tail -1)" = 2.27 ] || { echo "::error::$f needs GLIBC_$v (> 2.27)"; exit 1; }
             ! objdump -T "$f" | grep -q 'GLIBCXX\|CXXABI' || { echo "::error::$f depends on the system libstdc++"; exit 1; }
           done
