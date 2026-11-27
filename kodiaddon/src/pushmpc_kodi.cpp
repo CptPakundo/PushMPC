@@ -34,6 +34,7 @@ extern "C" {
 #include "tonemap.h"
 #include "kodi_engine.h"
 #include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: models, costs, Auto's pick
+#include "../../filter/src/PushMpcAnimeKeepUp.h"   // ... whether Auto's pick keeps up here, what runs when not
 #include "kodi_platform.h"
 #include "../../pushmpc/include/pushmpc/content_detect.h"   // what the picture is, interlacing: measured, never from names or flags
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
@@ -1153,6 +1154,7 @@ public:
         // held frames (animation on twos, threes, fours: cadence.h HeldCadence); PUSHMPC_DEDUP=0 turns it off
         if (m_engine) m_engine->SetDedup(m_k > 1 && !(std::getenv("PUSHMPC_DEDUP") && std::getenv("PUSHMPC_DEDUP")[0] == '0'));
         m_frameUs = m_in->VideoFrameUs();
+        AnimeKeepUpOpen();
         m_test2x = m_in->Config().upscale == 2;
         m_toneMap = m_in->ToneMap();
         if (m_toneMap) m_tm.Configure(m_in->ToneMapPq(), m_in->PeakNits());
@@ -1276,8 +1278,9 @@ public:
         m_havePrev = false;
         m_held.Reset();
         if (m_engine) m_engine->Forget();
+        m_animeLate.Restart();   // a seek: the warm-up again (PushMpcAnimeKeepUp.h)
 #if defined(_WIN32)
-        if (m_pc) m_pc->Flush();
+        if (m_pc) { m_pc->Flush(); m_animeMiss.Restart(m_pc->Lag() + 3, PcPicturesPerFrame()); }
         m_pend.clear();
 #endif
     }
@@ -1439,20 +1442,48 @@ private:
             m_queue.push_back(Out{p.s, p.pic, false, p.pc >= 0 ? p.pc : p.fallback});
         }
     }
-    // Auto's anime upscaler inside pushcore that does not keep up (its cost was a prior, card 1.0): pushcore back to its
-    // Video Super Resolution for the rest of the stream (win_anime_route.h AnimeMisses)
+    // Auto's anime upscaler inside pushcore that does not keep up (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h):
+    // counted over pictures expected from pushcore, sized in source frames (k pictures each), with a warm-up after the
+    // open, every settings update (a warm reload drops the pictures in flight) and a flush. A transient trip: Video Super
+    // Resolution for a while, then the model again; a real one: a cheaper model that fits, else VSR for the stream. When
+    // pushcore does not take the change, the check stays on and the model keeps running.
+    int PcPicturesPerFrame() const { return std::max(1, m_pc->AllOut() ? m_k : m_k - 1); }
     void AnimeMissCheck(bool delivered)
     {
-        if (m_pc->AnimeModel() < 0 || m_animeAuto.Running().empty()) { m_animeMiss.Reset(); return; }
-        if (!m_animeMiss.Update(delivered)) return;
-        std::string why;
+        if (m_pc->AnimeModel() < 0 || m_animeAuto.Running().empty()) return;   // VSR runs: nothing to count
+        const double now = NowS();
+        const pm::AnimeKeepUp::Trip trip = m_animeMiss.FeedDelivered(delivered, now);
+        if (trip == pm::AnimeKeepUp::Trip::None) return;
         const std::string was = m_animeAuto.Running();
-        const bool ok = m_pc->Update(m_contentCls, m_contentCg, -1, m_pc->Drawn(), why);
-        m_animeAuto.Stop();
-        if (ok) Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: pushcore missed most of its pictures with it; %s", was.c_str(), m_pc->Describe().c_str());
-        else Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s misses most pictures, and pushcore did not switch back: %s", was.c_str(), why.c_str());
+        const double frameMs = (m_frameUs > 0 ? m_frameUs : 41708.0) / 1000.0;
+        char counts[200];
+        std::snprintf(counts, sizeof(counts), "%d of the last %d pictures missed (about %.1fx a frame's time)", m_animeMiss.LastLate(), m_animeMiss.LastSeen(),
+                      m_animeMiss.LastRatio());
+        const int next = trip == pm::AnimeKeepUp::Trip::Real
+            ? pm::AnimeSrStepDown(m_pc->AnimeModel(), m_animeMiss.LastRatio() * frameMs, unsigned(m_w), unsigned(m_h), unsigned(m_pc->OutWidth()), unsigned(m_pc->OutHeight()), 1000.0 / frameMs)
+            : -1;
+        std::string why;
+        const bool ok = m_pc->Update(m_contentCls, m_contentCg, next, m_pc->Drawn(), why);
+        m_animeMiss.Restart(m_pc->Lag() + 3, PcPicturesPerFrame());
+        if (!ok) {
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s, and pushcore did not switch (%s): it keeps running, checked again", was.c_str(), counts, why.c_str());
+            return;
+        }
+        if (next >= 0) {
+            m_animeAuto.StepDown(PmmlModelId(next), now);
+            m_animeMiss.NewModel();
+            m_animeMiss.Restart(m_pc->Lag() + 3, PcPicturesPerFrame());
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the cheaper %s from here; %s", was.c_str(), counts, m_animeAuto.Running().c_str(), m_pc->Describe().c_str());
+        } else if (trip == pm::AnimeKeepUp::Trip::Transient) {
+            m_animeAuto.Pause();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: Video Super Resolution for %.0f s, then the model again (trip %d of %d); %s", was.c_str(), counts,
+                m_animeMiss.LastWaitS(), m_animeMiss.Trips(), pm::kAnimeMaxTrips, m_pc->Describe().c_str());
+        } else {
+            m_animeAuto.Stop();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %s, and no cheaper model fits; %s", was.c_str(), counts, m_pc->Describe().c_str());
+        }
     }
-    pmk::AnimeMisses m_animeMiss;
+    pm::AnimeKeepUp m_animeMiss;
     // ContentDetect on the decoder's texture, on the GPU (pushcore_route.h MeasureTexture: only the cells and the image
     // model's thumbnail come back)
     void MeasurePcGpu(void* tex, unsigned slice, int64_t ptsUs, bool disc)
@@ -1468,7 +1499,11 @@ private:
     void OnContentPc(int cls, bool cg)
     {
         if (!m_pc) return;
-        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double now = NowS();
+        if (m_animeAuto.Paused() && m_animeMiss.RetryDue(now)) {
+            m_animeAuto.Resume();
+            Log(ADDON_LOG_INFO, "anime upscaler (Auto): tried again after the wait (trip %d of %d so far)", m_animeMiss.Trips(), pm::kAnimeMaxTrips);
+        }
         std::string running;
         if (m_pc->AnimeModel() >= 0) { const std::wstring w = pm::AnimeSrModel(m_pc->AnimeModel()).id; running.assign(w.begin(), w.end()); }
         const pmk::PushcoreContentGate::Ask a = m_pcGate.Update(cls, cg, now, m_animeAuto, m_pc->Upscales(), running);
@@ -1477,6 +1512,7 @@ private:
         std::string why;
         const bool ok = m_pc->Update(cls, cg, model, a.drawn, why);
         m_pcGate.Done(a, ok, now, m_animeAuto);
+        if (ok) m_animeMiss.Restart(m_pc->Lag() + 3, PcPicturesPerFrame());   // the reload dropped the pictures in flight
         if (ok && a.drawnChanged)
             Log(ADDON_LOG_INFO, "pushcore: held drawings %s (measured %s)%s", m_pc->Held() ? "re-timed from here (pictures up to 14 frames later)" : "no longer re-timed",
                 pushmpc::content::ClassName(cls), m_pc->Held() ? "" : "; every picture stays pushcore's");
@@ -1512,8 +1548,11 @@ private:
         av_frame_unref(m_frame);
         av_frame_unref(m_sw);
 
-        const bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
+        bool contiguous = m_havePrev && pmk::Contiguous(m_prevPts, pts, m_frameUs);
         MeasureContent(m_pic[cur], pts, !contiguous);
+        // the anime model's time on the last frame, before this one is pushed: a swapped engine then gets this frame
+        if (m_lastPushed) AnimeLateCheck();
+        contiguous = contiguous && m_havePrev;   // a new engine (class switch, lateness) has no previous frame
         bool pushed = false;
         if (m_engine && (m_k > 1 || m_upscaled)) {
             pm_yuv src{};
@@ -1521,8 +1560,8 @@ private:
             std::string err;
             pushed = m_engine->Push(src, contiguous, err);
             if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
-            if (pushed) AnimeLateCheck();
         }
+        m_lastPushed = pushed;
         const bool dup = pushed && m_engine->LastDup();   // held frames: a repeat keeps the pair and m_pic[m_prevSlot]
         {
             const bool pair = pushed && m_engine->HavePair();
@@ -1575,8 +1614,12 @@ private:
 #if defined(_WIN32)
         if (Pc()) { OnContentPc(st.cls, st.cg); return; }
 #endif
+        const double now = NowS();
+        if (!Pc() && m_animeAuto.Paused() && m_animeLate.RetryDue(now)) {
+            m_animeAuto.Resume();
+            Log(ADDON_LOG_INFO, "anime upscaler (Auto): tried again after the wait (trip %d of %d so far)", m_animeLate.Trips(), pm::kAnimeMaxTrips);
+        }
         if (!m_animeAuto.Armed() || Pc() || m_cfg.external || !m_engine) return;
-        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (!m_animeAuto.Update(st.cls, st.cg, now)) return;
         pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, !m_animeAuto.Next().empty());
         c2.animeModel = m_animeAuto.Next();
@@ -1587,39 +1630,78 @@ private:
             Log(ADDON_LOG_WARNING, "anime upscaler (Auto) not switched: output %dx%d would replace %dx%d", e->OutWidth(), e->OutHeight(), m_engine->OutWidth(), m_engine->OutHeight());
             m_animeAuto.Disarm(); return;
         }
-        m_engine = std::move(e); m_cfg = c2;
         m_animeAuto.Commit(now);
         const bool want = !c2.animeModel.empty();
+        SwapEngine(std::move(e), c2);
+        Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s%s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "");
+    }
+
+    // a new engine at the same output size (the anime model on / off / cheaper): the output size and the multiplier as
+    // that engine can run them, no pair across the swap, the anime model's warm-up again
+    void SwapEngine(std::unique_ptr<pmk::IEngine> e, const pmk::EngineCfg& c2)
+    {
+        m_engine = std::move(e); m_cfg = c2;
+        m_k = std::clamp(m_k, 1, std::max(1, m_engine->MaxK()));
         m_upscaled = m_engine->OutWidth() != m_w || m_engine->OutHeight() != m_h;
         m_outW = (m_upscaled ? m_engine->OutWidth() : m_w) * (m_test2x ? 2 : 1);
         m_outH = (m_upscaled ? m_engine->OutHeight() : m_h) * (m_test2x ? 2 : 1);
         m_havePrev = false;
-        Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s%s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "");
+        m_lastPushed = false;
+        m_animeLate.Restart();
     }
 
-    // Auto's anime upscaler that cannot keep up here (its cost was a prior, card 1.0): back to the plain route at the same
-    // output size for the rest of the stream, said once (win_anime_route.h AnimeLateness)
+    // Auto's anime upscaler that does not keep up here (its cost was a prior, card 1.0; PushMpcAnimeKeepUp.h): fed the
+    // model's time on each source frame. A transient trip: the plain route at the same output size for a while, then the
+    // model again; a real one: a cheaper model that fits, else the plain route for the stream
     void AnimeLateCheck()
     {
-        if (!m_engine || m_animeAuto.Running().empty() || m_frameUs <= 0) { m_animeLate.Reset(); return; }
-        const double ms = m_engine->AnimeMs(), frameMs = m_frameUs / 1000.0;
-        if (!m_animeLate.Update(ms, frameMs)) return;
-        m_animeLate.Reset();
-        pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, false);
-        c2.animeModel.clear();
+        if (!m_engine || m_animeAuto.Running().empty() || m_frameUs <= 0) return;
+        const double ms = m_engine->AnimeMs(), frameMs = m_frameUs / 1000.0, now = NowS();
+        const pm::AnimeKeepUp::Trip trip = m_animeLate.FeedMs(ms, frameMs, now);
+        if (trip == pm::AnimeKeepUp::Trip::None) return;
+        const std::string was = m_animeAuto.Running();
+        char counts[200];
+        std::snprintf(counts, sizeof(counts), "%d of the last %d frames over a source frame (median %.1f ms of %.1f)", m_animeLate.LastLate(), m_animeLate.LastSeen(),
+                      m_animeLate.LastRatio() * frameMs, frameMs);
+        int next = -1;
+        if (trip == pm::AnimeKeepUp::Trip::Real) {
+            const int idx = pm::AnimeSrModelIndex(std::wstring(was.begin(), was.end()));
+            next = pm::AnimeSrStepDown(idx, m_animeLate.LastRatio() * frameMs, unsigned(m_w), unsigned(m_h), unsigned(m_engine->OutWidth()), unsigned(m_engine->OutHeight()), 1000.0 / frameMs);
+        }
+        pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, next >= 0);
+        c2.animeModel = next >= 0 ? PmmlModelId(next) : std::string();
         std::string why;
         auto e = pmk::OpenEngine(c2, why);
         if (!e || e->OutWidth() != m_engine->OutWidth() || e->OutHeight() != m_engine->OutHeight()) {
-            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) too slow here (%.1f ms a frame of %.1f) but the plain route did not open: %s", ms, frameMs,
-                e ? "another output size" : why.c_str());
-            m_animeAuto.Stop();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s, but %s did not open (%s): it keeps running, checked again", was.c_str(), counts,
+                next >= 0 ? c2.animeModel.c_str() : "the plain route", e ? "another output size" : why.c_str());
             return;
         }
-        Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %.1f ms a frame, more than a source frame (%.1f ms) for %d frames in a row",
-            m_animeAuto.Running().c_str(), ms, frameMs, pmk::kAnimeLateFrames);
-        m_engine = std::move(e); m_cfg = c2;
-        m_animeAuto.Stop();
-        m_havePrev = false;
+        SwapEngine(std::move(e), c2);
+        if (next >= 0) {
+            m_animeAuto.StepDown(c2.animeModel, now);
+            m_animeLate.NewModel();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the cheaper %s from here", was.c_str(), counts, c2.animeModel.c_str());
+        } else if (trip == pm::AnimeKeepUp::Trip::Transient) {
+            m_animeAuto.Pause();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s: %s: the plain route for %.0f s, then the model again (trip %d of %d)", was.c_str(), counts,
+                m_animeLate.LastWaitS(), m_animeLate.Trips(), pm::kAnimeMaxTrips);
+        } else {
+            m_animeAuto.Stop();
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %s, and no cheaper model fits", was.c_str(), counts);
+        }
+    }
+
+    static double NowS() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+    static std::string PmmlModelId(int model) { const std::wstring w = pm::AnimeSrModel(model).id; return std::string(w.begin(), w.end()); }
+    // the guards' source rate and samples per frame, from the open (PushMpcAnimeKeepUp.h)
+    void AnimeKeepUpOpen()
+    {
+        const double fps = m_frameUs > 0 ? 1e6 / m_frameUs : 23.976;
+        m_animeLate.Configure(fps, 1);
+#if defined(_WIN32)
+        if (m_pc) { m_animeMiss.Configure(fps, PcPicturesPerFrame()); m_animeMiss.Restart(m_pc->Lag() + 3); }
+#endif
     }
 
     void Setup(int w, int h, int bits)
@@ -2120,7 +2202,8 @@ private:
 #endif
     int m_contentCls = 0;
     bool m_contentCg = false;
-    pmk::AnimeLateness m_animeLate;     // Auto's anime upscaler keeps up (else the plain route for the stream)
+    pm::AnimeKeepUp m_animeLate;        // Auto's anime upscaler keeps up on the engines route (PushMpcAnimeKeepUp.h)
+    bool m_lastPushed = false;          // the last frame reached the engine (its anime time is this frame's)
     pmk::AnimeAutoSwitch m_animeAuto;   // Auto's anime upscaler: follows the measured class and its DrawnPolicy
     AVCodecContext* m_ctx = nullptr;
     AVFrame* m_frame = nullptr;

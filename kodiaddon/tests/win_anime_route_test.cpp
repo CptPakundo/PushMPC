@@ -5,6 +5,7 @@
 #include "win_anime_route.h"
 #include "kodi_engine.h"
 #include "../../filter/src/PushMpcAnimeSr.h"
+#include "../../filter/src/PushMpcAnimeKeepUp.h"
 #include <cstdio>
 #include <string>
 #include <tuple>
@@ -17,6 +18,101 @@ using namespace pushmpc::content;
 static std::string Id(int m) { const std::wstring w = pm::AnimeSrModel(m).id; return std::string(w.begin(), w.end()); }
 
 // the model helpers agree with the model table: every "-ds" id is a DS variant of a model AnimeModelHasDs names
+// Auto's anime upscaler keeps up (filter/src/PushMpcAnimeKeepUp.h): warm-up, sustained lateness, transient vs real trips,
+// the back-off, the step down, and the switch's pause / resume / step down
+static void KeepUp()
+{
+    using pm::AnimeKeepUp;
+    const double fps = 24.0, frameMs = 1000.0 / fps;
+    const int window = std::max(pm::kAnimeMinWindowFrames, int(std::lround(pm::kAnimeSustainS * fps)));
+    {   // warm-up: nothing counts for kAnimeWarmupFrames source frames, however slow (a cold model, a reload)
+        AnimeKeepUp g; g.Configure(fps);
+        for (int i = 0; i < pm::kAnimeWarmupFrames; ++i) CHECK(g.FeedMs(10 * frameMs, frameMs, 0) == AnimeKeepUp::Trip::None);
+        // then a short spike (the old rule's 12 in a row) does not trip: most of a kAnimeSustainS window must be late
+        for (int i = 0; i < 12; ++i) CHECK(g.FeedMs(3 * frameMs, frameMs, 1) == AnimeKeepUp::Trip::None);
+        for (int i = 0; i < 3 * window; ++i) CHECK(g.FeedMs(0.3 * frameMs, frameMs, 2) == AnimeKeepUp::Trip::None);
+        CHECK(g.OnTime());
+        // exactly half late over the window: keeps going
+        for (int i = 0; i < 2 * window; ++i) CHECK(g.FeedMs(i % 2 ? 1.5 * frameMs : 0.5 * frameMs, frameMs, 3) == AnimeKeepUp::Trip::None);
+        // a sustained slowdown after the model kept up: transient, with the back-off
+        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
+        int n = 0;
+        while (t == AnimeKeepUp::Trip::None && n < 4 * window) { t = g.FeedMs(5 * frameMs, frameMs, 100); ++n; }
+        CHECK(t == AnimeKeepUp::Trip::Transient && g.Trips() == 1 && g.LastWaitS() == pm::kAnimeRetryFirstS && g.Waiting());
+        CHECK(g.LastLate() * 2 > g.LastSeen() && g.LastRatio() > 1.0);   // the window's median: a late frame
+        CHECK(!g.RetryDue(100 + pm::kAnimeRetryFirstS - 1) && g.RetryDue(100 + pm::kAnimeRetryFirstS) && !g.Waiting());
+        // the retry has its warm-up again; the next trips double the wait, and after kAnimeMaxTrips the trip is real
+        double now = 200, wait = pm::kAnimeRetryFirstS;
+        for (int trip = 2; trip <= pm::kAnimeMaxTrips + 1; ++trip) {
+            t = AnimeKeepUp::Trip::None; n = 0;
+            while (t == AnimeKeepUp::Trip::None && n < 4 * window) { t = g.FeedMs(5 * frameMs, frameMs, now); ++n; }
+            CHECK(n > pm::kAnimeWarmupFrames);
+            if (trip <= pm::kAnimeMaxTrips) { wait = std::min(pm::kAnimeRetryMaxS, wait * 2); CHECK(t == AnimeKeepUp::Trip::Transient && g.LastWaitS() == wait); CHECK(g.RetryDue(now + wait)); }
+            else CHECK(t == AnimeKeepUp::Trip::Real);
+            now += 1000;
+        }
+    }
+    {   // never on time, far over (5x): real at once (a card that cannot run it); under 2x: transient (load)
+        AnimeKeepUp g; g.Configure(fps);
+        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
+        for (int i = 0; i < 4 * window && t == AnimeKeepUp::Trip::None; ++i) t = g.FeedMs(5 * frameMs, frameMs, 0);
+        CHECK(t == AnimeKeepUp::Trip::Real && !g.Waiting());
+        g.NewModel(); t = AnimeKeepUp::Trip::None;
+        for (int i = 0; i < 4 * window && t == AnimeKeepUp::Trip::None; ++i) t = g.FeedMs(1.5 * frameMs, frameMs, 0);
+        CHECK(t == AnimeKeepUp::Trip::Transient);
+        // nothing measured (no model ran) never counts
+        g.NewModel();
+        for (int i = 0; i < 4 * window; ++i) CHECK(g.FeedMs(-1, frameMs, 0) == AnimeKeepUp::Trip::None);
+    }
+    {   // the pushcore route: pictures, k per source frame; the warm-up covers pushcore's lag; a reload restarts it
+        const int k = 5, lag = 14;
+        AnimeKeepUp g; g.Configure(fps, k); g.Restart(lag + 3);
+        CHECK(g.WindowSamples() == window * k);
+        for (int i = 0; i < (lag + 3) * k; ++i) CHECK(g.FeedDelivered(false, 0) == AnimeKeepUp::Trip::None);   // dropped by the reload
+        for (int i = 0; i < 3 * window * k; ++i) CHECK(g.FeedDelivered(i % 2 == 0, 0) == AnimeKeepUp::Trip::None);   // half: keeps going
+        g.Restart(lag + 3);
+        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
+        int n = 0;
+        while (t == AnimeKeepUp::Trip::None && n < 10 * window * k) { t = g.FeedDelivered(n % 3 == 0, 0); ++n; }   // two thirds missed
+        CHECK(t != AnimeKeepUp::Trip::None && n == std::max(pm::kAnimeWarmupFrames, lag + 3) * k + window * k);
+        CHECK(g.LastRatio() > 2.9 && g.LastRatio() < 3.1);   // window / delivered
+    }
+    {   // the step down: a cheaper ranked model of the same scale that fits at the measured speed, else none
+        // 1080p to 4K at 24 fps (budget 14.6 ms, transfer 3.6 ms): C4F32 measured at 6 or 30 ms a frame (card factor up
+        // to 8.5) -> C4F16 still fits; at 45 ms (12.8) only CuNNy fast; at 60 ms (18.1) nothing
+        CHECK(pm::AnimeSrStepDown(3, 6.0, 1920, 1080, 3840, 2160, 24.0) == 0);
+        CHECK(pm::AnimeSrStepDown(3, 30.0, 1920, 1080, 3840, 2160, 24.0) == 0);
+        CHECK(pm::AnimeSrStepDown(3, 45.0, 1920, 1080, 3840, 2160, 24.0) == 7);
+        CHECK(pm::AnimeSrStepDown(3, 60.0, 1920, 1080, 3840, 2160, 24.0) == -1);
+        CHECK(pm::AnimeSrStepDown(7, 10.0, 1920, 1080, 3840, 2160, 24.0) == -1);   // the cheapest: nothing below it
+        const int r = pm::AnimeSrStepDown(0, 4.0, 1920, 1080, 3840, 2160, 24.0);
+        CHECK(r == -1 || pm::AnimeSrModel(r).msPerMpx < pm::AnimeSrModel(0).msPerMpx);
+        CHECK(pm::AnimeSrStepDown(10, 40.0, 720, 480, 2880, 1920, 24.0) == -1);     // AnimeSR (x4): no cheaper x4 model
+        CHECK(pm::AnimeSrStepDown(1, 6.0, 1920, 1080, 3840, 2160, 24.0) == pm::AnimeSrStepDown(0, 6.0, 1920, 1080, 3840, 2160, 24.0));   // a variant: from its base
+        for (int m = 0; m < pm::kAnimeSrModels; ++m) {   // never a dearer, other-scale or (above DVD) DVD-only model
+            const int d = pm::AnimeSrStepDown(m, 1.0, 1920, 1080, 3840, 2160, 24.0);
+            const int b = pm::AnimeSrModel(m).variantOf >= 0 ? pm::AnimeSrModel(m).variantOf : m;
+            CHECK(d == -1 || (pm::AnimeSrModel(d).msPerMpx < pm::AnimeSrModel(b).msPerMpx && pm::AnimeSrModel(d).scale == pm::AnimeSrModel(b).scale && !pm::AnimeSrModel(d).dvdOnly));
+        }
+    }
+    {   // the switch: pause (the plain route for a while), resume (the same model, switched back at once), step down, stop
+        pmk::AnimeAutoSwitch s; s.Arm("artcnn-c4f32");
+        CHECK(s.Update(kDrawn, false, 1.0)); s.Commit(1.0);
+        s.Pause();
+        CHECK(!s.Armed() && s.Running().empty() && s.Paused() && !s.Update(kDrawn, false, 2.0));
+        s.Resume();
+        CHECK(s.Armed() && !s.Paused() && s.Update(kDrawn, false, 3.0) && s.Next() == "artcnn-c4f32"); s.Commit(3.0);
+        s.StepDown("artcnn-c4f16", 4.0);
+        CHECK(s.Armed() && s.Running() == "artcnn-c4f16" && !s.Update(kDrawn, false, 5.0));   // already running the cheaper one
+        CHECK(s.Update(kLive, false, 40.0) && s.Next().empty()); s.Commit(40.0);         // live action: the plain route
+        CHECK(s.Update(kDrawn, false, 80.0) && s.Next() == "artcnn-c4f16");                  // drawn again: the cheaper model
+        s.Stop();
+        CHECK(!s.Armed() && s.Running().empty() && !s.Paused() && !s.Update(kDrawn, false, 100.0));   // stopped: not armed again this stream
+        s.Resume();
+        CHECK(!s.Armed());
+    }
+}
+
 static void Models()
 {
     int ds = 0;
@@ -145,29 +241,7 @@ static void Windows()
     for (unsigned m : {0u, 4u, 5u}) CHECK(pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m) == kAnimeSrBeforeDriverVsr);
     for (unsigned m : {1u, 2u, 3u}) CHECK(!pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m));
     CHECK(!pmk::PushcoreSrDriverVsr(false, 0));
-    // lateness: a run of frames over a source frame stops Auto's anime model; a single slow frame or none measured does not
-    {
-        pmk::AnimeLateness l;
-        for (int i = 0; i < pmk::kAnimeLateFrames - 1; ++i) CHECK(!l.Update(50, 41.7));
-        CHECK(!l.Update(30, 41.7));                                  // one in time: the run starts over
-        bool stop = false;
-        for (int i = 0; i < pmk::kAnimeLateFrames && !stop; ++i) stop = l.Update(50, 41.7);
-        CHECK(stop);
-        l.Reset();
-        for (int i = 0; i < 40; ++i) CHECK(!l.Update(-1, 41.7));     // no anime model: never
-        pmk::AnimeAutoSwitch s; s.Arm("artcnn-c4f16");
-        CHECK(s.Update(kDrawn, false, 1.0)); s.Commit(1.0);
-        s.Stop();
-        CHECK(!s.Armed() && s.Running().empty() && !s.Update(kDrawn, false, 100.0));   // stopped: not armed again this stream
-    }
-    {   // the pushcore route: more than half of a window missed stops it; half or fewer does not
-        pmk::AnimeMisses m;
-        bool stop = false;
-        for (int i = 0; i < pmk::kAnimeMissWindow; ++i) stop = m.Update(i % 2 == 0);
-        CHECK(!stop);                                                    // exactly half: keeps going
-        for (int i = 0; i < pmk::kAnimeMissWindow && !stop; ++i) stop = m.Update(i % 3 == 0);
-        CHECK(stop);                                                     // two thirds missed
-    }
+    KeepUp();
     // HDR: allowed where pushcore feeds the model (its SDR-like proxy), left out where the decoded planes would be fed
     CHECK(AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 16) && AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 18));
     CHECK(!AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 16) && !AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 18));

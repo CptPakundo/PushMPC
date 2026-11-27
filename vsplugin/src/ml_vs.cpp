@@ -6,6 +6,7 @@
 // Auto: pmml's measured candidates for this card and size (the autobench cache) decide the backend, the tier, flow once
 // and the multiplier within the frame budget; with no measurement yet: the first GPU EP found, Fast, x2.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <format>
@@ -18,6 +19,7 @@
 #include "vs_content.h"
 #include "pmml/upscale.h"
 #include "../../filter/src/PushMpcAnimeSr.h"   // the anime upscalers: model table, costs, Auto's pick
+#include "../../filter/src/PushMpcAnimeKeepUp.h"   // ... whether Auto's pick keeps up in playback
 #include "platform.h"
 #include "pmml/autobench.h"
 #include "schedule.h"
@@ -52,29 +54,51 @@ struct MInst {
     int64_t upLast = -2;
     std::vector<uint16_t> upIn[3];
     double upMs = 0;
-    // the output size stays the upscaler's for the clip: when the model stops (failed, or Auto's pick cannot keep up:
-    // longer than a source frame for kAnimeLateFrames frames in a row, its cost being a prior here) a plain bilinear
-    // resize to that size takes over
+    // the output size stays the upscaler's for the clip: when the model failed, or Auto's pick does not keep up in
+    // playback (PushMpcAnimeKeepUp.h; only with display_fps, never in an encode, where slower than real time is normal),
+    // a bicubic resize to that size runs instead: for a while (transient), or for the clip when no cheaper model of the
+    // same scale fits (a real trip steps down to one first)
     int upW = 0, upH = 0;
-    bool upAuto = false;
-    int upLateRun = 0;
+    bool upAuto = false, upRealtime = false, upPaused = false;
+    int upModel = -1;
+    pmml::UpscaleOptions upOpts;
+    pm::AnimeKeepUp upGuard;
 };
-inline constexpr int kAnimeLateFrames = 12;   // as the Kodi add-on (win_anime_route.h): a run, not a single slow frame
 
-// a plane resized bilinearly (centre-aligned), 16-bit samples in and out
-void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t* dst, int dw, int dh)
+double MNowS() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+// a plane resized with a separable bicubic (Catmull-Rom), 16-bit samples in and out, clamped to maxV. leftSited: the
+// 4:2:0 chroma of MPEG-2 / H.264 / HEVC (horizontally co-sited with the left luma sample, vertically centred), else
+// centre-aligned (luma)
+void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t* dst, int dw, int dh, bool leftSited, int maxV)
 {
+    struct Tap { int i[4]; float w[4]; };
+    auto taps = [](int sn, int dn, bool left) {
+        std::vector<Tap> t(static_cast<size_t>(dn));
+        for (int x = 0; x < dn; ++x) {
+            const double f = left ? ((2.0 * x + 0.5) * sn / dn - 0.5) / 2.0 : (x + 0.5) * sn / dn - 0.5;
+            const int b = int(std::floor(f));
+            const double u = f - b;
+            const double w[4] = {((-0.5 * u + 1.0) * u - 0.5) * u, (1.5 * u - 2.5) * u * u + 1.0, ((-1.5 * u + 2.0) * u + 0.5) * u, (0.5 * u - 0.5) * u * u};
+            for (int k = 0; k < 4; ++k) { t[size_t(x)].i[k] = std::clamp(b - 1 + k, 0, sn - 1); t[size_t(x)].w[k] = float(w[k]); }
+        }
+        return t;
+    };
+    const std::vector<Tap> tx = taps(sw, dw, leftSited), ty = taps(sh, dh, false);
+    std::vector<float> rows(size_t(sh) * dw);
+    for (int y = 0; y < sh; ++y) {
+        const uint16_t* r = src + y * sstride;
+        float* o = rows.data() + size_t(y) * dw;
+        for (int x = 0; x < dw; ++x) { const Tap& t = tx[size_t(x)]; o[x] = t.w[0] * r[t.i[0]] + t.w[1] * r[t.i[1]] + t.w[2] * r[t.i[2]] + t.w[3] * r[t.i[3]]; }
+    }
     for (int y = 0; y < dh; ++y) {
-        const double fy = std::clamp((y + 0.5) * sh / dh - 0.5, 0.0, double(sh - 1));
-        const int y0 = int(fy), y1 = std::min(y0 + 1, sh - 1);
-        const double wy = fy - y0;
+        const Tap& t = ty[size_t(y)];
+        const float* r0 = rows.data() + size_t(t.i[0]) * dw; const float* r1 = rows.data() + size_t(t.i[1]) * dw;
+        const float* r2 = rows.data() + size_t(t.i[2]) * dw; const float* r3 = rows.data() + size_t(t.i[3]) * dw;
+        uint16_t* o = dst + size_t(y) * dw;
         for (int x = 0; x < dw; ++x) {
-            const double fx = std::clamp((x + 0.5) * sw / dw - 0.5, 0.0, double(sw - 1));
-            const int x0 = int(fx), x1 = std::min(x0 + 1, sw - 1);
-            const double wx = fx - x0;
-            const double a = src[y0 * sstride + x0] * (1 - wx) + src[y0 * sstride + x1] * wx;
-            const double b = src[y1 * sstride + x0] * (1 - wx) + src[y1 * sstride + x1] * wx;
-            dst[size_t(y) * dw + x] = uint16_t(a * (1 - wy) + b * wy + 0.5);
+            const float v = t.w[0] * r0[x] + t.w[1] * r1[x] + t.w[2] * r2[x] + t.w[3] * r3[x];
+            o[x] = uint16_t(std::clamp(int(std::lround(v)), 0, maxV));
         }
     }
 }
@@ -99,12 +123,52 @@ void MSetProps(MInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
 }
 
+// Auto's pick in playback that does not keep up (PushMpcAnimeKeepUp.h; its cost was a prior, card 1.0): a transient trip
+// pauses the model (the bicubic resize, then the model again), a real one steps down to a cheaper model of the same
+// scale that fits, else the bicubic resize for the clip
+void MKeepUp(MInst* d, int srcW, int srcH)
+{
+    const double fps = d->inVi.fpsNum > 0 && d->inVi.fpsDen > 0 ? double(d->inVi.fpsNum) / double(d->inVi.fpsDen) : 23.976, frameMs = 1000.0 / fps;
+    const pm::AnimeKeepUp::Trip trip = d->upGuard.FeedMs(d->upMs, frameMs, MNowS());
+    if (trip == pm::AnimeKeepUp::Trip::None) return;
+    const std::wstring wasW = pm::AnimeSrModel(d->upModel).id;
+    const std::string was(wasW.begin(), wasW.end());
+    const std::string counts = std::format("{} of the last {} frames over a source frame (median {:.1f} ms of {:.1f})", d->upGuard.LastLate(), d->upGuard.LastSeen(),
+                                           d->upGuard.LastRatio() * frameMs, frameMs);
+    if (trip == pm::AnimeKeepUp::Trip::Transient) {
+        d->upPaused = true;
+        Log("ml: anime upscaler (Auto) " + was + ": " + counts + std::format(": a bicubic resize for {:.0f} s, then the model again (trip {} of {})", d->upGuard.LastWaitS(),
+                                                                         d->upGuard.Trips(), pm::kAnimeMaxTrips));
+        return;
+    }
+    const int next = pm::AnimeSrStepDown(d->upModel, d->upGuard.LastRatio() * frameMs, unsigned(srcW), unsigned(srcH), unsigned(d->upW), unsigned(d->upH), fps);
+    if (next >= 0) {
+        pmml::UpscaleOptions u = d->upOpts;
+        const std::wstring id = pm::AnimeSrModel(next).id;
+        u.model.assign(id.begin(), id.end());
+        std::string ue;
+        auto up = pmml::Upscaler::create(u, &ue);
+        if (up && up->outWidth() == d->upW && up->outHeight() == d->upH) {
+            d->up = std::move(up); d->upModel = next; d->upOpts = u;
+            d->upGuard.NewModel();
+            Log("ml: anime upscaler (Auto) " + was + ": " + counts + ": the cheaper " + u.model + " from here");
+            return;
+        }
+        Log("ml: anime upscaler (Auto): the cheaper " + u.model + " did not open (" + (up ? std::string("another output size") : ue) + ")");
+    }
+    d->up.reset();
+    Log("ml: anime upscaler (Auto) " + was + " off for this clip: " + counts + ", and no cheaper model fits: a bicubic resize from now on");
+}
+
 // the source frame through the anime upscaler; v then points at the upscaled planes (same bit depth, scale x the size)
 bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
 {
     auto it = d->upFrames.find(s);
     if (it == d->upFrames.end()) {
-        if (s != d->upLast + 1 && d->up) d->up->reset();   // a seek: AnimeSR's carry starts again
+        if (s != d->upLast + 1) {   // a seek: AnimeSR's carry starts again, the keep-up check's warm-up too
+            if (d->up) d->up->reset();
+            d->upGuard.Restart();
+        }
         d->upLast = s;
         pmml::Frame in;
         for (int i = 0; i < 3; ++i) {
@@ -121,25 +185,22 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
         bool ran = false;
-        if (d->up) {
-            ran = d->up->run(in, out, &err);
-            if (!ran) { Log("ml: anime upscaler failed (" + err + "): a plain resize to " + std::to_string(ow) + "x" + std::to_string(oh) + " from now on"); d->up.reset(); }
+        if (d->up && d->upPaused && d->upGuard.RetryDue(MNowS())) {
+            d->upPaused = false;
+            d->up->reset();
+            Log("ml: anime upscaler (Auto): tried again after the wait (trip " + std::to_string(d->upGuard.Trips()) + " of " + std::to_string(pm::kAnimeMaxTrips) + " so far)");
         }
-        if (!ran)   // a plain bilinear resize at the same output size (the clip's size is fixed)
+        if (d->up && !d->upPaused) {
+            ran = d->up->run(in, out, &err);
+            if (!ran) { Log("ml: anime upscaler failed (" + err + "): a bicubic resize to " + std::to_string(ow) + "x" + std::to_string(oh) + " from now on"); d->up.reset(); }
+        }
+        if (!ran)   // a bicubic resize at the same output size (the clip's size is fixed)
             for (int i = 0; i < 3; ++i) {
                 const int sw = i ? v.width / 2 : v.width, sh = i ? v.height / 2 : v.height;
-                MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh);
+                MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh, i > 0, (1 << v.bits) - 1);
             }
         d->upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (ran && d->upAuto) {   // Auto's pick that does not keep up here: the plain resize for the rest of the clip
-            const double frameMs = d->inVi.fpsNum > 0 ? 1000.0 * double(d->inVi.fpsDen) / double(d->inVi.fpsNum) : 0.0;
-            d->upLateRun = frameMs > 0 && d->upMs > frameMs ? d->upLateRun + 1 : 0;
-            if (d->upLateRun >= kAnimeLateFrames) {
-                Log("ml: anime upscaler (Auto) too slow here (" + std::to_string(int(d->upMs + 0.5)) + " ms a frame, more than a source frame for " +
-                    std::to_string(kAnimeLateFrames) + " frames in a row): a plain resize from now on");
-                d->up.reset();
-            }
-        }
+        if (ran && d->upAuto && d->upRealtime) MKeepUp(d, v.width, v.height);
         if (v.bits <= 8)
             for (int i = 0; i < 3; ++i) { u.p8[i].resize(u.p16[i].size()); for (size_t k = 0; k < u.p16[i].size(); ++k) u.p8[i][k] = uint8_t(u.p16[i][k]); u.p16[i].clear(); }
         it = d->upFrames.emplace(s, std::move(u)).first;
@@ -321,6 +382,8 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const double srcFps = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 23.976;
     int err = 0;
     const double displayHz = a->mapGetFloat(in, "display_fps", 0, &err);
+    // playback (mpv's script passes display_fps): Auto's anime pick is checked against real time; an encode never is
+    const bool realtime = !err && displayHz > 0;
     const std::string smoother = MArg(in, a, "smoother");
     const int fixedK = smoother.empty() ? 0 : std::atoi(smoother.c_str());
     const int wantK = fixedK >= 2 ? std::min(fixedK, kPortableMaxK) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2);
@@ -413,6 +476,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     if (const std::string v = MArg(in, a, "ml_line_art"); !v.empty()) o.lineArt = ParseBool(v, false);
     std::string e;
     std::unique_ptr<pmml::Upscaler> up;
+    pmml::UpscaleOptions upOpts;
     if (animeModel >= 0) {
         pmml::UpscaleOptions u;
         u.runtimeDir = rt; u.graphsDir = rt + "/graphs"; u.cacheDir = rt; u.backend = o.backend;
@@ -421,6 +485,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
         u.io = pmml::UpscaleIo::Yuv420; u.colour = o.colour; u.width = w; u.height = h;
         std::string ue;
         up = pmml::Upscaler::create(u, &ue);
+        upOpts = u;
         if (up) { o.width = up->outWidth(); o.height = up->outHeight(); Log("ml: anime upscaler " + animeNote + "; " + up->describe()); }
         else Log("ml: anime upscaler not used (" + ue + ")");
     } else if (!animeNote.empty()) Log("ml: anime upscaler " + animeNote);
@@ -435,7 +500,8 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = k;
     d->vi = *vi;
-    if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; }
+    if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; d->upRealtime = realtime; d->upModel = animeModel; d->upOpts = upOpts;
+              d->upGuard.Configure(srcFps); }
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, k);
     d->vi.fpsNum = outFps.num; d->vi.fpsDen = outFps.den;
     d->vi.numFrames = int(OutputFrames(vi->numFrames, k));
