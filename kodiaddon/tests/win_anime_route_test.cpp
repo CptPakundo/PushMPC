@@ -145,6 +145,29 @@ static void Windows()
     for (unsigned m : {0u, 4u, 5u}) CHECK(pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m) == kAnimeSrBeforeDriverVsr);
     for (unsigned m : {1u, 2u, 3u}) CHECK(!pmk::PushcoreSrDriverVsr(true, m) && pmk::PushcoreAnimeAllowed(true, m));
     CHECK(!pmk::PushcoreSrDriverVsr(false, 0));
+    // lateness: a run of frames over a source frame stops Auto's anime model; a single slow frame or none measured does not
+    {
+        pmk::AnimeLateness l;
+        for (int i = 0; i < pmk::kAnimeLateFrames - 1; ++i) CHECK(!l.Update(50, 41.7));
+        CHECK(!l.Update(30, 41.7));                                  // one in time: the run starts over
+        bool stop = false;
+        for (int i = 0; i < pmk::kAnimeLateFrames && !stop; ++i) stop = l.Update(50, 41.7);
+        CHECK(stop);
+        l.Reset();
+        for (int i = 0; i < 40; ++i) CHECK(!l.Update(-1, 41.7));     // no anime model: never
+        pmk::AnimeAutoSwitch s; s.Arm("artcnn-c4f16");
+        CHECK(s.Update(kDrawn, false, 1.0)); s.Commit(1.0);
+        s.Stop();
+        CHECK(!s.Armed() && s.Running().empty() && !s.Update(kDrawn, false, 100.0));   // stopped: not armed again this stream
+    }
+    {   // the pushcore route: more than half of a window missed stops it; half or fewer does not
+        pmk::AnimeMisses m;
+        bool stop = false;
+        for (int i = 0; i < pmk::kAnimeMissWindow; ++i) stop = m.Update(i % 2 == 0);
+        CHECK(!stop);                                                    // exactly half: keeps going
+        for (int i = 0; i < pmk::kAnimeMissWindow && !stop; ++i) stop = m.Update(i % 3 == 0);
+        CHECK(stop);                                                     // two thirds missed
+    }
     // HDR: allowed where pushcore feeds the model (its SDR-like proxy), left out where the decoded planes would be fed
     CHECK(AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 16) && AutoAnimeSrTakesTransfer(AnimeSrFeed::PushcoreProxy, 18));
     CHECK(!AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 16) && !AutoAnimeSrTakesTransfer(AnimeSrFeed::CodedPlanes, 18));

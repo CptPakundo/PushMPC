@@ -48,6 +48,7 @@ public:
     }
     void Forget() override { if (m_up) m_up->reset(); m_in->Forget(); }
     EngineStats Stats() const override { return m_in->Stats(); }
+    double AnimeMs() const override { return m_up ? m_ms : -1; }
     int DecideK(int smoother, double srcFps, double displayHz, std::string& why) override
     {
         // the upscaler's own time comes off the frame budget the inner engine measures against

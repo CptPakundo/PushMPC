@@ -56,6 +56,8 @@ public:
     // pixel are low (the _DS variant may then run on hand-drawn pictures)
     void Arm(const std::string& autoModel, bool lowBitrate = false) { m_auto = AnimeModelPlain(autoModel); m_low = lowBitrate; m_running.clear(); m_next.clear(); m_switched = false; }
     void Disarm() { m_auto.clear(); m_next = m_running; }
+    // the anime model stopped for the stream (it could not keep up): nothing runs, nothing is armed
+    void Stop() { m_auto.clear(); m_running.clear(); m_next.clear(); }
     bool Armed() const { return !m_auto.empty(); }
     const std::string& Running() const { return m_running; }
     const std::string& Next() const { return m_next; }
@@ -140,6 +142,42 @@ inline bool PushcoreAnimeAllowed(bool sr, unsigned method) { return pushmpc::con
 
 // the pushcore route is worth opening: for frame generation, or for its upscaler (then also at x1, Smoother off: it is the
 // only place the anime upscaler runs without taking Video Super Resolution away)
+// Auto's anime upscaler keeps up: it is given up for the stream when it took longer than a whole source frame for
+// kAnimeLateFrames frames in a row (the cost Auto picked it by is a prior: card 1.0, nothing learned on these routes).
+// Feed it every source frame's upscaler time (ms, < 0 = none); true once it is to be stopped.
+inline constexpr int kAnimeLateFrames = 12;   // half a second at 24 fps: a run, not a single slow frame
+class AnimeLateness {
+public:
+    bool Update(double animeMs, double frameMs)
+    {
+        if (animeMs < 0 || frameMs <= 0) { m_run = 0; return false; }
+        m_run = animeMs > frameMs ? m_run + 1 : 0;
+        return m_run >= kAnimeLateFrames;
+    }
+    void Reset() { m_run = 0; }
+private:
+    int m_run = 0;
+};
+
+// The same on the pushcore route, where the anime model runs inside pushcore: of the pictures expected from pushcore,
+// more than half missed over a window of kAnimeMissWindow means it does not keep up (VLC's output upscaler uses the same
+// rule, pm_pcsr_core.h). Feed every picture that was to come from pushcore; true once the anime model is to be stopped.
+inline constexpr int kAnimeMissWindow = 48;
+class AnimeMisses {
+public:
+    bool Update(bool delivered)
+    {
+        ++m_seen; if (!delivered) ++m_missed;
+        if (m_seen < kAnimeMissWindow) return false;
+        const bool stop = m_missed * 2 > m_seen;
+        m_seen = m_missed = 0;
+        return stop;
+    }
+    void Reset() { m_seen = m_missed = 0; }
+private:
+    int m_seen = 0, m_missed = 0;
+};
+
 inline bool PushcoreWorth(int smoother, const WinAnimePlan& plan) { return smoother != 1 || plan.route == WinUpscale::PushcoreSr; }
 
 // ---------------------------------------------------------------------------------------------------- pushcore updates

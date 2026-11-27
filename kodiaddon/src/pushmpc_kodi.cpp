@@ -1434,10 +1434,25 @@ private:
             if (p.pc < 0 && !all && p.age <= lag && !laterIn) break;
             m_pend.pop_front();
             if (!p.s.real) m_pc->Count(p.pc >= 0);
+            if (!p.s.real || m_pc->AllOut()) AnimeMissCheck(p.pc >= 0);
             if (!p.s.real && p.pc >= 0) ++m_generated;
             m_queue.push_back(Out{p.s, p.pic, false, p.pc >= 0 ? p.pc : p.fallback});
         }
     }
+    // Auto's anime upscaler inside pushcore that does not keep up (its cost was a prior, card 1.0): pushcore back to its
+    // Video Super Resolution for the rest of the stream (win_anime_route.h AnimeMisses)
+    void AnimeMissCheck(bool delivered)
+    {
+        if (m_pc->AnimeModel() < 0 || m_animeAuto.Running().empty()) { m_animeMiss.Reset(); return; }
+        if (!m_animeMiss.Update(delivered)) return;
+        std::string why;
+        const std::string was = m_animeAuto.Running();
+        const bool ok = m_pc->Update(m_contentCls, m_contentCg, -1, m_pc->Drawn(), why);
+        m_animeAuto.Stop();
+        if (ok) Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: pushcore missed most of its pictures with it; %s", was.c_str(), m_pc->Describe().c_str());
+        else Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s misses most pictures, and pushcore did not switch back: %s", was.c_str(), why.c_str());
+    }
+    pmk::AnimeMisses m_animeMiss;
     // ContentDetect on the decoder's texture, on the GPU (pushcore_route.h MeasureTexture: only the cells and the image
     // model's thumbnail come back)
     void MeasurePcGpu(void* tex, unsigned slice, int64_t ptsUs, bool disc)
@@ -1506,6 +1521,7 @@ private:
             std::string err;
             pushed = m_engine->Push(src, contiguous, err);
             if (!pushed && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
+            if (pushed) AnimeLateCheck();
         }
         const bool dup = pushed && m_engine->LastDup();   // held frames: a repeat keeps the pair and m_pic[m_prevSlot]
         {
@@ -1579,6 +1595,31 @@ private:
         m_outH = (m_upscaled ? m_engine->OutHeight() : m_h) * (m_test2x ? 2 : 1);
         m_havePrev = false;
         Log(ADDON_LOG_INFO, "anime upscaler (Auto): %s, measured %s%s", want ? c2.animeModel.c_str() : "off", ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "");
+    }
+
+    // Auto's anime upscaler that cannot keep up here (its cost was a prior, card 1.0): back to the plain route at the same
+    // output size for the rest of the stream, said once (win_anime_route.h AnimeLateness)
+    void AnimeLateCheck()
+    {
+        if (!m_engine || m_animeAuto.Running().empty() || m_frameUs <= 0) { m_animeLate.Reset(); return; }
+        const double ms = m_engine->AnimeMs(), frameMs = m_frameUs / 1000.0;
+        if (!m_animeLate.Update(ms, frameMs)) return;
+        m_animeLate.Reset();
+        pmk::EngineCfg c2 = pmk::AnimeAutoConfig(m_cfg, false);
+        c2.animeModel.clear();
+        std::string why;
+        auto e = pmk::OpenEngine(c2, why);
+        if (!e || e->OutWidth() != m_engine->OutWidth() || e->OutHeight() != m_engine->OutHeight()) {
+            Log(ADDON_LOG_WARNING, "anime upscaler (Auto) too slow here (%.1f ms a frame of %.1f) but the plain route did not open: %s", ms, frameMs,
+                e ? "another output size" : why.c_str());
+            m_animeAuto.Stop();
+            return;
+        }
+        Log(ADDON_LOG_WARNING, "anime upscaler (Auto) %s off for this stream: %.1f ms a frame, more than a source frame (%.1f ms) for %d frames in a row",
+            m_animeAuto.Running().c_str(), ms, frameMs, pmk::kAnimeLateFrames);
+        m_engine = std::move(e); m_cfg = c2;
+        m_animeAuto.Stop();
+        m_havePrev = false;
     }
 
     void Setup(int w, int h, int bits)
@@ -2079,6 +2120,7 @@ private:
 #endif
     int m_contentCls = 0;
     bool m_contentCg = false;
+    pmk::AnimeLateness m_animeLate;     // Auto's anime upscaler keeps up (else the plain route for the stream)
     pmk::AnimeAutoSwitch m_animeAuto;   // Auto's anime upscaler: follows the measured class and its DrawnPolicy
     AVCodecContext* m_ctx = nullptr;
     AVFrame* m_frame = nullptr;

@@ -52,7 +52,32 @@ struct MInst {
     int64_t upLast = -2;
     std::vector<uint16_t> upIn[3];
     double upMs = 0;
+    // the output size stays the upscaler's for the clip: when the model stops (failed, or Auto's pick cannot keep up:
+    // longer than a source frame for kAnimeLateFrames frames in a row, its cost being a prior here) a plain bilinear
+    // resize to that size takes over
+    int upW = 0, upH = 0;
+    bool upAuto = false;
+    int upLateRun = 0;
 };
+inline constexpr int kAnimeLateFrames = 12;   // as the Kodi add-on (win_anime_route.h): a run, not a single slow frame
+
+// a plane resized bilinearly (centre-aligned), 16-bit samples in and out
+void MResize16(const uint16_t* src, ptrdiff_t sstride, int sw, int sh, uint16_t* dst, int dw, int dh)
+{
+    for (int y = 0; y < dh; ++y) {
+        const double fy = std::clamp((y + 0.5) * sh / dh - 0.5, 0.0, double(sh - 1));
+        const int y0 = int(fy), y1 = std::min(y0 + 1, sh - 1);
+        const double wy = fy - y0;
+        for (int x = 0; x < dw; ++x) {
+            const double fx = std::clamp((x + 0.5) * sw / dw - 0.5, 0.0, double(sw - 1));
+            const int x0 = int(fx), x1 = std::min(x0 + 1, sw - 1);
+            const double wx = fx - x0;
+            const double a = src[y0 * sstride + x0] * (1 - wx) + src[y0 * sstride + x1] * wx;
+            const double b = src[y1 * sstride + x0] * (1 - wx) + src[y1 * sstride + x1] * wx;
+            dst[size_t(y) * dw + x] = uint16_t(a * (1 - wy) + b * wy + 0.5);
+        }
+    }
+}
 
 std::string MArg(const VSMap* in, const VSAPI* a, const char* key)
 {
@@ -79,7 +104,7 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
 {
     auto it = d->upFrames.find(s);
     if (it == d->upFrames.end()) {
-        if (s != d->upLast + 1) d->up->reset();   // a seek: AnimeSR's carry starts again
+        if (s != d->upLast + 1 && d->up) d->up->reset();   // a seek: AnimeSR's carry starts again
         d->upLast = s;
         pmml::Frame in;
         for (int i = 0; i < 3; ++i) {
@@ -90,19 +115,37 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
             in.plane[i] = d->upIn[i].data(); in.stride[i] = w;
         }
         MInst::UpFrame u;
-        const int ow = d->up->outWidth(), oh = d->up->outHeight();
+        const int ow = d->upW, oh = d->upH;
         pmml::OutFrame out;
         for (int i = 0; i < 3; ++i) { const int w = i ? ow / 2 : ow, h = i ? oh / 2 : oh; u.p16[i].resize(size_t(w) * h); out.plane[i] = u.p16[i].data(); out.stride[i] = w; }
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
-        if (!d->up->run(in, out, &err)) { Log("ml: anime upscaler failed (" + err + "): plain frames from now on"); d->up.reset(); return true; }
+        bool ran = false;
+        if (d->up) {
+            ran = d->up->run(in, out, &err);
+            if (!ran) { Log("ml: anime upscaler failed (" + err + "): a plain resize to " + std::to_string(ow) + "x" + std::to_string(oh) + " from now on"); d->up.reset(); }
+        }
+        if (!ran)   // a plain bilinear resize at the same output size (the clip's size is fixed)
+            for (int i = 0; i < 3; ++i) {
+                const int sw = i ? v.width / 2 : v.width, sh = i ? v.height / 2 : v.height;
+                MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh);
+            }
         d->upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ran && d->upAuto) {   // Auto's pick that does not keep up here: the plain resize for the rest of the clip
+            const double frameMs = d->inVi.fpsNum > 0 ? 1000.0 * double(d->inVi.fpsDen) / double(d->inVi.fpsNum) : 0.0;
+            d->upLateRun = frameMs > 0 && d->upMs > frameMs ? d->upLateRun + 1 : 0;
+            if (d->upLateRun >= kAnimeLateFrames) {
+                Log("ml: anime upscaler (Auto) too slow here (" + std::to_string(int(d->upMs + 0.5)) + " ms a frame, more than a source frame for " +
+                    std::to_string(kAnimeLateFrames) + " frames in a row): a plain resize from now on");
+                d->up.reset();
+            }
+        }
         if (v.bits <= 8)
             for (int i = 0; i < 3; ++i) { u.p8[i].resize(u.p16[i].size()); for (size_t k = 0; k < u.p16[i].size(); ++k) u.p8[i][k] = uint8_t(u.p16[i][k]); u.p16[i].clear(); }
         it = d->upFrames.emplace(s, std::move(u)).first;
         while (d->upFrames.size() > 8) d->upFrames.erase(d->upFrames.begin());
     }
-    const int ow = d->up->outWidth(), oh = d->up->outHeight();
+    const int ow = d->upW, oh = d->upH;
     for (int i = 0; i < 3; ++i) {
         const int w = i ? ow / 2 : ow;
         if (v.bits > 8) { v.data[i] = reinterpret_cast<const uint8_t*>(it->second.p16[i].data()); v.stride[i] = w * 2; }
@@ -129,7 +172,7 @@ void MBind(MInst* d)
         for (int i = 0; i < 3; ++i) { v.data[i] = d->api->getReadPtr(f, i); v.stride[i] = d->api->getStride(f, i); }
         v.width = d->api->getFrameWidth(f, 0); v.height = d->api->getFrameHeight(f, 0);
         v.bits = d->api->getVideoFrameFormat(f)->bitsPerSample;
-        if (d->up) return MUpscale(d, s, v);
+        if (d->upW > 0) return MUpscale(d, s, v);   // the model, or after it stopped the plain resize (the output size is fixed)
         return true;
     };
     d->be.alloc = [d](portable::YuvOut& o, void*& h) -> bool {
@@ -392,7 +435,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = k;
     d->vi = *vi;
-    if (up) { d->vi.width = up->outWidth(); d->vi.height = up->outHeight(); d->up = std::move(up); }
+    if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; }
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, k);
     d->vi.fpsNum = outFps.num; d->vi.fpsDen = outFps.den;
     d->vi.numFrames = int(OutputFrames(vi->numFrames, k));

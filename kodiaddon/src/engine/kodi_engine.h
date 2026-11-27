@@ -70,6 +70,8 @@ public:
     // the previous frame as it is, at the output size; false: the caller copies it itself (no upscaler)
     virtual bool Real(bool current, const pm_yuv_out& out, std::string& err) = 0;   // current: the newest frame (the end of a clip)
     virtual void Forget() = 0;
+    // the anime upscaler in front of the engine (AnimeSrEngine): its time for the last source frame in ms, -1 = none
+    virtual double AnimeMs() const { return -1; }
     // zero copy (Linux, GPU engine with dma-buf import): the player's frame buffer (a dma-buf fd laid out as Layout())
     // becomes the output; Import returns an id or -1 with the reason
     virtual bool Layout(OutLayout&) const { return false; }
