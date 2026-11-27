@@ -121,6 +121,18 @@ static void TestTimeline()
     const uint64_t r = t2.Add(arr[29] + 2.0, disc);
     CHECK(disc && r == 30, "a pause restarts the line (disc %d, idx %llu)", int(disc), (unsigned long long)r);
     std::printf("timeline: %.3f fps, delay %.1f ms, lateness %.1f ms\n", tl.Fps(), tl.Delay() * 1000, tl.Lateness() * 1000);
+    // exact frame times (the player's own) that reach the engine up to 30 ms later (a 30 Hz capture loop reads them):
+    // the delay covers the lag, so the newer frame of every pair is there when a refresh needs it
+    Timeline t3;
+    double maxLag = 0;
+    for (int i = 0; i < 64; ++i) {
+        const double t = 5.0 + i * (1001.0 / 24000), lag = 0.030 * ((i * 7) % 11) / 10.0;
+        maxLag = std::max(maxLag, lag);
+        t3.Add(t, disc, t + lag);
+    }
+    CHECK(t3.Delay() >= t3.Interval() + maxLag - 0.0005, "the delay %.1f ms covers the arrival lag (interval %.1f + lag %.1f ms)",
+          t3.Delay() * 1000, t3.Interval() * 1000, maxLag * 1000);
+    CHECK(std::fabs(t3.Interval() - 1001.0 / 24000) < 0.0002, "arrival lag leaves the fitted interval alone (%.5f s)", t3.Interval());
 }
 
 static void TestChoose()

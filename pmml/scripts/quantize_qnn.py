@@ -34,6 +34,7 @@ import hashlib
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -232,6 +233,7 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--gate-db", type=float, default=0.3)
     ap.add_argument("--variants", default="", help="comma-separated variant names (default: all)")
+    ap.add_argument("--extra-variants", action="store_true", help="also the record-only variants, after a pass too")
     a = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # CI tees this: keep the progress lines in order with ORT's stderr
     try:
@@ -276,9 +278,10 @@ def main() -> int:
     src = work / "static.onnx"
     folded = constants_to_initializers(pre if qnn_preprocess_model(str(fp32), str(pre)) else fp32, src)
     print(f"{folded} Constant nodes made initializers (Resize scales and other parameters stay exact)", flush=True)
-    # every variant is quantised and measured (the report has each one's numbers); the first that passes in this order
-    # (the HTP's fastest first) is written. A16W16 is measured for the record only: whether the HTP runs 16-bit weights
-    # in every op of this network is not confirmed on a device, so it is never written.
+    # the variants in the HTP's speed order; the first that passes is written and the rest are not run (each costs about
+    # 2.3 minutes on the runner). --extra-variants adds two measured for the record: percentile calibration (it keeps a
+    # histogram of every activation: the runner died after A16W8-pc passed, release run 45960732290, exit 143) and
+    # A16W16 (whether the HTP runs 16-bit weights in every op of this network is not confirmed: never written).
     from onnxruntime.quantization import CalibrationMethod
     U8, U16 = QuantType.QUInt8, QuantType.QUInt16
     mm, pct = CalibrationMethod.MinMax, CalibrationMethod.Percentile
@@ -287,9 +290,11 @@ def main() -> int:
         {"name": "A8W8-pc", "act": U8, "wt": U8, "per_channel": True, "method": mm, "ship": True},
         {"name": "A16W8", "act": U16, "wt": U8, "per_channel": False, "method": mm, "ship": True},
         {"name": "A16W8-pc", "act": U16, "wt": U8, "per_channel": True, "method": mm, "ship": True},
-        {"name": "A16W8-pc-p99999", "act": U16, "wt": U8, "per_channel": True, "method": pct, "ship": True},
-        {"name": "A16W16-pc", "act": U16, "wt": U16, "per_channel": True, "method": mm, "ship": False},
+        {"name": "A16W8-pc-p99999", "act": U16, "wt": U8, "per_channel": True, "method": pct, "ship": True, "extra": True},
+        {"name": "A16W16-pc", "act": U16, "wt": U16, "per_channel": True, "method": mm, "ship": False, "extra": True},
     ]
+    if not a.extra_variants:
+        variants = [v for v in variants if not v.get("extra")]
     if a.variants:
         variants = [v for v in variants if v["name"] in a.variants.split(",")]
 
@@ -302,7 +307,11 @@ def main() -> int:
               "fp16": base, "variants": {}, "pass": False}
     print("fp16:", json.dumps(base))
     for v in variants:
+        if report["pass"] and not a.extra_variants:
+            print(f"{v['name']}: not run (an earlier variant passed)")
+            continue
         vname = v["name"]
+        t0 = time.time()
         qdq = work / f"{vname}.onnx"
         cfg = get_qnn_qdq_config(str(src), make_reader(CalibrationDataReader, inputs, name), calibrate_method=v["method"],
                                  activation_type=v["act"], weight_type=v["wt"], per_channel=v["per_channel"])
@@ -317,7 +326,7 @@ def main() -> int:
         report["variants"][vname] = {"result": res, "loss_db": {c: round(l, 3) for c, l in losses.items()}, "loss_overall_db": round(overall, 3),
                                      "pass": ok, "shippable": v["ship"], "per_channel": v["per_channel"], "calibration": v["method"].name}
         print(f"{vname}: loss {overall:.3f} dB overall, per clip {json.dumps({c: round(l, 3) for c, l in losses.items()})}: "
-              f"{'PASS' if ok else 'FAIL'}{'' if v['ship'] else ' (measured only, never written)'}")
+              f"{'PASS' if ok else 'FAIL'}{'' if v['ship'] else ' (measured only, never written)'} ({time.time() - t0:.0f} s)", flush=True)
         if ok and v["ship"] and not report["pass"]:
             dst = out / f"pushflow-{a.role}-qdq.onnx"
             dst.write_bytes(qdq.read_bytes())

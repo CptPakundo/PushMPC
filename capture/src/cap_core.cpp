@@ -186,19 +186,19 @@ uint64_t Fingerprint(const uint8_t* px, ptrdiff_t pitch, int w, int h)
 }
 
 // ------------------------------------------------------------------------------------------------ the timeline
-uint64_t Timeline::Add(double t, bool& discontinuity)
+uint64_t Timeline::Add(double t, bool& discontinuity, double arrival)
 {
     discontinuity = false;
     uint64_t idx = 0;
     if (n_ == 0) {
         discontinuity = true;
-        pts_.clear();
+        pts_.clear(); arrivals_.clear();
     } else {
         const double gap = t - lastTime_;
         if (gap > std::max(pauseSeconds, pauseIntervals * d_)) {
             // a pause or a seek: the line starts again at this frame (the interval is kept)
             idx = lastIdx_ + 1;
-            pts_.clear();
+            pts_.clear(); arrivals_.clear();
             discontinuity = true;
         } else {
             const long step = n_ >= 3 ? std::max(1L, long(std::lround(gap / d_))) : 1L;
@@ -207,7 +207,8 @@ uint64_t Timeline::Add(double t, bool& discontinuity)
     }
     if (discontinuity) { segStart_ = idx; lastPos_ = -1e18; }
     pts_.emplace_back(double(idx), t);
-    while (int(pts_.size()) > window) pts_.pop_front();
+    arrivals_.push_back(arrival >= t ? arrival : t);
+    while (int(pts_.size()) > window) { pts_.pop_front(); arrivals_.pop_front(); }
     lastIdx_ = idx; lastTime_ = t; ++n_;
     Fit();
     return idx;
@@ -231,8 +232,8 @@ void Timeline::Fit()
     } else if (n == 1) {
         a_ = pts_[0].second - d_ * pts_[0].first;
     }
-    late_ = 0;
-    for (auto& p : pts_) late_ = std::max(late_, p.second - (a_ + d_ * p.first));
+    late_ = 0;   // the latest arrival above the line: a frame's time, or when it reached the engine when that was later
+    for (size_t i = 0; i < pts_.size(); ++i) late_ = std::max(late_, std::max(pts_[i].second, arrivals_[i]) - (a_ + d_ * pts_[i].first));
     delay_ = d_ + late_ + margin;
 }
 
