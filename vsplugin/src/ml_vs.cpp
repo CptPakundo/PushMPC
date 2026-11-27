@@ -126,22 +126,22 @@ void MSetProps(MInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
 // Auto's pick in playback that does not keep up (PushMpcAnimeKeepUp.h; its cost was a prior, card 1.0): a transient trip
 // pauses the model (the bicubic resize, then the model again), a real one steps down to a cheaper model of the same
 // scale that fits, else the bicubic resize for the clip
-void MKeepUp(MInst* d, int srcW, int srcH)
+void MKeepUp(MInst* d, int64_t s, int srcW, int srcH)
 {
     const double fps = d->inVi.fpsNum > 0 && d->inVi.fpsDen > 0 ? double(d->inVi.fpsNum) / double(d->inVi.fpsDen) : 23.976, frameMs = 1000.0 / fps;
-    const pm::AnimeKeepUp::Trip trip = d->upGuard.FeedMs(d->upMs, frameMs, MNowS());
+    const pm::AnimeKeepUp::Trip trip = d->upGuard.FeedMs(d->upMs, frameMs, double(s) / fps, MNowS());
     if (trip == pm::AnimeKeepUp::Trip::None) return;
     const std::wstring wasW = pm::AnimeSrModel(d->upModel).id;
     const std::string was(wasW.begin(), wasW.end());
-    const std::string counts = std::format("{} of the last {} frames over a source frame (median {:.1f} ms of {:.1f})", d->upGuard.LastLate(), d->upGuard.LastSeen(),
-                                           d->upGuard.LastRatio() * frameMs, frameMs);
+    const std::string counts = std::format("{} of the last {} frames ({:.1f} s) over a source frame (median of those {:.1f} ms of {:.1f})", d->upGuard.LastLate(), d->upGuard.LastSeen(),
+                                           d->upGuard.LastWindowS(), d->upGuard.LastMedianMs(), frameMs);
     if (trip == pm::AnimeKeepUp::Trip::Transient) {
         d->upPaused = true;
         Log("ml: anime upscaler (Auto) " + was + ": " + counts + std::format(": a bicubic resize for {:.0f} s, then the model again (trip {} of {})", d->upGuard.LastWaitS(),
-                                                                         d->upGuard.Trips(), pm::kAnimeMaxTrips));
+                                                                         d->upGuard.Trips(), pm::AnimeKeepUp::kMaxTrips));
         return;
     }
-    const int next = pm::AnimeSrStepDown(d->upModel, d->upGuard.LastRatio() * frameMs, unsigned(srcW), unsigned(srcH), unsigned(d->upW), unsigned(d->upH), fps);
+    const int next = pm::AnimeSrStepDown(d->upModel, d->upGuard.LastMedianMs(), unsigned(srcW), unsigned(srcH), unsigned(d->upW), unsigned(d->upH), fps);
     if (next >= 0) {
         pmml::UpscaleOptions u = d->upOpts;
         const std::wstring id = pm::AnimeSrModel(next).id;
@@ -188,7 +188,7 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
         if (d->up && d->upPaused && d->upGuard.RetryDue(MNowS())) {
             d->upPaused = false;
             d->up->reset();
-            Log("ml: anime upscaler (Auto): tried again after the wait (trip " + std::to_string(d->upGuard.Trips()) + " of " + std::to_string(pm::kAnimeMaxTrips) + " so far)");
+            Log("ml: anime upscaler (Auto): tried again after the wait (trip " + std::to_string(d->upGuard.Trips()) + " of " + std::to_string(pm::AnimeKeepUp::kMaxTrips) + " so far)");
         }
         if (d->up && !d->upPaused) {
             ran = d->up->run(in, out, &err);
@@ -200,7 +200,7 @@ bool MUpscale(MInst* d, int64_t s, portable::YuvView& v)
                 MResize16(in.plane[i], in.stride[i], sw, sh, u.p16[i].data(), i ? ow / 2 : ow, i ? oh / 2 : oh, i > 0, (1 << v.bits) - 1);
             }
         d->upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (ran && d->upAuto && d->upRealtime) MKeepUp(d, v.width, v.height);
+        if (ran && d->upAuto && d->upRealtime) MKeepUp(d, s, v.width, v.height);
         if (v.bits <= 8)
             for (int i = 0; i < 3; ++i) { u.p8[i].resize(u.p16[i].size()); for (size_t k = 0; k < u.p16[i].size(); ++k) u.p8[i][k] = uint8_t(u.p16[i][k]); u.p16[i].clear(); }
         it = d->upFrames.emplace(s, std::move(u)).first;
@@ -501,7 +501,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     d->k = k;
     d->vi = *vi;
     if (up) { d->vi.width = d->upW = up->outWidth(); d->vi.height = d->upH = up->outHeight(); d->up = std::move(up); d->upAuto = animeAuto && !animeAsked; d->upRealtime = realtime; d->upModel = animeModel; d->upOpts = upOpts;
-              d->upGuard.Configure(srcFps); }
+              d->upGuard.NewModel(); }
     const Rational outFps = OutputRate(vi->fpsNum, vi->fpsDen, k);
     d->vi.fpsNum = outFps.num; d->vi.fpsDen = outFps.den;
     d->vi.numFrames = int(OutputFrames(vi->numFrames, k));

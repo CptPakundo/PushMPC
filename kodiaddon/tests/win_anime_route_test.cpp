@@ -6,6 +6,7 @@
 #include "kodi_engine.h"
 #include "../../filter/src/PushMpcAnimeSr.h"
 #include "../../filter/src/PushMpcAnimeKeepUp.h"
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <tuple>
@@ -18,64 +19,81 @@ using namespace pushmpc::content;
 static std::string Id(int m) { const std::wstring w = pm::AnimeSrModel(m).id; return std::string(w.begin(), w.end()); }
 
 // the model helpers agree with the model table: every "-ds" id is a DS variant of a model AnimeModelHasDs names
-// Auto's anime upscaler keeps up (filter/src/PushMpcAnimeKeepUp.h): warm-up, sustained lateness, transient vs real trips,
-// the back-off, the step down, and the switch's pause / resume / step down
+// Auto's anime upscaler keeps up (filter/src/PushMpcAnimeKeepUp.h, VLC's PcsrLateRule): grace, a verdict over 3 s of
+// source time, transient vs real trips, the back-off, refused changes, the step down, and the switch's pause / resume
 static void KeepUp()
 {
     using pm::AnimeKeepUp;
-    const double fps = 24.0, frameMs = 1000.0 / fps;
-    const int window = std::max(pm::kAnimeMinWindowFrames, int(std::lround(pm::kAnimeSustainS * fps)));
-    {   // warm-up: nothing counts for kAnimeWarmupFrames source frames, however slow (a cold model, a reload)
-        AnimeKeepUp g; g.Configure(fps);
-        for (int i = 0; i < pm::kAnimeWarmupFrames; ++i) CHECK(g.FeedMs(10 * frameMs, frameMs, 0) == AnimeKeepUp::Trip::None);
-        // then a short spike (the old rule's 12 in a row) does not trip: most of a kAnimeSustainS window must be late
-        for (int i = 0; i < 12; ++i) CHECK(g.FeedMs(3 * frameMs, frameMs, 1) == AnimeKeepUp::Trip::None);
-        for (int i = 0; i < 3 * window; ++i) CHECK(g.FeedMs(0.3 * frameMs, frameMs, 2) == AnimeKeepUp::Trip::None);
-        CHECK(g.OnTime());
-        // exactly half late over the window: keeps going
-        for (int i = 0; i < 2 * window; ++i) CHECK(g.FeedMs(i % 2 ? 1.5 * frameMs : 0.5 * frameMs, frameMs, 3) == AnimeKeepUp::Trip::None);
-        // a sustained slowdown after the model kept up: transient, with the back-off
-        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
-        int n = 0;
-        while (t == AnimeKeepUp::Trip::None && n < 4 * window) { t = g.FeedMs(5 * frameMs, frameMs, 100); ++n; }
-        CHECK(t == AnimeKeepUp::Trip::Transient && g.Trips() == 1 && g.LastWaitS() == pm::kAnimeRetryFirstS && g.Waiting());
-        CHECK(g.LastLate() * 2 > g.LastSeen() && g.LastRatio() > 1.0);   // the window's median: a late frame
-        CHECK(!g.RetryDue(100 + pm::kAnimeRetryFirstS - 1) && g.RetryDue(100 + pm::kAnimeRetryFirstS) && !g.Waiting());
-        // the retry has its warm-up again; the next trips double the wait, and after kAnimeMaxTrips the trip is real
-        double now = 200, wait = pm::kAnimeRetryFirstS;
-        for (int trip = 2; trip <= pm::kAnimeMaxTrips + 1; ++trip) {
-            t = AnimeKeepUp::Trip::None; n = 0;
-            while (t == AnimeKeepUp::Trip::None && n < 4 * window) { t = g.FeedMs(5 * frameMs, frameMs, now); ++n; }
-            CHECK(n > pm::kAnimeWarmupFrames);
-            if (trip <= pm::kAnimeMaxTrips) { wait = std::min(pm::kAnimeRetryMaxS, wait * 2); CHECK(t == AnimeKeepUp::Trip::Transient && g.LastWaitS() == wait); CHECK(g.RetryDue(now + wait)); }
-            else CHECK(t == AnimeKeepUp::Trip::Real);
-            now += 1000;
-        }
+    using T = AnimeKeepUp::Trip;
+    const double fps = 24.0, f = 1000.0 / fps, dt = 1.0 / fps;
+    double t = 0;   // source time (s)
+    // feeds n frames at ms each from source time t; the first trip (or None)
+    auto run = [&](AnimeKeepUp& g, int n, double ms, double now, int* at = nullptr) {
+        for (int i = 0; i < n; ++i) { const T r = g.FeedMs(ms, f, t, now); t += dt; if (r != T::None) { if (at) *at = i + 1; return r; } }
+        return T::None;
+    };
+    const int window = int(std::ceil(AnimeKeepUp::kWindowS * fps)) + 1;   // samples a verdict covers (>= kMinPictures)
+    {   // grace: the first kGracePictures are not judged, however slow (a cold model, a reload)
+        AnimeKeepUp g; g.NewModel(); t = 0;
+        int at = 0;
+        CHECK(run(g, AnimeKeepUp::kGracePictures, 10 * f, 0) == T::None);
+        // a short spike (the old rule's 12 in a row) inside an on-time window does not trip
+        CHECK(run(g, 12, 3 * f, 1) == T::None);
+        CHECK(run(g, 3 * window, 0.3 * f, 2) == T::None && g.WasOnTime());
+        // a third late (well under half): keeps going
+        for (int i = 0; i < 4 * window; ++i) { CHECK(g.FeedMs(i % 3 == 0 ? 1.5 * f : 0.5 * f, f, t, 3) == T::None); t += dt; }
+        // sustained, after the model kept up: transient, with the back-off
+        const T r = run(g, 4 * window, 5 * f, 100, &at);
+        CHECK(r == T::Transient && g.Trips() == 1 && g.LastWaitS() == AnimeKeepUp::kRearmFirstS && g.Waiting());
+        CHECK(g.LastLate() * 2 > g.LastSeen() && g.LastSeen() >= AnimeKeepUp::kMinPictures && g.LastWindowS() >= AnimeKeepUp::kWindowS);
+        CHECK(!g.RetryDue(100 + AnimeKeepUp::kRearmFirstS - 1) && g.RetryDue(100 + AnimeKeepUp::kRearmFirstS) && !g.Waiting());
+        // the retry has its grace again; the second trip waits twice as long; the kMaxTrips-th is real
+        CHECK(run(g, 4 * window, 5 * f, 200, &at) == T::Transient && at > AnimeKeepUp::kGracePictures && g.LastWaitS() == 2 * AnimeKeepUp::kRearmFirstS);
+        CHECK(g.RetryDue(200 + 2 * AnimeKeepUp::kRearmFirstS));
+        CHECK(run(g, 4 * window, 5 * f, 400) == T::Real && g.Trips() == AnimeKeepUp::kMaxTrips);
     }
-    {   // never on time, far over (5x): real at once (a card that cannot run it); under 2x: transient (load)
-        AnimeKeepUp g; g.Configure(fps);
-        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
-        for (int i = 0; i < 4 * window && t == AnimeKeepUp::Trip::None; ++i) t = g.FeedMs(5 * frameMs, frameMs, 0);
-        CHECK(t == AnimeKeepUp::Trip::Real && !g.Waiting());
-        g.NewModel(); t = AnimeKeepUp::Trip::None;
-        for (int i = 0; i < 4 * window && t == AnimeKeepUp::Trip::None; ++i) t = g.FeedMs(1.5 * frameMs, frameMs, 0);
-        CHECK(t == AnimeKeepUp::Trip::Transient);
+    {   // never on time: far over (5x the frame) is real at once; within kSlowFactor x the frame is transient
+        AnimeKeepUp g; g.NewModel(); t = 0;
+        CHECK(run(g, 6 * window, 5 * f, 0) == T::Real && !g.Waiting() && g.LastMedianMs() == 5 * f);
+        g.NewModel();
+        CHECK(run(g, 6 * window, 1.5 * f, 0) == T::Transient);
         // nothing measured (no model ran) never counts
         g.NewModel();
-        for (int i = 0; i < 4 * window; ++i) CHECK(g.FeedMs(-1, frameMs, 0) == AnimeKeepUp::Trip::None);
+        for (int i = 0; i < 6 * window; ++i) { CHECK(g.FeedMs(-1, f, t, 0) == T::None); t += dt; }
     }
-    {   // the pushcore route: pictures, k per source frame; the warm-up covers pushcore's lag; a reload restarts it
-        const int k = 5, lag = 14;
-        AnimeKeepUp g; g.Configure(fps, k); g.Restart(lag + 3);
-        CHECK(g.WindowSamples() == window * k);
-        for (int i = 0; i < (lag + 3) * k; ++i) CHECK(g.FeedDelivered(false, 0) == AnimeKeepUp::Trip::None);   // dropped by the reload
-        for (int i = 0; i < 3 * window * k; ++i) CHECK(g.FeedDelivered(i % 2 == 0, 0) == AnimeKeepUp::Trip::None);   // half: keeps going
-        g.Restart(lag + 3);
-        AnimeKeepUp::Trip t = AnimeKeepUp::Trip::None;
-        int n = 0;
-        while (t == AnimeKeepUp::Trip::None && n < 10 * window * k) { t = g.FeedDelivered(n % 3 == 0, 0); ++n; }   // two thirds missed
-        CHECK(t != AnimeKeepUp::Trip::None && n == std::max(pm::kAnimeWarmupFrames, lag + 3) * k + window * k);
-        CHECK(g.LastRatio() > 2.9 && g.LastRatio() < 3.1);   // window / delivered
+    {   // a gap over kMaxGapS (or a step back) starts the window over; sparse samples never decide
+        AnimeKeepUp g; g.NewModel(); t = 0;
+        CHECK(run(g, AnimeKeepUp::kGracePictures, f, 0) == T::None);
+        for (int i = 0; i < 10 * window; ++i) { CHECK(g.FeedMs(5 * f, f, t, 0) == T::None); t += 1.5; }   // 1.5 s apart
+        t = 100;
+        CHECK(run(g, window / 2, 5 * f, 0) == T::None);
+        t -= 50;   // a step back (a seek without a flush)
+        int at = 0;
+        CHECK(run(g, 4 * window, 5 * f, 0, &at) == T::Real && at >= AnimeKeepUp::kMinPictures);
+    }
+    {   // pushcore's pictures: k per source frame, the grace covers its lag; no time known: real unless on time before
+        const int k = 5, grace = (14 + 3) * k;
+        AnimeKeepUp g; g.NewModel(); g.Restart(grace); t = 0;
+        for (int i = 0; i < grace; ++i) CHECK(g.FeedPicture(false, t + i * dt / k, f, 0) == T::None);   // dropped by the reload
+        t += grace * dt / k;
+        for (int i = 0; i < 4 * window * k; ++i) { CHECK(g.FeedPicture(i % 2 == 0, t, f, 0) == T::None); t += dt / k; }   // half: keeps going
+        CHECK(g.WasOnTime());
+        T r = T::None;
+        for (int i = 0; i < 4 * window * k && r == T::None; ++i) { r = g.FeedPicture(i % 3 == 0, t, f, 50); t += dt / k; }   // two thirds missed
+        CHECK(r == T::Transient && g.LastMedianMs() < 0);
+        AnimeKeepUp h; h.NewModel(); t = 0;
+        r = T::None;
+        for (int i = 0; i < 10 * window * k && r == T::None; ++i) { r = h.FeedPicture(false, t, f, 0); t += dt / k; }
+        CHECK(r == T::Real);
+    }
+    {   // a refused change: no verdict for the back-off, none after kMaxTrips refusals
+        AnimeKeepUp g; g.NewModel(); t = 0;
+        CHECK(run(g, 6 * window, 5 * f, 0) == T::Real);
+        g.Defer(0);
+        CHECK(g.LastWaitS() == AnimeKeepUp::kRearmFirstS && run(g, 6 * window, 5 * f, AnimeKeepUp::kRearmFirstS - 1) == T::None);
+        CHECK(run(g, 6 * window, 5 * f, AnimeKeepUp::kRearmFirstS) == T::Real);
+        g.Defer(100); g.Defer(1000);
+        CHECK(g.GaveUp() && run(g, 6 * window, 5 * f, 1e6) == T::None);
     }
     {   // the step down: a cheaper ranked model of the same scale that fits at the measured speed, else none
         // 1080p to 4K at 24 fps (budget 14.6 ms, transfer 3.6 ms): C4F32 measured at 6 or 30 ms a frame (card factor up
@@ -84,10 +102,9 @@ static void KeepUp()
         CHECK(pm::AnimeSrStepDown(3, 30.0, 1920, 1080, 3840, 2160, 24.0) == 0);
         CHECK(pm::AnimeSrStepDown(3, 45.0, 1920, 1080, 3840, 2160, 24.0) == 7);
         CHECK(pm::AnimeSrStepDown(3, 60.0, 1920, 1080, 3840, 2160, 24.0) == -1);
+        CHECK(pm::AnimeSrStepDown(3, -1.0, 1920, 1080, 3840, 2160, 24.0) == -1);   // no time known: no step down
         CHECK(pm::AnimeSrStepDown(7, 10.0, 1920, 1080, 3840, 2160, 24.0) == -1);   // the cheapest: nothing below it
-        const int r = pm::AnimeSrStepDown(0, 4.0, 1920, 1080, 3840, 2160, 24.0);
-        CHECK(r == -1 || pm::AnimeSrModel(r).msPerMpx < pm::AnimeSrModel(0).msPerMpx);
-        CHECK(pm::AnimeSrStepDown(10, 40.0, 720, 480, 2880, 1920, 24.0) == -1);     // AnimeSR (x4): no cheaper x4 model
+        CHECK(pm::AnimeSrStepDown(10, 40.0, 720, 480, 2880, 1920, 24.0) == -1);    // AnimeSR (x4): no cheaper x4 model
         CHECK(pm::AnimeSrStepDown(1, 6.0, 1920, 1080, 3840, 2160, 24.0) == pm::AnimeSrStepDown(0, 6.0, 1920, 1080, 3840, 2160, 24.0));   // a variant: from its base
         for (int m = 0; m < pm::kAnimeSrModels; ++m) {   // never a dearer, other-scale or (above DVD) DVD-only model
             const int d = pm::AnimeSrStepDown(m, 1.0, 1920, 1080, 3840, 2160, 24.0);
@@ -104,7 +121,7 @@ static void KeepUp()
         CHECK(s.Armed() && !s.Paused() && s.Update(kDrawn, false, 3.0) && s.Next() == "artcnn-c4f32"); s.Commit(3.0);
         s.StepDown("artcnn-c4f16", 4.0);
         CHECK(s.Armed() && s.Running() == "artcnn-c4f16" && !s.Update(kDrawn, false, 5.0));   // already running the cheaper one
-        CHECK(s.Update(kLive, false, 40.0) && s.Next().empty()); s.Commit(40.0);         // live action: the plain route
+        CHECK(s.Update(kLive, false, 40.0) && s.Next().empty()); s.Commit(40.0);              // live action: the plain route
         CHECK(s.Update(kDrawn, false, 80.0) && s.Next() == "artcnn-c4f16");                  // drawn again: the cheaper model
         s.Stop();
         CHECK(!s.Armed() && s.Running().empty() && !s.Paused() && !s.Update(kDrawn, false, 100.0));   // stopped: not armed again this stream

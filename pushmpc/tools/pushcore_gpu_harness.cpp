@@ -673,7 +673,8 @@ int wmain(int argc, wchar_t** argv) {
         srV.push_back(t.srMs); fgV.push_back(t.fgBatchMs); graphV.push_back(t.graphMs);
     }
     const Agg srA = aggregate(srV), fgA = aggregate(fgV), grA = aggregate(graphV);
-    PushCoreStats s{}; s.structSize = sizeof(s); api->stats(core, &s);
+    // animeSrModel preset to none: a pushcore without the field (or without the anime upscaler) leaves it so
+    PushCoreStats s{}; s.structSize = sizeof(s); s.animeSrModel = ~0u; api->stats(core, &s);
 
     if (gray) fclose(gray);
     uint64_t countMismatch = 0;
@@ -720,7 +721,7 @@ int wmain(int argc, wchar_t** argv) {
                                  "cuts counted {}\n", chk.gens, med, p90, tol, chk.noSquare, cutAt, chk.holdsOk, chk.holdsBad, s.cutGuardCuts);
     }
     std::cout << std::format("METHOD frame generation {} (fallback {}: {}), upscaler {}\n", s.fgBackend, s.fgFallback, s.fgNote, s.srMethod);
-    const bool animeOk = !animeWanted || (s.srMethod == PUSHCORE_SR_METHOD_PMML && s.animeSrModel == ps.animeSrModel);
+    const bool animeOk = !animeWanted || (s.srMethod == PUSHCORE_SR_METHOD_PMML && s.animeSrModel == ps.animeSrModel && s.animeSrMs > 0);
     if (animeWanted)
         std::cout << std::format("ANIME requested model {}: running model {} (upscaler {}){}\n", ps.animeSrModel, int(s.animeSrModel), s.srMethod,
                                  animeOk ? "" : ": NOT the anime upscaler");
