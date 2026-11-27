@@ -16,6 +16,7 @@
 // passed, 1 when one failed or was unavailable, 2 on a setup error.
 #include <windows.h>
 #include <dxgi1_6.h>
+#include <dbghelp.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +25,51 @@
 #include "pushmpc/pushcore_abi.h"
 
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dbghelp.lib")
+
+// A crash inside a test (a vendor runtime, pushcore) ends the process with no JSON: print what crashed and where first,
+// with the stack (module + offset, and function / file:line where a PDB is found next to the module or at its build
+// path), so a CI log names the module and the call that crashed (intel-video run 45973619605: exit 0xC0000005 in the
+// FSR upscaler probe and nothing else).
+static LONG WINAPI crashReport(EXCEPTION_POINTERS* ep)
+{
+    const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+    std::fprintf(stderr, "pushcore_selftest: CRASH exception 0x%08lX at %p", er->ExceptionCode, er->ExceptionAddress);
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        std::fprintf(stderr, " (%s of address 0x%llX)", er->ExceptionInformation[0] == 0 ? "read" : er->ExceptionInformation[0] == 1 ? "write" : "execute",
+                     static_cast<unsigned long long>(er->ExceptionInformation[1]));
+    std::fprintf(stderr, ", thread %lu\n", GetCurrentThreadId());
+    const HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_FAIL_CRITICAL_ERRORS);
+    SymInitialize(proc, nullptr, TRUE);
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 sf{};
+    sf.AddrPC.Offset = ctx.Rip; sf.AddrPC.Mode = AddrModeFlat;
+    sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+    for (int i = 0; i < 48; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) break;
+        const DWORD64 pc = sf.AddrPC.Offset;
+        if (!pc) break;
+        char mod[MAX_PATH] = "?";
+        const DWORD64 base = SymGetModuleBase64(proc, pc);
+        if (base) GetModuleFileNameA(reinterpret_cast<HMODULE>(base), mod, MAX_PATH);
+        const char* name = std::strrchr(mod, '\\') ? std::strrchr(mod, '\\') + 1 : mod;
+        alignas(SYMBOL_INFO) char sb[sizeof(SYMBOL_INFO) + 512]{};
+        auto* si = reinterpret_cast<SYMBOL_INFO*>(sb);
+        si->SizeOfStruct = sizeof(SYMBOL_INFO); si->MaxNameLen = 511;
+        DWORD64 disp = 0; DWORD ldisp = 0;
+        IMAGEHLP_LINE64 line{}; line.SizeOfStruct = sizeof(line);
+        const bool sym = SymFromAddr(proc, pc, &disp, si) != FALSE;
+        const bool ln = SymGetLineFromAddr64(proc, pc, &ldisp, &line) != FALSE;
+        std::fprintf(stderr, "  #%02d %s+0x%llX", i, name, static_cast<unsigned long long>(base ? pc - base : pc));
+        if (sym) std::fprintf(stderr, " %s+0x%llX", si->Name, static_cast<unsigned long long>(disp));
+        if (ln) std::fprintf(stderr, " (%s:%lu)", line.FileName, line.LineNumber);
+        std::fprintf(stderr, "\n");
+    }
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 // a hardware (not software) DXGI adapter on this PC
 static bool hardwareAdapter()
@@ -50,6 +96,7 @@ static std::string esc(const char* s)
 
 int wmain(int argc, wchar_t** argv)
 {
+    SetUnhandledExceptionFilter(crashReport);
     const wchar_t* core = nullptr; const wchar_t* root = nullptr; const wchar_t* json = nullptr;
     uint32_t which = 0, flags = 0; uint64_t luid = 0; bool noCaps = false, wantCaps = false;
     for (int i = 1; i < argc; ++i) {

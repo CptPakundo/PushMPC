@@ -316,6 +316,9 @@ Result testFsrSr(const Context& ctx) {
                 return o;
             }
             if (fsr.providerVersion() && *fsr.providerVersion()) provider = fsr.providerVersion();
+            // which run is under way (a crash inside the provider otherwise leaves only the initialize line)
+            veyra::log::info("pushcore", std::format("self-test fsrsr: {} {} with FSR {}", mode[0] == L'1' ? "single-frame" : "temporal", sceneName(scene),
+                                                     provider.empty() ? "?" : provider));
             const UpscaleRun run = upscaleProbe(device.Get(), queue.Get(), W, H, frames, scene,
                 [&](ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* out,
                     uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, bool reset) {
