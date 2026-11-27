@@ -116,11 +116,11 @@ $I uninstall --json >/dev/null 2>&1
 # one bridge per FFmpeg major: the app's bundled libavutil.<N>.dylib picks pushmpc-iina-av<N>.so (Stremio 5.1.26 bundles
 # FFmpeg 7 = libavutil 59, Homebrew has 61: players run 45964178745); no build for its major: not active, unchanged
 mkdir -p "$T/br"; : > "$T/br/pushmpc-iina.so"
-for n in 59 60 61; do : > "$T/br/pushmpc-iina-av$n.so"; done
+for n in 56 58 59 60 61; do : > "$T/br/pushmpc-iina-av$n.so"; done   # Homebrew's bottled majors (ffmpeg@4, @6, @7, @8, ffmpeg)
 rm -f "$A/Stremio.app/Contents/MacOS/libmpv.2.dylib"
 mkdir -p "$A/Stremio.app/Contents/Frameworks"
 printf 'libmpv %s mpv_create\n' "$BANNER" > "$A/Stremio.app/Contents/Frameworks/libmpv.2.dylib"
-for n in 59 60 61; do
+for n in 56 58 59 60 61; do
     rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.$n.dylib"
     b5=$(sums)
     out=$($I install --target stremio --from "$T/from" --bridge "$T/br/pushmpc-iina.so" --json 2>/dev/null)
@@ -130,12 +130,12 @@ for n in 59 60 61; do
     $I uninstall --json >/dev/null 2>&1
     [ "$(sums)" = "$b5" ] && ok "libavutil $n: uninstall byte-identical" || bad "libavutil $n: uninstall left differences"
 done
-rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.58.dylib"
+rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.57.dylib"
 b6=$(sums)
 out=$($I install --target stremio --from "$T/from" --bridge "$T/br/pushmpc-iina.so" --json 2>/dev/null); rc=$?
-echo "$out" | grep -q '"target":"stremio".*"state":"not-active".*libavutil is 58.*FFmpeg major versions differ' && [ "$rc" = 3 ] \
-    && ok "libavutil 58 (no bridge built for it): not active, the reason named" || { echo "$out"; bad "libavutil 58: no clean not-active (exit $rc)"; }
-[ "$(sums)" = "$b6" ] && ok "libavutil 58: the app unchanged" || bad "libavutil 58: files changed"
+echo "$out" | grep -q '"target":"stremio".*"state":"not-active".*libavutil is 57.*FFmpeg major versions differ' && [ "$rc" = 3 ] \
+    && ok "libavutil 57 (ffmpeg@5, deprecated in Homebrew: no bridge built for it): not active, the reason named" || { echo "$out"; bad "libavutil 57: no clean not-active (exit $rc)"; }
+[ "$(sums)" = "$b6" ] && ok "libavutil 57: the app unchanged" || bad "libavutil 57: files changed"
 
 # team-bound entitlements on a hardened app: refused, nothing changed
 printf '<plist><dict><key>keychain-access-groups</key><array/></dict></plist>' > "$J/fake-entitlements.plist"

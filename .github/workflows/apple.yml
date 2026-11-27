@@ -98,11 +98,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew install mpv ffmpeg ffmpeg@7 ffmpeg@8 > /dev/null
+          brew install mpv ffmpeg ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8 > /dev/null
           ffi=$(brew --prefix ffmpeg)/include; mpvi=$(brew --prefix mpv)/include
           grep -E 'define LIBAVUTIL_VERSION_MAJOR|define LIBAVFILTER_VERSION_MAJOR' "$ffi"/libavutil/version_major.h "$ffi"/libavfilter/version_major.h || true
           cmake -S vsplugin -B build -DCMAKE_BUILD_TYPE=Release -DPUSHMPC_APPLE=ON -DPUSHMPC_IINA_BRIDGE=ON -DFFMPEG_INCLUDE="$ffi" -DMPV_INCLUDE="$mpvi" \
-            -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include"
+            -DPUSHMPC_IINA_FFMPEG_INCLUDES="$(brew --prefix ffmpeg@4)/include;$(brew --prefix ffmpeg@6)/include;$(brew --prefix ffmpeg@7)/include;$(brew --prefix ffmpeg@8)/include"
           cmake --build build --target pushmpc_iina --parallel
           clang -O2 -I"$mpvi" -Wl,-rpath,"$IINA_FW" -o build/iina_bridge_host vsplugin/tests/iina_bridge_host.c
           ls build/pushmpc-iina*.so
@@ -430,7 +430,7 @@ jobs:
           set -euo pipefail
           brew --version
           # everything the formula needs, as bottles, before the formula itself (so its build step only builds PushMPC)
-          brew install mpv ffmpeg ffmpeg@7 ffmpeg@8 vapoursynth cmake pkgconf onnxruntime   # ffmpeg@7 / @8: the IINA bridge's other FFmpeg majors
+          brew install mpv ffmpeg ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8 vapoursynth cmake pkgconf onnxruntime   # ffmpeg@N: the IINA bridge's other FFmpeg majors
           brew deps mpv | grep -x vapoursynth
           brew info --json=v2 vapoursynth | python3 -c "import json,sys; f=json.load(sys.stdin)['formulae'][0]; print('vapoursynth', f['versions']['stable'], 'deps', f['dependencies'])"
           mpv --version | head -2
