@@ -70,3 +70,10 @@ set_target_properties(reload_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_B
 target_include_directories(reload_test PRIVATE "${PUSHMPC_CORE_INCLUDE}" "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(reload_test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(reload_test PRIVATE /W3 /EHsc /O2 /utf-8)
+
+# The log rotation (src/PushMpcLogs.h): per-process engine logs kept with their sessions, count / size bounds (CPU only)
+add_executable(logs_test tools/logs_test.cpp)
+set_target_properties(logs_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(logs_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(logs_test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(logs_test PRIVATE /W3 /EHsc /O2 /utf-8)

@@ -124,6 +124,7 @@ struct Filter {
         h.quit = [this] { return quit.load(); };
         h.tick = [] {};
         h.keep = [] { return true; };
+        h.describe = [](PushCore* c) { return c ? std::format("stub instance {} busy", S(c)->id) : std::string("stub graph lock"); };
         return h;
     }
 };
@@ -231,6 +232,8 @@ int main()
         rl::Limits lim; lim.timeoutMs = 500;
         const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
         Check(r.how == rl::Outcome::TimedOut && r.totalMs < 800 && f.core == nullptr, std::format("slow reload: abandoned after {:.0f} ms (timeout 500)", r.totalMs));
+        Check(r.stuckAt.find("job at: pushcore_reload") != std::string::npos && r.stuckAt.find("stub instance 10 busy") != std::string::npos && r.stuckAt.find("stub graph lock") != std::string::npos,
+              "slow reload: the log names the job's stage and pushcore's steps (" + r.stuckAt + ")");
         f.Stop();
         Check(WaitIdle(3000) && full.closed.load() && full.reloads == 1, "slow reload: closed by its own thread after it returned");
     }
@@ -247,6 +250,7 @@ int main()
         Check(r.how == rl::Outcome::Done && r.closesStuck && !r.reinstalled && full.reloads == 0 && r.totalMs < 1000,
               std::format("stuck close: the reload was not started beside it; reported after {:.0f} ms", r.totalMs));
         Check(f.core == nullptr, "stuck close: the filter falls back (no instance in the slot)");
+        Check(r.stuckAt.find("waiting for other pushcore closes") != std::string::npos && r.stuckAt.find("stub graph lock") != std::string::npos, "stuck close: the log names the wait and the graph lock holder");
         f.Stop();
         SetEvent(g_release);
         Check(WaitIdle(3000) && stuck.closed.load() && full.closed.load(), "stuck close: everything closed once pushcore returns");
@@ -275,6 +279,7 @@ int main()
         const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, P(quick), f.Hooks(), lim);
         stopper.join();
         Check(r.how == rl::Outcome::Stopped && r.totalMs < 400, std::format("Stop during the quick graph's close: abandoned after {:.0f} ms", r.totalMs));
+        Check(r.stuckAt.find("closing the idle quick graph") != std::string::npos, "Stop during the quick graph's close: the log names that stage");
         f.Stop();
         Check(WaitIdle(3000) && quick.closed.load() && full.closed.load() && full.reloads == 0, "Stop during the quick graph's close: both closed, no rebuild started");
     }
