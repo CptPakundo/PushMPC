@@ -112,6 +112,17 @@ int main(int argc, char **argv)
             if (ev->event_id == 7) { reason = ((mpv_end_file_t *)ev->data)->reason; break; }
             if (ev->event_id == 1) break;
         }
+        if (reason == -1) {   /* no end of file: say where playback stands before mpv_destroy (which may itself wait on it) */
+            char tail[16][400];
+            int n = 0;
+            printf("host: no end of file after %d events of up to 1 s; the log's last lines:\n", i);
+            if ((lf = fopen(log, "r")) != NULL) {
+                while (fgets(tail[n % 16], sizeof(tail[0]), lf)) n++;
+                fclose(lf);
+                for (int t = n > 16 ? n - 16 : 0; t < n; t++) printf("host:   tail: %s", tail[t % 16]);
+            }
+            fflush(stdout);
+        }
         destroy(ctx);
         lf = fopen(log, "r");
         while (lf && fgets(line, sizeof(line), lf)) {
