@@ -15,6 +15,8 @@ typedef int (*pmc_push_fn)(pmc_ctx *, const void *, ptrdiff_t, const void *, con
 typedef int (*pmc_state_fn)(pmc_ctx *, pmc_state *);
 typedef void (*pmc_evidence_fn)(pmc_ctx *, double, double, double);
 typedef const char *(*pmc_name_fn)(int);
+typedef int (*pmc_cells_fn)(pmc_ctx *, const uint32_t *, ptrdiff_t, int, int, int, double, int);
+typedef void (*pmc_clip_fn)(pmc_ctx *, const uint32_t *, ptrdiff_t, int, int, double);
 
 static struct {
     int tried, ok;
@@ -25,6 +27,8 @@ static struct {
     pmc_state_fn state;
     pmc_evidence_fn evidence;
     pmc_name_fn name;
+    pmc_cells_fn cells;   /* optional (a GPU tap): NULL in an older library */
+    pmc_clip_fn clip;
     char why[300];
     char where[600];
 } L;
@@ -139,6 +143,10 @@ static int Load(void)
             L.state = (pmc_state_fn)Sym(h, "pmc_get_state");
             L.evidence = (pmc_evidence_fn)Sym(h, "pmc_set_image_evidence");
             L.name = (pmc_name_fn)Sym(h, "pmc_class_name");
+            /* optional: a library without them cannot take a GPU tap (zero-copy pictures stay unmeasured, as before).
+             * PUSHMPC_CONTENT_NO_CELLS=1 behaves as such a library (tests) */
+            const char *nc = getenv("PUSHMPC_CONTENT_NO_CELLS");
+            if (!(nc && nc[0] == '1')) { L.cells = (pmc_cells_fn)Sym(h, "pmc_push_cells"); L.clip = (pmc_clip_fn)Sym(h, "pmc_offer_clip"); }
             if (!L.abi || !L.create || !L.destroy || !L.push || !L.state || !L.evidence || !L.name)
                 snprintf(L.why, sizeof(L.why), "%s is incomplete", L.where);
             else if (L.abi() != PMC_ABI)
@@ -211,4 +219,16 @@ void pm_content_policy_text(uint32_t policy, char *out, size_t n)
         len += (size_t)w;
     }
     if (!len) snprintf(out, n, "none");
+}
+
+int pm_content_has_cells(const pm_content *c) { return c && L.cells && L.clip; }
+
+int pm_content_push_cells(pm_content *c, const uint32_t *words, ptrdiff_t stride_words, int cw, int ch, int limited, double pts, int discontinuity)
+{
+    return pm_content_has_cells(c) ? L.cells(c->ctx, words, stride_words, cw, ch, limited, pts, discontinuity) : -1;
+}
+
+void pm_content_offer_clip(pm_content *c, const uint32_t *words, ptrdiff_t stride_words, int hd, int limited, double pts)
+{
+    if (pm_content_has_cells(c)) L.clip(c->ctx, words, stride_words, hd, limited, pts);
 }
