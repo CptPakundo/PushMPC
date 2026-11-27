@@ -132,11 +132,13 @@ struct XessSrSelfTestResult {
     std::string adapter, note, version;
     uint32_t vendor = 0, device = 0;
     std::wstring driver;
+    std::string summary;   // the upscaler probe's per-frame numbers (selftest::upscaleSummary)
 };
-// XeSS SR self-test (unlock XessSr): 2x upscale of a synthetic panning scene with exact motion; passes when XeSS
-// initialises and executes on this adapter, the output is not blank and its PSNR against the ground truth is at least
-// that of a bilinear upscale minus 0.5 dB.
-XessSrSelfTestResult xessSrSelfTest(uint64_t adapterLuid, bool warp, uint32_t width, uint32_t height, uint32_t frames);
+// XeSS SR self-test (unlock XessSr): 2x upscale of a synthetic scene (selftest::upscaleProbe); scene 0 = the pan with exact
+// motion (the verdict: passes when XeSS initialises and executes on this adapter, the output is not blank and its PSNR
+// against the ground truth over the last 4 frames is at least that of a bilinear upscale minus 0.5 dB), 1 = static with
+// history, 2 = static with a reset every frame (numbers only; the verdict is the pan's)
+XessSrSelfTestResult xessSrSelfTest(uint64_t adapterLuid, bool warp, uint32_t width, uint32_t height, uint32_t frames, int scene = 0);
 
 
 // ---------------------------------------------------------------------------------------------------- capabilities

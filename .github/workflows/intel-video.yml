@@ -240,6 +240,8 @@ jobs:
           $env:PATH = "$env:DEPS\vcpkg\installed\x64-windows\bin;$env:BUILD\pushmpc;$env:PATH"
           $root = "$env:RUNNER_TEMP\core-root"; New-Item -ItemType Directory -Force "$root\shaders" | Out-Null
           Copy-Item "$env:BUILD\shaders\*.dxil" "$root\shaders" -ErrorAction SilentlyContinue
+          # 48 frames: the upscaler probe reports frames 0, 1 and 36-47 (pan, still picture, still with a reset every frame)
+          $env:PUSHMPC_SELFTEST_FRAMES = '48'
           & "$env:BUILD\pushmpc\pushcore_selftest.exe" --core "$env:BUILD\pushmpc\pushcore.dll" --root $root --warp --all --json "$env:RUNNER_TEMP\selftest.json" 2>&1 | Tee-Object -Variable log
           $code = $LASTEXITCODE
           # the self-test's own exit counts WARP's refusals (Intel VSR, VPL) as failures: informational here, the
@@ -261,11 +263,13 @@ jobs:
             if ($j.xefg -notmatch '^pass') { Write-Host "::error::XeSS FG self-test on WARP: $($j.xefg)"; $fail++ }
             if ($j.xesssr -match '^unavailable|exception' -or -not $j.xesssr) { Write-Host "::error::XeSS SR self-test did not run: $($j.xesssr)"; $fail++ }
             if ($j.'xesssr.providerSlot' -ne 'yes') { Write-Host "::error::XeSS SR has no slot in this build: $($j.'xesssr.providerSlot')"; $fail++ }
+            # the probe's numbers (WARP-functional, never a quality claim): reported, not judged; they must be there
+            foreach ($k in 'pan', 'static', 'staticReset') { if ($j."xesssr.$k" -notmatch '^f0 psnr') { Write-Host "::error::XeSS SR probe ($k) did not report: $($j."xesssr.$k")"; $fail++ } }
           }
           $want = $(if ($xs) { (1 -shl 20) -bor (1 -shl 22) } else { 0 }) -bor $(if ($vp) { (1 -shl 21) -bor (1 -shl 23) } else { 0 })
           if (([uint32]$j.features -band $want) -ne $want) { Write-Host "::error::pushcore_features lacks an Intel bit: $($j.features) (want $want)"; $fail++ }
           if ($j.capsNoDevice -notmatch 'no hardware adapter|ok') { Write-Host "::error::capabilities without a GPU: $($j.capsNoDevice)"; $fail++ }
-          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "| check | result |`n|---|---|`n| bridge | $($j.bridge) |`n| Intel VSR | $($j.ivsr) |`n| VPL FI | $($j.vplfi) |`n| material | $($j.'vplfi.material') |`n| XeSS FG | $($j.xefg) |`n| XeSS SR | $($j.xesssr) |`n| XeSS SR pan (WARP-functional) | $($j.'xesssr.pan') |`n| XeSS SR still, history | $($j.'xesssr.static') |`n| XeSS SR still, reset each frame | $($j.'xesssr.staticReset') |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           if ($fail) { exit 1 }
           "WARP CHECKS PASS"
           exit 0
