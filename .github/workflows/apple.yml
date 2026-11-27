@@ -486,6 +486,15 @@ jobs:
             find "$(brew --prefix pushmpc)/" -name '*.dylib' -path '*vapoursynth*' -exec file {} \; 2>/dev/null | head -5
             for f in $(ls -t ~/Library/Logs/DiagnosticReports/*vspipe* ~/Library/Logs/DiagnosticReports/*python* 2>/dev/null | head -n 2); do echo "== $f"; head -c 6000 "$f"; echo; done
             echo "::endgroup::"
+            # run 45951785336 (macos-15-intel): exit 250, no output, no crash report, the plugin's log stops at "backend:
+            # portable" (before the GPU engine's line): who ends the process, and MoltenVK's own account of the device
+            echo "::group::who ends vspipe (lldb: exit / _exit / abort), MoltenVK at info level"
+            sudo DevToolsSecurity -enable >/dev/null 2>&1 || true
+            MVK_CONFIG_LOG_LEVEL=3 perl -e 'alarm shift; exec @ARGV' 300 lldb --batch \
+              -o 'breakpoint set -n exit' -o 'breakpoint set -n _exit' -o 'breakpoint set -n abort' -o 'breakpoint set -n abort_with_payload' \
+              -o run -o 'bt 50' -o 'register read rdi' -k 'bt 50' -k quit \
+              -- "$(brew --prefix vapoursynth)/bin/vspipe" --info "$RUNNER_TEMP/t.vpy" 2>&1 | grep -v '^\s*$' | tail -n 150 | cut -c1-300 || true
+            echo "::endgroup::"
             echo "::error::brew test failed (the formula's vspipe test; details above)"; exit 1
           fi
           brew audit --formula cptpakundo/pushmpc/pushmpc || echo "::warning::brew audit reported issues (see log)"

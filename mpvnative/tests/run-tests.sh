@@ -128,6 +128,16 @@ if [ -x "$MPV" ] || [ -f "$MPV" ]; then
     # the same through a lavfi graph string
     if "$MPV" --no-config "$T/clip.mkv" "--vf=lavfi=[pushmpc=smoother=2]" --o="$T/mpv-graph.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-graph.log" 2>&1 \
        && check "$T/mpv-graph.mkv" $((1 + (N - 1) * 2)) 48000/1001 3; then result mpv-lavfi-graph-x2 PASS; else tail -10 "$T/mpv-graph.log"; result mpv-lavfi-graph-x2 FAIL; fi
+    # 6b. frames that give no output yet (Dedup holds a repeated picture back): a still start, then animation on twos.
+    #     mpv feeds the filter only after libavfilter asked the source and the buffersink asks once, so a filter that
+    #     takes a frame without output must pass the request on (vf_pushmpc activate); before, mpv stopped at the first
+    #     repeated frame (Plex for Mac: 1 source, 0 outputs). Dedup is on by default. A hang is the failure: 120 s at most.
+    "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=12000/1001:duration=4" -vf "fps=24000/1001,tpad=start=12:start_mode=clone" \
+        -pix_fmt yuv420p -c:v ffv1 "$T/still-twos.mkv"
+    NS=$(count "$T/still-twos.mkv")
+    if timeout 120 "$MPV" --no-config --msg-level=all=info,ffmpeg=v "$T/still-twos.mkv" --vf=pushmpc=smoother=2 --o="$T/mpv-still.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-still.log" 2>&1 \
+       && check "$T/mpv-still.mkv" $((1 + (NS - 1) * 2)) 48000/1001 3; then result mpv-dedup-still-twos-x2 PASS
+    else echo "exit or hang: $NS source frames"; grep -iE "pushmpc|close:" "$T/mpv-still.log" | tail -5; result mpv-dedup-still-twos-x2 FAIL; fi
     # 7. playback timing: vo=null at a 96 Hz "display", display-resample, a seek (graph rebuilt); mpv must see 95.9 fps
     #    from the filter, lock vsync-ratio 1 and drop nothing
     "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 "$T/clip12.mkv"
