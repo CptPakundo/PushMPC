@@ -26,12 +26,19 @@
  * The measured content (ContentDetect) on the pushcore route: zero copy, the bridge measures VLC's textures on the GPU
  * (pm_pushcore.h, measure); else the content library on the CPU planes. A class change makes Auto decide again
  * (pm_pc_update, warm, at most once per 10 s): at the same multiplier it picks its frame generation method for drawn
- * pictures (PushMpcAuto.h: DLSS-G after PushFlow on animation). Held-frame re-timing (and with it the line-art and
- * sign holds and the animation mode: pushcore makes hold plans only with it) and the anime deband preset stay off here:
- * pushcore hands a pair's frames out up to a dozen source frames later with re-timing (pushmpc/src/PushCoreGpu.cpp,
- * kMaxQueued; HeldFrames.h: "the caller lets the source run further ahead"), while this filter collects each pair's
- * frames before the pair's last picture is due (RunJob / RunJobZc) and shows VLC's own decoded picture as the real
- * frame (a deband pass on the generated frames alone would make them differ from the real ones).
+ * pictures (PushMpcAuto.h: DLSS-G after PushFlow on animation). Once the picture is measured as drawn (DrawnPolicy
+ * holdRepair: hand-drawn and drawn CG) the same update turns on pushcore's held-frame re-timing (and with it the
+ * animation mode, the line-art and sign holds and the anime deband preset), at most once per 30 s, and the filter
+ * switches to its lag mode (PcLagFilter): every picture, the real ones too, then comes from pushcore (real_out), up to
+ * PM_PC_LAG source frames after its source frame was pushed (pushcore queues up to 12, PushCoreGpu.cpp kMaxQueued).
+ * The decoded picture is not kept for that: the bridge copies it at the push, so no decoder surface is held (VP9's
+ * pool is 6 surfaces, modules/codec/avcodec/directx_va.c:335,359-360); a copy of it in an output picture stands in
+ * for any picture pushcore did not deliver. That the pictures still come out in time rests on VLC's vout: when the
+ * static chain returns nothing it pops the next decoded picture at once (video_output.c ThreadDisplayPreparePicture,
+ * :857-897), and the decoder runs up to file-caching (1000 ms by default) ahead of the display, so a lag of a dozen
+ * source frames (500 ms at 24 fps) is read ahead; only the pictures popped are checked for lateness (:864-879).
+ * Lag mode needs output pictures beyond VLC's pool of 4: the zero-copy ring (grown when it starts) or heap pictures
+ * (pushmpc_out in the chain); without either, held frames stay off.
  *
  * Pictures: the vout's private pool holds 4 pictures, which caps a static filter at x4 (3 new + the source picture
  * itself). Heap pictures sent straight to a direct-rendering display crash some of them (VLC's OpenGL output with
@@ -79,7 +86,7 @@
  * VLC's device, made like the pictures of VLC's Direct3D 11 pool (same size, format, bind flags; one texture each, with
  * the luma and chroma shader views VLC's outputs draw from). A picture holds its slot and the ring until VLC releases
  * it, so pictures may outlive the filter. */
-#define PM_RING_MAX 52   /* 3 x 16 + 4: VFG 16x */
+#define PM_RING_MAX 128  /* 3 x 16 + 4: VFG 16x; pushcore's lag mode grows the ring up to this (RingGrow) */
 typedef struct pm_ring {
     atomic_int refs;
     ID3D11Device *dev;
@@ -124,6 +131,14 @@ static pm_ring *RingNew(ID3D11Texture2D *like, ID3D11DeviceContext *ctx, int siz
     r->size = size > PM_RING_MAX ? PM_RING_MAX : size;
     for (int i = 0; i < r->size; i++) atomic_init(&r->slot[i].busy, false);
     return r;
+}
+
+/* more slots (textures are made on first use); only the filter's thread changes the size */
+static void RingGrow(pm_ring *r, int size)
+{
+    if (size > PM_RING_MAX) size = PM_RING_MAX;
+    for (int i = r->size; i < size; i++) atomic_init(&r->slot[i].busy, false);
+    if (size > r->size) r->size = size;
 }
 
 static void RingPicDestroy(picture_t *p)
@@ -231,6 +246,8 @@ void pm_out_close(vlc_object_t *o) { CloseOut(o); }
 #define PM_LAGQ 16              /* held-drawing repair: source pictures waiting for their pair (lag 3 + repeats) */
 #define PM_HOLD 3               /* held frames: repeats that wait for the next drawing (twos, threes, fours) */
 #define PM_JOB_MAX 64           /* pictures per job: a held span of (PM_HOLD + 1) x 16 - 1 */
+#define PM_PC_LAG 14            /* pushcore's lag mode: a picture is given up this many source frames after its pair */
+#define PM_PCQ 256              /* pushcore's lag mode: pictures waiting for pushcore, in display order */
 typedef struct pm_job {
     vlc_mutex_t lock;
     vlc_cond_t cond;
@@ -391,6 +408,16 @@ struct filter_sys_t {
     int pc_cls, pc_cg;         /* the class pushcore was last given */
     mtime_t pc_class_at;       /* ... and when (at most once per 10 s) */
     uint64_t pc_updates;
+    /* pushcore's lag mode (PcLagFilter): every picture from pushcore (real_out), held frames while drawn is measured */
+    bool pc_lag;               /* on (stays on: the pictures waiting keep their order) */
+    bool pc_held;              /* pushcore re-times held frames now */
+    mtime_t pc_held_at;        /* the last held-frame switch (at most once per 30 s) */
+    struct { mtime_t date; picture_t *pic, *routing, *fb; int age; bool real; } pcq[PM_PCQ];
+    int pcn;
+    picture_t *pc_fb;          /* the last source frame's copy (stands in for its interval's missing pictures) */
+    mtime_t pc_prev_date;
+    bool pc_have_prev;
+    uint64_t pc_lag_out, pc_lag_missed, pc_held_switches;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
     int k_open;            /* k at open: the output rate and the pools were made for it (a later decision stays at or below) */
@@ -1044,6 +1071,7 @@ static const char *ClassName(int cls)
     static const char *const n[] = { "measuring", "drawn animation", "3D CG animation", "not drawn", "game footage" };
     return n[cls >= 0 && cls <= 4 ? cls : 0];
 }
+static picture_t *LagCopy(filter_t *f, struct filter_sys_t *sys, picture_t *src);
 static bool PcContent(filter_t *f, struct filter_sys_t *sys)
 {
     if (!sys->pc || pmx_abi() < 3) return false;
@@ -1059,15 +1087,59 @@ static bool PcContent(filter_t *f, struct filter_sys_t *sys)
             sys->content_state.cls = cls; sys->content_state.cg = cg;
         }
     }
-    if (cls == 0 || (cls == sys->pc_cls && cg == sys->pc_cg)) return false;
+    if (cls == 0) return false;
     const mtime_t now = mdate();
-    if (sys->pc_class_at && now - sys->pc_class_at < 10 * CLOCK_FREQ) return false;
+    /* held frames follow the measured class (DrawnPolicy holdRepair: drawn, hand-drawn or CG), at most once per 30 s,
+     * where the output pictures can wait (the zero-copy ring, or heap pictures with pushmpc_out) */
+#ifdef _WIN32
+    const bool ring = sys->ring != NULL;
+#else
+    const bool ring = false;
+#endif
+    const bool can_lag = OptInt(f, CFG "hold-repair", 1) != 0 && (sys->zc ? ring : sys->alloc == 2);
+    const bool want = can_lag && cls == 1;
+    const bool held_change = want != sys->pc_held && (!sys->pc_held_at || now - sys->pc_held_at >= 30 * CLOCK_FREQ);
+    if (!held_change) {
+        if (cls == sys->pc_cls && cg == sys->pc_cg) return false;
+        if (sys->pc_class_at && now - sys->pc_class_at < 10 * CLOCK_FREQ) return false;
+    }
+    const bool held = held_change ? want : sys->pc_held;
     sys->pc_class_at = now;
     sys->pc_cls = cls; sys->pc_cg = cg;
     pm_pc_cfg c = sys->pc_cfg;
     c.content_class = cls; c.content_cg = cg;
+    c.real_out = sys->pc_lag || held ? 1 : 0;
+    c.held_frames = held ? PM_PC_AUTO : 0; c.held_wait = held ? 1 : 0; c.deband = held ? PM_PC_AUTO : 0;
     char err[200] = "";
     const int r = pmx_update(sys->pc, &c, err, sizeof(err));
+    if (held_change) sys->pc_held_at = now;
+    if (r >= 0) {
+        pm_pc_info i;
+        memset(&i, 0, sizeof(i));
+        i.struct_size = sizeof(i);
+        sys->pc_cfg = c;
+        if (c.real_out && !sys->pc_lag) {   /* lag mode from the next picture on */
+            sys->pc_lag = true;
+            WorkerIdle(sys, false);
+#ifdef _WIN32
+            if (sys->ring) RingGrow(sys->ring, (PM_PC_LAG + 2) * (sys->k + 1) + 8);
+#endif
+            if (sys->prev) {   /* the frame still waiting: lag mode's first stand-in (pushcore dropped its pair in the reload) */
+                sys->pc_fb = LagCopy(f, sys, sys->prev);
+                sys->pc_prev_date = sys->prev->date;
+                sys->pc_have_prev = sys->pc_fb != NULL;
+                picture_Release(sys->prev);
+                sys->prev = NULL;
+            }
+        }
+        const bool was = sys->pc_held;
+        sys->pc_held = held && pmx_output(sys->pc, &i) == 0 && i.held_frames > 0;
+        if (was != sys->pc_held) {
+            sys->pc_held_switches++;
+            msg_Info(f, "PushMPC: content %s: pushcore %s", ClassName(cls),
+                     sys->pc_held ? "re-times held frames from here (every picture is pushcore's, up to 14 source frames later)" : "no longer re-times held frames");
+        }
+    }
     if (r == 0) {
         sys->pc_updates++;
         msg_Info(f, "PushMPC: content %s%s: pushcore's Auto decided again: %s", ClassName(cls), cg ? " (rendered 3D CG)" : "", pmx_describe(sys->pc));
@@ -1177,6 +1249,178 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
     return head;
 }
 
+/* ---- pushcore's lag mode (see the header): every picture from pushcore, routed by its time into an output picture,
+ * given out in order once it is in, or as the stand-in copy once pushcore cannot deliver it any more */
+typedef struct { filter_t *f; struct filter_sys_t *sys; pm_pc_out dst; pm_pc_tex tex; int idx; } pc_lag_route;
+static int LagIndex(struct filter_sys_t *sys, int64_t pts100ns)
+{
+    const int64_t tol = (int64_t)sys->nominal_dt * 10 / (2 * (sys->k > 0 ? sys->k : 1));
+    int best = -1; int64_t bd = INT64_MAX;
+    for (int i = 0; i < sys->pcn; i++) {
+        if (sys->pcq[i].pic || sys->pcq[i].routing) continue;
+        const int64_t d = llabs((int64_t)sys->pcq[i].date * 10 - pts100ns);
+        if (d <= tol && d < bd) { best = i; bd = d; }
+    }
+    return best;
+}
+static picture_t *LagRouteNew(pc_lag_route *r, int64_t pts100ns)
+{
+    const int i = LagIndex(r->sys, pts100ns);
+    if (i < 0) { r->sys->pc_unrouted++; return NULL; }
+    picture_t *o = NewOut(r->f, r->sys);
+    if (!o) return NULL;
+    r->sys->pcq[i].routing = o;
+    r->idx = i;
+    r->sys->pc_routed++;
+    return o;
+}
+static const pm_pc_out *LagDest(void *user, int64_t pts100ns)
+{
+    pc_lag_route *r = user;
+    picture_t *o = LagRouteNew(r, pts100ns);
+    if (!o) return NULL;
+    pm_yuv_out y;
+    PlanesOut(o, &r->sys->wfmt, r->sys->bps_w, &y);
+    for (int p = 0; p < 3; p++) { r->dst.data[p] = y.data[p]; r->dst.stride[p] = y.stride[p]; }
+    return &r->dst;
+}
+#ifdef _WIN32
+static const pm_pc_tex *LagDestTex(void *user, int64_t pts100ns)
+{
+    pc_lag_route *r = user;
+    picture_t *o = LagRouteNew(r, pts100ns);
+    if (!o) return NULL;
+    pm_d3d11_picsys *ps = PicSys(o);
+    if (!ps || !ps->texture[0]) { r->sys->pcq[r->idx].routing = NULL; picture_Release(o); return NULL; }
+    r->tex.texture = ps->texture[0];
+    r->tex.slice = ps->slice_index;
+    return &r->tex;
+}
+#endif
+static void LagDone(void *user, int64_t pts100ns)
+{
+    pc_lag_route *r = user;
+    struct filter_sys_t *sys = r->sys;
+    for (int i = 0; i < sys->pcn; i++)
+        if (sys->pcq[i].routing) {
+            const int64_t d = llabs((int64_t)sys->pcq[i].date * 10 - pts100ns);
+            if (d <= (int64_t)sys->nominal_dt * 10 / (2 * (sys->k > 0 ? sys->k : 1))) { sys->pcq[i].pic = sys->pcq[i].routing; sys->pcq[i].routing = NULL; return; }
+        }
+}
+/* a copy of src into an output picture (the stand-in); NULL when there is no picture or no copy */
+static picture_t *LagCopy(filter_t *f, struct filter_sys_t *sys, picture_t *src)
+{
+    if (!src) return NULL;
+    picture_t *o = NewOut(f, sys);
+    if (!o) return NULL;
+#ifdef _WIN32
+    if (sys->zc) {
+        pm_d3d11_picsys *a = PicSys(src), *b = PicSys(o);
+        if (!a || !b || !a->texture[0] || !b->texture[0] ||
+            pmx_copy_d3d11(sys->pc, a->texture[0], a->slice_index, b->texture[0], b->slice_index) != 0) { picture_Release(o); return NULL; }
+    } else
+#endif
+    picture_Copy(o, src);
+    picture_CopyProperties(o, src);
+    o->date = src->date;
+    o->p_next = NULL;
+    return o;
+}
+static void PcLagDrop(struct filter_sys_t *sys)
+{
+    for (int i = 0; i < sys->pcn; i++) {
+        if (sys->pcq[i].pic) picture_Release(sys->pcq[i].pic);
+        if (sys->pcq[i].routing) picture_Release(sys->pcq[i].routing);
+        if (sys->pcq[i].fb) picture_Release(sys->pcq[i].fb);
+    }
+    sys->pcn = 0;
+    if (sys->pc_fb) { picture_Release(sys->pc_fb); sys->pc_fb = NULL; }
+    sys->pc_have_prev = false;
+}
+static picture_t *PcLagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work, bool reloaded)
+{
+    char err[200] = "";
+    const mtime_t dt = sys->pc_have_prev ? cur->date - sys->pc_prev_date : 0;
+    const bool contiguous = !reloaded && sys->pc_have_prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+    picture_t *fb = LagCopy(f, sys, work);     /* before the push: what this frame's interval shows where pushcore misses */
+    if (fb) { picture_CopyProperties(fb, cur); fb->date = cur->date; }
+    int pushed = -1;
+#ifdef _WIN32
+    if (sys->zc) {
+        pm_d3d11_picsys *in = PicSys(cur);
+        if (in && in->texture[0]) pushed = pmx_push_d3d11(sys->pc, in->texture[0], in->slice_index, (int64_t)cur->date * 10, !contiguous, err, sizeof(err));
+    } else
+#endif
+    {
+        pm_yuv src;
+        PlanesIn(work, &sys->wfmt, sys->bps_w, &src);
+        pm_pc_planes pl;
+        for (int p = 0; p < 3; p++) { pl.data[p] = src.data[p]; pl.stride[p] = src.stride[p]; }
+        pushed = pmx_push(sys->pc, &pl, (int64_t)cur->date * 10, !contiguous, err, sizeof(err));
+    }
+    if (pushed != 0 && !sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "push: %s", err);
+    if (work != cur) picture_Release(work);
+    picture_Release(cur);                       /* the bridge copied it: no decoder surface is kept */
+    if (sys->pc_have_prev) {                    /* the interval that ended: its real picture and k - 1 generated ones */
+        if (!contiguous) sys->restarts++;
+        const int n = contiguous ? sys->k : 1;
+        for (int j = 0; j < n && sys->pcn < PM_PCQ; j++) {
+            sys->pcq[sys->pcn].date = sys->pc_prev_date + (contiguous ? dt * j / sys->k : 0);
+            sys->pcq[sys->pcn].pic = sys->pcq[sys->pcn].routing = NULL;
+            sys->pcq[sys->pcn].fb = sys->pc_fb ? picture_Hold(sys->pc_fb) : NULL;
+            sys->pcq[sys->pcn].age = 0;
+            sys->pcq[sys->pcn].real = j == 0;
+            sys->pcn++;
+        }
+    }
+    if (sys->pc_fb) picture_Release(sys->pc_fb);
+    sys->pc_fb = fb;
+    sys->pc_prev_date = cur->date;
+    sys->pc_have_prev = true;
+    /* route what pushcore has finished; wait (2.5 source frames at most) only when the oldest picture is due */
+    const int lag = sys->pc_held ? PM_PC_LAG : 1;
+    pc_lag_route r = { .f = f, .sys = sys };
+    bool wait = sys->pcn > 0 && !sys->pcq[0].pic && sys->pcq[0].age >= lag;
+    mtime_t full = sys->nominal_dt * 5 / 2;
+    full = full < 40000 ? 40000 : full > 250000 ? 250000 : full;
+    const mtime_t deadline = mdate() + full;
+    for (int guard = 0; guard < 256; guard++) {
+        int got;
+#ifdef _WIN32
+        if (sys->zc) got = pmx_poll_d3d11(sys->pc, wait ? 5 : 0, LagDestTex, LagDone, &r, err, sizeof(err));
+        else
+#endif
+        got = pmx_poll(sys->pc, wait ? 5 : 0, LagDest, LagDone, &r, err, sizeof(err));
+        if (got < 0) { if (!sys->pc_errors++) snprintf(sys->pc_err, sizeof(sys->pc_err), "poll: %s", err); break; }
+        if (wait && (sys->pcq[0].pic || mdate() > deadline)) wait = false;
+        if (!wait && got == 0) break;
+    }
+    for (int i = 0; i < sys->pcn; i++)          /* routed but never completed: not delivered */
+        if (sys->pcq[i].routing) { picture_Release(sys->pcq[i].routing); sys->pcq[i].routing = NULL; }
+    for (int i = 0; i < sys->pcn; i++) sys->pcq[i].age++;
+    /* give out in order: what is in; a missing one once it is too old or a later one is in (pushcore keeps order) */
+    picture_t *head = NULL, *tail = NULL;
+    while (sys->pcn > 0) {
+        bool later = false;
+        for (int i = 1; i < sys->pcn && !later; i++) later = sys->pcq[i].pic != NULL;
+        if (!sys->pcq[0].pic && sys->pcq[0].age <= lag && !later) break;
+        picture_t *o = sys->pcq[0].pic;
+        if (o) { if (sys->pcq[0].fb) picture_CopyProperties(o, sys->pcq[0].fb); if (!sys->pcq[0].real) sys->generated++; }
+        else { o = LagCopy(f, sys, sys->pcq[0].fb); sys->pc_lag_missed++; }
+        if (o) {
+            o->date = sys->pcq[0].date;
+            o->b_force = false;
+            o->p_next = NULL;
+            if (tail) tail->p_next = o; else head = o;
+            tail = o;
+            sys->out++; sys->pc_lag_out++;
+        }
+        if (sys->pcq[0].fb) picture_Release(sys->pcq[0].fb);
+        memmove(&sys->pcq[0], &sys->pcq[1], (size_t)(--sys->pcn) * sizeof(sys->pcq[0]));
+    }
+    return head;
+}
+
 static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
@@ -1251,6 +1495,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
         WorkerIdle(sys, false);
         const bool reloaded = PcContent(f, sys);   /* the measured class to pushcore's Auto (no job in flight now) */
+        if (sys->pc_lag) return PcLagFilter(f, sys, cur, work, reloaded);
         int span, hc;                               /* held frames: a repeat waits (HeldStep) */
         picture_t *still;
         if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
@@ -1380,6 +1625,7 @@ static void Flush(filter_t *f)
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     sys->held = 0; sys->still = false;   /* held frames: the repeats waiting are dropped */
     LagDrop(sys);
+    PcLagDrop(sys);
     sys->content_disc = true;            /* the detector's window starts over (its decision stays) */
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
@@ -1702,6 +1948,10 @@ static void Close(vlc_object_t *obj)
                  rs.frames, rs.parts, rs.gated, rs.over_budget, rs.gpu ? "GPU" : "CPU");
     }
     LagDrop(sys);
+    PcLagDrop(sys);
+    if (sys->pc_lag)
+        msg_Info(f, "PushMPC: pushcore's lag mode: %" PRIu64 " pictures, %" PRIu64 " not delivered (the decoded frame stood in), held frames switched %" PRIu64 " times",
+                 sys->pc_lag_out, sys->pc_lag_missed, sys->pc_held_switches);
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->pc) {
         msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64
