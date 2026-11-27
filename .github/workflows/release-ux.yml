@@ -287,9 +287,15 @@ jobs:
             try {
               $env:VLC_PLUGIN_PATH = [Environment]::GetEnvironmentVariable('VLC_PLUGIN_PATH', 'User')
               $vl = "$env:RUNNER_TEMP\vlc-pushcore.log"
+              # what this VLC run itself writes into VLC's profile (the uninstall check compares that profile with the
+              # one before Setup)
+              function VlcProfile { @(Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$((Get-FileHash $_.FullName).Hash.Substring(0, 12)) $($_.Length) $($_.FullName.Substring($env:APPDATA.Length))" }) }
+              $prof0 = VlcProfile
               $p = Start-Process "$env:ProgramFiles\VideoLAN\VLC\vlc.exe" -PassThru -ArgumentList @('-I', 'dummy', '--no-audio', '--play-and-exit', '--avcodec-hw=none',
                      '--pushmpc-engine=2', '--pushmpc-warp', '--pushmpc-smoother=2', '--file-logging', "--logfile=$vl", '--log-verbose=2', "`"$($clip.FullName)`"")
               if (-not $p.WaitForExit(90000)) { $p.Kill() }
+              $pdiff = @(Compare-Object @($prof0 + '') @((VlcProfile) + '') | Where-Object { $_.InputObject })
+              "VLC's profile, written by this VLC run: $(if ($pdiff.Count) { ($pdiff | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ' } else { 'nothing' })" | Tee-Object -Append $log
               $lines = @(Select-String -Path $vl -Pattern 'PushMPC 0|using vout display module|PushMPC: close' -ErrorAction SilentlyContinue | ForEach-Object Line)
               $lines | Select-Object -First 6 | Tee-Object -Append $log
               if (-not ($lines -match 'PushMPC 0.*-> x2 \(pushcore: ')) { $bad += 'VLC: the installed module did not run on pushcore' }
@@ -397,7 +403,11 @@ jobs:
           (Get-ItemProperty HKCU:\Environment -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" } | Sort-Object | Set-Content "$s\after-env.txt"
           if ((@(Get-Content "$s\before-env.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-env.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += 'HKCU\Environment differs' }
           Get-ChildItem "$env:APPDATA\vlc" -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { "$($_.Hash) $($_.Path)" } | Set-Content "$s\after-vlc.txt"
-          if ((@(Get-Content "$s\before-vlc.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-vlc.txt" -ErrorAction SilentlyContinue) -join "`n")) { $bad += 'VLC settings differ' }
+          if ((@(Get-Content "$s\before-vlc.txt" -ErrorAction SilentlyContinue) -join "`n") -ne (@(Get-Content "$s\after-vlc.txt" -ErrorAction SilentlyContinue) -join "`n")) {
+            $vd = Compare-Object @(@(Get-Content "$s\before-vlc.txt" -ErrorAction SilentlyContinue) + '') @(@(Get-Content "$s\after-vlc.txt" -ErrorAction SilentlyContinue) + '') | Where-Object { $_.InputObject }
+            $rcNow = @(Get-Content "$env:APPDATA\vlc\vlcrc" -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' })
+            $bad += "VLC settings differ: $(($vd | Select-Object -First 8 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ' ; ')$(if ($rcNow.Count) { '; vlcrc now: ' + ($rcNow -join ' | ') })"
+          }
           foreach ($k in 'HKCU:\Software\PushMPC', 'HKCU:\Software\Classes\CLSID\{798D4EC3-E59C-4A4E-A2EE-C804AEAE04CC}', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PushMPC') { if (Test-Path $k) { $bad += "left: $k" } }
           if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\PushMPC") { $bad += 'left: Start menu folder PushMPC' }
           if (Test-Path "$env:APPDATA\PushMPC\kodi-addon.installed") { $bad += 'left: the Kodi add-on marker' }
