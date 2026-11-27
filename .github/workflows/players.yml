@@ -194,6 +194,19 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      # macOS runs these with its own /bin/sh and /bin/bash (bash 3.2): a syntax error must fail here in seconds, not after
+      # the long steps (an apostrophe inside "${x:+...}" parsed on bash 5 but broke bash 3.2: runs 45968573181 / 45968576973)
+      - name: The macOS shell scripts parse with macOS's bash 3.2
+        run: |
+          /bin/bash --version | head -n 1
+          bad=0
+          for f in mpvnative/install/pushmpc-apps-mac.sh mpvnative/install/pushmpc-mac-players.sh mpvnative/install/pushmpc-plex-mac.sh \
+                   mpvnative/install/test-apps-mac.sh mpvnative/plex-mac/*.sh scripts/pushmpc-capture.sh integrations/mpv/mpv-integration.sh \
+                   integrations/linux/setup.sh; do
+            [ -f "$f" ] || continue
+            /bin/sh -n "$f" && /bin/bash -n "$f" || { echo "::error file=$f::does not parse with macOS's /bin/sh or /bin/bash (bash 3.2)"; bad=1; }
+          done
+          exit $bad
       - name: Stub test of the app route (libmpv dylib, framework, built-in player, team-bound entitlements)
         run: sh mpvnative/install/test-apps-mac.sh
       - name: Build the libmpv stand-in, the self-test host and the bridge
