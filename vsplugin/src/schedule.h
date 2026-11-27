@@ -109,6 +109,10 @@ public:
 
     void Init(int k, int64_t srcFrames, double srcDur100ns) { m_grid.k = std::max(1, k); m_grid.srcDur100ns = srcDur100ns; m_srcFrames = srcFrames; }
     void SetLookahead(int lookahead) { m_look = std::max(0, lookahead); }
+    // the stream ends before source frame e (learnt while playing: an unknown-length source, eof_guard.h); from here on
+    // the requests and the outputs are those of a clip of e frames
+    void SetEnd(int64_t e) { if (e > 0 && e < m_srcFrames) m_srcFrames = e; }
+    int64_t SrcFrames() const { return m_srcFrames; }
     int K() const { return m_grid.k; }
     const Grid& GridOf() const { return m_grid; }
     int64_t NextSubmit() const { return m_nextSubmit; }

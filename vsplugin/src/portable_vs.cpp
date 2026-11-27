@@ -26,6 +26,7 @@
 #include "schedule.h"
 #include "vs_content.h"
 #include "vslog.h"
+#include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
 #ifdef PMVS_GPU
 #include "gpu_backend.h"
 #endif
@@ -125,19 +126,31 @@ const VSFrame* VS_CC PGetFrame(int n, int reason, void* inst, void** frameData, 
     if (reason == arInitial) {
         int64_t from, to;
         { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
-        frameData[0] = reinterpret_cast<void*>(intptr_t(from));
+        frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
     if (reason == arError) {
         std::lock_guard<std::mutex> lk(d->lock);
-        LogSourceError("portable (CPU)", n, int64_t(reinterpret_cast<intptr_t>(frameData[0])), d->srcErrors);
+        { int64_t rf, rt; UnpackRange(frameData[0], rf, rt); LogSourceError("portable (CPU)", n, rf, d->srcErrors); }
         return nullptr;
     }
     if (reason != arAllFramesReady) return nullptr;
-    const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
+    int64_t requestedFrom, requestedTo; UnpackRange(frameData[0], requestedFrom, requestedTo);
     std::lock_guard<std::mutex> lk(d->lock);
     d->core = core; d->api = a; d->fc = fc;
+    // the end of an unknown-length stream, found while playing (eof_guard.h): from here a clip of that many frames
+    if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
+        d->pipe.SetEnd(end);
+        std::string e;
+        if (!d->be.End(end, e)) Log(std::format("portable (CPU): the stream's end at source frame {}: {}", end, e));
+        else Log(std::format("portable (CPU): the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
+    }
+    if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
+        for (const VSFrame* f : d->held) a->freeFrame(f); d->held.clear(); d->fc = nullptr; d->curSrc = nullptr;
+        a->setFilterError("pushmpc.Enhance: past the end of the stream", fc);
+        return nullptr;
+    }
     auto r = d->pipe.Produce(n, requestedFrom, d->be, 10000);
     for (const VSFrame* f : d->held) a->freeFrame(f);
     d->held.clear();
@@ -243,19 +256,31 @@ const VSFrame* VS_CC GGetFrame(int n, int reason, void* inst, void** frameData, 
     if (reason == arInitial) {
         int64_t from, to;
         { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
-        frameData[0] = reinterpret_cast<void*>(intptr_t(from));
+        frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
     if (reason == arError) {
         std::lock_guard<std::mutex> lk(d->lock);
-        LogSourceError("portable (GPU)", n, int64_t(reinterpret_cast<intptr_t>(frameData[0])), d->srcErrors);
+        { int64_t rf, rt; UnpackRange(frameData[0], rf, rt); LogSourceError("portable (GPU)", n, rf, d->srcErrors); }
         return nullptr;
     }
     if (reason != arAllFramesReady) return nullptr;
-    const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
+    int64_t requestedFrom, requestedTo; UnpackRange(frameData[0], requestedFrom, requestedTo);
     std::lock_guard<std::mutex> lk(d->lock);
     d->core = core; d->api = a; d->fc = fc;
+    // the end of an unknown-length stream, found while playing (eof_guard.h): from here a clip of that many frames
+    if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
+        d->pipe.SetEnd(end);
+        std::string e;
+        if (!d->be.End(end, e)) Log(std::format("portable (GPU): the stream's end at source frame {}: {}", end, e));
+        else Log(std::format("portable (GPU): the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
+    }
+    if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
+        d->fc = nullptr;
+        a->setFilterError("pushmpc.Enhance: past the end of the stream", fc);
+        return nullptr;
+    }
     auto r = d->pipe.Produce(n, requestedFrom, d->be, 10000);
     d->fc = nullptr;
     if (!r.ok) {
