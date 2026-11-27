@@ -172,7 +172,7 @@ if(APPLE AND PUSHMPC_APPLE)
     # (its guard says so otherwise). One build per FFmpeg major: pushmpc-iina.so from FFMPEG_INCLUDE (Homebrew's FFmpeg)
     # and, for every include folder in PUSHMPC_IINA_FFMPEG_INCLUDES (e.g. Homebrew's ffmpeg@7 / ffmpeg@8), one more;
     # each is also named by its libavutil major, pushmpc-iina-av<N>.so, which pushmpc-apps-mac.sh picks per app
-    # (Stremio 5.1.26 bundles FFmpeg 7 = libavutil 59). Target pushmpc_iina builds them all.
+    # (Stremio 5.1.26 bundles FFmpeg 7 = libavutil 59).
     set(PUSHMPC_IINA_FFMPEG_INCLUDES "" CACHE STRING "more FFmpeg include folders, one bridge each (pushmpc-iina-av<libavutil major>.so)")
     function(pmvs_avutil_major inc out)
       set(m "")
@@ -204,7 +204,12 @@ if(APPLE AND PUSHMPC_APPLE)
       add_custom_command(TARGET pushmpc_iina POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:pushmpc_iina>" "${CMAKE_BINARY_DIR}/pushmpc-iina-av${_iina_main}.so" VERBATIM)
     endif()
+    # each extra major is its own target (pushmpc_iina_av<N>), never a dependency of pushmpc_iina: a major that does not
+    # build cannot take the default bridge down. pushmpc_iina_extras builds them all (CI: every listed major must build);
+    # the formula builds them one by one and skips a failing one. Their majors: iina-bridge-majors.txt in the build folder.
     set(_iina_done "${_iina_main}")
+    set(_iina_extra "")
+    add_custom_target(pushmpc_iina_extras)
     foreach(inc IN LISTS PUSHMPC_IINA_FFMPEG_INCLUDES)
       pmvs_avutil_major("${inc}" m)
       if(NOT m)
@@ -214,10 +219,13 @@ if(APPLE AND PUSHMPC_APPLE)
         continue()
       endif()
       list(APPEND _iina_done ${m})
+      list(APPEND _iina_extra ${m})
       pmvs_iina_bridge(pushmpc_iina_av${m} pushmpc-iina-av${m} "${inc}")
-      add_dependencies(pushmpc_iina pushmpc_iina_av${m})
+      add_dependencies(pushmpc_iina_extras pushmpc_iina_av${m})
     endforeach()
-    message(STATUS "IINA bridge: builds for libavutil ${_iina_done}")
+    string(REPLACE ";" "\n" _iina_lines "${_iina_extra}")
+    file(WRITE "${CMAKE_BINARY_DIR}/iina-bridge-majors.txt" "${_iina_lines}\n")
+    message(STATUS "IINA bridge: builds for libavutil ${_iina_done} (default ${_iina_main}; targets pushmpc_iina, pushmpc_iina_extras)")
   endif()
 endif()
 # the Linux NVIDIA backend and its tests (engines/nvidia-linux/nvl.cmake; option PMVS_NVIDIA_LINUX)

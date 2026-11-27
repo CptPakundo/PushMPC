@@ -259,7 +259,7 @@ do_app() {   # do_app <target> <bundle>
         selftest_app "$lib" "$bundle"; s=$?
         if [ "$s" = 0 ]; then emit "$name" installed "$bundle ($(basename "$lib")$([ "$kind" = resign ] && echo ', signed again ad hoc; backup kept'); bridge $(basename "$abr")${av:+ for libavutil $av}); selftest: $st_detail"; return 0; fi
         app_put_back "$bundle" "$lib" "$bk"; rm -rf "$bk"
-        emit "$name" not-active "$bundle: put back as it was; ${av:+the app's libavutil is $av, }bridge $(basename "$abr"); ${st_detail:-the self-test could not run}"; return 3 ;;
+        emit "$name" not-active "$bundle: put back as it was; ${av:+libavutil in the app: $av, }bridge $(basename "$abr"); ${st_detail:-the self-test could not run}"; return 3 ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$bundle"; return 0; }
         # the stand-in gone (the app was updated or the file removed): the path the original had

@@ -31,6 +31,8 @@ class Pushmpc < Formula
   # portable GPU engine's Vulkan driver (Apple silicon and Intel Macs): the engine finds Homebrew's libMoltenVK.dylib by itself
   on_macos do
     # the IINA bridge for apps that bundle an older FFmpeg (Stremio 5.1: FFmpeg 7): headers only, at build time
+    depends_on "ffmpeg@4" => :build
+    depends_on "ffmpeg@6" => :build
     depends_on "ffmpeg@7" => :build
     depends_on "ffmpeg@8" => :build
     depends_on "glslang" => :build
@@ -119,11 +121,12 @@ class Pushmpc < Formula
 
     apple = OS.mac? ? "ON" : "OFF"
     # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers,
-    # and once more for each older FFmpeg major (ffmpeg@7, ffmpeg@8: pushmpc-iina-av<libavutil major>.so); a bridge
+    # and once more for each older FFmpeg major Homebrew bottles (ffmpeg@4, @6, @7, @8; @5 is deprecated there):
+    # pushmpc-iina-av<libavutil major>.so; a bridge
     # refuses to patch anything when the app's FFmpeg majors differ from its own, so pushmpc-apps-mac.sh picks per app
     bridge = if OS.mac?
       ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}",
-       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{Formula["ffmpeg@7"].opt_include};#{Formula["ffmpeg@8"].opt_include}"]
+       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{%w[ffmpeg@4 ffmpeg@6 ffmpeg@7 ffmpeg@8].map { |f| Formula[f].opt_include }.join(";")}"]
     else
       []
     end
@@ -139,6 +142,15 @@ class Pushmpc < Formula
            *bridge, *gpu_args, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
+    # the bridge for each older FFmpeg major, one target each: one that does not build is skipped (a warning), the
+    # default bridge and the rest install anyway (CI requires them all: pushmpc_iina_extras)
+    if OS.mac? && File.exist?("build/iina-bridge-majors.txt")
+      File.read("build/iina-bridge-majors.txt").split.each do |m|
+        next if quiet_system "cmake", "--build", "build", "--target", "pushmpc_iina_av#{m}", "--parallel"
+
+        opoo "PushMPC's IINA bridge for libavutil #{m} did not build: apps with that FFmpeg major get no frame generation"
+      end
+    end
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
