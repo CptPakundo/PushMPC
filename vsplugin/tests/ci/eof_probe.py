@@ -36,12 +36,23 @@ looped = core.std.Loop(base, times=0)
 
 def past_end(n, f):
     if n >= N:
-        raise vs.Error("EOF (as mpv returns it)")
+        raise vs.Error("EOF or filter EOF/reinit")   # mpv 0.42 vf_vapoursynth.c, word for word
     return f
 
 
 unknown = core.std.ModifyFrame(looped[:UNKNOWN], looped[:UNKNOWN], past_end)
 known = looped[:N]
+
+
+# any other failure stays an error (the guard ends the stream only on mpv's EOF): a decoder error at frame 30 must fail
+# the outputs from there, not end the stream quietly
+def broken(n, f):
+    if n >= 30:
+        raise vs.Error("a decoder error")
+    return f
+
+
+midfail = core.std.ModifyFrame(looped[:UNKNOWN], looped[:UNKNOWN], broken)
 
 
 def count(clip, cap):
@@ -75,3 +86,20 @@ for route, device in (("gpu", ""), ("cpu", "cpu")):
 if "--require" in sys.argv and bad:
     print(f"::error::{bad} case(s): the unknown-length stream does not give the known-length output")
     sys.exit(1)
+for route, device in (("gpu", ""), ("cpu", "cpu")):
+    args = dict(backend="portable", smoother=str(K))
+    if device:
+        args["portable_device"] = device
+    clip, n, msg = core.pushmpc.Enhance(midfail, **args), 0, ""
+    while n < N * K:
+        try:
+            clip.get_frame(n)
+        except vs.Error as e:
+            msg = str(e)
+            break
+        n += 1
+    ok = "a decoder error" in msg and n < 30 * K + 8
+    print(f"eof {route} decoder error at source frame 30: output {n} failed ({'the error reached it' if ok else 'WRONG: ' + (msg or 'no error')})")
+    if not ok and "--require" in sys.argv:
+        print("::error::a source error other than mpv's EOF was not passed on as an error")
+        sys.exit(1)

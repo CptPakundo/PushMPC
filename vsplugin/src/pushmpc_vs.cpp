@@ -569,13 +569,12 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     }
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
-    // the portable and ml backends request lookahead frames: an unknown-length source (mpv's) gets the end guard
-    if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, GuardUnknownLength(node, core, a), c.why);
+    if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);   // both wrap an unknown-length source (eof_guard.h)
 #ifdef PUSHMPC_APPLE
     if (c.kind == BackendKind::Apple) return AppleCreate(in, out, core, a, node, c.why);
 #endif
 #if PMVS_HAVE_PMML
-    if (c.kind == BackendKind::Ml) return MlCreate(in, out, core, a, GuardUnknownLength(node, core, a), c.why);
+    if (c.kind == BackendKind::Ml) return MlCreate(in, out, core, a, node, c.why);
 #endif
     if (c.kind == BackendKind::Rife) { a->freeNode(node); return fail("rife is a script preset: use pushmpc.vpy (it chains core.rife)"); }
 #if defined(PMVS_NVIDIA_VFX)

@@ -34,7 +34,12 @@ inline const VSFrame* VS_CC EofGuardGetFrame(int n, int reason, void* inst, void
     if (reason != arInitial) return nullptr;
     char err[512] = "";
     if (const VSFrame* f = a->getFrame(n, g->up, err, sizeof(err))) return f;
-    if (n == 0) { a->setFilterError(("pushmpc.Enhance: the source's first frame failed: " + std::string(err)).c_str(), fc); return nullptr; }
+    // only mpv's end ("EOF or filter EOF/reinit", vf_vapoursynth.c: no frame will come) is an end. Any other failure (a
+    // frame mpv no longer holds, a decoder error) stays an error, as without the guard: it must not cut the stream short
+    if (n == 0 || !std::strstr(err, "EOF")) {
+        a->setFilterError(("pushmpc.Enhance: source frame " + std::to_string(n) + " failed: " + std::string(err)).c_str(), fc);
+        return nullptr;
+    }
     if (!g->logged.exchange(true)) Log("source: frame " + std::to_string(n) + " failed (" + std::string(err) + "): the end of the stream");
     VSFrame* e = a->newVideoFrame(&g->vi.format, g->vi.width, g->vi.height, nullptr, core);
     if (!e) { a->setFilterError("pushmpc.Enhance: out of memory at the stream's end", fc); return nullptr; }

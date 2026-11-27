@@ -47,6 +47,7 @@ struct MInst {
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
     const VSFrame* curSrc = nullptr;
+    const VSFrame* lastSrc = nullptr;   // the newest source frame (a reference): props for the outputs an end settles (eof_guard.h)
     std::vector<const VSFrame*> held;
     pmvs::VsContent content;
     // the anime upscaler (pmml::Upscaler) on each source frame before frame generation; its result per source frame
@@ -248,6 +249,8 @@ void MBind(MInst* d)
         d->held.push_back(f);
         d->content.Push(d->api, f, s);
         d->curSrc = f;
+        if (d->lastSrc) d->api->freeFrame(d->lastSrc);
+        d->lastSrc = d->api->addFrameRef(f);
         const VSMap* p = d->api->getFramePropertiesRO(f);
         int e1 = 0, e2 = 0;
         MMeta m; m.durNum = d->api->mapGetInt(p, "_DurationNum", 0, &e1); m.durDen = d->api->mapGetInt(p, "_DurationDen", 0, &e2);
@@ -298,7 +301,10 @@ const VSFrame* VS_CC MGetFrame(int n, int reason, void* inst, void** frameData, 
     if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
         d->pipe.SetEnd(end);
         std::string e;
-        if (!d->be.End(end, e)) Log(std::format("ml: the stream's end at source frame {}: {}", end, e));
+        d->curSrc = d->lastSrc;   // the outputs it settles take the last frame's props (mpv reads _MP_IMAGE from every one)
+        const bool ended = d->be.End(end, e);
+        d->curSrc = nullptr;
+        if (!ended) Log(std::format("ml: the stream's end at source frame {}: {}", end, e));
         else Log(std::format("ml: the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
     }
     if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
@@ -337,6 +343,7 @@ void VS_CC MFree(void* inst, VSCore*, const VSAPI* a)
     {
         std::lock_guard<std::mutex> lk(d->lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
+        if (d->lastSrc) { a->freeFrame(d->lastSrc); d->lastSrc = nullptr; }
         const auto& rc = d->be.repairCounts;
         Log(std::format("ml: instance closed after {} frames; held-drawing repair: {} frames, {} parts on {} pairs ({} by phase map), {:.1f} ms a frame, spans gated {}, over budget {}",
             d->produced, rc.frames, rc.parts, rc.pairs, rc.mapRuns, rc.frames ? rc.ms / double(rc.frames) : 0.0, rc.gated, rc.overBudget));
@@ -542,7 +549,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     Log("ml: " + interp->describe() + (flowOnce ? "; flow once" : "; network per timestep"));
 
     auto* d = new MInst();
-    d->node = node;
+    d->node = node = GuardUnknownLength(node, core, a);   // mpv's unknown-length source (eof_guard.h); not on the pass-through paths above
     d->inVi = *vi;
     d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->k = k;
