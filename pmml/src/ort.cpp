@@ -209,15 +209,18 @@ const char* deviceType(Ort* ort, const OrtEpDevice* d) {
     }
 }
 
-// The EP devices of one EP name, of the wanted type ("" = any non-CPU first, then CPU).
-std::vector<const OrtEpDevice*> epDevices(Ort* ort, const std::string& epName, const std::string& type) {
+// The EP devices of one plugin EP, of the wanted type ("" = any non-CPU first, then CPU). A plugin EP's devices carry
+// the name its factory reports, which is not always the EP's documented name: TensorRT-RTX 0.5.0 under ONNX Runtime 1.30
+// reports the registration name ("trt-rtx") instead of NvTensorRTRTXExecutionProvider, so both are taken.
+std::vector<const OrtEpDevice*> epDevices(Ort* ort, const std::string& epName, const std::string& type, const std::string& regName = {}) {
     std::vector<const OrtEpDevice*> out;
     const OrtEpDevice* const* devs = nullptr;
     size_t n = 0;
     if (OrtStatus* s = ort->api->GetEpDevices(ort->env, &devs, &n)) { ort->api->ReleaseStatus(s); return out; }
     for (int pass = 0; pass < 2; ++pass)
         for (size_t i = 0; i < n; ++i) {
-            if (epName != ort->api->EpDevice_EpName(devs[i])) continue;
+            const char* name = ort->api->EpDevice_EpName(devs[i]);
+            if (!name || (epName != name && (regName.empty() || regName != name))) continue;
             const std::string t = deviceType(ort, devs[i]);
             if (!type.empty() ? (pass == 0 && t == type) : ((pass == 0) == (t != "CPU"))) out.push_back(devs[i]);
         }
@@ -397,7 +400,7 @@ bool appendEp(Ort* ort, OrtSessionOptions* so, const Options& o, EpChoice* choic
     if (it != plugins.end() && ort->version >= 22) {
         registerPlugins(ort, nullptr);
         const std::string type = ep == "qnn" ? "NPU" : "GPU";
-        auto devs = epDevices(ort, it->epName, type);
+        auto devs = epDevices(ort, it->epName, type, it->id);
         if (devs.empty()) { if (err) *err = it->epName + " reports no " + type + " device here"; return false; }
         if (o.backend.device < 0 || size_t(o.backend.device) >= devs.size()) { if (err) *err = it->epName + " has no device " + std::to_string(o.backend.device); return false; }
         const OrtEpDevice* d = devs[size_t(o.backend.device)];
@@ -1384,7 +1387,7 @@ std::vector<DeviceInfo> listOrt(const std::string& runtimeDir, std::string* log)
     if (registerPlugins(ort, log)) {
         for (const auto& p : pluginEps(runtimeDir)) {
             for (const char* type : {"GPU", "NPU"}) {
-                auto devs = epDevices(ort, p.epName, type);
+                auto devs = epDevices(ort, p.epName, type, p.id);
                 for (size_t i = 0; i < devs.size(); ++i) {
                     const OrtHardwareDevice* hw = ort->api->EpDevice_Device(devs[i]);
                     DeviceInfo d;
