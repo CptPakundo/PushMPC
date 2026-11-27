@@ -93,6 +93,52 @@ static int hook_parse2(void *graph, const char *filters, void **inputs, void **o
 /* the page's protection now (/proc/self/maps), so a patched page gets back exactly what it had: forcing it read-only
  * would make a writable page (a non-RELRO .got.plt still taking lazy bindings, .data next to an ABS64 slot) fault on
  * the program's next write there */
+/* the filter's options as mpv's filter parser reads them: "key=value:key=value". A value that holds '=' or ','
+ * (extra=a=b: the engine's own key=value) is quoted, else mpv splits it there: [a=b] (mpv's bracket quoting), or
+ * %<length>%value when it holds ']' itself. Values already quoted ([...] or %n%...) and plain ones are kept as written.
+ * in / len: the options (no "@pushmpc:pushmpc=" prefix); out: the quoted options, cut at n - 1 bytes. */
+static void quote_opts(char *out, size_t n, const char *in, size_t len)
+{
+    size_t k = 0, i = 0;
+    if (!n)
+        return;
+    out[0] = 0;
+    while (i < len) {
+        size_t j = i, eq = (size_t)-1;
+        int depth = 0;
+        for (; j < len; ++j) {   /* one item: up to the next ':' outside brackets */
+            const char c = in[j];
+            if (c == '[')
+                ++depth;
+            else if (c == ']' && depth)
+                --depth;
+            else if (c == ':' && !depth)
+                break;
+            else if (c == '=' && !depth && eq == (size_t)-1)
+                eq = j;
+        }
+        int w;
+        const char *sep = i ? ":" : "";
+        if (eq != (size_t)-1) {
+            const char *v = in + eq + 1;
+            const size_t vl = j - eq - 1;
+            const int needs = vl && v[0] != '[' && v[0] != '%' && (memchr(v, '=', vl) || memchr(v, ',', vl));
+            if (needs && memchr(v, ']', vl))
+                w = snprintf(out + k, n - k, "%s%.*s%%%zu%%%.*s", sep, (int)(eq + 1 - i), in + i, vl, (int)vl, v);
+            else if (needs)
+                w = snprintf(out + k, n - k, "%s%.*s[%.*s]", sep, (int)(eq + 1 - i), in + i, (int)vl, v);
+            else
+                w = snprintf(out + k, n - k, "%s%.*s", sep, (int)(j - i), in + i);
+        } else {
+            w = snprintf(out + k, n - k, "%s%.*s", sep, (int)(j - i), in + i);
+        }
+        if (w < 0 || (size_t)w >= n - k)
+            return;   /* cut: what fits stays */
+        k += (size_t)w;
+        i = j + 1;
+    }
+}
+
 /* a hex number at *p, advancing it; no libc number parsing: with _GNU_SOURCE and glibc 2.38+ headers sscanf / strtol
    bind to __isoc23_* (GLIBC_2.38), which Snap's core22 (2.35) and Debian 12 (2.36) do not have (players run 45951788669) */
 static unsigned long parse_hex(const char **p)
@@ -421,8 +467,11 @@ __attribute__((visibility("default"))) int mpv_initialize(void *h)
         return r;
     if (!strcmp(opt, "auto") || !strcmp(opt, "yes"))
         snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc");
-    else
-        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc=%s", opt);
+    else {
+        char q[sizeof(g_vfarg)];
+        quote_opts(q, sizeof(q), opt, strlen(opt));
+        snprintf(g_vfarg, sizeof(g_vfarg), "@pushmpc:pushmpc=%s", q);
+    }
     if (!vf_has_ours(h))
         vf_add(h, "after mpv_initialize");
     {
@@ -491,8 +540,10 @@ int mpv_open_cplugin(mpv_handle *h)
         const char *p = strstr(opts, "pushmpc-vf=");
         if (p) {
             const char *e = strchr(p, ',');
+            char q[sizeof(cmd)];
             p += strlen("pushmpc-vf=");
-            snprintf(cmd, sizeof(cmd), "@pushmpc:pushmpc=%.*s", e ? (int)(e - p) : (int)strlen(p), p);
+            quote_opts(q, sizeof(q), p, e ? (size_t)(e - p) : strlen(p));   /* extra=a=b -> extra=[a=b] */
+            snprintf(cmd, sizeof(cmd), "@pushmpc:pushmpc=%s", q);
         }
         if (strstr(opts, "pushmpc-append=no"))
             append = 0;
