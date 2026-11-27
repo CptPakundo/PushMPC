@@ -450,7 +450,11 @@ local native_up_failed = nil   -- the file on which the upload could not start: 
 local failed_for = nil   -- the file the filter failed on: no retry until the next file
 -- the VapourSynth filter measures the class and the real frame rate on the frames (vsplugin/src/vs_content.h) and writes
 -- them to <temp>/pushmpc-vs-<pid>.txt; when the running instance was created with another rate or class (reload=1),
--- the filter is added again once (as a seek does: mpv reloads the script) and the new instance starts with them
+-- the filter is added again once (as a seek does: mpv reloads the script) and the new instance starts with them.
+-- A re-add drops the frames in flight (about 9: mpv's buffer, the concurrent requests, Dedup's lookahead): never while
+-- encoding (--o: every frame counts; the encode keeps the instance it started with). The status file is removed once
+-- acted on: the new instance writes it again only when its own measurement differs (a stale reload=1 left by the
+-- previous instance re-added the filter a second time)
 local vs_watch = { timer = nil, reloads = 0 }
 local function vs_status_path()
     local dir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
@@ -465,6 +469,8 @@ function vs_status_watch()
         if not f then return end
         local t = f:read("*a"); f:close()
         if not t:find("reload=1", 1, true) or vs_watch.reloads >= 2 then return end
+        if (mp.get_property("o", "") or "") ~= "" then return end   -- encoding: keep every frame
+        os.remove(vs_status_path())
         vs_watch.reloads = vs_watch.reloads + 1
         msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
         mp.commandv("vf", "remove", "@pushmpc")
