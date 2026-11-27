@@ -197,6 +197,10 @@ class Pushmpc < Formula
         </dict>
         </plist>
       XML
+      # the helper inside the bundle first: a bundle signs only over signed nested code ("code object is not signed at
+      # all, in subcomponent pushmpc-vulkan-probe" on Intel, apple run 45979184986: the arm64 linker signs ad hoc by
+      # itself, the x86_64 one does not)
+      system "codesign", "--force", "--sign", "-", app/"MacOS/pushmpc-vulkan-probe"
       system "codesign", "--force", "--sign", "-", libexec/"PushMPC Capture.app"
       libexec.install "scripts/pushmpc-capture.sh"
       # the app itself must start the capture (macOS asks the starting app for the permission, not the terminal): open
