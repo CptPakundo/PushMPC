@@ -1038,6 +1038,7 @@ public:
         std::ostringstream d;
         d << "pmml " << kVersion << " ORT " << ort->flavor << ", " << choice_.describe << "; anime upscaler " << m_->id << " (" << m_->licence << ") "
           << w << "x" << h << " -> " << outW_ << "x" << outH_ << (rgba_ ? " RGBA8" : " YUV 4:2:0") << ", sessions in " << int(nowMs() - t0) << " ms";
+        if (!cpuFallback_.empty()) d << "; SLOW: nodes on the CPU EP in " << cpuFallback_;
         describe_ = d.str();
         return true;
     }
@@ -1223,13 +1224,28 @@ private:
         return true;
     }
 
+    // On a GPU EP every node of every session must land on that EP: a node it rejects goes to the CPU EP, with a copy of
+    // the picture each way, and one CPU node can cost seconds a frame (a cubic Resize at 720x480 -> 3240x2160 took over
+    // 20 s). So the session is made with the CPU fallback switched off first; if the EP refuses part of the graph, it is
+    // made again with the fallback (the picture still comes out) and the graph is named in describe()
+    // ("SLOW: nodes on the CPU EP in ..."), which pushcore logs. PMML_CPU_FALLBACK_PROBE=0 skips the first try.
     bool session(const std::string& path, const std::vector<std::pair<std::string, int64_t>>& dims, bool outSize, OrtSession** out, std::string* err) {
+        if (o_.backend.ep == "cpu" || envStr("PMML_CPU_FALLBACK_PROBE") == "0") return session(path, dims, outSize, false, out, err);
+        std::string strictErr;
+        if (session(path, dims, outSize, true, out, &strictErr)) return true;
+        if (!session(path, dims, outSize, false, out, err)) return false;
+        cpuFallback_ += (cpuFallback_.empty() ? "" : ", ") + path.substr(path.find_last_of("/\\") + 1);
+        return true;
+    }
+
+    bool session(const std::string& path, const std::vector<std::pair<std::string, int64_t>>& dims, bool outSize, bool noCpu, OrtSession** out, std::string* err) {
         if (!fileExists(path)) { if (err) *err = "missing " + path; return false; }
         OrtSessionOptions* so = nullptr;
         PMML_TRY(ort->api->CreateSessionOptions(&so));
         struct Guard { Ort* o; OrtSessionOptions* s; ~Guard() { o->api->ReleaseSessionOptions(s); } } guard{ort, so};
         PMML_TRY(ort->api->SetSessionGraphOptimizationLevel(so, ORT_ENABLE_ALL));
         for (auto& d : dims) PMML_TRY(ort->api->AddFreeDimensionOverrideByName(so, d.first.c_str(), d.second));
+        if (noCpu) PMML_TRY(ort->api->AddSessionConfigEntry(so, "session.disable_cpu_ep_fallback", "1"));
         EpChoice c;
         c.ownedMemory = choice_.ownedMemory;
         if (!appendEp(ort, so, o_, &c, err)) return false;
@@ -1309,6 +1325,7 @@ private:
     std::vector<std::vector<uint16_t>> stagingIn_, stagingOut_;
     std::vector<uint8_t> rgbaIn_, rgbaOut_;
     UpscaleStats stats_;
+    std::string cpuFallback_;   // graphs the GPU EP did not take whole
 };
 
 }  // namespace
