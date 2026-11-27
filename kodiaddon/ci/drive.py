@@ -119,21 +119,21 @@ time.sleep(min(4.0, secs))
 p0 = props(); w0 = time.time(); print("DRIVE props0", json.dumps(p0))
 if case == "seek":
     # Kodi's accurate seek decodes from the keyframe before 12 s and drops the pictures before the target: on a slow
-    # runner the clock reaches 12 s some seconds later (Kodi 22, run 45942669950: 3.0 s). Wait for it (10 s at most),
-    # then require a jump plain playback cannot explain (the clock more than 3 s ahead of where it would be without
-    # the seek) inside [12 s, 16.5 s]
+    # runner the clock reaches 12 s some seconds later (Kodi 22, run 45942669950: 3.0 s). Wait for it while a jump is
+    # still distinguishable from plain playback (until the clock without the seek would be 1 s short of 12 s), then
+    # require the clock inside [12 s, 16.5 s] and more than 1 s ahead of where plain playback would be
     t0 = ms(p0.get("time", {}))
     rpc("Player.Seek", {"playerid": PLAYER[0], "value": {"time": {"hours": 0, "minutes": 0, "seconds": 12, "milliseconds": 0}}})
     ws = time.time()
     while True:
         time.sleep(0.5)
         p1 = props(); t1 = ms(p1.get("time", {}))
-        if t1 >= 12000 or time.time() - ws > 10:
+        plain = t0 + (time.time() - w0) * 1000.0
+        if t1 >= 12000 or plain >= 11000:
             break
-    plain = t0 + (time.time() - w0) * 1000.0
     print("DRIVE props1", json.dumps(p1))
     print(f"DRIVE seek {t0} -> {t1} ms, {time.time() - ws:.1f} s after the seek; plain playback would be at {plain:.0f} ms")
-    print("DRIVE seek_ok", 12000 <= t1 <= 16500 and t1 > plain + 3000)
+    print("DRIVE seek_ok", 12000 <= t1 <= 16500 and t1 > plain + 1000)
 elif case == "chapter":
     t0 = ms(p0.get("time", {}))
     rpc("Input.ExecuteAction", {"action": "chapterorbigstepforward"})

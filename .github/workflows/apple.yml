@@ -465,9 +465,16 @@ jobs:
           brew tap CptPakundo/pushmpc "$RUNNER_TEMP/tap-src"
           brew install --build-from-source --verbose CptPakundo/pushmpc/pushmpc   # the full name: Homebrew 6 trusts this formula
           brew info CptPakundo/pushmpc/pushmpc | sed -n 1,3p
-          if ! brew test --verbose CptPakundo/pushmpc/pushmpc; then
+          if ! brew test --verbose --keep-tmp CptPakundo/pushmpc/pushmpc; then
             # brew test keeps vspipe's stderr and the plugin's log to itself (run 45942725916, macos-15-intel: exit 250
-            # and nothing else): the formula's test clip again through the same vspipe, with both, then fail
+            # and nothing else): the kept test folder's PushMPC logs (HOME is that folder), then the formula's test clip
+            # again through the same vspipe outside brew, with stderr, then fail
+            echo "::group::brew test failed: its kept test folder"
+            for d in $(ls -td /private/tmp/pushmpc-test-* 2>/dev/null | head -n 1); do
+              echo "== $d"; find "$d" -maxdepth 4 | head -40
+              find "$d" -path '*Logs/PushMPC*' -type f -exec sh -c 'echo "== $1"; tail -n 60 "$1" | cut -c1-400' _ {} \;
+            done
+            echo "::endgroup::"
             echo "::group::brew test failed: the formula's vspipe test, run directly"
             printf '%s\n' 'import vapoursynth as vs' 'core = vs.core' \
               'clip = core.std.BlankClip(format=vs.YUV420P8, width=320, height=240, length=24, fpsnum=24000, fpsden=1001)' \
@@ -476,7 +483,7 @@ jobs:
             rc=0; "$(brew --prefix vapoursynth)/bin/vspipe" --info "$RUNNER_TEMP/t.vpy" 2>&1 || rc=$?
             echo "vspipe exit $rc"
             tail -n 60 "$PUSHMPC_VS_LOG_DIR"/*.log 2>/dev/null | cut -c1-400 || true
-            find "$(brew --prefix pushmpc)" -name '*.dylib' -path '*vapoursynth*' -exec file {} \; 2>/dev/null | head -5
+            find "$(brew --prefix pushmpc)/" -name '*.dylib' -path '*vapoursynth*' -exec file {} \; 2>/dev/null | head -5
             for f in $(ls -t ~/Library/Logs/DiagnosticReports/*vspipe* ~/Library/Logs/DiagnosticReports/*python* 2>/dev/null | head -n 2); do echo "== $f"; head -c 6000 "$f"; echo; done
             echo "::endgroup::"
             echo "::error::brew test failed (the formula's vspipe test; details above)"; exit 1

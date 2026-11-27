@@ -35,8 +35,10 @@ if ! adb shell ls -d "$dev/.kodi" >/dev/null 2>&1; then
 fi
 adb shell ls -ld "$dev" "$dev/.kodi" 2>&1 | tr -d '\r'
 # fatal from here: without the clips on the device no case can play (a failed push still ran every case, about 40 min)
-adb shell mkdir -p "$dev/.kodi" "$dev/clips" || { echo "::error title=kodi-android::cannot create folders in $dev (Kodi did not make its folder)"; exit 1; }
-adb push "$clips/." "$dev/clips/" >/dev/null || { echo "::error title=kodi-android::cannot push the clips to $dev/clips"; exit 1; }
+fail() { echo "::error title=kodi-android::$1"; adb logcat -d > "$out/logcat.txt" 2>&1 || true
+         adb exec-out screencap -p > "$out/screen.png" 2>/dev/null || true; exit 1; }
+adb shell mkdir -p "$dev/.kodi" "$dev/clips" || fail "cannot create folders in $dev (Kodi did not make its folder; see logcat.txt, screen.png)"
+adb push "$clips/." "$dev/clips/" >/dev/null || fail "cannot push the clips to $dev/clips"
 adb shell ls -l "$dev/clips"
 before="adb shell mkdir -p $dev/.kodi && adb push '$home/.' '$dev/.kodi/' >/dev/null"
 after="mkdir -p '$home/userdata' '$home/temp'; adb pull '$dev/.kodi/userdata/Database' '$home/userdata/' >/dev/null 2>&1; adb pull '$dev/.kodi/temp/kodi.log' '$home/temp/kodi.log' >/dev/null 2>&1; true"
