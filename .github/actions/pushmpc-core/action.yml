@@ -307,6 +307,9 @@ runs:
       run: |
         & $env:PUSHFLOW_PYTHON -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core,directml --headers
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # pmml's DirectML path (ort.cpp: __has_include(<dml_provider_factory.h>)) needs the DirectML flavor's factory header
+        # beside the core headers the builds use (one folder: its #include "onnxruntime_c_api.h" then takes the core's)
+        Copy-Item "$env:DEPS\pmml\ort\directml\include\dml_provider_factory.h" "$env:DEPS\pmml\ort\core\include\" -Force
 
     # G10: Intel VPL frame interpolation in pushcore needs Intel's MIT dispatcher (libvpl), pinned by tag + SHA-256 (as
     # intel-video.yml), static with the static CRT; the runtime itself comes with Intel's graphics driver

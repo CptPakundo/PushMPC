@@ -199,6 +199,8 @@ jobs:
         run: |
           & '${{ steps.py.outputs.python-path }}' -I repo/pmml/scripts/fetch_runtime.py --pin repo/scripts/ml-runtime-pin.json --platform win-x64 --out "$env:DEPS\pmml" --cache "$env:DEPS\pmml-dl" --flavors core,directml --headers
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # pmml's DirectML path needs the DirectML flavor's factory header beside the core headers (pushmpc-core action)
+          Copy-Item "$env:DEPS\pmml\ort\directml\include\dml_provider_factory.h" "$env:DEPS\pmml\ort\core\include\" -Force
 
       - name: Configure and build pushcore with libvpl
         timeout-minutes: 50
