@@ -180,6 +180,8 @@ jobs:
           cd "$d/src/core"
           echo "--- getFrame (vsapi.cpp)"; grep -n -A30 "^static const VSFrame \*VS_CC getFrame(" vsapi.cpp | head -45
           echo "--- worker threads waiting, arError"; grep -n "releaseThread\|reserveThread\|isWorkerThread\|arError\|error was also set\|outstanding requests" vscore.cpp vscore.h vsapi.cpp | head -60
+
+      - uses: actions/cache@v4
         if: ${{ !cancelled() }}
         with:
           path: ~/.cache/pm-clips
