@@ -224,6 +224,20 @@ static void TestDrawn()
     if (!pc) return;
     CHECK(Info(pc).deband == 0 && Info(pc).real_out == 0, "deband stays off while the real frames are the player's");
     close_(pc);
+    // a caller that turns held frames on once the picture is measured as drawn: open without them (the real frames its
+    // own), then the update switches the real frames to pushcore's and Auto re-times held frames; and back off
+    c = Base(2); c.content_class = 3;
+    pc = open_(&c, &k, err, sizeof(err));
+    CHECK(pc != nullptr, "open: %s", err);
+    if (!pc) return;
+    CHECK(Info(pc).real_out == 0 && Info(pc).held_frames == 0, "live action at the open: no held frames, the real frames the caller's");
+    u = c; u.content_class = 1; u.real_out = 1; u.held_wait = 1; u.held_frames = PM_PC_AUTO; u.deband = PM_PC_AUTO;
+    const int r2 = update_(pc, &u, err, sizeof(err));
+    std::printf("  drawn measured later -> %d: %s\n", r2, describe_(pc));
+    CHECK(r2 >= 0 && Info(pc).real_out == 1 && Info(pc).held_frames >= 1, "the update turns real_out and held frames on (%d: %s)", r2, err);
+    u.content_class = 3; u.held_wait = 0; u.held_frames = 0; u.deband = 0;
+    CHECK(update_(pc, &u, err, sizeof(err)) >= 0 && Info(pc).held_frames == 0 && Info(pc).real_out == 1, "held frames off again, real_out as asked: %s", err);
+    close_(pc);
 }
 
 static void TestSrZeroCopy()

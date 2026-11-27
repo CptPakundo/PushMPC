@@ -120,7 +120,9 @@ struct PushcoreRoute::Impl {
     pm_pc* pc = nullptr;
     std::vector<ComPtr<ID3D11Texture2D>> ring;   // NV12 / P010 textures at the output size (one each: WARP and some drivers refuse larger NV12 arrays)
     unsigned slots = 0, next = 0;
-    // AllOut: the decoded frames at the source size (slot ids slots + i), shown only where pushcore missed a picture
+    // AllOut: the decoded frames at the source size (slot ids kSrcBase + i: they stay valid when the ring grows),
+    // shown only where pushcore missed a picture
+    static constexpr unsigned kSrcBase = 1u << 16;
     std::vector<ComPtr<ID3D11Texture2D>> srcRing;
     unsigned srcNext = 0;
     ComPtr<ID3D11Texture2D> upStage, downStage, downSrc;
@@ -136,8 +138,9 @@ struct PushcoreRoute::Impl {
     int cdState = 0;   // 0 not set up, 1 running, -1 failed
     unsigned NextSlot() { const unsigned s = next; next = (next + 1) % slots; return s; }
     // where a decoded frame is kept: the ring (its real picture) or, AllOut, the source ring
-    unsigned NextIn() { if (srcRing.empty()) return NextSlot(); const unsigned s = srcNext; srcNext = (srcNext + 1) % unsigned(srcRing.size()); return slots + s; }
-    ID3D11Texture2D* Tex(unsigned id) { return id < slots ? ring[id].Get() : srcRing[id - slots].Get(); }
+    unsigned NextIn() { if (srcRing.empty()) return NextSlot(); const unsigned s = srcNext; srcNext = (srcNext + 1) % unsigned(srcRing.size()); return kSrcBase + s; }
+    bool Valid(unsigned id) const { return id < slots || (id >= kSrcBase && id - kSrcBase < srcRing.size()); }
+    ID3D11Texture2D* Tex(unsigned id) { return id < kSrcBase ? ring[id].Get() : srcRing[id - kSrcBase].Get(); }
 };
 
 PushcoreRoute::PushcoreRoute() : m(new Impl) {}
@@ -272,24 +275,11 @@ bool PushcoreRoute::Open(const PcConfig& c, std::string& why)
              "; GPU " + adapter;
     if (m_k <= 1 && !m_sr) { why = "pushcore runs x1 here (" + m_desc + ")"; return false; }
 
-    // the ring: every picture of two pairs in flight, plus room; with held frames, a re-timed span (up to four source
-    // frames) handed out at once on top (pushcore hands its pictures out in order, so nothing waits behind a missing one)
-    m->slots = unsigned((m_held ? 7 : 2) * (m_k + 1) + 4);
+    if (!Rings(why)) return false;
     D3D11_TEXTURE2D_DESC td{};
     td.Width = UINT(m_ow); td.Height = UINT(m_oh); td.MipLevels = 1; td.ArraySize = 1; td.Format = m->fmt;
-    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.SampleDesc.Count = 1;
     int stage = 0;
-    m->ring.resize(m->slots);
-    for (auto& t : m->ring) if (SUCCEEDED(hr)) hr = m->dev->CreateTexture2D(&td, nullptr, &t);
-    if (m_allOut) {   // the decoded frames, kept as long as a picture of theirs may still be missing
-        D3D11_TEXTURE2D_DESC sd = td;
-        sd.Width = UINT(m_w); sd.Height = UINT(m_h);
-        m->srcRing.resize(size_t(Lag() + 6));
-        stage = 3;
-        for (auto& t : m->srcRing) if (SUCCEEDED(hr)) hr = m->dev->CreateTexture2D(&sd, nullptr, &t);
-        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (SUCCEEDED(hr) && (m_ow != m_w || m_oh != m_h)) { stage = 4; hr = m->dev->CreateTexture2D(&sd, nullptr, &m->downSrc); }
-    }
     D3D11_TEXTURE2D_DESC sd = td;
     sd.Width = UINT(m_w); sd.Height = UINT(m_h);   // the upload: a decoded frame
     sd.ArraySize = 1; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
@@ -301,6 +291,47 @@ bool PushcoreRoute::Open(const PcConfig& c, std::string& why)
     if (FAILED(hr)) { char e[96]; std::snprintf(e, sizeof(e), "cannot create the %s picture ring (step %d, 0x%08lX)", m_bits > 8 ? "P010" : "NV12", stage, static_cast<unsigned long>(hr)); why = e; return false; }
     return true;
 }
+
+// the ring: every picture of two pairs in flight, plus room; with held frames, a re-timed span (up to four source
+// frames) handed out at once on top (pushcore hands its pictures out in order, so nothing waits behind a missing one).
+// AllOut: the decoded frames too, kept as long as a picture of theirs may still be missing. Only ever grows (held
+// frames turned on mid-stream): the slots handed out so far stay valid.
+bool PushcoreRoute::Rings(std::string& why)
+{
+    const unsigned want = unsigned((m_held ? 7 : 2) * (m_k + 1) + 4);
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(m_ow); td.Height = UINT(m_oh); td.MipLevels = 1; td.ArraySize = 1; td.Format = m->fmt;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = S_OK;
+    int stage = 0;
+    while (SUCCEEDED(hr) && m->ring.size() < want) {
+        ComPtr<ID3D11Texture2D> t;
+        hr = m->dev->CreateTexture2D(&td, nullptr, &t);
+        if (SUCCEEDED(hr)) m->ring.push_back(t);
+    }
+    m->slots = unsigned(m->ring.size());
+    if (m_allOut && SUCCEEDED(hr)) {
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Width = UINT(m_w); sd.Height = UINT(m_h);
+        stage = 3;
+        while (SUCCEEDED(hr) && m->srcRing.size() < size_t(Lag() + 6)) {
+            ComPtr<ID3D11Texture2D> t;
+            hr = m->dev->CreateTexture2D(&sd, nullptr, &t);
+            if (SUCCEEDED(hr)) m->srcRing.push_back(t);
+        }
+        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (SUCCEEDED(hr) && !m->downSrc && (m_ow != m_w || m_oh != m_h)) { stage = 4; hr = m->dev->CreateTexture2D(&sd, nullptr, &m->downSrc); }
+    }
+    if (FAILED(hr)) {
+        char e[96];
+        std::snprintf(e, sizeof(e), "cannot create the %s picture ring (step %d, 0x%08lX)", m_bits > 8 ? "P010" : "NV12", stage, static_cast<unsigned long>(hr));
+        why = e;
+        return false;
+    }
+    return true;
+}
+
+size_t PushcoreRoute::RingSize() const { return m->ring.size() + m->srcRing.size(); }
 
 bool PushcoreRoute::BridgeHasAbi3()
 {
@@ -337,7 +368,7 @@ void PushcoreRoute::WithDevice(const std::function<void(void*, void*)>& fn)
     fn(m->dev.Get(), m->ctx.Get());
 }
 
-bool PushcoreRoute::Update(int contentClass, bool contentCg, int animeModel, std::string& why)
+bool PushcoreRoute::Update(int contentClass, bool contentCg, int animeModel, bool drawn, std::string& why)
 {
     Bridge& b = TheBridge();
     if (!m->pc || b.abi < 3) { why = "the bridge has no settings update (ABI 2)"; return false; }
@@ -346,18 +377,29 @@ bool PushcoreRoute::Update(int contentClass, bool contentCg, int animeModel, std
     pcc.width = uint32_t(m_w); pcc.height = uint32_t(m_h); pcc.bits = m_bits;
     pcc.sr = m_cfg.sr && m_cfg.outW > 0 && m_cfg.outH > 0 ? 1 : 0;
     pcc.out_width = uint32_t(std::max(0, m_cfg.outW)); pcc.out_height = uint32_t(std::max(0, m_cfg.outH));
-    pcc.real_out = m_allOut ? 1 : 0;
+    // the drawn treatment on: the real frames come from pushcore from now on (kept on when it goes off again: the
+    // decoder's pending pictures stay in order, and the ring that grew stays)
+    pcc.real_out = m_allOut || drawn ? 1 : 0;
     pcc.anime_model = animeModel >= 0 ? animeModel : PM_PC_ANIME_NONE;
     pcc.content_class = contentClass; pcc.content_cg = contentCg ? 1 : 0;
-    pcc.held_frames = m_cfg.drawn ? PM_PC_AUTO : 0;
-    pcc.deband = m_cfg.drawn ? PM_PC_AUTO : 0;
-    pcc.held_wait = m_cfg.drawn ? 1 : 0;
+    pcc.held_frames = drawn ? PM_PC_AUTO : 0;
+    pcc.deband = drawn ? PM_PC_AUTO : 0;
+    pcc.held_wait = drawn ? 1 : 0;
     char err[256] = {};
     const int r = b.update(m->pc, &pcc, err, sizeof(err));
     if (r < 0) { why = err[0] ? err : "refused"; return false; }
+    m_cfg.drawn = drawn;
     pm_pc_info info{};
     info.struct_size = sizeof(info);
-    if (b.output(m->pc, &info) == 0) { m_anime = info.anime_model; m_held = info.held_frames > 0; }
+    if (b.output(m->pc, &info) == 0) {
+        m_anime = info.anime_model; m_held = info.held_frames > 0; m_allOut = info.real_out != 0;
+        if (!Rings(why)) {   // no room for the held pictures: no held frames (the open's pair-by-pair wait)
+            m_held = false; m_cfg.drawn = false;
+            pcc.held_frames = 0; pcc.held_wait = 0;
+            b.update(m->pc, &pcc, err, sizeof(err));
+            return false;
+        }
+    }
     if (r == 0) m_desc = std::string(b.describe(m->pc));
     if (animeModel >= 0 && m_anime != animeModel) { why = "pushcore cannot run that anime upscaler on this GPU"; return false; }
     return true;
@@ -475,9 +517,9 @@ void PushcoreRoute::CollectInto(const std::vector<int64_t>& wantUs, int64_t tolU
 
 bool PushcoreRoute::Read(int slot, uint8_t* const dst[3], const int stride[3], bool semi, std::string& err)
 {
-    if (!m->pc || slot < 0 || unsigned(slot) >= m->slots + unsigned(m->srcRing.size())) { err = "no such picture"; return false; }
+    if (!m->pc || slot < 0 || !m->Valid(unsigned(slot))) { err = "no such picture"; return false; }
     // a decoded frame kept at the source size, shown at a larger output size: read at its own size, enlarged below
-    const bool enlarge = unsigned(slot) >= m->slots && (m_ow != m_w || m_oh != m_h);
+    const bool enlarge = unsigned(slot) >= Impl::kSrcBase && (m_ow != m_w || m_oh != m_h);
     const int sw = enlarge ? m_w : m_ow, sh = enlarge ? m_h : m_oh;
     ID3D11Texture2D* stage = enlarge ? m->downSrc.Get() : m->downStage.Get();
     Lock l(m->mutex);

@@ -132,8 +132,9 @@ typedef int (*pm_pc_push_d3d11_fn)(pm_pc *, void *, unsigned, int64_t, int, char
 typedef int (*pm_pc_poll_d3d11_fn)(pm_pc *, uint32_t, pm_pc_dest_tex_fn, pm_pc_done_fn, void *, char *, size_t);
 
 /* ABI 3. pm_pc_abi: the newest pm_pc_cfg this bridge takes (an older bridge has no such export: ABI 2).
- * pm_pc_update: the stream's settings again from cfg (same source, output size, sr and real_out as at the open: only
- * content_class, content_cg, anime_model, held_frames, deband and held_wait are read); returns 0 = applied (pushcore
+ * pm_pc_update: the stream's settings again from cfg (same source, output size and sr as at the open: only
+ * content_class, content_cg, anime_model, held_frames, deband, held_wait and real_out are read; real_out switches where
+ * the real frames come from at the next picture, so a caller turns held frames on only once it needs them); returns 0 = applied (pushcore
  * reloaded warm), 1 = nothing changed, < 0 = refused or failed (the open settings keep running). The multiplier stays the
  * open's; at that multiplier Auto's frame generation method follows the class (animation: DLSS-G after PushFlow).
  * pm_pc_output: what runs; 0 or < 0. */

@@ -137,10 +137,10 @@ static void RunSr(int bits, bool semi)
     std::printf("  stand-in (decoded frame enlarged): luma %.1f\n", lf);
     CHECK(std::fabs(lf - 180) < 1, "stand-in luma %.1f", lf);
     // drawn animation measured: the anime upscaler at the same size, then Video Super Resolution again
-    CHECK(r.Update(1, false, 0, why) && r.AnimeModel() == 0, "update to the anime model: %s", why.c_str());
+    CHECK(r.Update(1, false, 0, false, why) && r.AnimeModel() == 0, "update to the anime model: %s", why.c_str());
     CHECK(r.OutWidth() == ow && r.OutHeight() == oh, "the output size stays");
     std::printf("  after the update: %s\n", r.Describe().c_str());
-    CHECK(r.Update(3, false, -1, why) && r.AnimeModel() == -1, "update back: %s", why.c_str());
+    CHECK(r.Update(3, false, -1, false, why) && r.AnimeModel() == -1, "update back: %s", why.c_str());
     // still running
     const int s2 = r.PushPlanes(a.v, 2 * fus, false, err);
     const int s3 = r.PushPlanes(b.v, 3 * fus, true, err);
@@ -173,7 +173,7 @@ static void RunDrawn()
     for (int i = 0; i < 20 && (got[0] < 0 || got[1] < 0); ++i) r.CollectInto(want, fus / 4, 20, got);
     CHECK(got[0] >= 0 && got[1] >= 0, "drawn: pictures delivered");
     if (got[1] >= 0) CHECK(std::fabs(ReadLuma(r, got[1], 8, true) - 120) < 3, "drawn: generated picture");
-    CHECK(r.Update(1, false, -1, why), "drawn: the measured class goes in: %s", why.c_str());
+    CHECK(r.Update(1, false, -1, true, why), "drawn: the measured class goes in: %s", why.c_str());
     std::printf("  drawn measured: %s\n", r.Describe().c_str());
     // ContentDetect's GPU pass on a decoded texture of the route's device
     ID3D11Texture2D* tex = nullptr;
@@ -191,6 +191,53 @@ static void RunDrawn()
     if (tex) tex->Release();
 }
 
+// held frames follow the measured class: the route opens without them (pair by pair, the small ring); drawn measured ->
+// the settings update turns them on (every picture pushcore's, the ring grows, the slots handed out before stay valid);
+// measured as something else -> off again (every picture stays pushcore's)
+static void RunDrawnLate()
+{
+    pmk::PushcoreRoute r;
+    pmk::PcConfig c;
+    c.width = W; c.height = H; c.bits = 8; c.smoother = 2; c.displayHz = 240; c.warp = true;
+    std::string why;
+    if (!r.Open(c, why)) { CHECK(false, "open: %s", why.c_str()); return; }
+    const size_t ring0 = r.RingSize();
+    std::printf("open, not drawn: %s; ring %zu\n", r.Describe().c_str(), ring0);
+    CHECK(!r.AllOut() && !r.Held() && !r.Drawn() && r.Lag() == 0, "no held frames before the picture is measured as drawn");
+    CHECK(ring0 == size_t(2 * (r.K() + 1) + 4), "the small ring at the open (%zu)", ring0);
+    const int64_t fus = 41708;
+    Frame a(8, 60), b(8, 180);
+    std::string err;
+    const int s0 = r.PushPlanes(a.v, 0, false, err);
+    const int s1 = r.PushPlanes(b.v, fus, true, err);
+    CHECK(s0 >= 0 && s1 >= 0, "push: %s", err.c_str());
+    std::vector<int> got;
+    r.Collect({ fus / 2 }, double(fus), got);
+    CHECK(got.size() == 1 && got[0] >= 0, "pair by pair: the generated picture");
+    CHECK(r.Update(1, false, -1, true, why), "drawn measured: %s", why.c_str());
+    std::printf("  drawn: %s; held %d, lag %d, ring %zu\n", r.Describe().c_str(), r.Held() ? 1 : 0, r.Lag(), r.RingSize());
+    CHECK(r.Drawn() && r.AllOut(), "drawn: every picture from pushcore");
+    CHECK(r.Held() == (r.Lag() > 0), "lag follows held frames");
+    if (r.Held()) CHECK(r.RingSize() >= size_t(7 * (r.K() + 1) + 4 + r.Lag() + 6), "the ring grew for the held pictures (%zu)", r.RingSize());
+    // the pictures handed out before the switch still read back
+    CHECK(std::fabs(ReadLuma(r, s1, 8, true) - 180) < 1, "a slot from before the switch still reads back");
+    if (got.size() == 1 && got[0] >= 0) CHECK(std::fabs(ReadLuma(r, got[0], 8, true) - 120) < 3, "a generated picture from before the switch still reads back");
+    // pictures come as they are finished (CollectInto), the decoded frames now in the source ring
+    const int s2 = r.PushPlanes(a.v, 2 * fus, false, err);
+    const int s3 = r.PushPlanes(b.v, 3 * fus, true, err);
+    CHECK(s2 >= 0 && s3 >= 0 && s2 != s0 && s3 != s1, "push after the switch: %s", err.c_str());
+    std::vector<int64_t> want = { 2 * fus, 2 * fus + fus / 2 };
+    std::vector<int> got2(2, -1);
+    for (int i = 0; i < 20 && (got2[0] < 0 || got2[1] < 0); ++i) r.CollectInto(want, fus / 4, 20, got2);
+    CHECK(got2[0] >= 0 && got2[1] >= 0, "drawn: pictures delivered after the switch");
+    if (got2[1] >= 0) CHECK(std::fabs(ReadLuma(r, got2[1], 8, true) - 120) < 3, "drawn: generated picture after the switch");
+    CHECK(std::fabs(ReadLuma(r, s3, 8, true) - 180) < 1, "the decoded frame in the source ring reads back");
+    // live action measured: held frames off, every picture stays pushcore's, the ring stays
+    const size_t ring1 = r.RingSize();
+    CHECK(r.Update(3, false, -1, false, why), "not drawn: %s", why.c_str());
+    CHECK(!r.Held() && !r.Drawn() && r.AllOut() && r.Lag() == 0 && r.RingSize() == ring1, "held frames off again, AllOut kept");
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) { std::printf("usage: pushcore_route_test <stub core folder>\n"); return 2; }
@@ -204,6 +251,7 @@ int main(int argc, char** argv)
     RunSr(8, true);
     RunSr(10, false);
     RunDrawn();
+    RunDrawnLate();
     std::printf(fails ? "pushcore route: %d FAILED\n" : "pushcore route: all passed\n", fails);
     return fails ? 1 : 0;
 }

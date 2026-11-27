@@ -74,7 +74,12 @@ public:
     int AnimeModel() const { return m_anime; }
     // new measured content / anime model for the running stream (pm_pc_update: setSettings + reload, warm); false with
     // the reason when the bridge refused or cannot (the open settings keep running)
-    bool Update(int contentClass, bool contentCg, int animeModel, std::string& why);
+    // drawn: Auto's drawn treatment (held frames, the anime holds and deband) on or off; turning it on also makes every
+    // picture pushcore's (AllOut, kept from then on) and grows the ring for the held pictures
+    bool Update(int contentClass, bool contentCg, int animeModel, bool drawn, std::string& why);
+    bool Drawn() const { return m_cfg.drawn; }
+    // textures in the route's rings (output and decoded); tests
+    size_t RingSize() const;
     static bool BridgeHasAbi3();
     // runs fn(ID3D11Device*, ID3D11DeviceContext*) of the route's device with its context lock held (the decoder's own
     // GPU work there, e.g. ContentDetect's pass on the decoded textures)
@@ -110,6 +115,7 @@ public:
 
     struct Impl;
 private:
+    bool Rings(std::string& why);
     Impl* m = nullptr;
     int m_k = 1, m_bits = 8, m_w = 0, m_h = 0, m_ow = 0, m_oh = 0;
     bool m_sr = false, m_allOut = false, m_held = false;

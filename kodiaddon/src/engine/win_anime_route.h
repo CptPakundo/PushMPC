@@ -136,29 +136,44 @@ inline bool PushcoreWorth(int smoother, const WinAnimePlan& plan) { return smoot
 // ---------------------------------------------------------------------------------------------------- pushcore updates
 // The pushcore route's settings follow the measured class through the bridge's update (pm_pc_update: a warm reload
 // each, the frames in flight dropped): the anime model through AnimeAutoSwitch (at most once per 30 s), the drawn
-// treatment (held frames, line art, sign hold, the anime deband preset: Auto in the bridge) whenever the class or its
-// CG flag changes, at most once per kMinGapS. While the class is still being measured nothing changes.
+// treatment's settings (line art, sign hold, the anime deband preset: Auto in the bridge) whenever the class or its
+// CG flag changes, at most once per kMinGapS. Held frames themselves (re-timing: every picture then comes from pushcore,
+// up to 14 source frames late, in a ring about 3.5 times larger) run only while the picture is measured as drawn
+// (DrawnPolicy holdRepair: hand-drawn and drawn CG), switched at most once per kDrawnGapS (the first time at once);
+// the override (PUSHMPC_KODI_DRAWN: 0 off, 1 on from the open) replaces the measurement. While the class is still
+// being measured nothing changes.
 // modelIndex: the model id as the bridge takes it (PUSHCORE_ANIME_SR_*, the order of PushMpcAnimeSr.h), -1 = none.
 class PushcoreContentGate {
 public:
     static constexpr double kMinGapS = 10.0;
-    struct Ask { bool update = false; bool switched = false; int cls = 0; bool cg = false; std::string model; };
+    static constexpr double kDrawnGapS = 30.0;
+    struct Ask { bool update = false; bool switched = false; int cls = 0; bool cg = false; std::string model; bool drawn = false; bool drawnChanged = false; };
+
+    // running: whether the route runs the drawn treatment now; drawnOverride: -1 follow the measured class, 0 off, 1 on
+    void SetDrawn(bool running, int drawnOverride) { m_drawn = running; m_override = drawnOverride; }
+    bool Drawn() const { return m_drawn; }
+    // the drawn treatment wanted for a measured class
+    bool WantDrawn(int cls, bool cg) const { return m_override >= 0 ? m_override != 0 : pushmpc::content::PolicyFor(cls, cg).holdRepair; }
 
     // upscales: the route runs pushcore's upscaler (the anime model can change); running: the model pushcore runs ("")
     Ask Update(int cls, bool cg, double nowS, AnimeAutoSwitch& sw, bool upscales, const std::string& running)
     {
         Ask a;
         if (cls == pushmpc::content::kUnknown) return a;
-        a.cls = cls; a.cg = cg; a.model = running;
+        a.cls = cls; a.cg = cg; a.model = running; a.drawn = m_drawn;
         if (upscales && sw.Armed() && sw.Update(cls, cg, nowS)) { a.switched = true; a.model = sw.Next(); }
+        const bool want = WantDrawn(cls, cg);
+        if (want != m_drawn && (!m_drawnTried || nowS - m_drawnAt >= kDrawnGapS)) { a.drawn = want; a.drawnChanged = true; }
         const bool changed = !m_have || cls != m_cls || cg != m_cg;
-        a.update = a.switched || (changed && (!m_have || nowS - m_at >= kMinGapS));
+        a.update = a.switched || a.drawnChanged || (changed && (!m_have || nowS - m_at >= kMinGapS));
         return a;
     }
-    // after the update was tried (ok: pushcore runs it); a refused switch disarms the anime switch for the stream
+    // after the update was tried (ok: pushcore runs it); a refused switch disarms the anime switch for the stream; a
+    // refused drawn change is tried again kDrawnGapS later
     void Done(const Ask& a, bool ok, double nowS, AnimeAutoSwitch& sw)
     {
         if (a.switched) { if (ok) sw.Commit(nowS); else sw.Disarm(); }
+        if (a.drawnChanged) { if (ok) m_drawn = a.drawn; m_drawnTried = true; m_drawnAt = nowS; }
         m_have = true; m_cls = a.cls; m_cg = a.cg; m_at = nowS;
     }
 
@@ -167,6 +182,12 @@ private:
     int m_cls = 0;
     bool m_cg = false;
     double m_at = 0;
+    bool m_drawn = false, m_drawnTried = false;
+    int m_override = -1;
+    double m_drawnAt = 0;
 };
+
+// PUSHMPC_KODI_DRAWN: unset -1 (the measured class decides), "0" off, anything else on
+inline int KodiDrawnOverride(const char* env) { return !env || !*env ? -1 : env[0] == '0' ? 0 : 1; }
 
 } // namespace pmk

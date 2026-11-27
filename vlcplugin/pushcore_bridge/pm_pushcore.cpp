@@ -531,32 +531,34 @@ extern "C" int pm_pc_update(pm_pc* pc, const pm_pc_cfg* cfgIn, char* err, size_t
     std::string e;
     if (!ReadCfg(cfgIn, cfg, e)) { SetErr(err, errsize, e); return -1; }
     const pm_pc_cfg& o = pc->cfg;
-    if (cfg.width != o.width || cfg.height != o.height || cfg.bits != o.bits || cfg.sr != o.sr || cfg.real_out != o.real_out ||
+    if (cfg.width != o.width || cfg.height != o.height || cfg.bits != o.bits || cfg.sr != o.sr ||
         (cfg.sr && (cfg.out_width != o.out_width || cfg.out_height != o.out_height))) {
         SetErr(err, errsize, "the stream or its output differs from the open's: open again"); return -1;
     }
-    // what may change: the measured content and the caller's own switches
+    // what may change: the measured content and the caller's own switches; real_out too (a caller that turns held
+    // frames on once the picture is measured as drawn: its real frames come from pushcore from the next picture on)
     pm_pc_cfg next = o;
     next.content_class = cfg.content_class; next.content_cg = cfg.content_cg; next.anime_model = cfg.anime_model;
     next.held_frames = cfg.held_frames; next.deband = cfg.deband; next.held_wait = cfg.held_wait;   // measure stays the open's
+    next.real_out = cfg.real_out;
     CoreHost& host = CoreHost::Get();
     std::lock_guard<std::mutex> lk(host.Lock());
     if (!host.Owns(pc->token)) { SetErr(err, errsize, "pushcore was taken over by another instance"); return -1; }
     pm::Choice c;
     PushCoreSettings ps;
     Build(pc, next, false, c, ps);
-    if (memcmp(&ps, &pc->ps, sizeof(ps)) == 0) { pc->cfg = next; return 1; }
+    if (memcmp(&ps, &pc->ps, sizeof(ps)) == 0) { pc->cfg = next; pc->realOut = next.real_out != 0; return 1; }
     MutexLock vlc(pc->zc ? pc->zc->mutex : nullptr);
     const PushCoreSettings oldPs = pc->ps; const pm::Choice oldC = pc->c; const pm_pc_cfg oldCfg = pc->cfg;
     const uint32_t ow = pc->ow, oh = pc->oh;
     host.Release(pc->token);
-    pc->ps = ps; pc->c = c; pc->cfg = next;
+    pc->ps = ps; pc->c = c; pc->cfg = next; pc->realOut = next.real_out != 0;
     Reuse how = Reuse::Open; double ms = 0;
     bool ok = AcquireFor(pc, how, ms, e);
     if (ok && (host.OutInfo().width != ow || host.OutInfo().height != oh)) { ok = false; e = std::format("the output became {}x{}", host.OutInfo().width, host.OutInfo().height); host.Release(pc->token); }
     if (!ok) {
         // back to what ran (the core reloads with it); the caller keeps playing
-        pc->ps = oldPs; pc->c = oldC; pc->cfg = oldCfg;
+        pc->ps = oldPs; pc->c = oldC; pc->cfg = oldCfg; pc->realOut = oldCfg.real_out != 0;
         std::string e2;
         if (!AcquireFor(pc, how, ms, e2)) { SetErr(err, errsize, "update failed (" + e + ") and the open settings did not come back: " + e2); return -2; }
         SetErr(err, errsize, "update not applied: " + e);

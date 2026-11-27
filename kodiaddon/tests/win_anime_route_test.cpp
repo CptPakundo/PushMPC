@@ -192,12 +192,64 @@ static void PushcoreUpdates()
     CHECK(a.update && !a.switched && a.model.empty());
 }
 
+// held frames on the pushcore route follow the measured class (DrawnPolicy holdRepair), at most once per 30 s, the first
+// time at once; PUSHMPC_KODI_DRAWN overrides
+static void PushcoreDrawn()
+{
+    CHECK(pmk::KodiDrawnOverride(nullptr) == -1 && pmk::KodiDrawnOverride("") == -1);
+    CHECK(pmk::KodiDrawnOverride("0") == 0 && pmk::KodiDrawnOverride("1") == 1);
+    pmk::AnimeAutoSwitch sw;   // not armed: the class alone
+    pmk::PushcoreContentGate g;
+    g.SetDrawn(false, -1);
+    auto step = [&](int cls, bool cg, double t, bool ok = true) {
+        const pmk::PushcoreContentGate::Ask a = g.Update(cls, cg, t, sw, false, "");
+        if (a.update) g.Done(a, ok, t, sw);
+        return a;
+    };
+    pmk::PushcoreContentGate::Ask a = step(kUnknown, false, 0.5);
+    CHECK(!a.update && !a.drawnChanged && !g.Drawn());                 // measuring: nothing
+    a = step(kLive, false, 1.0);
+    CHECK(a.update && !a.drawnChanged && !a.drawn && !g.Drawn());       // live action: the class goes in, no held frames
+    a = step(kDrawn, false, 12.0);
+    CHECK(a.update && a.drawnChanged && a.drawn && g.Drawn());          // hand-drawn: held frames at once (first switch)
+    a = step(kDrawn, true, 25.0);
+    CHECK(a.update && !a.drawnChanged && g.Drawn());                    // drawn CG: held frames stay (holdRepair)
+    a = step(kLive, false, 36.0);
+    CHECK(a.update && !a.drawnChanged && a.drawn && g.Drawn());         // live 24 s after the switch: the class goes, held frames wait
+    a = step(kLive, false, 42.5);
+    CHECK(a.update && a.drawnChanged && !a.drawn && !g.Drawn());        // 30.5 s after the switch: off
+    a = step(kDrawn, false, 50.0);
+    CHECK(!a.update && !g.Drawn());                                     // drawn 7.5 s later: held back (both gaps)
+    a = step(kDrawn, false, 73.0);
+    CHECK(a.update && a.drawnChanged && g.Drawn());                     // 30.5 s after the last switch: on
+    // a refused switch (no room for the ring): tried again 30 s later
+    pmk::PushcoreContentGate f;
+    f.SetDrawn(false, -1);
+    a = f.Update(kDrawn, false, 1.0, sw, false, "");
+    CHECK(a.drawnChanged && a.drawn);
+    f.Done(a, false, 1.0, sw);
+    CHECK(!f.Drawn());
+    a = f.Update(kDrawn, false, 15.0, sw, false, "");
+    CHECK(!a.drawnChanged && !a.update);
+    a = f.Update(kDrawn, false, 31.5, sw, false, "");
+    CHECK(a.drawnChanged && a.drawn && a.update);
+    // the override: 0 never, 1 always (from the open)
+    pmk::PushcoreContentGate off; off.SetDrawn(false, 0);
+    CHECK(!off.Update(kDrawn, false, 1.0, sw, false, "").drawnChanged && !off.WantDrawn(kDrawn, false));
+    pmk::PushcoreContentGate on; on.SetDrawn(true, 1);
+    a = on.Update(kLive, false, 1.0, sw, false, "");
+    CHECK(!a.drawnChanged && a.drawn && on.WantDrawn(kLive, false));
+    // not drawn per the policy: live action, game footage
+    CHECK(!g.WantDrawn(kLive, false) && !g.WantDrawn(kGame, false) && g.WantDrawn(kDrawn, true));
+}
+
 int main()
 {
     Models();
     Switch();
     Windows();
     PushcoreUpdates();
+    PushcoreDrawn();
     std::printf(g_fail ? "win_anime_route_test: %d of %d check(s) failed\n" : "win_anime_route_test: all %d checks passed\n", g_fail ? g_fail : g_checks, g_checks);
     return g_fail ? 1 : 0;
 }

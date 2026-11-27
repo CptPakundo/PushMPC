@@ -1002,8 +1002,9 @@ private:
         c.warp = std::getenv("PUSHMPC_KODI_WARP") != nullptr;
         c.sr = sr; c.outW = plan.outW; c.outH = plan.outH;
         c.animeModel = -1;   // Video Super Resolution until the picture is measured as drawn (AnimeAutoSwitch)
-        // Auto's drawn treatment from the measured class (the decoder takes a pair's frames late); PUSHMPC_KODI_DRAWN=0 off
-        c.drawn = !(std::getenv("PUSHMPC_KODI_DRAWN") && std::getenv("PUSHMPC_KODI_DRAWN")[0] == '0');
+        // Auto's drawn treatment (held frames: the decoder takes a pair's frames late) follows the measured class: off
+        // until the picture is measured as drawn (the decoder's PushcoreContentGate); PUSHMPC_KODI_DRAWN=1 on from here
+        c.drawn = pmk::KodiDrawnOverride(std::getenv("PUSHMPC_KODI_DRAWN")) == 1;
         pmk::PushcoreRoute::SetLog([](const std::string& l) { Log(ADDON_LOG_INFO, "%s", l.c_str()); });
         auto pc = std::make_unique<pmk::PushcoreRoute>();
         std::string why;
@@ -1079,6 +1080,7 @@ public:
 #if defined(_WIN32)
         m_pc = m_in->TakePushcore();
         if (m_pc && m_pc->Upscales()) m_animeAuto.Arm(m_in->PcAnimeModel());   // pushcore's upscaler: VSR <-> the anime model
+        if (m_pc) m_pcGate.SetDrawn(m_pc->Drawn(), pmk::KodiDrawnOverride(std::getenv("PUSHMPC_KODI_DRAWN")));
 #endif
         const bool playback = m_in->Playback();
         const AVCodec* dec = nullptr;
@@ -1440,8 +1442,11 @@ private:
         if (!a.update) return;
         const int model = a.model.empty() ? -1 : pm::AnimeSrModelIndex(std::wstring(a.model.begin(), a.model.end()));
         std::string why;
-        const bool ok = m_pc->Update(cls, cg, model, why);
+        const bool ok = m_pc->Update(cls, cg, model, a.drawn, why);
         m_pcGate.Done(a, ok, now, m_animeAuto);
+        if (ok && a.drawnChanged)
+            Log(ADDON_LOG_INFO, "pushcore: held drawings %s (measured %s)%s", m_pc->Held() ? "re-timed from here (pictures up to 14 frames later)" : "no longer re-timed",
+                pushmpc::content::ClassName(cls), m_pc->Held() ? "" : "; every picture stays pushcore's");
         if (ok) Log(ADDON_LOG_INFO, "pushcore: content %s%s -> %s", pushmpc::content::ClassName(cls), cg ? " (rendered 3D CG)" : "", m_pc->Describe().c_str());
         else Log(ADDON_LOG_WARNING, "pushcore: content %s%s not applied: %s", pushmpc::content::ClassName(cls), cg ? " (rendered 3D CG)" : "", why.c_str());
     }
