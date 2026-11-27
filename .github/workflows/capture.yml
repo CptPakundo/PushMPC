@@ -289,7 +289,8 @@ jobs:
         run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
       # a window to capture: the hosted runner's session has no normal window on screen (--list printed none and
       # "--player Finder" found none, run 45946207451), so a small AppKit program shows the moving square (24 fps,
-      # 96 points a second, borderless: no title bar in the capture)
+      # 48 points a second in a 320x180 window, borderless: no title bar in the capture). Half size, like Linux's GPU runs:
+      # the runner is a 3-core VM whose paravirtual GPU matched a pair in about 314 ms at 640x360 (run 45958853836)
       - name: A window of a moving square
         run: |
           set -eu
@@ -297,21 +298,21 @@ jobs:
           import AppKit
           import QuartzCore
           final class V: NSView {
-              // the position from the clock (96 points a second, whole points), not from the number of timer ticks: on the
+              // the position from the clock (48 points a second, whole points), not from the number of timer ticks: on the
               // runner's VM the 24 Hz timer fired about 14 times a second, so a per-tick step moved the square at 55 points
               // a second and the motion check measured that (run 45953079462: mean 0.93 px, want 1.6)
               let t0 = CACurrentMediaTime()
               override func draw(_ r: NSRect) {
                   NSColor(calibratedWhite: 0.235, alpha: 1).setFill(); bounds.fill()
-                  let x = Int((CACurrentMediaTime() - t0) * 96) % 560
-                  NSColor.white.setFill(); NSRect(x: CGFloat(x), y: 148, width: 64, height: 64).fill()
+                  let x = Int((CACurrentMediaTime() - t0) * 48) % 280
+                  NSColor.white.setFill(); NSRect(x: CGFloat(x), y: 74, width: 32, height: 32).fill()
               }
           }
           let app = NSApplication.shared
           app.setActivationPolicy(.regular)
-          let w = NSWindow(contentRect: NSRect(x: 40, y: 200, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+          let w = NSWindow(contentRect: NSRect(x: 40, y: 200, width: 320, height: 180), styleMask: [.borderless], backing: .buffered, defer: false)
           w.title = "pmc-square"
-          let v = V(frame: NSRect(x: 0, y: 0, width: 640, height: 360)); w.contentView = v
+          let v = V(frame: NSRect(x: 0, y: 0, width: 320, height: 180)); w.contentView = v
           w.orderFrontRegardless()
           Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.needsDisplay = true }
           app.activate(ignoringOtherApps: true)
@@ -323,23 +324,27 @@ jobs:
           ./vsplugin/build-capture/pushmpc-capture --list
           ./vsplugin/build-capture/pushmpc-capture --list | grep -q pmc-square || { echo "::error::the square's window is not on screen"; exit 1; }
       - name: Capture the window (ScreenCaptureKit), or the plain message without the permission
-        # the GPU engine (MoltenVK on the VM's paravirtual GPU; its self-test above): the CPU engine took all three of the
-        # VM's cores (Auto x2 by its cost: an uneven 60 Hz cadence) and starved the square's window (13.6 captures a
-        # second; run 45953079462)
+        # the CPU engine at half size and 30 Hz: at 640x360 / 60 Hz the CPU engine took all three of the VM's cores (Auto
+        # x2 by its cost, 13.6 captures a second, run 45953079462) and the GPU engine on the paravirtual GPU matched a pair
+        # in about 314 ms (run 45958853836). A run that shows fewer than 90 % of the refreshes fails by name.
         run: |
           set +e
           b=./vsplugin/build-capture/pushmpc-capture
-          out=$(perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine gpu --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v 2>&1); rc=$?
+          out=$(perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 30 --engine cpu --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v 2>&1); rc=$?
           echo "$out"; echo "exit $rc"
           if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "::notice::no Screen Recording permission on this runner: the plain message and exit code 3"; exit 0; fi
           [ "$rc" = 0 ] || { echo "::error::capture failed (exit $rc)"; exit 1; }
-          perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine gpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
-          grep ' shown ' /tmp/capture-off.log | tail -1
+          perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 30 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
+          for n in auto off; do
+            last=$(grep ' shown ' /tmp/capture-$n.log | tail -1); echo "$n: $last"
+            shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
+            [ -n "$shown" ] && awk -v s="$shown" 'BEGIN { exit !(s < 27) }' && { echo "::error::capture ($n) showed $shown of 30 refreshes a second: the engine falls behind on this runner"; exit 1; }
+          done
           head -c 80 /tmp/auto.y4m | head -n 1
           w=$(head -n 1 /tmp/auto.y4m | tr ' ' '\n' | sed -n 's/^W//p')
-          speed=$(( 96 * w / 640 ))   # the window's points at the capture's pixel scale
+          speed=$(( 48 * w / 320 ))   # the window's points at the capture's pixel scale
           echo "dump width $w: $speed px a second"
-          python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed "$speed" --hz 60
+          python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed "$speed" --hz 30
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: capture-macos-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
