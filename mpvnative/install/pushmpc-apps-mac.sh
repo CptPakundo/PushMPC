@@ -98,8 +98,9 @@ is_proxy() { [ -f "$1" ] && grep -aq pushmpc_mpv_proxy_status "$1"; }
 # ---------------------------------------------------------------------------------------------- apps: the libmpv stand-in
 have_nm=0; [ "$(uname -s)" = Darwin ] && xcode-select -p >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 && have_nm=1
 is_libmpv() {   # is_libmpv <file>: libmpv's code is in it (it exports mpv_create; a program that only calls libmpv does not)
-    if [ "$have_nm" = 1 ]; then nm -gU "$1" 2>/dev/null | grep -q ' _mpv_create$'; return; fi
-    # without the Command Line Tools (nm would ask to install them): libmpv's own version banner, in no other file
+    if [ "$have_nm" = 1 ] && nm -gU "$1" 2>/dev/null | grep -q ' _mpv_create$'; then return 0; fi
+    # without the Command Line Tools (nm would ask to install them), or a file nm cannot read (a stripped or unusual
+    # binary): libmpv's own version banner, in no other file
     grep -a -q -F 'mpv/MPlayer/mplayer2 projects' "$1" 2>/dev/null && grep -a -q -F 'mpv_create' "$1" 2>/dev/null
 }
 app_lib() {   # the app's libmpv file (the real file, not a symlink): our stand-in, a libmpv*.dylib, or a framework binary
