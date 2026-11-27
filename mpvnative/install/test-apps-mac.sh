@@ -94,6 +94,17 @@ out=$($I install --target stremio --from "$T/from" --bridge "$T/bridge.so" --jso
 echo "$out" | grep -q "\"state\":\"capture-mode\".*$T/bin/pushmpc-capture --player" && [ "$rc" = 0 ] && ok "static with the capture host: its command, exit 0" || { echo "$out"; bad "static with capture host (exit $rc)"; }
 [ "$(sums)" = "$b2" ] && ok "static: nothing changed" || bad "static: files changed"
 
+# libmpv.2.dylib next to the program in Contents/MacOS, nothing in Frameworks (as Stremio 5.1.26 was taken for a built-in
+# player, players run 45958850658): found, installed, undone byte for byte
+printf 'calls mpv_create\n' > "$A/Stremio.app/Contents/MacOS/Stremio"
+printf 'libmpv %s mpv_create\n' "$BANNER" > "$A/Stremio.app/Contents/MacOS/libmpv.2.dylib"
+b4=$(sums)
+out=$($I install --target stremio --from "$T/from" --bridge "$T/bridge.so" --json 2>/dev/null)
+echo "$out" | grep -q '"target":"stremio".*"state":"installed".*48 frames in, 96 out' && grep -q pushmpc_mpv_proxy_status "$A/Stremio.app/Contents/MacOS/libmpv.2.dylib" \
+    && ok "libmpv in Contents/MacOS: installed" || { echo "$out"; bad "libmpv in Contents/MacOS: not installed"; }
+$I uninstall --json >/dev/null 2>&1
+[ "$(sums)" = "$b4" ] && ok "libmpv in Contents/MacOS: uninstall byte-identical" || bad "libmpv in Contents/MacOS: uninstall left differences"
+
 # team-bound entitlements on a hardened app: refused, nothing changed
 printf '<plist><dict><key>keychain-access-groups</key><array/></dict></plist>' > "$J/fake-entitlements.plist"
 b3=$(sums)

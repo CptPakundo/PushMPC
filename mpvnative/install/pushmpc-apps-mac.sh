@@ -20,7 +20,8 @@
 # Targets:
 #   stremio            /Applications/Stremio.app (Stremio 5)
 #   jellyfin-desktop   /Applications/Jellyfin Desktop.app, or Jellyfin Media Player.app
-#        The app's own libmpv is found in Contents/Frameworks: a libmpv*.dylib, else any library or framework binary
+#        The app's own libmpv is found in Contents/Frameworks (a libmpv*.dylib, else any library or framework binary),
+#        else as a libmpv*.dylib anywhere in Contents
 #        (Mpv.framework/Versions/A/Mpv, ...) that carries libmpv's code (exports mpv_create: nm when the Command Line
 #        Tools are there, else libmpv's own copyright line). It is renamed pushmpc-orig-libmpv.dylib and a small stand-in
 #        takes its name (apps/libmpv-proxy.dylib: every libmpv function goes to the original; after the app starts its
@@ -115,10 +116,17 @@ EOF
     while IFS= read -r f; do [ -n "$f" ] && is_libmpv "$f" && { printf '%s\n' "$f"; return 0; }; done <<EOF
 $fl
 EOF
+    # a libmpv*.dylib elsewhere in the bundle (Stremio 5.1.26 has none in Frameworks; players run 45958850658 found one
+    # in Contents and the old rule then took the app for one with libmpv built into its program)
+    f=$(find "$1/Contents" -type f -name 'libmpv*.dylib' ! -path '*/_CodeSignature/*' 2>/dev/null | LC_ALL=C sort | head -n 1)
+    [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
     return 1
 }
 app_static() {   # app_static <bundle>: the main program carries libmpv itself (nothing to stand in for)
-    for f in "$1"/Contents/MacOS/*; do [ -f "$f" ] && is_libmpv "$f" && return 0; done; return 1
+    # the bundle's program (CFBundleExecutable), not a library next to it in Contents/MacOS
+    exe=$(defaults read "$1/Contents/Info" CFBundleExecutable 2>/dev/null)
+    if [ -n "$exe" ] && [ -f "$1/Contents/MacOS/$exe" ]; then is_libmpv "$1/Contents/MacOS/$exe"; return; fi
+    for f in "$1"/Contents/MacOS/*; do case $f in *.dylib|*.so) continue ;; esac; [ -f "$f" ] && is_libmpv "$f" && return 0; done; return 1
 }
 capture_bin() { for c in "$(command -v pushmpc-capture 2>/dev/null)" /opt/homebrew/bin/pushmpc-capture /usr/local/bin/pushmpc-capture; do [ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }; done; return 1; }
 sig_kind() {   # sig_kind <bundle>: plain (loads ad-hoc libraries) | resign (hardened, library validation on) | team:<entitlement>

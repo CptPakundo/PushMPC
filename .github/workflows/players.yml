@@ -240,7 +240,7 @@ jobs:
           if printf '%s' "$st" | grep -q '"state":"installed".*frames in'; then echo "ok: stremio (its libmpv)"
           elif printf '%s' "$st" | grep -q '"state":"capture-mode".*built into the app itself' && ! find /Applications/Stremio.app/Contents -name 'libmpv*.dylib' | grep -q .; then
             echo "ok: stremio: libmpv is built into the app, capture mode named"
-          else echo "::error::stremio: neither installed nor capture mode for a built-in player (see the detail)"; bad=1; fi
+          else echo "::error::stremio: neither installed nor capture mode for a built-in player (see the detail)"; find /Applications/Stremio.app/Contents -maxdepth 4 \( -name 'libmpv*' -o -name '*.framework' \) | head -10; bad=1; fi
           $I status --json
           $I uninstall --from "$O" --json
           sums > "$RUNNER_TEMP/after.txt"
