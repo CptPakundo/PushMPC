@@ -713,8 +713,12 @@ int main()
         // 5. the rules themselves
         {
             learned::Values v; v[L"Gpu"] = L"x"; v[L"Model"] = L"3"; v[L"FgScale3"] = L"2.000";
+            const learned::Values before = v;
+            check(learned::OldModelKey(v) == L"model3", L"learned: model 3 values go to the subkey model3 (kept, not deleted)");
             learned::Reset(v, L"x");
-            check(v.count(L"FgScale3") == 0 && learned::Get(v, L"Model") == learned::kModel, L"learned: model 3 values are dropped (model 4)");
+            check(v.count(L"FgScale3") == 0 && learned::Get(v, L"Model") == learned::kModel && learned::OldModelKey(v).empty() && learned::OldModelKey(before) == L"model3",
+                  L"learned: model 4 starts over; nothing to keep once on model 4");
+            check(learned::OldModelKey(learned::Values{}).empty(), L"learned: an empty key has nothing to keep");
             std::vector<learned::Entry> h;
             learned::Record(h, 1, 1.0); learned::Record(h, 2, 3.0); double x = 0;
             check(learned::Resolve(h, 2, 1.0, x) && x == 1.0, L"learned: a slower session does not raise the saved value");
@@ -737,8 +741,7 @@ int main()
             check(c.pfFirst[1] == 5, L"speed test: a faster rerun replaces it");
             double f3[3] = { 9, 9, 9 }; learned::RecordBench(b, 21, f3, n, r); learned::LoadBench(b, 21, c);
             check(c.pfFirst[1] == 5, L"speed test: one slower rerun does not");
-            check(!learned::BenchStale(b, 30) && learned::BenchStale(b, 31), L"speed test: due again 10 sessions after its newest run");
-            check(learned::LoadBench(b, 21 + 40, c) && c.pfFirst[1] == 5, L"speed test: its results never expire (40 sessions later still the card's own, only due again)");
+            check(learned::LoadBench(b, 21 + 40, c) && c.pfFirst[1] == 5, L"speed test: its results never expire (40 sessions later still the card's own)");
         }
         wprintf(L"  learned: %d failed\n", learnFails);
     }

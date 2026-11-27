@@ -11,12 +11,14 @@
 //     (with Decide's own family factors) until enough sessions agree;
 //   - an entry older than kStaleSessions sessions expires: a value Auto stopped running goes back to its prior, so
 //     the candidate is tried again (the per-file step-downs and the 5-min failed-upgrade ban bound the churn);
-//   - the PushFlow speed test keeps the same history per tier value (its median, not its p95), the first run trusted
-//     (it measures this card): a faster rerun replaces a slower result, a slower one only when kKeepSessions runs agree;
-//     it runs again once its newest result is kBenchStaleSessions sessions old.
+//   - the PushFlow speed test keeps the same history per tier value (its p95, the statistic the priors were derived
+//     with), the first run trusted (it measures this card), its results never expire: a faster run replaces a slower
+//     result, a slower one only when kKeepSessions runs agree. It runs when a value is missing (as in 1.0); no
+//     periodic rerun (it would load the GPU during playback).
 // The plain values (FgScale3, NrMs, PfFirst1, ...) are the saved values the readers use (the filter and
 // vsplugin/src/autopick.h); "<name>.h" holds the history ("session:value;..."); "Session" counts the sessions.
-// Model 4: values learned under the old rules (model 3: every value followed the last measurement) are dropped.
+// Model 4: values learned under the old rules (model 3: every value followed the last measurement) are not used; the
+// filter moves them into the subkey "model3" (OldModelKey) on the first model-4 load, nothing is deleted.
 // Pure functions over a name -> text map, so filter/tools/auto_test.cpp runs the same rules without a registry or GPU.
 #pragma once
 
@@ -37,7 +39,6 @@ namespace pm::learned {
 inline constexpr const wchar_t* kModel = L"4";
 inline constexpr int kKeepSessions = 3;        // a slower value is saved only when this many sessions in a row agree
 inline constexpr uint32_t kStaleSessions = 20; // a value not measured for this many sessions goes back to its prior
-inline constexpr uint32_t kBenchStaleSessions = 10;   // the PushFlow speed test runs again after this many sessions
 
 using Values = std::map<std::wstring, std::wstring>;   // registry value name -> REG_SZ text
 
@@ -117,7 +118,19 @@ inline uint32_t BeginSession(Values& v)
     v[L"Session"] = std::to_wstring(s);
     return s;
 }
-// Values written under another model or for another GPU are dropped (the speed test included).
+// The subkey (of the Learned key) that keeps the values of an older model before Reset replaces them ("model3"), or
+// empty when there is nothing to keep (no values, or already this model). The filter copies them there (and a restored
+// older backup lands there again at the next load), so the user's learned state is never deleted.
+inline std::wstring OldModelKey(const Values& v)
+{
+    const std::wstring m = Get(v, L"Model");
+    if (m.empty() || m == kModel) return std::wstring();
+    std::wstring safe;
+    for (wchar_t ch : m) if (iswalnum(ch)) safe += ch;
+    return L"model" + (safe.empty() ? std::wstring(L"unknown") : safe);
+}
+// Values written under another model or for another GPU are dropped from the map (the caller keeps an older model's
+// values first: OldModelKey).
 inline void Reset(Values& v, const std::wstring& gpu)
 {
     if (Get(v, L"Gpu") == gpu && Get(v, L"Model") == kModel) return;
@@ -141,14 +154,7 @@ inline bool LoadBench(const Values& v, uint32_t session, Costs& c)
     c.pfRebuildBenched = bench && rebuild;
     return bench;
 }
-// newest speed test result older than kBenchStaleSessions (or none): run it again when PushFlow is picked
-inline bool BenchStale(const Values& v, uint32_t session)
-{
-    uint32_t newest = 0; bool any = false;
-    for (const auto& e : Decode(Get(v, L"PfFirst1.h"))) { newest = std::max(newest, e.session); any = true; }
-    return !any || newest + kBenchStaleSessions <= session;
-}
-// one speed test run (medians; < 0 = not measured): into the histories, the plain values rewritten
+// one speed test run (p95 per tier; < 0 = not measured): into the histories, the plain values rewritten
 inline void RecordBench(Values& v, uint32_t session, const double first[3], const double next[3], const double rebuild[3])
 {
     for (int t = 0; t < 3; ++t) {

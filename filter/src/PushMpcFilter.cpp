@@ -2819,7 +2819,6 @@ private:
     pm::Settings m_appliedSettings; pm::Display m_display, m_appliedDisplay; double m_appliedFps = 0;
     pm::Costs m_costs; bool m_learnedLoaded = false;
     uint32_t m_learnSession = 0;                         // this filter's session number (PushMpcLearned.h), 0 = not started
-    bool m_benchStale = false;                           // the PushFlow speed test is due again
     std::map<std::wstring, double> m_sessionLearned;     // what this session measured (m_autoLock): into the histories at SaveLearned
     struct TimedSample { PushCoreGpuTiming t; int fgLevel; int64_t qpc; };
     std::deque<TimedSample> m_autoTimings;
@@ -4960,6 +4959,21 @@ static pm::learned::Values ReadLearnedValues()
     RegCloseKey(k);
     return v;
 }
+// An older model's values (model 3: 1.0) are copied into Learned\<OldModelKey> (replacing what an earlier move put
+// there: a restored older backup is the newer state) before Reset replaces them; nothing learned is deleted.
+static void KeepOldModel(const pm::learned::Values& v)
+{
+    const std::wstring sub = pm::learned::OldModelKey(v);
+    if (sub.empty()) return;
+    const std::wstring path = L"Software\\PushMPC\\Learned\\" + sub;
+    RegDeleteTreeW(HKEY_CURRENT_USER, path.c_str());
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    for (const auto& [n, x] : v) RegSetValueExW(k, n.c_str(), 0, REG_SZ, (const BYTE*)x.c_str(), DWORD((x.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(k);
+    Log(std::format("learned GPU costs: the model {} values ({} values) are kept in HKCU\\Software\\PushMPC\\Learned\\{} (not used by model {})",
+        Narrow(pm::learned::Get(v, L"Model")), v.size(), Narrow(sub), Narrow(pm::learned::kModel)));
+}
 // writes the map back: every value of it, and the names it no longer has are deleted
 static void WriteLearnedValues(const pm::learned::Values& v)
 {
@@ -4988,14 +5002,14 @@ void CPushMpcFilter::LoadLearned()
     const bool first = m_learnSession == 0;
     if (first) {
         const bool dropped = pm::learned::Get(v, L"Gpu") != m_gpuName || pm::learned::Get(v, L"Model") != pm::learned::kModel;
-        if (dropped && !v.empty()) Log(std::format("learned GPU costs: model {} for {} (were: model {}, {}): the old values are dropped", Narrow(pm::learned::kModel), Narrow(m_gpuName),
+        if (dropped && !v.empty()) Log(std::format("learned GPU costs: model {} for {} (were: model {}, {}): starting over", Narrow(pm::learned::kModel), Narrow(m_gpuName),
             Narrow(pm::learned::Get(v, L"Model")), Narrow(pm::learned::Get(v, L"Gpu"))));
+        KeepOldModel(v);
         pm::learned::Reset(v, m_gpuName);
         m_learnSession = pm::learned::BeginSession(v);
     }
     std::lock_guard<std::mutex> lk(m_autoLock);
     const bool bench = pm::learned::LoadBench(v, m_learnSession, m_costs);
-    m_benchStale = pm::learned::BenchStale(v, m_learnSession);
     if (pm::ApplyMeasuredCard(m_costs)) Log(std::format("card factor {:.2f} measured by PushFlow's speed test (replaces the name table)", m_costs.card));
     if (!first) return;
     const int n = pm::learned::LoadCosts(v, m_learnSession, m_costs);
@@ -5003,9 +5017,9 @@ void CPushMpcFilter::LoadLearned()
     pm::learned::SaveSession(v, m_learnSession, {}, m_costs);
     WriteLearnedValues(v);
     gl.unlock();
-    Log(std::format("learned GPU costs for {} (session {}, {} values trusted): VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K{}), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
+    Log(std::format("learned GPU costs for {} (session {}, {} values trusted): VFG Medium x{:.2f}, High x{:.2f}, DLSS-G x{:.2f}, PushFlow {} (Balanced {:.1f} + {:.1f} ms per frame at 4K), VSR x{:.2f}, clean up {:.2f} ms, deband {:.3f} ms at 1080p, rest of the graph {:.2f} ms at 4K{}",
         Narrow(m_gpuName), m_learnSession, n, m_costs.fgScale[pm::kKeyVfgMed], m_costs.fgScale[pm::kKeyVfgHigh], m_costs.fgScale[pm::kKeyDlssg], bench ? "benched" : "priors",
-        m_costs.pfFirst[1], m_costs.pfNext[1], m_benchStale && bench ? "; speed test due again" : "", m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080, m_costs.base4k, m_costs.learnedBase ? "" : " (prior)"));
+        m_costs.pfFirst[1], m_costs.pfNext[1], m_costs.vsrScale, m_costs.nrMs, m_costs.deband1080, m_costs.base4k, m_costs.learnedBase ? "" : " (prior)"));
 }
 void CPushMpcFilter::SaveLearned()
 {
@@ -5015,6 +5029,7 @@ void CPushMpcFilter::SaveLearned()
     if (m_gpuName.empty() || !m_learnSession || measured.empty()) return;
     std::lock_guard<std::mutex> gl(g_learnedLock);
     pm::learned::Values v = ReadLearnedValues();
+    KeepOldModel(v);
     pm::learned::Reset(v, m_gpuName);   // another GPU's or model's values: start over
     pm::learned::SaveSession(v, m_learnSession, measured, c);
     WriteLearnedValues(v);
@@ -5029,8 +5044,8 @@ void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
 {
     if (!g_benchFn || m_rt.root.empty() || g_benchStarted.exchange(true)) return;
     // once per card; once more for a card measured before the flow-once rebuild was (PushFlow above 4x needs its cost)
-    // again once its newest result is 10 sessions old (PushMpcLearned.h: a faster run replaces a slower result at once)
-    { std::lock_guard<std::mutex> lk(m_autoLock); if (m_costs.pfBenched && !m_benchStale && (m_costs.pfRebuildBenched || pm::PushFlowCeiling() <= pm::kPushFlowOnceAbove)) return; }
+    // (no periodic rerun: it would load the GPU while a file plays; a later run, when one happens, replaces a slower result)
+    { std::lock_guard<std::mutex> lk(m_autoLock); if (m_costs.pfBenched && (m_costs.pfRebuildBenched || pm::PushFlowCeiling() <= pm::kPushFlowOnceAbove)) return; }
     struct Ctx { std::wstring root, gpu; uint64_t luid; UINT w, h; HMODULE self; uint32_t session; };
     auto* ctx = new Ctx{ m_rt.root, m_gpuName, m_gpuLuid, std::max<UINT>(w, 640), std::max<UINT>(h, 360), nullptr, m_learnSession };
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Log), &ctx->self);
@@ -5044,25 +5059,26 @@ void CPushMpcFilter::MaybeBenchPushFlow(UINT w, UINT h)
             const int64_t q0 = Qpc();
             Log(std::format("PushFlow speed test on {} at {}x{} (session {})", Narrow(c->gpu), b.width, b.height, c->session));
             const int r = SehBench(c->luid, c->root.c_str(), &b);
-            // the median of the pairs (the p95 of 12 pairs is about their maximum: one loaded pair set it)
-            Log(std::format("PushFlow speed test {} in {:.0f} ms: first/next/rebuild median Fast {:.2f}/{:.2f}/{:.2f}, Balanced {:.2f}/{:.2f}/{:.2f}, Quality {:.2f}/{:.2f}/{:.2f} ms "
-                "(p95 Balanced {:.2f}/{:.2f}/{:.2f}); {}",
-                r == PUSHCORE_OK ? "done" : "FAILED", QpcMs(Qpc() - q0), b.firstMsP50[0], b.nextMsP50[0], b.rebuildMsP50[0], b.firstMsP50[1], b.nextMsP50[1], b.rebuildMsP50[1],
-                b.firstMsP50[2], b.nextMsP50[2], b.rebuildMsP50[2], b.firstMsP95[1], b.nextMsP95[1], b.rebuildMsP95[1], b.note));
-            if (r == PUSHCORE_OK && b.firstMsP50[1] > 0 && c->session) {
+            // p95, the statistic the priors were derived with (the median is logged; switching needs priors re-derived on a free PC)
+            Log(std::format("PushFlow speed test {} in {:.0f} ms: first/next/rebuild p95 Fast {:.2f}/{:.2f}/{:.2f}, Balanced {:.2f}/{:.2f}/{:.2f}, Quality {:.2f}/{:.2f}/{:.2f} ms "
+                "(median Balanced {:.2f}/{:.2f}/{:.2f}); {}",
+                r == PUSHCORE_OK ? "done" : "FAILED", QpcMs(Qpc() - q0), b.firstMsP95[0], b.nextMsP95[0], b.rebuildMsP95[0], b.firstMsP95[1], b.nextMsP95[1], b.rebuildMsP95[1],
+                b.firstMsP95[2], b.nextMsP95[2], b.rebuildMsP95[2], b.firstMsP50[1], b.nextMsP50[1], b.rebuildMsP50[1], b.note));
+            if (r == PUSHCORE_OK && b.firstMsP95[1] > 0 && c->session) {
                 const double pix = double(b.width) * b.height / (3840.0 * 2160.0), size = 0.6 + 0.4 * pix;   // to 4K as FgPrior scales it
                 double first[3], next[3], rebuild[3];
                 for (int t = 0; t < 3; ++t) {
                     // a tier that did not run: from Balanced, by the 5090's tier ratios
                     const double ratio[3] = { 4.49 / 5.68, 1.0, 11.96 / 5.68 };
-                    first[t] = (b.firstMsP50[t] > 0 ? b.firstMsP50[t] : b.firstMsP50[1] * ratio[t]) / size;
-                    next[t] = (b.nextMsP50[t] > 0 ? b.nextMsP50[t] : b.nextMsP50[1] * ratio[t]) / size;
+                    first[t] = (b.firstMsP95[t] > 0 ? b.firstMsP95[t] : b.firstMsP95[1] * ratio[t]) / size;
+                    next[t] = (b.nextMsP95[t] > 0 ? b.nextMsP95[t] : b.nextMsP95[1] * ratio[t]) / size;
                     // flow once: a measured tier's rebuild, else Balanced's (the same pass at every tier), else not measured
-                    const double rb = b.rebuildMsP50[t] > 0 ? b.rebuildMsP50[t] : b.rebuildMsP50[1] > 0 ? b.rebuildMsP50[1] : -1;
+                    const double rb = b.rebuildMsP95[t] > 0 ? b.rebuildMsP95[t] : b.rebuildMsP95[1] > 0 ? b.rebuildMsP95[1] : -1;
                     rebuild[t] = rb > 0 ? rb / size : -1;
                 }
                 std::lock_guard<std::mutex> gl(g_learnedLock);
                 pm::learned::Values v = ReadLearnedValues();
+                KeepOldModel(v);
                 pm::learned::Reset(v, c->gpu);
                 pm::learned::RecordBench(v, c->session, first, next, rebuild);
                 v[L"PfBenchNote"] = Widen(b.note);
