@@ -80,6 +80,14 @@ check macnovout core vout -; no_pushmpc_keys macnovout
 run_case hw native '[avcodec]
 avcodec-hw=vaapi_drm' :
 check hw avcodec avcodec-hw vaapi_drm; no_pushmpc_keys hw
+# 8b. Linux: the user chose avcodec-hw after install (PushMPC had left "none"): their choice stays
+run_case hwuser native '[avcodec]
+avcodec-hw=vaapi_drm' 'vlcrc_set "$RC" avcodec avcodec-hw vdpau_avcodec'
+check hwuser avcodec avcodec-hw vdpau_avcodec; no_pushmpc_keys hwuser
+# 8c. Linux, no avcodec-hw before: PushMPC's "none" goes
+run_case hwnone native '[core]
+fullscreen=1' :
+check hwnone avcodec avcodec-hw -; no_pushmpc_keys hwnone
 # 9. the user changed vout after install (macOS): their choice stays
 run_case macuser macos '[core]
 fullscreen=1' 'vlcrc_set "$RC" core vout macosx'

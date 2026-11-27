@@ -195,6 +195,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # the installer's vlcrc handling (install, VLC's rewrite, uninstall: a user's own values back, no PushMPC key
+      # left) on synthetic files, under dash (Ubuntu's /bin/sh) and bash
+      - name: pushmpc-vlc.sh's vlcrc cases (dash, bash)
+        run: |
+          dash vlcplugin/install/pushmpc-vlc-test.sh
+          bash vlcplugin/install/pushmpc-vlc-test.sh
       - uses: actions/download-artifact@v4
         with: { path: art }
       - name: VLC (Ubuntu 24.04), Xvfb, Mesa
@@ -564,6 +570,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      # the Windows installer's vlcrc handling on synthetic files, in PowerShell 7 and in Windows PowerShell 5.1 (the
+      # one Setup runs it with)
+      - name: pushmpc-vlc.ps1's vlcrc cases (pwsh, Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File vlcplugin/install/pushmpc-vlc-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File vlcplugin/install/pushmpc-vlc-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          exit 0
       - name: Build pm_pushcore.dll and the stub core
         shell: bash
         run: |

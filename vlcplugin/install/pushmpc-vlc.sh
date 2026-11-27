@@ -126,6 +126,10 @@ restore_value() {
   case " $3 " in *" * "*|*" $cur "*) ;; *) return 0 ;; esac
   if pre_has "$1" "$2"; then vlcrc_set "$RC" "$1" "$2" "$(pre_get "$1" "$2")"; else vlcrc_del "$RC" "$1" "$2"; fi
 }
+# hw_set <value> / hw_del: avcodec-hw as PushMPC leaves it (install, the hardware self-test), recorded in
+# $RC.pushmpc-hw so uninstall restores the key only while it still holds PushMPC's value (a user's later choice stays)
+hw_set() { vlcrc_set "$RC" avcodec avcodec-hw "$1"; printf '%s\n' "$1" > "$RC.pushmpc-hw"; }
+hw_del() { vlcrc_del "$RC" avcodec avcodec-hw; : > "$RC.pushmpc-hw"; }
 # vlcrc_del_pushmpc_unrecorded: pushmpc-* keys VLC may have written outside [pushmpc]: out unless the backup has them
 vlcrc_del_pushmpc_unrecorded() {
   [ -f "$RC" ] || return 0
@@ -264,7 +268,7 @@ EOF
   vlcrc_set "$RC" core video-filter "$(filters_add "$(vlcrc_get "$RC" core video-filter)")"
   vlcrc_set "$RC" pushmpc pushmpc-smoother 0
   gl_fork_vout "$tgt"
-  [ "$tgt" != macos ] && vlcrc_set "$RC" avcodec avcodec-hw none
+  [ "$tgt" != macos ] && hw_set none
   [ "$tgt" = macos ] && [ -f "$DIR/libpushmpc_macosx_plugin.dylib" ] && vlcrc_set "$RC" core vout "pushmpc_macosx,any"
   if [ "$tgt" = snap ]; then
     intfs="$(vlcrc_get "$RC" core extraintf)"
@@ -376,16 +380,16 @@ selftest_hw() {
   if [ "$tier" = interop ]; then
     old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
     # the user's own setting comes back (one that was already "none" stays: their choice)
-    if [ -n "$old" ]; then vlcrc_set "$RC" avcodec avcodec-hw "$old"; else vlcrc_del "$RC" avcodec avcodec-hw; fi
+    if [ -n "$old" ]; then hw_set "$old"; else hw_del; fi
     printf 'ok interop %s %s\n%s\n' "$ok" "$now" "$result" > "$state"
     say "hardware self-test ($tgt): passed through $ok with VLC's OpenGL interop; hardware decoding is on with PushMPC ($result)"
   elif [ "$tier" = direct ]; then
     old="$(vlcrc_get "$RC.pushmpc-backup" avcodec avcodec-hw)"
-    if [ "$old" = none ]; then vlcrc_set "$RC" avcodec avcodec-hw none; else vlcrc_set "$RC" avcodec avcodec-hw "$ok"; fi
+    if [ "$old" = none ]; then hw_set none; else hw_set "$ok"; fi
     printf 'ok direct %s %s\n%s\n%s\n' "$ok" "$now" "$result" "${notes#; }" > "$state"
     say "hardware self-test ($tgt): passed through $ok (decoder only, VLC copies for the display); avcodec-hw=$ok ($result)"
   else
-    vlcrc_set "$RC" avcodec avcodec-hw none
+    hw_set none
     printf 'failed %s\n%s\n' "$now" "${notes#; }" > "$state"
     say "hardware self-test ($tgt): not passed (${notes#; }); software decoding stays on"
   fi
@@ -417,7 +421,7 @@ uninstall_one() {
   # nothing changed vlcrc since install: the file as it was, byte for byte (or no file, when install created it)
   if [ -f "$RC" ] && [ -f "$RC.pushmpc-installed" ] && [ "$(sha_of "$RC")" = "$(cat "$RC.pushmpc-installed")" ]; then
     if [ -f "$RC.pushmpc-absent" ]; then rm -f "$RC"; elif [ -f "$RC.pushmpc-backup" ]; then mv -f "$RC.pushmpc-backup" "$RC"; fi
-    rm -f "$RC.pushmpc-installed" "$RC.pushmpc-absent" "$RC.pushmpc-backup"
+    rm -f "$RC.pushmpc-installed" "$RC.pushmpc-absent" "$RC.pushmpc-backup" "$RC.pushmpc-hw"
     rmdir "$(dirname "$RC")" 2>/dev/null || true
     say "PushMPC for VLC removed ($tgt); $RC as it was"
     return 0
@@ -431,13 +435,17 @@ uninstall_one() {
     restore_list core video-filter "postproc pushmpc_out"
     restore_value core vout "pushmpc_macosx,any pushmpc_gl"
     restore_value pushmpc pushmpc-smoother "*"
-    # avcodec-hw: install and the hardware self-test set it (Linux; macOS leaves it alone)
-    [ "$tgt" = macos ] || restore_value avcodec avcodec-hw "*"
+    # avcodec-hw: install and the hardware self-test set it (Linux; macOS leaves it alone); only while it still holds
+    # the value PushMPC left ($RC.pushmpc-hw; "none" for an install from before that record)
+    if [ "$tgt" != macos ]; then
+      if [ -f "$RC.pushmpc-hw" ]; then hwours="$(cat "$RC.pushmpc-hw")"; else hwours=none; fi
+      [ -n "$hwours" ] && restore_value avcodec avcodec-hw "$hwours"
+    fi
     # any other PushMPC module option: the pre-install value where there was one, else out
     for k in $(vlcrc_active "$RC" | sed -n 's/^\(pushmpc-[A-Za-z0-9_-]*\)=.*/\1/p' | sort -u); do restore_value pushmpc "$k" "*"; done
     vlcrc_del_pushmpc_unrecorded
   fi
-  rm -f "$RC.pushmpc-backup"
+  rm -f "$RC.pushmpc-backup" "$RC.pushmpc-hw"
   # install created vlcrc and VLC rewrote it since (VLC writes its whole configuration, every option a commented
   # default): with PushMPC's keys out and no active setting left, it holds nothing of the user's: removed, as before
   # install. Any active line (a setting the user or VLC's GUI made) keeps the file.
