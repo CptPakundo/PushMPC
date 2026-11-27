@@ -18,6 +18,7 @@ ap.add_argument("--expect", required=True, choices=["base", "hw", "pass"])
 ap.add_argument("--mult", type=int, default=1)
 ap.add_argument("--src-frames", type=int, default=0)
 ap.add_argument("--need", action="append", default=[], help="a regular expression the log must match (repeatable)")
+ap.add_argument("--forbid", action="append", default=[], help="a regular expression the log must not match (repeatable)")
 ap.add_argument("--skip-motion", action="store_true", help="judge decoder, path and counters only (a renderer too slow for real time)")
 ap.add_argument("--zc", choices=["on", "off", "any"], default="any", help="zero copy (VA-API dmabufs into the GPU engine)")
 a = ap.parse_args()
@@ -63,6 +64,8 @@ elif a.expect == "pass":
     if "PushMPC: hw path ok" in log: problems.append("PushMPC used a driver that loses uploads")
 for rx in a.need:
     if not re.search(rx, log): problems.append(f"log lacks /{rx}/")
+for rx in a.forbid:
+    if re.search(rx, log): problems.append(f"log has /{rx}/")
 if a.zc == "on":
     if "PushMPC: zero copy on" not in log: problems.append("zero copy not on")
     zm = re.findall(r"zero copy on \(in (\d+), out (\d+), fell back (\d+)\)", log)
