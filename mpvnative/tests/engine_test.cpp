@@ -586,6 +586,59 @@ static void SetEnv(const char* n, const char* v)
 #endif
 }
 
+// A still with Dedup on (the CPU engine's held frames): a moving box, a 12-frame freeze mid-stream, motion again, and a
+// freeze at the end of the stream. A still must keep the output going at k pictures per source frame (never collapse to
+// one picture for its length), the timestamps rising, and nothing withheld at the end beyond the lookahead.
+static void TestStill(const pmeng_api* api, int k)
+{
+    const int W = 320, H = 160;
+    pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
+    pmeng_stream st{}; st.struct_size = sizeof(st); st.width = W; st.height = H; st.fmt = PMENG_FMT_YUV420P; st.fps_num = 24; st.fps_den = 1;
+    pmeng_output out{}; out.struct_size = sizeof(out);
+    char err[512] = {};
+    const std::string opts = "smoother=" + std::to_string(k) + "\nportable_threads=2\nbackend=portable-cpu\ndedup=yes\n";
+    void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
+    CHECK(h, "still x%d: open: %s", k, err);
+    if (!h) return;
+    // source frame s: the box's x (a freeze repeats the last position)
+    std::vector<int> pos;
+    for (int s = 0; s < 16; ++s) pos.push_back(4 * s);                 // motion
+    for (int s = 0; s < 12; ++s) pos.push_back(pos.back());            // a still mid-stream (12 repeats > the lookahead)
+    for (int s = 0; s < 12; ++s) pos.push_back(pos.back() + 4);        // motion
+    for (int s = 0; s < 10; ++s) pos.push_back(pos.back());            // a still at the end of the stream
+    const int N = int(pos.size());
+    int outputs = 0, back = 0, longest = 0, run = 0;
+    int64_t lastPts = -1;
+    for (int s = 0; s < N; ++s) {
+        Pic src(W, H, PMENG_FMT_YUV420P);
+        Box(src, 8 + pos[size_t(s)]);
+        pmeng_image im = src.Img();
+        CHECK(api->submit(h, &im, int64_t(s) * 41667, 0) == PMENG_OK, "still x%d: submit %d", k, s);
+        pmeng_out_info oi{};
+        int here = 0;
+        while (api->peek(h, &oi, 0) == 1) {
+            Pic dst(W, H, PMENG_FMT_YUV420P);
+            pmeng_image di = dst.Img();
+            api->write(h, &di);
+            ++outputs; ++here;
+            // the output's place on the k grid: subframe j > 0 lies between source - 1 and source, 0 is the source itself
+            const int64_t t = oi.subframe ? (int64_t(oi.source) - 1) * k + oi.subframe : int64_t(oi.source) * k;
+            if (t <= lastPts) ++back;
+            lastPts = t;
+        }
+        run = here ? 0 : run + 1;                                     // source frames in a row that gave no output
+        longest = std::max(longest, run);
+    }
+    const int look = 3;   // Dedup's lookahead (cadence.h / held_dedup.h)
+    std::printf("still x%d: %d sources, %d outputs (ideal %d), at most %d source frames in a row without an output, %d steps back\n",
+                k, N, outputs, 1 + (N - 1) * k, longest, back);
+    CHECK(back == 0, "still x%d: %d outputs out of order", k, back);
+    CHECK(longest <= look + 1, "still x%d: %d source frames in a row without an output (a still collapsed)", k, longest);
+    CHECK(outputs >= 1 + (N - 1 - look) * k, "still x%d: %d outputs, at least %d expected (k per source frame, the lookahead's tail aside)",
+          k, outputs, 1 + (N - 1 - look) * k);
+    api->close(h);
+}
+
 int main()
 {
     // CPU / WARP test runs never pick a GPU on their own: every Vulkan driver hidden unless PUSHMPC_TEST_GPU=1 or
@@ -607,6 +660,8 @@ int main()
     TestCpu(api, PMENG_FMT_P010, "p010");
     TestSpacing(api, 4);
     TestSpacing(api, 8);
+    TestStill(api, 2);
+    TestStill(api, 4);
     if (gpuAsked || vulkanAsked) {
         TestVulkanHost(api, PMENG_FMT_YUV420P, "yuv420p", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_YUV420P10, "yuv420p10", vulkanAsked);

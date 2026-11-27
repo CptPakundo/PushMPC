@@ -125,6 +125,20 @@ static void TestRules()
         for (auto& x : a) { if (x.kind == Action::Drop) ++drops; else { ++subs; if (x.gap > 1) ++longGap; } }
         Check(drops == 0 && subs == 9 && longGap == 0, "a still longer than the lookahead: every frame to the graph, nothing re-timed");
     }
+    // a still at the end of the stream: the frames waiting (up to the lookahead) and every later repeat reach the graph
+    // as they are once the stream ends (pushcore: Flush on the final frame), so the still is shown for its whole length
+    for (int tail : { 2, 3, 7 }) {
+        Retimer r; r.Configure(4, 8);
+        std::vector<Action> a;
+        r.Push(0, false, true, a); r.Push(1, false, false, a);
+        for (int i = 0; i < tail; ++i) r.Push(uint64_t(2 + i), true, false, a);
+        r.Flush(a);
+        int drops = 0, subs = 0, longGap = 0;
+        for (auto& x : a) { if (x.kind == Action::Drop) ++drops; else { ++subs; if (x.gap > 1) ++longGap; } }
+        Check(subs == 2 + tail && r.Waiting() == 0 && longGap == 0,
+              "a still of " + std::to_string(tail) + " repeats at the end of the stream: every frame reaches the graph (" +
+              std::to_string(subs) + " of " + std::to_string(2 + tail) + ", " + std::to_string(drops) + " dropped)");
+    }
     // a seek in the middle of a held run
     {
         Retimer r; r.Configure(4, 8);
