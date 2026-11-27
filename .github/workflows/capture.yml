@@ -278,11 +278,10 @@ jobs:
           cat > /tmp/pmc_square.swift <<'EOF'
           import AppKit
           final class V: NSView {
-              let t0 = Date()
+              var n = 0   // one step of 4 points per timer tick (24 a second): no repeated or skipped position
               override func draw(_ r: NSRect) {
                   NSColor(calibratedWhite: 0.235, alpha: 1).setFill(); bounds.fill()
-                  let t = Date().timeIntervalSince(t0), f = (t * 24).rounded(.down) / 24
-                  NSColor.white.setFill(); NSRect(x: (f * 96).truncatingRemainder(dividingBy: 560), y: 148, width: 64, height: 64).fill()
+                  NSColor.white.setFill(); NSRect(x: CGFloat((n * 4) % 560), y: 148, width: 64, height: 64).fill()
               }
           }
           let app = NSApplication.shared
@@ -291,7 +290,7 @@ jobs:
           w.title = "pmc-square"
           let v = V(frame: NSRect(x: 0, y: 0, width: 640, height: 360)); w.contentView = v
           w.orderFrontRegardless()
-          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.needsDisplay = true }
+          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.n += 1; v.needsDisplay = true }
           app.activate(ignoringOtherApps: true)
           app.run()
           EOF

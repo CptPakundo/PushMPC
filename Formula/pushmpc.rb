@@ -117,9 +117,9 @@ class Pushmpc < Formula
     apple = OS.mac? ? "ON" : "OFF"
     # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers;
     # it refuses to patch anything when IINA's FFmpeg majors differ from these
-    bridge = OS.mac? ? ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{formula_opt_include("ffmpeg")}", "-DMPV_INCLUDE=#{formula_opt_include("mpv")}"] : []
+    bridge = OS.mac? ? ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}"] : []
     # the ml backend: ONNX Runtime's C API headers from Homebrew's onnxruntime (loaded at run time, nothing linked)
-    ort = formula_opt_include("onnxruntime")
+    ort = Formula["onnxruntime"].opt_include
     ort /= "onnxruntime" if (ort/"onnxruntime/onnxruntime_c_api.h").exist?
     # the portable GPU engine (Vulkan: MoltenVK on macOS): the pinned headers and volk, the checked-in SPIR-V
     gpu = buildpath/"gpu-deps"
@@ -144,7 +144,7 @@ class Pushmpc < Formula
       # the same pinned Vulkan-Headers and volk as the plugin's GPU engine (staged above)
       system "cmake", "-S", "vsplugin", "-B", "build-capture", "-DPUSHMPC_APPLE=ON", "-DPMML_ORT_INCLUDE=#{ort}",
              "-DPMVS_VULKAN_HEADERS_DIR=#{gpu}/vulkan-headers", "-DPMVS_VOLK_DIR=#{gpu}/volk",
-             "-DPMVS_GLSLANG=#{formula_opt_bin("glslang")}/glslangValidator", *std_cmake_args
+             "-DPMVS_GLSLANG=#{Formula["glslang"].opt_bin}/glslangValidator", *std_cmake_args
       system "cmake", "--build", "build-capture", "--target", "pushmpc_capture", "capture_test", "--parallel"
       system "build-capture/capture_test"
       app = libexec/"PushMPC Capture.app/Contents"
@@ -205,7 +205,7 @@ class Pushmpc < Formula
     # ArtCNN (MIT): the pinned ONNX files become the Metal engine's .pmnn weights (next to the plugin, where the
     # apple backend looks first) and fragment-shader GLSL (OpenGL-only renderers); the upstream compute GLSL is used
     # by the gpu-next / Vulkan profile below. vsplugin/models/artcnn.lock.json has the same pins.
-    py = formula_opt_bin(vs_python)/"python#{vs_python.delete_prefix("python@")}"
+    py = Formula[vs_python].opt_bin/"python#{vs_python.delete_prefix("python@")}"
     models = prefix/vs_site_packages/"vapoursynth/plugins/pushmpc-models"
     models.mkpath
     (pkgshare/"shaders").mkpath
@@ -295,9 +295,9 @@ class Pushmpc < Formula
       data=${XDG_DATA_HOME:-$HOME/.local/share}; pm="$data/pushmpc/pmml"
       if [ "$action" = install ] && [ "$pmml" = 1 ]; then
         mkdir -p "$pm/ort/core" "$pm/models"
-        ln -sf "#{formula_opt_lib("onnxruntime")}/libonnxruntime.dylib" "$pm/ort/core/libonnxruntime.dylib"
+        ln -sf "#{Formula["onnxruntime"].opt_lib}/libonnxruntime.dylib" "$pm/ort/core/libonnxruntime.dylib"
         rm -rf "$pm/graphs"; ln -s "#{opt_pkgshare}/pmml/graphs" "$pm/graphs"
-        if "#{formula_opt_bin(vs_python)}/python#{vs_python.delete_prefix("python@")}" -I "#{opt_libexec}/pmml-models.py" "$pm/models" "#{opt_pkgshare}/pmml/ml-runtime-pin.json" "$data/pushmpc/pmml-download"; then
+        if "#{Formula[vs_python].opt_bin}/python#{vs_python.delete_prefix("python@")}" -I "#{opt_libexec}/pmml-models.py" "$pm/models" "#{opt_pkgshare}/pmml/ml-runtime-pin.json" "$data/pushmpc/pmml-download"; then
           echo "PushFlow for the ml backend: $pm"; : > "$pm/.pushmpc-setup"
         else
           echo "PushFlow's models could not be fetched: the ml backend stays off (run pushmpc-setup install again later)"; rm -rf "$pm"
@@ -316,7 +316,7 @@ class Pushmpc < Formula
           ax=''; [ "$artcnn" = 0 ] || ax="include=\\"#{opt_pkgshare}/mpv/pushmpc-artcnn.conf\\""
           ag=''; [ "$action" != install ] || ag=--agent
           aout=$(/bin/sh "$appsdir/pushmpc-apps-mac.sh" "$action" --from "$appsdir" --bridge "#{opt_lib}/pushmpc/pushmpc-iina.so" \\
-            --mpv "#{formula_opt_bin("mpv")}/mpv" --integration "#{opt_libexec}/mpv-integration.sh" --vpy "#{opt_pkgshare}/pushmpc.vpy" \\
+            --mpv "#{Formula["mpv"].opt_bin}/mpv" --integration "#{opt_libexec}/mpv-integration.sh" --vpy "#{opt_pkgshare}/pushmpc.vpy" \\
             --vsscript "#{HOMEBREW_PREFIX}/etc/mpv/scripts/pushmpc-vsscript.lua" ${ax:+--extra "$ax"} $ag 2>&1); arc=$?
           if [ "$arc" != 3 ] || ! printf '%s' "$aout" | grep -q 'none of these players'; then
             echo "Stremio, Jellyfin Desktop, MPV shims:"; printf '%s\\n' "$aout" | sed 's/^/  /'
