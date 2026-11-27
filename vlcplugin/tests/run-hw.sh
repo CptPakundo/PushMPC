@@ -83,6 +83,13 @@ if [ "${ZC:-0}" = 1 ]; then
   fi
   CHECK="--zc off --need zero.copy.not.used"    run va_zc_noexport_x2 va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PMNULL_EXPORT=0" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
   CHECK="--zc off --need zero.copy.unavailable" run va_zc_novk_x2     va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VK_NO_DMABUF=1" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
+  # ContentDetect on zero-copy pictures through the GPU engine's tap (the content library next to the module): the clip is
+  # measured (drawn) and the held-drawing repair runs in the GPU engine, zero copy kept; with an older library (no
+  # pmc_push_cells: PUSHMPC_CONTENT_NO_CELLS=1) the pictures stay unmeasured and the repair off, zero copy kept as well
+  CHECK="--zc on --skip-motion --need content.measured.on.the.GPU..zero.copy --need content.tap:.[1-9] --need held-drawing.repair.on..in.the.GPU.engine" \
+    run va_zc_x2_tap va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 $GPU
+  CHECK="--zc on --skip-motion --need no.GPU.tap..pmc_push_cells. --forbid held-drawing.repair.on" \
+    run va_zc_x2_notap va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_CONTENT_NO_CELLS=1" -- $PP --pushmpc-smoother=2 $GPU
 fi
 # VLC's own desktop path: the VA-API decoder on the OpenGL output's surfaces (glconv_vaapi_x11, EGL dma-buf import), with
 # PushMPC's pictures shown by the GL interop directly

@@ -18,7 +18,7 @@ namespace {
 double NowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 VkDeviceSize Align(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1) / a * a; }
 
-enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PBlur, PCells, PRepair8, PRepair16, PCount };
+enum P { PPyr0, PPyrDown, PDedup, PMe, PMeFinal, PMad, PFb, PInterp, PNis, PEasu, PRcas, PPack, POfConv, PBlur, PCells, PRepair8, PRepair16, PTap, PCount };
 constexpr VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SI = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SB = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                            SBD = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, SMP = VK_DESCRIPTOR_TYPE_SAMPLER,
                            SIM = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -47,6 +47,12 @@ std::vector<PipeDesc> Descs()
         { kSpv_repair16, sizeof(kSpv_repair16), { SI, SI, SI, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS, CIS }, 80 },
 #else
         { nullptr, 0, {}, 0 }, { nullptr, 0, {}, 0 }, { nullptr, 0, {}, 0 },
+#endif
+        // ContentDetect's GPU tap (tap.comp): absent from a build whose SPIR-V predates it (the frames are then not measured)
+#ifdef PMVS_HAVE_TAP_SPV
+        { kSpv_tap, sizeof(kSpv_tap), { CIS, CIS, CIS, SB }, 44 },
+#else
+        { nullptr, 0, {}, 0 },
 #endif
     };
 }
@@ -151,7 +157,7 @@ struct Engine::Impl {
     Buffer nisUbo;
     // the held-drawing repair (Config::regionRepair): each part's generated picture at the source size, the parts' mask
     // (RGBA8 on the cell grid), the cell grid's readback
-    Image rep[3][3], repMask; Buffer repMaskStage, cellsBuf;
+    Image rep[3][3], repMask; Buffer repMaskStage, cellsBuf, tapBuf;
     int cellPx = 0, cellsX = 0, cellsY = 0;
     bool repairOk = false;
     bool Pyramid(Job& j, Slot& s, std::string& err);
@@ -282,7 +288,7 @@ void Engine::Impl::Free()
     ctx->Destroy(readback); ctx->Destroy(dedupStats); ctx->Destroy(dummy); ctx->Destroy(nisUbo);
     for (Image* i : { &midY, &midU, &midV, &upTmp, &upY, &coefScale, &coefUsm }) ctx->Destroy(*i);
     for (auto& part : rep) for (Image& i : part) ctx->Destroy(i);
-    ctx->Destroy(repMask); ctx->Destroy(repMaskStage); ctx->Destroy(cellsBuf); repairOk = false;
+    ctx->Destroy(repMask); ctx->Destroy(repMaskStage); ctx->Destroy(cellsBuf); ctx->Destroy(tapBuf); repairOk = false;
     FreeOf();
     for (auto& j : jobs) if (j.dp) vkDestroyDescriptorPool(d, j.dp, nullptr);
     jobs.clear();
@@ -1159,6 +1165,36 @@ bool Engine::Cells(int slot, int prevSlot, CellGridOut& out, std::string& err)
     out.v.assign(f, f + n);
     out.aux.resize(n);
     std::memcpy(out.aux.data(), f + n, n * 4);
+    return true;
+}
+bool Engine::TapAvailable() const { return m->pipes[PTap].p != VK_NULL_HANDLE; }
+bool Engine::Tap(int slot, bool clip, std::vector<uint32_t>& words, int& cw, int& ch, std::string& err)
+{
+    Impl& I = *m;
+    if (!TapAvailable()) { err = "GPU engine: this build has no content tap shader"; return false; }
+    if (slot < 0 || slot >= int(I.slots.size())) { err = "GPU engine: no such slot"; return false; }
+    const int w = I.cfg.width, h = I.cfg.height;
+    cw = 480; ch = std::max(1, int(std::lround(480.0 * h / w)));   // pushmpc/content_detect.h kCellsW, CellsHeight
+    const size_t nCells = size_t(cw) * size_t(ch), n = nCells + (clip ? size_t(224 * 224) : 0);
+    if (!I.tapBuf.buf && !I.ctx->CreateBuffer(VkDeviceSize(nCells + 224 * 224) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, I.tapBuf, err))
+        return false;
+    bool ok = true;
+    Impl::Job& j = I.Begin(err, ok);
+    if (!ok) return false;
+    I.Barrier(j.cb);
+    const Impl::Slot& s = I.slots[size_t(slot)];
+    const uint32_t side = uint32_t(std::min(w, h));
+    struct { uint32_t w, h, cw, ch, mode, base, side, x0, y0; float kRaw, maxCode; } pc{ uint32_t(w), uint32_t(h), uint32_t(cw), uint32_t(ch), 0u, 0u,
+        side, uint32_t((w - int(side)) / 2), uint32_t((h - int(side)) / 2), I.kRaw, I.maxV };
+    if (!Impl::Bind(I, j, PTap).Img(0, s.y.view).Img(1, s.u.view).Img(2, s.v.view).Buf(3, I.tapBuf).Run(&pc, uint32_t((nCells + 63) / 64), 1, err)) return false;
+    if (clip) {
+        pc.mode = 1; pc.base = uint32_t(nCells);
+        if (!Impl::Bind(I, j, PTap).Img(0, s.y.view).Img(1, s.u.view).Img(2, s.v.view).Buf(3, I.tapBuf).Run(&pc, uint32_t((224 * 224 + 63) / 64), 1, err)) return false;
+    }
+    const uint64_t v = I.Submit(j, err);
+    if (!v || !I.WaitValue(v, err)) return false;
+    const uint32_t* p = static_cast<const uint32_t*>(I.tapBuf.map);
+    words.assign(p, p + n);
     return true;
 }
 bool Engine::RepairSlot(int slot, const RepairPart* parts, int n, float featherCells, bool detail, std::string& err)

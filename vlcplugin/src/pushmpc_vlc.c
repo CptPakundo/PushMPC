@@ -473,6 +473,12 @@ struct filter_sys_t {
     uint32_t content_serial;
     pmc_state content_state;
     uint64_t content_gpu;       /* frames not measured: zero-copy GPU pictures (no CPU planes) */
+    /* VA-API zero copy: the GPU engine's tap (ContentTap) */
+    bool tap_ready, tap_off;
+    uint32_t *tap_words;
+    size_t tap_cap;
+    double tap_clip_next;
+    uint64_t tap_frames, tap_fail;
 };
 
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
@@ -1061,8 +1067,60 @@ static void ContentOpen(filter_t *f, struct filter_sys_t *sys)
     if (sys->content) msg_Info(f, "PushMPC: content measured in the picture by %s", where);
     else msg_Info(f, "PushMPC: content not measured (%s); everything else runs as before", why);
 }
-static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_t *cur, const picture_t *work)
+static void ContentState(filter_t *f, struct filter_sys_t *sys);
+/* VA-API zero copy: the GPU engine's tap reads the surface (only the cells come back, and about once a second the
+ * image model's thumbnail) when the engine has it and the content library takes cells (pm_content_has_cells; an older
+ * library leaves these pictures unmeasured, as before). true: measured this way */
+static bool ContentTap(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
 {
+    if (!sys->zc_hw || !sys->eng || sys->tap_off) return false;
+    if (!sys->tap_ready) {
+        sys->tap_ready = true;
+        if (!pm_engine_tap_ok(sys->eng)) { sys->tap_off = true; return false; }
+        if (!sys->content_tried) { sys->content_tried = true; ContentOpen(f, sys); }
+        if (!sys->content || !pm_content_has_cells(sys->content)) {
+            if (sys->content) msg_Info(f, "PushMPC: content not measured on zero-copy pictures: this content library has no GPU tap (pmc_push_cells)");
+            sys->tap_off = true; return false;
+        }
+        const int w = (int)sys->wfmt.i_visible_width, h = (int)sys->wfmt.i_visible_height;
+        sys->tap_cap = (size_t)480 * (size_t)(480 * h / (w > 0 ? w : 1) + 2) + 224 * 224;
+        sys->tap_words = malloc(sys->tap_cap * sizeof(uint32_t));
+        if (!sys->tap_words) { sys->tap_off = true; return false; }
+        msg_Info(f, "PushMPC: content measured on the GPU (zero copy: the engine's tap, only the cells are read back)");
+    }
+    WorkerIdle(sys, false);   /* the engine is not shared with the worker */
+    pm_dmabuf d;
+    if (pm_hw_export(sys->hw, cur, &d) != 0) { sys->tap_fail++; return true; }
+    pmc_state ms;
+    const bool model = pm_content_state(sys->content, &ms) == 0 && (ms.model == PMC_MODEL_RUNNING || ms.model == PMC_MODEL_STARTING);
+    const double pts = (double)cur->date / CLOCK_FREQ;
+    const bool clip = model && (sys->tap_clip_next <= 0 || pts >= sys->tap_clip_next || pts < sys->tap_clip_next - 5.0);
+    int cw = 0, ch = 0;
+    char err[200] = "";
+    const int n = pm_engine_tap_dmabuf(sys->eng, &d, clip ? 1 : 0, sys->tap_words, sys->tap_cap, &cw, &ch, err, sizeof(err));
+    pm_hw_dmabuf_close(&d);
+    if (n < 0) {
+        if (!sys->tap_fail++) msg_Warn(f, "PushMPC: the content tap failed (%s)", err);
+        return true;
+    }
+    const video_format_t *wf = &sys->wfmt;
+    const int limited = !(wf->b_color_range_full || wf->i_chroma == VLC_CODEC_J420);
+    const int disc = sys->content_disc || sys->content_last <= 0 || cur->date <= sys->content_last || cur->date - sys->content_last > CLOCK_FREQ;
+    sys->content_disc = false;
+    sys->content_last = cur->date;
+    pm_content_push_cells(sys->content, sys->tap_words, cw, cw, ch, limited, pts, disc);
+    if (clip && n >= cw * ch + 224 * 224) {
+        sys->tap_clip_next = pts + 1.0;
+        pm_content_offer_clip(sys->content, sys->tap_words + (size_t)cw * (size_t)ch, 224, (int)wf->i_visible_height >= 720 ? 1 : 0, limited, pts);
+    }
+    sys->tap_frames++;
+    ContentState(f, sys);
+    return true;
+}
+
+static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, picture_t *cur, const picture_t *work)
+{
+    if (ContentTap(f, sys, cur)) return;
     if (sys->zc || sys->zc_hw || PM_CVPX_ON(sys)) {
         if (!sys->content_gpu++)
             msg_Info(f, sys->zc && sys->pc_cfg.measure && pmx_abi() >= 3
@@ -1082,6 +1140,11 @@ static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_
     sys->content_last = cur->date;
     pm_content_push(sys->content, y.data[0], y.stride[0], y.data[yv12 ? 2 : 1], y.data[yv12 ? 1 : 2], y.stride[1],
                     (int)wf->i_visible_width, (int)wf->i_visible_height, sys->bits, limited, (double)cur->date / CLOCK_FREQ, disc);
+    ContentState(f, sys);
+}
+/* the content library's latest state: logged when the class changes */
+static void ContentState(filter_t *f, struct filter_sys_t *sys)
+{
     pmc_state st;
     if (pm_content_state(sys->content, &st) != 0 || st.serial == sys->content_serial) return;
     sys->content_serial = st.serial;
@@ -1096,8 +1159,9 @@ static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_
 }
 
 /* the held-drawing repair on the portable engines follows the measured class, as pushcore's held frames do (PcContent):
- * lagged pairs run on VLC's video thread (no worker) and cost a copy and a cell grid per frame, so only once the picture
- * is measured as drawn (PUSHMPC_VLC_DRAWN: unset follows the class, 0 never, else from the start). Once on, it stays on
+ * the lag (three source frames), a copy and a cell grid per frame are only for pictures measured as drawn (zero-copy VA-API
+ * pictures through the GPU tap, ContentTap; pictures that are not measured stay without it). PUSHMPC_VLC_DRAWN: unset
+ * follows the class, 0 never, else from the start. Once on, it stays on
  * for the stream (the pictures waiting in the lag would have to be handed back to switch it off). */
 static bool PortableRepairWanted(filter_t *f, const struct filter_sys_t *sys)
 {
@@ -2105,6 +2169,8 @@ static void Close(vlc_object_t *obj)
                      sys->content_gpu, st.changes, model[st.model >= 0 && st.model <= 4 ? st.model : 4],
                      st.model == PMC_MODEL_RUNNING ? "" : " (the hand-built cues decided)", st.caller_ms, st.detect_ms, st.detect_ms_max);
         }
+        if (sys->tap_frames || sys->tap_fail)
+            msg_Info(f, "PushMPC: content tap: %" PRIu64 " zero-copy frames measured on the GPU, %" PRIu64 " failed", sys->tap_frames, sys->tap_fail);
         pm_content_close(sys->content);   /* its threads end here, with their last log line */
     }
     if (sys->eng && sys->lag) {
@@ -2112,6 +2178,7 @@ static void Close(vlc_object_t *obj)
         msg_Info(f, "PushMPC: held-drawing repair: %" PRIu64 " frames, %" PRIu64 " parts, %" PRIu64 " spans gated, %" PRIu64 " over budget (%s); pairs on the worker %" PRIu64 ", failed there %" PRIu64,
                  rs.frames, rs.parts, rs.gated, rs.over_budget, rs.gpu ? "GPU" : "CPU", sys->lag_jobs, sys->lag_errors);
     }
+    free(sys->tap_words);
     LagDrop(sys);
     PcLagDrop(sys);
     if (sys->pc_lag)

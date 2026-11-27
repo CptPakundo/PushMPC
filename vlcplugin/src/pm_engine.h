@@ -84,6 +84,11 @@ typedef struct pm_dmabuf {
 } pm_dmabuf;
 int pm_engine_dmabuf_ok(const pm_engine *e, const char **why);
 int pm_engine_push_dmabuf(pm_engine *e, const pm_dmabuf *src, int contiguous, char *err, size_t errsize);
+/* ContentDetect's GPU tap on a dmabuf (the zero-copy pictures the module cannot read on the CPU): its packed cells (cw x ch
+ * words) and with clip the image model's 224 x 224 thumbnail after them, as the content library's pmc_push_cells /
+ * pmc_offer_clip take them. Returns the words written, -1 on failure (err). pm_engine_tap_ok: 1 when this engine can. */
+int pm_engine_tap_ok(pm_engine *e);
+int pm_engine_tap_dmabuf(pm_engine *e, const pm_dmabuf *src, int clip, uint32_t *words, size_t cap, int *cw, int *ch, char *err, size_t errsize);
 /* the frame at phase t of the current pair into dst (written and finished when this returns). 0 = ok */
 int pm_engine_generate_dmabuf(pm_engine *e, float t, const pm_dmabuf *dst, char *err, size_t errsize);
 

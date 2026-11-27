@@ -111,6 +111,14 @@ PMC_API void pmc_destroy(pmc_ctx *c);
  * discontinuity: a seek, a flush or a gap before this frame. 0 = taken, < 0 = refused (bad arguments). */
 PMC_API int pmc_push_yuv420(pmc_ctx *c, const void *y, ptrdiff_t ystride, const void *u, const void *v, ptrdiff_t cstride,
                             int w, int h, int bits, int limited, double pts, int discontinuity);
+/* Optional exports (a caller looks them up and treats a library without them as one that cannot take a GPU tap).
+ * pmc_push_cells: one source frame as its packed cells, made elsewhere (a GPU tap, pushmpc/content_detect.h
+ * PackedCellsRef / the engines' cells shaders): cw = 480, ch = the picture's CellsHeight, each word luma in 8-bit code
+ * units x 256 (bits 0-15), Cb, Cr 8-bit codes (16-23, 24-31); stride in words; otherwise as pmc_push_yuv420.
+ * pmc_offer_clip: the image model's 224 x 224 thumbnail packed the same way (hd: BT.709, else BT.601), about once a
+ * second; nothing when no model runs. */
+PMC_API int pmc_push_cells(pmc_ctx *c, const uint32_t *words, ptrdiff_t stride_words, int cw, int ch, int limited, double pts, int discontinuity);
+PMC_API void pmc_offer_clip(pmc_ctx *c, const uint32_t *words, ptrdiff_t stride_words, int hd, int limited, double pts);
 /* the latest state; 0 = ok */
 PMC_API int pmc_get_state(pmc_ctx *c, pmc_state *out);
 /* the image model's evidence from the caller (tests, or a host that runs the model itself): pdrawn, pcg in 0..1 (pcg < 0:

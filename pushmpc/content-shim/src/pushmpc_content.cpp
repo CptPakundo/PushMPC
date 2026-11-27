@@ -173,6 +173,32 @@ struct pmc_ctx {
             }
         }
 #endif
+        return Enqueue(std::move(j), t0);
+    }
+    // the cells of a frame made elsewhere (a GPU tap: pmc_push_cells), as Push would have made them
+    int PushCells(const uint32_t* words, ptrdiff_t stride, int cw, int ch, bool limited, double pts, bool disc)
+    {
+        const auto t0 = Clock::now();
+        Job j;
+        j.t = pts; j.disc = disc;
+        j.cells = CellsFromPacked(words, stride, cw, ch, limited);
+        if (!j.cells.ok()) return -1;
+        return Enqueue(std::move(j), t0);
+    }
+    // the image model's 224 x 224 thumbnail made elsewhere (pmc_offer_clip); nothing when no model runs
+    void OfferClip(const uint32_t* words, ptrdiff_t stride, bool hd, bool limited, double pts)
+    {
+#if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
+        if (model && !model->Failed()) {
+            auto in = ClipInputFromPacked(words, stride, hd, limited);
+            if (!in.empty()) model->Offer(std::move(in), pts);
+        }
+#else
+        (void)words; (void)stride; (void)hd; (void)limited; (void)pts;
+#endif
+    }
+    int Enqueue(Job&& j, Clock::time_point t0)
+    {
         if (flags & PMC_FLAG_SYNC) Detect(j);
         else {
             std::lock_guard<std::mutex> lk(mx);
@@ -243,6 +269,22 @@ PMC_API int pmc_push_yuv420(pmc_ctx* c, const void* y, ptrdiff_t ystride, const 
     } catch (...) {
         return -2;
     }
+}
+
+PMC_API int pmc_push_cells(pmc_ctx* c, const uint32_t* words, ptrdiff_t stride_words, int cw, int ch, int limited, double pts, int discontinuity)
+{
+    if (!c || !words || cw != kCellsW || ch < 1 || stride_words < cw) return -1;
+    try {
+        return c->PushCells(words, stride_words, cw, ch, limited != 0, pts, discontinuity != 0);
+    } catch (...) {
+        return -2;
+    }
+}
+
+PMC_API void pmc_offer_clip(pmc_ctx* c, const uint32_t* words, ptrdiff_t stride_words, int hd, int limited, double pts)
+{
+    if (!c || !words || stride_words < 224) return;
+    try { c->OfferClip(words, stride_words, hd != 0, limited != 0, pts); } catch (...) {}
 }
 
 PMC_API int pmc_get_state(pmc_ctx* c, pmc_state* out)

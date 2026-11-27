@@ -24,6 +24,11 @@ void pm_content_close(pm_content *c);
 int pm_content_push(pm_content *c, const void *y, ptrdiff_t ystride, const void *u, const void *v, ptrdiff_t cstride,
                     int w, int h, int bits, int limited, double pts, int discontinuity);
 int pm_content_state(pm_content *c, pmc_state *out);
+/* a GPU tap's packed cells / the image model's thumbnail (pmc_push_cells / pmc_offer_clip, optional in the library):
+ * has_cells 0 = an older library (or PUSHMPC_CONTENT_NO_CELLS=1): zero-copy pictures stay unmeasured */
+int pm_content_has_cells(const pm_content *c);
+int pm_content_push_cells(pm_content *c, const uint32_t *words, ptrdiff_t stride_words, int cw, int ch, int limited, double pts, int discontinuity);
+void pm_content_offer_clip(pm_content *c, const uint32_t *words, ptrdiff_t stride_words, int hd, int limited, double pts);
 void pm_content_evidence(pm_content *c, double pdrawn, double pts, double pcg);
 const char *pm_content_class_name(pm_content *c, int cls);
 /* "hold-repair, anime-upscaler, ..." for the log ("none" when no bit is set) */
