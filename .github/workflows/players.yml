@@ -218,7 +218,7 @@ jobs:
             -install_name '@rpath/libmpv.2.dylib' -compatibility_version 1.0.0 -current_version 65535.255.255 \
             -Wl,-rpath,@loader_path -Wl,-reexport_library,"$W/pushmpc-orig-libmpv.dylib" -o "$O/apps/libmpv-proxy.dylib"
           codesign -f -s - "$O/apps/libmpv-proxy.dylib"
-          clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=11.0 mpvnative/hook/libmpv_host.c -o "$O/pushmpc-plex-selftest"
+          clang -O2 -Wall -arch arm64 -arch x86_64 -mmacosx-version-min=11.0 mpvnative/hook/libmpv_host.c -Wl,-rpath,/usr/lib/swift -o "$O/pushmpc-plex-selftest"
           codesign -f -s - "$O/pushmpc-plex-selftest"
           cp mpvnative/install/pushmpc-apps-mac.sh "$O/"
           # the bridge once per FFmpeg major (Homebrew's ffmpeg, ffmpeg@7, ffmpeg@8), as the formula builds it: Stremio 5.1.26
