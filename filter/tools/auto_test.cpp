@@ -1,5 +1,6 @@
 // Headless check of the Auto rules (no GPU): prints the decision for a few sources, displays and GPU families.
 #include "../src/PushMpcAuto.h"
+#include "../src/PushMpcLearned.h"
 #include "../src/PushMpcExtras.h"
 #include "../src/PushMpcShows.h"
 #include "../../pushmpc/include/pushmpc/unlocks.h"
@@ -598,7 +599,153 @@ int main()
         }
         wprintf(L"  intel video: %d failed\n", fails);
     }
+    // ---- Learned costs across sessions (PushMpcLearned.h): foreign GPU load must not lower later picks for good ----
+    // Each simulated session: a new session number, the saved values into Costs (as LoadLearned), Decide at the start of
+    // the file; the running key is measured at the card's true ratio times this session's load; under load the session
+    // steps down in-session (Decide again with that measurement, the new key measured too); then the session's values go
+    // into the histories (as SaveLearned). "Old rule" = the 1.0 behaviour: the saved value is the session's last value.
+    int learnFails = 0;
+    {
+        auto check = [&](bool ok, const std::wstring& what, const std::wstring& detail = L"") {
+            wprintf(L"  %-96ls [%ls]  %ls\n", what.c_str(), ok ? L"PASS" : L"FAIL", detail.c_str());
+            if (!ok) ++learnFails;
+        };
+        const Gpu g5090 = Family(kRtx50, L"NVIDIA GeForce RTX 5090");
+        const Source film{ 1920, 1080, 23.976, false, 0.5 };
+        const Display disp{ L"4K 240", 239.96, 3840, 2160, false };
+        auto pickStr = [](const Choice& c) { return std::format(L"{} q{} x{}", FgMethodLabel(c.fgMethod), c.fgQuality, c.multiplier); };
+        auto same = [](const Choice& a, const Choice& b) { return a.fgMethod == b.fgMethod && a.fgQuality == b.fgQuality && a.multiplier == b.multiplier && a.sr == b.sr && a.srLevel == b.srLevel; };
+        struct Sim {
+            learned::Values v;                 // the new rules (the Learned key)
+            std::map<int, double> old;         // the old rule: per key the last session's value
+            std::vector<Choice> starts, startsOld;
+            int lowered = 0, loweredOld = 0;   // sessions whose start pick was stepped down in-session (a rebuild while playing)
+        };
+        // one session: trueRatio per key (default 1.0), load factor for this session's measurements
+        auto session = [&](Sim& s, double load, const std::map<int, double>& trueRatio, double defaultRatio, const Source& src = Source{ 1920, 1080, 23.976, false, 0.5 }) {
+            auto ratio = [&](int k) { auto it = trueRatio.find(k); return (it == trueRatio.end() ? defaultRatio : it->second) * load; };
+            auto run = [&](Costs c, std::map<int, double>& measured, int& lowered) {
+                Choice ch = Decide({}, src, disp, c, g5090);
+                const Choice start = ch;
+                for (int step = 0; step < 6; ++step) {   // in-session: the running key measured, Decide again until it stays
+                    if (ch.multiplier < 2) break;
+                    const int k = FgKeyOf(ch.fgMethod, ch.fgQuality);
+                    measured[k] = ratio(k); c.fgScale[k] = ratio(k); c.fgLearned[k] = true;
+                    const Choice next = Decide({}, src, disp, c, g5090);
+                    if (same(next, ch)) break;
+                    ch = next;
+                }
+                if (ch.multiplier < start.multiplier || ch.fgQuality < start.fgQuality) ++lowered;
+                return start;
+            };
+            // new rules
+            const uint32_t sid = learned::BeginSession(s.v);
+            Costs c; learned::LoadBench(s.v, sid, c); ApplyMeasuredCard(c); learned::LoadCosts(s.v, sid, c);
+            std::map<int, double> m;
+            s.starts.push_back(run(c, m, s.lowered));
+            std::map<std::wstring, double> named;
+            for (auto& [k, x] : m) named[std::format(L"FgScale{}", k)] = x;
+            learned::SaveSession(s.v, sid, named, c);
+            // old rule
+            Costs o; for (auto& [k, x] : s.old) { o.fgScale[k] = x; o.fgLearned[k] = true; }
+            std::map<int, double> mo;
+            s.startsOld.push_back(run(o, mo, s.loweredOld));
+            for (auto& [k, x] : mo) s.old[k] = x;
+        };
+        // 1. a loaded session between clean ones: the next clean session picks what it picked before the load
+        {
+            Sim s;
+            session(s, 1.0, {}, 1.0); session(s, 1.0, {}, 1.0);
+            session(s, 2.5, {}, 1.0);   // other programs load the GPU: everything measures 2.5x slower
+            for (int i = 0; i < 4; ++i) session(s, 1.0, {}, 1.0);
+            const Choice& before = s.starts[1];
+            bool back = true; for (size_t i = 3; i < s.starts.size(); ++i) back = back && same(s.starts[i], before);
+            check(back, L"learned: a loaded session, then clean ones: the picks return to the original at once", pickStr(before) + L" -> " + pickStr(s.starts[3]));
+            check(!same(s.startsOld[3], s.startsOld[1]), L"learned (control): the old rule starts the next clean file lowered", pickStr(s.startsOld[1]) + L" -> " + pickStr(s.startsOld[3]));
+        }
+        // 2. three loaded sessions in a row ARE how the card does then: the values rise; clean sessions bring them back
+        //    for the keys that run, and a key Auto no longer runs goes back to its prior after 20 sessions
+        {
+            Sim s;
+            session(s, 1.0, {}, 1.0);
+            for (int i = 0; i < 3; ++i) session(s, 2.5, {}, 1.0);
+            const Choice lowered = s.starts.back();
+            session(s, 2.5, {}, 1.0);
+            check(!same(s.starts.back(), s.starts[0]), L"learned: three loaded sessions in a row: the slower values are saved", pickStr(s.starts.back()));
+            for (int i = 0; i < 22; ++i) session(s, 1.0, {}, 1.0);
+            check(same(s.starts.back(), s.starts[0]), L"learned: ...and 22 clean sessions later the original pick is back (faster values at once, unused ones expire)", pickStr(s.starts.back()));
+            (void)lowered;
+        }
+        // 3. a genuinely slower card (every key 1.6x the prior, every session): converges and then stays (no per-file flapping)
+        {
+            Sim s;
+            for (int i = 0; i < 12; ++i) session(s, 1.0, {}, 1.6);
+            Costs ideal; for (int k = 0; k < kFgKeys; ++k) { ideal.fgScale[k] = 1.6; ideal.fgLearned[k] = true; }
+            const Choice target = Decide({}, film, disp, ideal, g5090);
+            int firstStable = -1;
+            for (int i = 0; i < 12; ++i) {
+                bool rest = true; for (int j = i; j < 12; ++j) rest = rest && same(s.starts[j], s.starts[i]);
+                if (rest) { firstStable = i; break; }
+            }
+            check(firstStable >= 0 && firstStable <= 6 && same(s.starts.back(), target),
+                  std::format(L"learned: a slower card converges by session {} to the pick its true costs give, then stays", firstStable + 1), pickStr(s.starts.back()) + L" / " + pickStr(target));
+        }
+        // 3b. mixed content: two kinds of file alternate on the same frame generation key with different true ratios
+        //     (the prior model is not exact across sizes); how often a file's start pick has to be stepped down while playing
+        {
+            Sim s;
+            const Source a{ 1920, 1080, 23.976, false, 0.5 }, b{ 1280, 720, 23.976, false, 0.5 };
+            for (int i = 0; i < 12; ++i) session(s, 1.0, {}, i % 2 ? 1.35 : 0.85, i % 2 ? b : a);
+            check(s.lowered <= s.loweredOld + 1, std::format(L"learned: mixed content (two files alternating, true ratio 0.85 / 1.35): stepped down while playing in {} of 12 sessions (old rule {})", s.lowered, s.loweredOld),
+                  pickStr(s.starts[10]) + L" / " + pickStr(s.starts[11]));
+        }
+        // 4. steady unloaded input: the same start picks as the old rule (cards at or faster than the priors at once;
+        //    slower than the priors from the 3rd session on, the sessions before start on the priors)
+        {
+            Sim fast, slow;
+            for (int i = 0; i < 8; ++i) { session(fast, 1.0, {}, 0.85); session(slow, 1.0, {}, 1.25); }
+            bool sameFast = true, sameSlow = true;
+            for (size_t i = 0; i < fast.starts.size(); ++i) sameFast = sameFast && same(fast.starts[i], fast.startsOld[i]);
+            for (size_t i = 3; i < slow.starts.size(); ++i) sameSlow = sameSlow && same(slow.starts[i], slow.startsOld[i]);
+            check(sameFast, L"learned: steady unloaded input, card at/above the priors: the same picks as the old rule in every session", pickStr(fast.starts.back()));
+            check(sameSlow, L"learned: steady unloaded input, card slower than the priors: the same picks as the old rule from the 4th session on", pickStr(slow.starts.back()));
+        }
+        // 5. the rules themselves
+        {
+            learned::Values v; v[L"Gpu"] = L"x"; v[L"Model"] = L"3"; v[L"FgScale3"] = L"2.000";
+            const learned::Values before = v;
+            check(learned::OldModelKey(v) == L"model3", L"learned: model 3 values go to the subkey model3 (kept, not deleted)");
+            learned::Reset(v, L"x");
+            check(v.count(L"FgScale3") == 0 && learned::Get(v, L"Model") == learned::kModel && learned::OldModelKey(v).empty() && learned::OldModelKey(before) == L"model3",
+                  L"learned: model 4 starts over; nothing to keep once on model 4");
+            check(learned::OldModelKey(learned::Values{}).empty(), L"learned: an empty key has nothing to keep");
+            std::vector<learned::Entry> h;
+            learned::Record(h, 1, 1.0); learned::Record(h, 2, 3.0); double x = 0;
+            check(learned::Resolve(h, 2, 1.0, x) && x == 1.0, L"learned: a slower session does not raise the saved value");
+            learned::Record(h, 3, 3.0); learned::Record(h, 4, 3.0);
+            check(learned::Resolve(h, 4, 1.0, x) && x == 3.0, L"learned: three slower sessions in a row do");
+            learned::Record(h, 5, 0.9);
+            check(learned::Resolve(h, 5, 1.0, x) && x == 0.9, L"learned: a faster session lowers it at once");
+            learned::Record(h, 5, 1.1);
+            check(h.size() == 3 && learned::Resolve(h, 5, 1.0, x) && x == 1.1, L"learned: periodic saves replace the session's own entry");
+            std::vector<learned::Entry> one; learned::Record(one, 10, 2.0);
+            check(!learned::Resolve(one, 10, 1.0, x), L"learned: one session slower than the prior is not trusted (the prior stays)");
+            std::vector<learned::Entry> st = { { 1, 2.0 }, { 2, 2.0 }, { 3, 2.0 } };
+            check(learned::Resolve(st, 20, 1.0, x) && x == 2.0 && !learned::Resolve(st, 23, 1.0, x), L"learned: a value not measured for 20 sessions goes back to the prior");
+            check(learned::Encode(learned::Decode(L"7:1.2500;9:0.5000")) == L"7:1.2500;9:0.5000", L"learned: the history text round-trips");
+            // the PushFlow speed test: median results, first run trusted, faster replaces, slower only when 3 runs agree
+            learned::Values b; double f[3] = { 6, 6, 6 }, n[3] = { 4, 4, 4 }, r[3] = { 1, 1, 1 };
+            learned::RecordBench(b, 1, f, n, r);
+            Costs c; check(learned::LoadBench(b, 1, c) && c.pfFirst[1] == 6 && c.pfRebuildBenched, L"speed test: the first run is taken (it measures this card)");
+            double f2[3] = { 5, 5, 5 }; learned::RecordBench(b, 11, f2, n, r); learned::LoadBench(b, 11, c);
+            check(c.pfFirst[1] == 5, L"speed test: a faster rerun replaces it");
+            double f3[3] = { 9, 9, 9 }; learned::RecordBench(b, 21, f3, n, r); learned::LoadBench(b, 21, c);
+            check(c.pfFirst[1] == 5, L"speed test: one slower rerun does not");
+            check(learned::LoadBench(b, 21 + 40, c) && c.pfFirst[1] == 5, L"speed test: its results never expire (40 sessions later still the card's own)");
+        }
+        wprintf(L"  learned: %d failed\n", learnFails);
+    }
     Display real = QueryDisplay(PlayerWindow());
     wprintf(L"this machine's primary display: %ls %.3f Hz %ux%u HDR %d VRR %d (%ls)\n", real.name.c_str(), real.refreshHz, real.width, real.height, real.hdr, real.vrr, real.vrrHow.c_str());
-    return 0;
+    return learnFails ? 1 : 0;
 }
