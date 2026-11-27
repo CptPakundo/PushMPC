@@ -38,6 +38,7 @@
 #include "pm_pushcore.h"
 #include "win_anime_route.h"    // kodiaddon/src/engine: AnimeAutoSwitch (the measured class -> the anime model)
 #include "PushMpcAnimeSr.h"     // filter/src: the models' ids and their index as the bridge takes it
+#include "PushMpcAnimeKeepUp.h" // filter/src: the lateness rule's constants, shared with the Kodi and VapourSynth routes
 
 namespace pmpc {
 
@@ -69,16 +70,18 @@ private:
 //  - re-armed with back-off: kRearmFirstS, doubling per trip, given up after kMaxTrips trips in the stream, but only when
 //    the lateness looks transient: a whole window was on time before, or the late pictures still came within
 //    kSlowFactor x the frame time (median). Otherwise (never on time, far over the budget) it stays off, as before.
-// The constants are design choices, not measured; they are listed for the free-PC perf run.
+// The constants are design choices, not measured, and are PushMpcAnimeKeepUp.h's (one list for the free-PC perf run).
 class PcsrLateRule {
 public:
-    static constexpr int kGracePictures = 12;
-    static constexpr double kWindowS = 3.0;
-    static constexpr double kRearmFirstS = 60.0;
-    static constexpr int kMaxTrips = 3;
-    static constexpr double kSlowFactor = 2.0;
-    static constexpr int kMinPictures = 24;    // a verdict needs this many pictures too (sparse pictures never decide)
-    static constexpr double kMaxGapS = 1.0;    // a larger step between two pictures starts the window over
+    // the constants of the shared rule (filter/src/PushMpcAnimeKeepUp.h: the Kodi add-on and VapourSynth): one list
+    using K = pm::AnimeKeepUp;
+    static constexpr int kGracePictures = K::kGracePictures;
+    static constexpr double kWindowS = K::kWindowS;
+    static constexpr double kRearmFirstS = K::kRearmFirstS;
+    static constexpr int kMaxTrips = K::kMaxTrips;
+    static constexpr double kSlowFactor = K::kSlowFactor;
+    static constexpr int kMinPictures = K::kMinPictures;      // a verdict needs this many pictures too (sparse pictures never decide)
+    static constexpr double kMaxGapS = K::kMaxGapS;           // a larger step between two pictures starts the window over
 
     // an open, a reload, a flush or a seek: the grace again, the window starts over (the trips and "was on time" stay)
     void Restart() { m_grace = kGracePictures; m_seen = m_late = 0; m_start = m_last = INT64_MIN; m_delays.clear(); }

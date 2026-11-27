@@ -83,6 +83,8 @@ struct pm_engine {
     // slots (lagSlot) and are repaired there; else 16-bit CPU copies (lagPic) repaired on the CPU.
     int lag = 0;
     bool lagGpu = false, repOn = false;
+    bool repDefer = false;           // pm_engine_defer_repair: the CPU repair of a checked frame waits for pm_engine_run_deferred
+    std::deque<int64_t> repPending;  // frames whose CPU repair waits (in order)
     bool plainSaved = false, plainDedup = false;   // pm_engine_plain: lag and held frames set aside for a probe
     int plainLag = 0;
     double srcMs = 1000.0 / 23.976;
@@ -741,6 +743,7 @@ static void LagDrop(pm_engine *e)
 #endif
     e->lagWait.clear();
     e->lagRepaired.clear();
+    e->repPending.clear();
     e->lagSrc = e->lagLastDistinct = e->lagReady = e->lagA = e->lagB = -1;
     e->haveDistinct = e->lastDup = e->checked = false;
 }
@@ -975,7 +978,10 @@ static int LagStageCpu(pm_engine *e, const pm_yuv *src, int contiguous)
     e->lagSrc = s;
     if (!dup) { e->lagPic[s] = std::move(cur); e->lagWait.push_back({ s, contig }); e->lagLastDistinct = s; }
     const int64_t q = s - kLag;
-    if (e->repOn && q > e->lagB) CpuRepair(e, q);   // never a picture already handed out
+    if (e->repOn && q > e->lagB) {   // never a picture already handed out
+        if (e->repDefer) e->repPending.push_back(q);   // the worker runs it (pm_engine_run_deferred) before the pair advances
+        else CpuRepair(e, q);
+    }
     return LagChecked(e, dup);
 }
 #endif
@@ -1078,6 +1084,21 @@ extern "C" int pm_engine_set_repair(pm_engine *e, int on, char *why, size_t whys
 
 extern "C" int pm_engine_repair_lag(const pm_engine *e) { return e->lag; }
 
+extern "C" void pm_engine_defer_repair(pm_engine *e, int on) { e->repDefer = on != 0; }
+
+extern "C" void pm_engine_run_deferred(pm_engine *e)
+{
+#ifdef PM_HELD_REPAIR
+    while (!e->repPending.empty()) {
+        const int64_t q = e->repPending.front();
+        e->repPending.pop_front();
+        if (e->repOn && q > e->lagB) CpuRepair(e, q);
+    }
+#else
+    e->repPending.clear();
+#endif
+}
+
 extern "C" void pm_engine_plain(pm_engine *e, int on)
 {
     if (on) {
@@ -1107,6 +1128,7 @@ extern "C" int pm_engine_pairs_ready(const pm_engine *e)
 extern "C" int pm_engine_next_pair(pm_engine *e, char *err, size_t errsize)
 {
     if (!e->lag || e->lagWait.empty() || e->lagWait.front().s > e->lagReady) return 0;
+    pm_engine_run_deferred(e);   // a frame's repair before its pair advances
     const pm_engine::LagItem it = e->lagWait.front();
     e->lagWait.pop_front();
     e->lagA = e->lagB;
