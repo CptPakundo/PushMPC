@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Kodi for Android in the emulator (kodi-addon.yml, job kodi-android, inside reactivecircus/android-emulator-runner):
-# installs Kodi's APK, starts it once (it creates its own app folder), puts the clips into that folder and plays the
-# cases with run_cases.py through android-kodi.sh; the add-on goes into Kodi's home the way a zip install puts it.
+# installs Kodi's APK, gives it all-files access, moves Kodi's data folder to the shared storage (xbmc_env.properties
+# xbmc.data, Kodi's own setting for it), puts the clips there and plays the cases with run_cases.py through
+# android-kodi.sh; the add-on goes into Kodi's home the way a zip install puts it.
 #   android-test.sh <kodi apk> <add-on dir> <clips dir> <out dir> <kodi major> <abi: x86|arm64-v8a> [cases]
 # arm64-v8a on the x86_64 image runs through the image's ARM translation; without it the run is skipped (exit 0, a
 # note in the summary)
 set -uo pipefail
 apk=$1; addon=$2; clips=$3; out=$4; major=$5; abi=$6; cases=${7:-}
 here=$(cd "$(dirname "$0")" && pwd)
-dev=/sdcard/Android/data/org.xbmc.kodi/files
+# Kodi's data folder on the shared storage, where the adb shell may write: Android 11 keeps the shell out of
+# /sdcard/Android/data/<app> ("secure_mkdirs failed", and once Kodi made it, "ls: Permission denied": run 45956597886)
+dev=/storage/emulated/0/kodi-ci
 home=$RUNNER_TEMP/kodi-android-home; rm -rf "$home"; mkdir -p "$home/userdata" "$home/temp" "$out"
 adb wait-for-device
 abilist=$(adb shell getprop ro.product.cpu.abilist | tr -d '\r')
@@ -29,26 +32,27 @@ adb shell pm grant org.xbmc.kodi android.permission.READ_EXTERNAL_STORAGE 2>/dev
 adb shell appops set --uid org.xbmc.kodi MANAGE_EXTERNAL_STORAGE allow || adb shell appops set org.xbmc.kodi MANAGE_EXTERNAL_STORAGE allow
 adb shell pm grant org.xbmc.kodi android.permission.RECORD_AUDIO 2>/dev/null || true
 echo "Kodi's all-files access: $(adb shell appops get org.xbmc.kodi MANAGE_EXTERNAL_STORAGE | tr -d '\r')"
-# Android 11+ (scoped storage): only the app itself can create its folder under /sdcard/Android/data (adb's push and
-# mkdir fail with "secure_mkdirs failed: Permission denied" otherwise); the shell may write into it once it exists.
-# Kodi creates it (files/.kodi) on its first start: start Kodi once, wait for the folder, stop it.
-echo "adb shell: $(adb shell id | tr -d '\r')"
-adb shell ls -ld /sdcard/Android/data "$dev" 2>&1 | tr -d '\r'
-if ! adb shell ls -d "$dev/.kodi" >/dev/null 2>&1; then
-  adb shell am start -W -n org.xbmc.kodi/.Splash >/dev/null
-  i=0; until adb shell ls -d "$dev/.kodi" >/dev/null 2>&1 || [ "$i" -ge 240 ]; do sleep 3; i=$((i + 3)); done
-  if ! adb shell ls -d "$dev/.kodi" >/dev/null 2>&1; then   # what Kodi shows while it waits (before it is stopped)
-    adb exec-out screencap -p > "$out/first-start.png" 2>/dev/null || true
-    adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 && adb shell cat /sdcard/ui.xml | grep -o 'text="[^"]*"' | grep -v 'text=""' | head -20
-  fi
-  sleep 5; adb shell am force-stop org.xbmc.kodi
-  echo "Kodi's first start: ${i} s until its folder was there"
-fi
-adb shell ls -ld "$dev" "$dev/.kodi" 2>&1 | tr -d '\r'
-# fatal from here: without the clips on the device no case can play (a failed push still ran every case, about 40 min)
+# Kodi reads /sdcard/xbmc_env.properties at start (XBMCProperties); xbmc.data moves its data folder (special://home
+# = <xbmc.data>/.kodi). Kodi itself makes .kodi there on its first start (it may write anywhere on the shared storage
+# with all-files access): start it once, wait for userdata, stop it.
 fail() { echo "::error title=kodi-android::$1"; adb logcat -d > "$out/logcat.txt" 2>&1 || true
          adb exec-out screencap -p > "$out/screen.png" 2>/dev/null || true; exit 1; }
-adb shell mkdir -p "$dev/.kodi" "$dev/clips" || fail "cannot create folders in $dev (Kodi did not make its folder; see logcat.txt, screen.png)"
+echo "adb shell: $(adb shell id | tr -d '\r')"
+adb shell mkdir -p "$dev/clips" || fail "cannot create $dev on the shared storage"
+adb shell "echo xbmc.data=$dev > /sdcard/xbmc_env.properties" || fail "cannot write /sdcard/xbmc_env.properties"
+adb shell cat /sdcard/xbmc_env.properties | tr -d '\r'
+adb shell am start -W -n org.xbmc.kodi/.Splash >/dev/null
+i=0; until adb shell ls -d "$dev/.kodi/userdata" >/dev/null 2>&1 || [ "$i" -ge 240 ]; do sleep 3; i=$((i + 3)); done
+if ! adb shell ls -d "$dev/.kodi/userdata" >/dev/null 2>&1; then   # what Kodi shows while it waits (before it is stopped)
+  adb exec-out screencap -p > "$out/first-start.png" 2>/dev/null || true
+  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 && adb shell cat /sdcard/ui.xml | grep -o 'text="[^"]*"' | grep -v 'text=""' | head -20
+  adb shell ls -la "$dev" 2>&1 | tr -d '\r'
+  fail "Kodi did not make its home in $dev/.kodi in 240 s (xbmc.data not taken? see logcat.txt, first-start.png)"
+fi
+sleep 5; adb shell am force-stop org.xbmc.kodi
+echo "Kodi's first start: ${i} s until $dev/.kodi/userdata was there"
+adb shell ls -la "$dev/.kodi" 2>&1 | tr -d '\r'
+# fatal from here: without the clips on the device no case can play (a failed push still ran every case, about 40 min)
 adb push "$clips/." "$dev/clips/" >/dev/null || fail "cannot push the clips to $dev/clips"
 adb shell ls -l "$dev/clips"
 before="adb shell mkdir -p $dev/.kodi && adb push '$home/.' '$dev/.kodi/' >/dev/null"
