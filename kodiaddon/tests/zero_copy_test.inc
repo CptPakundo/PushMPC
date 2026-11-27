@@ -6,7 +6,16 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if __has_include(<linux/udmabuf.h>)
 #include <linux/udmabuf.h>
+#else
+// older kernel headers (manylinux_2_28's are 4.18; udmabuf came in 4.20): the uapi definitions, unchanged since then
+#include <linux/ioctl.h>
+#include <linux/types.h>
+#define UDMABUF_FLAGS_CLOEXEC 0x01
+struct udmabuf_create { __u32 memfd; __u32 flags; __u64 offset; __u64 size; };
+#define UDMABUF_CREATE _IOW('u', 0x42, struct udmabuf_create)
+#endif
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
 

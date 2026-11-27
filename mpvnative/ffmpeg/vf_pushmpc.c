@@ -81,6 +81,27 @@
 #ifndef CUDA_VERSION
 typedef struct CUctx_st *CUcontext;
 typedef struct CUstream_st *CUstream;
+/* FFmpeg 9.1's hwcontext_cuda.h also names CUDA arrays (frames context members only; never touched here): the same
+ * definitions as ffnvcodec's dynlink_cuda.h so the structs' layout matches; unused by older FFmpeg */
+typedef struct CUarray_st *CUarray;
+typedef enum CUarray_format_enum {
+    CU_AD_FORMAT_UNSIGNED_INT8 = 0x01,
+    CU_AD_FORMAT_UNSIGNED_INT16 = 0x02,
+    CU_AD_FORMAT_UNSIGNED_INT32 = 0x03,
+    CU_AD_FORMAT_SIGNED_INT8 = 0x08,
+    CU_AD_FORMAT_SIGNED_INT16 = 0x09,
+    CU_AD_FORMAT_SIGNED_INT32 = 0x0a,
+    CU_AD_FORMAT_HALF = 0x10,
+    CU_AD_FORMAT_FLOAT = 0x20
+} CUarray_format;
+typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
+    size_t Width;
+    size_t Height;
+    size_t Depth;
+    CUarray_format Format;
+    unsigned int NumChannels;
+    unsigned int Flags;
+} CUDA_ARRAY3D_DESCRIPTOR;
 #define CUDA_VERSION 7050
 #define PM_CUDA_OWN_TYPES 1
 #endif

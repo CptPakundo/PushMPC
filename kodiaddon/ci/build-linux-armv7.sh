@@ -8,6 +8,18 @@ set -euo pipefail
 devkit="$1"; ff="$2"; build="$3"
 here=$(cd "$(dirname "$0")" && pwd); src=$(cd "$here/.." && pwd)
 export DEBIAN_FRONTEND=noninteractive
+# bullseye (glibc 2.31) stays the baseline for older Raspberry Pi OS / OSMC / CoreELEC "ng" systems; its LTS ended and
+# deb.debian.org's bullseye-security now lists empty indexes (404s): every bullseye suite from archive.debian.org,
+# whose Release files are past their Valid-Until date
+if grep -q 'VERSION_CODENAME=bullseye' /etc/os-release; then
+  cat > /etc/apt/sources.list <<'SRC'
+deb http://archive.debian.org/debian bullseye main
+deb http://archive.debian.org/debian bullseye-updates main
+deb http://archive.debian.org/debian-security bullseye-security main
+SRC
+  rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99pushmpc-archive
+fi
 apt-get update -qq
 apt-get install -y -qq crossbuild-essential-armhf git curl ca-certificates xz-utils make pkg-config python3-pip qemu-user > /dev/null
 pip3 install -q 'cmake>=3.24,<4'

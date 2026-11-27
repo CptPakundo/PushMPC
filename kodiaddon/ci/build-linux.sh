@@ -4,7 +4,8 @@
 # checkout and $RUNNER_TEMP mounted at the same paths as on the host, so the host runs the unit tests afterwards.
 #   build-linux.sh <kodi dev kit include dir> <ffmpeg prefix> <build dir> [nvl]
 # nvl: also the NVIDIA engine (x86_64; nvcc from NVIDIA's RHEL 8 repository, build time only); with SLANG_DIR set (the
-# pinned Slang, scripts/slang-pin.json) also its GPU cut guard, else the CPU guard
+# pinned Slang, scripts/slang-pin.json) also its GPU cut guard (then required; PM_NVL_GUARD_CU_DIR: its CUDA sources
+# pre-generated on the host by the same slangc), else the CPU guard
 # FFMPEG_VERSION comes from the environment (kodi-addon.yml passes it into the container).
 set -euo pipefail
 devkit="$1"; ff="$2"; build="$3"; nvl="${4:-}"
@@ -24,7 +25,13 @@ if [ "$nvl" = nvl ] && [ "$(uname -m)" = x86_64 ]; then
   export CUDA_PATH=/usr/local/cuda-${ver/-/.}
   "$CUDA_PATH/bin/nvcc" --version | tail -1
   args+=(-DPM_NVL=ON -DPM_NVCC="$CUDA_PATH/bin/nvcc")
-  if [ -n "${SLANG_DIR:-}" ] && [ -x "$SLANG_DIR/bin/slangc" ]; then args+=(-DPM_SLANGC="$SLANG_DIR/bin/slangc"); fi
+  if [ -n "${SLANG_DIR:-}" ]; then
+    # the GPU cut guard is required whenever Slang was provided: CUDA sources pre-generated on the host (the pinned
+    # slangc needs a newer glibc than this container's 2.28), else slangc here if it runs (CMake checks)
+    args+=(-DPM_NVL_REQUIRE_GUARD=ON -DPM_SLANG_INCLUDE="$SLANG_DIR/include")
+    if [ -n "${PM_NVL_GUARD_CU_DIR:-}" ]; then args+=(-DPM_NVL_GUARD_CU_DIR="$PM_NVL_GUARD_CU_DIR"); fi
+    if [ -x "$SLANG_DIR/bin/slangc" ]; then args+=(-DPM_SLANGC="$SLANG_DIR/bin/slangc"); fi
+  fi
 else
   args+=(-DPM_NVL=OFF)
 fi

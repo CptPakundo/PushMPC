@@ -15,7 +15,7 @@ for a in arm64 x86_64; do
   fi
   MACOSX_DEPLOYMENT_TARGET=$min bash "$here/build-ffmpeg.sh" "$ver" "$prefix-$a" --enable-videotoolbox \
     --cc="clang -arch $a" --cxx="clang++ -arch $a" --extra-cflags="-mmacosx-version-min=$min" \
-    --extra-ldflags="-arch $a -mmacosx-version-min=$min" "${cross[@]}"
+    --extra-ldflags="-arch $a -mmacosx-version-min=$min" ${cross[@]+"${cross[@]}"}   # bash 3.2 + set -u: an empty array is "unbound"
 done
 rm -rf "$prefix"; mkdir -p "$prefix/lib"
 cp -R "$prefix-arm64/include" "$prefix/include"

@@ -188,10 +188,17 @@ jobs:
           [ "$(sha256sum "$RUNNER_TEMP/slang.tgz" | cut -d' ' -f1 | tr a-f A-F)" = "$(echo "$sha" | tr a-f A-F)" ]
           mkdir -p "$RUNNER_TEMP/slang" && tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
           echo "SLANG_DIR=$RUNNER_TEMP/slang" >> "$GITHUB_ENV"
+          # the pinned slangc needs glibc 2.34 (the container has 2.28): the guard shaders' CUDA sources are made here on
+          # the host, with the same flags as kodiaddon/CMakeLists.txt; nvcc compiles them in the container
+          g="$RUNNER_TEMP/nvl-guard-cu"; mkdir -p "$g"; n=vsplugin/engines/nvidia-linux/shaders
+          "$RUNNER_TEMP/slang/bin/slangc" -lang slang "$n/VfgShotChange.hlsl" -entry main -stage compute -target cuda -o "$g/nvl_guard_sc.cu"
+          "$RUNNER_TEMP/slang/bin/slangc" -lang slang "$n/VfgFourierMellin.hlsl" -entry main -stage compute -target cuda -o "$g/nvl_guard_fm.cu"
+          ls -la "$g"
+          echo "PM_NVL_GUARD_CU_DIR=$g" >> "$GITHUB_ENV"
       - name: Build in manylinux_2_28 (FFmpeg static on a cold cache)
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" -w "$GITHUB_WORKSPACE" \
-            -e FFMPEG_VERSION -e SLANG_DIR="${SLANG_DIR:-}" "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
+            -e FFMPEG_VERSION -e SLANG_DIR="${SLANG_DIR:-}" -e PM_NVL_GUARD_CU_DIR="${PM_NVL_GUARD_CU_DIR:-}" "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
             bash kodiaddon/ci/build-linux.sh "$RUNNER_TEMP/xbmc/xbmc/addons/kodi-dev-kit/include" "$RUNNER_TEMP/ffmpeg" "$GITHUB_WORKSPACE/build" ${{ matrix.nvl }}
           sudo chown -R "$(id -u):$(id -g)" build "$RUNNER_TEMP/ffmpeg"
           ls -la build/addon/inputstream.pushmpc

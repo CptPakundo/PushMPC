@@ -138,26 +138,67 @@ if(PM_NVL)
   add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/nvl_kernels_fatbin.cpp"
     COMMAND "${CMAKE_COMMAND}" -DIN=${_fb} -DOUT=${CMAKE_BINARY_DIR}/nvl_kernels_fatbin.cpp -P "${NVL}/bin2cpp.cmake"
     DEPENDS "${_fb}" "${NVL}/bin2cpp.cmake" VERBATIM)
+  # the GPU cut guard: Slang's CUDA output of the two guard shaders, compiled by nvcc. slangc runs here when it can; a
+  # pinned slangc built for a newer glibc than the build container's (manylinux_2_28: 2.28) cannot, so the CUDA sources
+  # may come pre-generated (PM_NVL_GUARD_CU_DIR: nvl_guard_sc.cu / nvl_guard_fm.cu, made by the same pinned slangc on
+  # the host; PM_SLANG_INCLUDE: its include folder for the CUDA prelude). Neither: the CPU guard (said loudly, and an
+  # error with PM_NVL_REQUIRE_GUARD so CI never ships without it unnoticed)
   set(_guard "")
-  find_program(PM_SLANGC slangc HINTS "$ENV{SLANG_DIR}/bin")
-  if(PM_SLANGC)
-    get_filename_component(_sroot "${PM_SLANGC}" DIRECTORY)
+  set(PM_NVL_GUARD_CU_DIR "" CACHE PATH "pre-generated nvl_guard_sc.cu / nvl_guard_fm.cu (slangc -target cuda)")
+  set(PM_SLANG_INCLUDE "" CACHE PATH "Slang's include folder (slang-cuda-prelude.h) for the guard's nvcc step")
+  option(PM_NVL_REQUIRE_GUARD "fail the configure when the GPU cut guard cannot be built" OFF)
+  set(_guard_how "")
+  if(PM_NVL_GUARD_CU_DIR AND EXISTS "${PM_NVL_GUARD_CU_DIR}/nvl_guard_sc.cu" AND EXISTS "${PM_NVL_GUARD_CU_DIR}/nvl_guard_fm.cu")
+    set(_guard_how "pre-generated CUDA sources in ${PM_NVL_GUARD_CU_DIR}")
+  else()
+    find_program(PM_SLANGC slangc HINTS "$ENV{SLANG_DIR}/bin")
+    if(PM_SLANGC)
+      # a probe: one guard shader compiled now (slangc's own exit code for -v is not one to rely on)
+      execute_process(COMMAND "${PM_SLANGC}" -lang slang "${NVL}/shaders/VfgShotChange.hlsl" -entry main -stage compute -target cuda
+                              -o "${CMAKE_BINARY_DIR}/slangc-probe.cu"
+                      RESULT_VARIABLE _src_rc OUTPUT_VARIABLE _src_out ERROR_VARIABLE _src_err
+                      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+      if(_src_rc EQUAL 0 AND EXISTS "${CMAKE_BINARY_DIR}/slangc-probe.cu")
+        set(_guard_how "slangc ${PM_SLANGC}")
+        if(NOT PM_SLANG_INCLUDE)
+          get_filename_component(_sroot "${PM_SLANGC}" DIRECTORY)
+          set(PM_SLANG_INCLUDE "${_sroot}/../include")
+        endif()
+      else()
+        message(WARNING "nvl: ${PM_SLANGC} does not run here (${_src_rc}: ${_src_err}) and there is no PM_NVL_GUARD_CU_DIR")
+      endif()
+    endif()
+  endif()
+  if(NOT PM_SLANG_INCLUDE AND DEFINED ENV{SLANG_DIR})
+    set(PM_SLANG_INCLUDE "$ENV{SLANG_DIR}/include")
+  endif()
+  if(_guard_how)
     foreach(g sc fm)
       set(src "${NVL}/shaders/VfgShotChange.hlsl")
       if(g STREQUAL "fm")
         set(src "${NVL}/shaders/VfgFourierMellin.hlsl")
       endif()
       set(gfb "${CMAKE_BINARY_DIR}/nvl_guard_${g}.fatbin")
-      add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu"
-        COMMAND "${PM_SLANGC}" -lang slang "${src}" -entry main -stage compute -target cuda -o "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu" DEPENDS "${src}" VERBATIM)
+      if(PM_NVL_GUARD_CU_DIR AND EXISTS "${PM_NVL_GUARD_CU_DIR}/nvl_guard_${g}.cu")
+        set(gcu "${PM_NVL_GUARD_CU_DIR}/nvl_guard_${g}.cu")
+      else()
+        set(gcu "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu")
+        add_custom_command(OUTPUT "${gcu}"
+          COMMAND "${PM_SLANGC}" -lang slang "${src}" -entry main -stage compute -target cuda -o "${gcu}" DEPENDS "${src}" VERBATIM)
+      endif()
       add_custom_command(OUTPUT "${gfb}"
-        COMMAND "${PM_NVCC}" -fatbin -O3 -std=c++17 -include cuda_fp16.h -I "${_sroot}/../include" ${_gencode} -o "${gfb}" "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu"
-        DEPENDS "${CMAKE_BINARY_DIR}/nvl_guard_${g}.cu" VERBATIM COMMAND_EXPAND_LISTS)
+        COMMAND "${PM_NVCC}" -fatbin -O3 -std=c++17 -include cuda_fp16.h -I "${PM_SLANG_INCLUDE}" ${_gencode} -o "${gfb}" "${gcu}"
+        DEPENDS "${gcu}" VERBATIM COMMAND_EXPAND_LISTS)
       add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp"
         COMMAND "${CMAKE_COMMAND}" -DIN=${gfb} -DOUT=${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp -DNAME=nvl_guard_${g}_fatbin -P "${NVL}/bin2cpp.cmake"
         DEPENDS "${gfb}" "${NVL}/bin2cpp.cmake" VERBATIM)
       list(APPEND _guard "${CMAKE_BINARY_DIR}/nvl_guard_${g}_fatbin.cpp")
     endforeach()
+    message(STATUS "nvl: GPU cut guard ON (${_guard_how})")
+  elseif(PM_NVL_REQUIRE_GUARD)
+    message(FATAL_ERROR "nvl: the GPU cut guard cannot be built (no runnable slangc, no PM_NVL_GUARD_CU_DIR)")
+  else()
+    message(WARNING "nvl: GPU cut guard OFF: the NVIDIA engine uses the CPU cut guard")
   endif()
   add_library(pm_nvl STATIC "${NVL}/nvl_loader.cpp" "${NVL}/nvl_engine.cpp" "${NVL}/nvl_ampere.cpp" "${NVL}/nvl_selftest.cpp"
               "${NVL}/nvl_gpuguard.cpp" "${NVL}/nvl_nvof.cpp" "${CMAKE_BINARY_DIR}/nvl_kernels_fatbin.cpp" ${_guard})

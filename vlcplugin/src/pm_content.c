@@ -1,5 +1,8 @@
 /* pm_content.c: loads PushMPC's content library at run time (see pm_content.h). Loaded once per process and kept (as
  * pm_pushcore.dll is): its threads belong to the contexts, which end in pm_content_close. */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1   /* Dl_info / dladdr in glibc's <dlfcn.h>; must come before any system header */
+#endif
 #include "pm_content.h"
 #include <stdio.h>
 #include <stdlib.h>
