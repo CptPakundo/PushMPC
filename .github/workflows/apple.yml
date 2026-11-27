@@ -558,6 +558,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # on a failure, the end of the plugin's own log (its "portable (GPU): frame N: ..." lines, the instance's
+          # "closed after N frames"): wherever this step's runs wrote it (PUSHMPC_VS_LOG_DIR when set, else the log
+          # folder of the HOME in use, which the encode below moves), so a frame-count failure shows the plugin's side
+          # (run 45971462911: 593 of 600 frames)
+          plugin_log_tail() {
+            [ "$1" = 0 ] && return 0
+            echo "--- PushMPC VapourSynth plugin log (tail)"
+            for f in "${PUSHMPC_VS_LOG_DIR:-/nonexistent}"/*.log "$RUNNER_TEMP"/home/Library/Logs/PushMPC/*.log "$HOME"/Library/Logs/PushMPC/*.log; do
+              [ -f "$f" ] || continue; echo "== $f"; grep -E 'portable \(GPU\): frame [0-9]+:|closed after|error|failed' "$f" | tail -n 20 | cut -c1-400 || true; tail -n 15 "$f" | cut -c1-400 || true
+            done; return 0
+          }
+          trap 'plugin_log_tail $?' EXIT
           mkdir -p "$RUNNER_TEMP/clip"; clip="$RUNNER_TEMP/clip/bbb.mp4"
           [ -f "$clip" ] || curl -fsSL --retry 3 --max-time 120 -o "$clip" "$CLIP_URL"
           got=$(shasum -a 256 "$clip" | cut -d' ' -f1 | tr A-F a-f)   # both sides lower case (the pin is)
