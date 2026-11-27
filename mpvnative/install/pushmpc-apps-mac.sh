@@ -166,9 +166,20 @@ host: timed out after ${PUSHMPC_SELFTEST_SECONDS:-60} s (playback never reached 
     [ "$r" = 2 ] && return 2
     return 3
 }
-write_conf() {   # write_conf <folder>
+# The bridge is built once per FFmpeg major (it uses FFmpeg's structures, so the app's libavutil major must be the one it
+# was built for): pushmpc-iina-av<libavutil major>.so next to pushmpc-iina.so (Homebrew's FFmpeg). Stremio 5.1.26 bundles
+# FFmpeg 7 (libavutil 59) while Homebrew has FFmpeg 9 (61): the one bridge said "not active" there (players run 45964178745).
+app_avutil() {   # app_avutil <libmpv> <bundle>: the libavutil major the app's libmpv uses, "" when it cannot be told
+    m=$(find "$2/Contents" -name 'libavutil.*.dylib' ! -path '*/_CodeSignature/*' 2>/dev/null | sed -n 's/.*libavutil\.\([0-9][0-9]*\)\..*dylib$/\1/p' | head -n 1)
+    [ -n "$m" ] || m=$(otool -L "$1" 2>/dev/null | sed -n 's/.*libavutil\.\([0-9][0-9]*\)\.dylib.*/\1/p' | head -n 1)
+    printf '%s\n' "$m"
+}
+bridge_for() {   # bridge_for <libavutil major>: the bridge built for it, else the default one (it then says why it is not active)
+    if [ -n "$1" ] && [ -f "$(dirname "$bridge")/pushmpc-iina-av$1.so" ]; then printf '%s\n' "$(dirname "$bridge")/pushmpc-iina-av$1.so"; else printf '%s\n' "$bridge"; fi
+}
+write_conf() {   # write_conf <folder> <bridge>
     # engine: the bundle's engine module (VideoToolbox, Vulkan on MoltenVK, CPU) for the bridge (PUSHMPC_ENGINE)
-    { printf 'vf=%s\n' "$VF"; printf 'script=%s\n' "$bridge"; [ ! -f "$from/libpushmpc_engine.dylib" ] || printf 'engine=%s\n' "$from/libpushmpc_engine.dylib"; } > "$1/pushmpc-autoload.conf"
+    { printf 'vf=%s\n' "$VF"; printf 'script=%s\n' "${2:-$bridge}"; [ ! -f "$from/libpushmpc_engine.dylib" ] || printf 'engine=%s\n' "$from/libpushmpc_engine.dylib"; } > "$1/pushmpc-autoload.conf"
 }
 app_put_back() {   # app_put_back <bundle> <lib> <bk>: the original libmpv (or the whole app) as it was
     b=$1; l=$2; k=$3; d=$(dirname "$l")
@@ -237,7 +248,8 @@ do_app() {   # do_app <target> <bundle>
             mv "$lib" "$d/pushmpc-orig-libmpv.dylib" && cp "$from/apps/libmpv-proxy.dylib" "$lib" \
                 || { [ -f "$lib" ] || mv "$d/pushmpc-orig-libmpv.dylib" "$lib"; emit "$name" error "cannot replace $lib"; return 1; }
         fi
-        write_conf "$d"
+        av=$(app_avutil "$d/pushmpc-orig-libmpv.dylib" "$bundle"); abr=$(bridge_for "$av")
+        write_conf "$d" "$abr"
         xattr -d com.apple.quarantine "$lib" 2>/dev/null
         if [ "$kind" = resign ]; then
             # the app's own entitlements, without the hardened runtime: it then loads ad-hoc signed libraries
@@ -245,9 +257,9 @@ do_app() {   # do_app <target> <bundle>
                 || { app_put_back "$bundle" "$lib" "$bk"; rm -rf "$bk"; emit "$name" error "signing $bundle again failed; the app is as it was"; return 1; }
         fi
         selftest_app "$lib" "$bundle"; s=$?
-        if [ "$s" = 0 ]; then emit "$name" installed "$bundle ($(basename "$lib")$([ "$kind" = resign ] && echo ', signed again ad hoc; backup kept')); selftest: $st_detail"; return 0; fi
+        if [ "$s" = 0 ]; then emit "$name" installed "$bundle ($(basename "$lib")$([ "$kind" = resign ] && echo ', signed again ad hoc; backup kept'); bridge $(basename "$abr")${av:+ for libavutil $av}); selftest: $st_detail"; return 0; fi
         app_put_back "$bundle" "$lib" "$bk"; rm -rf "$bk"
-        emit "$name" not-active "$bundle: put back as it was; ${st_detail:-the self-test could not run}"; return 3 ;;
+        emit "$name" not-active "$bundle: put back as it was; ${av:+the app's libavutil is $av, }bridge $(basename "$abr"); ${st_detail:-the self-test could not run}"; return 3 ;;
     uninstall)
         [ "$dry" = 1 ] && { emit "$name" would-uninstall "$bundle"; return 0; }
         # the stand-in gone (the app was updated or the file removed): the path the original had

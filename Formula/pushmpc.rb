@@ -30,6 +30,9 @@ class Pushmpc < Formula
   # capture mode on macOS (pushmpc-capture: QuickTime Player, Infuse, browsers): its shaders, and Vulkan on Metal; the
   # portable GPU engine's Vulkan driver (Apple silicon and Intel Macs): the engine finds Homebrew's libMoltenVK.dylib by itself
   on_macos do
+    # the IINA bridge for apps that bundle an older FFmpeg (Stremio 5.1: FFmpeg 7): headers only, at build time
+    depends_on "ffmpeg@7" => :build
+    depends_on "ffmpeg@8" => :build
     depends_on "glslang" => :build
     depends_on "molten-vk"
   end
@@ -115,9 +118,15 @@ class Pushmpc < Formula
     ohai "VapourSynth headers: #{inc}"
 
     apple = OS.mac? ? "ON" : "OFF"
-    # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers;
-    # it refuses to patch anything when IINA's FFmpeg majors differ from these
-    bridge = OS.mac? ? ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}"] : []
+    # macOS: also the IINA bridge (pushmpc-iina.so, an mpv C plugin), built against Homebrew's FFmpeg and mpv headers,
+    # and once more for each older FFmpeg major (ffmpeg@7, ffmpeg@8: pushmpc-iina-av<libavutil major>.so); a bridge
+    # refuses to patch anything when the app's FFmpeg majors differ from its own, so pushmpc-apps-mac.sh picks per app
+    bridge = if OS.mac?
+      ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}",
+       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{Formula["ffmpeg@7"].opt_include};#{Formula["ffmpeg@8"].opt_include}"]
+    else
+      []
+    end
     # the ml backend: ONNX Runtime's C API headers from Homebrew's onnxruntime (loaded at run time, nothing linked)
     ort = Formula["onnxruntime"].opt_include
     ort /= "onnxruntime" if (ort/"onnxruntime/onnxruntime_c_api.h").exist?
@@ -193,7 +202,7 @@ class Pushmpc < Formula
     pkgshare.install "integrations/mpv/pushmpc.lua"
     pkgshare.install "build-content/pushmpc-content"   # next to pushmpc.lua (it looks there)
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
-    (lib/"pushmpc").install "build/pushmpc-iina.so" if OS.mac? && File.exist?("build/pushmpc-iina.so")
+    (lib/"pushmpc").install Dir["build/pushmpc-iina*.so"] if OS.mac?   # pushmpc-iina.so and pushmpc-iina-av<N>.so
     libexec.install "integrations/mpv/mpv-integration.sh"
     if OS.mac? && resources.any? { |r| r.name == "plex-mac" }
       (pkgshare/"plex-mac").mkpath

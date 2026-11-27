@@ -22,6 +22,14 @@ grep -q pushmpc_mpv_proxy_status "$1" || { echo "host: $1 is not the stand-in"; 
 [ -f "$(dirname "$1")/pushmpc-orig-libmpv.dylib" ] || { echo "host: cannot load the original"; exit 2; }
 grep -q '^script=' "$(dirname "$1")/pushmpc-autoload.conf" || { echo "host: no autoload conf"; exit 3; }
 mkdir -p "$HOME/Library/Logs/PushMPC"
+# the bridge's FFmpeg-major guard: an app that bundles libavutil.<N>.dylib runs only pushmpc-iina-av<N>.so
+c=$(dirname "$1"); while [ "$(basename "$c")" != Contents ] && [ "$c" != / ]; do c=$(dirname "$c"); done
+m=$(find "$c" -name 'libavutil.*.dylib' | sed -n 's/.*libavutil\.\([0-9][0-9]*\)\..*dylib$/\1/p' | head -n 1)
+br=$(sed -n 's/^script=//p' "$(dirname "$1")/pushmpc-autoload.conf")
+if [ -n "$m" ] && [ "$(basename "$br")" != "pushmpc-iina-av$m.so" ]; then
+    printf 'pushmpc-iina: not active: FFmpeg major versions differ from this build (libavutil %s vs 61)\n' "$m" >> "$HOME/Library/Logs/PushMPC/iina-bridge.log"
+    echo "host: y4m: vf accepted; end of file reason 0 (0 = eof)"; exit 0
+fi
 printf 'pushmpc-iina: engine: portable-cpu (built in)\npushmpc-iina: graph closed: 48 frames in, 96 out (x2)\n' >> "$HOME/Library/Logs/PushMPC/iina-bridge.log"
 echo "host: y4m: vf accepted; end of file reason 0 (0 = eof)"
 EOF
@@ -104,6 +112,30 @@ echo "$out" | grep -q '"target":"stremio".*"state":"installed".*48 frames in, 96
     && ok "libmpv in Contents/MacOS: installed" || { echo "$out"; bad "libmpv in Contents/MacOS: not installed"; }
 $I uninstall --json >/dev/null 2>&1
 [ "$(sums)" = "$b4" ] && ok "libmpv in Contents/MacOS: uninstall byte-identical" || bad "libmpv in Contents/MacOS: uninstall left differences"
+
+# one bridge per FFmpeg major: the app's bundled libavutil.<N>.dylib picks pushmpc-iina-av<N>.so (Stremio 5.1.26 bundles
+# FFmpeg 7 = libavutil 59, Homebrew has 61: players run 45964178745); no build for its major: not active, unchanged
+mkdir -p "$T/br"; : > "$T/br/pushmpc-iina.so"
+for n in 59 60 61; do : > "$T/br/pushmpc-iina-av$n.so"; done
+rm -f "$A/Stremio.app/Contents/MacOS/libmpv.2.dylib"
+mkdir -p "$A/Stremio.app/Contents/Frameworks"
+printf 'libmpv %s mpv_create\n' "$BANNER" > "$A/Stremio.app/Contents/Frameworks/libmpv.2.dylib"
+for n in 59 60 61; do
+    rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.$n.dylib"
+    b5=$(sums)
+    out=$($I install --target stremio --from "$T/from" --bridge "$T/br/pushmpc-iina.so" --json 2>/dev/null)
+    echo "$out" | grep -q "\"target\":\"stremio\".*\"state\":\"installed\".*bridge pushmpc-iina-av$n.so for libavutil $n.*48 frames in" \
+        && grep -q "^script=$T/br/pushmpc-iina-av$n.so$" "$A/Stremio.app/Contents/Frameworks/pushmpc-autoload.conf" \
+        && ok "libavutil $n: its bridge, active" || { echo "$out"; bad "libavutil $n: not installed with its bridge"; }
+    $I uninstall --json >/dev/null 2>&1
+    [ "$(sums)" = "$b5" ] && ok "libavutil $n: uninstall byte-identical" || bad "libavutil $n: uninstall left differences"
+done
+rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.58.dylib"
+b6=$(sums)
+out=$($I install --target stremio --from "$T/from" --bridge "$T/br/pushmpc-iina.so" --json 2>/dev/null); rc=$?
+echo "$out" | grep -q '"target":"stremio".*"state":"not-active".*libavutil is 58.*FFmpeg major versions differ' && [ "$rc" = 3 ] \
+    && ok "libavutil 58 (no bridge built for it): not active, the reason named" || { echo "$out"; bad "libavutil 58: no clean not-active (exit $rc)"; }
+[ "$(sums)" = "$b6" ] && ok "libavutil 58: the app unchanged" || bad "libavutil 58: files changed"
 
 # team-bound entitlements on a hardened app: refused, nothing changed
 printf '<plist><dict><key>keychain-access-groups</key><array/></dict></plist>' > "$J/fake-entitlements.plist"
