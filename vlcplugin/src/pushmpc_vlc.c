@@ -460,6 +460,7 @@ struct filter_sys_t {
     picture_t *lag_a;                 /* the picture advanced last (the next pair's first) */
     bool lag_seen;
     uint64_t lag_jobs, lag_errors;    /* pairs advanced and generated on the worker; advances that failed there */
+    bool rep_tried;                   /* the repair was set (PortableRepairOn): once per stream */
     mtime_t held_base;
     picture_t *still_pic;             /* held-drawing repair: the still's picture (as shown), cloned for each repeat */
     uint64_t still_out;               /* pictures that showed a still at the output rate */
@@ -1094,6 +1095,26 @@ static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_
     sys->content_state = st;
 }
 
+/* the held-drawing repair on the portable engines follows the measured class, as pushcore's held frames do (PcContent):
+ * lagged pairs run on VLC's video thread (no worker) and cost a copy and a cell grid per frame, so only once the picture
+ * is measured as drawn (PUSHMPC_VLC_DRAWN: unset follows the class, 0 never, else from the start). Once on, it stays on
+ * for the stream (the pictures waiting in the lag would have to be handed back to switch it off). */
+static bool PortableRepairWanted(filter_t *f, const struct filter_sys_t *sys)
+{
+    if (sys->pc || !sys->eng || !sys->dedup || sys->lag || sys->rep_tried || !OptInt(f, CFG "hold-repair", 1)) return false;
+    const char *ov = getenv("PUSHMPC_VLC_DRAWN");
+    if (ov && *ov) return ov[0] != '0';
+    return sys->content_state.cls == PMC_CLASS_DRAWN;
+}
+static void PortableRepairOn(filter_t *f, struct filter_sys_t *sys)
+{
+    sys->rep_tried = true;
+    if (!sys->dedup_set) { pm_engine_set_dedup(sys->eng, 1); sys->dedup_set = true; }
+    char rwhy[200] = "";
+    sys->lag = pm_engine_set_repair(sys->eng, 1, rwhy, sizeof(rwhy)) ? pm_engine_repair_lag(sys->eng) : 0;
+    msg_Info(f, "PushMPC: held-drawing repair %s", rwhy);
+}
+
 /* the measured class on the pushcore route (see the header): Auto decides again with it, warm (pm_pc_update), at most
  * once per 10 s, with no job in flight; true when pushcore was reloaded (its pair starts over: the next frame has none) */
 static const char *ClassName(int cls)
@@ -1594,9 +1615,23 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
 
     ContentMeasure(f, sys, cur, work);   /* before the held-frame step: repeats are part of what is measured */
 
+    if (PortableRepairWanted(f, sys)) {   /* measured as drawn: the pairs lag from this frame on */
+        WorkerIdle(sys, false);
+        PortableRepairOn(f, sys);
+        if (sys->still && sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }   /* a still showed it already */
+        sys->held = 0; sys->still = false;
+        if (sys->still_pic) { picture_Release(sys->still_pic); sys->still_pic = NULL; }
+    }
     const bool async = sys->worker_on && OutStages() > 0 && !sys->zc && !sys->lag;
-    /* the repair's lag mode: the worker too, where pushmpc_out can wait for its pictures (as above) */
-    if (sys->lag && !sys->pc) { WorkerIdle(sys, false); return LagFilter(f, sys, cur, work, sys->worker_on && OutStages() > 0 && !sys->zc); }
+    if (sys->lag && !sys->pc) {
+        WorkerIdle(sys, false);
+        picture_t *pre = sys->prev;   /* the switch above: the frame still waiting goes out alone (its pair restarts) */
+        sys->prev = NULL;
+        /* the worker too, where pushmpc_out can wait for its pictures (as above) */
+        picture_t *r = LagFilter(f, sys, cur, work, sys->worker_on && OutStages() > 0 && !sys->zc);
+        if (pre) { pre->p_next = r; sys->out++; sys->restarts++; r = pre; }
+        return r;
+    }
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
@@ -1985,11 +2020,11 @@ static int Open(vlc_object_t *obj)
             sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
-            if (sys->eng && sys->dedup) {   /* the held-drawing repair runs with Dedup (as the other portable routes) */
+            if (sys->eng && sys->dedup) {   /* held frames (Dedup) from the start; the repair once the picture is measured as drawn */
                 pm_engine_set_dedup(sys->eng, 1); sys->dedup_set = true;
-                char rwhy[200] = "";
-                sys->lag = pm_engine_set_repair(sys->eng, OptInt(f, CFG "hold-repair", 1) != 0, rwhy, sizeof(rwhy)) ? pm_engine_repair_lag(sys->eng) : 0;
-                msg_Info(f, "PushMPC: held-drawing repair %s", rwhy);
+                if (PortableRepairWanted(f, sys)) PortableRepairOn(f, sys);
+                else if (OptInt(f, CFG "hold-repair", 1))
+                    msg_Info(f, "PushMPC: held-drawing repair waits for the picture to be measured as drawn (until then the pairs follow the frames)");
             }
         }
     } else if (!sys->pc && !PM_CVPX_ON(sys)) {   /* (the CVPX zero-copy path set k and why above) */
