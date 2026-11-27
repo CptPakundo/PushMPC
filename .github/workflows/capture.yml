@@ -117,16 +117,21 @@ jobs:
             done; }
           motion() { echo "$1:"; python3 -I capture/tests/check_motion.py "/tmp/$2.y4m" "/tmp/$3.y4m" --speed "$4" --hz "$5" || bad=1; }
           # the GPU engine on llvmpipe (a software rasteriser: block matching about 65 ms a pair at 640x360, run 45953079462)
-          # at half size and 30 Hz, where every refresh gets its frame; the CPU engine at full size and 60 Hz
+          # at half size and 30 Hz, where every refresh gets its frame; the CPU engine at half size and 60 Hz. At 640x360 the
+          # CPU engine's Auto took x2 on this runner by its own cost rule (run 45976483878: 2.5 ms motion + 2 x 11.5 ms
+          # generated frames = 25.5 ms of its 25.0 ms budget a source frame), and 48 frames a second on a 60 Hz screen judder
+          # (spread 1.04): correct for that machine, not the mode under test. The run must say it gives every refresh a
+          # frame of its own, or it fails by name before the motion check.
           square 320 180 32 48 280 74
           run auto 30 --player pmc-square --no-present --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
           run off 30 --player pmc-square --no-present --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
-          square 640 360 64 96 560 148
           run cpu 60 --player pmc-square --no-present --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
           run cpuoff 60 --player pmc-square --no-present --engine cpu --smoother off --frames 300 --dump /tmp/cpuoff.y4m --log /tmp/capture-cpuoff.log -v
+          grep -h 'engine: cpu' /tmp/capture-cpu.log | tail -1
+          grep -q 'every screen refresh its own frame' /tmp/capture-cpu.log || { echo "::error::the CPU engine's Auto did not give every refresh its own frame at 320x180 / 60 Hz on this runner (its engine line above)"; bad=1; }
           clean_source auto off cpu cpuoff
           motion "GPU engine (320x180, 30 Hz)" auto off 48 30
-          motion "CPU engine (640x360, 60 Hz)" cpu cpuoff 96 60
+          motion "CPU engine (320x180, 60 Hz)" cpu cpuoff 48 60
           # mpv: capture takes a real player's window and generates frames (no motion limit: the player's own dropped
           # frames are not ours to measure here)
           player /tmp/square.mkv 640x360   # stays for the presented run

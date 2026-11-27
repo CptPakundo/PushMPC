@@ -4,7 +4,7 @@
 # (pushmpc-capture --no-present --dump), then the steps between frames. Frame generation must make the motion even:
 #   check_motion.py <with.y4m> [<without.y4m>] [--speed <px per second> --hz <display rate>]
 # with.y4m: frame generation on (Smoother Auto); without.y4m: --smoother off. Passes when, on the frames where the
-# square moves (wrap-arounds left out), the step's spread with frame generation is below 0.75 px and below half the spread
+# square moves (wrap-arounds and the 2 steps either side of them left out), the step's spread with frame generation is below 0.75 px and below half the spread
 # without it, the mean step is within 25 % of speed / hz, and no step goes backwards by more than 0.5 px.
 # Every result also prints what the steps are made of, for both dumps: stalls (a step under a quarter of the wanted
 # one), jumps (over one and a half source frames' worth: a frame the source skipped), backward steps, the extremes and
@@ -52,16 +52,38 @@ def centres(path):
     return out
 
 
+WRAP_GUARD = 2  # steps left out on each side of a wrap-around
+
+
 def steps(c):
+    """(frame index, step) pairs. The square wraps around at the right edge: that step, and the steps up to WRAP_GUARD
+    frames either side of it, are left out. A generated frame between the last picture at the right and the first at
+    the left blends the two places (no motion joins them), so the steps next to the wrap measure the wrap, not the
+    motion (capture run 45976483878, GPU engine: one step of 8.2 px in a run of 1.5-1.6 px steps, the off dump wrapping
+    in the same stretch)."""
+    wraps = [i for i, (a, b) in enumerate(zip(c, c[1:])) if a is not None and b is not None and abs(b - a) > 60]
     s = []
-    for a, b in zip(c, c[1:]):
+    for i, (a, b) in enumerate(zip(c, c[1:])):
         if a is None or b is None:
             continue
-        d = b - a
-        if abs(d) > 60:  # the square wrapped around
+        if any(abs(i - w) <= WRAP_GUARD for w in wraps):
             continue
-        s.append(d)
+        s.append((i, b - a))
     return s
+
+
+def show_outliers(name, c, s, want, src_step):
+    """the positions around every jump and backward step: where it is, and whether a wrap is near"""
+    jump_at = 1.5 * max(want, src_step)
+    shown = 0
+    for i, d in s:
+        if d > jump_at or d < -0.5:
+            lo, hi = max(0, i - 3), min(len(c), i + 5)
+            pos = " ".join("-" if x is None else f"{x:.1f}" for x in c[lo:hi])
+            print(f"  {name}: step {d:.3f} after frame {i}; positions of frames {lo}-{hi - 1}: {pos}")
+            shown += 1
+            if shown >= 8:
+                break
 
 
 def describe(name, s, want, src_step):
@@ -89,16 +111,20 @@ def main(argv):
     fps = float(opt.get("--fps", "24"))
     want = speed / hz
     src_step = speed / fps
-    on = steps(centres(args[0]))
+    c_on = centres(args[0])
+    on_ix = steps(c_on)
+    on = [d for _, d in on_ix]
     if len(on) < 30:
         print(f"FAIL: only {len(on)} usable steps in {args[0]}")
         return 1
-    on = on[10:]  # the timeline settles first
+    on_ix = on_ix[10:]  # the timeline settles first
+    on = on[10:]
     sd_on = statistics.pstdev(on)
     mean_on = statistics.mean(on)
     back = min(on)
     print(f"with frame generation: {len(on)} steps, mean {mean_on:.3f} px (want {want:.3f}), spread {sd_on:.3f} px, lowest {back:.3f}")
     describe("with", on, want, src_step)
+    show_outliers("with", c_on, on_ix, want, src_step)
     limited = opt.get("--source-limited", "no") == "yes"
     failed, info = [], []
     spread_rules = info if limited else failed
@@ -110,11 +136,14 @@ def main(argv):
     if not back > -0.5:
         failed.append(f"a step goes back {back:.3f} px")
     if len(args) > 1:
-        off = steps(centres(args[1]))[10:]
+        c_off = centres(args[1])
+        off_ix = steps(c_off)[10:]
+        off = [d for _, d in off_ix]
         sd_off = statistics.pstdev(off) if off else 0
         print(f"without: {len(off)} steps, spread {sd_off:.3f} px")
         if off:
             describe("without", off, want, src_step)
+            show_outliers("without", c_off, off_ix, want, src_step)
         if not sd_on < 0.5 * sd_off:
             spread_rules.append(f"spread {sd_on:.3f} not under half the spread without ({0.5 * sd_off:.3f})")
     if limited:
