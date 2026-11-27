@@ -24,6 +24,7 @@ ap.add_argument("--alloc-on", default="", help="command that gives it back")
 ap.add_argument("--gpu", action="store_true", help="the GPU engine is expected (Vulkan present)")
 ap.add_argument("--play", type=float, default=14.0)
 ap.add_argument("--first", type=float, default=25.0, help="seconds for each first start (Kodi registers the add-on)")
+ap.add_argument("--threads", type=int, default=0, help="the CPU engine's threads (add-on setting; 0 = its own choice)")
 ap.add_argument("--before", default="", help="command run before every Kodi start, after the settings are written")
 ap.add_argument("--after", default="", help="command run after every Kodi run (after --kill)")
 ap.add_argument("--player-clips", default="", help="the clips folder as Kodi sees it (default: --clips)")
@@ -166,7 +167,7 @@ if log:
 
 failed = []
 for name, clip, settings, k, decode, size, drive_case in CASES:
-    s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": 0}
+    s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": a.threads}
     if a.gpu:
         s.update({"engine": 1, "upscale": 1})
     s.update(settings)
