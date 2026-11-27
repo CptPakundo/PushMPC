@@ -70,6 +70,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Packages
         run: |
+          # the runner image's packages.microsoft.com source (nothing here comes from it) answered 403 / "no longer
+          # signed", which made apt-get update exit 100: left out
+          { grep -l packages.microsoft.com /etc/apt/sources.list.d/* 2>/dev/null || true; } | xargs -r sudo rm -f
           sudo rm -f /var/lib/man-db/auto-update; sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends build-essential nasm pkg-config meson ninja-build cmake ccache \
             glslang-tools spirv-headers libvulkan-dev mesa-vulkan-drivers vulkan-tools libshaderc-dev glslang-dev \
