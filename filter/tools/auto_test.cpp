@@ -476,7 +476,8 @@ int main()
                 check(Decide({}, bd, d, {}, xv).srMethod != Upscaler::Anime, L"anime SR: with Intel VSR too: the driver's VSR stays first");
                 // HDR: pushcore feeds the model its SDR-like proxy (AnimeSrFeed::PushcoreProxy): allowed
                 Source hdrBd = bd; hdrBd.hdr = true; hdrBd.tenBit = true;
-                const Choice hv = Decide({}, hdrBd, d, {}, rdna3);
+                Display dh = d; dh.hdr = true;   // HDR in and out: the traced path (hdrWorking, the SDR-like proxy)
+                const Choice hv = Decide({}, hdrBd, dh, {}, rdna3);
                 check(hv.srMethod == Upscaler::Anime, L"anime SR: an HDR source in pushcore (SDR-like proxy, restored onto HDR) keeps the anime model", hv.animeSrNote);
             }
             Settings asked; asked.upscaler = Upscaler::Anime;

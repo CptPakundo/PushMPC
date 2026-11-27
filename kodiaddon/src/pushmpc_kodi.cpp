@@ -1025,7 +1025,7 @@ private:
             // rule every player follows, content_detect.h); the anime model is not armed. Opened only for it (Smoother
             // off): Kodi's own renderer runs the same Video Super Resolution, so pushcore is not needed
             upNote = "; the anime upscaler " + plan.autoModel + " is a candidate: Video Super Resolution stays first until the verdict";
-            if (m_settings.smoother == 1) {
+            if (m_settings.smoother == 1 || pc->K() <= 1) {   // no frame generation either (also Auto at x1)
                 engWhy = "pushcore: only its upscaler was wanted" + upNote;
                 Log(ADDON_LOG_INFO, "pushcore not used:%s", upNote.c_str() + 1);
                 return false;

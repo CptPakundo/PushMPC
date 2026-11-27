@@ -180,5 +180,7 @@ set_target_properties(pushmpc_capture PROPERTIES OUTPUT_NAME pushmpc-capture RUN
 target_include_directories(pushmpc_capture PRIVATE ${PMC_INCS})
 target_compile_definitions(pushmpc_capture PRIVATE ${PMC_DEFS})
 target_link_libraries(pushmpc_capture PRIVATE ${PMC_LIBS})
-add_dependencies(pushmpc_capture pmc_spv)
+if(TARGET pmc_spv)   # glslang ran here; the checked-in SPIR-V needs no build step
+  add_dependencies(pushmpc_capture pmc_spv)
+endif()
 message(STATUS "capture mode: pushmpc-capture with ${PMC_DEFS}")
