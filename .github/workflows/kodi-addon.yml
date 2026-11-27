@@ -596,9 +596,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { kodi: 21, abi: x86, art: x86, info: false }
-          - { kodi: 22, abi: x86, art: x86, info: false }
-          - { kodi: 21, abi: arm64-v8a, art: arm64, info: true }
+          - { kodi: 21, abi: x86, art: x86, info: false, api: 30 }
+          - { kodi: 22, abi: x86, art: x86, info: false, api: 30 }
+          # API 33's ARM translation: API 30's (ndk_translation) stopped Kodi's ARM process with SIGILL in a SIMD scalar
+          # instruction (DecodeSimdScalarTwoRegMisc) and SIGSEGV in Kodi's own uname call (run 45960712431)
+          - { kodi: 21, abi: arm64-v8a, art: arm64, info: true, api: 33 }
     continue-on-error: ${{ matrix.info }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
@@ -619,10 +621,13 @@ jobs:
       - name: Play the cases in Kodi on the emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
           disable-animations: true
+          # all 4 runner cores: Kodi 22's software rendering plus the CPU engine missed the render check by 0.5 frames a
+          # second on the default 2 (40.3 of 40.8, run 45960712431)
+          cores: 4
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -memory 4096
           script: bash kodiaddon/ci/android-test.sh "$RUNNER_TEMP/kodi.apk" addon/inputstream.pushmpc "$RUNNER_TEMP/clips" out ${{ matrix.kodi }} ${{ matrix.abi }} "${{ inputs.cases || 'h264_x2,h264_x4,auto,cpu_engine,off,hevc_x2,mpeg2_x2,seek,disabled' }}"
       - name: Summary

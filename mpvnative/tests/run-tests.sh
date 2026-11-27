@@ -13,6 +13,8 @@ fails=0
 result() { echo "check $1: $2"; [ "$2" = FAIL ] && fails=$((fails + 1)); echo "$1 $2" >> "$T/summary.txt"; }
 count() { "$FP" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1" | tr -d '\r'; }
 check() { $PY "$HERE/check_frames.py" "$1" "$2" "$3" --ffprobe "$FP" --tolerance "${4:-1}"; }
+# tmo <seconds> <command...>: GNU timeout where there is one (Linux, MSYS2); macOS has none (perl's alarm instead)
+tmo() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
 : > "$T/summary.txt"
 
 "$FF" -hide_banner -filters 2>/dev/null | grep -E " (pushmpc|fruc_vulkan) " | tee "$T/filters.txt"
@@ -135,9 +137,9 @@ if [ -x "$MPV" ] || [ -f "$MPV" ]; then
     "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=12000/1001:duration=4" -vf "fps=24000/1001,tpad=start=12:start_mode=clone" \
         -pix_fmt yuv420p -c:v ffv1 "$T/still-twos.mkv"
     NS=$(count "$T/still-twos.mkv")
-    if timeout 120 "$MPV" --no-config --msg-level=all=info,ffmpeg=v "$T/still-twos.mkv" --vf=pushmpc=smoother=2 --o="$T/mpv-still.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-still.log" 2>&1 \
+    if tmo 120 "$MPV" --no-config --msg-level=all=info,ffmpeg=v "$T/still-twos.mkv" --vf=pushmpc=smoother=2 --o="$T/mpv-still.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-still.log" 2>&1 \
        && check "$T/mpv-still.mkv" $((1 + (NS - 1) * 2)) 48000/1001 3; then result mpv-dedup-still-twos-x2 PASS
-    else echo "exit or hang: $NS source frames"; grep -iE "pushmpc|close:" "$T/mpv-still.log" | tail -5; result mpv-dedup-still-twos-x2 FAIL; fi
+    else echo "exit or hang: $NS source frames"; tail -8 "$T/mpv-still.log"; result mpv-dedup-still-twos-x2 FAIL; fi
     # 7. playback timing: vo=null at a 96 Hz "display", display-resample, a seek (graph rebuilt); mpv must see 95.9 fps
     #    from the filter, lock vsync-ratio 1 and drop nothing
     "$FF" -v error -y -f lavfi -i "testsrc2=size=640x360:rate=24000/1001:duration=12" -pix_fmt yuv420p -c:v ffv1 "$T/clip12.mkv"
