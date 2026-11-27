@@ -156,6 +156,16 @@ jobs:
           "$vsp" vsplugin/tests/ci/portable_clip.vpy -- > /dev/null
           cat $RUNNER_TEMP/vslog/*.log | tail -20
 
+      - name: The end of a stream of unknown length (mpv's source; probe, not judged yet)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        env: { PUSHMPC_VK_ALLOW_CPU: '1' }
+        run: |
+          set -uo pipefail
+          export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so PUSHMPC_VS_LOG_DIR=$RUNNER_TEMP/vslog-eof
+          python vsplugin/tests/ci/eof_probe.py
+          grep -h "failed: a source frame it requested\|instance closed" $RUNNER_TEMP/vslog-eof/*.log | head -20 || true
+
       - uses: actions/cache@v4
         if: ${{ !cancelled() }}
         with:

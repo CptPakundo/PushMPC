@@ -138,3 +138,15 @@ inline void Log(const std::string& line)
 
 } // namespace pmvs
 #endif
+
+namespace pmvs {
+// arError: VapourSynth failed output n before the filter ran, because a source frame it requested failed. Under mpv
+// that is a request past the end of the stream (its source does not know its length and errors there), e.g. a Dedup
+// lookahead frame. The first few are logged (none was before: such frames left no trace).
+inline void LogSourceError(const char* who, int n, int64_t from, uint64_t& count)
+{
+    if (++count <= 3)
+        Log(std::string(who) + ": output frame " + std::to_string(n) + " failed: a source frame it requested (from " + std::to_string(from) +
+            " on) failed (the end of a stream of unknown length, or the source's own error)");
+}
+} // namespace pmvs
