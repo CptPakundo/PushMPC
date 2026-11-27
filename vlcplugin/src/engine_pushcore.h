@@ -18,4 +18,9 @@ pm_pc *pmx_open_d3d11(const pm_pc_cfg *cfg, void *device, void *mutex, int *k, c
 int pmx_push_d3d11(pm_pc *pc, void *texture, unsigned slice, int64_t pts100ns, int discontinuity, char *err, size_t n);
 int pmx_poll_d3d11(pm_pc *pc, uint32_t timeout_ms, pm_pc_dest_tex_fn dest, pm_pc_done_fn done, void *user, char *err, size_t n);
 int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned src_slice, void *dst, unsigned dst_slice);
+/* ABI 3 (pm_pushcore.h): the bridge's ABI (0 = none loaded, 2 = no update), a settings update for the running stream
+ * (the measured class), what runs */
+unsigned pmx_abi(void);
+int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n);
+int pmx_output(pm_pc *pc, pm_pc_info *info);
 #endif

@@ -32,7 +32,7 @@ static void Models()
     // the DrawnPolicy per measured kind
     const std::string m = "artcnn-c4f16";
     CHECK(pmk::AnimeModelFor(m, kDrawn, false, false) == m);            // hand-drawn
-    CHECK(pmk::AnimeModelFor(m, kDrawn, false, true) == m + "-ds");     // hand-drawn, low bitrate: DS allowed
+    CHECK(pmk::AnimeModelFor(m, kDrawn, false, true) == m);            // hand-drawn, low bitrate: plain too (DS never automatic)
     CHECK(pmk::AnimeModelFor(m, kDrawn, true, true) == m);              // rendered CG: plain model, never DS
     CHECK(pmk::AnimeModelFor(m + "-ds", kDrawn, true, false) == m);     // a DS pick is made plain for CG
     for (int cls : {int(kUnknown), int(kCg), int(kLive), int(kGame)})
@@ -62,21 +62,21 @@ static void Switch()
     };
     CHECK(!step(kUnknown, false, 0.5));                    // still measuring: nothing changes
     CHECK(step(kDrawn, false, 1.5));                       // first decision: at once
-    CHECK(s.Running() == "artcnn-c4f16-ds" && cfg.animeModel == "artcnn-c4f16-ds");   // hand-drawn, low bitrate
+    CHECK(s.Running() == "artcnn-c4f16" && cfg.animeModel == "artcnn-c4f16");   // hand-drawn, low bitrate: the plain model
     CHECK(!step(kDrawn, false, 5.0));                      // same class: no reopen
     CHECK(!step(kLive, false, 20.0));                      // live action within 30 s: held back
-    CHECK(s.Running() == "artcnn-c4f16-ds");
+    CHECK(s.Running() == "artcnn-c4f16");
     CHECK(step(kLive, false, 31.6));                       // asked again by a later state: off now
     CHECK(s.Running().empty() && cfg.animeModel.empty());
     CHECK(!step(kDrawn, true, 40.0));                      // rendered CG within 30 s: held back
     CHECK(step(kDrawn, true, 62.0));                       // then the plain model (never DS on CG)
     CHECK(s.Running() == "artcnn-c4f16" && cfg.animeModel == "artcnn-c4f16");
     CHECK(!step(kDrawn, false, 80.0));                     // hand-drawn again within 30 s: held back
-    CHECK(step(kDrawn, false, 92.5));                      // the DS variant may run now
-    CHECK(s.Running() == "artcnn-c4f16-ds");
+    CHECK(!step(kDrawn, false, 92.5));                     // hand-drawn after CG: the same plain model, no switch
+    CHECK(s.Running() == "artcnn-c4f16");
     CHECK(step(kGame, false, 130.0));                      // game footage: off
     CHECK(s.Running().empty());
-    CHECK(switches == 5);
+    CHECK(switches == 4);   // hand-drawn after CG keeps the plain model (no DS): no switch there
 
     // a normal bitrate source never gets DS; a failed reopen stops further switches
     pmk::AnimeAutoSwitch n;
@@ -141,11 +141,63 @@ static void Windows()
     CHECK(pmk::PlanWindowsAnime(x).route == pmk::WinUpscale::KodiScaler);
 }
 
+// the pushcore route's updates (pm_pc_update) from the measured class: the anime model through AnimeAutoSwitch (30 s),
+// the drawn treatment on every class / CG change (10 s apart at most), nothing while measuring; the route opens at x1
+// only for its upscaler
+static void PushcoreUpdates()
+{
+    pmk::WinAnimePlan up; up.route = pmk::WinUpscale::PushcoreSr;
+    pmk::WinAnimePlan keep;
+    CHECK(pmk::PushcoreWorth(0, keep) && pmk::PushcoreWorth(2, keep) && !pmk::PushcoreWorth(1, keep));   // Smoother off: only to upscale
+    CHECK(pmk::PushcoreWorth(1, up));                                                                     // x1 with pushcore's upscaler
+
+    pmk::AnimeAutoSwitch sw;
+    sw.Arm("artcnn-c4f16");
+    pmk::PushcoreContentGate g;
+    std::string running;
+    auto step = [&](int cls, bool cg, double t, bool ok = true) {
+        const pmk::PushcoreContentGate::Ask a = g.Update(cls, cg, t, sw, true, running);
+        if (a.update) { g.Done(a, ok, t, sw); if (ok) running = a.model; }
+        return a;
+    };
+    CHECK(!step(kUnknown, false, 0.5).update);                     // measuring: nothing
+    pmk::PushcoreContentGate::Ask a = step(kDrawn, false, 2.0);    // drawn: the anime model and the drawn treatment at once
+    CHECK(a.update && a.switched && a.model == "artcnn-c4f16" && running == "artcnn-c4f16");
+    CHECK(!step(kDrawn, false, 3.0).update);                       // the same class: nothing
+    a = step(kDrawn, true, 5.0);                                   // CG measured 3 s later: held back (10 s), the model stays plain
+    CHECK(!a.update);
+    a = step(kDrawn, true, 12.5);                                  // ... then given (the treatment changes, the model does not)
+    CHECK(a.update && !a.switched && a.cg && a.model == "artcnn-c4f16" && !pmk::AnimeModelIsDs(running));
+    a = step(kLive, false, 20.0);                                  // live 7.5 s later: the switch waits 30 s, the class 10 s
+    CHECK(!a.update);
+    a = step(kLive, false, 32.6);                                  // class gap over, the anime switch not yet (30.6 s after 2.0)
+    CHECK(a.update && a.switched && a.model.empty() && running.empty());   // 30 s since the model went on: both
+    a = step(kDrawn, false, 40.0);
+    CHECK(!a.update);                                              // 7.4 s after the last update
+    a = step(kDrawn, false, 70.0);
+    CHECK(a.update && a.switched && a.model == "artcnn-c4f16");
+    // a refused anime model (pushcore cannot run it): the switch is disarmed, the class still goes on
+    pmk::AnimeAutoSwitch sw2; sw2.Arm("cunny-fast");
+    pmk::PushcoreContentGate g2;
+    a = g2.Update(kDrawn, false, 1.0, sw2, true, "");
+    CHECK(a.update && a.switched && a.model == "cunny-fast");
+    g2.Done(a, false, 1.0, sw2);
+    CHECK(!sw2.Armed());
+    a = g2.Update(kLive, false, 20.0, sw2, true, "");
+    CHECK(a.update && !a.switched && a.model.empty());
+    // no upscaler on the route (source size): the class alone
+    pmk::AnimeAutoSwitch sw3; sw3.Arm("artcnn-c4f16");
+    pmk::PushcoreContentGate g3;
+    a = g3.Update(kDrawn, false, 1.0, sw3, false, "");
+    CHECK(a.update && !a.switched && a.model.empty());
+}
+
 int main()
 {
     Models();
     Switch();
     Windows();
+    PushcoreUpdates();
     std::printf(g_fail ? "win_anime_route_test: %d of %d check(s) failed\n" : "win_anime_route_test: all %d checks passed\n", g_fail ? g_fail : g_checks, g_checks);
     return g_fail ? 1 : 0;
 }

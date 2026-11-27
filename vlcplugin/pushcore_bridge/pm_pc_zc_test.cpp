@@ -61,7 +61,8 @@ static void Run(ID3D11Device* dev, ID3D11DeviceContext* ctx, HANDLE mutex, ID3D1
 {
     std::printf("== x%d into %s\n", want, ring ? "single textures (the module's ring)" : "a texture array (VLC's pool)");
     pm_pc_cfg cfg = {};
-    cfg.abi = PM_PC_ABI; cfg.width = W; cfg.height = H; cfg.bits = 8; cfg.fps_num = 24; cfg.fps_den = 1;
+    cfg.abi = PM_PC_ABI; cfg.struct_size = sizeof(cfg); cfg.anime_model = PM_PC_ANIME_NONE;   // ABI 3, the source size (as ABI 2)
+    cfg.width = W; cfg.height = H; cfg.bits = 8; cfg.fps_num = 24; cfg.fps_den = 1;
     cfg.matrix = 1; cfg.transfer = 1; cfg.primaries = 1; cfg.range = 1; cfg.smoother = want; cfg.warp = 1; cfg.core_dir = stub;
     cfg.display_hz = 240;   // a high-refresh display: x8 of 24 fps fits
     int k = 0; char err[512] = "";

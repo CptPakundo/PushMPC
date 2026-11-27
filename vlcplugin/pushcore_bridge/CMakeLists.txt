@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")   # static CRT: one self-contained DLL
 set(ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 add_library(pm_pushcore SHARED pm_pushcore.cpp "${ROOT}/vsplugin/src/corehost.cpp")
-target_include_directories(pm_pushcore PRIVATE . "${ROOT}/vsplugin/src" "${ROOT}/filter/src" "${ROOT}/pushmpc/include")
+target_include_directories(pm_pushcore PRIVATE . "${ROOT}/vsplugin/src" "${ROOT}/filter/src" "${ROOT}/pushmpc/include" "${ROOT}/mpvnative/include")
 target_compile_definitions(pm_pushcore PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(pm_pushcore PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(pm_pushcore PRIVATE d3d11 dxgi d3dcompiler user32 advapi32 shell32 ole32)
@@ -21,3 +21,11 @@ add_executable(pm_pc_zc_test pm_pc_zc_test.cpp)
 target_compile_definitions(pm_pc_zc_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(pm_pc_zc_test PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(pm_pc_zc_test PRIVATE d3d11)
+
+# the configuration ABI (ABI 2 callers, ABI 3 sizes, upscaler, updates) on WARP with the stub core (PUSHCORE_STUB_SR):
+# pm_pc_abi_test <pm_pushcore.dll> <stub folder> <scratch folder>
+add_executable(pm_pc_abi_test pm_pc_abi_test.cpp)
+target_compile_definitions(pm_pc_abi_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(pm_pc_abi_test PRIVATE /W3 /EHsc /O2 /utf-8)
+target_include_directories(pm_pc_abi_test PRIVATE "${ROOT}/pushmpc/include")
+target_link_libraries(pm_pc_abi_test PRIVATE d3d11)

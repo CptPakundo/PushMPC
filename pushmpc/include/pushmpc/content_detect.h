@@ -49,7 +49,11 @@ struct DrawnPolicy {
     bool lineArt;         // line-art protection
     bool animeDeband;     // the anime deband preset (else the normal Auto deband rule)
 };
-inline constexpr DrawnPolicy kPolicyHandDrawn{ true, true, true, true, true, true };
+// _DS (denoise + sharpen) is never picked automatically, on any kind: under realistic degradation (Lanczos plus
+// x264 / x265 release encodes) it measured 4-5 dB worse on clean input and -0.9 to +0.5 dB on encodes, and at the low
+// bitrate where Auto used to pick it the plain model won (+0.69 dB over 48 frames). It stays selectable by hand.
+inline constexpr bool kAnimeUpscalerDsAuto = false;
+inline constexpr DrawnPolicy kPolicyHandDrawn{ true, true, kAnimeUpscalerDsAuto, true, true, true };
 inline constexpr DrawnPolicy kPolicyDrawnCg{ true, true, false, false, false, false };
 inline constexpr DrawnPolicy kPolicyNotDrawn{ false, false, false, false, false, false };
 inline const DrawnPolicy& PolicyFor(int cls, bool cg) { return cls == kDrawn ? (cg ? kPolicyDrawnCg : kPolicyHandDrawn) : kPolicyNotDrawn; }
@@ -109,68 +113,142 @@ inline Cells CellsFromYuv(const T* y, ptrdiff_t yStride, const T* u, const T* v,
 
 // ------------------------------------------------------------------------------------------------ helpers
 namespace detail {
-inline void Fft(std::vector<std::complex<float>>& a, bool inv)
-{
-    const size_t n = a.size();
-    for (size_t i = 1, j = 0; i < n; ++i) { size_t bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) std::swap(a[i], a[j]); }
-    for (size_t len = 2; len <= n; len <<= 1) {
-        const float ang = 6.2831853f / float(len) * (inv ? 1.f : -1.f);
-        const std::complex<float> wl(std::cos(ang), std::sin(ang));
-        for (size_t i = 0; i < n; i += len) {
-            std::complex<float> wv(1.f, 0.f);
-            for (size_t k = 0; k < len / 2; ++k) { const auto u = a[i + k], t = a[i + k + len / 2] * wv; a[i + k] = u + t; a[i + k + len / 2] = u - t; wv *= wl; }
-        }
-    }
-}
-// 2-D FFT of a W x H grid zero-padded to pw x ph (powers of two), in place, row-major
-inline void Fft2(std::vector<std::complex<float>>& g, int pw, int ph, bool inv)
-{
-    std::vector<std::complex<float>> line;
-    line.resize(size_t(pw));
-    for (int y = 0; y < ph; ++y) { std::copy_n(g.begin() + ptrdiff_t(y) * pw, pw, line.begin()); Fft(line, inv); std::copy_n(line.begin(), pw, g.begin() + ptrdiff_t(y) * pw); }
-    line.resize(size_t(ph));
-    for (int x = 0; x < pw; ++x) { for (int y = 0; y < ph; ++y) line[size_t(y)] = g[size_t(y) * pw + x]; Fft(line, inv); for (int y = 0; y < ph; ++y) g[size_t(y) * pw + x] = line[size_t(y)]; }
-}
-// in-place radix-2 FFT on split re / im arrays with a precomputed twiddle table (n a power of two; stride for columns)
-struct FftPlan {
-    int n = 0; std::vector<float> c, s; std::vector<uint32_t> rev;
+using Cplx = std::complex<float>;
+// Complex DFT of any length n, unnormalised (the inverse is not divided by n), without zero padding: a circular
+// transform like the offline reference's numpy FFT. Self-sorting mixed radix (Stockham: radices 4, 2, 3 and any other
+// prime up to kMaxRadix, e.g. 240 = 4 x 4 x 3 x 5, 135 = 3 x 3 x 3 x 5); a length with a larger prime factor goes through
+// Bluestein's chirp-z transform on the shortest 2-3-5-smooth length >= 2n - 1. `count` transforms run interleaved (element j of
+// transform q at q + count * j): the columns of a row-major grid in one call, the inner loop over contiguous memory.
+struct DftPlan {
+    static constexpr int kMaxRadix = 13;
+    int n = 0;
+    std::vector<int> radix;            // per stage
+    std::vector<size_t> twOff;         // per stage: offset of its twiddles W_len^(p t) (p < len / r, t < r; forward sign)
+    std::vector<Cplx> tw;
+    // Bluestein (n has a prime factor > kMaxRadix)
+    static constexpr int kBlueBatch = 64;   // transforms at a time (bounds the scratch)
+    int bm = 0;                        // the smooth length
+    std::vector<DftPlan> sub;          // its plan (one element)
+    std::vector<Cplx> chirp, kernF, kernI;   // e^{-i pi j^2 / n}; the transformed kernels (forward, inverse), divided by bm
+
     void Init(int len)
     {
         if (n == len) return;
-        n = len; c.resize(size_t(n / 2)); s.resize(size_t(n / 2)); rev.resize(size_t(n));
-        for (int k = 0; k < n / 2; ++k) { c[size_t(k)] = float(std::cos(6.283185307179586 * k / n)); s[size_t(k)] = float(std::sin(6.283185307179586 * k / n)); }
-        int bits = 0; while ((1 << bits) < n) ++bits;
-        for (int i = 0; i < n; ++i) { uint32_t r = 0; for (int b = 0; b < bits; ++b) if (i & (1 << b)) r |= 1u << (bits - 1 - b); rev[size_t(i)] = r; }
-    }
-    void Run(float* re, float* im, bool inv) const
-    {
-        for (int i = 0; i < n; ++i) { const int j = int(rev[size_t(i)]); if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); } }
-        const float sg = inv ? 1.f : -1.f;
-        for (int len = 2; len <= n; len <<= 1) {
-            const int half = len / 2, step = n / len;
-            for (int i = 0; i < n; i += len)
-                for (int k = 0; k < half; ++k) {
-                    const float wr = c[size_t(k * step)], wi = sg * s[size_t(k * step)];
-                    const int a = i + k, b = a + half;
-                    const float tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
-                }
+        *this = DftPlan(); n = len;
+        int rem = len;
+        while (rem % 4 == 0 && rem > 4) { radix.push_back(4); rem /= 4; }
+        for (int p = 2; p <= kMaxRadix && rem > 1; ++p) while (rem % p == 0) { radix.push_back(p); rem /= p; }
+        if (rem > 1) {   // Bluestein
+            radix.clear();
+            auto smooth = [](int v) { for (int p : { 2, 3, 5 }) while (v % p == 0) v /= p; return v == 1; };
+            bm = 2 * len - 1; while (!smooth(bm)) ++bm;
+            sub.resize(1); sub[0].Init(bm);
+            chirp.resize(size_t(len)); kernF.assign(size_t(bm), Cplx()); kernI.assign(size_t(bm), Cplx());
+            for (int j = 0; j < len; ++j) {
+                const double a = 3.141592653589793 * double((int64_t(j) * j) % (2 * int64_t(len))) / len;
+                chirp[size_t(j)] = Cplx(float(std::cos(a)), float(-std::sin(a)));
+                const Cplx b(float(std::cos(a) / bm), float(std::sin(a) / bm));   // conj(chirp) / bm
+                kernF[size_t(j)] = b; kernI[size_t(j)] = std::conj(b);
+                if (j) { kernF[size_t(bm - j)] = b; kernI[size_t(bm - j)] = std::conj(b); }
+            }
+            std::vector<Cplx> s(static_cast<size_t>(bm));
+            sub[0].Run(kernF.data(), s.data(), 1, false); sub[0].Run(kernI.data(), s.data(), 1, false);
+            return;
+        }
+        int l = len;
+        for (int r : radix) {
+            const int m = l / r;
+            twOff.push_back(tw.size());
+            for (int p = 0; p < m; ++p)
+                for (int t = 0; t < r; ++t) { const double a = -6.283185307179586 * double(p) * t / l; tw.emplace_back(float(std::cos(a)), float(std::sin(a))); }
+            l = m;
         }
     }
-};
-// 2-D FFT of pw x ph split arrays (rows, then columns through a line buffer)
-inline void Fft2Split(std::vector<float>& re, std::vector<float>& im, int pw, int ph, bool inv, FftPlan& rows, FftPlan& cols)
-{
-    rows.Init(pw); cols.Init(ph);
-    for (int y = 0; y < ph; ++y) rows.Run(re.data() + size_t(y) * pw, im.data() + size_t(y) * pw, inv);
-    std::vector<float> lr(static_cast<size_t>(ph)), li(static_cast<size_t>(ph));
-    for (int x = 0; x < pw; ++x) {
-        for (int y = 0; y < ph; ++y) { lr[size_t(y)] = re[size_t(y) * pw + x]; li[size_t(y)] = im[size_t(y) * pw + x]; }
-        cols.Run(lr.data(), li.data(), inv);
-        for (int y = 0; y < ph; ++y) { re[size_t(y) * pw + x] = lr[size_t(y)]; im[size_t(y) * pw + x] = li[size_t(y)]; }
+    // scratch: at least ScratchSize(count) elements
+    size_t ScratchSize(int count) const { return bm ? size_t(2 * bm) * size_t(std::min(count, kBlueBatch)) : size_t(n) * size_t(count); }
+    void Run(Cplx* x, Cplx* scratch, int count, bool inv) const
+    {
+        if (n <= 1) return;
+        if (bm) {   // interleaved batches: a[q + c * k] for the batch's c transforms
+            const std::vector<Cplx>& kern = inv ? kernI : kernF;
+            for (int q0 = 0; q0 < count; q0 += kBlueBatch) {
+                const int c = std::min(kBlueBatch, count - q0);
+                Cplx* a = scratch; Cplx* s = scratch + size_t(bm) * c;
+                for (int j = 0; j < n; ++j) {
+                    const Cplx w = inv ? std::conj(chirp[size_t(j)]) : chirp[size_t(j)];
+                    for (int q = 0; q < c; ++q) a[size_t(j) * c + q] = x[size_t(q0 + q) + size_t(count) * j] * w;
+                }
+                std::fill(a + size_t(n) * c, a + size_t(bm) * c, Cplx());
+                sub[0].Run(a, s, c, false);
+                for (int k = 0; k < bm; ++k) { const Cplx w = kern[size_t(k)]; for (int q = 0; q < c; ++q) a[size_t(k) * c + q] *= w; }
+                sub[0].Run(a, s, c, true);
+                for (int k = 0; k < n; ++k) {
+                    const Cplx w = inv ? std::conj(chirp[size_t(k)]) : chirp[size_t(k)];
+                    for (int q = 0; q < c; ++q) x[size_t(q0 + q) + size_t(count) * k] = a[size_t(k) * c + q] * w;
+                }
+            }
+            return;
+        }
+        Cplx* src = x; Cplx* dst = scratch;
+        int l = n; size_t s = size_t(count);
+        const float sg = inv ? 1.f : -1.f;
+        for (size_t st = 0; st < radix.size(); ++st) {
+            const int r = radix[st], m = l / r;
+            const Cplx* w = tw.data() + twOff[st];
+            for (int p = 0; p < m; ++p) {
+                const Cplx* in = src + s * size_t(p);
+                Cplx* out = dst + s * size_t(r) * p;
+                if (r == 2) {
+                    const Cplx w1 = inv ? std::conj(w[size_t(p) * 2 + 1]) : w[size_t(p) * 2 + 1];
+                    const Cplx* i1 = in + s * size_t(m);
+                    for (size_t q = 0; q < s; ++q) { const Cplx a0 = in[q], a1 = i1[q]; out[q] = a0 + a1; out[q + s] = (a0 - a1) * w1; }
+                } else if (r == 3) {
+                    const Cplx w1 = inv ? std::conj(w[size_t(p) * 3 + 1]) : w[size_t(p) * 3 + 1], w2 = inv ? std::conj(w[size_t(p) * 3 + 2]) : w[size_t(p) * 3 + 2];
+                    const Cplx* i1 = in + s * size_t(m); const Cplx* i2 = i1 + s * size_t(m);
+                    const float h = sg * 0.8660254037844386f;   // the imaginary part of W_3 (forward: -sin 60)
+                    for (size_t q = 0; q < s; ++q) {
+                        const Cplx a0 = in[q], a1 = i1[q], a2 = i2[q], t1 = a1 + a2, t2 = a0 - 0.5f * t1, d = a1 - a2;
+                        const Cplx jd(-h * d.imag(), h * d.real());   // i h d
+                        out[q] = a0 + t1; out[q + s] = (t2 + jd) * w1; out[q + 2 * s] = (t2 - jd) * w2;
+                    }
+                } else if (r == 4) {
+                    const Cplx w1 = inv ? std::conj(w[size_t(p) * 4 + 1]) : w[size_t(p) * 4 + 1], w2 = inv ? std::conj(w[size_t(p) * 4 + 2]) : w[size_t(p) * 4 + 2],
+                               w3 = inv ? std::conj(w[size_t(p) * 4 + 3]) : w[size_t(p) * 4 + 3];
+                    const Cplx* i1 = in + s * size_t(m); const Cplx* i2 = i1 + s * size_t(m); const Cplx* i3 = i2 + s * size_t(m);
+                    for (size_t q = 0; q < s; ++q) {
+                        const Cplx a0 = in[q], a1 = i1[q], a2 = i2[q], a3 = i3[q];
+                        const Cplx b0 = a0 + a2, b1 = a0 - a2, b2 = a1 + a3, d = a1 - a3;
+                        const Cplx b3(-sg * d.imag(), sg * d.real());   // sg * i * (a1 - a3): forward -i, inverse +i
+                        out[q] = b0 + b2; out[q + s] = (b1 + b3) * w1; out[q + 2 * s] = (b0 - b2) * w2; out[q + 3 * s] = (b1 - b3) * w3;
+                    }
+                } else {   // any other prime radix: the r-point DFT directly
+                    Cplx a[kMaxRadix], wr[kMaxRadix];
+                    for (int k = 0; k < r; ++k) { const double ang = sg * 6.283185307179586 * k / r; wr[k] = Cplx(float(std::cos(ang)), float(std::sin(ang))); }
+                    for (size_t q = 0; q < s; ++q) {
+                        for (int k = 0; k < r; ++k) a[k] = in[q + s * size_t(m) * k];
+                        for (int t = 0; t < r; ++t) {
+                            Cplx acc = a[0];
+                            for (int k = 1; k < r; ++k) acc += a[k] * wr[(k * t) % r];
+                            const Cplx wt = inv ? std::conj(w[size_t(p) * r + t]) : w[size_t(p) * r + t];
+                            out[q + s * size_t(t)] = acc * wt;
+                        }
+                    }
+                }
+            }
+            std::swap(src, dst);
+            l = m; s *= size_t(r);
+        }
+        if (src != x) std::copy_n(src, size_t(n) * count, x);
     }
+};
+// 2-D DFT of a w x h row-major grid in place (rows one by one, then all columns interleaved)
+inline void Dft2(Cplx* g, int w, int h, bool inv, DftPlan& rows, DftPlan& cols, std::vector<Cplx>& scratch)
+{
+    rows.Init(w); cols.Init(h);
+    scratch.resize(std::max(rows.ScratchSize(1), cols.ScratchSize(w)));
+    for (int y = 0; y < h; ++y) rows.Run(g + size_t(y) * w, scratch.data(), 1, inv);
+    cols.Run(g, scratch.data(), w, inv);
 }
-inline int Pow2(int v) { int p = 1; while (p < v) p <<= 1; return p; }
 // area mean of a w x h grid into ow x oh (bin edges rounded as the offline extractor's reduceat)
 inline std::vector<float> Area(const std::vector<float>& a, int w, int h, int ow, int oh)
 {
@@ -402,36 +480,34 @@ private:
         const auto hs = Histogram(c); float l1 = 0; for (int k = 0; k < 32; ++k) l1 += std::fabs(hs[k] - m_hist[k]);
         f.cut = l1 >= 0.30f && f.chgShare > 0.5f;
     }
-    // phase correlation at half size; the current frame's spectrum is kept for the next frame (one forward and one
-    // inverse transform a frame instead of three)
+    // phase correlation at half size (the area-halved cell picture, w/2 x h/2), circular on the grid itself as the offline
+    // reference (no zero padding: padding to powers of two moved the peak on ~3 % of real frames, measured); the current frame's
+    // spectrum is kept for the next frame (one forward and one inverse transform a frame)
     void PhaseShift(const Cells& a, const Cells& b, int& dx, int& dy)
     {
-        const int w2 = a.w / 2, h2 = std::max(1, a.h / 2);
-        const int pw = detail::Pow2(w2), ph = detail::Pow2(h2);
-        const size_t N = size_t(pw) * ph;
-        auto spectrum = [&](const Cells& c, std::vector<float>& re, std::vector<float>& im) {
+        const int w2 = std::max(1, a.w / 2), h2 = std::max(1, a.h / 2);
+        const size_t N = size_t(w2) * h2;
+        auto spectrum = [&](const Cells& c, std::vector<detail::Cplx>& s) {
             const auto A = detail::Area(c.y, c.w, c.h, w2, h2);
             double m = 0; for (float v : A) m += v; m /= double(A.size());
-            re.assign(N, 0.f); im.assign(N, 0.f);
-            for (int y = 0; y < h2; ++y) for (int x = 0; x < w2; ++x) re[size_t(y) * pw + x] = float(A[size_t(y) * w2 + x] - m);
-            detail::Fft2Split(re, im, pw, ph, false, m_fftRows, m_fftCols);
+            s.resize(N);
+            for (size_t i = 0; i < N; ++i) s[i] = detail::Cplx(float(A[i] - m), 0.f);
+            detail::Dft2(s.data(), w2, h2, false, m_dftRows, m_dftCols, m_dftScratch);
         };
-        if (!m_specValid || m_specRe.size() != N) spectrum(a, m_specRe, m_specIm);
-        std::vector<float> br, bi;
-        spectrum(b, br, bi);
-        std::vector<float> rr(N), ri(N);
+        if (!m_specValid || m_spec.size() != N) spectrum(a, m_spec);
+        spectrum(b, m_specNext);
+        m_corr.resize(N);
         for (size_t i = 0; i < N; ++i) {   // B x conj(A), normalised
-            const float xr = br[i] * m_specRe[i] + bi[i] * m_specIm[i], xi = bi[i] * m_specRe[i] - br[i] * m_specIm[i];
-            const float mg = std::sqrt(xr * xr + xi * xi) + 1e-6f;
-            rr[i] = xr / mg; ri[i] = xi / mg;
+            const detail::Cplx x = m_specNext[i] * std::conj(m_spec[i]);
+            m_corr[i] = x / (std::abs(x) + 1e-6f);
         }
-        m_specRe.swap(br); m_specIm.swap(bi); m_specValid = true;   // b becomes the next frame's a (m_prev)
-        detail::Fft2Split(rr, ri, pw, ph, true, m_fftRows, m_fftCols);
+        m_spec.swap(m_specNext); m_specValid = true;   // b becomes the next frame's a (m_prev)
+        detail::Dft2(m_corr.data(), w2, h2, true, m_dftRows, m_dftCols, m_dftScratch);
         size_t bi0 = 0; float bv = -1e30f;
-        for (size_t i = 0; i < N; ++i) if (rr[i] > bv) { bv = rr[i]; bi0 = i; }
-        int py = int(bi0 / pw), px = int(bi0 % pw);
-        if (py > ph / 2) py -= ph;
-        if (px > pw / 2) px -= pw;
+        for (size_t i = 0; i < N; ++i) if (m_corr[i].real() > bv) { bv = m_corr[i].real(); bi0 = i; }
+        int py = int(bi0 / size_t(w2)), px = int(bi0 % size_t(w2));
+        if (py > h2 / 2) py -= h2;
+        if (px > w2 / 2) px -= w2;
         dx = px * 2; dy = py * 2;
     }
     bool WindowFeatures(float* x) const
@@ -607,8 +683,8 @@ private:
     Cells m_prev;
     std::array<float, 32> m_hist{};
     float m_nf = 0; uint32_t m_nfN = 0;
-    detail::FftPlan m_fftRows, m_fftCols;
-    std::vector<float> m_specRe, m_specIm;   // the previous frame's spectrum (PhaseShift)
+    detail::DftPlan m_dftRows, m_dftCols;
+    std::vector<detail::Cplx> m_spec, m_specNext, m_corr, m_dftScratch;   // the previous frame's spectrum, work buffers (PhaseShift)
     bool m_specValid = false;   // m_specRe/Im hold m_prev's spectrum
     double m_nextEval = -1, m_t0 = -1, m_L = 0, m_img = 0.5, m_imgT = -1e18, m_Lcg = 0, m_imgCg = 0.5, m_cgT = -1e18;
     bool m_cgNew = false;

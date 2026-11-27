@@ -21,6 +21,10 @@ static struct {
     pm_pc_push_d3d11_fn push_d3d11;
     pm_pc_poll_d3d11_fn poll_d3d11;
     pm_pc_copy_d3d11_fn copy_d3d11;
+    /* optional (ABI 3: settings update, what runs) */
+    pm_pc_update_fn update;
+    pm_pc_output_fn output;
+    uint32_t abi;
 } B;
 static SRWLOCK lockB = SRWLOCK_INIT;
 
@@ -57,6 +61,11 @@ static int LoadBridge(char *err, size_t n)
                 B.copy_d3d11 = (pm_pc_copy_d3d11_fn)(void *)GetProcAddress(B.dll, "pm_pc_copy_d3d11");
                 if (!B.open_d3d11 || !B.push_d3d11 || !B.poll_d3d11 || !B.copy_d3d11)
                     B.open_d3d11 = NULL;   /* an older bridge: the copy path only */
+                pm_pc_abi_fn abi = (pm_pc_abi_fn)(void *)GetProcAddress(B.dll, "pm_pc_abi");
+                B.update = (pm_pc_update_fn)(void *)GetProcAddress(B.dll, "pm_pc_update");
+                B.output = (pm_pc_output_fn)(void *)GetProcAddress(B.dll, "pm_pc_output");
+                B.abi = abi && B.update && B.output ? abi() : 2u;   /* an older bridge: ABI 2 (no update) */
+                if (B.abi > PM_PC_ABI) B.abi = PM_PC_ABI;
             }
         }
     }
@@ -66,10 +75,19 @@ static int LoadBridge(char *err, size_t n)
     return ok;
 }
 
+/* an older bridge takes the ABI 2 part of the configuration (the fields it knows come first) */
+static const pm_pc_cfg *ForBridge(const pm_pc_cfg *cfg, pm_pc_cfg *tmp)
+{
+    if (B.abi >= 3 || !cfg) return cfg;
+    *tmp = *cfg;
+    tmp->abi = 2;
+    return tmp;
+}
 pm_pc *pmx_open(const pm_pc_cfg *cfg, int *k, char *err, size_t n)
 {
     if (!LoadBridge(err, n)) return NULL;
-    return B.open(cfg, k, err, n);
+    pm_pc_cfg tmp;
+    return B.open(ForBridge(cfg, &tmp), k, err, n);
 }
 int pmx_push(pm_pc *pc, const pm_pc_planes *src, int64_t pts, int disc, char *err, size_t n) { return B.push(pc, src, pts, disc, err, n); }
 int pmx_poll(pm_pc *pc, uint32_t ms, pm_pc_dest_fn d, pm_pc_done_fn f, void *u, char *err, size_t n) { return B.poll(pc, ms, d, f, u, err, n); }
@@ -81,11 +99,19 @@ pm_pc *pmx_open_d3d11(const pm_pc_cfg *cfg, void *dev, void *mutex, int *k, char
 {
     if (k) *k = 1;
     if (!pmx_has_d3d11()) { if (err && n) snprintf(err, n, "pm_pushcore.dll has no zero-copy path"); return NULL; }
-    return B.open_d3d11(cfg, dev, mutex, k, err, n);
+    pm_pc_cfg tmp;
+    return B.open_d3d11(ForBridge(cfg, &tmp), dev, mutex, k, err, n);
 }
 int pmx_push_d3d11(pm_pc *pc, void *t, unsigned s, int64_t pts, int disc, char *err, size_t n) { return B.push_d3d11(pc, t, s, pts, disc, err, n); }
 int pmx_poll_d3d11(pm_pc *pc, uint32_t ms, pm_pc_dest_tex_fn d, pm_pc_done_fn f, void *u, char *err, size_t n) { return B.poll_d3d11(pc, ms, d, f, u, err, n); }
 int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned ss, void *dst, unsigned ds) { return B.copy_d3d11(pc, src, ss, dst, ds); }
+unsigned pmx_abi(void) { char e[8]; return LoadBridge(e, sizeof(e)) ? B.abi : 0u; }
+int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n)
+{
+    if (B.abi < 3 || !B.update) { if (err && n) snprintf(err, n, "pm_pushcore.dll is older than ABI 3 (no settings update)"); return -1; }
+    return B.update(pc, cfg, err, n);
+}
+int pmx_output(pm_pc *pc, pm_pc_info *info) { return B.abi >= 3 && B.output ? B.output(pc, info) : -1; }
 
 #else
 
@@ -110,5 +136,8 @@ pm_pc *pmx_open_d3d11(const pm_pc_cfg *cfg, void *dev, void *mutex, int *k, char
 int pmx_push_d3d11(pm_pc *pc, void *t, unsigned s, int64_t pts, int disc, char *err, size_t n) { (void)pc; (void)t; (void)s; (void)pts; (void)disc; (void)err; (void)n; return -1; }
 int pmx_poll_d3d11(pm_pc *pc, uint32_t ms, pm_pc_dest_tex_fn d, pm_pc_done_fn f, void *u, char *err, size_t n) { (void)pc; (void)ms; (void)d; (void)f; (void)u; (void)err; (void)n; return -1; }
 int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned ss, void *dst, unsigned ds) { (void)pc; (void)src; (void)ss; (void)dst; (void)ds; return -1; }
+unsigned pmx_abi(void) { return 0u; }
+int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n) { (void)pc; (void)cfg; if (err && n) snprintf(err, n, "pushcore is Windows-only"); return -1; }
+int pmx_output(pm_pc *pc, pm_pc_info *info) { (void)pc; (void)info; return -1; }
 
 #endif

@@ -1,9 +1,171 @@
 /* pm_engine_test: the VLC module's engine interface on synthetic frames (no VLC): a box moving 8 px per frame must
- * come out half way at t = 0.5, a hard cut must repeat the nearer real frame, and Auto must pick sane multipliers. */
+ * come out half way at t = 0.5, a hard cut must repeat the nearer real frame, Auto must pick sane multipliers, and the
+ * held-drawing repair (engine_portable.h, CPU engine) must lag, advance, drain and lay a part held on twos over a pan
+ * in at its in-between position. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "pm_engine.h"
+#include "engine_portable.h"
+
+/* ---- the held-drawing repair: a painted background and a disc drawn on twos (12 px per drawing, back and forth).
+ * Until frame RT everything is on twos (whole frames repeat: the evidence that opens the repair's animation gate, as
+ * animation gives it); from RT on the background pans 3 px per frame (on ones) while the disc stays on twos. On such a
+ * held frame the disc stands still while the picture pans; repaired, it stands half way to its next drawing. */
+enum { RW = 480, RH = 272, RN = 80, RT = 48 };
+static float rtex[RH][2 * RW];
+static void RepairTexture(void)
+{
+    unsigned s = 12345u;
+    float c[RH / 8 + 2][2 * RW / 8 + 2];
+    for (int j = 0; j < RH / 8 + 2; j++)
+        for (int i = 0; i < 2 * RW / 8 + 2; i++) { s = s * 1103515245u + 12345u; c[j][i] = 40.f + 120.f * (float)((s >> 16) & 1023) / 1023.f; }
+    for (int y = 0; y < RH; y++)
+        for (int x = 0; x < 2 * RW; x++) {
+            const float fx = x / 8.f, fy = y / 8.f, ax = fx - (int)fx, ay = fy - (int)fy;
+            const int ix = (int)fx, iy = (int)fy;
+            rtex[y][x] = c[iy][ix] * (1 - ax) * (1 - ay) + c[iy][ix + 1] * ax * (1 - ay) + c[iy + 1][ix] * (1 - ax) * ay + c[iy + 1][ix + 1] * ax * ay;
+        }
+}
+static double RepairDisc(int f)   /* the disc's drawn centre: a new drawing on even frames */
+{
+    const int d = (f / 2) % 40, x = d < 20 ? d : 40 - d;
+    return 100.0 + 12.0 * x;
+}
+static void RepairFrame(int f, unsigned char *y, unsigned char *u, unsigned char *v)
+{
+    const double pan = f < RT ? 6.0 * (f / 2) : 6.0 * (RT / 2) + 3.0 * (f - RT), cx = RepairDisc(f), cy = 136;
+    for (int yy = 0; yy < RH; yy++)
+        for (int xx = 0; xx < RW; xx++) {
+            const double sx = xx + pan;
+            const int i = (int)sx;
+            const double a = sx - i;
+            double val = rtex[yy][i] * (1 - a) + rtex[yy][i + 1] * a;
+            const double d = sqrt((xx - cx) * (xx - cx) + (yy - cy) * (yy - cy));
+            if (d < 28) val = 220; else if (d < 30) val = 15;
+            y[yy * RW + xx] = (unsigned char)(val + 0.5);
+        }
+    memset(u, 128, RW * RH / 4);
+    memset(v, 128, RW * RH / 4);
+}
+/* the disc's centre from its bright inside on rows y0..y1 - 1 */
+static double RepairCentreRows(const unsigned char *p, int y0, int y1)
+{
+    long sx = 0, n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = 0; x < RW; x++)
+            if (p[y * RW + x] > 190) { sx += x; n++; }
+    return n ? (double)sx / n : -1;
+}
+/* the upper rows of the disc: there the plan lays the whole part in from its pair (on this clip it splits the middle
+ * rows into a part of their own, timed to another pair) */
+static double RepairCentre(const unsigned char *p) { return RepairCentreRows(p, 110, 124); }
+
+static int TestRepair(void)
+{
+    int fails = 0;
+    char err[256] = "", why[256] = "";
+    RepairTexture();
+    unsigned char *Yb = malloc(RW * RH), *Ub = malloc(RW * RH / 4), *Vb = malloc(RW * RH / 4);
+    unsigned char *OYb = malloc(RW * RH), *OUb = malloc(RW * RH / 4), *OVb = malloc(RW * RH / 4);
+    pm_engine_cfg cc = { RW, RH, 8, 2, 1, PM_ENGINE_CPU };
+    pm_engine *e = pm_engine_open(&cc, err, sizeof(err));
+    if (!e || !Yb || !OYb) { printf("FAIL open (repair): %s\n", err); return 1; }
+    if (pm_engine_set_repair(e, 1, why, sizeof(why)) != 0 || pm_engine_repair_lag(e) != 0) { printf("FAIL repair without held frames: %s\n", why); fails++; }
+    pm_engine_set_dedup(e, 1);
+    if (pm_engine_set_repair(e, 1, why, sizeof(why)) != 1 || pm_engine_repair_lag(e) != 3) { printf("FAIL repair: %s\n", why); pm_engine_close(e); return fails + 1; }
+    /* the repair's budget is half a source frame of its measured cost (a busy test machine must not decide the test):
+     * a 2 fps source gives it 250 ms (smoother off: nothing is measured) */
+    printf("repair: %s\n", why);
+    pm_engine_decide(e, 1, 2.0, 0, why, sizeof(why));
+    pm_yuv in = { { Yb, Ub, Vb }, { RW, RW / 2, RW / 2 } };
+    pm_yuv_out out = { { OYb, OUb, OVb }, { RW, RW / 2, RW / 2 } };
+    int advanced = 0, readyWrong = 0, pairsWrong = 0, repaired = 0, wrong = 0, heldChecked = 0, heldRepaired = 0, dups = 0, dupWrong = 0;
+    int fifo[RN], head = 0, tail = 0;   /* the new pictures pushed, in order (the module's queue) */
+    double worst = 0, heldErr = 0;
+    for (int f = 0; f < RN; f++) {
+        RepairFrame(f, Yb, Ub, Vb);
+        const int dup = pm_engine_check_dup(e, &in, f > 0, err, sizeof(err));
+        if (dup < 0) { printf("FAIL frame %d: %s\n", f, err); fails++; break; }
+        if (dup != (f < RT && (f & 1))) dupWrong++;   /* the opening's odd frames repeat */
+        if (dup) { dups++; } else {
+            if (pm_engine_push(e, &in, f > 0, err, sizeof(err)) != 0) { printf("FAIL push %d: %s\n", f, err); fails++; break; }
+            fifo[tail++] = f;
+        }
+        int want = 0;   /* each check is a source frame: the pictures 3 or more source frames old may advance */
+        for (int i = head; i < tail && fifo[i] <= f - 3; i++) want++;
+        if (pm_engine_pairs_ready(e) != want) readyWrong++;
+        while (pm_engine_next_pair(e, err, sizeof(err)) == 1) {
+            const int b = fifo[head++];
+            if (pm_engine_have_pair(e) != (advanced++ > 0)) pairsWrong++;
+            const int r = pm_engine_repair_real(e, 1, &out);
+            double expect = RepairDisc(b), got;
+            if (r == 0) { got = RepairCentre(OYb); repaired++; if (b >= RT && (b & 1)) expect = 0.5 * (RepairDisc(b - 1) + RepairDisc(b + 1)); }
+            else { RepairFrame(b, OYb, OUb, OVb); got = RepairCentre(OYb); }
+            const double off = fabs(got - expect);
+            if (off > worst) worst = off;
+            if (off > 3.0) {   /* the held and the half-way positions are 6 px apart */
+                wrong++;
+                printf("  frame %d %s: disc at %.2f, expected %.2f\n", b, r == 0 ? "repaired" : "as drawn", got, expect);
+            }
+            if (b >= RT + 12 && (b & 1)) {
+                heldChecked++;
+                heldErr += off;
+                if (r == 0) heldRepaired++;
+                printf("  held frame %d: %s, disc at %.2f (drawn %.2f, half way %.2f)\n", b, r == 0 ? "repaired" : "NOT repaired", got, RepairDisc(b), 0.5 * (RepairDisc(b - 1) + RepairDisc(b + 1)));
+            }
+            if (pm_engine_have_pair(e)) pm_engine_generate(e, 0.5f, &out);
+        }
+    }
+    pm_repair_stats rs;
+    pm_engine_repair_stats_get(e, &rs);
+    printf("repair: %d repeats, %d advanced, %d repaired real frames (stats: %llu frames, %llu parts, %llu gated, %llu over budget, %llu failed, %.1f ms), "
+           "worst disc error %.2f px\n", dups, advanced, repaired, (unsigned long long)rs.frames, (unsigned long long)rs.parts,
+           (unsigned long long)rs.gated, (unsigned long long)rs.over_budget, (unsigned long long)rs.failed, rs.ms, worst);
+    /* the gate opens after 48 frames with evidence: the held frames over the pan must all be repaired, half way */
+    if (advanced != tail - 3 || readyWrong || pairsWrong || dupWrong) {
+        printf("FAIL lag: %d advanced (want %d), %d ready counts wrong, %d pair states wrong, %d repeats misjudged\n", advanced, tail - 3, readyWrong, pairsWrong, dupWrong);
+        fails++;
+    }
+    const double meanErr = heldChecked ? heldErr / heldChecked : 99;
+    printf("held frames over the pan: %d of %d repaired, mean distance from half way %.2f px\n", heldRepaired, heldChecked, meanErr);
+    if (wrong || heldRepaired != heldChecked || !heldChecked || meanErr > 1.5 || rs.frames == 0) { printf("FAIL repair: %d discs misplaced\n", wrong); fails++; }
+
+    /* a gap: the three pictures still waiting become ready at once; the new run starts without a pair */
+    RepairFrame(52, Yb, Ub, Vb);
+    pm_engine_check_dup(e, &in, 0, err, sizeof(err));
+    pm_engine_push(e, &in, 0, err, sizeof(err));
+    int gapReady = pm_engine_pairs_ready(e), taken = 0;
+    while (pm_engine_next_pair(e, err, sizeof(err)) == 1) taken++;
+    for (int f = 53; f < 56; f++) {
+        RepairFrame(f, Yb, Ub, Vb);
+        pm_engine_check_dup(e, &in, 1, err, sizeof(err));
+        pm_engine_push(e, &in, 1, err, sizeof(err));
+    }
+    const int afterGap = pm_engine_pairs_ready(e);
+    const int adv = pm_engine_next_pair(e, err, sizeof(err)), restartPair = pm_engine_have_pair(e);
+    pm_engine_drain(e);
+    const int drained = pm_engine_pairs_ready(e);
+    pm_engine_forget(e);
+    const int forgotten = pm_engine_pairs_ready(e), lagKept = pm_engine_repair_lag(e);
+    printf("gap: %d ready (want 3), %d taken; after 3 more: %d ready (want 1), advanced %d, pair %d (want 0); drained %d (want 3); "
+           "forgotten %d, lag %d\n", gapReady, taken, afterGap, adv, restartPair, drained, forgotten, lagKept);
+    if (gapReady != 3 || taken != 3 || afterGap != 1 || adv != 1 || restartPair || drained != 3 || forgotten || lagKept != 3) fails++;
+
+    /* a repeat (held frames) is consumed by the check, advances nothing and is never repaired on its own */
+    RepairFrame(0, Yb, Ub, Vb);
+    int dupOk = pm_engine_check_dup(e, &in, 0, err, sizeof(err)) == 0 && pm_engine_push(e, &in, 0, err, sizeof(err)) == 0;
+    dupOk = dupOk && pm_engine_check_dup(e, &in, 1, err, sizeof(err)) == 1 && pm_engine_last_dup(e);
+    for (int f = 2; f < 6; f++) { RepairFrame(f, Yb, Ub, Vb); pm_engine_check_dup(e, &in, 1, err, sizeof(err)); pm_engine_push(e, &in, 1, err, sizeof(err)); }
+    /* source frames 0, 0 (repeat), 2, 3, 4, 5: pictures 0 and 2 are 3 or more source frames old */
+    dupOk = dupOk && pm_engine_pairs_ready(e) == 2;
+    printf("repeat while lagged: %s\n", dupOk ? "as expected" : "WRONG");
+    if (!dupOk) fails++;
+    pm_engine_close(e);
+    free(Yb); free(Ub); free(Vb); free(OYb); free(OUb); free(OVb);
+    return fails;
+}
 
 enum { W = 320, H = 192 };
 static unsigned char Y[2][W * H], U[2][W * H / 4], V[2][W * H / 4], OY[W * H], OU[W * H / 4], OV[W * H / 4];
@@ -87,8 +249,10 @@ int main(void)
         pm_engine_close(d);
     }
 
+    fails += TestRepair();
+
     char why[256];
-    int k1 = pm_engine_decide_k(0, 23.976, 240, 1280, 720, 8, 0, 1, why, sizeof(why));
+    int k1 =pm_engine_decide_k(0, 23.976, 240, 1280, 720, 8, 0, 1, why, sizeof(why));
     printf("Auto 720p24 on 240 Hz: x%d (%s)\n", k1, why);
     int k2 = pm_engine_decide_k(1, 23.976, 240, 1280, 720, 8, 0, 1, why, sizeof(why));
     printf("Off: x%d (%s)\n", k2, why);

@@ -164,7 +164,7 @@ int main(void)
     pm_content_state(c, &s);
     pm_content_policy_text(s.policy, pol, sizeof(pol));
     CHECK(s.cls == PMC_CLASS_DRAWN && !s.cg && s.image_evidence, "evidence drawn: cls %d cg %d img %d", s.cls, s.cg, s.image_evidence);
-    CHECK(s.policy == (PMC_POLICY_HOLD_REPAIR | PMC_POLICY_ANIME_UPSCALER | PMC_POLICY_ANIME_UPSCALER_DS | PMC_POLICY_SIGN_HOLD |
+    CHECK(s.policy == (PMC_POLICY_HOLD_REPAIR | PMC_POLICY_ANIME_UPSCALER | PMC_POLICY_SIGN_HOLD |
                        PMC_POLICY_LINE_ART | PMC_POLICY_ANIME_DEBAND), "hand-drawn policy %s", pol);
     printf("evidence drawn: %s, policy %s\n", pm_content_class_name(c, s.cls), pol);
     CHECK(s.serial > serial, "serial did not move"); serial = s.serial;

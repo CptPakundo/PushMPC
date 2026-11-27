@@ -24,8 +24,8 @@ local options = require 'mp.options'
 -- authors publish them, fetched and checked by Setup): used instead of the set above for drawn animation MEASURED in the
 -- picture (never from the file name: the image model in pushmpc-content, see below; without it mpv's fingerprint filter
 -- counts frames that repeat the drawing before them, on at 20 % of the last ~4 s, off again below 10 % for ~8 s), only
--- when the picture is enlarged (their //!WHEN guard), the "-ds" (denoise + sharpen) variant at a low bitrate unless the
--- model measures rendered 3D CG (content-helper: the helper's path when it is not next to this script). After a few
+-- when the picture is enlarged (their //!WHEN guard); the "-ds" (denoise + sharpen) variants are never picked
+-- automatically (content-helper: the helper's path when it is not next to this script). After a few
 -- seconds their measured render time
 -- (vo-passes) must stay within anime-share of a frame's time, else the next lighter one takes over. They are compute
 -- shaders: renderers without compute (OpenGL below 4.3) keep the fragment set.
@@ -298,8 +298,9 @@ local function set_anime(i)
     if anime.path then mp.commandv("change-list", "glsl-shaders", "remove", anime.path); anime.path = nil end
     local e = anime.list[i]
     if not e then return false end
-    -- the -ds variant only where the measured policy allows it (not on rendered 3D CG: worse than the default scaler there)
-    if anime.ds ~= false and low_bitrate() and not e.id:find("%-ds$") then
+    -- the -ds variant only where the measured policy allows it: today never automatically (measured worse than the plain
+    -- model on clean pictures and on release encodes alike); it stays selectable by hand (pushmpc-anime-shaders order)
+    if anime.ds == true and low_bitrate() and not e.id:find("%-ds$") then
         for _, x in ipairs(anime.list) do if x.id == e.id .. "-ds" then e = x end end
     end
     mp.commandv("change-list", "glsl-shaders", "append", e.path)

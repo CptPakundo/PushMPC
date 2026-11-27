@@ -346,6 +346,12 @@ class Pushmpc < Formula
                   echo "IINA and VLC:"
                   /bin/sh "$plexdir/pushmpc-mac-players.sh" install --from "$plexdir" --bridge "$bridge" | sed 's/^/  /'
                 fi
+                # the image model's runtime for IINA / VLC (pinned ONNX Runtime + the content model into
+                # ~/Library/Application Support/PushMPC/pmml; without it the hand-built cues decide); --no-pmml skips it
+                if [ "$pmml" = 1 ] && [ -f "$plexdir/setup.sh" ]; then
+                  echo "Image model (content detection):"
+                  /bin/sh "$plexdir/setup.sh" pmml 2>&1 | sed 's/^/  /' || echo "  not installed (see above): the hand-built cues decide"
+                fi
               fi
             fi ;;
           uninstall)
@@ -353,7 +359,8 @@ class Pushmpc < Formula
               if has_plex || [ -d "$HOME/Library/Application Support/PushMPC/plex-native" ]; then echo "Plex for Mac:"; /bin/sh "$plexdir/pushmpc-plex-mac.sh" uninstall; fi
               if [ -f "$plexdir/pushmpc-mac-players.sh" ]; then echo "IINA and VLC:"; /bin/sh "$plexdir/pushmpc-mac-players.sh" uninstall --from "$plexdir" | sed 's/^/  /'; fi
               rm -rf "$plexdir"; rmdir "$data/pushmpc" 2>/dev/null
-            fi ;;
+            fi
+            rm -rf "$HOME/Library/Application Support/PushMPC/pmml"; rmdir "$HOME/Library/Application Support/PushMPC" 2>/dev/null ;;
           status)
             [ ! -f "$plexdir/pushmpc-plex-mac.sh" ] || /bin/sh "$plexdir/pushmpc-plex-mac.sh" status --from "$plexdir"
             [ ! -f "$plexdir/pushmpc-mac-players.sh" ] || /bin/sh "$plexdir/pushmpc-mac-players.sh" status --from "$plexdir" ;;

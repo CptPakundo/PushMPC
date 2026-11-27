@@ -105,7 +105,7 @@ static void TestTracker()
         t.Evidence(0.97, 1.0, -1); CHECK(t.steps() == 3 && t.Current().cls == kUnknown);
         t.Evidence(0.97, 2.0, -1); CHECK(t.steps() == 5 && t.Current().cls == kDrawn);
         CHECK(!t.Current().cg && t.Current().cgShare < 0);
-        CHECK(t.Policy().animeUpscaler && t.Policy().animeUpscalerDs);   // hand-drawn until CG is measured
+        CHECK(t.Policy().animeUpscaler && !t.Policy().animeUpscalerDs);   // hand-drawn until CG is measured; _DS never automatic
         double L = 0; for (int k = 0; k < 5; ++k) L = D::kImgDecay * L + std::log((1.0 / (1.0 + std::exp(-0.85 * std::log(0.97 / 0.03)))) / (1.0 - 1.0 / (1.0 + std::exp(-0.85 * std::log(0.97 / 0.03)))));
         CHECK(std::fabs(t.Current().logOdds - L) < 1e-3);
         // live action from 3 s on: not drawn again, the CG flag stays off
@@ -125,7 +125,7 @@ static void TestTracker()
         CHECK(t.Policy().animeUpscaler && !t.Policy().animeUpscalerDs && t.Policy().holdRepair && !t.Policy().signHold && !t.Policy().lineArt && !t.Policy().animeDeband);
         // hand-drawn again: off below -kCgOff (3)
         int k = 5; while (t.Current().cg && k < 60) { t.Evidence(0.97, k, 0.05); ++k; }
-        CHECK(!t.Current().cg && t.Current().cls == kDrawn && t.Policy().animeUpscalerDs);
+        CHECK(!t.Current().cg && t.Current().cls == kDrawn && !t.Policy().animeUpscalerDs);
     }
     // neutral evidence never decides
     {
@@ -167,7 +167,7 @@ static void TestCutsAndStatus()
     StatusInfo i; i.state = "ready"; i.model = "ort cpu\nline"; i.seq = 7; i.pImage = 0.97; i.pCg = 0.1; i.ms = 12.5;
     const auto s = ParseStatus(StatusText(i, t));
     CHECK(s.at("pushmpc-content") == "1" && s.at("state") == "ready" && s.at("class") == "drawn" && s.at("cg") == "0");
-    CHECK(s.at("seq") == "7" && s.at("animeUpscaler") == "1" && s.at("animeUpscalerDs") == "1" && s.at("model") == "ort cpu line");
+    CHECK(s.at("seq") == "7" && s.at("animeUpscaler") == "1" && s.at("animeUpscalerDs") == "0" && s.at("model") == "ort cpu line");
     ImageTracker none;
     const auto s2 = ParseStatus(StatusText(StatusInfo{}, none));
     CHECK(s2.at("state") == "loading" && s2.at("class") == "measuring" && s2.at("animeUpscaler") == "0");

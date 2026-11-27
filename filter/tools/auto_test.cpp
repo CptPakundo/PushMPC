@@ -474,7 +474,7 @@ int main()
             check(h.srMethod == Upscaler::Fsr, L"anime SR: without its files the GPU keeps FSR");
             Source lowRate = bd; lowRate.bppEq = 0.02;
             const Choice l = Decide({}, lowRate, d, {}, rdna3);
-            check(l.animeModel == 1 || l.animeModel == 4, L"anime SR: a low-bitrate source gets the denoise + sharpen variant", l.animeSrNote);
+            check(l.animeModel == 0 || l.animeModel == 3, L"anime SR: a low-bitrate source keeps the plain model (_DS never automatic: measured worse)", l.animeSrNote);
             {   // drawn + rendered 3D CG (ContentDetect's cg flag): the plain anime model even at a low bitrate, hold repair on,
                 // sign hold / line art / the anime deband preset off (DrawnPolicy kPolicyDrawnCg)
                 Source cg = lowRate; cg.contentCg = true;

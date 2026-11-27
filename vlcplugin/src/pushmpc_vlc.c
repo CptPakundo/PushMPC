@@ -16,7 +16,22 @@
  *
  * Output size cannot change here: VLC converts a static filter's output back to the source size (es_format_IsSimilar
  * -> filter_chain_AppendConverter), so upscaling is the display's job (Windows: d3d11-upscale-mode=super, i.e. RTX /
- * Intel Video Super Resolution in VLC's own Direct3D 11 output; the installer sets it).
+ * Intel Video Super Resolution in VLC's own Direct3D 11 output; the installer sets it). In VLC 3.0.24:
+ * src/video_output/video_output.c:789 takes the target format from the decoder's (fmt_target), :820-824 appends a
+ * converter back to it whenever the chains' output is not similar, and src/misc/es_format.c:400-404 (video_format_IsSimilar)
+ * counts any other width / height as not similar; for hardware pictures (DX11) no converter scales them, so VLC would
+ * remove every filter ("Failed to compensate for the format changes"). So pushcore's upscaler (and with it Auto's anime
+ * upscaler, which only runs in that upscaler slot) cannot run in this filter: a bigger picture never reaches the display.
+ *
+ * The measured content (ContentDetect) on the pushcore route: zero copy, the bridge measures VLC's textures on the GPU
+ * (pm_pushcore.h, measure); else the content library on the CPU planes. A class change makes Auto decide again
+ * (pm_pc_update, warm, at most once per 10 s): at the same multiplier it picks its frame generation method for drawn
+ * pictures (PushMpcAuto.h: DLSS-G after PushFlow on animation). Held-frame re-timing (and with it the line-art and
+ * sign holds and the animation mode: pushcore makes hold plans only with it) and the anime deband preset stay off here:
+ * pushcore hands a pair's frames out up to a dozen source frames later with re-timing (pushmpc/src/PushCoreGpu.cpp,
+ * kMaxQueued; HeldFrames.h: "the caller lets the source run further ahead"), while this filter collects each pair's
+ * frames before the pair's last picture is due (RunJob / RunJobZc) and shows VLC's own decoded picture as the real
+ * frame (a deband pass on the generated frames alone would make them differ from the real ones).
  *
  * Pictures: the vout's private pool holds 4 pictures, which caps a static filter at x4 (3 new + the source picture
  * itself). Heap pictures sent straight to a direct-rendering display crash some of them (VLC's OpenGL output with
@@ -46,6 +61,7 @@
 
 #include "pm_engine.h"
 #include "engine_pushcore.h"
+#include "engine_portable.h"
 #include "pm_hw.h"
 #include "pm_content.h"   /* what the picture is: PushMPC's content library, loaded at run time */
 #ifdef __APPLE__
@@ -212,6 +228,7 @@ void pm_out_close(vlc_object_t *o) { CloseOut(o); }
  * before it is shown, waits until that picture is filled (at most until its display time; if it is not ready by
  * then, the real frame is shown in its place). So generated frame j has j/k of the frame interval to be made, instead
  * of everything having to be ready before VLC's video thread may go on. */
+#define PM_LAGQ 16              /* held-drawing repair: source pictures waiting for their pair (lag 3 + repeats) */
 #define PM_HOLD 3               /* held frames: repeats that wait for the next drawing (twos, threes, fours) */
 #define PM_JOB_MAX 64           /* pictures per job: a held span of (PM_HOLD + 1) x 16 - 1 */
 typedef struct pm_job {
@@ -319,6 +336,7 @@ vlc_module_begin()
         change_private()
     add_bool(CFG "worker", true, "Generate on a worker thread", "Frames are made off VLC's video thread and each one "
              "has until its display time (needs pushmpc_out after postproc).", true)
+    add_bool(CFG "hold-repair", true, "Held-drawing repair (animation)", "A part held between two of its drawings while the rest moves is laid in at its in-between position", false)
     add_bool(CFG "dedup", true, "Held frames (animation)", "Animation drawn on twos, threes or fours: a repeated frame "
              "waits for the next drawing, and the generated frames move evenly over the whole held span (portable "
              "engines).", true)
@@ -369,6 +387,10 @@ struct filter_sys_t {
     uint64_t pc_errors, pc_routed, pc_unrouted;
     char pc_err[240];
     int64_t pc_miss_pts, pc_miss_want;
+    pm_pc_cfg pc_cfg;          /* what pushcore was opened with (ABI 3: the measured class goes back through pm_pc_update) */
+    int pc_cls, pc_cg;         /* the class pushcore was last given */
+    mtime_t pc_class_at;       /* ... and when (at most once per 10 s) */
+    uint64_t pc_updates;
     pm_engine *eng;
     int k;                 /* outputs per source frame */
     int k_open;            /* k at open: the output rate and the pools were made for it (a later decision stays at or below) */
@@ -403,6 +425,14 @@ struct filter_sys_t {
     bool dedup, dedup_set, still;
     int held;
     mtime_t held_last;
+    /* held-drawing repair (engine_portable.h): pairs lag this many source frames (0: off); the waiting pictures */
+    int lag;
+    struct { picture_t *pic; int span; bool contig; mtime_t base; } lagq[PM_LAGQ];
+    int lagn;
+    picture_t *lag_a;                 /* the picture advanced last (the next pair's first) */
+    bool lag_seen;
+    mtime_t held_base;
+    uint64_t lag_repaired;
     uint64_t repeats, stills;
     /* what the picture is (ContentMeasure): the content library's context, the last state seen, the frame dates */
     pm_content *content;
@@ -962,8 +992,8 @@ static bool HeldStep(struct filter_sys_t *sys, picture_t *cur, picture_t *work, 
  * reads (CPU planes; zero-copy GPU pictures are not read back for it), from the first such frame on (nothing is loaded
  * for a pass-through or a zero-copy stream). The class and Auto's drawn-animation policy
  * (pushmpc/content_detect.h PolicyFor) come from the picture only. In this module the held-frame step runs for every
- * class (as pushcore's re-timing does: held frames are re-timed whatever the picture is), so the policy changes nothing
- * here yet; it is logged with the class. */
+ * class (as pushcore's re-timing does: held frames are re-timed whatever the picture is); the class goes to pushcore's
+ * Auto on the pushcore route (PcContent) and is logged with the policy. */
 static void ContentLog(void *user, const char *line) { msg_Info((filter_t *)user, "PushMPC: %s", line); }
 static void ContentOpen(filter_t *f, struct filter_sys_t *sys)
 {
@@ -976,7 +1006,10 @@ static void ContentOpen(filter_t *f, struct filter_sys_t *sys)
 static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_t *cur, const picture_t *work)
 {
     if (sys->zc || sys->zc_hw || PM_CVPX_ON(sys)) {
-        if (!sys->content_gpu++) msg_Info(f, "PushMPC: content not measured on zero-copy GPU pictures (no CPU copy is made for it)");
+        if (!sys->content_gpu++)
+            msg_Info(f, sys->zc && sys->pc_cfg.measure && pmx_abi() >= 3
+                     ? "PushMPC: content measured on the GPU by pushcore's bridge (VLC's textures; only the cells are read back)"
+                     : "PushMPC: content not measured on zero-copy GPU pictures (no CPU copy is made for it)");
         return;
     }
     if (!sys->content_tried) { sys->content_tried = true; ContentOpen(f, sys); }   /* at the first frame it can read */
@@ -1002,6 +1035,146 @@ static void ContentMeasure(filter_t *f, struct filter_sys_t *sys, const picture_
                  st.image_evidence ? "with the image model" : "hand-built cues", pol);
     }
     sys->content_state = st;
+}
+
+/* the measured class on the pushcore route (see the header): Auto decides again with it, warm (pm_pc_update), at most
+ * once per 10 s, with no job in flight; true when pushcore was reloaded (its pair starts over: the next frame has none) */
+static const char *ClassName(int cls)
+{
+    static const char *const n[] = { "measuring", "drawn animation", "3D CG animation", "not drawn", "game footage" };
+    return n[cls >= 0 && cls <= 4 ? cls : 0];
+}
+static bool PcContent(filter_t *f, struct filter_sys_t *sys)
+{
+    if (!sys->pc || pmx_abi() < 3) return false;
+    int cls = sys->content_state.cls, cg = sys->content_state.cg ? 1 : 0;
+    if (sys->zc) {
+        pm_pc_info i;
+        memset(&i, 0, sizeof(i));
+        i.struct_size = sizeof(i);
+        if (pmx_output(sys->pc, &i) != 0) return false;
+        cls = i.measured_class; cg = i.measured_cg;
+        if (cls && (cls != sys->content_state.cls || (cg != 0) != (sys->content_state.cg != 0))) {   /* the log, as ContentMeasure */
+            msg_Info(f, "PushMPC: content %s%s, measured on the GPU", ClassName(cls), cls == 1 ? (cg ? ", rendered 3D CG" : ", hand-drawn") : "");
+            sys->content_state.cls = cls; sys->content_state.cg = cg;
+        }
+    }
+    if (cls == 0 || (cls == sys->pc_cls && cg == sys->pc_cg)) return false;
+    const mtime_t now = mdate();
+    if (sys->pc_class_at && now - sys->pc_class_at < 10 * CLOCK_FREQ) return false;
+    sys->pc_class_at = now;
+    sys->pc_cls = cls; sys->pc_cg = cg;
+    pm_pc_cfg c = sys->pc_cfg;
+    c.content_class = cls; c.content_cg = cg;
+    char err[200] = "";
+    const int r = pmx_update(sys->pc, &c, err, sizeof(err));
+    if (r == 0) {
+        sys->pc_updates++;
+        msg_Info(f, "PushMPC: content %s%s: pushcore's Auto decided again: %s", ClassName(cls), cg ? " (rendered 3D CG)" : "", pmx_describe(sys->pc));
+        return true;
+    }
+    if (r == 1) msg_Dbg(f, "PushMPC: content %s%s: pushcore's settings stay", ClassName(cls), cg ? " (rendered 3D CG)" : "");
+    else msg_Warn(f, "PushMPC: content %s: pushcore's settings not changed (%s)", ClassName(cls), err);
+    return false;
+}
+
+/* held-drawing repair: the waiting pictures dropped (flush, close; the engine side goes with pm_engine_forget) */
+static void LagDrop(struct filter_sys_t *sys)
+{
+    for (int i = 0; i < sys->lagn; i++) picture_Release(sys->lagq[i].pic);
+    sys->lagn = 0;
+    if (sys->lag_a) { picture_Release(sys->lag_a); sys->lag_a = NULL; }
+    sys->lag_seen = false;
+}
+/* the pair's picture as repaired (a new output picture), or a itself when the engine did not change it */
+static picture_t *LagReal(filter_t *f, struct filter_sys_t *sys, picture_t *a, int which)
+{
+    picture_t *o = NewOut(f, sys);
+    if (!o) return a;
+    int r = -1;
+    if (sys->zc_hw) {
+        pm_dmabuf d; char err[200];
+        if (pm_hw_export(sys->hw, o, &d) == 0) { r = pm_engine_repair_real_dmabuf(sys->eng, which, &d, err, sizeof(err)); pm_hw_dmabuf_close(&d); }
+    }
+    if (r != 0) {
+        picture_t *dst = sys->hw ? pm_hw_cpu_picture(sys->hw) : o;
+        if (!dst) { picture_Release(o); return a; }
+        pm_yuv_out y; PlanesOut(dst, &sys->wfmt, sys->bps, &y);
+        r = pm_engine_repair_real(sys->eng, which, &y);
+        if (r == 0 && dst != o) r = pm_hw_upload(sys->hw, dst, o) == 0 ? 0 : -1;
+        if (dst != o) picture_Release(dst);
+    }
+    if (r != 0) { picture_Release(o); return a; }
+    picture_CopyProperties(o, a); o->date = a->date; o->b_force = a->b_force; o->p_next = NULL;
+    picture_Release(a); sys->lag_repaired++;
+    return o;
+}
+/* the portable engines with the held-drawing repair: pairs lag pm_engine_repair_lag() source frames (a held part is laid
+ * in once its next drawing has been seen), so the pictures wait here and each ready pair is shown and generated */
+static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work)
+{
+    char err[200] = "";
+    const mtime_t dt0 = sys->lag_seen ? cur->date - sys->held_last : 0;
+    const bool contiguous = sys->lag_seen && dt0 > 0 && dt0 <= 4 * sys->nominal_dt && dt0 <= CLOCK_FREQ / 4;
+    sys->lag_seen = true; sys->held_last = cur->date;
+    picture_t *head = NULL, *tail = NULL;
+#define LAG_EMIT(p) do { (p)->p_next = NULL; if (tail) tail->p_next = (p); else head = (p); tail = (p); sys->out++; } while (0)
+    if (EngineCheck(sys, work, contiguous) && contiguous) {   /* a repeat: consumed, the engine counts it */
+        sys->repeats++;
+        if (work != cur) picture_Release(work);
+        picture_Release(cur);
+        sys->held++;
+    } else {
+        if (EnginePush(sys, work, contiguous, err, sizeof(err)) != 0) msg_Warn(f, "engine: %s", err);
+        if (work != cur) picture_Release(work);
+        if (sys->lagn == PM_LAGQ) { picture_Release(cur); return NULL; }   /* cannot happen with lag 3 */
+        sys->lagq[sys->lagn].pic = cur;
+        sys->lagq[sys->lagn].span = contiguous && !sys->still ? sys->held + 1 : 1;
+        sys->lagq[sys->lagn].contig = contiguous;
+        sys->lagq[sys->lagn].base = contiguous && sys->still ? sys->held_base : 0;   /* after a still: only its last interval moves */
+        sys->lagn++;
+        sys->held = 0; sys->still = false;
+    }
+    while (pm_engine_pairs_ready(sys->eng) > 0) {
+        if (pm_engine_next_pair(sys->eng, err, sizeof(err)) != 1) { msg_Warn(f, "engine: %s", err); break; }
+        const int span = sys->lagq[0].span; const bool contig = sys->lagq[0].contig; const mtime_t base = sys->lagq[0].base;
+        picture_t *b = sys->lagq[0].pic;
+        memmove(&sys->lagq[0], &sys->lagq[1], (size_t)(--sys->lagn) * sizeof(sys->lagq[0]));
+        picture_t *a = sys->lag_a;
+        sys->lag_a = b;
+        if (!a) continue;                                         /* the first picture shows with the next pair */
+        if (base) { picture_t *c = picture_Clone(a); if (c) { picture_CopyProperties(c, a); c->date = base; picture_Release(a); a = c; } }
+        a = LagReal(f, sys, a, 0);
+        LAG_EMIT(a);
+        if (!contig || !pm_engine_have_pair(sys->eng)) { sys->restarts++; continue; }
+        const mtime_t dt = sys->lag_a->date - a->date;
+        for (int j = 1; j < sys->k * span; j++) {             /* as the synchronous path, with (a, lag_a) for (prev, cur) */
+            picture_t *o = NewOut(f, sys); if (!o) break;
+            picture_t *dstpic = o;
+            picture_CopyProperties(o, a);
+            const float t = (float)j / (float)(sys->k * span);
+            if (sys->zc_hw) { if (EngineGenerateHw(sys, t, o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
+            else {
+                if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
+                pm_yuv_out dst; PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
+                pm_engine_generate(sys->eng, t, &dst);
+            }
+            if (dstpic != o) { const int up = pm_hw_upload(sys->hw, dstpic, o); picture_Release(dstpic); if (up != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
+            o->date = a->date + dt * j / (sys->k * span); o->b_force = false;
+            RegAdd(o, NULL, 0);
+            LAG_EMIT(o); sys->generated++;
+        }
+    }
+    /* a still (more repeats than PM_HOLD): the last picture now, as repaired, when nothing older still waits */
+    if (sys->held > PM_HOLD && !sys->still && sys->lagn == 0 && sys->lag_a) {
+        sys->still = true; sys->stills++; sys->held_base = sys->held_last;
+        picture_t *c = LagReal(f, sys, picture_Hold(sys->lag_a), 1);
+        if (c == sys->lag_a) { picture_Release(c); c = picture_Clone(sys->lag_a); if (c) picture_CopyProperties(c, sys->lag_a); }
+        if (c) LAG_EMIT(c);
+    }
+    if (sys->still) sys->held_base = sys->held_last;          /* the base moves to the newest repeat */
+#undef LAG_EMIT
+    return head;
 }
 
 static picture_t *Filter(filter_t *f, picture_t *cur)
@@ -1071,18 +1244,20 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
 
     ContentMeasure(f, sys, cur, work);   /* before the held-frame step: repeats are part of what is measured */
 
-    const bool async = sys->worker_on && OutStages() > 0 && !sys->zc;
+    const bool async = sys->worker_on && OutStages() > 0 && !sys->zc && !sys->lag;
+    if (sys->lag && !sys->pc) { WorkerIdle(sys, false); return LagFilter(f, sys, cur, work); }
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
         WorkerIdle(sys, false);
+        const bool reloaded = PcContent(f, sys);   /* the measured class to pushcore's Auto (no job in flight now) */
         int span, hc;                               /* held frames: a repeat waits (HeldStep) */
         picture_t *still;
         if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
         picture_t *prev = sys->prev;
         sys->prev = cur;
         const mtime_t dt = prev ? cur->date - prev->date : 0;
-        const bool contiguous = hc >= 0 ? hc != 0 : prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
+        const bool contiguous = !reloaded && (hc >= 0 ? hc != 0 : prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4);
         pm_job *j = JobNew();
         if (!j) {
             if (work != cur) picture_Release(work);
@@ -1204,6 +1379,7 @@ static void Flush(filter_t *f)
     WorkerIdle(sys, true);
     if (sys->prev) { picture_Release(sys->prev); sys->prev = NULL; }
     sys->held = 0; sys->still = false;   /* held frames: the repeats waiting are dropped */
+    LagDrop(sys);
     sys->content_disc = true;            /* the detector's window starts over (its decision stays) */
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
@@ -1265,6 +1441,14 @@ static void FillPcc(pm_pc_cfg *pcc, const video_format_t *v, int bits, int smoot
     pcc->smoother = smoother;
     pcc->display_hz = hz;
     pcc->warp = warp;
+    /* ABI 3: the source size, VLC's own real frames (the module's header says why), Auto told the measured class later */
+    pcc->struct_size = sizeof(*pcc);
+    pcc->sr = 0;
+    pcc->anime_model = PM_PC_ANIME_NONE;
+    pcc->held_frames = 0;
+    pcc->deband = 0;
+    pcc->real_out = 0;
+    pcc->held_wait = 0;
 }
 
 #ifdef _WIN32
@@ -1325,11 +1509,13 @@ static int Open(vlc_object_t *obj)
             pm_pc_cfg pcc;
             FillPcc(&pcc, v, v->i_chroma == VLC_CODEC_D3D11_OPAQUE_10B ? 10 : 8, smoother, zhz, OptInt(f, CFG "warp", 0) ? 1 : 0);
             pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
+            pcc.measure = OptInt(f, CFG "content", 1) ? 1 : 0;   /* ContentDetect on VLC's textures, on the GPU (in the bridge) */
             int pk = 1;
             char err[300] = "";
             sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
             if (sys->pc && pk > 1) {
                 sys->zc = true;
+                sys->pc_cfg = pcc;
                 bits = pcc.bits;
                 sys->k = pk > 16 ? 16 : pk;
                 snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
@@ -1406,6 +1592,7 @@ static int Open(vlc_object_t *obj)
         char err[300] = "";
         sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
         if (sys->pc) {
+            sys->pc_cfg = pcc;
             sys->k = pk < 1 ? 1 : pk > 16 ? 16 : pk;
             snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             if (sys->k <= 1) { pmx_close(sys->pc); sys->pc = NULL; sys->k = 1; }
@@ -1431,6 +1618,12 @@ static int Open(vlc_object_t *obj)
             sys->k = pm_engine_decide(sys->eng, smoother, fps, hz, why, sizeof(why));
             snprintf(sys->why, sizeof(sys->why), "%s; %s", pm_engine_name(sys->eng), why);
             if (sys->k <= 1) { pm_engine_close(sys->eng); sys->eng = NULL; sys->k = 1; }
+            if (sys->eng && sys->dedup) {   /* the held-drawing repair runs with Dedup (as the other portable routes) */
+                pm_engine_set_dedup(sys->eng, 1); sys->dedup_set = true;
+                char rwhy[200] = "";
+                sys->lag = pm_engine_set_repair(sys->eng, OptInt(f, CFG "hold-repair", 1) != 0, rwhy, sizeof(rwhy)) ? pm_engine_repair_lag(sys->eng) : 0;
+                msg_Info(f, "PushMPC: held-drawing repair %s", rwhy);
+            }
         }
     } else if (!sys->pc && !PM_CVPX_ON(sys)) {   /* (the CVPX zero-copy path set k and why above) */
         sys->k = 1;
@@ -1503,11 +1696,18 @@ static void Close(vlc_object_t *obj)
         }
         pm_content_close(sys->content);   /* its threads end here, with their last log line */
     }
+    if (sys->eng && sys->lag) {
+        pm_repair_stats rs; pm_engine_repair_stats_get(sys->eng, &rs);
+        msg_Info(f, "PushMPC: held-drawing repair: %" PRIu64 " frames, %" PRIu64 " parts, %" PRIu64 " spans gated, %" PRIu64 " over budget (%s)",
+                 rs.frames, rs.parts, rs.gated, rs.over_budget, rs.gpu ? "GPU" : "CPU");
+    }
+    LagDrop(sys);
     if (sys->eng) pm_engine_close(sys->eng);
     if (sys->pc) {
         msg_Info(f, "PushMPC: pushcore routed %" PRIu64 " generated frames, %" PRIu64 " not matched (first at %" PRId64
                  " for %" PRId64 "), %" PRIu64 " errors%s%s", sys->pc_routed, sys->pc_unrouted, sys->pc_miss_pts, sys->pc_miss_want,
                  sys->pc_errors, sys->pc_errors ? ", first: " : "", sys->pc_err);
+        if (sys->pc_updates) msg_Info(f, "PushMPC: pushcore's Auto decided again %" PRIu64 " times with the measured content", sys->pc_updates);
         if (sys->zc)
             msg_Info(f, "PushMPC: zero copy on VLC's D3D11 device; %" PRIu64 " generated pictures not delivered in time "
                      "(the real frame shown); %" PRIu64 " from our own texture ring", sys->zc_fallback, sys->ring_out);

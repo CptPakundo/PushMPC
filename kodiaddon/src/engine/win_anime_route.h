@@ -31,7 +31,7 @@ inline std::string AnimeModelPlain(const std::string& id) { return AnimeModelIsD
 inline bool AnimeModelHasDs(const std::string& plain) { return plain == "artcnn-c4f16" || plain == "artcnn-c4f32"; }
 
 // the model Auto runs for this measured picture: "" (the plain route) unless the policy turns the anime upscaler on;
-// the _DS variant only where the policy allows it (hand-drawn) and the source is low bitrate
+// the _DS variant only where the policy allows it and the source is low bitrate (never today: kAnimeUpscalerDsAuto)
 inline std::string AnimeModelFor(const std::string& autoModel, int cls, bool cg, bool lowBitrate)
 {
     const pushmpc::content::DrawnPolicy& p = pushmpc::content::PolicyFor(cls, cg);
@@ -128,5 +128,45 @@ inline WinAnimePlan PlanWindowsAnime(const WinAnimeIn& in)
             ": Video Super Resolution, the anime upscaler " + p.autoModel + " once the picture is measured as drawn animation";
     return p;
 }
+
+// the pushcore route is worth opening: for frame generation, or for its upscaler (then also at x1, Smoother off: it is the
+// only place the anime upscaler runs without taking Video Super Resolution away)
+inline bool PushcoreWorth(int smoother, const WinAnimePlan& plan) { return smoother != 1 || plan.route == WinUpscale::PushcoreSr; }
+
+// ---------------------------------------------------------------------------------------------------- pushcore updates
+// The pushcore route's settings follow the measured class through the bridge's update (pm_pc_update: a warm reload
+// each, the frames in flight dropped): the anime model through AnimeAutoSwitch (at most once per 30 s), the drawn
+// treatment (held frames, line art, sign hold, the anime deband preset: Auto in the bridge) whenever the class or its
+// CG flag changes, at most once per kMinGapS. While the class is still being measured nothing changes.
+// modelIndex: the model id as the bridge takes it (PUSHCORE_ANIME_SR_*, the order of PushMpcAnimeSr.h), -1 = none.
+class PushcoreContentGate {
+public:
+    static constexpr double kMinGapS = 10.0;
+    struct Ask { bool update = false; bool switched = false; int cls = 0; bool cg = false; std::string model; };
+
+    // upscales: the route runs pushcore's upscaler (the anime model can change); running: the model pushcore runs ("")
+    Ask Update(int cls, bool cg, double nowS, AnimeAutoSwitch& sw, bool upscales, const std::string& running)
+    {
+        Ask a;
+        if (cls == pushmpc::content::kUnknown) return a;
+        a.cls = cls; a.cg = cg; a.model = running;
+        if (upscales && sw.Armed() && sw.Update(cls, cg, nowS)) { a.switched = true; a.model = sw.Next(); }
+        const bool changed = !m_have || cls != m_cls || cg != m_cg;
+        a.update = a.switched || (changed && (!m_have || nowS - m_at >= kMinGapS));
+        return a;
+    }
+    // after the update was tried (ok: pushcore runs it); a refused switch disarms the anime switch for the stream
+    void Done(const Ask& a, bool ok, double nowS, AnimeAutoSwitch& sw)
+    {
+        if (a.switched) { if (ok) sw.Commit(nowS); else sw.Disarm(); }
+        m_have = true; m_cls = a.cls; m_cg = a.cg; m_at = nowS;
+    }
+
+private:
+    bool m_have = false;
+    int m_cls = 0;
+    bool m_cg = false;
+    double m_at = 0;
+};
 
 } // namespace pmk

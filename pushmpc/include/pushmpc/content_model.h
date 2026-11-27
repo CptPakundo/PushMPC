@@ -60,6 +60,9 @@ private:
         if (const char* la = std::getenv("LOCALAPPDATA"); la && ok(fs::path(la) / "PushMPC" / "pmml")) return fs::path(la) / "PushMPC" / "pmml";
 #elif defined(__APPLE__)
         if (const char* h = std::getenv("HOME"); h && ok(fs::path(h) / "Library/Application Support/PushMPC/pmml")) return fs::path(h) / "Library/Application Support/PushMPC/pmml";
+        // Homebrew's pushmpc-setup keeps its pmml runtime in the XDG data folder
+        if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x && ok(fs::path(x) / "pushmpc/pmml")) return fs::path(x) / "pushmpc/pmml";
+        if (const char* h = std::getenv("HOME"); h && ok(fs::path(h) / ".local/share/pushmpc/pmml")) return fs::path(h) / ".local/share/pushmpc/pmml";
 #else
         if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x && ok(fs::path(x) / "pushmpc/pmml")) return fs::path(x) / "pushmpc/pmml";
         if (const char* h = std::getenv("HOME"); h && ok(fs::path(h) / ".local/share/pushmpc/pmml")) return fs::path(h) / ".local/share/pushmpc/pmml";

@@ -569,6 +569,13 @@ jobs:
           set -u
           t=$(find bb -name pm_pc_zc_test.exe | head -1)
           timeout 120 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)"
+      - name: The bridge's configuration ABI (ABI 2 callers; ABI 3 upscaler, real frames out, updates) on WARP with the stub core
+        shell: bash
+        run: |
+          set -u
+          t=$(find bb -name pm_pc_abi_test.exe | head -1)
+          mkdir -p abi-scratch
+          timeout 180 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)" "$(cygpath -aw abi-scratch)"
       - name: PushMPC's content library (pushmpc_content.dll, MSVC; ContentDetect + the image model through pmml) and its CPU test
         shell: bash
         run: |

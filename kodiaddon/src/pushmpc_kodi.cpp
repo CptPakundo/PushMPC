@@ -546,6 +546,8 @@ public:
 #if defined(_WIN32)
     // pushcore (Windows), opened for this stream, handed over to the decoder once
     std::unique_ptr<pmk::PushcoreRoute> TakePushcore() { return std::move(m_pc); }
+    // Auto's anime upscaler on the pushcore route: the plain model AnimeAutoSwitch is armed with ("" none)
+    const std::string& PcAnimeModel() const { return m_pcAnimeModel; }
 #endif
 
     // Kodi tells the add-on the screen size before Open (CInputStreamAddon::DetectScreenResolution)
@@ -956,15 +958,34 @@ private:
 
 #if defined(_WIN32)
     // Windows: pushcore (VFG / DLSS-G on RTX, PushFlow, FSR FG, AMD FRC) through pm_pushcore.dll, first in Auto; it
-    // decides the multiplier with PushMPC's own Auto rules and settings. Kept at the source size: Kodi's DXVA renderer
-    // upscales (with RTX / Intel Video Super Resolution when switched on in Kodi). What it cannot take (SD / BT.601,
-    // Kodi 21 HDR tone-mapped to SDR, a shader upscaler chosen, the CPU / GPU engine chosen) goes to the engines below.
+    // decides the multiplier with PushMPC's own Auto rules and settings. The picture keeps the source size (Kodi's DXVA
+    // renderer upscales, with RTX / Intel Video Super Resolution when switched on in Kodi), unless Auto's anime upscaler
+    // can run: then pushcore's own upscaler runs to the screen size for the whole stream (Video Super Resolution while
+    // the picture is not drawn, the anime upscaler while it is: win_anime_route.h), also at x1 (Smoother off or nothing
+    // to gain) since that is the only place it can run without losing Video Super Resolution. With the bridge's ABI 3
+    // Auto's drawn treatment (held frames, line art, sign hold, the anime deband preset) follows the measured class too.
+    // What it cannot take (SD / BT.601, Kodi 21 HDR tone-mapped to SDR, a shader upscaler chosen, the CPU / GPU engine
+    // chosen) goes to the engines below.
     bool TryPushcore(const AVStream* st, int bits, double hz, std::string& engWhy)
     {
         const AVCodecParameters* p = st->codecpar;
         const int e = m_settings.engine, up = m_settings.upscale;
         if (e == 3) m_engineCfg.backend = 0;   // pushcore only, else Auto's engines
-        if (!(e == 0 || e == 3) || m_settings.smoother == 1 || m_toneMap || up >= 2) return false;
+        if (!(e == 0 || e == 3) || m_toneMap || up >= 2) return false;
+        // Auto's anime upscaler for this source (pmml's runtime, a model that fits, a picture that is enlarged)
+        pmk::WinAnimeIn wi;
+        wi.srcW = p->width; wi.srcH = p->height; wi.screenW = m_screenW; wi.screenH = m_screenH; wi.upscale = up;
+        const AVRational sar0 = st->sample_aspect_ratio.num ? st->sample_aspect_ratio : p->sample_aspect_ratio;
+        wi.dar = double(p->width) / std::max(1, p->height) * (sar0.num > 0 && sar0.den > 0 ? av_q2d(sar0) : 1.0);
+        if (up == 0 && m_screenW > 0 && p->height <= 1080 && (m_screenW > p->width * 11 / 10 || m_screenH > p->height * 11 / 10) && !PmmlRuntime().empty()) {
+            const auto pick = pm::PickAnimeSr(unsigned(p->width), unsigned(p->height), unsigned(std::max(m_screenW, p->width)), unsigned(std::max(m_screenH, p->height)),
+                                              m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
+            if (pick.model >= 0) wi.autoModel = AnimeModelId(pick.model);
+        }
+        wi.pushcore = true; wi.pushcoreSr = pmk::PushcoreRoute::BridgeHasAbi3();
+        const pmk::WinAnimePlan plan = pmk::PlanWindowsAnime(wi);
+        const bool sr = plan.route == pmk::WinUpscale::PushcoreSr;
+        if (!pmk::PushcoreWorth(m_settings.smoother, plan)) return false;   // Smoother off and nothing for pushcore to upscale
         if (void* hc = kodi::gui::GetHWContext()) Log(ADDON_LOG_INFO, "Kodi renders on: %s", pmk::AdapterOfContext(hc).c_str());
         pmk::PcConfig c;
         c.width = p->width; c.height = p->height; c.bits = bits > 8 ? 10 : 8;
@@ -976,9 +997,14 @@ private:
         c.transfer = m_trc == AVCOL_TRC_SMPTE2084 ? 16 : m_trc == AVCOL_TRC_ARIB_STD_B67 ? 18 : 1;
         c.primaries = m_prim == AVCOL_PRI_BT2020 || (m_prim == AVCOL_PRI_UNSPECIFIED && c.matrix == 9) ? 9 : 1;
         c.range = p->color_range == AVCOL_RANGE_JPEG ? 2 : 1;
-        c.smoother = m_settings.smoother;   // 0 Auto (PushMPC's Smoother setting), 2..16: pushcore clamps it and reports its k
+        c.smoother = m_settings.smoother;   // 0 Auto (PushMPC's Smoother setting), 1 off, 2..16: pushcore clamps it and reports its k
         c.displayHz = hz;
         c.warp = std::getenv("PUSHMPC_KODI_WARP") != nullptr;
+        c.sr = sr; c.outW = plan.outW; c.outH = plan.outH;
+        c.animeModel = -1;   // Video Super Resolution until the picture is measured as drawn (AnimeAutoSwitch)
+        // Auto's drawn treatment from the measured class (the decoder takes a pair's frames late); PUSHMPC_KODI_DRAWN=0 off
+        c.drawn = !(std::getenv("PUSHMPC_KODI_DRAWN") && std::getenv("PUSHMPC_KODI_DRAWN")[0] == '0');
+        pmk::PushcoreRoute::SetLog([](const std::string& l) { Log(ADDON_LOG_INFO, "%s", l.c_str()); });
         auto pc = std::make_unique<pmk::PushcoreRoute>();
         std::string why;
         if (!pc->Open(c, why)) {
@@ -988,24 +1014,18 @@ private:
         }
         m_pc = std::move(pc);
         m_k = m_pc->K();
-        m_outW = p->width; m_outH = p->height;
+        m_outW = m_pc->OutWidth(); m_outH = m_pc->OutHeight();
+        m_pcAnimeModel = sr ? plan.autoModel : std::string();
         Log(ADDON_LOG_INFO, "video: %s %dx%d %d-bit %.3f fps, display %.2f Hz, screen %dx%d", avcodec_get_name(p->codec_id), p->width,
             p->height, bits, m_fps, hz, m_screenW, m_screenH);
         Log(ADDON_LOG_INFO, "engine: pushcore: %s", m_pc->Describe().c_str());
-        // Auto's anime upscaler on this route: only through pushcore's own upscaler at a fixed size (win_anime_route.h)
-        pmk::WinAnimeIn wi;
-        wi.srcW = p->width; wi.srcH = p->height; wi.screenW = m_screenW; wi.screenH = m_screenH; wi.upscale = up;
-        if (up == 0 && m_screenW > 0 && p->height <= 1080 && (m_screenW > p->width * 11 / 10 || m_screenH > p->height * 11 / 10) && !PmmlRuntime().empty()) {
-            const auto pick = pm::PickAnimeSr(unsigned(p->width), unsigned(p->height), unsigned(std::max(m_screenW, p->width)), unsigned(std::max(m_screenH, p->height)),
-                                              m_fps > 0 ? m_fps : 23.976, false, 1.0, nullptr, -1);
-            if (pick.model >= 0) wi.autoModel = AnimeModelId(pick.model);
-        }
-        wi.pushcore = true; wi.pushcoreSr = m_pc->Upscales();
-        const std::string upWhy = up == 1 ? std::string("upscaling: Kodi's video scaler (your setting)") : pmk::PlanWindowsAnime(wi).why;
+        const std::string upWhy = up == 1 ? std::string("upscaling: Kodi's video scaler (your setting)") : plan.why;
         Log(ADDON_LOG_INFO, "%s; output %dx%d", upWhy.c_str(), m_outW, m_outH);
-        Log(ADDON_LOG_INFO, "multiplier: x%d (pushcore, PushMPC's Auto and settings)", m_k);
+        Log(ADDON_LOG_INFO, "multiplier: x%d (pushcore, PushMPC's Auto and settings)%s", m_k,
+            m_pc->Held() ? "; held drawings re-timed by pushcore (its pictures come up to 14 frames later)" : "");
         return true;
     }
+    std::string m_pcAnimeModel;   // Auto's anime upscaler on the pushcore route (the plain model; "" none)
     std::unique_ptr<pmk::PushcoreRoute> m_pc;
 #endif
 
@@ -1058,6 +1078,7 @@ public:
         m_engine = m_in->TakeEngine();
 #if defined(_WIN32)
         m_pc = m_in->TakePushcore();
+        if (m_pc && m_pc->Upscales()) m_animeAuto.Arm(m_in->PcAnimeModel());   // pushcore's upscaler: VSR <-> the anime model
 #endif
         const bool playback = m_in->Playback();
         const AVCodec* dec = nullptr;
@@ -1164,6 +1185,14 @@ public:
             }
             // end of the drained stream (or an error): the last held frame goes out alone, then the end
             if (m_havePrev) {
+#if defined(_WIN32)
+                if (Pc()) {   // pushcore: the last frame (from pushcore where it hands every picture out), then the end
+                    if (m_pc->AllOut()) { m_pend.push_back(Pend{pmk::Slot{m_prevPts, 0.f, true, true}, m_prevSlot, m_prevPc}); DrainPc(true); }
+                    else m_queue.push_back(Out{pmk::Slot{m_prevPts, 0.f, true, true}, m_prevSlot, true, m_prevPc});
+                    m_havePrev = false;
+                    continue;
+                }
+#endif
                 for (const pmk::Slot& s : m_held.Drain()) m_queue.push_back(Out{s, m_prevSlot, true, m_prevPc});   // with held repeats
                 m_havePrev = false;
                 continue;
@@ -1229,6 +1258,7 @@ public:
         if (m_engine) m_engine->Forget();
 #if defined(_WIN32)
         if (m_pc) m_pc->Flush();
+        m_pend.clear();
 #endif
     }
 
@@ -1291,6 +1321,8 @@ private:
     // pushcore: the decoded frame (its D3D11 texture, or planes uploaded) into pushcore and the ring; then the pictures
     // of the previous frame: itself, and the generated frames pushcore delivered for the pair (the real frame where one
     // is missing, never a stale picture). A frame pushcore could not take stays in m_pic (the CPU copy path).
+    // Where every picture comes from pushcore (its upscaler, or the drawn treatment) the pictures wait in m_pend until
+    // pushcore hands them out (with held-frame re-timing up to Lag() source frames later), then go out in order.
     void OnFramePc()
     {
         AVFrame* f = m_frame;
@@ -1303,9 +1335,13 @@ private:
         const int cur = m_havePrev ? 1 - m_prevSlot : 0;
         std::string err;
         int slot = -1;
+        bool planes = false;
         if (f->format == AV_PIX_FMT_D3D11 && f->hw_frames_ctx) {
-            slot = m_pc->PushTexture(f->data[0], unsigned(reinterpret_cast<intptr_t>(f->data[1])), pts, contiguous, err);
-            if (slot < 0) {   // keep it on the CPU
+            void* tex = f->data[0];
+            const unsigned slice = unsigned(reinterpret_cast<intptr_t>(f->data[1]));
+            slot = m_pc->PushTexture(tex, slice, pts, contiguous, err);
+            if (slot >= 0) MeasurePcGpu(tex, slice, pts, !contiguous);
+            else {   // keep it on the CPU
                 av_frame_unref(m_sw);
                 if (av_hwframe_transfer_data(m_sw, f, 0) < 0) { av_frame_unref(m_frame); return; }   // no picture at all: drop it
                 av_frame_copy_props(m_sw, f);
@@ -1314,6 +1350,7 @@ private:
         }
         if (slot < 0 && !f->hw_frames_ctx) {
             ToPlanes(f, m_pic[cur]);
+            planes = true;
             if (err.empty()) {
                 pm_yuv src{};
                 for (int i = 0; i < 3; ++i) { src.data[i] = m_pic[cur].data[i]; src.stride[i] = m_pic[cur].stride[i]; }
@@ -1322,25 +1359,91 @@ private:
         }
         av_frame_unref(m_frame);
         av_frame_unref(m_sw);
+        if (planes) MeasureContent(m_pic[cur], pts, !contiguous);   // the class itself goes to OnContentPc
         if (!err.empty() && !m_warned) { Log(ADDON_LOG_WARNING, "pushcore: %s", err.c_str()); m_warned = true; }
         if (m_havePrev) {
             const bool pair = slot >= 0 && m_prevPc >= 0;
             const std::vector<pmk::Slot> slots = pmk::SlotsForPair(m_prevPts, pts, m_k, contiguous, pair);
-            std::vector<int64_t> want;
-            for (const pmk::Slot& s : slots) if (!s.real) want.push_back(s.pts);
-            std::vector<int> got;
-            if (!want.empty()) m_pc->Collect(want, double(pts - m_prevPts), got);
-            size_t j = 0;
-            for (const pmk::Slot& s : slots) {
-                int pc = m_prevPc;
-                if (!s.real) { const int g = got[j++]; if (g >= 0) { pc = g; ++m_generated; } }
-                m_queue.push_back(Out{s, m_prevSlot, false, pc});
+            if (m_pc->AllOut()) {
+                for (const pmk::Slot& s : slots) m_pend.push_back(Pend{s, m_prevSlot, m_prevPc});
+            } else {
+                std::vector<int64_t> want;
+                for (const pmk::Slot& s : slots) if (!s.real) want.push_back(s.pts);
+                std::vector<int> got;
+                if (!want.empty()) m_pc->Collect(want, double(pts - m_prevPts), got);
+                size_t j = 0;
+                for (const pmk::Slot& s : slots) {
+                    int pc = m_prevPc;
+                    if (!s.real) { const int g = got[j++]; if (g >= 0) { pc = g; ++m_generated; } }
+                    m_queue.push_back(Out{s, m_prevSlot, false, pc});
+                }
             }
         }
+        if (m_pc->AllOut()) DrainPc(false);
         m_prevSlot = cur;
         m_prevPc = slot;
         m_prevPts = pts;
         m_havePrev = true;
+    }
+    // AllOut: route what pushcore has finished into the pending pictures, then give out (in order) every picture that is
+    // in, or that waited longer than pushcore may hold it (the decoded frame of its pair stands in, enlarged if need be)
+    void DrainPc(bool all)
+    {
+        std::vector<int64_t> want;
+        std::vector<int> got;
+        std::vector<size_t> idx;
+        for (size_t i = 0; i < m_pend.size(); ++i)
+            if (m_pend[i].pc < 0) { want.push_back(m_pend[i].s.pts); got.push_back(-1); idx.push_back(i); }
+        const double frameUs = m_frameUs > 0 ? m_frameUs : 41708.0;
+        const int lag = m_pc->Lag();
+        if (!want.empty()) {
+            // no re-timing: wait for this pair as before (2.5 source frames); re-timing: only what is finished, unless the
+            // oldest picture is about to be given up
+            const double full = std::clamp(2.5 * frameUs / 1000.0, 40.0, 250.0);
+            const bool due = m_pend.front().pc < 0 && m_pend.front().age >= lag;
+            const double waitMs = all || lag == 0 || due ? full : 0.0;
+            m_pc->CollectInto(want, int64_t(frameUs / double(std::max(1, m_k)) / 2.0), waitMs, got);
+            for (size_t j = 0; j < idx.size(); ++j) if (got[j] >= 0) m_pend[idx[j]].pc = got[j];
+        }
+        for (Pend& p : m_pend) ++p.age;
+        while (!m_pend.empty()) {
+            const Pend p = m_pend.front();
+            // pushcore hands its pictures out in order: one still missing while a later one is in will not come
+            bool laterIn = false;
+            for (size_t i = 1; i < m_pend.size() && !laterIn; ++i) laterIn = m_pend[i].pc >= 0;
+            if (p.pc < 0 && !all && p.age <= lag && !laterIn) break;
+            m_pend.pop_front();
+            if (!p.s.real) m_pc->Count(p.pc >= 0);
+            if (!p.s.real && p.pc >= 0) ++m_generated;
+            m_queue.push_back(Out{p.s, p.pic, false, p.pc >= 0 ? p.pc : p.fallback});
+        }
+    }
+    // ContentDetect on the decoder's texture, on the GPU (pushcore_route.h MeasureTexture: only the cells and the image
+    // model's thumbnail come back)
+    void MeasurePcGpu(void* tex, unsigned slice, int64_t ptsUs, bool disc)
+    {
+        int cls = 0; bool cg = false;
+        if (!m_pc->MeasureTexture(tex, slice, ptsUs, disc, !m_cfg.fullRange, cls, cg)) return;
+        m_contentCls = cls; m_contentCg = cg;
+        OnContentPc(cls, cg);
+    }
+    // the measured class on the pushcore route: Auto's anime upscaler (AnimeAutoSwitch, at most once per 30 s) and the
+    // drawn treatment (the class itself, at most once per 10 s), both through the bridge's settings update (warm reload:
+    // the frames in flight are dropped, the decoded frames stand in for them)
+    void OnContentPc(int cls, bool cg)
+    {
+        if (!m_pc) return;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::string running;
+        if (m_pc->AnimeModel() >= 0) { const std::wstring w = pm::AnimeSrModel(m_pc->AnimeModel()).id; running.assign(w.begin(), w.end()); }
+        const pmk::PushcoreContentGate::Ask a = m_pcGate.Update(cls, cg, now, m_animeAuto, m_pc->Upscales(), running);
+        if (!a.update) return;
+        const int model = a.model.empty() ? -1 : pm::AnimeSrModelIndex(std::wstring(a.model.begin(), a.model.end()));
+        std::string why;
+        const bool ok = m_pc->Update(cls, cg, model, why);
+        m_pcGate.Done(a, ok, now, m_animeAuto);
+        if (ok) Log(ADDON_LOG_INFO, "pushcore: content %s%s -> %s", pushmpc::content::ClassName(cls), cg ? " (rendered 3D CG)" : "", m_pc->Describe().c_str());
+        else Log(ADDON_LOG_WARNING, "pushcore: content %s%s not applied: %s", pushmpc::content::ClassName(cls), cg ? " (rendered 3D CG)" : "", why.c_str());
     }
     bool Pc() const { return m_pc != nullptr; }
 #else
@@ -1430,6 +1533,9 @@ private:
                 100.0 * st.confidence, double(ptsUs) / 1e6);
         }
         // every measured state goes to the switch (a change held back by its 30 s limit is made by a later one)
+#if defined(_WIN32)
+        if (Pc()) { OnContentPc(st.cls, st.cg); return; }
+#endif
         if (!m_animeAuto.Armed() || Pc() || m_cfg.external || !m_engine) return;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (!m_animeAuto.Update(st.cls, st.cg, now)) return;
@@ -1461,7 +1567,11 @@ private:
         for (auto& p : m_pic) p.Alloc(w, h, bytes);
         m_gen.Alloc(w, h, bytes);
         ReleaseImports();
-        if (Pc()) { m_upscaled = false; m_outW = w; m_outH = h; m_havePrev = false; return; }   // pushcore keeps the source size
+#if defined(_WIN32)
+        if (Pc()) {   // pushcore's output: the source size, or its upscaler's fixed size
+            m_upscaled = m_pc->Upscales(); m_outW = m_pc->OutWidth(); m_outH = m_pc->OutHeight(); m_havePrev = false; m_pend.clear(); return;
+        }
+#endif
         if (!m_engine || w != m_cfg.width || h != m_cfg.height || bits != m_cfg.bits) {
             // the stream changed size or depth mid-way (rare): a new engine for the new pictures
             m_cfg.width = w; m_cfg.height = h; m_cfg.bits = bits;
@@ -1610,7 +1720,7 @@ private:
                 for (int i = 0; i < 3; ++i) { g.data[i] = m_gen.data[i]; g.stride[i] = m_gen.stride[i]; }
                 if (m_engine->Generate(s.t, g, err)) { srcp = &m_gen; ++m_generated; }
             }
-        } else if (s.real && ((m_upscaled && !m_test2x) || semi || m_gpuFrames)) {
+        } else if (s.real && m_engine && ((m_upscaled && !m_test2x) || semi || m_gpuFrames)) {
             done = m_engine->Real(q.current, kodiOut, err);   // through the engine: upscaled, or in its NV12 / P010 layout
         }
         if (!err.empty() && !m_warned) { Log(ADDON_LOG_WARNING, "engine: %s", err.c_str()); m_warned = true; }
@@ -1994,6 +2104,10 @@ private:
     int m_prevPc = -1;   // the pushcore ring slice of the previous frame (-1: none)
 #if defined(_WIN32)
     std::unique_ptr<pmk::PushcoreRoute> m_pc;
+    // AllOut: a picture waiting for pushcore (pc: its ring slice once in; fallback: the decoded frame of its pair)
+    struct Pend { pmk::Slot s; int pic = 0; int fallback = -1; int pc = -1; int age = 0; };
+    std::deque<Pend> m_pend;
+    pmk::PushcoreContentGate m_pcGate;   // when the measured class goes to pushcore (win_anime_route.h)
 #endif
     pmk::HeldCadence m_held;   // held frames: the pictures per source frame (cadence.h)
     std::deque<Out> m_queue;

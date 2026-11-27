@@ -80,6 +80,40 @@ int main()
         Run(0, 23.976, 2, 30, e); e.Discontinuity();
         Check(e.Current().windows > 0, "a discontinuity keeps the decision state (same title)");
     }
+    {   // 1b. the phase correlation's DFT: any length, circular (no padding), forward and inverse against a direct DFT,
+        //     interleaved columns as a grid's columns; mixed radix (240, 135, 100, 180) and Bluestein (prime 131, 2 x 67)
+        double worst = 0; std::string where;
+        std::mt19937 rng(3); std::uniform_real_distribution<float> u(-100.f, 100.f);
+        for (int n : { 1, 2, 3, 4, 5, 7, 8, 12, 13, 16, 17, 100, 131, 134, 135, 180, 240, 256 })
+            for (int inv = 0; inv < 2; ++inv) {
+                const int count = n % 3 == 0 ? 3 : 1;
+                std::vector<detail::Cplx> x(size_t(n) * count), y; for (auto& v : x) v = { u(rng), u(rng) };
+                y = x;
+                detail::DftPlan pl; pl.Init(n); std::vector<detail::Cplx> sc(pl.ScratchSize(count));
+                pl.Run(y.data(), sc.data(), count, inv != 0);
+                double err = 0, mag = 0;
+                for (int q = 0; q < count; ++q)
+                    for (int k = 0; k < n; ++k) {
+                        std::complex<double> acc;
+                        for (int j = 0; j < n; ++j) acc += std::complex<double>(x[size_t(q) + size_t(count) * j]) * std::polar(1.0, (inv ? 2.0 : -2.0) * 3.141592653589793 * double((int64_t(j) * k) % n) / n);
+                        err = std::max(err, std::abs(acc - std::complex<double>(y[size_t(q) + size_t(count) * k]))); mag = std::max(mag, std::abs(acc));
+                    }
+                if (err / std::max(mag, 1.0) > worst) { worst = err / std::max(mag, 1.0); where = std::to_string(n) + (inv ? " inverse" : " forward"); }
+            }
+        Check(worst < 2e-5, "DFT of any length (mixed radix / Bluestein) = direct DFT", "worst relative error " + std::to_string(worst) + " at " + where);
+        // a pan on pictures whose half grids are not powers of two (16:9 -> 240 x 135, 2.39:1 -> 240 x 100, 4:3 -> 240 x 180)
+        for (int hh : { 540, 402, 720 }) {
+            ContentDetector d; std::mt19937 rr(7);
+            const int w = 960, h = hh;
+            for (int i = 0; i < 40; ++i) {
+                std::vector<uint8_t> yy(size_t(w) * h), uv(size_t(w) * h / 2, 128);
+                for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { const int xx = x + 6 * i; const uint32_t hs = uint32_t(xx / 37) * 2654435761u ^ uint32_t(y / 29) * 40503u; yy[size_t(y) * w + x] = uint8_t(40 + (hs >> 9) % 170u); }
+                d.Push(CellsFromYuv(yy.data(), w, uv.data(), static_cast<const uint8_t*>(nullptr), w, w, h, 8, false), i / 24.0);
+            }
+            Check(d.Current().feat[fCam] > 0.9f && d.Current().feat[fChgm] < 0.05f, "a pan is found and taken out on a " + std::to_string(w) + "x" + std::to_string(h) + " picture (half grid " + std::to_string(kCellsW / 2) + "x" + std::to_string(CellsHeight(w, h) / 2) + ")",
+                  "cam " + std::to_string(d.Current().feat[fCam]) + " chg " + std::to_string(d.Current().feat[fChgm]));
+        }
+    }
     {   // 2. replay of measured feature traces
         int rows = 0, same = 0, traces = 0, right = 0, decided = 0;
         ContentDetector d; int cur = -1;
@@ -118,7 +152,7 @@ int main()
         for (int i = 0; i < 40; ++i, t += 0.5) { g.SetImageEvidence(0.995, t, 0.05); g.Classify(x, t, 0); }
         Check(g.Current().cls == kDrawn && !g.Current().cg, "the CG flag turns off with steady hand-drawn evidence", std::to_string(g.Current().cgLogOdds));
         const DrawnPolicy& ph = PolicyFor(kDrawn, false);
-        Check(ph.holdRepair && ph.animeUpscaler && ph.animeUpscalerDs && ph.signHold && ph.lineArt && ph.animeDeband, "hand-drawn policy: everything on");
+        Check(ph.holdRepair && ph.animeUpscaler && !ph.animeUpscalerDs && ph.signHold && ph.lineArt && ph.animeDeband, "hand-drawn policy: everything on except an automatic _DS upscaler (by hand only)");
         ContentDetector k; for (int i = 0; i < 30; ++i, t += 0.5) { k.SetImageEvidence(0.995, t, i < 26 ? 0.3 : 0.9); k.Classify(x, t, 0); }
         const float before = k.Current().cgLogOdds; const double kt = t - 0.5;   // one keyframe repeated (the model runs about once a second)
         for (int i = 0; i < 4; ++i, t += 0.5) { k.SetImageEvidence(0.995, kt, 0.9); k.Classify(x, t, 0); }

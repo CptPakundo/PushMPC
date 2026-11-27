@@ -101,7 +101,7 @@ inline AnimeSrPick PickAnimeSr(unsigned srcW, unsigned srcH, unsigned outW, unsi
         const double ms = cost(i);
         if (ms > budget) { skipped += std::format(L"{}{} {:.1f} ms", skipped.empty() ? L"" : L", ", m.label, ms); continue; }
         int use = i;
-        if (lowBitrate && (i == 0 || i == 3)) use = i + 1;   // _DS
+        if (lowBitrate && (i == 0 || i == 3)) use = i + 1;   // _DS: only when a caller passes lowBitrate (Auto never does: kAnimeUpscalerDsAuto)
         p.model = use;
         p.ms = cost(use);
         p.note = std::format(L"{} ({:.1f} ms a frame of {:.1f} allowed{}{})", AnimeSrModel(use).label, p.ms, budget, use != i ? L", low bitrate: denoise + sharpen" : L"",

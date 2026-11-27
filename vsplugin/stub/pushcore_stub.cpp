@@ -1,13 +1,16 @@
 // pushcore.dll (stub): the pushcore ABI 3 exports with no NVIDIA stack, for the VapourSynth plugin's tests and CI (no GPU
 // needed: it runs on WARP). It converts each NV12/P010 source frame to RGB on the CPU and hands it out as a real frame;
 // with multiplier k > 1 it first hands out k - 1 generated frames that blend the previous and the current source frame
-// (pts on the k-th grid), in pushcore's presentation order. The output size equals the source size.
+// (pts on the k-th grid), in pushcore's presentation order. The output size equals the source size (PUSHCORE_STUB_SR: see below).
 //   PUSHCORE_STUB_SKIP_EVERY=N  : no generated frames for every N-th pair (as pushcore's skippedGenerated)
 //   PUSHCORE_STUB_OPEN_MS=N     : pushcore_open sleeps N ms (a cold open)
 //   PUSHCORE_STUB_NO_FENCE=1    : hand out frames without a fence
 //   PUSHCORE_STUB_FAST_START=1  : pushcore_features() also reports PUSHCORE_FEATURE_FAST_START (read at each call), so the
 //                                 hosts run their quick-start + handover path (tests; with PUSHMPC_TEST_QUICK_ANY_GPU=1)
 //   PUSHCORE_STUB_FULL_OPEN_MS=N: an open with PUSHCORE_FLAG_WARMUP_GPU_ONLY (the hosts' full graph) sleeps N ms
+//   PUSHCORE_STUB_SR=1          : PushCoreSettings.sr is honoured: the output is the source fitted into the srTarget box
+//                                 (nearest pixel), and the features include held frames, the anime upscaler and the
+//                                 anime holds (the settings are logged: "settings sr .. method .. model .. held ..")
 // Every call is logged to PUSHCORE_STUB_LOG when set (the tests count opens, flushes and submits there).
 #define PUSHCORE_BUILD
 #include <windows.h>
@@ -54,6 +57,24 @@ struct PushCore {
     std::string err;
 };
 
+// PUSHCORE_STUB_SR: the output size for the settings (as pushcore: the source fitted into the target box; at most 5 %
+// larger stays the source size)
+static void OutSize(PushCore* c)
+{
+    c->oi.width = c->si.width; c->oi.height = c->si.height;
+    if (!EnvInt("PUSHCORE_STUB_SR", 0) || !c->ps.sr) return;
+    const uint32_t tw = c->ps.srTarget == PUSHCORE_SR_TARGET_1440P ? 2560u : c->ps.srTarget == PUSHCORE_SR_TARGET_5K ? 5120u : 3840u;
+    const uint32_t th = c->ps.srTarget == PUSHCORE_SR_TARGET_1440P ? 1440u : c->ps.srTarget == PUSHCORE_SR_TARGET_5K ? 2880u : 2160u;
+    const double sc = std::min(double(tw) / c->si.width, double(th) / c->si.height);
+    if (sc <= 1.05) return;
+    c->oi.width = uint32_t(c->si.width * sc + 0.5) & ~1u; c->oi.height = uint32_t(c->si.height * sc + 0.5) & ~1u;
+}
+static void LogSettings(const PushCore* c, const char* when)
+{
+    StubLog("settings %s sr %u target %u method %u model %u held %d anim %d hold %u deband %u/%u k %u out %ux%u", when, c->ps.sr, c->ps.srTarget,
+            c->ps.srMethod, c->ps.animeSrModel, c->ps.heldFrames, c->ps.animationMode, c->ps.holdFlags, c->ps.deband, c->ps.debandStrength,
+            c->ps.multiplier, c->oi.width, c->oi.height);
+}
 static bool ToRgb(PushCore* c, ID3D11Texture2D* src, uint32_t slice)
 {
     const uint32_t w = c->si.width, h = c->si.height;
@@ -90,6 +111,14 @@ static bool ToRgb(PushCore* c, ID3D11Texture2D* src, uint32_t slice)
         c->cur[size_t(y) * w + x] = c->hdrOut ? (q(r, 1023) | (q(g, 1023) << 10) | (q(b, 1023) << 20) | (3u << 30)) : (q(r, 255) | (q(g, 255) << 8) | (q(b, 255) << 16) | (255u << 24));
     }
     c->ctx->Unmap(c->inStage.Get(), 0);
+    if (c->oi.width != w || c->oi.height != h) {   // the stub's "upscaler": nearest pixel
+        std::vector<uint32_t> big(size_t(c->oi.width) * c->oi.height);
+        for (uint32_t y = 0; y < c->oi.height; ++y) {
+            const uint32_t sy = std::min(h - 1, uint32_t(uint64_t(y) * h / c->oi.height));
+            for (uint32_t x = 0; x < c->oi.width; ++x) big[size_t(y) * c->oi.width + x] = c->cur[size_t(sy) * w + std::min(w - 1, uint32_t(uint64_t(x) * w / c->oi.width))];
+        }
+        c->cur.swap(big);
+    }
     return true;
 }
 static uint32_t Blend(uint32_t a, uint32_t b, float t, bool ten)
@@ -105,15 +134,15 @@ static bool Emit(PushCore* c, const std::vector<uint32_t>& px, int64_t pts, uint
     if (!c->pool.empty()) { t = c->pool.back(); c->pool.pop_back(); }
     else {
         D3D11_TEXTURE2D_DESC d = {};
-        d.Width = c->si.width; d.Height = c->si.height; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1;
+        d.Width = c->oi.width; d.Height = c->oi.height; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1;
         d.Format = c->hdrOut ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         if (FAILED(c->dev->CreateTexture2D(&d, nullptr, &t))) { c->err = "stub: output texture"; return false; }
     }
-    c->ctx->UpdateSubresource(t.Get(), 0, nullptr, px.data(), c->si.width * 4, 0);
+    c->ctx->UpdateSubresource(t.Get(), 0, nullptr, px.data(), c->oi.width * 4, 0);
     PushCore::Item it; it.tex = t;
     it.fr.texture = t.Get(); it.fr.pts100ns = pts; it.fr.sourceIndex = srcIdx; it.fr.kind = kind; it.fr.subframe = sub;
-    it.fr.width = c->si.width; it.fr.height = c->si.height;
+    it.fr.width = c->oi.width; it.fr.height = c->oi.height;
     if (c->fence && c->ctx4) { c->ctx4->Signal(c->fence.Get(), ++c->fenceValue); it.fr.readyFence = c->fence.Get(); it.fr.readyValue = c->fenceValue; }
     c->queue.push_back(it);
     c->st.outputs++; (kind == PUSHCORE_FRAME_REAL ? c->st.real : c->st.generated)++;
@@ -122,7 +151,11 @@ static bool Emit(PushCore* c, const std::vector<uint32_t>& px, int64_t pts, uint
 
 extern "C" {
 PUSHCORE_API uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-PUSHCORE_API uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | (EnvInt("PUSHCORE_STUB_FAST_START", 0) ? PUSHCORE_FEATURE_FAST_START : 0u); }
+PUSHCORE_API uint32_t pushcore_features(void)
+{
+    return PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | (EnvInt("PUSHCORE_STUB_FAST_START", 0) ? PUSHCORE_FEATURE_FAST_START : 0u) |
+           (EnvInt("PUSHCORE_STUB_SR", 0) ? (PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR | PUSHCORE_FEATURE_ANIME_HOLD) : 0u);
+}
 PUSHCORE_API int pushcore_capabilities(uint64_t, const wchar_t*, PushCoreCaps* out)
 {
     if (!out || out->structSize < sizeof(PushCoreCaps)) return PUSHCORE_ERROR;
@@ -149,14 +182,15 @@ PUSHCORE_API PushCore* pushcore_open(const PushCoreConfig* cfg, const PushCoreSt
     c->hdrOut = (si->transfer == 16 || si->transfer == 18 || c->ps.videoHdr) && si->displayHdr;
     ComPtr<ID3D11Device5> d5;
     if (!EnvInt("PUSHCORE_STUB_NO_FENCE", 0) && SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&d5)))) d5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&c->fence));
-    c->oi.width = si->width; c->oi.height = si->height; c->oi.multiplier = c->k;
+    OutSize(c); c->oi.multiplier = c->k;
     c->oi.dxgiFormat = c->hdrOut ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
     c->oi.hdrInput = (si->transfer == 16 || si->transfer == 18) ? 1 : 0; c->oi.hdrOutput = c->hdrOut ? 1 : 0;
     snprintf(c->oi.description, sizeof(c->oi.description), "stub: source %ux%u %s -> output %ux%u; FG blend %uX%s", si->width, si->height, si->format ? "P010" : "NV12",
-             si->width, si->height, c->k, c->hdrOut ? "; HDR10" : "");
+             c->oi.width, c->oi.height, c->k, c->hdrOut ? "; HDR10" : "");
     c->st.structSize = sizeof(c->st);
     const uint32_t n = ++g_opens;
     StubLog("open %u %ux%u fmt %u k %u transfer %d displayHdr %u fence %d flags %u", n, si->width, si->height, si->format, c->k, si->transfer, si->displayHdr, c->fence ? 1 : 0, cfg->flags);
+    if (EnvInt("PUSHCORE_STUB_SR", 0)) LogSettings(c, "open");
     return c;
 }
 PUSHCORE_API int pushcore_canSubmit(PushCore* c) { return c && c->leased.size() + c->queue.size() < 4u * c->k + 4u; }
@@ -221,7 +255,9 @@ PUSHCORE_API int pushcore_reload(PushCore* c)
     if (!c->leased.empty()) return PUSHCORE_BUSY;
     c->k = std::clamp<uint32_t>(c->ps.multiplier, 1, 8); c->oi.multiplier = c->k;
     c->queue.clear(); c->havePrev = false;
+    if (EnvInt("PUSHCORE_STUB_SR", 0)) { OutSize(c); c->pool.clear(); }   // the output size follows the settings
     StubLog("reload k %u", c->k);
+    if (EnvInt("PUSHCORE_STUB_SR", 0)) LogSettings(c, "reload");
     return PUSHCORE_OK;
 }
 PUSHCORE_API int pushcore_applySettings(PushCore* c) { return c ? PUSHCORE_NEEDS_REBUILD : PUSHCORE_ERROR; }

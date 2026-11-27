@@ -70,7 +70,7 @@ typedef struct pmc_config {
  * the user's explicit settings win over it) */
 #define PMC_POLICY_HOLD_REPAIR       1u    /* the held-drawing repair (animation mode) */
 #define PMC_POLICY_ANIME_UPSCALER    2u    /* the anime upscalers' plain models */
-#define PMC_POLICY_ANIME_UPSCALER_DS 4u    /* Auto may pick an upscaler's _DS (denoise + sharpen) variant */
+#define PMC_POLICY_ANIME_UPSCALER_DS 4u    /* Auto may pick an upscaler's _DS (denoise + sharpen) variant (never set today: by hand only) */
 #define PMC_POLICY_SIGN_HOLD         8u    /* typeset signs held over a pan */
 #define PMC_POLICY_LINE_ART          16u   /* line-art protection */
 #define PMC_POLICY_ANIME_DEBAND      32u   /* the anime deband preset */
