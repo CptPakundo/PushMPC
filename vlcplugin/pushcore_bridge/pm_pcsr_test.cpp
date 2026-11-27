@@ -451,7 +451,7 @@ static void TestLateRule()
             CHECK(trips == 1 && k >= R::kGracePictures + 72 && k <= R::kGracePictures + 74 + 72, "trip %d after %d late pictures (3 s windows)", t + 1, k);
             again[t] = r.Trip(frameMs);
         }
-        CHECK(again[0] == 60 && again[1] == 120 && again[2] < 0, "back-off %.0f, %.0f, then %.0f (off)", again[0], again[1], again[2]);
+        CHECK(again[0] == R::kRearmFirstS && again[1] == 2 * R::kRearmFirstS && again[2] < 0, "back-off %.0f, %.0f, then %.0f (off)", again[0], again[1], again[2]);
         CHECK(r.LastLate() * 2 > r.LastSeen(), "the counts are kept for the log (%d of %d)", r.LastLate(), r.LastSeen());
     }
     {   // never on time and nothing delivered (far over the budget): off for the stream at the first trip
@@ -467,7 +467,7 @@ static void TestLateRule()
             trips = r.Picture(false, i * step) ? 1 : 0;
         }
         const double a = r.Trip(frameMs);
-        CHECK(trips == 1 && a == 60, "slightly slow: re-armed after %.0f s (median %.1f ms)", a, r.LastMedianMs());
+        CHECK(trips == 1 && a == R::kRearmFirstS, "slightly slow: re-armed after %.0f s (median %.1f ms)", a, r.LastMedianMs());
     }
     {   // sparse pictures (a stall, VLC dropping under load, a pause without a flush): late ones 2 s apart, or a few in 3 s
         R r; int64_t i = 0;
