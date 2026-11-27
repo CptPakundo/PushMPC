@@ -15,14 +15,19 @@ import os
 import re
 import sys
 
-PLEX_BLOCK = '''  on_macos do
-    resource "plex-mac" do
-      url "{url}"
-      sha256 "{sha}"
-    end
-  end
-'''
-KODI_BLOCK = PLEX_BLOCK.replace('"plex-mac"', '"kodi-mac"')
+# the Mac-only archives live in the formula's one on_macos block (brew audit allows one, before the resources),
+# each between its own marker comments: "    # >>> plex-mac" ... "    # <<< plex-mac" (and kodi-mac)
+def part_re(name):
+    return r'    # >>> ' + name + r'\n(?:.*\n)*?    # <<< ' + name + r'\n'
+
+
+def res_re(name):
+    return r'(    resource "' + name + r'" do\n      url )".*"(\n      sha256 )".*"'
+
+
+def part_block(name, url, sha):
+    return (f'    # >>> {name}\n    resource "{name}" do\n      url "{url}"\n      sha256 "{sha}"\n    end\n'
+            f'    # <<< {name}\n')
 
 
 def sha256(path):
@@ -64,38 +69,25 @@ def main():
     # pmml's graphs
     text = sub1(r'(  resource "pmml-graphs" do\n    url )".*"(\n    sha256 )".*"',
                 lambda m: f'{m.group(1)}"{a.pmml_url}"{m.group(2)}"{sha256(a.pmml)}"', text, 'resource "pmml-graphs"')
-    # Plex for Mac: replaced, added after pmml-graphs, or left out
-    plex_re = r'  on_macos do\n    resource "plex-mac" do\n      url ".*"\n      sha256 ".*"\n    end\n  end\n'
-    has = re.search(plex_re, text) is not None
-    if a.plex and os.path.isfile(a.plex):
-        block = PLEX_BLOCK.format(url=a.plex_url, sha=sha256(a.plex))
-        if has:
-            text = re.sub(plex_re, lambda m: block, text, count=1)
+    # Plex for Mac, then Kodi for Mac: replaced in its part, added at the end of the on_macos block (after the
+    # molten-vk line, or after the plex-mac part), or its part left out
+    for name, path, url, after in (('plex-mac', a.plex, a.plex_url, None), ('kodi-mac', a.kodi, a.kodi_url, 'plex-mac')):
+        part = re.search(part_re(name), text)
+        if path and os.path.isfile(path):
+            sha = sha256(path)
+            if part:
+                text = sub1(res_re(name), lambda m: f'{m.group(1)}"{url}"{m.group(2)}"{sha}"', text, f'resource "{name}"')
+            elif after and re.search(part_re(after), text):
+                text = sub1('(' + part_re(after) + ')', lambda m: m.group(1) + part_block(name, url, sha), text,
+                            f'the end of the {after} part')
+            else:
+                text = sub1(r'(^    depends_on "molten-vk"\n)', lambda m: m.group(1) + part_block(name, url, sha), text,
+                            'depends_on "molten-vk" in the on_macos block')
+            print(f'update-formula: {name} ->', url)
         else:
-            text = sub1(r'(  resource "pmml-graphs" do\n    url .*\n    sha256 .*\n  end\n)', lambda m: m.group(1) + '\n' + block, text,
-                        'the end of resource "pmml-graphs"')
-        print('update-formula: plex-mac ->', a.plex_url)
-    else:
-        if has:
-            text = re.sub(plex_re, '', text, count=1)
-        print('update-formula: no Plex for Mac archive: the plex-mac resource is left out')
-    # Kodi for Mac: replaced, added after the last resource block before it (plex-mac or pmml-graphs), or left out
-    kodi_re = plex_re.replace('"plex-mac"', '"kodi-mac"')
-    has = re.search(kodi_re, text) is not None
-    if a.kodi and os.path.isfile(a.kodi):
-        block = KODI_BLOCK.format(url=a.kodi_url, sha=sha256(a.kodi))
-        if has:
-            text = re.sub(kodi_re, lambda m: block, text, count=1)
-        elif re.search(plex_re, text):
-            text = sub1(r'(' + plex_re + r')', lambda m: m.group(1) + '\n' + block, text, 'the end of resource "plex-mac"')
-        else:
-            text = sub1(r'(  resource "pmml-graphs" do\n    url .*\n    sha256 .*\n  end\n)', lambda m: m.group(1) + '\n' + block, text,
-                        'the end of resource "pmml-graphs"')
-        print('update-formula: kodi-mac ->', a.kodi_url)
-    else:
-        if has:
-            text = re.sub(r'\n?' + kodi_re, '', text, count=1)
-        print('update-formula: no Kodi for Mac package: the kodi-mac resource is left out')
+            if part:
+                text = re.sub(part_re(name), '', text, count=1)
+            print(f'update-formula: no {name} archive: the {name} resource is left out')
     open(a.formula, 'w', encoding='utf-8', newline='\n').write(text)
     print(f'update-formula: {a.formula} -> {a.version} ({a.src_url})')
 
