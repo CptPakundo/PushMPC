@@ -1,9 +1,11 @@
 # PushMPC capture mode for Linux and macOS (capture/: pushmpc-capture) on hosted runners:
 #   linux-x11     ubuntu-24.04: the build (X11 + portal + Wayland parts, the GPU engine), capture_test, the self-test
-#                 on Mesa lavapipe; then on Xvfb: mpv (--vo=x11) plays a 24 fps clip of a moving square, pushmpc-capture
-#                 captures its window (XComposite + XDamage + MIT-SHM) and writes what it would show at 60 Hz
-#                 (--no-present --dump): with frame generation the square must move evenly (check_motion.py against
-#                 --smoother off, the 3:2 judder); then a presented run (the X11 overlay through lavapipe's X11 WSI):
+#                 on Mesa lavapipe; then on Xvfb: a small Xlib program (capture/tests/square_x11.c) draws a 24 fps
+#                 moving square, pushmpc-capture captures its window (XComposite + XDamage + MIT-SHM) and writes what it
+#                 would show at 30 / 60 Hz (--no-present --dump): every run must get at least 95 % of the 24 pictures a
+#                 second, and with frame generation the square must move evenly (check_motion.py against --smoother off,
+#                 the judder); mpv (--vo=x11) playing the same square: capture generates frames from a real player;
+#                 then a presented run (the X11 overlay through lavapipe's X11 WSI):
 #                 the overlay window must be mapped over mpv's with the player's size, and the screen there not black.
 #   linux-nvl     ubuntu-24.04: pushmpc-capture with the nvl engine (NVIDIA Video Effects) compiled in, the kernels'
 #                 fatbin from a green run's artifact (else nvcc); the self-test's probe must refuse cleanly (no GPU).
@@ -62,12 +64,10 @@ jobs:
           ./vsplugin/build-capture/pushmpc-capture --help | head -3
       - name: Self-test (the GPU engine on lavapipe, the CPU engine)
         run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
-      - name: Clips (24 fps, a square moving 96 px a second at 640x360; the same at half size, 48 px a second)
+      - name: Clip for mpv (24 fps, a square moving 96 px a second at 640x360; pmc-square draws the same, and at half size)
         run: |
           ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=640x360:r=24" -f lavfi -i "color=c=white:s=64x64:r=24" \
             -filter_complex "[0][1]overlay=x='mod(t*96,560)':y=148,format=yuv420p" -t 40 -c:v libx264 -crf 12 -g 24 /tmp/square.mkv
-          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=320x180:r=24" -f lavfi -i "color=c=white:s=32x32:r=24" \
-            -filter_complex "[0][1]overlay=x='mod(t*48,280)':y=74,format=yuv420p" -t 40 -c:v libx264 -crf 12 -g 24 /tmp/square-half.mkv
           ffprobe -hide_banner -v error -show_entries format=duration -of csv=p=0 /tmp/square.mkv
       - name: Capture on Xvfb (dumped, Auto vs off)
         env: { DISPLAY: ':99' }
@@ -76,13 +76,20 @@ jobs:
           Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
           for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
           b=./vsplugin/build-capture/pushmpc-capture
-          # mpv must draw every frame of the clip: on the loaded 4-core runner it dropped some (run 45965850826: about 21
-          # new pictures a second of 24, and even the smoother-off dump had about 1.2 px of step noise over a clean 24 fps
-          # cadence). --framedrop=no draws a late frame late instead of leaving it out; one decoding thread leaves the
-          # cores to the engine. clean_source() then checks what capture got, before the motion check measures it.
+          # the moving source of the motion runs: pmc-square (capture/tests/square_x11.c), a 24 fps square drawn straight
+          # with Xlib from the clock. mpv left out frames on the loaded 4-core runner even with --framedrop=no and one
+          # decoding thread (run 45973220987: 20.1-21.9 new pictures a second of 24; the smoother-off dumps carried about
+          # 1.2 px of step noise over a clean 24 fps cadence), so the motion check measured the player. mpv stays for one
+          # functional run (capture works with a real player and generates frames) and the presented run.
+          cc -O2 -Wall -o /tmp/pmc-square capture/tests/square_x11.c -lX11
+          square() {   # square <W> <H> <side> <speed> <wrap> <y>: the clip geometry, the window at +40+40
+            pkill -x mpv 2>/dev/null || true; pkill -x pmc-square 2>/dev/null || true; sleep 0.5
+            /tmp/pmc-square "$@" 2>>/tmp/capture-square.log &
+            for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
+            sleep 1; "$b" --list; }
           player() {   # player <clip> <WxH>: the one mpv window capture takes (--player mpv picks the largest)
-            pkill -x mpv 2>/dev/null || true; sleep 0.5
-            mpv --vo=x11 --no-audio --loop=inf --framedrop=no --vd-lavc-threads=1 --geometry=$2+40+40 --no-border --title=pmc-square --really-quiet "$1" &
+            pkill -x mpv 2>/dev/null || true; pkill -x pmc-square 2>/dev/null || true; sleep 0.5
+            mpv --vo=x11 --no-audio --loop=inf --geometry=$2+40+40 --no-border --title=pmc-square --really-quiet "$1" &
             for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
             sleep 1; "$b" --list; }
           # 300 frames take 5-10 s: 120 s means the run hangs (runs 45938409156 to 45946207451 hung after the engine line
@@ -90,7 +97,9 @@ jobs:
           bad=0
           run() { name=$1; hz=$2; shift 2; s=$(date +%s); rc=0; timeout -k 5 120 "$b" --display-hz "$hz" "$@" || rc=$?
             echo "$name: exit $rc after $(( $(date +%s) - s )) s, $(stat -c %s "/tmp/$name.y4m" 2>/dev/null || echo 0) bytes dumped"
-            last=$(grep ' shown ' "/tmp/capture-$name.log" 2>/dev/null | tail -1); echo "  $last"
+            # the last stats line ("shown <n> fps"; the done line says "frames shown" and used to be taken instead,
+            # which left this check without a number)
+            last=$(grep -E ' shown [0-9.]+ fps' "/tmp/capture-$name.log" 2>/dev/null | tail -1); echo "  $last"
             # a dump is the screen only when every refresh got its frame: a run that fell behind fails here by name
             # (run 45953079462: the GPU engine on llvmpipe showed 18 of 60 Hz at 640x360, and the motion check failed)
             shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
@@ -99,6 +108,7 @@ jobs:
           # a clean source first: at least 95 % of the clip's 24 pictures a second reached capture (the done line counts
           # new pictures as they arrive, repeats left out). Below that the motion check would measure the player's dropped
           # frames, not frame generation: the step fails by name, and the motion check still prints its numbers.
+          # (pmc-square's own count of frames it put up late is in capture-square.log.)
           clean_source() { for n in "$@"; do
               d=$(grep ' done: ' "/tmp/capture-$n.log" 2>/dev/null | tail -1); echo "$n source: ${d#*source: }"
               r=$(printf '%s' "$d" | sed -n 's/.*(\([0-9.]*\) a second).*/\1/p')
@@ -108,15 +118,21 @@ jobs:
           motion() { echo "$1:"; python3 -I capture/tests/check_motion.py "/tmp/$2.y4m" "/tmp/$3.y4m" --speed "$4" --hz "$5" || bad=1; }
           # the GPU engine on llvmpipe (a software rasteriser: block matching about 65 ms a pair at 640x360, run 45953079462)
           # at half size and 30 Hz, where every refresh gets its frame; the CPU engine at full size and 60 Hz
-          player /tmp/square-half.mkv 320x180
-          run auto 30 --player mpv --no-present --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
-          run off 30 --player mpv --no-present --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
-          player /tmp/square.mkv 640x360   # stays for the presented run
-          run cpu 60 --player mpv --no-present --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
-          run cpuoff 60 --player mpv --no-present --engine cpu --smoother off --frames 300 --dump /tmp/cpuoff.y4m --log /tmp/capture-cpuoff.log -v
+          square 320 180 32 48 280 74
+          run auto 30 --player pmc-square --no-present --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
+          run off 30 --player pmc-square --no-present --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
+          square 640 360 64 96 560 148
+          run cpu 60 --player pmc-square --no-present --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
+          run cpuoff 60 --player pmc-square --no-present --engine cpu --smoother off --frames 300 --dump /tmp/cpuoff.y4m --log /tmp/capture-cpuoff.log -v
           clean_source auto off cpu cpuoff
           motion "GPU engine (320x180, 30 Hz)" auto off 48 30
           motion "CPU engine (640x360, 60 Hz)" cpu cpuoff 96 60
+          # mpv: capture takes a real player's window and generates frames (no motion limit: the player's own dropped
+          # frames are not ours to measure here)
+          player /tmp/square.mkv 640x360   # stays for the presented run
+          run mpv 60 --player mpv --no-present --engine cpu --smoother auto --frames 150 --dump /tmp/mpv.y4m --log /tmp/capture-mpv.log -v
+          g=$(grep ' done: ' /tmp/capture-mpv.log 2>/dev/null | sed -n 's/.*), \([0-9]*\) generated.*/\1/p' | tail -1); echo "mpv: ${g:-no} frames generated"
+          [ "${g:-0}" -gt 0 ] || { echo "::error::capture of mpv generated no frames"; bad=1; }
           [ "$bad" = 0 ]
       - name: Presented run (the X11 overlay over mpv)
         env: { DISPLAY: ':99' }
@@ -378,7 +394,7 @@ jobs:
           [ "$rc" = 0 ] || { echo "::error::capture failed (exit $rc)"; exit 1; }
           perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 30 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
           for n in auto off; do
-            last=$(grep ' shown ' /tmp/capture-$n.log | tail -1); echo "$n: $last"
+            last=$(grep -E ' shown [0-9.]+ fps' /tmp/capture-$n.log | tail -1); echo "$n: $last"
             d=$(grep ' done: ' /tmp/capture-$n.log | tail -1); echo "$n source: ${d#*source: }"   # of the window's 24 a second
             shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
             [ -n "$shown" ] && awk -v s="$shown" 'BEGIN { exit !(s < 27) }' && { echo "::error::capture ($n) showed $shown of 30 refreshes a second: the engine falls behind on this runner"; exit 1; }
