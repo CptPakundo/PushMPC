@@ -350,7 +350,7 @@ class Pushmpc < Formula
                 # ~/Library/Application Support/PushMPC/pmml; without it the hand-built cues decide); --no-pmml skips it
                 if [ "$pmml" = 1 ] && [ -f "$plexdir/setup.sh" ]; then
                   echo "Image model (content detection):"
-                  /bin/sh "$plexdir/setup.sh" pmml 2>&1 | sed 's/^/  /' || echo "  not installed (see above): the hand-built cues decide"
+                  { /bin/sh "$plexdir/setup.sh" pmml 2>&1 || echo "not installed (see above): the hand-built cues decide"; } | sed 's/^/  /'
                 fi
               fi
             fi ;;
