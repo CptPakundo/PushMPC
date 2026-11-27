@@ -331,7 +331,7 @@ int Run(const Options& o)
     Timeline tl;
     Protected prot;
     I420 hostPic, outPic;
-    uint64_t lastPrint = 0, inFrames = 0, dupFrames = 0, shown = 0, presented = 0;
+    uint64_t lastPrint = 0, inFrames = 0, dupFrames = 0, shown = 0, presented = 0, drainCuts = 0;
     uint64_t lastFp = 0;
     bool haveFp = false, hidden = false;
     double start = Now(), lastStats = start, audioAt = 0, reopenAt = 0, nextTick = start;
@@ -376,9 +376,17 @@ int Run(const Options& o)
         if (!src->Alive(why)) { Log("%s", why.c_str()); break; }
 
         // ---- new frames
+        // Only the wait for the very first frame may block (50 ms per call). The wait used to be decided once before this
+        // loop, so the whole first drain waited 50 ms per call: a player drawing more often than every 50 ms (24 fps: every
+        // 42 ms) always had a new picture by then, the loop never ended, nothing was shown and --frames was never reached
+        // (CI linux-x11 hung right after the engine line in every run). Now the wait is decided per call, and taking frames
+        // also stops after one refresh: a source that outruns the engine (not measured; llvmpipe could) still gets shown.
+        // The X11 source keeps only the newest picture, so a picture left for the next refresh is not a backlog.
         SourceFrame f;
-        const bool waitFirst = !tl.Valid();
-        while (src->Next(f, waitFirst ? 50 : 0)) {
+        const double drainUntil = Now() + 1.0 / hz;
+        for (;;) {
+            if (tl.Valid() && Now() >= drainUntil) { ++drainCuts; break; }
+            if (!src->Next(f, tl.Valid() ? 0 : 50)) break;
             const int w = f.width & ~1, h = f.height & ~1;
             const int fbits = IsHdr10(f.fmt) ? 10 : 8;
             const bool fpq = IsHdr10(f.fmt);
@@ -467,8 +475,9 @@ int Run(const Options& o)
         }
         if (now - lastStats >= 5.0 && (g_verbose || shown - lastPrint > 0)) {
             const double dt = now - lastStats;
-            Log("source %.2f fps (%llu captured, %llu repeats), shown %.1f fps, %llu generated, delay %.0f ms%s%s",
-                tl.Fps(), static_cast<unsigned long long>(inFrames), static_cast<unsigned long long>(dupFrames), double(shown - lastPrint) / dt,
+            Log("source %.2f fps (%llu captured, %llu repeats; taking frames ran past a refresh %llu times), shown %.1f fps, %llu generated, delay %.0f ms%s%s",
+                tl.Fps(), static_cast<unsigned long long>(inFrames), static_cast<unsigned long long>(dupFrames),
+                static_cast<unsigned long long>(drainCuts), double(shown - lastPrint) / dt,
                 static_cast<unsigned long long>(eng.Generated()), tl.Delay() * 1000, eng.gpu ? "; " : "", eng.gpu ? eng.gpu->Stats().c_str() : "");
             lastStats = now; lastPrint = shown;
         }
