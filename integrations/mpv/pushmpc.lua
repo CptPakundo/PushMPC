@@ -17,20 +17,6 @@ local mp = require 'mp'
 local msg = require 'mp.msg'
 local options = require 'mp.options'
 
--- one copy per mpv: mpv.conf read twice (an --include of the default config, a second scripts-append) loads this script
--- twice, and two copies would each add the filter and re-add it after a measurement. The first copy claims a shared
--- property (user-data, mpv 0.36+); a later copy sees the claim and stays idle. On an older mpv without user-data the
--- claim cannot be made and every copy runs (the status file's rename claim still keeps the re-add single).
-do
-    local me = mp.get_script_name()
-    local owner = mp.get_property("user-data/pushmpc/script", "")
-    if owner ~= nil and owner ~= "" and owner ~= me then
-        msg.info("PushMPC: this script already runs in this mpv (as " .. owner .. "); this copy (" .. me .. ") stays idle")
-        return
-    end
-    mp.set_property("user-data/pushmpc/script", me)
-end
-
 -- Upscaling shaders (pushmpc-shaders, ";" between paths; PushMPC ships ArtCNN fragment shaders): shaders-when=always
 -- adds them for every video (no better upscaler on this PC), =fallback only when PushMPC's filter or d3d11vpp could not
 -- start. They carry a //!WHEN guard, so they run only when the video is shown at least 1.3x its size.
@@ -405,7 +391,8 @@ end
 -- One copy of this script per player: a libmpv that PushMPC swapped in loads the block itself (pushmpc-libmpv.ps1),
 -- and the player's own config may name the script too
 do
-    local owner = mp.get_property("user-data/pushmpc/script", "")
+    -- user-data strings read back quoted (mpv formats the node): compare the bare name
+    local owner = (mp.get_property("user-data/pushmpc/script", "") or ""):gsub('^"(.*)"$', "%1")
     if owner ~= "" and owner ~= mp.get_script_name() then
         msg.verbose("already running as " .. owner .. ": this copy does nothing")
         return
