@@ -627,7 +627,14 @@ jobs:
           y0() { ffprobe -v error -f lavfi "movie=$1,signalstats" -read_intervals '%+#1' -show_entries frame_tags=lavfi.signalstats.YAVG -of csv=p=0 | head -1; }
           ys=$(y0 "$clip"); yo=$(y0 "$RUNNER_TEMP/out.mkv"); echo "first frame mean luma: source $ys, output $yo"
           [ -n "$ys" ] && [ -n "$yo" ] && awk -v a="$ys" -v b="$yo" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 8) }' || { echo "::error::the first output frame differs from the source's first (mean luma $yo vs $ys)"; exit 1; }
-          [ "$outn" -ge $((2 * srcn - 4)) ] && [ "$outn" -le $((2 * srcn + 2)) ] || { echo "::error::mpv output has $outn frames for $srcn source frames (want about x2)"; exit 1; }
+          # control: the same encode by mpv alone (no config, no scripts, no PushMPC filter). The x2 count is judged against
+          # what mpv itself puts out, so frames mpv drops on its own are not charged to PushMPC (Intel run 46011580160: the
+          # stream ended at source frame 298 of ffprobe's 300)
+          MPV_HOME="$RUNNER_TEMP/mpv-none" mpv "$clip" --no-config --load-scripts=no --no-audio --o="$RUNNER_TEMP/control.mkv" --ovc=ffv1 --of=matroska > "$RUNNER_TEMP/control.txt" 2>&1 || true
+          ctrln=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$RUNNER_TEMP/control.mkv" 2>/dev/null | tr -d '\r')
+          echo "control: mpv alone ${ctrln:-?} frames (source $srcn by ffprobe); PushMPC $outn"
+          [ -n "$ctrln" ] && [ "$ctrln" -gt 0 ] || { echo "::error::the control encode (mpv alone) gave no frame count"; tail -20 "$RUNNER_TEMP/control.txt"; exit 1; }
+          [ "$outn" -ge $((2 * ctrln - 4)) ] && [ "$outn" -le $((2 * ctrln + 2)) ] || { echo "::error::mpv output has $outn frames for $ctrln frames from mpv alone (want about x2)"; exit 1; }
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
           # PushFlow through pmml (the ml backend) with Homebrew's ONNX Runtime (CoreML; the VM has no GPU for it, so the
           # CPU may run it): pushmpc-setup put the runtime in ~/.local/share/pushmpc/pmml
