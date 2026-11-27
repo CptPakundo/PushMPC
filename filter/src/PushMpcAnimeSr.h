@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
+#include <cstdio>
 #include <cwchar>
 #include <cwctype>
 #include <string>
@@ -58,6 +58,14 @@ inline int AnimeSrModelIndex(const std::wstring& id) {
                        [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); })) return i;
     return -1;
 }
+// a note's number with one decimal (no <format>: the Kodi add-on builds this header on Debian bullseye's gcc 10 and for
+// macOS 10.15 / 11, whose libc++ has no floating-point to_chars)
+inline std::wstring AnimeSrMs(double v)
+{
+    wchar_t b[32];
+    std::swprintf(b, sizeof(b) / sizeof(b[0]), L"%.1f", v);
+    return b;
+}
 // best first (offline evidence above); the DS / DN variants are chosen from their base, never ranked themselves
 constexpr int kAnimeSrRank[] = {6, 3, 0, 9, 8, 7, 10};
 constexpr double kAnimeSrShare = 0.35;         // the most of a source frame's time the upscaler may take
@@ -91,7 +99,7 @@ inline AnimeSrPick PickAnimeSr(unsigned srcW, unsigned srcH, unsigned outW, unsi
     if (forced >= 0 && forced < kAnimeSrModels) {
         p.model = forced;
         p.ms = cost(forced);
-        p.note = std::format(L"{} (your choice; {:.1f} ms a frame{})", AnimeSrModel(forced).label, p.ms, p.ms > budget ? L", more than Auto would give it" : L"");
+        p.note = std::wstring(AnimeSrModel(forced).label) + L" (your choice; " + AnimeSrMs(p.ms) + L" ms a frame" + (p.ms > budget ? L", more than Auto would give it" : L"") + L")";
         return p;
     }
     std::wstring skipped;
@@ -99,13 +107,13 @@ inline AnimeSrPick PickAnimeSr(unsigned srcW, unsigned srcH, unsigned outW, unsi
         const auto& m = AnimeSrModel(i);
         if (m.dvdOnly && !dvd) continue;
         const double ms = cost(i);
-        if (ms > budget) { skipped += std::format(L"{}{} {:.1f} ms", skipped.empty() ? L"" : L", ", m.label, ms); continue; }
+        if (ms > budget) { skipped += (skipped.empty() ? L"" : L", ") + std::wstring(m.label) + L" " + AnimeSrMs(ms) + L" ms"; continue; }
         int use = i;
         if (lowBitrate && (i == 0 || i == 3)) use = i + 1;   // _DS: only when a caller passes lowBitrate (Auto never does: kAnimeUpscalerDsAuto)
         p.model = use;
         p.ms = cost(use);
-        p.note = std::format(L"{} ({:.1f} ms a frame of {:.1f} allowed{}{})", AnimeSrModel(use).label, p.ms, budget, use != i ? L", low bitrate: denoise + sharpen" : L"",
-                             skipped.empty() ? L"" : L"; too slow here: " + skipped);
+        p.note = std::wstring(AnimeSrModel(use).label) + L" (" + AnimeSrMs(p.ms) + L" ms a frame of " + AnimeSrMs(budget) + L" allowed" +
+                 (use != i ? L", low bitrate: denoise + sharpen" : L"") + (skipped.empty() ? std::wstring() : L"; too slow here: " + skipped) + L")";
         return p;
     }
     p.note = L"no anime upscaler fits (" + skipped + L")";
