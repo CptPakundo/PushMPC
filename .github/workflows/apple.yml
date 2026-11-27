@@ -662,6 +662,7 @@ jobs:
             MPV_HOME="$RUNNER_TEMP/mpv-none" mpv "$short" --no-config --load-scripts=no --no-audio --o="$r-ctl.mkv" --ovc=ffv1 --of=matroska > "$r-ctl.txt" 2>&1 || true
             cn=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$r-ctl.mkv" 2>/dev/null | tr -d ',\r' || true)
             pn=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$r.mkv" 2>/dev/null | tr -d ',\r' || true)
+            case $cn in ''|*[!0-9]*) cn='' ;; esac; case $pn in ''|*[!0-9]*) pn='' ;; esac   # ffprobe's N/A (no frames)
             yr=$( [ -f "$r.mkv" ] && y0 "$r.mkv" | tr -d ',\r' || true)
             grep -qF "$pre" "$r.txt" && pl=yes || pl=no
             grep -q 'Frame requested during init' "$r.txt" && ri=yes || ri=no
