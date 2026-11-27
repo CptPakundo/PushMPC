@@ -66,6 +66,7 @@
 #include "PushMpcFastStart.h"
 #include "PushMpcLearned.h"         // what Auto keeps between sessions (rules against foreign GPU load)
 #include "PushMpcLogs.h"            // old logs go (filter logs and the per-process engine log)
+#include "PushMpcPassConvert.h"     // pass-through CPU conversions (YUY2, RGB32) for renderers that refuse NV12 / P010
 #include "PushMpcReload.h"          // F-T1: the settings reload on its own thread, bounded, never beside a close
 #include <VersionHelpers.h>
 #include <IVideoRenderer.h>   // MPC Video Renderer's settings interface (live HDR settings)
@@ -2027,7 +2028,11 @@ public:
             for (const auto& f : m_offered) if (f.fmt == Fmt::P010H) BuildMediaType(f, &m_offeredP010H);
         }
         if (pos < int(m_offered.size())) { BuildMediaType(m_offered[pos], pmt); return S_OK; }
-        if (pos == int(m_offered.size())) { *pmt = m_inMt; return S_OK; } // the pass-through type, last
+        if (pos == int(m_offered.size())) { *pmt = m_inMt; return S_OK; } // the pass-through type
+        // then the decoder's usual fallbacks, converted on the CPU, for renderers that refuse NV12 / P010 (EVR without a
+        // hardware video processor took only YUY2): pass-through all the same, no PushFPS
+        if (pos == int(m_offered.size()) + 1) { BuildConvType(pm::pass::Conv::Yuy2, pmt); return S_OK; }
+        if (pos == int(m_offered.size()) + 2) { BuildConvType(pm::pass::Conv::Rgb32, pmt); return S_OK; }
         return VFW_S_NO_MORE_ITEMS;
     }
     // the processed P010 output is told from the pass-through type (both P010) by being the exact type offered
@@ -2036,7 +2041,26 @@ public:
         return out->subtype == MEDIASUBTYPE_P010_PM && m_offeredP010H.subtype == MEDIASUBTYPE_P010_PM && out->cbFormat == m_offeredP010H.cbFormat
             && out->pbFormat && memcmp(out->pbFormat, m_offeredP010H.pbFormat, out->cbFormat) == 0;
     }
-    bool IsPassType(const AM_MEDIA_TYPE* out) const { return out->subtype == m_inMt.subtype && !IsOfferedP010H(out); }
+    static pm::pass::Conv ConvOf(const AM_MEDIA_TYPE* out) { return out->subtype == MEDIASUBTYPE_YUY2 ? pm::pass::Conv::Yuy2 : out->subtype == MEDIASUBTYPE_RGB32 ? pm::pass::Conv::Rgb32 : pm::pass::Conv::None; }
+    // the source picture in system memory: the decoder's own type, or one of the CPU conversions of it
+    bool IsPassType(const AM_MEDIA_TYPE* out) const { return (out->subtype == m_inMt.subtype && !IsOfferedP010H(out)) || ConvOf(out) != pm::pass::Conv::None; }
+    // the decoder's type turned into YUY2 or RGB32 (same size, frame rate, aspect ratio and interlace flags)
+    void BuildConvType(pm::pass::Conv c, CMediaType* pmt) const
+    {
+        *pmt = m_inMt;
+        const bool yuy2 = c == pm::pass::Conv::Yuy2;
+        pmt->SetSubtype(yuy2 ? &MEDIASUBTYPE_YUY2 : &MEDIASUBTYPE_RGB32);
+        BITMAPINFOHEADER* bih = pmt->formattype == FORMAT_VideoInfo2 && pmt->cbFormat >= sizeof(VIDEOINFOHEADER2) ? &((VIDEOINFOHEADER2*)pmt->pbFormat)->bmiHeader
+            : pmt->formattype == FORMAT_VideoInfo && pmt->cbFormat >= sizeof(VIDEOINFOHEADER) ? &((VIDEOINFOHEADER*)pmt->pbFormat)->bmiHeader : nullptr;
+        if (!bih) return;
+        const LONG w = bih->biWidth, h = labs(bih->biHeight);
+        bih->biBitCount = WORD(8 * pm::pass::BytesPerPixel(c));
+        bih->biCompression = yuy2 ? MAKEFOURCC('Y', 'U', 'Y', '2') : BI_RGB;
+        bih->biHeight = yuy2 ? h : -h;   // FOURCC types positive; RGB top-down
+        bih->biSizeImage = DWORD(w) * DWORD(h) * pm::pass::BytesPerPixel(c);
+        pmt->SetSampleSize(bih->biSizeImage);
+        if (!yuy2 && pmt->formattype == FORMAT_VideoInfo2) ((VIDEOINFOHEADER2*)pmt->pbFormat)->dwControlFlags = 0;   // RGB: no Y'CbCr description
+    }
     HRESULT CheckTransform(const CMediaType* in, const CMediaType* out) override
     {
         if (FAILED(CheckInputType(in))) return VFW_E_TYPE_NOT_ACCEPTED;
@@ -2044,6 +2068,11 @@ public:
         BITMAPINFOHEADER bi, bo; REFERENCE_TIME a; DWORD c, il, ax, ay;
         if (!ParseVideo(in, bi, a, c, il, ax, ay) || !ParseVideo(out, bo, a, c, il, ax, ay)) return VFW_E_TYPE_NOT_ACCEPTED;
         if (IsOfferedP010H(out)) return S_OK;
+        if (ConvOf(out) != pm::pass::Conv::None) {
+            // pass-through converted on the CPU: same picture, the downstream may ask for a wider row
+            if (labs(bo.biHeight) != labs(bi.biHeight) || bo.biWidth < bi.biWidth) return VFW_E_TYPE_NOT_ACCEPTED;
+            return S_OK;
+        }
         if (out->subtype == in->subtype) {
             // pass-through: same picture; the downstream allocator may ask for a wider stride
             if (labs(bo.biHeight) != labs(bi.biHeight) || bo.biWidth < bi.biWidth) return VFW_E_TYPE_NOT_ACCEPTED;
@@ -2084,8 +2113,10 @@ public:
                 (int)ex.VideoTransferFunction, il));
         } else {
             if (IsPassType(mt)) {
+                m_passConv = ConvOf(mt);
                 m_outFmt = { m_inP010 ? Fmt::P010 : Fmt::NV12, UINT(bih.biWidth), UINT(labs(bih.biHeight)) };
-                m_outStride = UINT(bih.biWidth) * (m_inP010 ? 2 : 1);
+                m_outStride = PassStride(UINT(bih.biWidth));
+                if (m_passConv != pm::pass::Conv::None) Log(std::format("output type: {} (the source picture converted on the CPU)", m_passConv == pm::pass::Conv::Yuy2 ? "YUY2" : "RGB32"));
             } else {
                 m_outFmt = { IsOfferedP010H(mt) ? Fmt::P010H : mt->subtype == MEDIASUBTYPE_Y410_PM ? Fmt::Y410 : mt->subtype == MEDIASUBTYPE_Y416_PM ? Fmt::Y416 : Fmt::BGRA, UINT(bih.biWidth), UINT(labs(bih.biHeight)) };
             }
@@ -2104,7 +2135,8 @@ public:
         if (IsPassType(&mt)) {
             m_mode = Mode::PassSys;
             const std::wstring why = m_passWhy.empty() ? m_lastRefusal : m_passWhy;
-            SetStatus(L"pass-through (source format, no PushFPS): " + (why.empty() ? std::wstring(L"the downstream filter took the source format") : why));
+            SetStatus(std::wstring(m_passConv == pm::pass::Conv::None ? L"pass-through (source format, no PushFPS): " : m_passConv == pm::pass::Conv::Yuy2 ? L"pass-through (converted to YUY2 for the renderer, no PushFPS): "
+                      : L"pass-through (converted to RGB32 for the renderer, no PushFPS): ") + (why.empty() ? std::wstring(L"the downstream filter took the source format") : why));
             return S_OK;
         }
         ComPtr<ID3D11DecoderConfiguration> cfg;
@@ -2158,7 +2190,7 @@ public:
         ALLOCATOR_PROPERTIES p = {}, act = {};
         if (m_mode == Mode::PassSys || IsPassType(&m_pOutput->CurrentMediaType())) {
             p.cBuffers = std::max<long>(3, req->cBuffers);
-            p.cbBuffer = std::max<long>(long(m_pOutput->CurrentMediaType().GetSampleSize()), long(m_outStride * m_outFmt.h * 3 / 2));
+            p.cbBuffer = std::max<long>(long(m_pOutput->CurrentMediaType().GetSampleSize()), long(m_outStride * m_outFmt.h * (m_passConv == pm::pass::Conv::None ? 3 : 2) / 2));
             p.cbAlign = std::max<long>(1, req->cbAlign);
             HRESULT hr = pAlloc->SetProperties(&p, &act);
             Log(std::format("DecideBufferSize (pass-through): {} x {} bytes -> 0x{:08X}", act.cBuffers, act.cbBuffer, uint32_t(hr)));
@@ -2817,6 +2849,8 @@ private:
     double m_srMedian = 0, m_fgMedian = 0;
     std::atomic<int> m_reopens = 0;
     bool m_warnedSdrIntoY410 = false, m_passMtPending = false;
+    pm::pass::Conv m_passConv = pm::pass::Conv::None;   // pass-through converted on the CPU (YUY2 / RGB32), else the decoder's type
+    UINT PassStride(UINT widthPixels) const { return widthPixels * UINT(m_passConv != pm::pass::Conv::None ? pm::pass::BytesPerPixel(m_passConv) : m_inP010 ? 2 : 1); }
     int64_t m_csvFlushQpc = 0;
     // Auto
     std::mutex m_autoLock;               // the members below
@@ -3960,7 +3994,7 @@ HRESULT CPushMpcFilter::PassSysmem(IMediaSample* pIn)
         // the renderer asked for another stride (MPC-VR's CalcImageSize / QueryAccept)
         BITMAPINFOHEADER b; REFERENCE_TIME a; DWORD c, il, ax, ay;
         if (ParseVideo(omt, b, a, c, il, ax, ay)) {
-            m_outStride = UINT(b.biWidth) * (m_inP010 ? 2 : 1);
+            m_outStride = PassStride(UINT(b.biWidth));
             Out()->SetMt(CMediaType(*omt));
             Log(std::format("pass-through: downstream stride now {} bytes", m_outStride));
         }
@@ -3969,11 +4003,28 @@ HRESULT CPushMpcFilter::PassSysmem(IMediaSample* pIn)
     BYTE *src = nullptr, *dst = nullptr;
     pIn->GetPointer(&src); out->GetPointer(&dst);
     const UINT rows = m_inH * 3 / 2, rowBytes = m_inW * (m_inP010 ? 2 : 1);
+    if (m_passConv != pm::pass::Conv::None) {
+        // the renderer takes YUY2 / RGB32 only: converted on the CPU (the matrix from the stream's colour description,
+        // else BT.709 from 720 lines up)
+        const long need = long(m_outStride) * long(m_inH);
+        if (src && dst && out->GetSize() >= need && pIn->GetActualDataLength() >= long(m_inStride * rows)) {
+            if (m_passConv == pm::pass::Conv::Yuy2) pm::pass::ToYuy2(src, m_inStride, int(m_inW), int(m_inH), m_inP010, dst, m_outStride);
+            else {
+                DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;
+                const bool bt709 = (m_inCtrl & AMCONTROL_COLORINFO_PRESENT) && ex.VideoTransferMatrix != DXVA2_VideoTransferMatrix_Unknown
+                    ? ex.VideoTransferMatrix == DXVA2_VideoTransferMatrix_BT709 : m_inH >= 720;
+                pm::pass::ToRgb32(src, m_inStride, int(m_inW), int(m_inH), m_inP010, bt709, dst, m_outStride);
+            }
+            out->SetActualDataLength(need);
+        }
+        m_passMtPending = false;   // the converted type stays (a colour change is not passed on)
+    } else {
     const long need = long(m_outStride) * long(rows);
     if (src && dst && out->GetSize() >= need && pIn->GetActualDataLength() >= long(m_inStride * rows)) {
         if (m_outStride == m_inStride) memcpy(dst, src, size_t(m_inStride) * rows);
         else for (UINT y = 0; y < rows; y++) memcpy(dst + size_t(y) * m_outStride, src + size_t(y) * m_inStride, std::min(rowBytes, m_outStride));
         out->SetActualDataLength(need);
+    }
     }
     if (m_passMtPending) {
         // the upstream type changed (colour description): passed on, with the stride the downstream buffers have
