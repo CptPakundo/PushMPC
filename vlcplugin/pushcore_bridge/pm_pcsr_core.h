@@ -33,6 +33,8 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 #include "pm_pushcore.h"
 #include "win_anime_route.h"    // kodiaddon/src/engine: AnimeAutoSwitch (the measured class -> the anime model)
 #include "PushMpcAnimeSr.h"     // filter/src: the models' ids and their index as the bridge takes it
@@ -56,6 +58,76 @@ public:
 private:
     double m_delay = 0, m_at = 0;
     int m_lost = 0, m_busy = 0;
+};
+
+// ---------------------------------------------------------------------------------------------------- lateness (Auto)
+// When pushcore's anime upscaler does not keep up, Auto hands the picture back to the scaler; the same rule as the Kodi
+// and VapourSynth routes. A short load spike must not decide a whole film:
+//  - grace: the first kGracePictures after an open, a reload, a flush or a seek are not judged;
+//  - sustained: a verdict covers at least kWindowS of SOURCE time (pts) and kMinPictures pictures with no step larger
+//    than kMaxGapS, and trips when more than half its pictures came too late (after the wait's bound: the scaler drew them);
+//  - re-armed with back-off: kRearmFirstS, doubling per trip, given up after kMaxTrips trips in the stream, but only when
+//    the lateness looks transient: a whole window was on time before, or the late pictures still came within
+//    kSlowFactor x the frame time (median). Otherwise (never on time, far over the budget) it stays off, as before.
+// The constants are design choices, not measured; they are listed for the free-PC perf run.
+class PcsrLateRule {
+public:
+    static constexpr int kGracePictures = 12;
+    static constexpr double kWindowS = 3.0;
+    static constexpr double kRearmFirstS = 60.0;
+    static constexpr int kMaxTrips = 3;
+    static constexpr double kSlowFactor = 2.0;
+    static constexpr int kMinPictures = 24;    // a verdict needs this many pictures too (sparse pictures never decide)
+    static constexpr double kMaxGapS = 1.0;    // a larger step between two pictures starts the window over
+
+    // an open, a reload, a flush or a seek: the grace again, the window starts over (the trips and "was on time" stay)
+    void Restart() { m_grace = kGracePictures; m_seen = m_late = 0; m_start = m_last = INT64_MIN; m_delays.clear(); }
+    // a late picture that pushcore still delivered, ms after its push
+    void LateDelivery(double ms) { if (m_delays.size() < 4096) m_delays.push_back(ms); }
+    // one picture at source time pts100 (100 ns units): true = trip (Auto: the scaler draws from now on); then Trip()
+    bool Picture(bool onTime, int64_t pts100)
+    {
+        if (m_grace > 0) { --m_grace; return false; }
+        // a step back, or a gap (a stall or a pause without a flush): the window starts over
+        if (m_start == INT64_MIN || pts100 < m_last || double(pts100 - m_last) > kMaxGapS * 1e7) { m_start = pts100; m_seen = m_late = 0; m_delays.clear(); }
+        m_last = pts100;
+        ++m_seen;
+        if (!onTime) ++m_late;
+        if (double(pts100 - m_start) < kWindowS * 1e7 || m_seen < kMinPictures) return false;
+        m_lastSeen = m_seen; m_lastLate = m_late; m_lastS = double(pts100 - m_start) / 1e7;
+        const bool trip = m_late * 2 > m_seen;
+        if (!trip) { m_onTime = true; m_delays.clear(); }
+        m_start = pts100; m_seen = m_late = 0;
+        return trip;
+    }
+    // after a trip: seconds until Auto may try the model again, or < 0 when it stays off for the stream
+    double Trip(double frameMs)
+    {
+        ++m_trips;
+        m_lastMedian = -1;
+        if (!m_delays.empty()) {
+            std::nth_element(m_delays.begin(), m_delays.begin() + m_delays.size() / 2, m_delays.end());
+            m_lastMedian = m_delays[m_delays.size() / 2];
+        }
+        m_delays.clear();
+        const bool transient = m_onTime || (m_lastMedian >= 0 && m_lastMedian <= kSlowFactor * frameMs);
+        if (!transient || m_trips >= kMaxTrips) return -1;
+        double s = kRearmFirstS;
+        for (int i = 1; i < m_trips; ++i) s *= 2;
+        return s;
+    }
+    int Trips() const { return m_trips; }
+    bool WasOnTime() const { return m_onTime; }
+    int LastSeen() const { return m_lastSeen; }
+    int LastLate() const { return m_lastLate; }
+    double LastWindowS() const { return m_lastS; }
+    double LastMedianMs() const { return m_lastMedian; }   // < 0: no late picture was delivered
+private:
+    int m_grace = kGracePictures, m_seen = 0, m_late = 0, m_trips = 0, m_lastSeen = 0, m_lastLate = 0;
+    int64_t m_start = INT64_MIN, m_last = INT64_MIN;
+    bool m_onTime = false;
+    double m_lastS = 0, m_lastMedian = -1;
+    std::vector<double> m_delays;
 };
 
 // ---------------------------------------------------------------------------------------------------- the bridge
@@ -285,7 +357,15 @@ public:
         // a discontinuity (a new file, a seek, a resume: VLC's picture dates are the system clock's, so a new stream does
         // not step back): the backoff starts over (at most one extra try per such event; a held core stays busy)
         if (disc && m_havePts) m_back.NewStream();
+        if (disc) m_lateRule.Restart();   // a flush or a seek: the grace again
         m_havePts = true; m_lastPts = pts100;
+        // Auto after a transient lateness trip (PcsrLateRule): the anime upscaler is armed again once the back-off ran out
+        if (m_off && m_rearmAt > 0 && nowS >= m_rearmAt && m_s.mode == PcsrMode::Auto) {
+            m_off = false; m_rearmAt = 0;
+            m_sw.Arm(m_s.autoModel);
+            m_lateRule.Restart();
+            Log(false, "Auto tries pushcore's anime upscaler again (after " + std::to_string(m_lateRule.Trips()) + " lateness trip(s))");
+        }
         char err[300] = "";
         // the measured class
         int cls = 0; bool cg = false;
@@ -315,6 +395,7 @@ public:
         m_want = pts100; m_pending = false;
         const double tw = Ms();
         if (m_b.push(m_pc, tex, slice, pts100, disc ? 1 : 0, err, sizeof(err)) != 0) { Lost("pushcore refused a picture", err, nowS); return Done(t0); }
+        m_pushed[m_pushedAt++ % kPushed] = { pts100, tw };   // a late picture's delivery time (PcsrLateRule::LateDelivery)
         // the wait is bounded from the push (an open before it is not: it happens once per switch or retry)
         const double deadline = tw + std::clamp(1.5 * m_s.frameMs, 12.0, 50.0);
         for (;;) {
@@ -328,20 +409,25 @@ public:
         m_pending = false;
         const double wms = Ms() - tw;
         m_stats.waits++; m_stats.waitMsSum += wms; m_stats.waitMsMax = std::max(m_stats.waitMsMax, wms);
-        // late pictures: the scaler draws them; when most are late, pushcore does not keep up here
-        if (m_grace > 0) m_grace--;
-        else {
-            m_seen++;
-            if (!m_got) m_late++;
-            if (m_seen >= 48) {
-                if (m_late * 2 > m_seen) {
-                    Log(true, std::to_string(m_late) + " of the last " + std::to_string(m_seen) + " pictures from pushcore came too late");
-                    Close();
-                    if (m_s.mode == PcsrMode::Anime) { Done(t0); return false; }
-                    m_sw.Disarm(); m_off = true;   // Auto: the scaler for the rest of the stream
-                }
-                m_seen = m_late = 0;
+        // late pictures: the scaler draws them; when most are late for a while, pushcore does not keep up here
+        if (m_lateRule.Picture(m_got, pts100)) {
+            char d[200];
+            snprintf(d, sizeof(d), "%d of the last %d pictures (%.1f s) from pushcore came too late", m_lateRule.LastLate(), m_lateRule.LastSeen(),
+                     m_lateRule.LastWindowS());
+            Close();
+            if (m_s.mode == PcsrMode::Anime) { Log(true, d); Done(t0); return false; }
+            const double again = m_lateRule.Trip(m_s.frameMs);
+            m_sw.Disarm(); m_off = true;   // Auto: the scaler draws
+            char w[200];
+            if (again >= 0) {
+                m_rearmAt = nowS + again;
+                snprintf(w, sizeof(w), "; Auto tries the anime upscaler again in %.0f s (trip %d of %d)", again, m_lateRule.Trips(), PcsrLateRule::kMaxTrips);
+            } else {
+                m_rearmAt = 0;
+                snprintf(w, sizeof(w), "; Auto leaves it off for this stream (trip %d; %s)", m_lateRule.Trips(),
+                         m_lateRule.Trips() >= PcsrLateRule::kMaxTrips ? "too many trips" : "never on time here");
             }
+            Log(true, std::string(d) + w);
         }
         return Done(t0);
     }
@@ -437,11 +523,11 @@ private:
             return;
         }
         m_stats.opens++;
-        m_grace = 12; m_seen = m_late = 0;
+        m_lateRule.Restart();
         if (model >= 0 && info.anime_model != model) {
             // the GPU cannot run that model: no anime upscaler this stream
             m_sw.Disarm();
-            if (m_s.mode == PcsrMode::Auto) { Close(); m_off = true; Log(true, "pushcore cannot run the anime upscaler " + target + " on this GPU: the scaler"); return; }
+            if (m_s.mode == PcsrMode::Auto) { Close(); m_off = true; m_rearmAt = 0; Log(true, "pushcore cannot run the anime upscaler " + target + " on this GPU: the scaler"); return; }
             m_model.clear();
             Log(true, "pushcore cannot run the anime upscaler " + target + " on this GPU: its Video Super Resolution");
         } else {
@@ -461,11 +547,11 @@ private:
         const int r = m_b.update(m_pc, &c, err, sizeof(err));
         if (r < 0) { Lost("pushcore's model not switched", err, nowS); return; }   // taken over, or the reload failed
         m_stats.updates++;
-        if (r == 0) m_grace = 12;      // reloaded: the pictures in flight were dropped
+        if (r == 0) m_lateRule.Restart();     // reloaded: the pictures in flight were dropped
         if (!CheckModel(target)) {
             m_sw.Disarm();
             Log(true, "pushcore cannot run the anime upscaler " + target + " on this GPU");
-            if (m_s.mode == PcsrMode::Auto) { Close(); m_off = true; }
+            if (m_s.mode == PcsrMode::Auto) { Close(); m_off = true; m_rearmAt = 0; }
             return;
         }
         m_model = target;
@@ -504,6 +590,9 @@ private:
     {
         auto* p = static_cast<PcsrCore*>(user);
         if (p->m_pending && pts100 == p->m_want) p->m_got = true;
+        else
+            for (const auto& q : p->m_pushed)
+                if (q.second > 0 && q.first == pts100) { p->m_lateRule.LateDelivery(Ms() - q.second); break; }
         p->m_pending = false;
     }
 
@@ -524,7 +613,11 @@ private:
     int64_t m_want = INT64_MIN, m_lastPts = 0;
     bool m_havePts = false, m_pending = false, m_got = false, m_drawWarned = false;
     bool m_off = false;                // Auto: pushcore is not used again this stream (its model cannot run, or it was late)
-    int m_seen = 0, m_late = 0, m_grace = 12;
+    PcsrLateRule m_lateRule;           // Auto: pushcore late for a while -> the scaler, re-armed with back-off when transient
+    double m_rearmAt = 0;              // when Auto may arm the anime model again (0: not planned)
+    static constexpr int kPushed = 16; // the recent pushes (pts, ms) for the late pictures' delivery time
+    std::pair<int64_t, double> m_pushed[kPushed] = {};
+    unsigned m_pushedAt = 0;
 };
 
 } // namespace pmpc

@@ -416,6 +416,78 @@ static void TestAutoRule()
     CHECK(pmpc::PcsrAutoRefusal(false, 16).empty() && pmpc::PcsrAutoRefusal(false, 18).empty(), "PQ / HLG on the NIS scaler: allowed");
 }
 
+// Auto's lateness rule (PcsrLateRule), on source times alone (24 fps): grace, a sustained window, back-off re-arm
+static void TestLateRule()
+{
+    using R = pmpc::PcsrLateRule;
+    std::printf("== 6b. lateness: grace %d pictures, %.0f s windows, re-arm after %.0f s doubling, %d trips, transient within %.0fx\n",
+                R::kGracePictures, R::kWindowS, R::kRearmFirstS, R::kMaxTrips, R::kSlowFactor);
+    const double frameMs = 1000.0 / 24;
+    const int64_t step = 416667;   // 100 ns units
+    // n pictures from picture *i on; late when lateFrom <= index < lateTo; returns the number of trips
+    auto run = [&](R& r, int64_t& i, int n, int lateFrom, int lateTo) {
+        int trips = 0;
+        for (int k = 0; k < n; ++k, ++i) trips += r.Picture(!(k >= lateFrom && k < lateTo), i * step) ? 1 : 0;
+        return trips;
+    };
+    {   // the grace: an open's first pictures late, then on time
+        R r; int64_t i = 0;
+        CHECK(run(r, i, 200, 0, 12) == 0, "late during the grace: no trip");
+        CHECK(r.WasOnTime(), "a whole window on time counts");
+    }
+    {   // a 0.5 s spike (12 pictures) inside 3 s windows: no trip
+        R r; int64_t i = 0;
+        CHECK(run(r, i, 300, 100, 112) == 0, "a 0.5 s spike: no trip");
+        CHECK(run(r, i, 40, 0, 40) == 0, "1.7 s late: the window is not over");
+    }
+    {   // on time first, then sustained lateness: trips, re-armed after 60 s, 120 s, then off (3 trips)
+        R r; int64_t i = 0;
+        CHECK(run(r, i, 100, 0, 0) == 0 && r.WasOnTime(), "on time");
+        double again[3];
+        for (int t = 0; t < 3; ++t) {
+            r.Restart();   // the re-arm (or the first open) restarts the grace
+            int trips = 0, k = 0;
+            for (; k < 200 && !trips; ++k, ++i) trips = r.Picture(false, i * step) ? 1 : 0;
+            CHECK(trips == 1 && k >= R::kGracePictures + 72 && k <= R::kGracePictures + 74 + 72, "trip %d after %d late pictures (3 s windows)", t + 1, k);
+            again[t] = r.Trip(frameMs);
+        }
+        CHECK(again[0] == 60 && again[1] == 120 && again[2] < 0, "back-off %.0f, %.0f, then %.0f (off)", again[0], again[1], again[2]);
+        CHECK(r.LastLate() * 2 > r.LastSeen(), "the counts are kept for the log (%d of %d)", r.LastLate(), r.LastSeen());
+    }
+    {   // never on time and nothing delivered (far over the budget): off for the stream at the first trip
+        R r; int64_t i = 0;
+        int trips = run(r, i, 200, 0, 200);
+        CHECK(trips >= 1 && r.Trip(frameMs) < 0, "never on time: stays off (%d)", trips);
+    }
+    {   // never on time, but the late pictures came within 2x the frame time (median): transient, re-armed
+        R r; int64_t i = 0;
+        int trips = 0;
+        for (int k = 0; k < 200 && !trips; ++k, ++i) {
+            if (k >= R::kGracePictures) r.LateDelivery(k % 3 ? 1.5 * frameMs : 3.0 * frameMs);
+            trips = r.Picture(false, i * step) ? 1 : 0;
+        }
+        const double a = r.Trip(frameMs);
+        CHECK(trips == 1 && a == 60, "slightly slow: re-armed after %.0f s (median %.1f ms)", a, r.LastMedianMs());
+    }
+    {   // sparse pictures (a stall, VLC dropping under load, a pause without a flush): late ones 2 s apart, or a few in 3 s
+        R r; int64_t i = 0;
+        run(r, i, 12, 0, 0);
+        int trips = 0;
+        for (int k = 0; k < 40; ++k) trips += r.Picture(false, (i + k * 48) * step) ? 1 : 0;
+        CHECK(trips == 0, "late pictures 2 s apart: no trip (%d)", trips);
+        R r2; int64_t j = 0;
+        run(r2, j, 12, 0, 0);
+        for (int k = 0; k < 10; ++k) trips += r2.Picture(false, (j + k * 9) * step) ? 1 : 0;   // 10 pictures over 3.4 s
+        CHECK(trips == 0, "10 late pictures over 3.4 s: too few for a verdict (%d)", trips);
+    }
+    {   // a seek (Restart) gives the grace again and starts the window over
+        R r; int64_t i = 0;
+        run(r, i, 60, 0, 0);
+        r.Restart();
+        CHECK(run(r, i, 12, 0, 12) == 0, "late right after the seek: grace");
+    }
+}
+
 static void TestTimings()
 {
     std::printf("== 7. per-picture work on the stub (the output thread's share)\n");
@@ -475,6 +547,7 @@ int wmain(int argc, wchar_t** argv)
     TestOldBridge();
     TestDraw();
     TestAutoRule();
+    TestLateRule();
     TestTimings();
     CloseHandle(g_mutex);
     std::printf(fails ? "pm_pcsr_test: %d of %d checks FAILED\n" : "pm_pcsr_test: %d checks passed\n", fails ? fails : checks, checks);
