@@ -611,12 +611,21 @@ jobs:
           tail -40 "$RUNNER_TEMP/encode.txt"
           echo "ContentDetect on this clip:"; grep -E 'why=|measured on the frames' "$RUNNER_TEMP/encode.txt" | cut -c1-600 || echo "  (no measurement line)"
           [ "${rc:-0}" = 0 ] || { echo "::error::mpv's encode exited ${rc}"; exit 1; }
-          grep -q '^PUSHMPC_VF=.*vapoursynth' "$RUNNER_TEMP/encode.txt" || { echo "::error::mpv did not apply the mpv.conf block in encode mode (no vapoursynth filter)"; exit 1; }
+          # that the filter ran: mpv's vapoursynth filter started its requests and the plugin closed an instance after some
+          # frames (PUSHMPC_VF= from --term-playing-msg is a snapshot: pushmpc.lua may add the filter after it, run
+          # 45998797243's Intel job printed it empty although the filter ran)
+          log=$(cat "$HOME/Library/Logs/PushMPC/"*.log 2>/dev/null || true)
+          grep -q '\[vapoursynth\] using [0-9]* concurrent requests' "$RUNNER_TEMP/encode.txt" && echo "$log" | grep -qE 'instance closed after [1-9]' \
+            || { echo "::error::mpv's vapoursynth filter did not run PushMPC in encode mode"; exit 1; }
+          echo "$log" | grep -E "backend|apple|portable:|ml:|src_frames|failed: a source frame" | cut -c1-400 | head -24
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"
           srcn=$(echo "$src" | awk -F, '{print $NF}'); outn=$(echo "$out" | awk -F, '{print $NF}')
-          log=$(cat "$HOME/Library/Logs/PushMPC/"*.log 2>/dev/null || true)
-          echo "$log" | grep -E "backend|apple|portable:" | cut -c1-400 | head -20
+          # the first output frame is the source's first picture, not black: mpv answers a frame requested while the script
+          # loads with a black dummy ("Frame requested during init", the ml backend reads frame 0's colour properties)
+          y0() { ffprobe -v error -f lavfi "movie=$1,signalstats" -read_intervals '%+#1' -show_entries frame_tags=lavfi.signalstats.YAVG -of csv=p=0 | head -1; }
+          ys=$(y0 "$clip"); yo=$(y0 "$RUNNER_TEMP/out.mkv"); echo "first frame mean luma: source $ys, output $yo"
+          [ -n "$ys" ] && [ -n "$yo" ] && awk -v a="$ys" -v b="$yo" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 8) }' || { echo "::error::the first output frame differs from the source's first (mean luma $yo vs $ys)"; exit 1; }
           [ "$outn" -ge $((2 * srcn - 4)) ] && [ "$outn" -le $((2 * srcn + 2)) ] || { echo "::error::mpv output has $outn frames for $srcn source frames (want about x2)"; exit 1; }
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
           # PushFlow through pmml (the ml backend) with Homebrew's ONNX Runtime (CoreML; the VM has no GPU for it, so the
