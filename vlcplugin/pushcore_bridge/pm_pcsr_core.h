@@ -264,7 +264,9 @@ public:
     {
         const ULONGLONG t0 = GetTickCount64();
         m_got = false;
-        if (disc && m_havePts && pts100 < m_lastPts) m_back.NewStream();   // a new stream (or a seek back): the backoff starts over
+        // a discontinuity (a new file, a seek, a resume: VLC's picture dates are the system clock's, so a new stream does
+        // not step back): the backoff starts over (at most one extra try per such event; a held core stays busy)
+        if (disc && m_havePts) m_back.NewStream();
         m_havePts = true; m_lastPts = pts100;
         char err[300] = "";
         // the measured class

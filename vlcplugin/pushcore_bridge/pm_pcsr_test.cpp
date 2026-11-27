@@ -198,8 +198,17 @@ static void TestTakenOverAgain()
     const double want[8] = { 2, 4, 8, 16, 32, 60, 60, 60 };
     for (int i = 0; i < 8; ++i) CHECK(std::fabs(waits[size_t(i)] - want[i]) < 1e-9, "wait %d: %.0f (want %.0f)", i, waits[size_t(i)], want[i]);
     CHECK(o.Running() && o.Stat().lost == 8, "the output runs pushcore after 8 takeovers (lost %d)", o.Stat().lost);
-    // a new stream (the clock starts over) resets the wait
+    // a discontinuity (a new file or a seek; VLC's picture dates are system dates: forward) resets the wait
     Filter f;
+    f.Open(2);
+    Feed(o);
+    f.Close();
+    CHECK(o.Backoff().Delay() == 60 && !o.Running(), "taken over again: 60 s");
+    g_pts += 10 * 10000000LL;
+    CHECK(o.Feed(g_src.Get(), 0, g_pts, true, g_now + 0.04), "new stream");
+    g_now += 0.04;
+    CHECK(o.Backoff().Delay() == 0 && o.Running(), "a discontinuity: no wait (%.0f), opened at once", o.Backoff().Delay());
+    // and backwards (the clock starts over)
     f.Open(2);
     Feed(o);
     f.Close();
