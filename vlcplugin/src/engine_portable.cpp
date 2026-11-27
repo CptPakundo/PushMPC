@@ -531,6 +531,39 @@ static int DbUpload(pm_engine *e, const pm_dmabuf *src, std::string &why)
 }
 #endif
 
+extern "C" int pm_engine_tap_ok(pm_engine *e)
+{
+#ifdef PM_DMABUF
+    return e && e->gpu && e->g && e->g->TapAvailable() && DbReady(e) ? 1 : 0;
+#else
+    (void)e;
+    return 0;
+#endif
+}
+
+extern "C" int pm_engine_tap_dmabuf(pm_engine *e, const pm_dmabuf *src, int clip, uint32_t *words, size_t cap, int *cw, int *ch, char *err, size_t errsize)
+{
+#ifdef PM_DMABUF
+    if (!pm_engine_tap_ok(e)) { SetErr(err, errsize, "no GPU tap here"); return -1; }
+    std::string why;
+    const int slot = DbUpload(e, src, why);   // its own slot: the pair's slots and the repair's stay as they are
+    if (slot < 0) { SetErr(err, errsize, why); return -1; }
+    std::vector<uint32_t> w;
+    int x = 0, y = 0;
+    const bool ok = e->g->Tap(slot, clip != 0, w, x, y, why);
+    e->g->ReleaseSlot(slot);
+    if (!ok) { SetErr(err, errsize, why); return -1; }
+    if (w.size() > cap) { SetErr(err, errsize, "the tap's buffer is too small"); return -1; }
+    std::memcpy(words, w.data(), w.size() * 4);
+    *cw = x; *ch = y;
+    return int(w.size());
+#else
+    (void)e; (void)src; (void)clip; (void)words; (void)cap; (void)cw; (void)ch;
+    SetErr(err, errsize, "this build has no zero-copy path");
+    return -1;
+#endif
+}
+
 extern "C" int pm_engine_dmabuf_ok(const pm_engine *e, const char **why)
 {
 #ifdef PM_DMABUF

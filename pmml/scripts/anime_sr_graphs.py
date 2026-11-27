@@ -188,9 +188,12 @@ def _scale_hw(g, x, s):
 # ---------------------------------------------------------------------------------------------------------------
 # wrappers
 
+# The YUV wrappers take and give the 16-bit codes as float32 (exact: integers below 2^24): TensorRT(-RTX) takes no
+# uint16 at all, not even as network I/O ("Unsupported data type UINT16 for input node"), so uint16 planes sent the
+# whole wrapper to the CPU EP. pmml converts the planes on the host (OrtUpscaler::run binds host memory there anyway).
 def _yuv_inputs(g):
     for n, sub in (("in_y", False), ("in_u", True), ("in_v", True)):
-        g.inputs.append(helper.make_tensor_value_info(n, TensorProto.UINT16, [1, 1, "pmml_ch" if sub else "pmml_h", "pmml_cw" if sub else "pmml_w"]))
+        g.inputs.append(helper.make_tensor_value_info(n, F32, [1, 1, "pmml_ch" if sub else "pmml_h", "pmml_cw" if sub else "pmml_w"]))
     g.inputs.append(helper.make_tensor_value_info("colour", F32, [8]))
 
 
@@ -199,9 +202,9 @@ def _k(g, i):
 
 
 def _yuv_norm(g):
-    """16-bit planes -> y (0..1), cbcr (-0.5..0.5) at their own sizes."""
+    """16-bit codes (as float) -> y (0..1), cbcr (-0.5..0.5) at their own sizes."""
     inv = g.op("Reciprocal", [_k(g, 6)])
-    y, u, v = (g.op("Mul", [g.op("Cast", [n], to=F32), inv]) for n in ("in_y", "in_u", "in_v"))
+    y, u, v = (g.op("Mul", [n, inv]) for n in ("in_y", "in_u", "in_v"))
     y = g.op("Div", [g.op("Sub", [y, _k(g, 2)]), _k(g, 3)])
     uv = g.op("Div", [g.op("Sub", [g.op("Concat", [u, v], axis=1), _k(g, 4)]), _k(g, 5)])
     return y, uv
@@ -228,32 +231,127 @@ def _rgb_to_ycc(g, rgb, kr, kb):
     return y, g.op("Concat", [cb, cr], axis=1)
 
 
-def _code(g, x, mx, name, dtype=TensorProto.UINT16):
-    q = g.op("Round", [g.op("Mul", [g.op("Clip", [x, g.const(0.0), g.const(1.0)]), mx])])
-    return g.op("Cast", [q], out=name, to=dtype)
+def _code(g, x, mx, name):
+    """0..1 -> the code 0..max, rounded, as float (pmml writes the 16-bit planes on the host)."""
+    return g.op("Round", [g.op("Mul", [g.op("Clip", [x, g.const(0.0), g.const(1.0)]), mx])], out=name)
 
 
+# The RGBA8 wrappers keep uint8 at the graph's edges only: one Cast right after in_rgba, one Cast that writes out_rgba.
+# TensorRT(-RTX) takes uint8 only as network I/O ("does not support UINT8 types for intermediate tensors"), so any
+# other uint8 node (a Slice, Transpose or Pad on the bytes) splits the graph and sends that part to the CPU EP, with
+# a device <-> host copy of the picture each way. check_wrapper() enforces this.
 def _rgba_in(g):
     g.inputs.append(helper.make_tensor_value_info("in_rgba", TensorProto.UINT8, [1, "pmml_h", "pmml_ipw", 4]))
-    rows = g.op("Slice", ["in_rgba", g.i64([0]), g.const([SENTINEL_PITCH["inw"]], np.int64, name="in_width"), g.i64([2])])
-    x = g.op("Mul", [g.op("Cast", [g.op("Transpose", [rows], perm=[0, 3, 1, 2])], to=F32), g.const(1.0 / 255.0)])
+    x = g.op("Cast", ["in_rgba"], to=F32)
+    rows = g.op("Slice", [x, g.i64([0]), g.const([SENTINEL_PITCH["inw"]], np.int64, name="in_width"), g.i64([2])])
+    x = g.op("Mul", [g.op("Transpose", [rows], perm=[0, 3, 1, 2]), g.const(1.0 / 255.0)])
     return g.op("Slice", [x, g.i64([0]), g.i64([3]), g.i64([1])])
 
 
+CUBIC_A = -0.5
+
+
+def _cubic_axis(g, x, axis, out_n, name):
+    """Bicubic resampling of x [1,C,H,W] along `axis` (2 or 3) to out_n samples, as ONNX Resize mode cubic with
+    half_pixel, cubic_coeff_a -0.5, exclude_outside 1 computes it, built from Gather / Mul / Add only. Resize's cubic
+    mode ran on the CPU EP under TensorRT-RTX (and DirectML has no cubic resampling): ONNX Runtime's CPU kernel takes
+    over 20 s for 1440x960 -> 3240x2160, while an exact 2x (1080p -> 2160p: scale 1) takes a fraction of a second.
+    Taps and weights depend on the sizes only, so ONNX Runtime folds them when the session is created."""
+    n_in = g.op("Slice", [g.op("Shape", [x]), g.i64([axis]), g.i64([axis + 1])])                   # int64 [1]
+    m = g.const([out_n], np.int64, name=name)                                                       # sentinel
+    pos = g.op("Cast", [g.op("Range", [g.i64(0), g.op("Squeeze", [m, g.i64([0])]), g.i64(1)])], to=F32)
+    nf = g.op("Cast", [n_in], to=F32)
+    ratio = g.op("Div", [nf, g.op("Cast", [m], to=F32)])
+    src = g.op("Sub", [g.op("Mul", [g.op("Add", [pos, g.const(0.5)]), ratio]), g.const(0.5)])
+    base = g.op("Floor", [src])
+    t = g.op("Sub", [src, base])
+    last = g.op("Squeeze", [g.op("Sub", [nf, g.const(1.0)]), g.i64([0])])
+    a = CUBIC_A
+    taps, weights = [], []
+    for k in (-1, 0, 1, 2):
+        d = g.op("Abs", [g.op("Sub", [t, g.const(float(k))])])                                     # 0..2
+        d2 = g.op("Mul", [d, d])
+        d3 = g.op("Mul", [d2, d])
+        near = g.op("Add", [g.op("Sub", [g.op("Mul", [d3, g.const(a + 2)]), g.op("Mul", [d2, g.const(a + 3)])]), g.const(1.0)])
+        far = g.op("Sub", [g.op("Add", [g.op("Sub", [g.op("Mul", [d3, g.const(a)]), g.op("Mul", [d2, g.const(5 * a)])]),
+                                        g.op("Mul", [d, g.const(8 * a)])]), g.const(4 * a)])
+        w = g.op("Where", [g.op("LessOrEqual", [d, g.const(1.0)]), near, far])
+        idx = g.op("Add", [base, g.const(float(k))])
+        inside = g.op("And", [g.op("GreaterOrEqual", [idx, g.const(0.0)]), g.op("LessOrEqual", [idx, last])])
+        weights.append(g.op("Where", [inside, w, g.const(0.0)]))                                      # exclude_outside
+        taps.append(g.op("Cast", [g.op("Clip", [idx, g.const(0.0), last])], to=TensorProto.INT64))
+    total = g.op("Add", [g.op("Add", [weights[0], weights[1]]), g.op("Add", [weights[2], weights[3]])])
+    shape = [-1] if axis == 3 else [-1, 1]
+    acc = None
+    for idx, w in zip(taps, weights):
+        wn = g.op("Reshape", [g.op("Div", [w, total]), g.i64(shape)])
+        term = g.op("Mul", [g.op("Gather", [x, idx], axis=axis), wn])
+        acc = term if acc is None else g.op("Add", [acc, term])
+    return acc
+
+
 def _rgba_out(g, rgb):
-    """RGB [1,3,H,W] -> resized to the caller's size -> out_rgba [1,oh,ow,4] uint8 (alpha 255)."""
-    size = g.const([1, 3, SENTINEL_OUT["outh"], SENTINEL_OUT["outw"]], np.int64, name="out_size")
-    rgb = g.op("Resize", [rgb, "", "", size], mode="cubic", coordinate_transformation_mode="half_pixel", cubic_coeff_a=-0.5, exclude_outside=1)
+    """RGB [1,3,H,W] -> bicubic to the caller's size -> out_rgba [1,oh,ow,4] uint8 (alpha 255)."""
+    rgb = _cubic_axis(g, _cubic_axis(g, rgb, 3, SENTINEL_OUT["outw"], "out_w"), 2, SENTINEL_OUT["outh"], "out_h")
     shp = g.op("Shape", [rgb])
     alpha = g.op("Expand", [g.const(1.0), g.op("Concat", [g.i64([1, 1]), g.op("Slice", [shp, g.i64([2]), g.i64([4])])], axis=0)])
     rgba = g.op("Concat", [rgb, alpha], axis=1)
     q = g.op("Round", [g.op("Mul", [g.op("Clip", [rgba, g.const(0.0), g.const(1.0)]), g.const(255.0)])])
     pads = g.const([0, 0, 0, 0, 0, 0, SENTINEL_PITCH["opad"], 0], np.int64, name="out_pads")
-    g.op("Pad", [g.op("Transpose", [g.op("Cast", [q], to=TensorProto.UINT8)], perm=[0, 2, 3, 1]), pads], out="out_rgba", mode="constant")
+    g.op("Cast", [g.op("Pad", [g.op("Transpose", [q], perm=[0, 2, 3, 1]), pads], mode="constant")], out="out_rgba", to=TensorProto.UINT8)
     g.outputs.append(helper.make_tensor_value_info("out_rgba", TensorProto.UINT8, [1, "pmml_oh", "pmml_opw", 4]))
 
 
-BT709 = (0.2126, 0.0722)
+def check_wrapper(m):
+    """The rules the wrappers keep for TensorRT-RTX / DirectML (no GPU needed; write_wrappers runs it): no Resize in
+    cubic mode, no 16-bit integer tensors anywhere (TensorRT-RTX refuses them even as I/O), and uint8 only at the edges
+    (a graph input read by Casts only, a graph output written by a Cast)."""
+    gr = m.graph
+    for v in list(gr.input) + list(gr.output):
+        if v.type.tensor_type.elem_type in (TensorProto.UINT16, TensorProto.INT16):
+            raise ValueError(f"{gr.name}: {v.name} is a 16-bit integer tensor (TensorRT-RTX refuses it)")
+    u8_in = {i.name for i in gr.input if i.type.tensor_type.elem_type == TensorProto.UINT8}
+    u8_out = {o.name for o in gr.output if o.type.tensor_type.elem_type == TensorProto.UINT8}
+    for n in gr.node:
+        attrs = {a.name: helper.get_attribute_value(a) for a in n.attribute}
+        if n.op_type == "Resize" and attrs.get("mode", b"nearest") in (b"cubic", "cubic"):
+            raise ValueError(f"{gr.name}: {n.name} is a cubic Resize (CPU EP under TensorRT-RTX / DirectML)")
+        if any(i in u8_in for i in n.input) and n.op_type != "Cast":
+            raise ValueError(f"{gr.name}: {n.name} ({n.op_type}) reads a uint8 input; only a Cast may")
+        if n.op_type == "Cast" and attrs.get("to") == TensorProto.UINT8 and not all(o in u8_out for o in n.output):
+            raise ValueError(f"{gr.name}: {n.name} makes an intermediate uint8 tensor")
+        if n.op_type == "Cast" and attrs.get("to") in (TensorProto.UINT16, TensorProto.INT16):
+            raise ValueError(f"{gr.name}: {n.name} makes a 16-bit integer tensor")
+    return m
+
+
+def check_cubic():
+    """_cubic_axis against ONNX Runtime's own Resize (cubic, half_pixel, a -0.5, exclude_outside 1) on the CPU EP, up
+    and down, at small sizes (skipped without onnxruntime). Returns the largest difference."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    worst = 0.0
+    rng = np.random.default_rng(7)
+    for h, w, oh, ow in ((20, 36, 45, 81), (48, 30, 21, 13), (16, 16, 16, 16), (9, 11, 40, 7)):
+        g = G("pmml_check_cubic")
+        g.inputs.append(helper.make_tensor_value_info("x", F32, [1, 3, h, w]))
+        g.op("Identity", [_cubic_axis(g, _cubic_axis(g, "x", 3, ow, "cw"), 2, oh, "ch")], out="mine")
+        g.op("Resize", ["x", "", "", g.i64([1, 3, oh, ow])], out="ref", mode="cubic", coordinate_transformation_mode="half_pixel",
+             cubic_coeff_a=CUBIC_A, exclude_outside=1)
+        g.outputs += [helper.make_tensor_value_info(n, F32, [1, 3, oh, ow]) for n in ("mine", "ref")]
+        s = ort.InferenceSession(g.model().SerializeToString(), providers=["CPUExecutionProvider"])
+        mine, ref = s.run(None, {"x": rng.random((1, 3, h, w), dtype=np.float32)})
+        if mine.shape != ref.shape:
+            raise ValueError(f"cubic check: shape {mine.shape} vs {ref.shape}")
+        worst = max(worst, float(np.abs(mine - ref).max()))
+    if worst > 1e-4:
+        raise ValueError(f"cubic check: differs from ONNX Resize by {worst}")
+    return worst
+
+
+BT709 =(0.2126, 0.0722)
 
 
 def sr_in(kind, fmt):
@@ -299,7 +397,7 @@ def sr_out(kind, fmt):
         _code(g, g.op("Slice", [uv, g.i64([0]), g.i64([1]), g.i64([1])]), mx, "out_u")
         _code(g, g.op("Slice", [uv, g.i64([1]), g.i64([2]), g.i64([1])]), mx, "out_v")
         for n, sub in (("out_y", False), ("out_u", True), ("out_v", True)):
-            g.outputs.append(helper.make_tensor_value_info(n, TensorProto.UINT16, [1, 1, "pmml_oh2c" if sub else "pmml_oh2", "pmml_ow2c" if sub else "pmml_ow2"]))
+            g.outputs.append(helper.make_tensor_value_info(n, F32, [1, 1, "pmml_oh2c" if sub else "pmml_oh2", "pmml_ow2c" if sub else "pmml_ow2"]))
     else:
         if kind == "luma":
             rgb = _ycc_to_rgb(g, "y", _resize_to(g, "cbcr", _hw(g, "y")), g.const(BT709[0]), g.const(BT709[1]))
@@ -406,10 +504,12 @@ def animesr_graph(model):
 # ---------------------------------------------------------------------------------------------------------------
 
 def write_wrappers(out: Path):
+    worst = check_cubic()
+    print("cubic check: skipped (no onnxruntime)" if worst is None else f"cubic check: max difference to ONNX Resize {worst:.2e}")
     for kind in ("luma", "rgb"):
         for fmt in ("yuv", "rgba8"):
             for name, make in ((f"sr_in_{kind}-{fmt}.onnx", sr_in), (f"sr_out_{kind}-{fmt}.onnx", sr_out)):
-                onnx.save(make(kind, fmt), str(out / name))
+                onnx.save(check_wrapper(make(kind, fmt)), str(out / name))
                 print(f"wrote {out / name}")
 
 

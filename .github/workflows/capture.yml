@@ -62,10 +62,12 @@ jobs:
           ./vsplugin/build-capture/pushmpc-capture --help | head -3
       - name: Self-test (the GPU engine on lavapipe, the CPU engine)
         run: ./vsplugin/build-capture/pushmpc-capture --selftest --allow-cpu-vulkan
-      - name: Clip (24 fps, a square moving 96 px a second)
+      - name: Clips (24 fps, a square moving 96 px a second at 640x360; the same at half size, 48 px a second)
         run: |
           ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=640x360:r=24" -f lavfi -i "color=c=white:s=64x64:r=24" \
             -filter_complex "[0][1]overlay=x='mod(t*96,560)':y=148,format=yuv420p" -t 40 -c:v libx264 -crf 12 -g 24 /tmp/square.mkv
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=0x3c3c3c:s=320x180:r=24" -f lavfi -i "color=c=white:s=32x32:r=24" \
+            -filter_complex "[0][1]overlay=x='mod(t*48,280)':y=74,format=yuv420p" -t 40 -c:v libx264 -crf 12 -g 24 /tmp/square-half.mkv
           ffprobe -hide_banner -v error -show_entries format=duration -of csv=p=0 /tmp/square.mkv
       - name: Capture on Xvfb (dumped, Auto vs off)
         env: { DISPLAY: ':99' }
@@ -73,23 +75,35 @@ jobs:
           set -eu
           Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
           for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
-          mpv --vo=x11 --no-audio --loop=inf --geometry=640x360+40+40 --no-border --title=pmc-square --really-quiet /tmp/square.mkv &
-          for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
-          sleep 1
-          ./vsplugin/build-capture/pushmpc-capture --list
           b=./vsplugin/build-capture/pushmpc-capture
-          # 300 frames at 60 Hz take 5 s: 120 s means the run hangs (runs 45938409156 to 45946207451 hung after the engine
-          # line until the job's timeout); every run gets its own verdict, then the step fails if any did
+          player() {   # player <clip> <WxH>: the one mpv window capture takes (--player mpv picks the largest)
+            pkill -x mpv 2>/dev/null || true; sleep 0.5
+            mpv --vo=x11 --no-audio --loop=inf --geometry=$2+40+40 --no-border --title=pmc-square --really-quiet "$1" &
+            for i in $(seq 1 100); do xwininfo -name pmc-square >/dev/null 2>&1 && break; sleep 0.1; done
+            sleep 1; "$b" --list; }
+          # 300 frames take 5-10 s: 120 s means the run hangs (runs 45938409156 to 45946207451 hung after the engine line
+          # until the job's timeout); every run gets its own verdict, then the step fails if any did
           bad=0
-          run() { name=$1; shift; s=$(date +%s); rc=0; timeout -k 5 120 "$b" "$@" || rc=$?
+          run() { name=$1; hz=$2; shift 2; s=$(date +%s); rc=0; timeout -k 5 120 "$b" --display-hz "$hz" "$@" || rc=$?
             echo "$name: exit $rc after $(( $(date +%s) - s )) s, $(stat -c %s "/tmp/$name.y4m" 2>/dev/null || echo 0) bytes dumped"
+            last=$(grep ' shown ' "/tmp/capture-$name.log" 2>/dev/null | tail -1); echo "  $last"
+            # a dump is the screen only when every refresh got its frame: a run that fell behind fails here by name
+            # (run 45953079462: the GPU engine on llvmpipe showed 18 of 60 Hz at 640x360, and the motion check failed)
+            shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
+            [ -n "$shown" ] && awk -v s="$shown" -v h="$hz" 'BEGIN { exit !(s < 0.9 * h) }' && { echo "::error::capture ($name) showed $shown of $hz refreshes a second: the engine falls behind on this runner"; bad=1; }
             if [ "$rc" != 0 ]; then bad=1; [ "$rc" = 124 ] && echo "::error::capture ($name) did not finish in 120 s: it hangs"; tail -5 "/tmp/capture-$name.log" 2>/dev/null || true; fi; }
-          run auto --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
-          run off --player mpv --no-present --display-hz 60 --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
-          run cpu --player mpv --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
-          [ "$bad" = 0 ] || exit 1
-          echo "GPU engine:"; python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed 96 --hz 60
-          echo "CPU engine:"; python3 -I capture/tests/check_motion.py /tmp/cpu.y4m /tmp/off.y4m --speed 96 --hz 60
+          motion() { echo "$1:"; python3 -I capture/tests/check_motion.py "/tmp/$2.y4m" "/tmp/$3.y4m" --speed "$4" --hz "$5" || bad=1; }
+          # the GPU engine on llvmpipe (a software rasteriser: block matching about 65 ms a pair at 640x360, run 45953079462)
+          # at half size and 30 Hz, where every refresh gets its frame; the CPU engine at full size and 60 Hz
+          player /tmp/square-half.mkv 320x180
+          run auto 30 --player mpv --no-present --engine gpu --allow-cpu-vulkan --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v
+          run off 30 --player mpv --no-present --engine gpu --allow-cpu-vulkan --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v
+          player /tmp/square.mkv 640x360   # stays for the presented run
+          run cpu 60 --player mpv --no-present --engine cpu --smoother auto --frames 300 --dump /tmp/cpu.y4m --log /tmp/capture-cpu.log -v
+          run cpuoff 60 --player mpv --no-present --engine cpu --smoother off --frames 300 --dump /tmp/cpuoff.y4m --log /tmp/capture-cpuoff.log -v
+          motion "GPU engine (320x180, 30 Hz)" auto off 48 30
+          motion "CPU engine (640x360, 60 Hz)" cpu cpuoff 96 60
+          [ "$bad" = 0 ]
       - name: Presented run (the X11 overlay over mpv)
         env: { DISPLAY: ':99' }
         run: |
@@ -244,7 +258,9 @@ jobs:
           runuser -u pm -- dbus-run-session -- sh /out/run.sh
           EOF
           chmod 644 /tmp/run.sh /tmp/square.mkv
-          docker run --rm -v "$GITHUB_WORKSPACE:/w:ro" -v /tmp:/out archlinux:latest bash /out/container.sh
+          # SYS_NICE: Arch's sway carries the file capability cap_sys_nice; outside the container's bounding set its exec
+          # fails ("/usr/sbin/sway: Operation not permitted", run 45953079462: no Wayland display, no portal)
+          docker run --rm --cap-add SYS_NICE -v "$GITHUB_WORKSPACE:/w:ro" -v /tmp:/out archlinux:latest bash /out/container.sh
           ls -la /tmp/portal.y4m
           python3 -I capture/tests/check_motion.py /tmp/portal.y4m --speed 96 --hz 60 || echo "::warning::portal capture: motion check did not pass (headless timing)"
       - uses: actions/upload-artifact@v4
@@ -277,11 +293,16 @@ jobs:
           set -eu
           cat > /tmp/pmc_square.swift <<'EOF'
           import AppKit
+          import QuartzCore
           final class V: NSView {
-              var n = 0   // one step of 4 points per timer tick (24 a second): no repeated or skipped position
+              // the position from the clock (96 points a second, whole points), not from the number of timer ticks: on the
+              // runner's VM the 24 Hz timer fired about 14 times a second, so a per-tick step moved the square at 55 points
+              // a second and the motion check measured that (run 45953079462: mean 0.93 px, want 1.6)
+              let t0 = CACurrentMediaTime()
               override func draw(_ r: NSRect) {
                   NSColor(calibratedWhite: 0.235, alpha: 1).setFill(); bounds.fill()
-                  NSColor.white.setFill(); NSRect(x: CGFloat((n * 4) % 560), y: 148, width: 64, height: 64).fill()
+                  let x = Int((CACurrentMediaTime() - t0) * 96) % 560
+                  NSColor.white.setFill(); NSRect(x: CGFloat(x), y: 148, width: 64, height: 64).fill()
               }
           }
           let app = NSApplication.shared
@@ -290,7 +311,7 @@ jobs:
           w.title = "pmc-square"
           let v = V(frame: NSRect(x: 0, y: 0, width: 640, height: 360)); w.contentView = v
           w.orderFrontRegardless()
-          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.n += 1; v.needsDisplay = true }
+          Timer.scheduledTimer(withTimeInterval: 1.0 / 24, repeats: true) { _ in v.needsDisplay = true }
           app.activate(ignoringOtherApps: true)
           app.run()
           EOF
@@ -300,14 +321,18 @@ jobs:
           ./vsplugin/build-capture/pushmpc-capture --list
           ./vsplugin/build-capture/pushmpc-capture --list | grep -q pmc-square || { echo "::error::the square's window is not on screen"; exit 1; }
       - name: Capture the window (ScreenCaptureKit), or the plain message without the permission
+        # the GPU engine (MoltenVK on the VM's paravirtual GPU; its self-test above): the CPU engine took all three of the
+        # VM's cores (Auto x2 by its cost: an uneven 60 Hz cadence) and starved the square's window (13.6 captures a
+        # second; run 45953079462)
         run: |
           set +e
           b=./vsplugin/build-capture/pushmpc-capture
-          out=$(perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine cpu --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v 2>&1); rc=$?
+          out=$(perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine gpu --smoother auto --frames 300 --dump /tmp/auto.y4m --log /tmp/capture-auto.log -v 2>&1); rc=$?
           echo "$out"; echo "exit $rc"
           if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "::notice::no Screen Recording permission on this runner: the plain message and exit code 3"; exit 0; fi
           [ "$rc" = 0 ] || { echo "::error::capture failed (exit $rc)"; exit 1; }
-          perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log || { echo "::error::capture with --smoother off failed"; exit 1; }
+          perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 60 --engine gpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
+          grep ' shown ' /tmp/capture-off.log | tail -1
           head -c 80 /tmp/auto.y4m | head -n 1
           w=$(head -n 1 /tmp/auto.y4m | tr ' ' '\n' | sed -n 's/^W//p')
           speed=$(( 96 * w / 640 ))   # the window's points at the capture's pixel scale

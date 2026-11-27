@@ -23,6 +23,7 @@
 #include "gpu_backend.h"
 #include "portable_engine.h"
 #include "veyra/portable/Motion.h"
+#include "../../pushmpc/include/pushmpc/content_detect.h"   // PackedCellsRef / PackedClipRef: the reference for Engine::Tap
 
 using namespace pmvs;
 using namespace pmvs::gpu;
@@ -282,6 +283,44 @@ static void Centroid(const Pic& f, double& cx, double& cy)
             if (v > 130) { const double w = v - 130; sx += w * x; sy += w * y; sw += w; }
         }
     cx = sw > 0 ? sx / sw : -1; cy = sw > 0 ? sy / sw : -1;
+}
+
+// ContentDetect's GPU tap (Engine::Tap, tap.comp) against the CPU reference the content library's own path matches
+// (pushmpc/content_detect.h PackedCellsRef / PackedClipRef): 8 and 10 bits, a non-16:9 size, chroma that varies. A word is
+// luma x 256 (16 bits) and Cb, Cr codes: luma within 1/256 code, Cb / Cr within 1 code (float rounding at .5).
+static void TestTap(int bits, int W, int H)
+{
+    Pic p = Make(W, H, bits, 3.0, 1.0);
+    const int s8 = 1 << (bits - 8);
+    for (int y = 0; y < p.PH(1); ++y)
+        for (int x = 0; x < p.PW(1); ++x) { p.At(1, x, y) = uint16_t((40 + (x * 7 + y * 3) % 180) * s8); p.At(2, x, y) = uint16_t((200 - (x + 2 * y) % 150) * s8); }
+    Config c; c.width = W; c.height = H; c.bits = bits;
+    Engine e; std::string err;
+    if (!MakeEngine(e, c, err)) { CHECK(false, "engine (tap, %d-bit): %s", bits, err.c_str()); return; }
+    if (!e.TapAvailable()) { std::printf("  content tap (%d-bit): skipped, this build has no tap shader\n", bits); return; }
+    const int s = e.Upload(p.View(), err);
+    CHECK(s >= 0, "upload: %s", err.c_str());
+    if (s < 0) return;
+    std::vector<uint32_t> words; int cw = 0, ch = 0;
+    CHECK(e.Tap(s, true, words, cw, ch, err), "Tap: %s", err.c_str());
+    const auto ref = pushmpc::content::PackedCellsRef(p.p[0].data(), W, p.p[1].data(), p.p[2].data(), p.PW(1), W, H, bits);
+    const auto clip = pushmpc::content::PackedClipRef(p.p[0].data(), W, p.p[1].data(), p.p[2].data(), p.PW(1), W, H, bits);
+    CHECK(cw == pushmpc::content::kCellsW && ch == pushmpc::content::CellsHeight(W, H) && words.size() == ref.size() + clip.size(),
+          "tap %dx%d, %zu words (expected %dx%d + 224x224)", cw, ch, words.size(), pushmpc::content::kCellsW, pushmpc::content::CellsHeight(W, H));
+    if (words.size() != ref.size() + clip.size()) return;
+    auto worst = [](const uint32_t* a, const uint32_t* b, size_t n, int& dy, int& dc) {
+        dy = dc = 0;
+        for (size_t i = 0; i < n; ++i) {
+            dy = std::max(dy, std::abs(int(a[i] & 0xffffu) - int(b[i] & 0xffffu)));
+            dc = std::max(dc, std::max(std::abs(int((a[i] >> 16) & 0xffu) - int((b[i] >> 16) & 0xffu)), std::abs(int(a[i] >> 24) - int(b[i] >> 24))));
+        }
+    };
+    int dy = 0, dc = 0, cy = 0, cc = 0;
+    worst(words.data(), ref.data(), ref.size(), dy, dc);
+    worst(words.data() + ref.size(), clip.data(), clip.size(), cy, cc);
+    CHECK(dy <= 1 && dc <= 1, "tap cells vs the CPU (%d-bit, %dx%d): luma %d / 256 code, chroma %d codes", bits, W, H, dy, dc);
+    CHECK(cy <= 2 && cc <= 1, "tap thumbnail vs the CPU (%d-bit, %dx%d): luma %d / 256 code, chroma %d codes", bits, W, H, cy, cc);
+    std::printf("  content tap (%d-bit, %dx%d): cells %dx%d, worst luma %d / 256, chroma %d; thumbnail luma %d / 256, chroma %d\n", bits, W, H, cw, ch, dy, dc, cy, cc);
 }
 
 // The held-drawing repair (Engine::Cells / RepairSlot): a background panning 2 px a frame (on ones) and a dark sprite on
@@ -601,6 +640,8 @@ int main(int argc, char** argv)
     TestOpticalFlow();
     TestRegionRepair(8);
     TestRegionRepair(10);
+    TestTap(8, 640, 360);
+    TestTap(10, 720, 480);
     if (timings) Timings();
     const uint64_t ve = ctx->ValidationErrors();
     CHECK(ve == 0, "validation errors: %llu", (unsigned long long)ve);

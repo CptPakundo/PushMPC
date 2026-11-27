@@ -24,3 +24,8 @@
 #include "repair16.h"
 #define PMVS_HAVE_REPAIR_SPV 1
 #endif
+// ContentDetect's GPU tap (tap.comp: the content library's packed cells and thumbnail)
+#if __has_include("tap.h")
+#include "tap.h"
+#define PMVS_HAVE_TAP_SPV 1
+#endif

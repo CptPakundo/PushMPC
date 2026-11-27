@@ -490,10 +490,24 @@ jobs:
             # portable" (before the GPU engine's line): who ends the process, and MoltenVK's own account of the device
             echo "::group::who ends vspipe (lldb: exit / _exit / abort), MoltenVK at info level"
             sudo DevToolsSecurity -enable >/dev/null 2>&1 || true
-            MVK_CONFIG_LOG_LEVEL=3 perl -e 'alarm shift; exec @ARGV' 300 lldb --batch \
-              -o 'breakpoint set -n exit' -o 'breakpoint set -n _exit' -o 'breakpoint set -n abort' -o 'breakpoint set -n abort_with_payload' \
-              -o run -o 'bt 50' -o 'register read rdi' -k 'bt 50' -k quit \
-              -- "$(brew --prefix vapoursynth)/bin/vspipe" --info "$RUNNER_TEMP/t.vpy" 2>&1 | grep -v '^\s*$' | tail -n 150 | cut -c1-300 || true
+            # Homebrew's bin/vspipe is not the Mach-O itself (run 45954913100: lldb "is not a valid executable"): a link
+            # to Homebrew's environment wrapper script, which sets Python's paths and execs the real program. lldb goes
+            # in front of that exec, so the program runs with the wrapper's environment.
+            vs="$(brew --prefix vapoursynth)/bin/vspipe"; real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$vs")
+            echo "vspipe: $vs -> $real: $(file -b "$real")"
+            printf '%s\n' 'breakpoint set -n exit' 'breakpoint set -n _exit' 'breakpoint set -n abort' 'breakpoint set -n abort_with_payload' \
+              run 'bt 50' 'register read rdi' > "$RUNNER_TEMP/lldb.cmds"
+            printf '%s\n' 'bt 50' quit > "$RUNNER_TEMP/lldb-crash.cmds"
+            if file -b "$real" | grep -q Mach-O; then
+              set -- lldb --batch --source "$RUNNER_TEMP/lldb.cmds" --source-on-crash "$RUNNER_TEMP/lldb-crash.cmds" -- "$real"
+            else
+              echo "the wrapper:"; sed -n 1,20p "$real"
+              grep -q '^ *exec ' "$real" || echo "::warning::the vspipe wrapper has no exec line: lldb cannot be put in front of the program"
+              sed "s|^\( *\)exec |\1exec lldb --batch --source $RUNNER_TEMP/lldb.cmds --source-on-crash $RUNNER_TEMP/lldb-crash.cmds -- |" "$real" > "$RUNNER_TEMP/vspipe-lldb"
+              chmod +x "$RUNNER_TEMP/vspipe-lldb"; grep -n 'exec ' "$RUNNER_TEMP/vspipe-lldb" | head -3
+              set -- "$RUNNER_TEMP/vspipe-lldb"
+            fi
+            MVK_CONFIG_LOG_LEVEL=3 perl -e 'alarm shift; exec @ARGV' 300 "$@" --info "$RUNNER_TEMP/t.vpy" 2>&1 | grep -v '^\s*$' | tail -n 150 | cut -c1-300 || true
             echo "::endgroup::"
             echo "::error::brew test failed (the formula's vspipe test; details above)"; exit 1
           fi

@@ -68,9 +68,28 @@ static void MakeLive(Frame *f, int n)
 }
 
 /* the same picture in other layouts */
-enum Layout { I420, I0AL, NV12, P010, J420 };
+enum Layout { I420, I0AL, NV12, P010, J420, CELLS };
 static uint16_t y16[W * H], c16[W * H / 2];
 static uint8_t c8[W * H / 2], yj[W * H], uj[W * H / 4], vj[W * H / 4];
+/* CELLS: the packed cells a GPU tap gives (pushmpc/content_detect.h PackedCellsRef, 8-bit I420), through pmc_push_cells */
+enum { CW = 480, CH = (480 * H + W / 2) / W };
+static uint32_t cells[CW * CH];
+static long Rd(double x) { return (long)(x < 0 ? x - 0.5 : x + 0.5); }
+static void PackCells(const Frame *f)
+{
+    for (int j = 0; j < CH; j++)
+        for (int i = 0; i < CW; i++) {
+            const int xs = (int)Rd((double)i * W / CW), xe0 = (int)Rd((double)(i + 1) * W / CW), ys = (int)Rd((double)j * H / CH), ye0 = (int)Rd((double)(j + 1) * H / CH);
+            const int xe = xe0 > xs + 1 ? xe0 : xs + 1, ye = ye0 > ys + 1 ? ye0 : ys + 1;
+            double s = 0; int n = 0;
+            for (int yy = ys; yy < ye; yy++) for (int xx = xs; xx < xe; xx++) { s += f->y[yy * W + xx]; n++; }
+            int cx = (xs + xe) / 4, cy = (ys + ye) / 4;
+            if (cx > W / 2 - 1) cx = W / 2 - 1;
+            if (cy > H / 2 - 1) cy = H / 2 - 1;
+            long yv = Rd(s / n * 256.0); if (yv > 65535) yv = 65535;
+            cells[j * CW + i] = (uint32_t)yv | ((uint32_t)f->u[cy * (W / 2) + cx] << 16) | ((uint32_t)f->v[cy * (W / 2) + cx] << 24);
+        }
+}
 static int Push(pm_content *c, const Frame *f, enum Layout l, double t, int disc)
 {
     switch (l) {
@@ -86,6 +105,9 @@ static int Push(pm_content *c, const Frame *f, enum Layout l, double t, int disc
         for (int k = 0; k < W * H; k++) y16[k] = (uint16_t)(f->y[k] << 8);
         for (int k = 0; k < W * H / 4; k++) { c16[2 * k] = (uint16_t)(f->u[k] << 8); c16[2 * k + 1] = (uint16_t)(f->v[k] << 8); }
         return pm_content_push(c, y16, W * 2, c16, NULL, W * 2, W, H, 16, 1, t, disc);
+    case CELLS:
+        PackCells(f);
+        return pm_content_push_cells(c, cells, CW, CW, CH, 1, t, disc);
     case J420:   /* full range */
         for (int k = 0; k < W * H; k++) yj[k] = (uint8_t)((f->y[k] - 16) * 255 / 219 < 0 ? 0 : (f->y[k] - 16) * 255 / 219 > 255 ? 255 : (f->y[k] - 16) * 255 / 219);
         for (int k = 0; k < W * H / 4; k++) { uj[k] = (uint8_t)(128 + (f->u[k] - 128) * 255 / 224); vj[k] = (uint8_t)(128 + (f->v[k] - 128) * 255 / 224); }
@@ -123,6 +145,12 @@ int main(void)
     CHECK(c != NULL, "the library did not load: %s", why);
     if (!c) { printf("%d of %d checks failed\n", fails, checks); return fails ? fails : 1; }
     printf("loaded %s\n", where);
+    /* the GPU tap's exports (optional): PUSHMPC_CONTENT_NO_CELLS=1 plays an older library, which must refuse cells */
+    const int noCells = getenv("PUSHMPC_CONTENT_NO_CELLS") && getenv("PUSHMPC_CONTENT_NO_CELLS")[0] == '1';
+    const int hasCells = pm_content_has_cells(c);
+    CHECK(hasCells == !noCells, "pmc_push_cells %s (PUSHMPC_CONTENT_NO_CELLS %d)", hasCells ? "found" : "not found", noCells);
+    if (noCells) CHECK(pm_content_push_cells(c, cells, CW, CW, CH, 1, 0, 0) < 0, "cells taken without the export");
+    else CHECK(pm_content_push_cells(c, cells, CW, 100, CH, 1, 0, 0) < 0, "cells 100 wide taken");
     pmc_state s;
     CHECK(pm_content_state(c, &s) == 0 && s.cls == PMC_CLASS_MEASURING && s.model == PMC_MODEL_OFF && s.policy == 0,
           "initial state cls %d model %d policy %u", s.cls, s.model, s.policy);
@@ -185,9 +213,10 @@ int main(void)
 
     /* 4. every layout measures the same picture alike */
     {
-        static const char *names[] = { "I420", "I0AL", "NV12", "P010", "J420" };
-        pmc_state r[5];
-        for (int l = 0; l < 5; l++) {
+        static const char *names[] = { "I420", "I0AL", "NV12", "P010", "J420", "CELLS" };
+        pmc_state r[6];
+        const int nl = hasCells ? 6 : 5;   /* CELLS: the GPU tap's path measures the picture as the planes do */
+        for (int l = 0; l < nl; l++) {
             c = pm_content_open(Log, NULL, PMC_FLAG_NO_MODEL | PMC_FLAG_SYNC, why, sizeof(why), where, sizeof(where));
             rng = 777; r[l] = Run(c, 1, (enum Layout)l, 120, 24.0, 0);
             pm_content_close(c);
@@ -197,6 +226,7 @@ int main(void)
         }
         printf("layouts: drawn share I420 %.3f I0AL %.3f NV12 %.3f P010 %.3f J420 %.3f\n", r[0].drawn_share, r[1].drawn_share,
                r[2].drawn_share, r[3].drawn_share, r[4].drawn_share);
+        if (nl == 6) printf("  CELLS (pmc_push_cells): drawn share %.3f, class %d (I420 %d)\n", r[5].drawn_share, r[5].cls, r[0].cls);
     }
 
     /* 5. the worker thread: everything taken or dropped as a gap; destroy with frames queued */

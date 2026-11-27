@@ -475,14 +475,17 @@ jobs:
           # one file per libavfilter version (two tags of one version give the same build; copied one after another)
           mkdir -p "$RUNNER_TEMP/hook"
           for d in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$d"*.so "$RUNNER_TEMP/hook/"; done
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$RUNNER_TEMP/hook/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          # the hook on Debian 12 too (build-hook-c.sh; a runner build needed GLIBC_2.38 and Snap's Plex refused it)
+          sh mpvnative/hook/build-hook-c.sh "$RUNNER_TEMP/hookc"
+          cp "$RUNNER_TEMP/hookc/pushmpc_hook.so" "$RUNNER_TEMP/hook/"
           cp mpvnative/ci/SOURCES.txt "$RUNNER_TEMP/hook/"
           ls -la "$RUNNER_TEMP/hook"
           # the engine for distro mpv is built on Debian 12 (glibc 2.36, the oldest system the hook targets), so it loads
           # on every distro from there on (a build on the runner's glibc 2.39 does not load on Debian 12)
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so "$RUNNER_TEMP/hook/"
-          objdump -T "$RUNNER_TEMP/hook/libpushmpc_engine.so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/^/engine needs at most /'
+          # everything this folder ships (the hook, the engine, every libavfilter glue build): at most GLIBC_2.35
+          sh mpvnative/hook/glibc-ceiling.sh "$RUNNER_TEMP"/hook/*.so
       - name: Ubuntu 24.04's mpv (FFmpeg 6.1)
         run: sh mpvnative/hook/test-hook.sh "$RUNNER_TEMP/hook" "$RUNNER_TEMP/hook/libpushmpc_engine.so" "$RUNNER_TEMP/t-ubuntu"
       - name: The engines Auto picks in the hook (software frames; the Vulkan engine on lavapipe)
@@ -575,7 +578,7 @@ jobs:
           ./build-engine/out/engine_test
           d="$RUNNER_TEMP/hook"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          sh mpvnative/hook/build-hook-c.sh "$RUNNER_TEMP/hookc" && cp "$RUNNER_TEMP/hookc/pushmpc_hook.so" "$d/"   # as shipped (Debian 12)
           cp build-engine/out/libpushmpc_engine*.so build-engine/out/pushmpc-nvvfx-selftest build-engine/out/pmml_cli "$d/"
           ls -la "$d"
           for f in "$d"/libpushmpc_engine_*.so; do readelf -d "$f" | grep -E "NEEDED.*(cuda|VideoFX|NVCV|onnxruntime)" && { echo "::error::$f links CUDA / NVIDIA / ONNX Runtime"; exit 1; }; nm -D --defined-only "$f" | grep -E " T pmeng_"; done
@@ -801,11 +804,9 @@ jobs:
         run: |
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
-          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
-          # the hook as Plex's C plugin (where its libmpv runs them): mpv's client header only
+          # the preload, the self-test host and the hook (Plex's C plugin) as shipped: built on Debian 12 (build-hook-c.sh)
           sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          sh mpvnative/hook/build-hook-c.sh "$d"
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '
@@ -870,11 +871,9 @@ jobs:
         run: |
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_preload.c -o "$d/pushmpc_preload.so" -ldl -lpthread
-          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$d/pushmpc-plex-selftest" -ldl
-          # the hook as Plex's C plugin (where its libmpv runs them): mpv's client header only
+          # the preload, the self-test host and the hook (Plex's C plugin) as shipped: built on Debian 12 (build-hook-c.sh)
           sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
-          cc -shared -fPIC -O2 -Wall mpvnative/hook/pushmpc_hook.c -o "$d/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
+          sh mpvnative/hook/build-hook-c.sh "$d"
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
           ls "$d" | tr '\n' ' '

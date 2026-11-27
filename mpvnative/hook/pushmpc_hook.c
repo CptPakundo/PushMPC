@@ -93,6 +93,20 @@ static int hook_parse2(void *graph, const char *filters, void **inputs, void **o
 /* the page's protection now (/proc/self/maps), so a patched page gets back exactly what it had: forcing it read-only
  * would make a writable page (a non-RELRO .got.plt still taking lazy bindings, .data next to an ABS64 slot) fault on
  * the program's next write there */
+/* a hex number at *p, advancing it; no libc number parsing: with _GNU_SOURCE and glibc 2.38+ headers sscanf / strtol
+   bind to __isoc23_* (GLIBC_2.38), which Snap's core22 (2.35) and Debian 12 (2.36) do not have (players run 45951788669) */
+static unsigned long parse_hex(const char **p)
+{
+    unsigned long v = 0;
+    for (;; ++*p) {
+        const char c = **p;
+        const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0)
+            return v;
+        v = v * 16 + (unsigned long)d;
+    }
+}
+
 static int page_prot(uintptr_t addr)
 {
     FILE *f = fopen("/proc/self/maps", "r");
@@ -101,9 +115,17 @@ static int page_prot(uintptr_t addr)
     if (!f)
         return -1;
     while (fgets(line, sizeof(line), f)) {
-        unsigned long lo, hi;
-        char perm[8];
-        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) == 3 && addr >= lo && addr < hi) {
+        /* "lo-hi perms ..." */
+        const char *p = line, *s = line;
+        const unsigned long lo = parse_hex(&p);
+        if (p == s || *p != '-')
+            continue;
+        s = ++p;
+        const unsigned long hi = parse_hex(&p);
+        if (p == s || *p != ' ' || !p[1] || !p[2] || !p[3])
+            continue;
+        const char *perm = p + 1;
+        if (addr >= lo && addr < hi) {
             prot = (perm[0] == 'r' ? PROT_READ : 0) | (perm[1] == 'w' ? PROT_WRITE : 0) | (perm[2] == 'x' ? PROT_EXEC : 0);
             break;
         }

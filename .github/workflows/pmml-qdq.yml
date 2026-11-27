@@ -27,7 +27,7 @@ env:
 jobs:
   qdq:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
@@ -37,7 +37,8 @@ jobs:
         id: data
         with:
           path: qdq-data
-          key: pmml-qdq-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', '.github/workflows/pmml-qdq.yml') }}
+          # the graphs come from make_graphs.py with the anime SR wrappers in anime_sr_graphs.py: both in the key
+          key: pmml-qdq-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', '.github/workflows/pmml-qdq.yml') }}
       - name: Python packages (PushFPS's model preparation pins; ONNX Runtime with the QNN quantisation tools)
         timeout-minutes: 8
         run: |
@@ -76,20 +77,25 @@ jobs:
             echo "$(sha256sum qdq-data/clips/$n.y4m)"
           done
       - name: Quantise and gate (per model role)
-        timeout-minutes: 60
+        timeout-minutes: 80
         run: |
+          # exit 1 of quantize_qnn.py = no variant within the gate: that model keeps its other paths (a capability
+          # fallback, a warning), never a failed job; anything else is an error. The runner's shell has -e: the pipeline's
+          # status is taken with || so a 1 does not end the step before the next role (run 45951778480 stopped after "fast")
           set -uo pipefail
           mkdir -p out
           clips=$(for n in $(jq -r '.clips.names[]' "$PIN"); do printf '%s ' qdq-data/clips/$n.y4m; done)
           for role in fast quality; do
+            rc=0
             ~/q/bin/python -I pmml/scripts/quantize_qnn.py --models qdq-data/models --graphs qdq-data/graphs --clips $clips \
-              --role $role --out out --calib-frames "$CALIB" --frames "$FRAMES" --gate-db 0.3 | tee out/$role.log
-            rc=${PIPESTATUS[0]}
+              --role $role --out out --calib-frames "$CALIB" --frames "$FRAMES" --gate-db 0.3 2>&1 | tee out/$role.log || rc=$?
             [ $rc -eq 0 ] || [ $rc -eq 1 ] || { echo "::error::quantize_qnn.py $role: exit $rc"; exit 1; }
             [ $rc -eq 0 ] || echo "::warning title=O4 $role::no int8 variant within the 0.3 dB gate: qnn-split stays off for the $role model"
           done
-          echo '| model | pass | variant | loss (dB) |' >> $GITHUB_STEP_SUMMARY; echo '|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
-          for j in out/pushflow-*-qdq.json; do jq -r '"| \(.role) | \(.pass) | \(.variant // "-") | \([.variants[] | .loss_overall_db] | map(tostring) | join(" / ")) |"' "$j" >> $GITHUB_STEP_SUMMARY; done
+          echo '| model | written | variant | per clip loss (dB) |' >> $GITHUB_STEP_SUMMARY; echo '|---|---|---|---|' >> $GITHUB_STEP_SUMMARY
+          for j in out/pushflow-*-qdq.json; do
+            jq -r '"| \(.role) | \(.pass) | \(.variant // "-") | |", (.variants | to_entries[] | "| | \(.value.pass) | \(.key)\(if .value.shippable then "" else " (measured only)" end) | \(.value.loss_overall_db) overall; \(.value.loss_db | to_entries | map("\(.key) \(.value)") | join(", ")) |")' "$j" >> $GITHUB_STEP_SUMMARY
+          done
           (cd out && sha256sum pushflow-*-qdq.* NOTICE.txt RIFE_LICENSE.txt > SHA256SUMS && cat SHA256SUMS NOTICE.txt)
       - uses: actions/upload-artifact@v4
         with:

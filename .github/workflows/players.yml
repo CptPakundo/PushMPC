@@ -153,9 +153,11 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libmpv-dev flatpak >/dev/null
           K="$RUNNER_TEMP/kit"; F="$RUNNER_TEMP/from"; mkdir -p "$K" "$F"
           cp "$RUNNER_TEMP"/h/hook/libpushmpc-avfilter-*.so "$RUNNER_TEMP"/h/hook/libpushmpc_engine.so "$F/"
-          cc -shared -fPIC -O2 -Wall -Werror=implicit-function-declaration mpvnative/hook/pushmpc_hook.c -o "$F/pushmpc_hook.so" $(pkg-config --cflags mpv) -ldl
-          cc -shared -fPIC -O2 -Wall -Werror=implicit-function-declaration mpvnative/hook/pushmpc_preload.c -o "$K/pushmpc_preload.so" -ldl -lpthread
-          cc -O2 -Wall mpvnative/hook/libmpv_host.c -o "$K/pushmpc-plex-selftest" -ldl
+          # as shipped: built on Debian 12 with the GLIBC_2.35 ceiling (build-hook-c.sh); a runner build needed GLIBC_2.38
+          # and the real Snap Plex refused the hook (run 45951788669)
+          sh mpvnative/hook/build-hook-c.sh "$RUNNER_TEMP/hc"
+          cp "$RUNNER_TEMP/hc/pushmpc_hook.so" "$F/"; cp "$RUNNER_TEMP/hc/pushmpc_preload.so" "$RUNNER_TEMP/hc/pushmpc-plex-selftest" "$K/"
+          sh mpvnative/hook/glibc-ceiling.sh "$F"/*.so
           nm -D --defined-only "$F/pushmpc_hook.so" | grep -E ' (mpv_open_cplugin|pfn_mpv_command)$'
           nm -D --defined-only "$K/pushmpc_preload.so" | grep -E ' (mpv_initialize|avfilter_get_by_name)$'
       - name: Stub test (fake Snap / Flatpak / Emby / Stremio installs)
@@ -166,7 +168,13 @@ jobs:
           sudo snap install plex-desktop >/dev/null
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y --noninteractive flathub com.stremio.Stremio org.jellyfin.JellyfinDesktop >/dev/null
-          sums() { (cd "$HOME" && find snap .var .local/share/flatpak/overrides .config -type f 2>/dev/null | grep -v -e '/cache/' -e '\.lock$' | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(cksum < "$f")" "$f"; done); }
+          # left out: what the sandboxes write for themselves the first time an app runs in them (the install's self-test
+          # is that first run): Flatpak's ld.so cache, Snap's per-revision home (.config/fontconfig, user-dirs, .last_revision)
+          # and its .cache files (run 45951788669). PushMPC writes none of these names; its own files stay compared.
+          sums() { (cd "$HOME" && find snap .var .local/share/flatpak/overrides .config -type f 2>/dev/null \
+            | grep -v -e '/cache/' -e '\.lock$' -e '^\.var/app/[^/]*/\.ld\.so/' -e '/\.cache/' -e '/\.config/fontconfig/' \
+                    -e '/\.config/user-dirs\.' -e '^snap/[^/]*/[^/]*/\.last_revision$' \
+            | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(cksum < "$f")" "$f"; done); }
           sums > /tmp/before.txt
           I="sh mpvnative/install/pushmpc-apps-linux.sh"
           $I install --from "$RUNNER_TEMP/from" --kit "$RUNNER_TEMP/kit" --json 2> /tmp/install.log | tee /tmp/install.json; cat /tmp/install.log
@@ -224,9 +232,15 @@ jobs:
           $I install --from "$O" --bridge "$O/pushmpc-iina.so" --json 2> "$RUNNER_TEMP/install.log" | tee "$RUNNER_TEMP/install.json"; cat "$RUNNER_TEMP/install.log"
           tail -n 30 ~/Library/Logs/PushMPC/apps-mac.log ~/Library/Logs/PushMPC/iina-bridge.log 2>/dev/null
           bad=0
-          for t in stremio jellyfin-desktop; do
-            if grep "\"target\":\"$t\"" "$RUNNER_TEMP/install.json" | grep -q '"state":"installed".*frames in'; then echo "ok: $t"; else echo "::error::$t: not installed (see the detail)"; bad=1; fi
-          done
+          if grep '"target":"jellyfin-desktop"' "$RUNNER_TEMP/install.json" | grep -q '"state":"installed".*frames in'; then echo "ok: jellyfin-desktop"; else echo "::error::jellyfin-desktop: not installed (see the detail)"; bad=1; fi
+          # Stremio 5.1.26 for Mac carries libmpv inside its main program (run 45951788669: "its player is built into the
+          # app itself"): nothing can stand in for it, and the right answer is capture mode with the app untouched (the
+          # byte compare below). A Stremio with a separate libmpv must be installed with frames through PushMPC.
+          st=$(grep '"target":"stremio"' "$RUNNER_TEMP/install.json" | head -n 1)
+          if printf '%s' "$st" | grep -q '"state":"installed".*frames in'; then echo "ok: stremio (its libmpv)"
+          elif printf '%s' "$st" | grep -q '"state":"capture-mode".*built into the app itself' && ! find /Applications/Stremio.app/Contents -name 'libmpv*.dylib' | grep -q .; then
+            echo "ok: stremio: libmpv is built into the app, capture mode named"
+          else echo "::error::stremio: neither installed nor capture mode for a built-in player (see the detail)"; bad=1; fi
           $I status --json
           $I uninstall --from "$O" --json
           sums > "$RUNNER_TEMP/after.txt"

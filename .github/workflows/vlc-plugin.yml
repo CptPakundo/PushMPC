@@ -125,7 +125,8 @@ jobs:
           docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux2014_${{ matrix.arch }} bash -euxc "
             cmake -S pushmpc/content-shim -B build-content -DCMAKE_BUILD_TYPE=Release -DPMML_ORT_INCLUDE=/w/ortrt/ort/core/include
             cmake --build build-content -j4
-            ./build-content/pushmpc_content_test"
+            ./build-content/pushmpc_content_test
+            PUSHMPC_CONTENT_NO_CELLS=1 ./build-content/pushmpc_content_test"
           cp build-content/libpushmpc_content.so out/linux/
       - name: GLIBC gate (newest symbol version <= 2.27, so Debian 11+, Ubuntu 18.04+ and a core18 snap load it)
         run: |
@@ -603,6 +604,7 @@ jobs:
           cmake -S pushmpc/content-shim -B bcs -A x64 -DPMML_ORT_INCLUDE="$(cygpath -m "$PWD/ortrt/ort/core/include")"
           cmake --build bcs --config Release
           "$(find bcs -name pushmpc_content_test.exe | head -1)"
+          PUSHMPC_CONTENT_NO_CELLS=1 "$(find bcs -name pushmpc_content_test.exe | head -1)"   # as an older library: no GPU tap exports
           cp "$(find bcs -name pushmpc_content.dll | head -1)" out/
       - uses: actions/upload-artifact@v4
         with: { name: bridge-win64, path: out, retention-days: 7 }
