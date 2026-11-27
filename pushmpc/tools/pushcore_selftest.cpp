@@ -1,7 +1,7 @@
 // pushcore_selftest: runs pushcore's vendor self-tests (pushcore_selfTest) and its capabilities query.
 //
 // usage: pushcore_selftest --core <pushcore.dll> [--root <runtime root>] [--warp] [--luid <hex>]
-//                          [--xefg] [--xess] [--ivsr] [--vpl] [--bridge] [--all] [--record] [--json <file>] [--no-caps|--caps]
+//                          [--xefg] [--xess] [--ivsr] [--vpl] [--bridge] [--fsr] [--all] [--record] [--json <file>] [--no-caps|--caps]
 //                          [--xefg-multiplier N] [--size WxH] [--frames N]
 //   --warp    run on Windows' software adapter only (CI: what needs Intel hardware must be refused cleanly, the rest must
 //             pass); nothing runs on a hardware adapter and nothing is recorded
@@ -69,16 +69,17 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--ivsr") which |= PUSHCORE_SELFTEST_IVSR;
         else if (a == L"--vpl") which |= PUSHCORE_SELFTEST_VPL_FI;
         else if (a == L"--bridge") which |= PUSHCORE_SELFTEST_BRIDGE;
+        else if (a == L"--fsr") which |= PUSHCORE_SELFTEST_FSR_SR;
         else if (a == L"--no-caps") noCaps = true;
         else if (a == L"--caps") wantCaps = true;
-        else if (a == L"--all") which |= PUSHCORE_SELFTEST_XEFG | PUSHCORE_SELFTEST_XESS_SR | PUSHCORE_SELFTEST_IVSR | PUSHCORE_SELFTEST_VPL_FI | PUSHCORE_SELFTEST_BRIDGE;
+        else if (a == L"--all") which |= PUSHCORE_SELFTEST_XEFG | PUSHCORE_SELFTEST_XESS_SR | PUSHCORE_SELFTEST_IVSR | PUSHCORE_SELFTEST_VPL_FI | PUSHCORE_SELFTEST_BRIDGE | PUSHCORE_SELFTEST_FSR_SR;
         else { fwprintf(stderr, L"unknown argument %s\n", argv[i]); return 2; }
     }
     if (!core) {
-        fwprintf(stderr, L"usage: pushcore_selftest --core <pushcore.dll> [--root DIR] [--warp] [--luid HEX] [--all|--xefg|--xess|--ivsr|--vpl|--bridge] [--record] [--caps|--no-caps] [--json FILE]\n");
+        fwprintf(stderr, L"usage: pushcore_selftest --core <pushcore.dll> [--root DIR] [--warp] [--luid HEX] [--all|--xefg|--xess|--ivsr|--vpl|--bridge|--fsr] [--record] [--caps|--no-caps] [--json FILE]\n");
         return 2;
     }
-    if (!which) which = PUSHCORE_SELFTEST_XEFG | PUSHCORE_SELFTEST_XESS_SR | PUSHCORE_SELFTEST_IVSR | PUSHCORE_SELFTEST_VPL_FI | PUSHCORE_SELFTEST_BRIDGE;
+    if (!which) which = PUSHCORE_SELFTEST_XEFG | PUSHCORE_SELFTEST_XESS_SR | PUSHCORE_SELFTEST_IVSR | PUSHCORE_SELFTEST_VPL_FI | PUSHCORE_SELFTEST_BRIDGE | PUSHCORE_SELFTEST_FSR_SR;
     if (flags & PUSHCORE_SELFTEST_FLAG_WARP) SetEnvironmentVariableW(L"PUSHMPC_TEST_WARP", L"1");   // pushcore's D3D12 side may then take WARP
     std::wstring dir = core; const size_t slash = dir.find_last_of(L"\\/"); dir = slash == std::wstring::npos ? L"." : dir.substr(0, slash);
     SetDllDirectoryW(dir.c_str());

@@ -2575,10 +2575,18 @@ index f87c428..85397df 100644
  #endif
  }
 diff --git a/src/gfx/FsrSrBackend.cpp b/src/gfx/FsrSrBackend.cpp
-index 98ff308..3e3aa68 100644
+index 98ff308..5839a8f 100644
 --- a/src/gfx/FsrSrBackend.cpp
 +++ b/src/gfx/FsrSrBackend.cpp
-@@ -86,11 +86,16 @@ struct DirectoryGuard {
+@@ -3,6 +3,7 @@
+ #include "veyra/Log.h"
+ #include "veyra/RuntimePaths.h"
+ 
++#include <cstdlib>
+ #include <filesystem>
+ #include <string>
+ 
+@@ -86,11 +87,16 @@ struct DirectoryGuard {
  } // namespace
  #endif
  
@@ -2595,7 +2603,15 @@ index 98ff308..3e3aa68 100644
  #ifdef VEYRA_HAS_FSR
      HMODULE loader = nullptr;
      HMODULE provider = nullptr;
-@@ -107,10 +112,23 @@ FsrSrBackend::~FsrSrBackend() { release(); }
+@@ -98,6 +104,7 @@ struct FsrSrBackend::Impl {
+     ffxContext context = nullptr;
+     uint32_t maxRenderWidth = 0, maxRenderHeight = 0;
+     uint32_t maxUpscaleWidth = 0, maxUpscaleHeight = 0;
++    bool singleFrame = false;   // PushMPC: every dispatch a new sample (see evaluate)
+ #endif
+ };
+ 
+@@ -107,10 +114,23 @@ FsrSrBackend::~FsrSrBackend() { release(); }
  
  bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uint32_t maxRenderHeight,
                                uint32_t maxUpscaleWidth, uint32_t maxUpscaleHeight, bool hdr) {
@@ -2620,7 +2636,28 @@ index 98ff308..3e3aa68 100644
      const auto loaderPath = std::filesystem::absolute(root / "amd_fidelityfx_loader_dx12.dll");
      const auto providerPath = std::filesystem::absolute(root / "amd_fidelityfx_upscaler_dx12.dll");
      if (!std::filesystem::exists(loaderPath)) {
-@@ -208,6 +226,13 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+@@ -194,9 +214,18 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+     p.maxUpscaleWidth = maxUpscaleWidth;
+     p.maxUpscaleHeight = maxUpscaleHeight;
+     p.available = true;
+-    log::info("fsr-sr", std::format("provider={} maxRender={}x{} maxUpscale={}x{} hdr={}",
++    // PushMPC (F-T3): video carries no camera jitter (jitterOffset stays 0). FSR 2 / 3's analytic upsampler narrows its
++    // Lanczos kernel as a pixel's history accumulates (it expects jittered samples to fill the gaps), so an unjittered
++    // history converges to the source grid: 2x2 stair steps, below bicubic (5090 fidelity panel, FSR 3.1.5: pixel
++    // differences inside 2x2 blocks 0.21-0.24 of those across them, NIS 0.91, the 4K master 0.99). Every dispatch is
++    // then a new sample (reset): the full-width kernel, a clean single-frame upscale. FSR 4 (ML) keeps its history.
++    // PUSHMPC_FSR_SR_SINGLE_FRAME=1 / 0 forces either way (A/B on a panel).
++    p.singleFrame = std::atoi(p.providerVersion.c_str()) < 4;   // "3.1.5" -> 3; unknown -> 0
++    { wchar_t o[8]{}; const DWORD n = GetEnvironmentVariableW(L"PUSHMPC_FSR_SR_SINGLE_FRAME", o, 8); if (n > 0 && n < 8) p.singleFrame = o[0] == L'1'; }
++    log::info("fsr-sr", std::format("provider={} maxRender={}x{} maxUpscale={}x{} hdr={} history={}",
+                                     p.providerVersion.empty() ? "unknown" : p.providerVersion,
+-                                    maxRenderWidth, maxRenderHeight, maxUpscaleWidth, maxUpscaleHeight, hdr));
++                                    maxRenderWidth, maxRenderHeight, maxUpscaleWidth, maxUpscaleHeight, hdr,
++                                    p.singleFrame ? "single frame (unjittered video)" : "temporal"));
+     return true;
+ #else
+     (void)device; (void)maxRenderWidth; (void)maxRenderHeight; (void)maxUpscaleWidth; (void)maxUpscaleHeight; (void)hdr;
+@@ -208,6 +237,13 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
  bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion,
                              ID3D12Resource* depth, ID3D12Resource* output, uint32_t renderWidth, uint32_t renderHeight,
                              uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs) {
@@ -2634,7 +2671,16 @@ index 98ff308..3e3aa68 100644
  #ifdef VEYRA_HAS_FSR
      auto& p = *p_;
      if (!p.available || list == nullptr || color == nullptr || motion == nullptr || depth == nullptr ||
-@@ -282,6 +307,11 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
+@@ -259,7 +295,7 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
+     dispatch.sharpness = 0.0f;
+     dispatch.frameTimeDelta = frameTimeMs > 0.0f ? frameTimeMs : 16.6f;
+     dispatch.preExposure = 1.0f;
+-    dispatch.reset = reset;
++    dispatch.reset = reset || p.singleFrame;   // PushMPC (F-T3): see initialize
+     dispatch.cameraNear = 0.1f;
+     dispatch.cameraFar = 1000.0f;
+     dispatch.cameraFovAngleVertical = 1.0f;
+@@ -282,6 +318,11 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
  }
  
  void FsrSrBackend::release() {
