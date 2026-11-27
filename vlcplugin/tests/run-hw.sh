@@ -56,8 +56,12 @@ run va_x2          va hw   2 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=2
 run va_x4          va hw   4 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=4
 run va_x8          va hw   8 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=8
 run va_x4_sync     va hw   4 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=4 --no-pushmpc-worker
-# without pushmpc_out: PushMPC's own surface pool, so no x4 cap from VLC's pool
-run va_x8_noout    va hw   8 "$CLIP" "$S" "" -- --video-filter=postproc --pushmpc-smoother=8
+# without pushmpc_out: PushMPC's own surface pool, so no x4 cap from VLC's pool. No worker here (it needs pushmpc_out): x8 runs on
+# VLC's video thread, already over this runner's budget (68 ms a source frame); the content library's threads (newer than
+# a191b46, about 8 ms a frame on a 4-core runner) are left out: the case judges the surface path, as it did before them
+run va_x8_noout    va hw   8 "$CLIP" "$S" "" -- --video-filter=postproc --pushmpc-smoother=8 --no-pushmpc-content
+# the same path with the content library (as users run it): at x4, within this runner's budget, every frame must come
+run va_x4_noout    va hw   4 "$CLIP" "$S" "" -- --video-filter=postproc --pushmpc-smoother=4
 # what real drivers differ in (the null driver's quirk switches)
 run va_noderive_x4 va hw   4 "$CLIP" "$S" "PMNULL_DERIVE=0" -- $PP --pushmpc-smoother=4
 run va_noput_x4    va hw   4 "$CLIP" "$S" "PMNULL_PUTIMAGE=0" -- $PP --pushmpc-smoother=4
@@ -83,11 +87,18 @@ if [ "${ZC:-0}" = 1 ]; then
   fi
   CHECK="--zc off --need zero.copy.not.used"    run va_zc_noexport_x2 va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PMNULL_EXPORT=0" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
   CHECK="--zc off --need zero.copy.unavailable" run va_zc_novk_x2     va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VK_NO_DMABUF=1" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker $GPU
-  # ContentDetect on zero-copy pictures through the GPU engine's tap (the content library next to the module): the clip is
-  # measured (drawn) and the held-drawing repair runs in the GPU engine, zero copy kept; with an older library (no
-  # pmc_push_cells: PUSHMPC_CONTENT_NO_CELLS=1) the pictures stay unmeasured and the repair off, zero copy kept as well
-  CHECK="--zc on --skip-motion --need content.measured.on.the.GPU..zero.copy --need content.tap:.[1-9] --need held-drawing.repair.on..in.the.GPU.engine" \
+  # ContentDetect on zero-copy pictures through the GPU engine's tap (the content library next to the module): every frame
+  # measured on the GPU, zero copy kept (on lavapipe only ~50 frames reach the module, too few for the class: the repair
+  # cases below set it); with an older library (no pmc_push_cells: PUSHMPC_CONTENT_NO_CELLS=1) the pictures stay
+  # unmeasured and the repair off, zero copy kept as well
+  CHECK="--zc on --skip-motion --need content.measured.on.the.GPU..zero.copy --need content.tap:.[1-9][0-9]*.zero-copy.frames.measured.on.the.GPU,.0.failed" \
     run va_zc_x2_tap va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1" -- $PP --pushmpc-smoother=2 $GPU
+  # zero copy with the held-drawing repair in the GPU engine (lagged pairs on the worker): from the open, and switched on
+  # mid-stream (PUSHMPC_VLC_DRAWN=at:24: the GPU engine is opened again with the repair's slots, as when the class says
+  # drawn); zero copy kept (counters), pairs advanced, nothing failed on the worker
+  REP='--need held-drawing.repair.on..in.the.GPU.engine --need held-drawing.repair:.[0-9]+.frames --need failed.there.0'
+  CHECK="--zc on --skip-motion $REP" run va_zc_x2_lag    va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VLC_DRAWN=1" -- $PP --pushmpc-smoother=2 $GPU
+  CHECK="--zc on --skip-motion $REP" run va_zc_x2_switch va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_VLC_DRAWN=at:24" -- $PP --pushmpc-smoother=2 $GPU
   CHECK="--zc on --skip-motion --need no.GPU.tap..pmc_push_cells. --forbid held-drawing.repair.on" \
     run va_zc_x2_notap va hw 2 "$CLIP" 0 "PUSHMPC_VK_ALLOW_CPU=1 PUSHMPC_CONTENT_NO_CELLS=1" -- $PP --pushmpc-smoother=2 $GPU
 fi

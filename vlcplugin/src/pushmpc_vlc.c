@@ -1161,12 +1161,13 @@ static void ContentState(filter_t *f, struct filter_sys_t *sys)
 /* the held-drawing repair on the portable engines follows the measured class, as pushcore's held frames do (PcContent):
  * the lag (three source frames), a copy and a cell grid per frame are only for pictures measured as drawn (zero-copy VA-API
  * pictures through the GPU tap, ContentTap; pictures that are not measured stay without it). PUSHMPC_VLC_DRAWN: unset
- * follows the class, 0 never, else from the start. Once on, it stays on
+ * follows the class, 0 never, at:N from input frame N (tests), else from the start. Once on, it stays on
  * for the stream (the pictures waiting in the lag would have to be handed back to switch it off). */
 static bool PortableRepairWanted(filter_t *f, const struct filter_sys_t *sys)
 {
     if (sys->pc || !sys->eng || !sys->dedup || sys->lag || sys->rep_tried || !OptInt(f, CFG "hold-repair", 1)) return false;
     const char *ov = getenv("PUSHMPC_VLC_DRAWN");
+    if (ov && !strncmp(ov, "at:", 3)) return sys->in >= (uint64_t)atoi(ov + 3);   /* tests: on from that input frame (a switch mid-stream) */
     if (ov && *ov) return ov[0] != '0';
     return sys->content_state.cls == PMC_CLASS_DRAWN;
 }
