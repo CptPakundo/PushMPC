@@ -35,7 +35,7 @@ mkdir -p /opt/fakehw
 gcc -std=gnu11 -O2 -Wall -fPIC -shared -o /opt/fakehw/pmnull_drv_video.so vlcplugin/tests/fakehw/pmnull_drv_video.c -lpthread
 id tester >/dev/null 2>&1 || useradd -m tester
 mkdir -p res && chmod -R a+rwX res
-cases='va_base va_x4 va_x8_noout va_noderive_x4 va_broken_x4'
+cases='va_base va_x4 va_x8_noout va_x4_noout va_noderive_x4 va_broken_x4'
 envx=""
 case "$mode" in
   full) cases='' ;;                                   # every VA-API case, the HEVC Main 10 clip too

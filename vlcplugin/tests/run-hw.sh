@@ -60,6 +60,8 @@ run va_x4_sync     va hw   4 "$CLIP" "$S" "" -- $PP --pushmpc-smoother=4 --no-pu
 # VLC's video thread, already over this runner's budget (68 ms a source frame); the content library's threads (newer than
 # a191b46, about 8 ms a frame on a 4-core runner) are left out: the case judges the surface path, as it did before them
 run va_x8_noout    va hw   8 "$CLIP" "$S" "" -- --video-filter=postproc --pushmpc-smoother=8 --no-pushmpc-content
+# the same path with the content library (as users run it): at x4, within this runner's budget, every frame must come
+run va_x4_noout    va hw   4 "$CLIP" "$S" "" -- --video-filter=postproc --pushmpc-smoother=4
 # what real drivers differ in (the null driver's quirk switches)
 run va_noderive_x4 va hw   4 "$CLIP" "$S" "PMNULL_DERIVE=0" -- $PP --pushmpc-smoother=4
 run va_noput_x4    va hw   4 "$CLIP" "$S" "PMNULL_PUTIMAGE=0" -- $PP --pushmpc-smoother=4
