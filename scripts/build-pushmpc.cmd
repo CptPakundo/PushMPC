@@ -28,8 +28,12 @@ rem PUSHMPC_NVOF_SDK = a folder with NvOFInterface\nvOpticalFlowCommon.h and nvO
 if not defined PUSHMPC_NVOF_SDK if exist "%DEPS%\nvof-sdk\NvOFInterface\nvOpticalFlowD3D12.h" set PUSHMPC_NVOF_SDK=%DEPS%\nvof-sdk
 set NVOF_ARG=
 if defined PUSHMPC_NVOF_SDK set "NVOF_ARG=-DVEYRA_NVOF_SDK_ROOT=%PUSHMPC_NVOF_SDK:\=/%"
+rem PushFPS's version string (pushcore.dll's version resource and the core manifest) from scripts\pushfps-pin.json, on
+rem every build: part of the compared options, so a reused tree is configured again when the pin's version changes
+set PUSHFPS_DISPLAY_VERSION=4.5.5-pushmpc
+for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Get-Content '%REPO%\scripts\pushfps-pin.json' -Raw | ConvertFrom-Json).pushfps.displayVersion" 2^>nul`) do set "PUSHFPS_DISPLAY_VERSION=%%v"
 rem the MSVC loop optimiser bug guard for PushFPS's own targets too (cmake\msvc-loop-guard.cmake, no patch hunk needed)
-set "PUSHMPC_CFG="-DPUSHMPC_SOURCE_DIR=%CORE:\=/%" "-DCMAKE_PROJECT_INCLUDE=%REPO:\=/%/cmake/msvc-loop-guard.cmake" %NVOF_ARG%"
+set "PUSHMPC_CFG="-DPUSHMPC_SOURCE_DIR=%CORE:\=/%" "-DCMAKE_PROJECT_INCLUDE=%REPO:\=/%/cmake/msvc-loop-guard.cmake" "-DVEYRA_DISPLAY_VERSION=%PUSHFPS_DISPLAY_VERSION%" %NVOF_ARG%"
 rem a new tree: pushcore only, with the dependencies release.yml uses (options as in its "Configure PushFPS" step)
 set PUSHMPC_CFG_NEW=
 if exist "%PUSHMPC_BUILD_DIR%\build.ninja" goto :configure
@@ -38,12 +42,10 @@ set DOVI=-DVEYRA_ENABLE_LIBDOVI=OFF
 if exist "%DEPS%\libdovi\bin\dolby_vision.dll" set "DOVI=-DVEYRA_ENABLE_LIBDOVI=ON "-DVEYRA_LIBDOVI_ROOT=%DEPS%\libdovi""
 set PMML=
 if exist "%DEPS%\pmml\ort\core\include" set "PMML="-DPUSHMPC_PMML_ORT_INCLUDE=%DEPS:\=/%/pmml/ort/core/include""
-set PUSHFPS_DISPLAY_VERSION=4.5.5-pushmpc
-for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Get-Content '%REPO%\scripts\pushfps-pin.json' -Raw | ConvertFrom-Json).pushfps.displayVersion" 2^>nul`) do set "PUSHFPS_DISPLAY_VERSION=%%v"
 set PUSHMPC_CFG_NEW=-DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=%FFMPEG%" ^
   -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF ^
   -DVEYRA_ENABLE_REMOTEPLAY=OFF -DVEYRA_ENABLE_MOONLIGHT=OFF -DVEYRA_ENABLE_XBOX=OFF ^
-  "-DVEYRA_DISPLAY_VERSION=%PUSHFPS_DISPLAY_VERSION%" "-DVEYRA_FFMPEG_ROOT=%FFMPEG%" "-DVEYRA_DLSS_SDK_ROOT=%DEPS%\dlss" ^
+  "-DVEYRA_FFMPEG_ROOT=%FFMPEG%" "-DVEYRA_DLSS_SDK_ROOT=%DEPS%\dlss" ^
   "-DVEYRA_NVENC_HEADERS_ROOT=%DEPS%\nv-codec-headers" "-DVEYRA_CUDA_DRIVER_INCLUDE_DIR=%DEPS%\cudart-root\include" ^
   "-DVEYRA_XESS_ROOT=%DEPS%\xess" "-DVEYRA_FIDELITYFX_ROOT=%DEPS%\ffx1\sdk" "-DVEYRA_FIDELITYFX2_ROOT=%DEPS%\ffx2\Kits\FidelityFX" ^
   "-DVEYRA_AMF_SDK_ROOT=%DEPS%\amf\amf\public" "-DVEYRA_ONNXRUNTIME_ROOT=%DEPS%\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=%DEPS%\pushflow\dml" ^
