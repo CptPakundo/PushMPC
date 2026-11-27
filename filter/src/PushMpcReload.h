@@ -96,6 +96,17 @@ inline void CloseDetached(const SpawnFn& spawn, const PushCoreApi* api, PushCore
     });
 }
 
+// A reload abandoned after the timeout that later succeeds: its instance is handed here instead of being closed, while
+// the filter still wants it (same file, still playing, nothing newer); the filter adopts it (TakeLate) or gives it up
+// (ReleaseLate: a deposited instance is closed then, a later one is closed by the job's thread). One lock decides.
+struct Late {
+    std::mutex lock;
+    bool wanted = true;
+    PushCore* core = nullptr;
+    PushCoreOutputInfo oi = {};
+    double reloadMs = 0;
+};
+
 struct Job {
     std::mutex lock;
     std::condition_variable cv;
@@ -105,7 +116,8 @@ struct Job {
     PushCoreOutputInfo oi = {};
     std::string err;
     double retiredMs = 0, waitMs = 0, reloadMs = 0;
-    const char* stage = "starting";  // where the job's thread is: the quick graph's close, the wait for closes, pushcore_reload
+    const char* stage = "starting";
+    std::shared_ptr<Late> late;      // set when the caller abandons after the timeout: a later success goes there  // where the job's thread is: the quick graph's close, the wait for closes, pushcore_reload
 };
 
 // Starts the reload of `core` on its own thread: first `retired` is closed (if any), then it waits up to closesWaitMs
@@ -156,6 +168,15 @@ inline std::shared_ptr<Job> Start(const PushCoreApi* api, PushCore* core, PushCo
             job->done = true;
             abandoned = job->abandoned;
         }
+        if (abandoned && job->late && r == PUSHCORE_OK && closesDone) {
+            // F-T1 follow-up: the filter gave up waiting (20 s) but still wants the reloaded graph: hand it over
+            std::lock_guard<std::mutex> ll(job->late->lock);
+            if (job->late->wanted) {
+                job->late->core = core; job->late->oi = oi; job->late->reloadMs = reloadMs;
+                abandoned = false;   // not closed here: the filter adopts it (or ReleaseLate closes it)
+                if (log) log(std::format("settings reload: the abandoned reload succeeded after {:.0f} ms; its graph is handed to the filter", reloadMs));
+            }
+        }
         job->cv.notify_all();
         if (abandoned) {
             // the filter gave up on this reload (stop, timeout): the instance is this thread's to close
@@ -178,7 +199,7 @@ enum class Outcome { Done, Stopped, TimedOut };
 // the job is abandoned (Stopped). timeoutMs over: abandoned (TimedOut). Done: the caller owns the instance again.
 // beforeAbandon runs under the job's lock while the job still runs (its instances are alive): what it is doing, for the log.
 inline Outcome Wait(Job& job, const std::function<bool()>& quit, const std::function<void()>& tick, double timeoutMs, double quitGraceMs,
-                    const std::function<void()>& beforeAbandon = {})
+                    const std::function<void(Outcome)>& beforeAbandon = {})
 {
     const auto t0 = Clock::now();
     Clock::time_point quitAt{};
@@ -194,8 +215,8 @@ inline Outcome Wait(Job& job, const std::function<bool()>& quit, const std::func
         lk.lock();
         if (job.done) return Outcome::Done;
         if (q && !quitting) { quitting = true; quitAt = Clock::now(); }
-        if (quitting && MsSince(quitAt) >= quitGraceMs) { if (beforeAbandon) beforeAbandon(); job.abandoned = true; return Outcome::Stopped; }
-        if (MsSince(t0) >= timeoutMs) { if (beforeAbandon) beforeAbandon(); job.abandoned = true; return Outcome::TimedOut; }
+        if (quitting && MsSince(quitAt) >= quitGraceMs) { if (beforeAbandon) beforeAbandon(Outcome::Stopped); job.abandoned = true; return Outcome::Stopped; }
+        if (MsSince(t0) >= timeoutMs) { if (beforeAbandon) beforeAbandon(Outcome::TimedOut); job.abandoned = true; return Outcome::TimedOut; }
     }
 }
 
@@ -224,6 +245,7 @@ struct Result {
     std::string err;
     double retiredMs = 0, waitMs = 0, reloadMs = 0, totalMs = 0;
     std::string stuckAt;                   // abandoned or stuck behind a close: the job's stage and pushcore's steps (logged)
+    std::shared_ptr<Late> late;            // TimedOut: where a later successful reload's instance arrives (TakeLate / ReleaseLate)
 };
 
 // The whole reload, as the filter's copier runs it: takes the instance out of `slot` (under coreLock), runs the job
@@ -249,7 +271,10 @@ inline Result Run(const PushCoreApi* api, std::mutex& coreLock, PushCore*& slot,
         if (h.describe) res.stuckAt += std::format("; this instance in pushcore: {}; graph lock: {}", h.describe(core), h.describe(nullptr));
         if (h.log) h.log("settings reload stuck: " + res.stuckAt);
     };
-    res.how = Wait(*job, h.quit, h.tick, lim.timeoutMs, lim.quitGraceMs, [&] { describe(job->stage); });   // under job->lock
+    res.how = Wait(*job, h.quit, h.tick, lim.timeoutMs, lim.quitGraceMs, [&](Outcome o) {   // under job->lock
+        describe(job->stage);
+        if (o == Outcome::TimedOut) { res.late = std::make_shared<Late>(); job->late = res.late; }
+    });
     res.totalMs = MsSince(t0);
     if (res.how != Outcome::Done) return res;   // the job's thread closes the instance
     {
@@ -268,6 +293,26 @@ inline Result Run(const PushCoreApi* api, std::mutex& coreLock, PushCore*& slot,
     }
     if (!res.reinstalled) CloseDetached(h.spawn, api, core, h.close, h.log, "pushcore (after the settings reload)");
     return res;
+}
+
+// The late instance, if it arrived (the caller then owns it and adopts it); nullptr while the reload still runs.
+inline PushCore* TakeLate(Late& l, PushCoreOutputInfo* oi, double* reloadMs = nullptr)
+{
+    std::lock_guard<std::mutex> lk(l.lock);
+    if (!l.wanted || !l.core) return nullptr;
+    PushCore* c = l.core; l.core = nullptr; l.wanted = false;
+    if (oi) *oi = l.oi;
+    if (reloadMs) *reloadMs = l.reloadMs;
+    return c;
+}
+// The filter no longer wants it (stop, close, another fallback, adopted elsewhere): a deposited instance closes on its
+// own thread; one that arrives later is closed by the job's thread.
+inline void ReleaseLate(const std::shared_ptr<Late>& l, const PushCoreApi* api, const Hooks& h)
+{
+    if (!l) return;
+    PushCore* c = nullptr;
+    { std::lock_guard<std::mutex> lk(l->lock); l->wanted = false; c = l->core; l->core = nullptr; }
+    if (c) CloseDetached(h.spawn, api, c, h.close, h.log, "pushcore (a late reload not adopted)");
 }
 
 }  // namespace pm::reload
