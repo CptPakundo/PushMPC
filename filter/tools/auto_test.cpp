@@ -619,35 +619,37 @@ int main()
             learned::Values v;                 // the new rules (the Learned key)
             std::map<int, double> old;         // the old rule: per key the last session's value
             std::vector<Choice> starts, startsOld;
+            int lowered = 0, loweredOld = 0;   // sessions whose start pick was stepped down in-session (a rebuild while playing)
         };
         // one session: trueRatio per key (default 1.0), load factor for this session's measurements
-        auto session = [&](Sim& s, double load, const std::map<int, double>& trueRatio, double defaultRatio) {
+        auto session = [&](Sim& s, double load, const std::map<int, double>& trueRatio, double defaultRatio, const Source& src = Source{ 1920, 1080, 23.976, false, 0.5 }) {
             auto ratio = [&](int k) { auto it = trueRatio.find(k); return (it == trueRatio.end() ? defaultRatio : it->second) * load; };
-            auto run = [&](Costs c, std::map<int, double>& measured) {
-                Choice ch = Decide({}, film, disp, c, g5090);
+            auto run = [&](Costs c, std::map<int, double>& measured, int& lowered) {
+                Choice ch = Decide({}, src, disp, c, g5090);
                 const Choice start = ch;
                 for (int step = 0; step < 6; ++step) {   // in-session: the running key measured, Decide again until it stays
                     if (ch.multiplier < 2) break;
                     const int k = FgKeyOf(ch.fgMethod, ch.fgQuality);
                     measured[k] = ratio(k); c.fgScale[k] = ratio(k); c.fgLearned[k] = true;
-                    const Choice next = Decide({}, film, disp, c, g5090);
+                    const Choice next = Decide({}, src, disp, c, g5090);
                     if (same(next, ch)) break;
                     ch = next;
                 }
+                if (ch.multiplier < start.multiplier || ch.fgQuality < start.fgQuality) ++lowered;
                 return start;
             };
             // new rules
             const uint32_t sid = learned::BeginSession(s.v);
             Costs c; learned::LoadBench(s.v, sid, c); ApplyMeasuredCard(c); learned::LoadCosts(s.v, sid, c);
             std::map<int, double> m;
-            s.starts.push_back(run(c, m));
+            s.starts.push_back(run(c, m, s.lowered));
             std::map<std::wstring, double> named;
             for (auto& [k, x] : m) named[std::format(L"FgScale{}", k)] = x;
             learned::SaveSession(s.v, sid, named, c);
             // old rule
             Costs o; for (auto& [k, x] : s.old) { o.fgScale[k] = x; o.fgLearned[k] = true; }
             std::map<int, double> mo;
-            s.startsOld.push_back(run(o, mo));
+            s.startsOld.push_back(run(o, mo, s.loweredOld));
             for (auto& [k, x] : mo) s.old[k] = x;
         };
         // 1. a loaded session between clean ones: the next clean session picks what it picked before the load
@@ -688,6 +690,15 @@ int main()
             check(firstStable >= 0 && firstStable <= 6 && same(s.starts.back(), target),
                   std::format(L"learned: a slower card converges by session {} to the pick its true costs give, then stays", firstStable + 1), pickStr(s.starts.back()) + L" / " + pickStr(target));
         }
+        // 3b. mixed content: two kinds of file alternate on the same frame generation key with different true ratios
+        //     (the prior model is not exact across sizes); how often a file's start pick has to be stepped down while playing
+        {
+            Sim s;
+            const Source a{ 1920, 1080, 23.976, false, 0.5 }, b{ 1280, 720, 23.976, false, 0.5 };
+            for (int i = 0; i < 12; ++i) session(s, 1.0, {}, i % 2 ? 1.35 : 0.85, i % 2 ? b : a);
+            check(s.lowered <= s.loweredOld + 1, std::format(L"learned: mixed content (two files alternating, true ratio 0.85 / 1.35): stepped down while playing in {} of 12 sessions (old rule {})", s.lowered, s.loweredOld),
+                  pickStr(s.starts[10]) + L" / " + pickStr(s.starts[11]));
+        }
         // 4. steady unloaded input: the same start picks as the old rule (cards at or faster than the priors at once;
         //    slower than the priors from the 3rd session on, the sessions before start on the priors)
         {
@@ -727,6 +738,7 @@ int main()
             double f3[3] = { 9, 9, 9 }; learned::RecordBench(b, 21, f3, n, r); learned::LoadBench(b, 21, c);
             check(c.pfFirst[1] == 5, L"speed test: one slower rerun does not");
             check(!learned::BenchStale(b, 30) && learned::BenchStale(b, 31), L"speed test: due again 10 sessions after its newest run");
+            check(learned::LoadBench(b, 21 + 40, c) && c.pfFirst[1] == 5, L"speed test: its results never expire (40 sessions later still the card's own, only due again)");
         }
         wprintf(L"  learned: %d failed\n", learnFails);
     }
