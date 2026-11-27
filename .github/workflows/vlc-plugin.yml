@@ -733,9 +733,13 @@ jobs:
             || { echo "::error::the installed module did not run on pushcore"; grep -h "PushMPC" res/installed-pushcore/installed.log | head; exit 1; }
           rm -rf "$LOCALAPPDATA/PushMPC/core"
           rm -f "$(cygpath -u "$pp")/libpushdump_plugin.dll"
-          # VLC with no arguments opens PushMPC's Direct3D 11 output from the vlcrc (WARP: software decoding). VLC_PLUGIN_PATH as a
-          # new process gets it from the user environment the installer set (this shell started before the install)
-          VLC_PLUGIN_PATH="$pp" timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --avcodec-hw=none --file-logging --logfile=res/installed/vout.log --log-verbose=2 \
+          # VLC with no arguments opens PushMPC's Direct3D 11 output from the vlcrc (WARP: software decoding). A process started
+          # after the install (Explorer got the installer's WM_SETTINGCHANGE "Environment") takes VLC_PLUGIN_PATH from
+          # HKCU\Environment; this shell started before the install, so the run gets the value read from there, as such a
+          # process would (empty when the installer did not write it: then the check below fails)
+          envpp=$(powershell -NoProfile -Command "(Get-ItemProperty -Path 'HKCU:\Environment' -Name VLC_PLUGIN_PATH -ErrorAction SilentlyContinue).VLC_PLUGIN_PATH" | tr -d '\r')
+          echo "HKCU\\Environment VLC_PLUGIN_PATH = $envpp"
+          VLC_PLUGIN_PATH="$envpp" timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --avcodec-hw=none --file-logging --logfile=res/installed/vout.log --log-verbose=2 \
             art/clips/clip720.mkv > /dev/null 2>&1 || true
           taskkill //F //T //IM vlc.exe > /dev/null 2>&1 || true
           grep -hE "using vout display module|PushMPC NIS|generated=" res/installed/vout.log | sort | uniq -c || true
