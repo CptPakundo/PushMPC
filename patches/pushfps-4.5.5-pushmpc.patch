@@ -2575,7 +2575,7 @@ index f87c428..85397df 100644
  #endif
  }
 diff --git a/src/gfx/FsrSrBackend.cpp b/src/gfx/FsrSrBackend.cpp
-index 98ff308..5839a8f 100644
+index 98ff308..69e893e 100644
 --- a/src/gfx/FsrSrBackend.cpp
 +++ b/src/gfx/FsrSrBackend.cpp
 @@ -3,6 +3,7 @@
@@ -2636,7 +2636,19 @@ index 98ff308..5839a8f 100644
      const auto loaderPath = std::filesystem::absolute(root / "amd_fidelityfx_loader_dx12.dll");
      const auto providerPath = std::filesystem::absolute(root / "amd_fidelityfx_upscaler_dx12.dll");
      if (!std::filesystem::exists(loaderPath)) {
-@@ -194,9 +214,18 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+@@ -189,14 +209,30 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+                                          unsigned(result)));
+         return false;
+     }
++    {   // PushMPC: the provider the loader actually created (the versions list above is only what this device can run)
++        ffxQueryGetProviderVersion used{};
++        used.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
++        if (p.functions.Query(&p.context, &used.header) == FFX_API_RETURN_OK && used.versionName != nullptr) {
++            p.providerVersion = used.versionName;
++        }
++    }
+     p.maxRenderWidth = maxRenderWidth;
+     p.maxRenderHeight = maxRenderHeight;
      p.maxUpscaleWidth = maxUpscaleWidth;
      p.maxUpscaleHeight = maxUpscaleHeight;
      p.available = true;
@@ -2657,7 +2669,7 @@ index 98ff308..5839a8f 100644
      return true;
  #else
      (void)device; (void)maxRenderWidth; (void)maxRenderHeight; (void)maxUpscaleWidth; (void)maxUpscaleHeight; (void)hdr;
-@@ -208,6 +237,13 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
+@@ -208,6 +244,13 @@ bool FsrSrBackend::initialize(ID3D12Device* device, uint32_t maxRenderWidth, uin
  bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion,
                              ID3D12Resource* depth, ID3D12Resource* output, uint32_t renderWidth, uint32_t renderHeight,
                              uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs) {
@@ -2671,7 +2683,7 @@ index 98ff308..5839a8f 100644
  #ifdef VEYRA_HAS_FSR
      auto& p = *p_;
      if (!p.available || list == nullptr || color == nullptr || motion == nullptr || depth == nullptr ||
-@@ -259,7 +295,7 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
+@@ -259,7 +302,7 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
      dispatch.sharpness = 0.0f;
      dispatch.frameTimeDelta = frameTimeMs > 0.0f ? frameTimeMs : 16.6f;
      dispatch.preExposure = 1.0f;
@@ -2680,7 +2692,7 @@ index 98ff308..5839a8f 100644
      dispatch.cameraNear = 0.1f;
      dispatch.cameraFar = 1000.0f;
      dispatch.cameraFovAngleVertical = 1.0f;
-@@ -282,6 +318,11 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
+@@ -282,6 +325,11 @@ bool FsrSrBackend::evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* col
  }
  
  void FsrSrBackend::release() {

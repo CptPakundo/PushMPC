@@ -209,7 +209,12 @@ jobs:
         timeout-minutes: 50
         run: |
           $ffmpeg = "$env:DEPS\vcpkg\installed\x64-windows"
+          # Release with debug information (/Z7 in the objects, /DEBUG: PDBs beside pushcore.dll and pushcore_selftest.exe):
+          # the self-test's crash report then names the function and line (run 45973619605 crashed in the FSR probe with
+          # nothing but 0xC0000005); the code is the Release code (/O2 /Ob2, /OPT:REF /OPT:ICF as without /DEBUG)
           cmake -S PushFPS -B $env:BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$ffmpeg" `
+            "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7" "-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7" `
+            "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/DEBUG /OPT:REF /OPT:ICF" "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG /OPT:REF /OPT:ICF" `
             -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF `
             -DVEYRA_ENABLE_REMOTEPLAY=OFF -DVEYRA_ENABLE_MOONLIGHT=OFF -DVEYRA_ENABLE_XBOX=OFF -DVEYRA_ENABLE_LIBDOVI=OFF `
             "-DVEYRA_DISPLAY_VERSION=$env:PUSHFPS_DISPLAY_VERSION" "-DVEYRA_FFMPEG_ROOT=$ffmpeg" "-DVEYRA_DLSS_SDK_ROOT=$env:DEPS\dlss" `
