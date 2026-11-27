@@ -680,9 +680,10 @@ jobs:
           mkdir -p "$LOCALAPPDATA/PushMPC/core" && cp art/bridge-win64/stub/pushcore.dll "$LOCALAPPDATA/PushMPC/core/"
           export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clips/clip.mkv \
                  CLIP720=art/clips/clip720.mkv OUT=res/windows-pushcore SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt | tr -d '\r') \
-                 PY=python PUSHCORE=1 CASES="pc_x2_720 pc_x2_720_inline" LABEL="Windows, pushcore (stub core, WARP)"
+                 PY=python PUSHCORE=1 CASES="pc_x2_720 pc_x2_720_inline pc_x2_720_held" LABEL="Windows, pushcore (stub core, WARP)"
           bash vlcplugin/tests/run-module.sh
           grep -h "PushMPC 0\|pushcore\|PushMPC: close\|output stage:" res/windows-pushcore/*.log | sort | uniq -c | head -20
+          grep -q "pushcore's lag mode" res/windows-pushcore/pc_x2_720_held.log || { echo "::error::pushcore's lag mode did not run"; exit 1; }
           cp -r "$LOCALAPPDATA/PushMPC/logs" res/windows-pushcore/ 2>/dev/null || true; tail -40 res/windows-pushcore/logs/*.log 2>/dev/null || true
           rm -f "$d/pm_pushcore.dll"; rm -rf "$LOCALAPPDATA/PushMPC/core"
       - name: Installer round trip (HKCU VLC_PLUGIN_PATH + %APPDATA%\vlc\vlcrc; the vlc component with pushcore and the D3D11 output; runs with no arguments; uninstall)

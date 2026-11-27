@@ -78,6 +78,8 @@ if [ "${PUSHCORE:-0}" = 1 ] && [ -n "${CLIP720:-}" ]; then
   PC="--pushmpc-engine=2 --pushmpc-warp --pushmpc-smoother=2"   # x2: the stub converts on the CPU and WARP is slow
   want pc_x2_720        && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x2_720        2 "$CLIP720" -- $PP $PC
   want pc_x2_720_inline && SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x2_720_inline 2 "$CLIP720" -- --video-filter=postproc $PC
+  # pushcore's lag mode (held frames, every picture pushcore's) forced on whatever the clip is measured as
+  want pc_x2_720_held   && PUSHMPC_VLC_DRAWN=1 PUSHCORE_STUB_SR=1 SRC_FRAMES="${S720:-$SRC_FRAMES}" run pc_x2_720_held 2 "$CLIP720" -- $PP $PC
 fi
 # the portable GPU engine (Vulkan); CI: Mesa's lavapipe (PUSHMPC_VK_ALLOW_CPU=1), so it shows the plumbing, not the speed
 if [ "${GPU_TEST:-0}" = 1 ]; then

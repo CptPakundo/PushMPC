@@ -1072,6 +1072,14 @@ static const char *ClassName(int cls)
     return n[cls >= 0 && cls <= 4 ? cls : 0];
 }
 static picture_t *LagCopy(filter_t *f, struct filter_sys_t *sys, picture_t *src);
+/* pushmpc_out in the interactive chain: the static filter then gets heap pictures (VoutVideoFilterStaticNewPicture) */
+static bool OutFilterInChain(filter_t *f)
+{
+    char *chain = var_InheritString(f, "video-filter");
+    const bool in = chain && strstr(chain, "pushmpc_out") != NULL;
+    free(chain);
+    return in;
+}
 static bool PcContent(filter_t *f, struct filter_sys_t *sys)
 {
     if (!sys->pc || pmx_abi() < 3) return false;
@@ -1096,8 +1104,10 @@ static bool PcContent(filter_t *f, struct filter_sys_t *sys)
 #else
     const bool ring = false;
 #endif
-    const bool can_lag = OptInt(f, CFG "hold-repair", 1) != 0 && (sys->zc ? ring : sys->alloc == 2);
-    const bool want = can_lag && cls == 1;
+    const bool can_lag = OptInt(f, CFG "hold-repair", 1) != 0 && (sys->zc ? ring : sys->alloc == 2 || OutFilterInChain(f));
+    /* PUSHMPC_VLC_DRAWN: unset follows the measured class, 0 off, anything else on (tests) */
+    const char *ov = getenv("PUSHMPC_VLC_DRAWN");
+    const bool want = can_lag && (ov && *ov ? ov[0] != '0' : cls == 1);
     const bool held_change = want != sys->pc_held && (!sys->pc_held_at || now - sys->pc_held_at >= 30 * CLOCK_FREQ);
     if (!held_change) {
         if (cls == sys->pc_cls && cg == sys->pc_cg) return false;
