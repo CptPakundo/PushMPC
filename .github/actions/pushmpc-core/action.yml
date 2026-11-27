@@ -512,6 +512,9 @@ runs:
         # the settings reload beside pushcore's open / close: its own thread, bounded, never beside a close (F-T1)
         & "$env:RUNNER_TEMP\filter-build\reload_test.exe" | Tee-Object -Variable rlt | Select-Object -Last 6
         if ($LASTEXITCODE -ne 0) { Write-Host "::error::reload_test failed: $(($rlt | Select-String '^RESULT').Line)"; exit 1 }
+        # the per-process engine logs and pushcore's phase markers (F-T1 diagnostics)
+        & "$env:RUNNER_TEMP\filter-build\logs_test.exe" | Tee-Object -Variable lgt | Select-Object -Last 6
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error::logs_test failed: $(($lgt | Select-String '^RESULT').Line)"; exit 1 }
         cmake -S repo/updater -B "$env:RUNNER_TEMP\updater-build" -G Ninja -DCMAKE_BUILD_TYPE=Release @cc -DPUSHMPC_UPDATER_DEV=OFF
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cmake --build "$env:RUNNER_TEMP\updater-build" --parallel
