@@ -459,6 +459,8 @@ struct filter_sys_t {
     picture_t *lag_a;                 /* the picture advanced last (the next pair's first) */
     bool lag_seen;
     mtime_t held_base;
+    picture_t *still_pic;             /* held-drawing repair: the still's picture (as shown), cloned for each repeat */
+    uint64_t still_out;               /* pictures that showed a still at the output rate */
     uint64_t lag_repaired;
     uint64_t repeats, stills;
     /* what the picture is (ContentMeasure): the content library's context, the last state seen, the frame dates */
@@ -955,8 +957,27 @@ static picture_t *FilterCvpx(filter_t *f, struct filter_sys_t *sys, picture_t *c
  * one (the engine's duplicate test) is dropped: it shows the same picture, so nothing changes on screen. Up to PM_HOLD
  * of them wait for the next distinct frame, whose pair then makes the whole held span: the last distinct frame, then
  * k x span - 1 generated pictures dated evenly up to the new frame (t = j / (k x span)). One more repeat makes a still:
- * the last distinct frame goes out at once (a clone), and when the still ends only its last interval moves (the base
- * becomes a clone dated at the last repeat). */
+ * the last distinct frame goes out at once, and from then on at the output rate (StillFill: k clones per source frame,
+ * as a moving picture would have, so the frame rate stays constant and a still at the end of a file is shown for its
+ * whole length); when the still ends only its last interval moves (the base becomes a clone dated at the last repeat). */
+/* n clones of src dated evenly over [from, to) (the first at from), as one list; *count += n made */
+static picture_t *StillFill(picture_t *src, mtime_t from, mtime_t to, int n, uint64_t *count)
+{
+    picture_t *head = NULL, *tail = NULL;
+    if (!src || n < 1 || to <= from) n = src ? 1 : 0;
+    for (int i = 0; i < n; i++) {
+        picture_t *c = picture_Clone(src);
+        if (!c) break;
+        picture_CopyProperties(c, src);
+        c->date = from + (to > from ? (to - from) * i / n : 0);
+        c->b_force = false;
+        c->p_next = NULL;
+        if (tail) tail->p_next = c; else head = c;
+        tail = c;
+        (*count)++;
+    }
+    return head;
+}
 /* the duplicate test of the frame the engine reads next (as EnginePush reads it); 1 = a repeat. Failed: a new picture */
 static int EngineCheck(struct filter_sys_t *sys, picture_t *src, bool contiguous)
 {
@@ -995,12 +1016,12 @@ static bool HeldStep(struct filter_sys_t *sys, picture_t *cur, picture_t *work, 
     *contig = contiguous;
     if (dup && contiguous) {
         sys->repeats++;
-        if (!sys->still && ++sys->held > PM_HOLD) {   /* a still: the last distinct frame goes out as it is, now */
+        if (!sys->still && ++sys->held > PM_HOLD) {   /* a still: the last distinct frame goes out now, for the held span */
             sys->still = true;
             sys->stills++;
-            picture_t *c = picture_Clone(prev);
-            if (c) { picture_CopyProperties(c, prev); c->p_next = NULL; *out = c; }
-        }
+            *out = StillFill(prev, prev->date, cur->date, sys->k * sys->held, &sys->still_out);
+        } else if (sys->still)                        /* then for each repeat's interval before this one */
+            *out = StillFill(prev, last, cur->date, sys->k, &sys->still_out);
         if (work != cur) picture_Release(work);
         picture_Release(cur);
         return true;
@@ -1095,7 +1116,11 @@ static bool PcContent(filter_t *f, struct filter_sys_t *sys)
             sys->content_state.cls = cls; sys->content_state.cg = cg;
         }
     }
-    if (cls == 0) return false;
+    /* PUSHMPC_VLC_DRAWN: unset follows the measured class, 0 off, anything else on (tests; also before anything is
+     * measured, e.g. without the content library, which the test runner does not install next to the module) */
+    const char *ov = getenv("PUSHMPC_VLC_DRAWN");
+    const bool forced = ov && *ov && ov[0] != '0';
+    if (cls == 0 && !forced) return false;
     const mtime_t now = mdate();
     /* held frames follow the measured class (DrawnPolicy holdRepair: drawn, hand-drawn or CG), at most once per 30 s,
      * where the output pictures can wait (the zero-copy ring, or heap pictures with pushmpc_out) */
@@ -1105,9 +1130,7 @@ static bool PcContent(filter_t *f, struct filter_sys_t *sys)
     const bool ring = false;
 #endif
     const bool can_lag = OptInt(f, CFG "hold-repair", 1) != 0 && (sys->zc ? ring : sys->alloc == 2 || OutFilterInChain(f));
-    /* PUSHMPC_VLC_DRAWN: unset follows the measured class, 0 off, anything else on (tests) */
-    const char *ov = getenv("PUSHMPC_VLC_DRAWN");
-    const bool want = can_lag && (ov && *ov ? ov[0] != '0' : cls == 1);
+    const bool want = can_lag && (ov && *ov ? forced : cls == 1);
     const bool held_change = want != sys->pc_held && (!sys->pc_held_at || now - sys->pc_held_at >= 30 * CLOCK_FREQ);
     if (!held_change) {
         if (cls == sys->pc_cls && cg == sys->pc_cg) return false;
@@ -1166,6 +1189,7 @@ static void LagDrop(struct filter_sys_t *sys)
     for (int i = 0; i < sys->lagn; i++) picture_Release(sys->lagq[i].pic);
     sys->lagn = 0;
     if (sys->lag_a) { picture_Release(sys->lag_a); sys->lag_a = NULL; }
+    if (sys->still_pic) { picture_Release(sys->still_pic); sys->still_pic = NULL; }
     sys->lag_seen = false;
 }
 /* the pair's picture as repaired (a new output picture), or a itself when the engine did not change it */
@@ -1199,6 +1223,7 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
     const mtime_t dt0 = sys->lag_seen ? cur->date - sys->held_last : 0;
     const bool contiguous = sys->lag_seen && dt0 > 0 && dt0 <= 4 * sys->nominal_dt && dt0 <= CLOCK_FREQ / 4;
     sys->lag_seen = true; sys->held_last = cur->date;
+    const mtime_t base0 = sys->held_base;   /* a still's last repeat before this picture */
     picture_t *head = NULL, *tail = NULL;
 #define LAG_EMIT(p) do { (p)->p_next = NULL; if (tail) tail->p_next = (p); else head = (p); tail = (p); sys->out++; } while (0)
     if (EngineCheck(sys, work, contiguous) && contiguous) {   /* a repeat: consumed, the engine counts it */
@@ -1206,6 +1231,11 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
         if (work != cur) picture_Release(work);
         picture_Release(cur);
         sys->held++;
+        if (sys->still && sys->still_pic) {                     /* a still runs: the last repeat's interval at the output rate */
+            for (picture_t *p = StillFill(sys->still_pic, base0, sys->held_last, sys->k, &sys->still_out), *nx; p; p = nx) {
+                nx = p->p_next; LAG_EMIT(p);
+            }
+        }
     } else {
         if (EnginePush(sys, work, contiguous, err, sizeof(err)) != 0) msg_Warn(f, "engine: %s", err);
         if (work != cur) picture_Release(work);
@@ -1216,6 +1246,7 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
         sys->lagq[sys->lagn].base = contiguous && sys->still ? sys->held_base : 0;   /* after a still: only its last interval moves */
         sys->lagn++;
         sys->held = 0; sys->still = false;
+        if (sys->still_pic) { picture_Release(sys->still_pic); sys->still_pic = NULL; }
     }
     while (pm_engine_pairs_ready(sys->eng) > 0) {
         if (pm_engine_next_pair(sys->eng, err, sizeof(err)) != 1) { msg_Warn(f, "engine: %s", err); break; }
@@ -1252,7 +1283,13 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
         sys->still = true; sys->stills++; sys->held_base = sys->held_last;
         picture_t *c = LagReal(f, sys, picture_Hold(sys->lag_a), 1);
         if (c == sys->lag_a) { picture_Release(c); c = picture_Clone(sys->lag_a); if (c) picture_CopyProperties(c, sys->lag_a); }
-        if (c) LAG_EMIT(c);
+        if (c) {   /* the held span so far (from the last drawing to this repeat) at the output rate; kept for the next repeats */
+            if (sys->still_pic) picture_Release(sys->still_pic);
+            sys->still_pic = c;
+            for (picture_t *p = StillFill(c, c->date, sys->held_last, sys->k * sys->held, &sys->still_out), *nx; p; p = nx) {
+                nx = p->p_next; LAG_EMIT(p);
+            }
+        }
     }
     if (sys->still) sys->held_base = sys->held_last;          /* the base moves to the newest repeat */
 #undef LAG_EMIT
@@ -1508,7 +1545,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (sys->pc_lag) return PcLagFilter(f, sys, cur, work, reloaded);
         int span, hc;                               /* held frames: a repeat waits (HeldStep) */
         picture_t *still;
-        if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
+        if (HeldStep(sys, cur, work, &span, &hc, &still)) { for (picture_t *p = still; p; p = p->p_next) sys->out++; return still; }
         picture_t *prev = sys->prev;
         sys->prev = cur;
         const mtime_t dt = prev ? cur->date - prev->date : 0;
@@ -1574,7 +1611,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
 
     int span, hc;                                 /* held frames: a repeat waits (HeldStep) */
     picture_t *still;
-    if (HeldStep(sys, cur, work, &span, &hc, &still)) { if (still) sys->out++; return still; }
+    if (HeldStep(sys, cur, work, &span, &hc, &still)) { for (picture_t *p = still; p; p = p->p_next) sys->out++; return still; }
     picture_t *prev = sys->prev;
     sys->prev = cur;
     mtime_t dt = prev ? cur->date - prev->date : 0;
@@ -1961,7 +1998,7 @@ static void Close(vlc_object_t *obj)
              sys->in, sys->out, sys->generated, sys->pool_out, sys->heap_out, sys->alloc_fail, sys->restarts,
              st.cuts, st.me_ms, st.gen_ms, sys->worker_on ? "on" : "off", sys->async_jobs, sys->cancelled);
     if (sys->eng && sys->dedup_set)
-        msg_Info(f, "PushMPC: held frames: %" PRIu64 " repeats waited for the next drawing, %" PRIu64 " stills", sys->repeats, sys->stills);
+        msg_Info(f, "PushMPC: held frames: %" PRIu64 " repeats waited for the next drawing, %" PRIu64 " stills (%" PRIu64 " pictures at the output rate)", sys->repeats, sys->stills, sys->still_out);
     if (sys->content) {
         pmc_state st;
         if (pm_content_state(sys->content, &st) == 0) {
