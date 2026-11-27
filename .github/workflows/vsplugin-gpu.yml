@@ -166,7 +166,20 @@ jobs:
           python vsplugin/tests/ci/eof_probe.py
           grep -h "failed: a source frame it requested\|instance closed" $RUNNER_TEMP/vslog-eof/*.log | head -20 || true
 
-      - uses: actions/cache@v4
+      # a probe for the unknown-length fix (not judged): may a filter fetch its source synchronously inside its getFrame
+      # without deadlocking a small pool (1 thread is the decisive case), and what the pinned core does there and on arError
+      - name: VapourSynth R82, a synchronous getFrame inside a filter at 1 and 2 threads, and the core's source on it
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+          for t in 1 2; do rc=0; timeout 60 python vsplugin/tests/ci/sync_probe.py $t || rc=$?; [ $rc = 0 ] || echo "sync $t: exit $rc (124: timed out, a deadlock)"; done
+          d="$RUNNER_TEMP/vs-src"
+          git clone -q --depth 1 -b R82 https://github.com/vapoursynth/vapoursynth "$d" || exit 0
+          cd "$d/src/core"
+          echo "--- getFrame (vsapi.cpp)"; grep -n -A30 "^static const VSFrame \*VS_CC getFrame(" vsapi.cpp | head -45
+          echo "--- worker threads waiting, arError"; grep -n "releaseThread\|reserveThread\|isWorkerThread\|arError\|error was also set\|outstanding requests" vscore.cpp vscore.h vsapi.cpp | head -60
         if: ${{ !cancelled() }}
         with:
           path: ~/.cache/pm-clips
