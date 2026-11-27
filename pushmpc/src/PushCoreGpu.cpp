@@ -143,6 +143,11 @@ uint8_t gDummy = 0;
 // One instance at a time may use it; a second concurrent instance gets a private cache. Graph build and
 // teardown are serialised process-wide because NgxCoreCache is single-threaded by design.
 std::mutex gGraphLock;
+// F-T1 diagnostics: the instance that holds gGraphLock now (reload, close, open), read by pushcore_debugPhase.
+// gGraphHolderLock guards the pointer: it is cleared before gGraphLock is released, and an instance is deleted only
+// after it released gGraphLock, so a reader holding gGraphHolderLock always sees a live instance or none.
+std::mutex gGraphHolderLock;
+PushCore* gGraphHolder = nullptr;
 veyra::ngx::NgxCoreCache* gSharedCache = nullptr;   // never destroyed: no NGX shutdown during process exit
 const void* gSharedCacheUser = nullptr;
 Microsoft::WRL::ComPtr<ID3D12Device> gSharedDevice;  // keeps the singleton device (and the cached core's key) valid
@@ -593,6 +598,27 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
 }
 
 struct PushCore {
+    // ---- F-T1 diagnostics: the step a reload / close / open is in (pushcore_debugPhase; each change is logged) ----
+    std::atomic<const char*> phase{ "idle" };
+    std::atomic<int64_t> phaseAt{ 0 };   // Clock ticks
+    void setPhase(const char* p) {
+        phase.store(p);
+        phaseAt.store(Clock::now().time_since_epoch().count());
+        veyra::log::info("pushcore", std::format("phase: {}", p));
+    }
+    double phaseMs() const { return std::chrono::duration<double, std::milli>(Clock::now() - Clock::time_point(Clock::duration(phaseAt.load()))).count(); }
+    // gGraphLock with the waiting and holding steps marked, and this instance recorded as the holder
+    struct GraphHold {
+        PushCore* core;
+        std::unique_lock<std::mutex> lk;
+        GraphHold(PushCore* c, const char* waiting, const char* held) : core(c) {
+            c->setPhase(waiting);
+            lk = std::unique_lock<std::mutex>(gGraphLock);
+            { std::lock_guard<std::mutex> h(gGraphHolderLock); gGraphHolder = c; }
+            c->setPhase(held);
+        }
+        ~GraphHold() { std::lock_guard<std::mutex> h(gGraphHolderLock); if (gGraphHolder == core) gGraphHolder = nullptr; }   // before lk unlocks
+    };
     // ---- configuration ----
     PushCoreStreamInfo stream{};
     std::wstring dataDir, runtimeDir;
@@ -3600,9 +3626,11 @@ struct PushCore {
         routeGraphEnded();
         testEnd(helixFgTest); helixFgGraph = false;
         testEnd(hlxFsrTest); hlxGraph = false;
+        setPhase("teardown: draining the graph queue (GPU work of the old graph)");
         if (ring.initialized()) ring.drainQueue();
         dropQueued();
         if (xefg) {   // XeFG presents on the graph's queue: stop it before the graph goes
+            setPhase("teardown: XeFG shutdown");
             const auto c = xefg->counters();
             veyra::log::info("pushcore", std::format("XeFG: {} presents, {} captured ({} real, {} generated, {} dropped), {} status errors, holds {} (skipped {}), "
                 "XeLL sleep {:.1f} ms and Present {:.1f} ms per frame", c.presents, c.captures, c.real, c.generated, c.dropped, c.statusErrors, xholds, xholdsSkipped,
@@ -3613,6 +3641,7 @@ struct PushCore {
             xlastPts = INT64_MIN; xlastGraphSource = 0;
             if (ring.initialized()) ring.drainQueue();
         }
+        setPhase("teardown: source repair planner");
         stopPlanner();
         if (spanVfgOk) {
             collectRepairTimes();
@@ -3624,6 +3653,7 @@ struct PushCore {
                 costRepair.p50(), costRepair.pct(0.95), planThr.load(), planNoise.load(), 100.0 * evidence.Ratio(), cascadeEnds, cascadeMissed, midCalls, midApprox, midApprox ? midErrSum / double(midApprox) : 0.0));
         }
         if (holdOn) holdLogClose();
+        setPhase("teardown: span streams (VFG Low / flow / midpoint)");
         if (spanLowInit.joinable()) spanLowInit.join();
         if (lowMade || lowPolicy.Dropped())
             veyra::log::info("pushcore", std::format("source repair: VFG Low span stream made {} time(s), released {} time(s) while playing; {} parts repaired on it, {} spans still dropped over the budget",
@@ -3631,7 +3661,9 @@ struct PushCore {
         spanLow.shutdown(); spanLowState = 0; lowMade = lowReleased = lowParts = 0; lowPolicy = {};
         spanVfg.shutdown(); spanFlow.shutdown(); shutdownMid(); spanVfgOk = false; spanIsFlow = false; rgbSlots.clear(); for (auto& rs : repSlots) rs = {}; repairOut.Reset(); repairPass.forgetViews();
         opened.clear(); outSlots.clear();
+        setPhase("teardown: Intel VPL / VSR");
         vpl.shutdown(); vplOn = false; ivsr.reset(); ivsrOn = false;
+        if (graph) setPhase("teardown: graph shutdown (NGX features, VFG, RTX VSR, CUDA frees)");
         if (graph) { graph->shutdown(); cutBase += graph->cutGuardCuts(); cutsSeen.store(cutBase, std::memory_order_relaxed); graph.reset(); }
     }
 
@@ -3690,13 +3722,15 @@ struct PushCore {
         const auto t = Clock::now();
         int r = PUSHCORE_ERROR;
         {
-            std::lock_guard<std::mutex> lk(gGraphLock);
+            GraphHold lk(this, "reload: waiting for the graph lock (another instance builds or closes)", "reload: graph lock taken");
             teardownGraph();
             haveReal = false; needReset = true;
+            setPhase("reload: build (NGX core, VFG, RTX VSR init)");
             r = buildGraph();
         }
-        if (r == PUSHCORE_OK && !(flags & PUSHCORE_FLAG_NO_WARMUP)) warmUp();
+        if (r == PUSHCORE_OK && !(flags & PUSHCORE_FLAG_NO_WARMUP)) { setPhase("reload: warm-up (first frames through the new graph)"); warmUp(); }
         veyra::log::info("pushcore", std::format("reload {} in {:.0f} ms", r == PUSHCORE_OK ? "done" : "failed", msSince(t)));
+        setPhase("idle");
         return r;
     }
 
@@ -3766,8 +3800,9 @@ struct PushCore {
     void close() {
         leases.clear();
         {
-            std::lock_guard<std::mutex> lk(gGraphLock);
+            GraphHold lk(this, "close: waiting for the graph lock (another instance builds or closes)", "close: graph lock taken");
             teardownGraph();
+            setPhase("close: NGX core cache (keep warm or shut down)");
             checkDeviceLost();
             if (sharedCache) {
                 // keep the NGX core warm for the next file, unless the device is gone
@@ -3779,7 +3814,9 @@ struct PushCore {
             }
             cache = nullptr;
         }
+        setPhase("close: driver RTX VSR (D3D11 video processor)");
         qvsr.reset();
+        setPhase("close: buffers, command ring, D3D11-on-12 bridge, D3D12 context");
         for (auto& s : inSlots) s = {};
         deband = pushmpc::Deband{}; debandEligible = false;
         clearHeldQueues(); held = pushmpc::HeldDetector{}; heldEligible = false;
@@ -3796,6 +3833,7 @@ struct PushCore {
         fence12in11.Reset(); fence11.Reset();
         lastPresentCtx4.Reset(); lastPresentCtx = nullptr;
         imm4.Reset(); imm.Reset(); d11_5.Reset(); d11_1.Reset(); d11.Reset();
+        setPhase("closed");
     }
 };
 
@@ -3942,6 +3980,27 @@ void done() {   // a successful open: it holds its own references now
 // C ABI
 extern "C" {
 
+// F-T1 diagnostics (optional export, found with GetProcAddress, not in the ABI table): the step a reload / close /
+// open of `core` is in now and for how long; core NULL: the instance that holds the process-wide graph lock and its
+// step ("free" when none). Safe while another thread runs that instance; the caller keeps `core` alive (a filter
+// asks before it abandons a reload whose thread then closes it). Writes a NUL-terminated line; PUSHCORE_OK.
+__declspec(dllexport) int pushcore_debugPhase(PushCore* core, char* buffer, uint32_t size) {
+    if (!buffer || !size) return PUSHCORE_ERROR;
+    std::string line;
+    try {
+        if (core) {
+            line = std::format("{} (for {:.0f} ms)", core->phase.load(), core->phaseMs());
+        } else {
+            std::lock_guard<std::mutex> h(gGraphHolderLock);
+            line = gGraphHolder ? std::format("held by instance {} in: {} (for {:.0f} ms)", static_cast<const void*>(gGraphHolder), gGraphHolder->phase.load(), gGraphHolder->phaseMs())
+                                : std::string("free");
+        }
+    } catch (...) { line = "unknown"; }
+    const size_t n = std::min<size_t>(line.size(), size - 1);
+    std::memcpy(buffer, line.data(), n); buffer[n] = 0;
+    return PUSHCORE_OK;
+}
+
 // the player's filter is going away: nothing of the prewarm may stay (thread, device, CUDA context)
 int pushcore_prewarmRelease(void) { try { prewarm::done(); } catch (...) {} return PUSHCORE_OK; }
 static int startPrewarm(uint64_t adapterLuid, prewarm::NgxJob job) {
@@ -4036,9 +4095,10 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
         int built = core->openDevices(device);
         if (built == PUSHCORE_OK) core->setupQuickVsr();
         if (built == PUSHCORE_OK) {
-            std::lock_guard<std::mutex> lk(gGraphLock);
+            PushCore::GraphHold lk(core, "open: waiting for the graph lock (another instance builds or closes)", "open: build (NGX core, VFG, RTX VSR init)");
             built = core->buildGraph();
         }
+        core->setPhase(built == PUSHCORE_OK ? "open: warm-up" : "open: failed");
         if (built != PUSHCORE_OK) {
             report(core->error);
             core->close();
@@ -4046,6 +4106,7 @@ PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* 
             return nullptr;
         }
         if (!(core->flags & PUSHCORE_FLAG_NO_WARMUP)) core->warmUp();
+        core->setPhase("idle");
         prewarm::done();
         veyra::pipeline::pushMpcBeforeNgxCore = &prewarm::waitNgx;
         veyra::Logger::instance().flush();   // the open's timeline on disk now (a player's fast exit skips the buffered rest)

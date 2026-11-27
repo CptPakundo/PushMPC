@@ -64,6 +64,7 @@
 #include <fstream>
 #include "PushMpcExtras.h"
 #include "PushMpcFastStart.h"
+#include "PushMpcLogs.h"            // old logs go (filter logs and the per-process engine log)
 #include "PushMpcReload.h"          // F-T1: the settings reload on its own thread, bounded, never beside a close
 #include <VersionHelpers.h>
 #include <IVideoRenderer.h>   // MPC Video Renderer's settings interface (live HDR settings)
@@ -123,49 +124,8 @@ static std::wstring LocalAppData()
 }
 
 // ------------------------------------------------------------------------------------------------ log
-// Old logs go (F-LOG: nothing was ever deleted; one folder held 1702 files / 205 MB): the filter's own files only
-// (filter-*.log, filter-frames-*.csv, filter-gpu-*.csv, filter-exit-*.log, diagnostics-*.txt, and the frames-*.csv /
-// gpu-*.csv of builds before 0.6; Setup's and the updater's
-// logs stay), newest first, kept while within kKeepSessions playback sessions and kKeepBytes. A session is the files
-// that share one stamp (date-time-process id; filter-exit-<pid>.log goes with its process). At most 400 deletions per
-// start, so a huge backlog shrinks over a few starts without delaying one.
-static void PruneLogs(const std::wstring& dir)
-{
-    constexpr size_t kKeepSessions = 20;
-    constexpr uint64_t kKeepBytes = 50ull << 20;
-    struct F { std::wstring name, key; uint64_t bytes; FILETIME t; };
-    std::vector<F> files;
-    for (const wchar_t* pat : { L"filter-*.log", L"filter-frames-*.csv", L"filter-gpu-*.csv", L"diagnostics-*.txt", L"frames-*.csv", L"gpu-*.csv" }) {
-        WIN32_FIND_DATAW fd{};
-        HANDLE h = FindFirstFileW((dir + L"\\" + pat).c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            const std::wstring n = fd.cFileName;
-            // the session key: the trailing "-<pid>" of the stamp (yyyymmdd-hhmmss-pid), so filter-exit-<pid>.log
-            // joins its process's files; a file without one is a session of its own
-            std::wstring key = n;
-            const size_t dot = n.find_last_of(L'.'), dash = n.find_last_of(L'-', dot);
-            if (dot != std::wstring::npos && dash != std::wstring::npos && dash + 1 < dot) {
-                const std::wstring pid = n.substr(dash + 1, dot - dash - 1);
-                if (pid.find_first_not_of(L"0123456789") == std::wstring::npos) key = pid;
-            }
-            files.push_back({ n, key, (uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow, fd.ftLastWriteTime });
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    std::sort(files.begin(), files.end(), [](const F& a, const F& b) { return CompareFileTime(&a.t, &b.t) > 0; });
-    std::vector<std::wstring> sessions;
-    uint64_t bytes = 0;
-    int deleted = 0;
-    for (const F& f : files) {
-        const bool known = std::find(sessions.begin(), sessions.end(), f.key) != sessions.end();
-        if (!known && sessions.size() < kKeepSessions && bytes + f.bytes <= kKeepBytes) sessions.push_back(f.key);
-        if ((known || std::find(sessions.begin(), sessions.end(), f.key) != sessions.end()) && bytes + f.bytes <= kKeepBytes) { bytes += f.bytes; continue; }
-        if (deleted >= 400) break;
-        if (DeleteFileW((dir + L"\\" + f.name).c_str())) ++deleted;
-    }
-}
+// Old logs go: PushMpcLogs.h (the filter's own files, the last 20 sessions within 50 MB; the engine log too since F-T1)
+static void PruneLogs(const std::wstring& dir) { pm::logs::PruneLogs(dir); }
 static std::wstring LogDir()
 {
     static const std::wstring dir = [] {
@@ -276,6 +236,16 @@ static std::string SampleThreadStack(DWORD tid)
     return out.empty() ? std::string("(no frames)") : out;
 }
 struct TeardownWatch { HANDLE done = nullptr; DWORD tid = 0; HMODULE self = nullptr; };
+static std::string DescribePhase(PushCore* c);   // pushcore's step (pushcore_debugPhase), below
+// the thread that owns the process's loader lock now (0 = free): PEB->LoaderLock (x64 offset 0x110), a CRITICAL_SECTION
+static DWORD LoaderLockOwner()
+{
+    __try {
+        const auto* peb = reinterpret_cast<const BYTE*>(__readgsqword(0x60));   // TEB->ProcessEnvironmentBlock (x64)
+        const auto* cs = *reinterpret_cast<RTL_CRITICAL_SECTION* const*>(peb + 0x110);
+        return cs ? DWORD(ULONG_PTR(cs->OwningThread)) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static HANDLE StartTeardownWatch()
 {
     auto* w = new TeardownWatch;
@@ -292,10 +262,14 @@ static HANDLE StartTeardownWatch()
             done = WaitForSingleObject(w->done, 3000) == WAIT_OBJECT_0;
             if (!done) Log(std::format("teardown watchdog: not done {:.0f} ms after the input disconnect; teardown thread {} at {}", QpcMs(Qpc() - q0), w->tid, SampleThreadStack(w->tid)));
         }
-        if (done && WaitForSingleObject(w->done, 0) == WAIT_OBJECT_0) {
+        // F-T1 follow-up: after the teardown the player may still not exit (one run: 8.7 s, ending when a detached pushcore
+        // close ended); up to 5 samples 2.5 s apart while its window is hidden or gone: the UI thread, the teardown (graph)
+        // thread, the loader lock's owner, our pushcore work on threads of its own and pushcore's graph lock
+        for (int n = 0; n < 5 && done && WaitForSingleObject(w->done, 0) == WAIT_OBJECT_0; ++n) {
             Sleep(2500);
             HWND wnd = pm::PlayerWindow();
-            if (!wnd || !IsWindowVisible(wnd)) {
+            if (wnd && IsWindowVisible(wnd)) break;   // still playing (another file): not an exit
+            {
                 // the player is closing (its window gone or hidden) but the process still runs: where its threads are
                 DWORD ui = wnd ? GetWindowThreadProcessId(wnd, nullptr) : 0;
                 if (!ui) {   // the window is destroyed: the process's first thread (the UI thread of MFC players)
@@ -309,8 +283,13 @@ static HANDLE StartTeardownWatch()
                     }
                     if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
                 }
-                if (ui) Log(std::format("exit watchdog: the player window is {} 2.5 s after the teardown and the process still runs; UI thread {} at {}",
-                                        wnd ? "hidden" : "gone", ui, SampleThreadStack(ui)));
+                const DWORD ll = LoaderLockOwner();
+                Log(std::format("exit watchdog: the player window is {} {:.1f} s after the teardown and the process still runs; UI thread {} at {}; teardown thread {} at {}; "
+                                "loader lock: {}; our pushcore work: {} close(s), {} reload(s) {}; pushcore graph lock: {}",
+                                wnd ? "hidden" : "gone", 2.5 * (n + 1), ui, ui ? SampleThreadStack(ui) : std::string("(not found)"), w->tid, SampleThreadStack(w->tid),
+                                ll ? std::format("thread {}{}", ll, ll == ui ? " (the UI thread)" : ll == w->tid ? " (the teardown thread)" : "") : std::string("free"),
+                                pm::reload::Busy().Closes(), pm::reload::Busy().Reloads(), pm::reload::Busy().Threads(), DescribePhase(nullptr)));
+                if (pm::reload::Busy().Idle() && n >= 1) break;   // nothing of ours runs: two samples are enough
             }
         }
         CloseHandle(w->done);
@@ -654,6 +633,8 @@ static PushCoreCapabilitiesFn g_capsFn = nullptr;   // pushcore_capabilities (PU
 static PushCoreFlowBenchFn g_benchFn = nullptr;     // pushcore_pushFlowBench
 static PushCorePrewarmFn g_prewarmFn = nullptr;     // pushcore_prewarm (fast start; absent in older cores)
 static PushCorePrewarmReleaseFn g_prewarmReleaseFn = nullptr;   // pushcore_prewarmRelease
+using PushCoreDebugPhaseFn = int (*)(PushCore*, char*, uint32_t);   // pushcore_debugPhase (F-T1 diagnostics; optional export)
+static PushCoreDebugPhaseFn g_phaseFn = nullptr;
 static PushCorePrewarm2Fn g_prewarm2Fn = nullptr;   // pushcore_prewarm2 (with the NGX core)
 static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
 {
@@ -679,8 +660,22 @@ static const PushCoreApi* LoadApi(const Runtime& rt, std::wstring& err)
     g_prewarmFn = reinterpret_cast<PushCorePrewarmFn>(GetProcAddress(h, "pushcore_prewarm"));
     g_prewarmReleaseFn = reinterpret_cast<PushCorePrewarmReleaseFn>(GetProcAddress(h, "pushcore_prewarmRelease"));
     g_prewarm2Fn = reinterpret_cast<PushCorePrewarm2Fn>(GetProcAddress(h, "pushcore_prewarm2"));
+    g_phaseFn = reinterpret_cast<PushCoreDebugPhaseFn>(GetProcAddress(h, "pushcore_debugPhase"));
     Log(std::format("loaded {} (ABI {}, core {}, PushFPS {}), runtime root {}", Narrow(rt.corePath), api->abiVersionFn(), Narrow(rt.coreVersion), Narrow(rt.pushfpsVersion), Narrow(rt.root)));
     return api;
+}
+// F-T1 diagnostics: pushcore's reload / close step (optional export pushcore_debugPhase; nullptr = the holder of its
+// graph lock), for the log when a settings reload is abandoned
+static void SehPhase(PushCore* c, char* b, uint32_t n)
+{
+    __try { g_phaseFn(c, b, n); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(b, n, "(phase report raised an exception)"); }
+}
+static std::string DescribePhase(PushCore* c)
+{
+    if (!g_phaseFn) return "(this pushcore.dll has no phase report)";
+    char b[512] = {};
+    SehPhase(c, b, sizeof(b));
+    return std::string(b);
 }
 static void SehCaps(uint64_t luid, const wchar_t* root, PushCoreCaps* c)
 {
@@ -3580,7 +3575,9 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
             CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             std::wstring err;
             const PushCoreApi* api = LoadApi(c->rt, err);
-            const std::wstring logFile = LogDir() + L"\\pushcore-engine-filter.log";
+            // one engine log per process (F-T1: the single pushcore-engine-filter.log was overwritten by the next start, so a
+            // hang run's engine log never survived); pruned with the filter's own logs (PushMpcLogs.h)
+            static const std::wstring logFile = LogDir() + L"\\pushcore-engine-filter-" + Stamp() + L".log";
             auto openOne = [&](const PushCoreSettings* settings, uint32_t flags, std::string& openErr) -> PushCore* {
                 if (!api) { openErr = Narrow(err); return nullptr; }
                 PushCoreConfig pc = {};
@@ -5664,6 +5661,7 @@ void CPushMpcFilter::DoReload(bool forced)
     hooks.quit = [this] { return m_quit.load(); };
     hooks.tick = [this] { if (m_flushing) m_copierAck = m_flushGen.load(); };   // the copier's flush acknowledgement (EndFlush waits for it)
     hooks.keep = [this] { return !m_faulted && m_mode == Mode::Active; };       // under m_coreLock
+    hooks.describe = &DescribePhase;                                             // pushcore's step, logged when a reload is stuck
     const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, hooks, pm::reload::Limits{});
     { std::lock_guard<std::mutex> lk(m_coreLock); m_coreDisc = true; m_lastSubmitPts = INT64_MIN; }
     int r = rr.r;
