@@ -18,6 +18,8 @@
 // and judder analysis.
 // --deband off|low|medium|high|anime, --srfamily standard|highbitrate|streaming, --srtarget WxH (the target class by
 // its height: 1440 / 2160 / 2880; the source's shape is kept): test switches of the settings route
+// --anime N: the anime upscaler (srMethod PMML) with model PUSHCORE_ANIME_SR_* N (settings route; the pmml runtime
+// comes from PMML_RUNTIME, the registry or the install, PMML_ANIME_SR_BACKEND picks the backend)
 // --subtitles 1: PushFPS's Subtitle Hold (PushCoreSettings.subtitleHold; implies the PushMPC settings route)
 // --shaders: the compiled shaders pushcore uses. Default: the build tree's own (<harness folder>\..\shaders, the
 // shaders built from the patched PushFPS source) when that folder exists, else <pushfps>\shaders. A copy of an
@@ -127,6 +129,7 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t grayWidth = 0;
     // PushMPC's own settings instead of a chain session (--backend vfg|dlssg|pushflow|fsr|frc|nvof|xefg|vpl|none, --srmethod rtx|fsr|nis|xess|ivsr): the filter's route
     bool useSettings = false;
+    bool animeWanted = false;
     // G10: --adapter nvidia (default) | intel | amd | any | warp (Windows' software GPU, sets PUSHMPC_TEST_WARP=1 for pushcore);
     // <video> = synthetic:WxH = no file: a textured square moving over a textured background, a hard cut at --cut N
     // (default 0 = none), 30 fps; --check 1 reads every output back and checks the square's position in the generated
@@ -179,6 +182,11 @@ int wmain(int argc, wchar_t** argv) {
                 std::cout << "--srtarget " << tw << "x" << th << ": no such class; 4K (2160 lines) is used\n";
             std::cout << "--srtarget " << tw << "x" << th << ": the output is the source's shape fitted to " << (th == 1440 ? 1440 : th == 2880 ? 2880 : 2160)
                       << " lines (a 16:9 source: exactly " << (th == 1440 ? "2560x1440" : th == 2880 ? "5120x2880" : "3840x2160") << ")\n";
+            continue;
+        }
+        if (k == L"--anime") {   // test switch: the anime upscaler (srMethod PMML), model by PUSHCORE_ANIME_SR_* index
+            useSettings = true;
+            ps.sr = 1; ps.srMethod = PUSHCORE_SR_METHOD_PMML; ps.animeSrModel = uint32_t(_wtoi(v.c_str())); animeWanted = true;
             continue;
         }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
@@ -712,8 +720,12 @@ int wmain(int argc, wchar_t** argv) {
                                  "cuts counted {}\n", chk.gens, med, p90, tol, chk.noSquare, cutAt, chk.holdsOk, chk.holdsBad, s.cutGuardCuts);
     }
     std::cout << std::format("METHOD frame generation {} (fallback {}: {}), upscaler {}\n", s.fgBackend, s.fgFallback, s.fgNote, s.srMethod);
+    const bool animeOk = !animeWanted || (s.srMethod == PUSHCORE_SR_METHOD_PMML && s.animeSrModel == ps.animeSrModel);
+    if (animeWanted)
+        std::cout << std::format("ANIME requested model {}: running model {} (upscaler {}){}\n", ps.animeSrModel, int(s.animeSrModel), s.srMethod,
+                                 animeOk ? "" : ": NOT the anime upscaler");
     const bool pass = !failed && submitted > 1 && countMismatch == 0 && orderErrors == 0 && ptsErrors == 0 && sizeErrors == 0 &&
-                      presentedCount == expected && (m == 1 || generated > 0) && checkPass;
+                      presentedCount == expected && (m == 1 || generated > 0) && checkPass && animeOk;
     std::cout << (pass ? "PASS" : "FAIL") << "\n";
 
     if (idleMs) { std::cout << "IDLE " << idleMs << " ms (core open, no frames)" << std::endl; Sleep(idleMs); std::cout << "IDLE done" << std::endl; }
