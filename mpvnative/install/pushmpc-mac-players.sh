@@ -104,16 +104,26 @@ do_iina() {
         rmdir "$plugins/.preferences" "$plugins/.data" 2>/dev/null
         if [ -f "$state/iina-enabled" ]; then
             old=$(cat "$state/iina-enabled")
+            echo "IINA: PluginEnabled before install: $old$( [ -f "$state/iina-domain-created" ] && echo "; its preferences did not exist before")"
             case $old in
                 absent) defaults delete com.colliderli.iina "PluginEnabled.$pid" 2>/dev/null ;;
                 0|false) defaults write com.colliderli.iina "PluginEnabled.$pid" -bool false ;;
                 *) defaults write com.colliderli.iina "PluginEnabled.$pid" -bool true ;;
             esac
             if [ -f "$state/iina-plugins-created" ]; then rmdir "$plugins" 2>/dev/null; fi
-            if [ -f "$state/iina-domain-created" ] && [ "$(defaults read com.colliderli.iina 2>/dev/null | tr -d ' \t\n')" = "{}" ]; then
-                defaults delete com.colliderli.iina 2>/dev/null
+            if [ -f "$state/iina-domain-created" ]; then
+                left=$(defaults read com.colliderli.iina 2>&1)
+                if [ "$(printf '%s' "$left" | tr -d ' \t\n')" = "{}" ]; then
+                    defaults delete com.colliderli.iina 2>/dev/null
+                    echo "IINA: its preferences removed again (PushMPC had created them; empty now)"
+                else
+                    echo "IINA: its preferences kept (they hold more than PushMPC put there):"
+                    printf '%s\n' "$left" | head -n 12 | sed 's/^/    /'
+                fi
             fi
             rm -f "$state/iina-enabled" "$state/iina-plugins-created" "$state/iina-domain-created"
+        else
+            echo "IINA: no record of IINA's setting before install ($state/iina-enabled): PluginEnabled left as it is"
         fi
         echo "IINA: PushMPC plugin removed" ;;
     status)
