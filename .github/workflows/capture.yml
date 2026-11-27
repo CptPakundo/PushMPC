@@ -393,17 +393,28 @@ jobs:
           if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'Screen & System Audio Recording'; then echo "::notice::no Screen Recording permission on this runner: the plain message and exit code 3"; exit 0; fi
           [ "$rc" = 0 ] || { echo "::error::capture failed (exit $rc)"; exit 1; }
           perl -e 'alarm shift; exec @ARGV' 120 $b --player pmc-square --no-present --display-hz 30 --engine cpu --smoother off --frames 300 --dump /tmp/off.y4m --log /tmp/capture-off.log -v || { echo "::error::capture with --smoother off failed"; exit 1; }
+          # the source gate, as on Linux: at least 95 % of the window's 24 pictures a second reached capture. Then the full
+          # motion limits apply, as on a real Mac. Below it (the hosted VM: its screen capture delivered 13-15 new pictures
+          # a second while the window drew 24, run 45973220987) the spread is information only, and the run must still
+          # generate frames, keep its mean step within 10 % and never step back (check_motion.py --source-limited yes).
+          limited=no
           for n in auto off; do
             last=$(grep -E ' shown [0-9.]+ fps' /tmp/capture-$n.log | tail -1); echo "$n: $last"
             d=$(grep ' done: ' /tmp/capture-$n.log | tail -1); echo "$n source: ${d#*source: }"   # of the window's 24 a second
             shown=$(printf '%s' "$last" | sed -n 's/.*shown \([0-9.]*\) fps.*/\1/p')
-            [ -n "$shown" ] && awk -v s="$shown" 'BEGIN { exit !(s < 27) }' && { echo "::error::capture ($n) showed $shown of 30 refreshes a second: the engine falls behind on this runner"; exit 1; }
+            [ -n "$shown" ] || { echo "::error::capture ($n): no shown rate in its log"; exit 1; }
+            awk -v s="$shown" 'BEGIN { exit !(s < 27) }' && { echo "::error::capture ($n) showed $shown of 30 refreshes a second: the engine falls behind on this runner"; exit 1; }
+            r=$(printf '%s' "$d" | sed -n 's/.*(\([0-9.]*\) a second).*/\1/p')
+            if [ -z "$r" ] || awk -v r="$r" 'BEGIN { exit !(r < 0.95 * 24) }'; then
+              echo "::notice::capture ($n) got ${r:-no} new pictures a second of the window's 24 (this machine's screen capture): the motion spread is information only"; limited=yes; fi
           done
+          g=$(grep ' done: ' /tmp/capture-auto.log | sed -n 's/.*), \([0-9]*\) generated.*/\1/p' | tail -1); echo "auto: ${g:-no} frames generated"
+          [ "${g:-0}" -gt 0 ] || { echo "::error::capture with Smoother Auto generated no frames"; exit 1; }
           head -c 80 /tmp/auto.y4m | head -n 1
           w=$(head -n 1 /tmp/auto.y4m | tr ' ' '\n' | sed -n 's/^W//p')
           speed=$(( 48 * w / 320 ))   # the window's points at the capture's pixel scale
           echo "dump width $w: $speed px a second"
-          python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed "$speed" --hz 30
+          python3 -I capture/tests/check_motion.py /tmp/auto.y4m /tmp/off.y4m --speed "$speed" --hz 30 --source-limited "$limited"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: capture-macos-logs, path: '/tmp/capture-*.log', if-no-files-found: ignore }
