@@ -7,9 +7,10 @@
 #   brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
 #   brew install CptPakundo/pushmpc/pushmpc   (the full name: Homebrew then trusts this formula from the tap)
 #   pushmpc-setup install
-# url / version / sha256 and the release resources below are filled in by the release (scripts/update-formula.py, run by
-# release.yml's publish job on main once the assets exist). CI (.github/workflows/apple.yml, job homebrew) taps a clone
-# of this repository with the same script pointing at the checkout's own archives, then installs and tests.
+# url / version / sha256 and the release resources below are filled in by the release (scripts/update-formula.py,
+# run by release.yml's publish job on main once the assets exist). CI (.github/workflows/apple.yml, job homebrew)
+# taps a clone of this repository with the same script pointing at the checkout's own archives, then installs and
+# tests.
 class Pushmpc < Formula
   desc "Frame generation and upscaling for mpv (VapourSynth filter)"
   homepage "https://github.com/CptPakundo/PushMPC"
@@ -37,27 +38,26 @@ class Pushmpc < Formula
   # PushFlow (RIFE) through pmml, the plugin's ml backend: Homebrew's ONNX Runtime (built with CoreML on macOS)
   depends_on "onnxruntime"
   depends_on "vapoursynth"
-  # capture mode on macOS (pushmpc-capture: QuickTime Player, Infuse, browsers): its shaders, and Vulkan on Metal; the
-  # portable GPU engine's Vulkan driver (Apple silicon and Intel Macs): the engine finds Homebrew's libMoltenVK.dylib by itself
+  # capture mode on macOS (pushmpc-capture: QuickTime Player, Infuse, browsers): its shaders, and Vulkan on Metal;
+  # the portable GPU engine's Vulkan driver (Apple silicon and Intel Macs): the engine finds Homebrew's
+  # libMoltenVK.dylib by itself
   on_macos do
     # the IINA bridge for apps that bundle an older FFmpeg (Stremio 5.1: FFmpeg 7): headers only, at build time; the
-    # versioned FFmpeg formulae this Homebrew knows (IINA_FFMPEG_EXTRA)
-    IINA_FFMPEG_EXTRA.each { |f| depends_on f => :build }
+    # versioned FFmpeg formulae this Homebrew knows (IINA_FFMPEG_EXTRA), one line each (an on_macos block takes no
+    # loop)
+    depends_on "ffmpeg@4" => :build if IINA_FFMPEG_EXTRA.include?("ffmpeg@4")
+    depends_on "ffmpeg@6" => :build if IINA_FFMPEG_EXTRA.include?("ffmpeg@6")
+    depends_on "ffmpeg@7" => :build if IINA_FFMPEG_EXTRA.include?("ffmpeg@7")
+    depends_on "ffmpeg@8" => :build if IINA_FFMPEG_EXTRA.include?("ffmpeg@8")
     depends_on "glslang" => :build
     depends_on "molten-vk"
   end
 
-  # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release time
-  # set url / sha256 as for the tarball above (CI replaces both with a freshly generated archive)
-  resource "pmml-graphs" do
-    url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pmml-graphs-0.6.0.tar.gz"
-    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  end
-
   # PushMPC for Plex for Mac / Plex HTPC (mpv-native.yml builds it, release.yml attaches it): the universal proxy
-  # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the self-test and
-  # pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into Plex); pushmpc-setup
-  # unpacks it and puts it into the Plex apps. A release without that asset leaves this block out
+  # libavfilter.8.dylib, the vf_pushmpc builds, the engines (VideoToolbox, Vulkan on MoltenVK, CPU), the self-test
+  # and pushmpc-plex-mac.sh. Kept as the archive (Homebrew does not relocate or re-sign what goes into Plex);
+  # pushmpc-setup unpacks it and puts it into the Plex apps. A release without that asset leaves this block out.
+  # (on_macos blocks come before the resources)
   on_macos do
     resource "plex-mac" do
       url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-plex-mac-0.6.0.tar.gz"
@@ -65,7 +65,25 @@ class Pushmpc < Formula
     end
   end
 
-  # the portable GPU engine (vsplugin/engines/gpu): Vulkan-Headers and volk, the commits vsplugin/engines/gpu/gpu-pins.json pins
+  # PushMPC for Kodi on the Mac (kodi-addon.yml builds it, release.yml attaches it): the add-on inputstream.pushmpc
+  # (universal, for Kodi 21 and 22) and its installer. Kept as the archive; pushmpc-setup unpacks it and puts the
+  # add-on into Kodi. A release without that asset leaves this block out
+  on_macos do
+    resource "kodi-mac" do
+      url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-kodi-macos-0.6.0.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
+  # pmml's graphs (pmml/scripts/make_graphs.py output, GPL-3.0), a release asset: release.yml builds it; at release
+  # time set url / sha256 as for the tarball above (CI replaces both with a freshly generated archive)
+  resource "pmml-graphs" do
+    url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pmml-graphs-0.6.0.tar.gz"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  end
+
+  # the portable GPU engine (vsplugin/engines/gpu): Vulkan-Headers and volk, the commits
+  # vsplugin/engines/gpu/gpu-pins.json pins
   resource "vulkan-headers" do
     url "https://github.com/KhronosGroup/Vulkan-Headers/archive/b5c8f996196ba4aa6d8f97e52b5d3b6e70f7e4e2.tar.gz"
     sha256 "7937d8ec21785736436d9ff52564db7d55992070b5ac98324472cce6e425a7ba"
@@ -73,16 +91,6 @@ class Pushmpc < Formula
   resource "volk" do
     url "https://github.com/zeux/volk/archive/d979819fd03de3a7606d6e23d6ff4968942599da.tar.gz"
     sha256 "ff6facfca90161325a1f817c08c7edb6f892bd3bf4745449b735d7e13585ec4c"
-  end
-
-  # PushMPC for Kodi on the Mac (kodi-addon.yml builds it, release.yml attaches it): the add-on inputstream.pushmpc
-  # (universal, for Kodi 21 and 22) and its installer. Kept as the archive; pushmpc-setup unpacks it and puts the add-on
-  # into Kodi. A release without that asset leaves this block out
-  on_macos do
-    resource "kodi-mac" do
-      url "https://github.com/CptPakundo/PushMPC/releases/download/v0.6.0/pushmpc-kodi-macos-0.6.0.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    end
   end
 
   # ArtCNN (MIT, github.com/Artoriuz/ArtCNN), pinned to one commit (vsplugin/models/artcnn.lock.json)
@@ -133,21 +141,22 @@ class Pushmpc < Formula
     # pushmpc-iina-av<libavutil major>.so; a bridge
     # refuses to patch anything when the app's FFmpeg majors differ from its own, so pushmpc-apps-mac.sh picks per app
     bridge = if OS.mac?
-      ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{Formula["ffmpeg"].opt_include}", "-DMPV_INCLUDE=#{Formula["mpv"].opt_include}",
-       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{IINA_FFMPEG_EXTRA.map { |f| Formula[f].opt_include }.join(";")}"]
+      ["-DPUSHMPC_IINA_BRIDGE=ON", "-DFFMPEG_INCLUDE=#{formula_opt_include("ffmpeg")}",
+       "-DMPV_INCLUDE=#{formula_opt_include("mpv")}",
+       "-DPUSHMPC_IINA_FFMPEG_INCLUDES=#{IINA_FFMPEG_EXTRA.map { |f| formula_opt_include(f) }.join(";")}"]
     else
       []
     end
     # the ml backend: ONNX Runtime's C API headers from Homebrew's onnxruntime (loaded at run time, nothing linked)
-    ort = Formula["onnxruntime"].opt_include
+    ort = formula_opt_include("onnxruntime")
     ort /= "onnxruntime" if (ort/"onnxruntime/onnxruntime_c_api.h").exist?
     # the portable GPU engine (Vulkan: MoltenVK on macOS): the pinned headers and volk, the checked-in SPIR-V
     gpu = buildpath/"gpu-deps"
     resource("vulkan-headers").stage(gpu/"vulkan-headers")
     resource("volk").stage(gpu/"volk")
     gpu_args = ["-DPMVS_GPU=ON", "-DPMVS_VULKAN_HEADERS_DIR=#{gpu}/vulkan-headers", "-DPMVS_VOLK_DIR=#{gpu}/volk"]
-    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}", "-DPMML_ORT_INCLUDE=#{ort}",
-           *bridge, *gpu_args, *std_cmake_args
+    system "cmake", "-S", "vsplugin", "-B", "build", "-DVAPOURSYNTH_SDK=#{inc}", "-DPUSHMPC_APPLE=#{apple}",
+           "-DPMML_ORT_INCLUDE=#{ort}", *bridge, *gpu_args, *std_cmake_args
     system "cmake", "--build", "build", "--target", "pushmpc_vs", "--parallel"
     system "cmake", "--build", "build", "--target", "pushmpc_apple", "pushmpc_iina", "--parallel" if OS.mac?
     # the bridge for each older FFmpeg major, one target each: one that does not build is skipped (a warning), the
@@ -156,24 +165,26 @@ class Pushmpc < Formula
       File.read("build/iina-bridge-majors.txt").split.each do |m|
         next if quiet_system "cmake", "--build", "build", "--target", "pushmpc_iina_av#{m}", "--parallel"
 
-        opoo "PushMPC's IINA bridge for libavutil #{m} did not build: apps with that FFmpeg major get no frame generation"
+        opoo "PushMPC's IINA bridge for libavutil #{m} did not build: " \
+             "apps with that FFmpeg major get no frame generation"
       end
     end
     system "cmake", "--build", "build", "--target", "portable_test", "apple_test", "--parallel"
     system "build/portable_test"
     system "build/apple_test"
     # the image model's helper for plain mpv (pushmpc.lua starts it when no PushMPC engine runs), with its unit test
-    system "cmake", "-S", "integrations/mpv/content-helper", "-B", "build-content", "-DPMML_ORT_INCLUDE=#{ort}", *std_cmake_args
+    system "cmake", "-S", "integrations/mpv/content-helper", "-B", "build-content", "-DPMML_ORT_INCLUDE=#{ort}",
+           *std_cmake_args
     system "cmake", "--build", "build-content", "--target", "pushmpc-content", "content_helper_test", "--parallel"
     system "build-content/content_helper_test"
 
-    # capture mode (macOS): pushmpc-capture inside an app bundle, because macOS gives the Screen Recording permission to
-    # an app ("PushMPC Capture" in System Settings > Privacy & Security). Its own build folder with the GPU engine.
+    # capture mode (macOS): pushmpc-capture inside an app bundle, because macOS gives the Screen Recording permission
+    # to an app ("PushMPC Capture" in System Settings > Privacy & Security). Its own build folder with the GPU engine.
     if OS.mac?
       # the same pinned Vulkan-Headers and volk as the plugin's GPU engine (staged above)
       system "cmake", "-S", "vsplugin", "-B", "build-capture", "-DPUSHMPC_APPLE=ON", "-DPMML_ORT_INCLUDE=#{ort}",
              "-DPMVS_VULKAN_HEADERS_DIR=#{gpu}/vulkan-headers", "-DPMVS_VOLK_DIR=#{gpu}/volk",
-             "-DPMVS_GLSLANG=#{Formula["glslang"].opt_bin}/glslangValidator", *std_cmake_args
+             "-DPMVS_GLSLANG=#{formula_opt_bin("glslang")}/glslangValidator", *std_cmake_args
       system "cmake", "--build", "build-capture", "--target", "pushmpc_capture", "capture_test", "--parallel"
       system "build-capture/capture_test"
       app = libexec/"PushMPC Capture.app/Contents"
@@ -224,9 +235,9 @@ class Pushmpc < Formula
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
     # pushmpc.lua adds the filter at run time (the mpv.conf block names it, next to pushmpc.vpy)
     pkgshare.install "integrations/mpv/pushmpc.lua"
-    pkgshare.install "build-content/pushmpc-content"   # next to pushmpc.lua (it looks there)
+    pkgshare.install "build-content/pushmpc-content" # next to pushmpc.lua (it looks there)
     libexec.install "build/pushmpc-apple" if OS.mac? && File.exist?("build/pushmpc-apple")
-    (lib/"pushmpc").install Dir["build/pushmpc-iina*.so"] if OS.mac?   # pushmpc-iina.so and pushmpc-iina-av<N>.so
+    (lib/"pushmpc").install Dir["build/pushmpc-iina*.so"] if OS.mac? # pushmpc-iina.so and pushmpc-iina-av<N>.so
     libexec.install "integrations/mpv/mpv-integration.sh"
     if OS.mac? && resources.any? { |r| r.name == "plex-mac" }
       (pkgshare/"plex-mac").mkpath
@@ -244,21 +255,22 @@ class Pushmpc < Formula
     # ArtCNN (MIT): the pinned ONNX files become the Metal engine's .pmnn weights (next to the plugin, where the
     # apple backend looks first) and fragment-shader GLSL (OpenGL-only renderers); the upstream compute GLSL is used
     # by the gpu-next / Vulkan profile below. vsplugin/models/artcnn.lock.json has the same pins.
-    py = Formula[vs_python].opt_bin/"python#{vs_python.delete_prefix("python@")}"
+    py = formula_opt_bin(vs_python)/"python#{vs_python.delete_prefix("python@")}"
     models = prefix/vs_site_packages/"vapoursynth/plugins/pushmpc-models"
     models.mkpath
     (pkgshare/"shaders").mkpath
     %w[C4F16 C4F32].each do |m|
       resource("artcnn-#{m.downcase}-onnx").stage do
-        system py, "-I", buildpath/"vsplugin/tools/artcnn_tool.py", "pmnn", "ArtCNN_#{m}.onnx", models/"ArtCNN_#{m}.pmnn"
+        system py, "-I", buildpath/"vsplugin/tools/artcnn_tool.py", "pmnn", "ArtCNN_#{m}.onnx",
+               models/"ArtCNN_#{m}.pmnn"
         system py, "-I", buildpath/"vsplugin/tools/artcnn_tool.py", "glsl", "ArtCNN_#{m}.onnx",
                pkgshare/"shaders/ArtCNN_#{m}_fragment.glsl", "--name", "ArtCNN #{m}"
       end
       resource("artcnn-#{m.downcase}-glsl").stage { (pkgshare/"shaders").install "ArtCNN_#{m}.glsl" }
     end
-    # the mpv profile: ArtCNN in mpv's own renderer (gpu-next, mpv's default vo since 0.41; Vulkan for compute shaders:
-    # MoltenVK on macOS). It only runs when mpv upscales luma by more than 1.3x, so it never doubles our own super
-    # resolution. It sets no vo, so encode mode (--o) keeps working.
+    # the mpv profile: ArtCNN in mpv's own renderer (gpu-next, mpv's default vo since 0.41; Vulkan for compute
+    # shaders: MoltenVK on macOS). It only runs when mpv upscales luma by more than 1.3x, so it never doubles our own
+    # super resolution. It sets no vo, so encode mode (--o) keeps working.
     api = OS.mac? ? "gpu-api=vulkan\ngpu-context=macvk\n" : ""
     (pkgshare/"mpv").mkpath
     (pkgshare/"mpv/pushmpc-artcnn.conf").write <<~CONF
@@ -334,9 +346,9 @@ class Pushmpc < Formula
       data=${XDG_DATA_HOME:-$HOME/.local/share}; pm="$data/pushmpc/pmml"
       if [ "$action" = install ] && [ "$pmml" = 1 ]; then
         mkdir -p "$pm/ort/core" "$pm/models"
-        ln -sf "#{Formula["onnxruntime"].opt_lib}/libonnxruntime.dylib" "$pm/ort/core/libonnxruntime.dylib"
+        ln -sf "#{formula_opt_lib("onnxruntime")}/libonnxruntime.dylib" "$pm/ort/core/libonnxruntime.dylib"
         rm -rf "$pm/graphs"; ln -s "#{opt_pkgshare}/pmml/graphs" "$pm/graphs"
-        if "#{Formula[vs_python].opt_bin}/python#{vs_python.delete_prefix("python@")}" -I "#{opt_libexec}/pmml-models.py" "$pm/models" "#{opt_pkgshare}/pmml/ml-runtime-pin.json" "$data/pushmpc/pmml-download"; then
+        if "#{formula_opt_bin(vs_python)}/python#{vs_python.delete_prefix("python@")}" -I "#{opt_libexec}/pmml-models.py" "$pm/models" "#{opt_pkgshare}/pmml/ml-runtime-pin.json" "$data/pushmpc/pmml-download"; then
           echo "PushFlow for the ml backend: $pm"; : > "$pm/.pushmpc-setup"
         else
           echo "PushFlow's models could not be fetched: the ml backend stays off (run pushmpc-setup install again later)"; rm -rf "$pm"
@@ -355,7 +367,7 @@ class Pushmpc < Formula
           ax=''; [ "$artcnn" = 0 ] || ax="include=\\"#{opt_pkgshare}/mpv/pushmpc-artcnn.conf\\""
           ag=''; [ "$action" != install ] || ag=--agent
           aout=$(/bin/sh "$appsdir/pushmpc-apps-mac.sh" "$action" --from "$appsdir" --bridge "#{opt_lib}/pushmpc/pushmpc-iina.so" \\
-            --mpv "#{Formula["mpv"].opt_bin}/mpv" --integration "#{opt_libexec}/mpv-integration.sh" --vpy "#{opt_pkgshare}/pushmpc.vpy" \\
+            --mpv "#{formula_opt_bin("mpv")}/mpv" --integration "#{opt_libexec}/mpv-integration.sh" --vpy "#{opt_pkgshare}/pushmpc.vpy" \\
             --vsscript "#{HOMEBREW_PREFIX}/etc/mpv/scripts/pushmpc-vsscript.lua" ${ax:+--extra "$ax"} $ag 2>&1); arc=$?
           if [ "$arc" != 3 ] || ! printf '%s' "$aout" | grep -q 'none of these players'; then
             echo "Stremio, Jellyfin Desktop, MPV shims:"; printf '%s\\n' "$aout" | sed 's/^/  /'
@@ -462,10 +474,10 @@ class Pushmpc < Formula
     SH
   end
 
-  def post_install
-    # the global helper (see install). A file in etc survives upgrades; it is inert once PushMPC is uninstalled.
-    (etc/"mpv/scripts").mkpath
-    cp pkgshare/"mpv/pushmpc-vsscript.lua", etc/"mpv/scripts/pushmpc-vsscript.lua"
+  # the global helper (see install). A file in etc survives upgrades; it is inert once PushMPC is uninstalled.
+  post_install_steps do
+    mkdir_p "mpv/scripts", base: :etc
+    copy "mpv/pushmpc-vsscript.lua", "mpv/scripts/pushmpc-vsscript.lua", source_base: :pkgshare, target_base: :etc
   end
 
   def caveats
