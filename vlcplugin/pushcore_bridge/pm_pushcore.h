@@ -145,6 +145,25 @@ typedef uint32_t (*pm_pc_abi_fn)(void);
 typedef int (*pm_pc_update_fn)(pm_pc *, const pm_pc_cfg *, char *, size_t);
 typedef int (*pm_pc_output_fn)(pm_pc *, pm_pc_info *);
 
+/* Sharing the process's one pushcore (additive exports, no ABI change: a caller looks them up and keeps its older
+ * behaviour on a bridge without them). The host hands the core to the instance that opened it last; the previous one's
+ * calls then fail ("taken over").
+ * pm_pc_decide: the open's decision (the same configuration checks, the user's settings, Auto) up to the multiplier,
+ *   without taking the core or a device; *k = the multiplier Auto asks pushcore for (the open's own k can still differ:
+ *   honour it). 0, or < 0 with the reason in err (on 0, err holds a short summary).
+ * pm_pc_busy: 1 while an instance holds the core (lock-free; also 1 when that instance is the caller's own).
+ * pm_pc_measure_open / pm_pc_measure_push: ContentDetect alone on the caller's D3D11 device and immediate context (the
+ *   cells only are read back), without the core; the class in pm_pc_output's measured_class / measured_cg; pm_pc_close
+ *   ends it. Only width, height, bits and range of cfg are read. */
+__declspec(dllexport) int pm_pc_decide(const pm_pc_cfg *cfg, int *k, char *err, size_t errsize);
+__declspec(dllexport) int pm_pc_busy(void);
+__declspec(dllexport) pm_pc *pm_pc_measure_open(const pm_pc_cfg *cfg, void *d3d11_device, void *context_mutex, char *err, size_t errsize);
+__declspec(dllexport) int pm_pc_measure_push(pm_pc *pc, void *texture, unsigned slice, int64_t pts100ns, int discontinuity, char *err, size_t errsize);
+typedef int (*pm_pc_decide_fn)(const pm_pc_cfg *, int *, char *, size_t);
+typedef int (*pm_pc_busy_fn)(void);
+typedef pm_pc *(*pm_pc_measure_open_fn)(const pm_pc_cfg *, void *, void *, char *, size_t);
+typedef int (*pm_pc_measure_push_fn)(pm_pc *, void *, unsigned, int64_t, int, char *, size_t);
+
 typedef pm_pc *(*pm_pc_open_fn)(const pm_pc_cfg *, int *, char *, size_t);
 typedef int (*pm_pc_push_fn)(pm_pc *, const pm_pc_planes *, int64_t, int, char *, size_t);
 typedef int (*pm_pc_poll_fn)(pm_pc *, uint32_t, pm_pc_dest_fn, pm_pc_done_fn, void *, char *, size_t);

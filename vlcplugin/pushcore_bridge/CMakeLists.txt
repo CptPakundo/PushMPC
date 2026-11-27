@@ -29,3 +29,11 @@ target_compile_definitions(pm_pc_abi_test PRIVATE UNICODE _UNICODE NOMINMAX WIN3
 target_compile_options(pm_pc_abi_test PRIVATE /W3 /EHsc /O2 /utf-8)
 target_include_directories(pm_pc_abi_test PRIVATE "${ROOT}/pushmpc/include")
 target_link_libraries(pm_pc_abi_test PRIVATE d3d11)
+
+# the Direct3D 11 output's pushcore upscaler (pm_pcsr_core.h) sharing the core with the filter, Auto's switch and the draw,
+# on WARP with the stub core: pm_pcsr_test <pm_pushcore.dll> <stub folder> <scratch folder>
+add_executable(pm_pcsr_test pm_pcsr_test.cpp)
+target_compile_definitions(pm_pcsr_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(pm_pcsr_test PRIVATE /W3 /EHsc /O2 /utf-8)
+target_include_directories(pm_pcsr_test PRIVATE . "${ROOT}/pushmpc/include" "${ROOT}/filter/src" "${ROOT}/kodiaddon/src/engine")
+target_link_libraries(pm_pcsr_test PRIVATE d3d11)

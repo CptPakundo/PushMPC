@@ -576,6 +576,13 @@ jobs:
           t=$(find bb -name pm_pc_abi_test.exe | head -1)
           mkdir -p abi-scratch
           timeout 180 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)" "$(cygpath -aw abi-scratch)"
+      - name: The Direct3D 11 output's pushcore upscaler sharing the core with the filter (Auto's switch, the draw) on WARP with the stub core
+        shell: bash
+        run: |
+          set -u
+          t=$(find bb -name pm_pcsr_test.exe | head -1)
+          mkdir -p pcsr-scratch
+          timeout 300 "$t" "$(cygpath -aw out/pm_pushcore.dll)" "$(cygpath -aw out/stub)" "$(cygpath -aw pcsr-scratch)"
       - name: PushMPC's content library (pushmpc_content.dll, MSVC; ContentDetect + the image model through pmml) and its CPU test
         shell: bash
         run: |

@@ -313,7 +313,7 @@ uint64_t CoreHost::Acquire(const CoreKey& key, const PushCoreStreamInfo& si, con
     m_key = key;
     m_owner = m_nextToken++;
     ms = double(GetTickCount64() - t0);
-    return m_owner;
+    return m_owner.load();
 }
 void CoreHost::Release(uint64_t token)
 {

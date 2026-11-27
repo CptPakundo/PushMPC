@@ -111,6 +111,10 @@ struct pm_pc {
     pme::D3D11ContentTap cdGpu;
     int cdState = 0;                 // 0 not set up, 1 running, -1 failed
     int measuredClass = 0, measuredCg = 0;
+    // pm_pc_measure_open: ContentDetect alone, on the caller's device and immediate context (no core taken)
+    bool measureOnly = false;
+    ComPtr<ID3D11DeviceContext> mctx;
+    HANDLE mmutex = nullptr;
 };
 
 static void SetErr(char* err, size_t n, const std::string& s) { if (err && n) { strncpy_s(err, n, s.c_str(), _TRUNCATE); } }
@@ -409,34 +413,10 @@ static bool AcquireFor(pm_pc* pc, Reuse& how, double& ms, std::string& e)
     return true;
 }
 
-static pm_pc* OpenImpl(const pm_pc_cfg* cfgIn, ID3D11Device* device, HANDLE mutex, int* kOut, char* err, size_t errsize)
+// Auto for this stream, up to the settings pushcore would get (the host loaded; no device, no core taken)
+static void Prepare(pm_pc* pc, const pm_pc_cfg* cfg)
 {
-    if (kOut) *kOut = 1;
-    pm_pc_cfg cfgv;
-    std::string e;
-    if (!ReadCfg(cfgIn, cfgv, e)) { SetErr(err, errsize, e); return nullptr; }
-    const pm_pc_cfg* cfg = &cfgv;
-    if (!(cfg->matrix == 1 || cfg->matrix == 9 || cfg->matrix == 10)) {
-        SetErr(err, errsize, std::format("pm_pushcore: matrix {} (SD / BT.601 sources stay on the portable engine)", cfg->matrix));
-        return nullptr;
-    }
     CoreHost& host = CoreHost::Get();
-    std::lock_guard<std::mutex> lk(host.Lock());
-    MutexLock vlc(mutex);   // with a player's device, its immediate context is the player's
-    HostPaths paths;
-    paths.coreDir = cfg->core_dir && *cfg->core_dir ? cfg->core_dir : DefaultCoreDir();
-    const std::wstring rt = LocalAppDataDir() + L"\\PushMPC\\runtime";
-    paths.runtimeDir = GetFileAttributesW(rt.c_str()) != INVALID_FILE_ATTRIBUTES ? rt : paths.coreDir;
-    const std::wstring sh = paths.coreDir + L"\\shaders";
-    if (GetFileAttributesW(sh.c_str()) != INVALID_FILE_ATTRIBUTES) paths.shaderDir = sh;
-    if (!host.Load(paths, e)) { SetErr(err, errsize, e); return nullptr; }
-    pm::VfgCeiling() = (host.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;   // VFG above 8x only with a core that has it
-    pm::PushFlowCeiling() = (host.Features() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;   // PushFlow above 4x (flow once) the same
-    if (device ? !host.AdoptDevice(device, e) : !host.EnsureDevice(0, cfg->warp ? AdapterPick::Warp : AdapterPick::Auto, e)) {
-        SetErr(err, errsize, e); return nullptr;
-    }
-
-    auto* pc = new pm_pc();
     pc->cfg = *cfg;
     pc->cfg.core_dir = nullptr;   // the caller's string is not kept
     pc->w = cfg->width; pc->h = cfg->height; pc->bits = cfg->bits;
@@ -467,6 +447,45 @@ static pm_pc* OpenImpl(const pm_pc_cfg* cfgIn, ID3D11Device* device, HANDLE mute
     pc->disp = pc->real;
     pc->disp.hdr = src.hdr;   // HDR sources stay HDR10 (the player presents them); SDR stays SDR
     Build(pc, *cfg, true, pc->c, pc->ps);
+}
+
+// the configuration's checks and the host's load (the open's first steps; pm_pc_decide stops after them)
+static bool LoadFor(const pm_pc_cfg* cfgIn, pm_pc_cfg& cfgv, std::string& e)
+{
+    if (!ReadCfg(cfgIn, cfgv, e)) return false;
+    if (!(cfgv.matrix == 1 || cfgv.matrix == 9 || cfgv.matrix == 10)) {
+        e = std::format("pm_pushcore: matrix {} (SD / BT.601 sources stay on the portable engine)", cfgv.matrix);
+        return false;
+    }
+    CoreHost& host = CoreHost::Get();
+    HostPaths paths;
+    paths.coreDir = cfgv.core_dir && *cfgv.core_dir ? cfgv.core_dir : DefaultCoreDir();
+    const std::wstring rt = LocalAppDataDir() + L"\\PushMPC\\runtime";
+    paths.runtimeDir = GetFileAttributesW(rt.c_str()) != INVALID_FILE_ATTRIBUTES ? rt : paths.coreDir;
+    const std::wstring sh = paths.coreDir + L"\\shaders";
+    if (GetFileAttributesW(sh.c_str()) != INVALID_FILE_ATTRIBUTES) paths.shaderDir = sh;
+    if (!host.Load(paths, e)) return false;
+    pm::VfgCeiling() = (host.Features() & PUSHCORE_FEATURE_VFG16) ? int(PUSHCORE_MAX_MULTIPLIER) : 8;   // VFG above 8x only with a core that has it
+    pm::PushFlowCeiling() = (host.Features() & PUSHCORE_FEATURE_PUSHFLOW16) ? int(PUSHCORE_MAX_MULTIPLIER) : 4;   // PushFlow above 4x (flow once) the same
+    return true;
+}
+
+static pm_pc* OpenImpl(const pm_pc_cfg* cfgIn, ID3D11Device* device, HANDLE mutex, int* kOut, char* err, size_t errsize)
+{
+    if (kOut) *kOut = 1;
+    pm_pc_cfg cfgv;
+    std::string e;
+    CoreHost& host = CoreHost::Get();
+    std::lock_guard<std::mutex> lk(host.Lock());
+    MutexLock vlc(mutex);   // with a player's device, its immediate context is the player's
+    if (!LoadFor(cfgIn, cfgv, e)) { SetErr(err, errsize, e); return nullptr; }
+    const pm_pc_cfg* cfg = &cfgv;
+    if (device ? !host.AdoptDevice(device, e) : !host.EnsureDevice(0, cfg->warp ? AdapterPick::Warp : AdapterPick::Auto, e)) {
+        SetErr(err, errsize, e); return nullptr;
+    }
+
+    auto* pc = new pm_pc();
+    Prepare(pc, cfg);
 
     PushCoreStreamInfo& si = pc->si;
     si.structSize = sizeof(si);
@@ -704,6 +723,7 @@ extern "C" int pm_pc_flush(pm_pc* pc)
 extern "C" void pm_pc_close(pm_pc* pc)
 {
     if (!pc) return;
+    if (pc->measureOnly) { delete pc; return; }   // never took the core
     {
         CoreHost& host = CoreHost::Get();
         std::lock_guard<std::mutex> lk(host.Lock());
@@ -715,3 +735,59 @@ extern "C" void pm_pc_close(pm_pc* pc)
 }
 
 extern "C" const char* pm_pc_describe(pm_pc* pc) { return pc ? pc->describe.c_str() : ""; }
+
+// ---- sharing the process's one pushcore (pm_pushcore.h: pm_pc_decide, pm_pc_busy, pm_pc_measure_*)
+extern "C" int pm_pc_decide(const pm_pc_cfg* cfgIn, int* kOut, char* err, size_t errsize)
+{
+    if (kOut) *kOut = 1;
+    pm_pc_cfg cfgv;
+    std::string e;
+    CoreHost& host = CoreHost::Get();
+    std::lock_guard<std::mutex> lk(host.Lock());
+    if (!LoadFor(cfgIn, cfgv, e)) { SetErr(err, errsize, e); return -1; }
+    auto pc = std::make_unique<pm_pc>();
+    Prepare(pc.get(), &cfgv);
+    const int k = int(std::clamp<uint32_t>(pc->ps.multiplier, 1, PUSHCORE_MAX_MULTIPLIER));
+    if (kOut) *kOut = k;
+    SetErr(err, errsize, std::format("Auto: x{} {}", k, Narrow(pm::FgMethodLabel(pc->c.fgMethod))));
+    Log(std::format("VLC: decided without opening: x{} {}", k, Narrow(pm::FgMethodLabel(pc->c.fgMethod))));
+    return 0;
+}
+
+extern "C" int pm_pc_busy(void) { return CoreHost::Get().Busy() ? 1 : 0; }
+
+extern "C" pm_pc* pm_pc_measure_open(const pm_pc_cfg* cfgIn, void* device, void* mutex, char* err, size_t errsize)
+{
+    pm_pc_cfg cfg;
+    std::string e;
+    if (!device) { SetErr(err, errsize, "no D3D11 device"); return nullptr; }
+    if (!ReadCfg(cfgIn, cfg, e)) { SetErr(err, errsize, e); return nullptr; }
+    if (cfg.width < 16 || cfg.height < 16) { SetErr(err, errsize, "pm_pushcore: no source size"); return nullptr; }
+    auto* dev = static_cast<ID3D11Device*>(device);
+    auto pc = std::make_unique<pm_pc>();
+    pc->cfg = cfg; pc->cfg.core_dir = nullptr;
+    pc->w = cfg.width; pc->h = cfg.height; pc->bits = cfg.bits;
+    pc->measureOnly = true;
+    pc->mmutex = static_cast<HANDLE>(mutex);
+    dev->GetImmediateContext(&pc->mctx);
+    std::string why;
+    if (!pc->mctx || !pc->cdGpu.Init(dev, pc->w, pc->h, pc->bits > 8, cfg.range != 2, why)) {
+        SetErr(err, errsize, "content not measured: " + (why.empty() ? std::string("no immediate context") : why)); return nullptr;
+    }
+    pc->cdTap = std::make_unique<pme::ContentTap>();
+    pc->cdState = 1;
+    pc->describe = std::format("ContentDetect alone on the player's device ({}x{}, {}-bit)", pc->w, pc->h, pc->bits);
+    Log("VLC: content measured on the GPU without pushcore (the player's textures: the cells only)");
+    return pc.release();
+}
+
+extern "C" int pm_pc_measure_push(pm_pc* pc, void* texture, unsigned slice, int64_t pts100ns, int discontinuity, char* err, size_t errsize)
+{
+    if (!pc || !pc->measureOnly || !pc->cdTap) { SetErr(err, errsize, "not a measuring instance (pm_pc_measure_open)"); return -1; }
+    if (!texture) { SetErr(err, errsize, "no texture"); return -1; }
+    MutexLock vlc(pc->mmutex);
+    pc->cdGpu.Record(pc->mctx.Get(), static_cast<ID3D11Texture2D*>(texture), slice, double(pts100ns) / 1e7, discontinuity != 0, *pc->cdTap);
+    const pme::ContentTap::Snapshot sn = pc->cdTap->Poll();
+    pc->measuredClass = sn.cls; pc->measuredCg = sn.cg ? 1 : 0;
+    return 0;
+}

@@ -61,7 +61,9 @@ public:
     // take the core for a new instance (open, reuse or reopen); returns the owner token (0 = failed)
     uint64_t Acquire(const CoreKey& key, const PushCoreStreamInfo& si, const PushCoreSettings& ps, Reuse& how, double& ms, std::string& err);
     void Release(uint64_t token);    // the instance is gone: return everything, keep the core warm
-    bool Owns(uint64_t token) const { return token && token == m_owner; }
+    bool Owns(uint64_t token) const { return token && token == m_owner.load(); }
+    // another instance holds the core now (lock-free: a caller that has no instance asks without waiting for Lock())
+    bool Busy() const { return m_owner.load() != 0; }
     const PushCoreOutputInfo& OutInfo() const { return m_out; }
     bool Stats(PushCoreStats& st);
     uint32_t Features() const { return m_features; }
@@ -137,7 +139,8 @@ private:
     int64_t m_handoverPts = 0, m_discardUpTo = INT64_MIN;
     uint64_t m_quickTick = 0;
     PushCoreOutputInfo m_out{};
-    uint64_t m_owner = 0, m_nextToken = 1;
+    std::atomic<uint64_t> m_owner{0};
+    uint64_t m_nextToken = 1;
     // ingress ring
     struct Up { ComPtr<ID3D11Texture2D> staging, tex; };
     std::vector<Up> m_up; size_t m_upNext = 0; uint32_t m_upW = 0, m_upH = 0; bool m_upP010 = false;
