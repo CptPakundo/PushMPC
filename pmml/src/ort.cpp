@@ -166,6 +166,14 @@ std::vector<PluginEp> pluginEps(const std::string& runtimeDir) {
     return v;
 }
 
+#if ORT_API_VERSION < 22
+// built against headers older than API 22: no plugin EPs (TensorRT-RTX, QNN, OpenVINO, WebGPU); see pmml/CMakeLists.txt
+#if defined(_MSC_VER)
+#pragma message("pmml: ONNX Runtime headers older than API 22: the plugin EPs (TensorRT-RTX, QNN, OpenVINO, WebGPU) are not built")
+#else
+#warning "pmml: ONNX Runtime headers older than API 22: the plugin EPs (TensorRT-RTX, QNN, OpenVINO, WebGPU) are not built"
+#endif
+#endif
 #if ORT_API_VERSION >= 22
 bool registerPlugins(Ort* ort, std::string* log) {
     if (ort->version < 22) return false;
@@ -325,6 +333,17 @@ void parseOptions(const std::string& text, std::vector<std::string>* keys, std::
     }
 }
 
+// an EP compiled into the loaded ONNX Runtime library itself ("NvTensorRtRtx" -> "NvTensorRtRtxExecutionProvider")
+bool builtIn(Ort* ort, const std::string& legacy) {
+    char** names = nullptr;
+    int n = 0;
+    if (OrtStatus* s = ort->api->GetAvailableProviders(&names, &n)) { ort->api->ReleaseStatus(s); return true; }   // unknown: let it try
+    bool found = false;
+    for (int i = 0; i < n && !found; ++i) found = std::string(names[i]).rfind(legacy, 0) == 0;
+    ort->api->ReleaseAvailableProviders(names, n);
+    return found;
+}
+
 bool appendEp(Ort* ort, OrtSessionOptions* so, const Options& o, EpChoice* choice, std::string* err) {
     const std::string& ep = o.backend.ep;
     std::vector<std::string> keys, vals;
@@ -419,9 +438,22 @@ bool appendEp(Ort* ort, OrtSessionOptions* so, const Options& o, EpChoice* choic
         return true;
     }
 #endif
-    // the same EPs built into the ONNX Runtime library itself (older ABI)
+    // the same EPs built into the ONNX Runtime library itself (older ABI), only where this library has them
     const char* legacy = ep == "openvino" ? "OpenVINO" : (ep == "qnn" || ep == "qnn-gpu") ? "QNN" : ep == "trt-rtx" ? "NvTensorRtRtx" : nullptr;
     if (!legacy) { if (err) *err = "unknown EP '" + ep + "'"; return false; }
+    if (!builtIn(ort, legacy)) {
+        if (err) {
+            const bool plugin = it != plugins.end();
+#if ORT_API_VERSION >= 22
+            *err = !plugin ? "no " + ep + " plugin EP in " + joinPath(ort->runtimeDir, "eps") + " and ONNX Runtime " + ort->versionString + " has no built-in " + legacy
+                           : "the " + it->epName + " plugin EP needs ONNX Runtime API 22+ (this library: " + std::to_string(ort->version) + ")";
+#else
+            *err = std::string(plugin ? "the " + it->epName + " plugin EP is installed, but this pmml was built against ONNX Runtime headers older than API 22 (no plugin EPs)"
+                                      : "no " + ep + " plugin EP installed") + "; ONNX Runtime " + ort->versionString + " has no built-in " + legacy;
+#endif
+        }
+        return false;
+    }
     if (ep == "openvino" && std::find(keys.begin(), keys.end(), "device_type") == keys.end()) { keys.push_back("device_type"); vals.push_back("GPU"); }
     if (ep == "qnn" || ep == "qnn-gpu") { keys.push_back("backend_type"); vals.push_back(ep == "qnn" ? "htp" : "gpu"); }
     auto k = cstrs(keys), v = cstrs(vals);
@@ -1013,6 +1045,7 @@ public:
     void reset() override { releaseValues(&prevX_); releaseValues(&fb_); releaseValues(&state_); }
     UpscaleStats stats() const override { return stats_; }
     std::string describe() const override { return describe_; }
+    void noteFallback(const std::string& why) { describe_ += "; instead of " + why; }
 
     bool run(const Frame& in, const OutFrame& out, std::string* err) override {
         if (rgba_) { if (err) *err = "this upscaler was created for RGBA8"; return false; }
@@ -1291,10 +1324,33 @@ std::unique_ptr<Interpolator> createOrt(const Options& o, std::string* err) {
     return p;
 }
 
+// The anime upscaler on the asked backend; when that cannot start (a GPU EP that does not register, no device, an EP
+// the library lacks), the other GPU EPs of the same ONNX Runtime library in quality order before giving up. Never
+// the CPU on its own (it is far from real time for these models), and never another flavor's library in this process.
 std::unique_ptr<Upscaler> createOrtUpscaler(const UpscaleOptions& o, std::string* err) {
+    std::string why;
     auto p = std::make_unique<OrtUpscaler>();
-    if (!p->init(o, err)) return nullptr;
-    return p;
+    if (p->init(o, &why)) return p;
+    std::string all = o.backend.ep + ": " + why;
+    if (o.backend.ep != "cpu" && envStr("PMML_NO_FALLBACK") != "1") {
+        std::vector<std::string> alts;
+        for (const char* id : {"trt-rtx", "openvino", "qnn-gpu", "qnn", "webgpu", "amdgpu"}) {
+            const std::string want = std::string(id) == "qnn-gpu" ? "qnn" : id;
+            for (const auto& pe : pluginEps(o.runtimeDir))
+                if (pe.id == want && id != o.backend.ep) { alts.push_back(id); break; }
+        }
+        if (o.backend.flavor == "directml" && o.backend.ep != "dml") alts.push_back("dml");
+        for (const std::string& ep : alts) {
+            UpscaleOptions a = o;
+            a.backend.ep = ep; a.backend.device = 0;
+            std::string w;
+            auto q = std::make_unique<OrtUpscaler>();
+            if (q->init(a, &w)) { q->noteFallback(o.backend.ep + " did not start (" + why + ")"); return q; }
+            all += "; " + ep + ": " + w;
+        }
+    }
+    if (err) *err = all;
+    return nullptr;
 }
 
 std::vector<DeviceInfo> listOrt(const std::string& runtimeDir, std::string* log) {

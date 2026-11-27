@@ -22,6 +22,25 @@ if(NOT _pmml_ort_first OR NOT EXISTS "${_pmml_ort_first}/onnxruntime_c_api.h")
   message(FATAL_ERROR "pmml: set PMML_ORT_INCLUDE to a folder with onnxruntime_c_api.h (pmml/scripts/fetch_runtime.py --headers)")
 endif()
 
+# The plugin EPs (TensorRT-RTX on RTX, QNN, OpenVINO, WebGPU: eps/<id>, ONNX Runtime 1.22+ / API 22+) are compiled
+# only against headers of API 22 or newer: older headers make a pmml whose TensorRT-RTX never starts (it then asks the
+# core library for a built-in "NvTensorRtRtx", which ort/core does not have). Said at configure; an error with
+# PMML_REQUIRE_PLUGIN_EPS (CI's release builds set it)
+option(PMML_REQUIRE_PLUGIN_EPS "fail the configure when the ONNX Runtime headers are older than API 22 (no plugin EPs)" OFF)
+file(STRINGS "${_pmml_ort_first}/onnxruntime_c_api.h" _pmml_api_line REGEX "^#define ORT_API_VERSION [0-9]+")
+string(REGEX MATCH "[0-9]+$" PMML_ORT_API "${_pmml_api_line}")
+if(NOT PMML_ORT_API)
+  message(WARNING "pmml: ORT_API_VERSION not found in ${_pmml_ort_first}/onnxruntime_c_api.h")
+elseif(PMML_ORT_API LESS 22)
+  if(PMML_REQUIRE_PLUGIN_EPS)
+    message(FATAL_ERROR "pmml: the ONNX Runtime headers in ${_pmml_ort_first} are API ${PMML_ORT_API}: the plugin EPs (TensorRT-RTX, QNN, OpenVINO, WebGPU) need API 22+ (scripts/ml-runtime-pin.json ort/core headers)")
+  endif()
+  message(WARNING "pmml: the ONNX Runtime headers in ${_pmml_ort_first} are API ${PMML_ORT_API}: this pmml has NO plugin EPs "
+                  "(TensorRT-RTX, QNN, OpenVINO, WebGPU never start; DirectML and CPU only). Use the pinned ort/core headers (API 22+).")
+else()
+  message(STATUS "pmml: ONNX Runtime headers API ${PMML_ORT_API} (plugin EPs built in)")
+endif()
+
 add_library(pmml STATIC src/common.cpp src/platform.cpp src/cpu.cpp src/ort.cpp src/autobench.cpp src/upscale.cpp)
 target_include_directories(pmml PUBLIC include PRIVATE src ${PMML_ORT_INCLUDE})
 find_package(Threads REQUIRED)

@@ -395,7 +395,7 @@ runs:
           "-DVEYRA_ONNXRUNTIME_ROOT=$env:DEPS\pushflow\ort" "-DVEYRA_DIRECTML_ROOT=$env:DEPS\pushflow\dml" `
           "-DPUSHMPC_SOURCE_DIR=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/pushmpc" `
           "-DCMAKE_PROJECT_INCLUDE=$($env:GITHUB_WORKSPACE.Replace('\','/'))/repo/cmake/msvc-loop-guard.cmake" `
-          "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" @nvof @dovi @vpl
+          "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" -DPMML_REQUIRE_PLUGIN_EPS=ON @nvof @dovi @vpl
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # only what PushMPC ships: every PushFPS shader target (the .dxil set), pushcore.dll, the HIP preflight child and
