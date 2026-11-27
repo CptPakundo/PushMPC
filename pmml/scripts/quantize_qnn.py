@@ -11,14 +11,16 @@ GPU ("qnn-gpu"): pmml backend "qnn-split".
      public Xiph derf clips CI already uses (never anyone's own media): the first --calib-frames of each clip, pairs 2
      and 4 frames apart, timesteps 0.25 / 0.5 / 0.75, at the network sizes of the tiers that use the model (fast: 540
      and 720 lines; quality: the clip's own size).
-  2. Quantisation, two variants: A8W8 (uint8 activations and weights: the HTP's fastest) and A16W8 (uint16 activations,
-     uint8 weights: ONNX Runtime's recommendation when 8-bit activations lose accuracy).
+  2. Quantisation, every variant, in the HTP's speed order: A8W8 (uint8 activations and weights: the fastest), the same
+     with per-channel weights, A16W8 (uint16 activations, uint8 weights: ONNX Runtime's recommendation when 8-bit
+     activations lose accuracy), A16W8 with per-channel weights, the same calibrated by percentile (99.999) instead of
+     min / max; A16W16 per-channel is measured for the record only (never written).
   3. The gate, on frames calibration never saw (the rest of each clip): the whole pmml pipeline (pack, network, synth)
      on the CPU EP with the fp16 network (what the NPU runs otherwise) and with each int8 network: PSNR-Y against the
      true middle frames (2x at t = 0.5, 4x at t = 0.25 / 0.5 / 0.75). A variant passes when its mean PSNR is at most
      --gate-db (0.3) below the fp16 network's on every clip's mean and overall, and above a frame repeat. The first
-     passing variant in the order A8W8, A16W8 is written; none passing writes the report with "pass": false (pmml then
-     never offers qnn-split).
+     passing variant in the order above is written; none passing writes the report with "pass": false (pmml then
+     never offers qnn-split for that model: it keeps its other paths).
 
   python -I quantize_qnn.py --models DIR --graphs DIR --clips a.y4m b.y4m ... --role fast|quality --out DIR
                             [--calib-frames 24] [--frames 48] [--gate-db 0.3]
@@ -229,6 +231,7 @@ def main() -> int:
     ap.add_argument("--calib-frames", type=int, default=24)
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--gate-db", type=float, default=0.3)
+    ap.add_argument("--variants", default="", help="comma-separated variant names (default: all)")
     a = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # CI tees this: keep the progress lines in order with ORT's stderr
     try:
@@ -273,7 +276,22 @@ def main() -> int:
     src = work / "static.onnx"
     folded = constants_to_initializers(pre if qnn_preprocess_model(str(fp32), str(pre)) else fp32, src)
     print(f"{folded} Constant nodes made initializers (Resize scales and other parameters stay exact)", flush=True)
-    variants = [("A8W8", QuantType.QUInt8, QuantType.QUInt8), ("A16W8", QuantType.QUInt16, QuantType.QUInt8)]
+    # every variant is quantised and measured (the report has each one's numbers); the first that passes in this order
+    # (the HTP's fastest first) is written. A16W16 is measured for the record only: whether the HTP runs 16-bit weights
+    # in every op of this network is not confirmed on a device, so it is never written.
+    from onnxruntime.quantization import CalibrationMethod
+    U8, U16 = QuantType.QUInt8, QuantType.QUInt16
+    mm, pct = CalibrationMethod.MinMax, CalibrationMethod.Percentile
+    variants = [
+        {"name": "A8W8", "act": U8, "wt": U8, "per_channel": False, "method": mm, "ship": True},
+        {"name": "A8W8-pc", "act": U8, "wt": U8, "per_channel": True, "method": mm, "ship": True},
+        {"name": "A16W8", "act": U16, "wt": U8, "per_channel": False, "method": mm, "ship": True},
+        {"name": "A16W8-pc", "act": U16, "wt": U8, "per_channel": True, "method": mm, "ship": True},
+        {"name": "A16W8-pc-p99999", "act": U16, "wt": U8, "per_channel": True, "method": pct, "ship": True},
+        {"name": "A16W16-pc", "act": U16, "wt": U16, "per_channel": True, "method": mm, "ship": False},
+    ]
+    if a.variants:
+        variants = [v for v in variants if v["name"] in a.variants.split(",")]
 
     # 3. the gate
     gate_tier = TIERS_OF_ROLE[a.role][0]
@@ -283,22 +301,28 @@ def main() -> int:
               "inputs": len(inputs)}, "held_out_frames_per_clip": a.frames - a.calib_frames, "gate_db": a.gate_db,
               "fp16": base, "variants": {}, "pass": False}
     print("fp16:", json.dumps(base))
-    for vname, act, wt in variants:
+    for v in variants:
+        vname = v["name"]
         qdq = work / f"{vname}.onnx"
-        cfg = get_qnn_qdq_config(str(src), make_reader(CalibrationDataReader, inputs, name), activation_type=act, weight_type=wt)
+        cfg = get_qnn_qdq_config(str(src), make_reader(CalibrationDataReader, inputs, name), calibrate_method=v["method"],
+                                 activation_type=v["act"], weight_type=v["wt"], per_channel=v["per_channel"])
+        if v["method"] == CalibrationMethod.Percentile:
+            cfg.extra_options["CalibPercentile"] = 99.999
         quantize(str(src), str(qdq), cfg)
         check_static_params(qdq)
         res = evaluate(models, graphs, clips, gate_tier, qdq)
         losses = {c: base[c]["psnr"] - res[c]["psnr"] for c in res}
         overall = float(np.mean([base[c]["psnr"] for c in res]) - np.mean([res[c]["psnr"] for c in res]))
         ok = all(l <= a.gate_db for l in losses.values()) and overall <= a.gate_db and all(res[c]["psnr"] > res[c]["repeat"] for c in res)
-        report["variants"][vname] = {"result": res, "loss_db": {c: round(l, 3) for c, l in losses.items()}, "loss_overall_db": round(overall, 3), "pass": ok}
-        print(f"{vname}: loss {overall:.3f} dB overall, per clip {json.dumps({c: round(l, 3) for c, l in losses.items()})}: {'PASS' if ok else 'FAIL'}")
-        if ok:
+        report["variants"][vname] = {"result": res, "loss_db": {c: round(l, 3) for c, l in losses.items()}, "loss_overall_db": round(overall, 3),
+                                     "pass": ok, "shippable": v["ship"], "per_channel": v["per_channel"], "calibration": v["method"].name}
+        print(f"{vname}: loss {overall:.3f} dB overall, per clip {json.dumps({c: round(l, 3) for c, l in losses.items()})}: "
+              f"{'PASS' if ok else 'FAIL'}{'' if v['ship'] else ' (measured only, never written)'}")
+        if ok and v["ship"] and not report["pass"]:
             dst = out / f"pushflow-{a.role}-qdq.onnx"
             dst.write_bytes(qdq.read_bytes())
             report.update({"pass": True, "variant": vname, "file": dst.name, "sha256": sha256(dst)})
-            break
+        qdq.unlink(missing_ok=True)
     (out / f"pushflow-{a.role}-qdq.json").write_text(json.dumps(report, indent=2))
     write_licence(models, out, report)
     print("PASS" if report["pass"] else "FAIL: no int8 variant within the gate; qnn-split stays off for this model")
