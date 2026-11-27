@@ -634,7 +634,9 @@ jobs:
           ctrln=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$RUNNER_TEMP/control.mkv" 2>/dev/null | tr -d '\r')
           echo "control: mpv alone ${ctrln:-?} frames (source $srcn by ffprobe); PushMPC $outn"
           [ -n "$ctrln" ] && [ "$ctrln" -gt 0 ] || { echo "::error::the control encode (mpv alone) gave no frame count"; tail -20 "$RUNNER_TEMP/control.txt"; exit 1; }
-          [ "$outn" -ge $((2 * ctrln - 4)) ] && [ "$outn" -le $((2 * ctrln + 2)) ] || { echo "::error::mpv output has $outn frames for $ctrln frames from mpv alone (want about x2)"; exit 1; }
+          # exactly x2: the end guard (eof_guard.h) and buffered-frames 8 give an unknown-length stream the known-length count
+          # (N x k) on every route; the old range allowed the last frames' loss (Intel ml: 599 of 600 with buffered-frames 4)
+          [ "$outn" -eq $((2 * ctrln)) ] || { echo "::error::mpv output has $outn frames for $ctrln frames from mpv alone (want exactly $((2 * ctrln)))"; exit 1; }
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
           # PushFlow through pmml (the ml backend) with Homebrew's ONNX Runtime (CoreML; the VM has no GPU for it, so the
           # CPU may run it): pushmpc-setup put the runtime in ~/.local/share/pushmpc/pmml

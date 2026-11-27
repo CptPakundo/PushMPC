@@ -105,7 +105,7 @@ restore_file() {
 # ------------------------------------------------------------------------------------------------ the block as options
 vf_option() {
     case $1 in *']'*) n=$(printf '%s' "$1" | wc -c | tr -d ' '); q="%$n%$1" ;; *) q="[$1]" ;; esac
-    printf '@pushmpc:vapoursynth=file=%s:buffered-frames=4:concurrent-frames=2' "$q"
+    printf '@pushmpc:vapoursynth=file=%s:buffered-frames=8:concurrent-frames=2' "$q"
 }
 mpvconf() { sh "$mi" "$1" --conf "$2" --script "$3" $( [ "$dry" = 1 ] && echo --dry-run ) ${4:-} | sed 's/^/  /'; }
 # a value for mpv's options: plain when simple, else %n% (byte length) quoted

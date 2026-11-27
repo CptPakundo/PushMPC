@@ -11,7 +11,7 @@
 #   ${XDG_CONFIG_HOME:-~/.config}/mpv/mpv.conf (mpv on Linux and macOS; Celluloid and IINA can read the same file, see
 #   below). A marked block goes at the very top (before any [profile], so it is global):
 #     # >>> PushMPC managed ...
-#     vf-append=@pushmpc:vapoursynth=file=[<pushmpc.vpy>]:buffered-frames=4:concurrent-frames=2
+#     vf-append=@pushmpc:vapoursynth=file=[<pushmpc.vpy>]:buffered-frames=8:concurrent-frames=2
 #     hwdec=auto-copy            (VapourSynth gets CPU frames only: copy-back decoding)
 #     hr-seek-framedrop=no       (no dropped frames around a seek: the filter sees a continuous stream)
 #     interpolation=no           (mpv's own frame blending would fight the generated frames)
@@ -36,7 +36,7 @@ END_MARK='# <<< PushMPC managed'
 
 action=${1:-}
 [ $# -gt 0 ] && shift
-script=''; conf=''; buffered=4; concurrent=2; dry=0; extra=''; direct=0
+script=''; conf=''; buffered=8; concurrent=2; dry=0; extra=''; direct=0   # buffered: see pushmpc.lua (the request window)
 while [ $# -gt 0 ]; do
     case $1 in
         --script) script=$2; shift 2 ;;

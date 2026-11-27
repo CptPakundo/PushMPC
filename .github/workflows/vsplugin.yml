@@ -104,7 +104,7 @@ jobs:
           $stub = "$PWD\vsplugin\bin\stub".Replace('\', '/')
           $vpy = "$t\pushmpc.vpy".Replace('\', '/')
           & "$env:MPVDIR\mpv.com" --no-config --vo=null --ao=null --hwdec=no --hr-seek-framedrop=no --interpolation=no `
-            "--vf=vapoursynth=file=[$vpy]:buffered-frames=4:concurrent-frames=2:user-data=[adapter=warp,core_dir=$stub,smoother=$env:K,sharper=off]" `
+            "--vf=vapoursynth=file=[$vpy]:buffered-frames=8:concurrent-frames=2:user-data=[adapter=warp,core_dir=$stub,smoother=$env:K,sharper=off]" `
             "--script=$PWD\vsplugin\tests\ci\seek.lua" --msg-level=all=v "$t\clip.y4m" 2>&1 | Tee-Object "$t\mpv.log" | Select-String 'vapoursynth|pushmpc-ci|Error' | Select-Object -Last 40
           $mlog = Get-Content "$t\mpv.log" -Raw
           if ($mlog -notmatch 'pushmpc-ci: estimated-vf-fps=([\d.]+)') { throw 'mpv did not report the filter rate' }
