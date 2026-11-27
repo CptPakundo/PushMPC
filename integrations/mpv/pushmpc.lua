@@ -33,7 +33,7 @@ local options = require 'mp.options'
 -- a request at or past in_frameno + buffered-frames drops the oldest decoded frames). One output asks for source s .. s + 1
 -- + 3 (the pair and the Dedup / held-drawing-repair lookahead of 3, every portable and ml route), and with
 -- concurrent-frames = 2 the next output may already ask from s + 1: s .. s + 5, 6 frames. 8 leaves 2 for a short gap the
--- pipeline fills in (schedule.h kMaxGap). With 4, the ml route lost the last source frame (Homebrew Intel: 599 of 600).
+-- pipeline fills in (schedule.h kMaxGap). (The Homebrew Intel 599 of 600 was not this but the late add, see on_preloaded.)
 -- Cost: 8 decoded frames held instead of 4 (4K 10-bit: about 25 MB each); no added latency (mpv decodes on demand).
 local opts = { vpy = "", buffered = "8", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
                shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "", ["anime-shaders"] = "", ["anime-share"] = "0.35",
@@ -520,9 +520,10 @@ local function remove_native()
     end
 end
 
-local function ensure()
+local function ensure(early)
     if busy then return end
-    if mp.get_property_native("video-params") == nil then return end   -- only once video runs: soft failure
+    -- early (the on_preloaded hook below): before any frame is decoded; else only once video runs (soft failure)
+    if not early and mp.get_property_native("video-params") == nil then return end
     local path = mp.get_property("path")
     if failed_for ~= nil and failed_for == path then return end
     local vf = mp.get_property_native("vf") or {}
@@ -567,7 +568,7 @@ local function ensure()
             busy = false
             return
         end
-        msg.info("PushMPC's filter added")
+        msg.info("PushMPC's filter added" .. (early and " before the first frame" or " while video runs"))
         vs_status_watch()
     end
     if opts["drop-d3d11vpp"] == "yes" then
@@ -589,3 +590,15 @@ mp.register_event("file-loaded", function()
 end)
 mp.observe_property("video-params", "native", function() ensure() end)
 mp.observe_property("vf", "native", function() ensure() end)
+
+-- the filter goes in before the decoder starts, so the first frame passes through it too. Added once video already
+-- runs, mpv could hand the first frame on unfiltered (Homebrew Intel, ml: the instance saw 299 of 300 frames, and its
+-- "EOF" for frame 299 was right for it; 599 outputs instead of 600, now and then). mpv disables a filter that fails
+-- ("Disabling filter ... because it has failed"), so video keeps playing. Before decoding there is no video-params:
+-- the plugin opens with its colour guess and checks it at the first real frame (matrix and range).
+mp.add_hook("on_preloaded", 50, function()
+    if native then return end   -- the native filter keeps its own timing (not this lane's; left as it was)
+    for _, t in ipairs(mp.get_property_native("track-list") or {}) do
+        if t.type == "video" and not t.albumart and not t.image then ensure(true); return end
+    end
+end)
