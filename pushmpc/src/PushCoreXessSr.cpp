@@ -296,7 +296,7 @@ void srDestroy(void* ctx) {
     delete c;
 }
 const char* srVersion(void* ctx) { return ctx ? static_cast<SrContext*>(ctx)->version.c_str() : "XeSS SR"; }
-#ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE   // the slot (the XeSS hunks of patches/pushfps-4.5.4-pushmpc.patch); without it XeSS SR reports "no slot"
+#ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE   // the slot (the XeSS hunks of patches/pushfps-4.5.5-pushmpc.patch); without it XeSS SR reports "no slot"
 veyra::gfx::FsrSrBackend::ProviderOverride gProvider{&srCreate, &srEvaluate, &srDestroy, &srVersion, &gSrQuality};
 #endif
 }  // namespace

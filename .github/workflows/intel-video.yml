@@ -18,7 +18,7 @@ on:
     branches: ['track/vendor-intelvp', 'track/vendor-xess']
     paths: ['.github/workflows/intel-video.yml', 'pushmpc/src/PushCoreD3D11Bridge.*', 'pushmpc/src/PushCoreIntelVsr.*', 'pushmpc/src/PushCoreVplFi.*',
             'pushmpc/src/PushCoreIntel.*', 'pushmpc/src/PushCoreXe*', 'pushmpc/src/PushCoreSelfTest.*', 'pushmpc/tools/pushcore_selftest.cpp',
-            'patches/pushfps-4.5.4-pushmpc.patch', 'scripts/xess-fetch.ps1', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp',
+            'patches/pushfps-4.5.5-pushmpc.patch', 'scripts/xess-fetch.ps1', 'filter/src/PushMpcAuto.h', 'filter/tools/auto_test.cpp',
             'tests/intel-*-manual.ps1', 'tests/xess-fg-manual.ps1']
   workflow_dispatch:
 # a push whose commit message contains [libvpl only] builds and uploads only libvpl's install (a developer convenience)

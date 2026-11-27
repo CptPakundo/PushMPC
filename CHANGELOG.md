@@ -49,7 +49,7 @@ sets itself up for your graphics card and display.
 - Updates on Windows: at most one check a day, only changed parts downloaded, installed when the player is closed, and
   an automatic step back if a new version fails to load.
 
-Built on PushFPS 4.5.4 and Veyra 2.2.1.
+Built on PushFPS 4.5.5 and Veyra 2.2.1.
 
 ### Known limits
 

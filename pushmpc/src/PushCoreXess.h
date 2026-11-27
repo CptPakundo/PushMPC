@@ -124,7 +124,7 @@ XefgSelfTestResult xefgSelfTest(uint64_t adapterLuid, bool warp, uint32_t multip
 // quality 1..4 = PushMPC's sharpening levels: Performance, Balanced, Quality, Ultra Quality (the XeSS preset whose input
 // range holds the real scale; Native AA when the source is at the output size).
 const void* srProvider(uint32_t quality);
-// this build has FsrSrBackend's provider slot (PushFPS with patches/pushfps-4.5.4-xess.patch)
+// this build has FsrSrBackend's provider slot (PushFPS with the XeSS hunks of patches/pushfps-4.5.5-pushmpc.patch)
 bool srProviderBuilt();
 struct XessSrSelfTestResult {
     bool ran = false, passed = false;

@@ -1,6 +1,6 @@
 # PushFPS portable core (motion estimation, interpolation, Subtitle Hold)
 
-- **What:** `include/veyra/portable/{Image,Motion,Interpolate,CrosshairHold,Dedup,HudLock}.h`, `src/{Motion,Interpolate,CrosshairHold}.cpp` (directory `portable/core`) and `include/veyra/pipeline/PushOverlay.h` (the Crosshair / Subtitle Hold rule, from the repository's `include/`), copied unmodified (byte for byte, upstream line endings) from PushFPS **v4.5.3** (commit `731589e2`, portable core 0.3.0).
+- **What:** `include/veyra/portable/{Image,Motion,Interpolate,CrosshairHold,Dedup,HudLock}.h`, `src/{Motion,Interpolate,CrosshairHold}.cpp` (directory `portable/core`) and `include/veyra/pipeline/PushOverlay.h` (the Crosshair / Subtitle Hold rule, from the repository's `include/`), copied unmodified (byte for byte, upstream line endings) from PushFPS **v4.5.3** (commit `731589e2`, portable core 0.3.0); byte for byte the same in v4.5.4 and v4.5.5 (`a8a79d53`, compared 2026-11-27).
 - **License:** GPL-3.0-or-later. Copyright (C) 2026 DosukaSOL and the PushFPS contributors; PushFPS is a modified version of Veyra. The full licence text is in `LICENSE`.
 - **Used by:** the `portable` backend of `pushmpc.Enhance`:
   - the CPU engine (`vsplugin/engines/portable/`) uses the hierarchical block motion estimation and its scene-cut rule as they are; `Interpolate.cpp` is the reference its planar YUV port follows (`portable_test` compares the two);

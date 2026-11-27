@@ -48,11 +48,11 @@ $ProgressPreference = 'SilentlyContinue'
 
 # capture mode's PushFPS (the release PushMPC's engine is built from)
 $PushFps = @{
-    Version = '4.5.4'
-    Asset   = 'PushFPS-4.5.4-win64.zip'
-    Url     = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip'
-    Sha256  = '4BF3FE869EB8A2CA579DD7ADE849C0C6CB2BF959F1A434FD53849F8E715F0AF5'
-    Size    = 138574882
+    Version = '4.5.5'
+    Asset   = 'PushFPS-4.5.5-win64.zip'
+    Url     = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.5/PushFPS-4.5.5-win64.zip'
+    Sha256  = 'EE58E9CEE35B09E1B2A728011737604DF20D6549226F96C8DB74CD8ED250468C'
+    Size    = 138576848
 }
 $CaptureDir = Join-Path $InstallDir 'capture'
 $AppDir = Join-Path $CaptureDir 'PushFPS'
@@ -125,7 +125,7 @@ function Install-PushFps {
 }
 
 # PushFPS versions whose positional screen: URI start was checked; others get the window picker (--dialog screen)
-$TestedPushFps = @('4.5.3', '4.5.4')   # 4.5.4: no change to the URI start (v4.5.3..v4.5.4 diff)
+$TestedPushFps = @('4.5.3', '4.5.4', '4.5.5')   # 4.5.4, 4.5.5: no change to the URI start (v4.5.3..v4.5.5 diffs)
 function Get-PushFpsVersion([string]$exe) {
     $vf = Join-Path (Split-Path $exe) 'PushFPS-VERSION.txt'
     if (Test-Path -LiteralPath $vf) { $m = [regex]::Match((Get-Content -LiteralPath $vf -Raw), '\d+\.\d+\.\d+'); if ($m.Success) { return $m.Value } }

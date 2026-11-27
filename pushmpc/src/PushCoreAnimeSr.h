@@ -1,6 +1,6 @@
 #pragma once
 // PushMPC: the anime upscalers (srMethod PUSHCORE_SR_METHOD_PMML, PUSHCORE_FEATURE_ANIME_SR) in the graph's RTX VSR slot
-// (EnhanceGraphDesc::externalSr, the external SR hunks of patches/pushfps-4.5.4-pushmpc.patch). ArtCNN (MIT), CuNNy (LGPL-3.0, a
+// (EnhanceGraphDesc::externalSr, the external SR hunks of patches/pushfps-4.5.5-pushmpc.patch). ArtCNN (MIT), CuNNy (LGPL-3.0, a
 // separate replaceable component: its weights file + graph), AnimeSR v2 (Apache-2.0) run through pmml (ONNX Runtime:
 // TensorRT-RTX on NVIDIA RTX, DirectML on any DirectX 12 GPU) on the graph's encoded RGBA8 picture:
 //   copyIn  records a copy of the picture into a buffer;

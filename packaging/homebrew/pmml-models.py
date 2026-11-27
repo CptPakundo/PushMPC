@@ -12,8 +12,8 @@ import sys
 import urllib.request
 import zipfile
 
-ZIP_URL = "https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.4/PushFPS-4.5.4-win64.zip"
-ZIP_SHA = "4bf3fe869eb8a2ca579dd7ade849c0c6cb2bf959f1a434fd53849f8e715f0af5"
+ZIP_URL = "https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.5/PushFPS-4.5.5-win64.zip"
+ZIP_SHA = "ee58e9cee35b09e1b2a728011737604df20d6549226f96c8db74cd8ed250468c"
 
 
 def sha(p: pathlib.Path) -> str:

@@ -38,7 +38,7 @@ set DOVI=-DVEYRA_ENABLE_LIBDOVI=OFF
 if exist "%DEPS%\libdovi\bin\dolby_vision.dll" set "DOVI=-DVEYRA_ENABLE_LIBDOVI=ON "-DVEYRA_LIBDOVI_ROOT=%DEPS%\libdovi""
 set PMML=
 if exist "%DEPS%\pmml\ort\core\include" set "PMML="-DPUSHMPC_PMML_ORT_INCLUDE=%DEPS:\=/%/pmml/ort/core/include""
-set PUSHFPS_DISPLAY_VERSION=4.5.4-pushmpc
+set PUSHFPS_DISPLAY_VERSION=4.5.5-pushmpc
 for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Get-Content '%REPO%\scripts\pushfps-pin.json' -Raw | ConvertFrom-Json).pushfps.displayVersion" 2^>nul`) do set "PUSHFPS_DISPLAY_VERSION=%%v"
 set PUSHMPC_CFG_NEW=-DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=%FFMPEG%" ^
   -DVEYRA_BUILD_QML_UI=OFF -DVEYRA_BUILD_QT_PROBE=OFF -DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON -DVEYRA_ENABLE_D3D12_DEBUG=OFF ^

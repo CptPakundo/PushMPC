@@ -52,7 +52,7 @@
 #include "veyra/pipeline/GpuPassUtils.h"
 #include "veyra/pushflow/PushFlowBackend.h"
 #include "veyra/gfx/AmfFrcBackend.h"
-#include "veyra/gfx/FsrFgPresenter.h"   // VEYRA_FSR_PAIR_API: the anime FSR pair hunks of patches/pushfps-4.5.4-pushmpc.patch
+#include "veyra/gfx/FsrFgPresenter.h"   // VEYRA_FSR_PAIR_API: the anime FSR pair hunks of patches/pushfps-4.5.5-pushmpc.patch
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/ngx/NvOfSession.h"          // builtWithSdk: the NVOF frame generation capability
 #include "PushCoreSelfTest.h"                // pushcore_features: the registered vendor methods' bits
@@ -1104,7 +1104,7 @@ struct PushCore {
             break;
         case PUSHCORE_FG_PUSHFLOW:
             s.frameGenerationBackend = FrameGenerationBackend::PushFlow;
-            cap = PUSHCORE_MAX_MULTIPLIER;   // flow once above 4x (the PushFlow 16x hunks of patches/pushfps-4.5.4-pushmpc.patch)
+            cap = PUSHCORE_MAX_MULTIPLIER;   // flow once above 4x (the PushFlow 16x hunks of patches/pushfps-4.5.5-pushmpc.patch)
             break;
         case PUSHCORE_FG_XEFG:
             // G10: PushFPS's XeSS present-sink mode (the graph makes the real frames at the output size and the motion its
@@ -1676,20 +1676,20 @@ struct PushCore {
         // graph is described (instances in one process describe their graphs one at a time, under the open / reload path).
         veyra::pipeline::overlay::setWanted(false);
         // Anime round 5 (item 4): the sign hold is that Subtitle Hold pass over the whole picture with PushFPS's text gate
-        // (patch pushfps-4.5.4-anime-signs: overlay::signZoneFor / signGate), for PUSHCORE_HOLD_SIGNS; it composes only
+        // (the anime signs hunks of patches/pushfps-4.5.5-pushmpc.patch: overlay::signZoneFor / signGate), for PUSHCORE_HOLD_SIGNS; it composes only
         // while the picture is animation and the budget has room (signsPoll below).
         signsOn = haveSettings && (settings.holdFlags & PUSHCORE_HOLD_SIGNS) != 0 && settings.heldFrames != 0;
 #ifdef PUSHFPS_ANIME_SIGNS
         veyra::pipeline::overlay::setSignsWanted(signsOn);
 #ifdef PUSHFPS_SIGN_GATE_CHOICE
-        // which text gate (patches/pushfps-4.5.4-pushmpc.patch): the caller's per-class choice
+        // which text gate (patches/pushfps-4.5.5-pushmpc.patch): the caller's per-class choice
         veyra::pipeline::overlay::setSignsStrict((settings.holdFlags & PUSHCORE_HOLD_SIGNS_STRICT) != 0);
 #endif
 #else
         signsOn = false;   // a PushFPS without the anime signs hunks: no sign zone
 #endif
         veyra::pipeline::overlay::setSubtitlesWanted(haveSettings && (settings.subtitleHold != 0 || signsOn));
-        // item 6: NVOF FG line-art protection (patch pushfps-4.5.4-anime-nvof-line: PushMpcLinePass after FidelityFX's blend);
+        // item 6: NVOF FG line-art protection (the NVOF line hunks of patches/pushfps-4.5.5-pushmpc.patch: PushMpcLinePass after FidelityFX's blend);
         // the graph makes it only for NVOF FG, it composes on animation while the budget has room (signsPoll below)
         lineNvofOn = haveSettings && (settings.holdFlags & PUSHCORE_HOLD_LINE_ART) != 0 && settings.heldFrames != 0;
 #ifdef PUSHMPC_NVOF_LINE_PASS
@@ -1841,7 +1841,7 @@ struct PushCore {
                 cache = &ownCache;
             }
         }
-        // G11: the worker takes the graph's RTX VSR pass (the external SR hunks of patches/pushfps-4.5.4-pushmpc.patch: EnhanceGraphDesc::externalSr)
+        // G11: the worker takes the graph's RTX VSR pass (the external SR hunks of patches/pushfps-4.5.5-pushmpc.patch: EnhanceGraphDesc::externalSr)
         zludaSr.reset();
         if (zludaRun) { zludaSr = std::make_shared<pushmpc::ZludaVsrSr>(*zvsr); gd.externalSr = zludaSr; }
         graph = std::make_unique<pipeline::EnhanceGraph>(ctx, ring, cache);
