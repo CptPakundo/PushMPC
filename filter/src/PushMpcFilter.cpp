@@ -2193,6 +2193,7 @@ public:
     {
         const int64_t q0 = Qpc();
         StopThreads();
+        ReleaseLate();   // a late reload is adopted only while this file plays
         DrainCore(true);
         Log(std::format("StopStreaming: threads joined, pushcore drained in {:.1f} ms", QpcMs(Qpc() - q0)));
         return S_OK;
@@ -2545,6 +2546,12 @@ private:
     }
     void AdmissionTick();
     void DoReload(bool forced);
+    // F-T1 follow-up: a reload abandoned after 20 s that later succeeds is adopted (AdoptLate, on the copier) while this
+    // file still plays on the source frames; given up at Stop, close and a lost device
+    std::shared_ptr<pm::reload::Late> m_late;
+    pm::reload::Hooks ReloadHooks();
+    void AdoptLate();
+    void ReleaseLate() { if (m_late) { pm::reload::ReleaseLate(m_late, m_api, ReloadHooks()); m_late.reset(); } }
     // --- Auto (PushMpcAuto.h): decided at connect/open, re-evaluated once a second on its own thread
     bool LegacyMode() const { return !m_rt.dataDir.empty(); }
     pm::Source SourceInfo();
@@ -3779,6 +3786,7 @@ void CPushMpcFilter::DrainCore(bool flush)
 }
 void CPushMpcFilter::CloseCore()
 {
+    ReleaseLate();
     bool quickPending = false;
     if (m_job) {
         std::lock_guard<std::mutex> lk(m_job->lock);
@@ -3888,7 +3896,7 @@ bool CPushMpcFilter::DeviceGone()
 // where: 1 = pushcore reported it, 2 = our device (shared with MPC-VR) is gone
 void CPushMpcFilter::DeviceLost(int where, const std::string& what)
 {
-    if (m_deviceLostSeen.exchange(true)) return;
+    if (m_deviceLostSeen.exchange(true)) return;   // a late reload (m_late) is not adopted after this (AdoptLate), released at the stop
     const bool gone = where == 2 || DeviceGone();
     Log(std::format("device lost ({}); the shared D3D11 device {}", what, gone ? "is gone: MPC-HC is asked to reopen the file" : "still works: source format"));
     m_faulted = true;
@@ -4299,6 +4307,7 @@ void CPushMpcFilter::CopierLoop()
             WaitForSingleObject(m_hWake, 1);
             continue;
         }
+        if (m_late && m_mode == Mode::PassD3D) AdoptLate();
         if (m_mode != Mode::Active || m_faulted) { WaitForSingleObject(m_hSubmit, 5); continue; }
         if (!m_quickPhase && m_settingsPending.exchange(false)) {
             PushCoreSettings ps;
@@ -5621,6 +5630,46 @@ void CPushMpcFilter::WatcherLoop()
 }
 // Copier thread. First PushFPS's live path (pushcore_applySettings: no rebuild, nothing dropped); a change of the
 // graph's shape rebuilds (1-3 s, more when the NGX key changes) while Receive delivers the source frames converted.
+pm::reload::Hooks CPushMpcFilter::ReloadHooks()
+{
+    pm::reload::Hooks hooks;
+    hooks.close = &SehClose; hooks.log = &Log; hooks.spawn = DetachSpawn();
+    hooks.quit = [this] { return m_quit.load(); };
+    hooks.tick = [this] { if (m_flushing) m_copierAck = m_flushGen.load(); };   // the copier's flush acknowledgement (EndFlush waits for it)
+    hooks.keep = [this] { return !m_faulted && m_mode == Mode::Active; };       // under m_coreLock
+    hooks.describe = &DescribePhase;                                             // pushcore's step, logged when a reload is stuck
+    return hooks;
+}
+// Copier thread, on the source frames after a reload abandoned at the timeout: when that reload succeeded after all, its
+// graph takes over (as a reload that finished in time would have), for the rest of this file
+void CPushMpcFilter::AdoptLate()
+{
+    PushCoreOutputInfo oi = {};
+    double ms = 0;
+    PushCore* c = pm::reload::TakeLate(*m_late, &oi, &ms);
+    if (!c) return;
+    m_late.reset();
+    if (m_deviceLostSeen || DeviceGone()) { CloseAsync(m_api, c, "pushcore (a late reload, device lost)"); return; }
+    {
+        std::lock_guard<std::mutex> lk(m_coreLock);
+        if (m_core) { CloseAsync(m_api, c, "pushcore (a late reload, another instance runs)"); return; }
+        m_core = c;
+        m_coreDisc = true; m_lastSubmitPts = INT64_MIN; m_discardUpTo = INT64_MIN;
+    }
+    { std::lock_guard<std::mutex> sl(m_sideLock); m_sideByPts.clear(); }
+    m_oi = oi;
+    m_mult = oi.multiplier ? oi.multiplier : 1;
+    { std::lock_guard<std::mutex> l2(m_srvLock); m_srvs.clear(); }
+    { OutFmt cur; { std::lock_guard<std::mutex> lk(m_fmtLock); cur = m_outFmt; } RequestOutFmt({ cur.fmt, oi.width, oi.height }, "a late settings reload (size only)"); }
+    ++m_reloads;
+    m_admHistN = 0; m_admGrace = 2;
+    m_waitOutQpc = 0; m_activeQpc = Qpc();   // the no-output guard counts from now
+    { std::lock_guard<std::mutex> al(m_autoLock); m_autoTimings.clear(); m_graphGen++; m_graphQpc = Qpc(); }
+    m_faulted = false;
+    m_mode = Mode::Active;
+    Log(std::format("settings reload: the late reload ({:.0f} ms) is taken over: {}; output {}x{} x{}", ms, oi.description, oi.width, oi.height, oi.multiplier));
+    SetStatus(L"active: " + Widen(oi.description) + std::format(L" (settings reloaded {}x, late)", m_reloads));
+}
 void CPushMpcFilter::DoReload(bool forced)
 {
     const int64_t t0 = Qpc();
@@ -5656,23 +5705,20 @@ void CPushMpcFilter::DoReload(bool forced)
     // The reload runs on its own thread with the core lock released (the source frames are shown meanwhile; Receive,
     // the deliverer, EndFlush and Stop never wait for it); a Stop gives it 1 s, then abandons it (its thread closes the
     // instance); after 20 s it is abandoned too and the source frames stay (no frozen picture, no hung player).
-    pm::reload::Hooks hooks;
-    hooks.close = &SehClose; hooks.log = &Log; hooks.spawn = DetachSpawn();
-    hooks.quit = [this] { return m_quit.load(); };
-    hooks.tick = [this] { if (m_flushing) m_copierAck = m_flushGen.load(); };   // the copier's flush acknowledgement (EndFlush waits for it)
-    hooks.keep = [this] { return !m_faulted && m_mode == Mode::Active; };       // under m_coreLock
-    hooks.describe = &DescribePhase;                                             // pushcore's step, logged when a reload is stuck
-    const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, hooks, pm::reload::Limits{});
+    ReleaseLate();   // an older late reload is not wanted any more
+    const pm::reload::Result rr = pm::reload::Run(m_api, m_coreLock, m_core, retired, ReloadHooks(), pm::reload::Limits{});
     { std::lock_guard<std::mutex> lk(m_coreLock); m_coreDisc = true; m_lastSubmitPts = INT64_MIN; }
     int r = rr.r;
     const PushCoreOutputInfo oi = rr.oi;
     if (rr.how == pm::reload::Outcome::Stopped || rr.how == pm::reload::Outcome::TimedOut) {
         const bool stopped = rr.how == pm::reload::Outcome::Stopped;
-        Log(std::format("settings reload {} after {:.0f} ms: abandoned, its thread closes the instance when pushcore returns; the source frames are shown",
-            stopped ? "still running at Stop" : "did not finish", rr.totalMs));
+        Log(std::format("settings reload {} after {:.0f} ms: abandoned; the source frames are shown{}",
+            stopped ? "still running at Stop" : "did not finish", rr.totalMs,
+            stopped ? "; its thread closes the instance when pushcore returns" : "; should it still succeed, its graph is taken over then (this file)"));
         m_reloading = false;
         m_faulted = true;
-        Fallback(stopped ? L"stopped during a settings reload (the reload was abandoned)" : L"the settings reload did not finish in 20 s (abandoned)");
+        Fallback(stopped ? L"stopped during a settings reload (the reload was abandoned)" : L"the settings reload did not finish in 20 s (abandoned; taken over should it still succeed)");
+        if (!stopped) m_late = rr.late;
         return;
     }
     if (rr.hadCore && r != PUSHCORE_OK) Log(std::format("pushcore_reload -> {} {}", r, rr.err));

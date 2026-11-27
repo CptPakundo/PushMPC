@@ -237,7 +237,8 @@ int main()
         Check(r.stuckAt.find("job at: pushcore_reload") != std::string::npos && r.stuckAt.find("stub instance 10 busy") != std::string::npos && r.stuckAt.find("stub graph lock") != std::string::npos,
               "slow reload: the log names the job's stage and pushcore's steps (" + r.stuckAt + ")");
         f.Stop();
-        Check(WaitIdle(3000) && full.closed.load() && full.reloads == 1, "slow reload: closed by its own thread after it returned");
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());   // the filter stopped meanwhile: not adopted
+        Check(WaitIdle(3000) && full.closed.load() && full.reloads == 1, "slow reload: closed by its own thread after it returned (not adopted)");
     }
     {   // 7. a close that never returns: the reload is not started beside it; bounded; the instance is not reinstalled
         Reset();
@@ -284,6 +285,56 @@ int main()
         Check(r.stuckAt.find("closing the idle quick graph") != std::string::npos, "Stop during the quick graph's close: the log names that stage");
         f.Stop();
         Check(WaitIdle(3000) && quick.closed.load() && full.closed.load() && full.reloads == 0, "Stop during the quick graph's close: both closed, no rebuild started");
+    }
+
+    {   // 10. F-T1 follow-up: a reload abandoned at the timeout that succeeds later is handed over (adopted), not closed
+        Reset();
+        Filter f; f.Start();
+        StubCore full; full.id = 16; full.reload = Mode::Slow; full.slowMs = 700;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 200;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        Check(r.how == rl::Outcome::TimedOut && r.late != nullptr && f.core == nullptr, "late reload: abandoned at the timeout, a hand-over slot is returned");
+        PushCore* got = nullptr; PushCoreOutputInfo oi = {};
+        const auto t = rl::Clock::now();
+        while (!got && rl::MsSince(t) < 3000) { got = rl::TakeLate(*r.late, &oi); if (!got) Sleep(10); }
+        Check(got == P(full) && !full.closed.load() && oi.width == 1920 && oi.multiplier == 4, "late reload: the successful instance arrives with its output info and is not closed");
+        Check(rl::TakeLate(*r.late, &oi) == nullptr, "late reload: taken once");
+        f.Stop();
+        Check(WaitIdle(2000) && !full.closed.load(), "late reload: nothing left running, the adopted instance stays open");
+    }
+    {   // 11. given up (Stop / close) before the late reload returns: the job's thread closes it
+        Reset();
+        Filter f;
+        StubCore full; full.id = 17; full.reload = Mode::Slow; full.slowMs = 600;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 150;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());
+        Check(r.how == rl::Outcome::TimedOut && WaitIdle(3000) && full.closed.load(), "late reload given up before it returned: closed by its own thread");
+    }
+    {   // 12. given up after it arrived (never adopted): closed then
+        Reset();
+        Filter f;
+        StubCore full; full.id = 18; full.reload = Mode::Slow; full.slowMs = 300;
+        f.core = P(full);
+        rl::Limits lim; lim.timeoutMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        const auto t = rl::Clock::now();
+        while (rl::MsSince(t) < 3000) { { std::lock_guard<std::mutex> lk(r.late->lock); if (r.late->core) break; } Sleep(10); }
+        rl::ReleaseLate(r.late, &g_api, f.Hooks());
+        Check(WaitIdle(3000) && full.closed.load(), "late reload given up after it arrived: closed on its own thread");
+    }
+    {   // 13. Stop (not the timeout): no hand-over, the job's thread closes it as before
+        Reset();
+        Filter f;
+        StubCore full; full.id = 19; full.reload = Mode::Slow; full.slowMs = 500;
+        f.core = P(full);
+        std::thread stopper([&] { Sleep(50); f.quit = true; });
+        rl::Limits lim; lim.quitGraceMs = 100;
+        const rl::Result r = rl::Run(&g_api, f.coreLock, f.core, nullptr, f.Hooks(), lim);
+        stopper.join();
+        Check(r.how == rl::Outcome::Stopped && r.late == nullptr && WaitIdle(3000) && full.closed.load(), "Stop: no late hand-over, closed by its own thread");
     }
 
     std::printf("RESULT %s: %d of %d checks passed\n", g_fail ? "FAIL" : "PASS", g_checks - g_fail, g_checks);
