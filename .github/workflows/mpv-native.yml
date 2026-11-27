@@ -892,6 +892,22 @@ jobs:
             echo "$s: $(sed -n 's/^version: *//p' "$t/meta/snap.yaml" | head -1)"
             find "$t" -maxdepth 2 \( -name 'Plex*' -o -name '*.sh' \) | head -10
             find "$t" -name 'libmpv.so*' -o -name 'libavfilter.so*' | head -4
+            # a Snap leaves system libraries to its base Snap (core20, core22 ...): what Plex's libmpv needs and this
+            # runner lacks comes from that base into <tarball>/base-libs, as the Snap's own runtime provides it (run
+            # 45964792910: Plex HTPC 1.71.1's libmpv needs libffi.so.7, which Ubuntu 24.04 no longer ships)
+            base=$(sed -n 's/^base: *//p' "$t/meta/snap.yaml" | head -1)
+            for pass in 1 2 3; do
+              lp=$(find "$t" -name '*.so*' -type f -printf '%h\n' | sort -u | tr '\n' ':' | sed 's/:$//')
+              miss=$(for m in $(find "$t" -name 'libmpv.so*' -type f) "$t"/base-libs/*.so*; do [ -f "$m" ] && LD_LIBRARY_PATH="$lp" ldd "$m"; done | awk '/not found/{print $1}' | sort -u)
+              [ -n "$miss" ] || break
+              [ -n "$base" ] || { echo "::warning::$s: libmpv misses $miss and the Snap names no base"; break; }
+              if [ ! -d "$RUNNER_TEMP/base-$base" ]; then
+                snap download "$base" > "$base.dl.txt" 2>&1 && unsquashfs -q -d "$RUNNER_TEMP/base-$base" "$base"_*.snap >/dev/null && rm -f "$base"_*.snap "$base"_*.assert \
+                  || { echo "::warning::$s: base $base not downloaded ($(tail -1 "$base.dl.txt"))"; break; }
+              fi
+              mkdir -p "$t/base-libs"
+              for l in $miss; do p=$(find "$RUNNER_TEMP/base-$base" -name "$l" | head -1); [ -n "$p" ] && cp -L "$p" "$t/base-libs/" && echo "$s: $l from its base $base"; done
+            done
             if [ ! -f "$t/Plex.sh" ]; then
               # the Snap starts Plex through its own command chain: a plain launcher with the bundled libraries first
               bin=$(find "$t" -type f -name Plex -perm -u+x | head -1)
