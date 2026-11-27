@@ -85,3 +85,9 @@ set_target_properties(late_reload_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CM
 target_compile_definitions(late_reload_host PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(late_reload_host PRIVATE /W3 /EHsc /O2 /utf-8)
 target_link_libraries(late_reload_host PRIVATE strmiids ole32 user32 advapi32 shell32)
+
+# The pass-through's CPU conversions (src/PushMpcPassConvert.h: YUY2, RGB32 for renderers that refuse NV12 / P010)
+add_executable(pass_convert_test tools/pass_convert_test.cpp)
+set_target_properties(pass_convert_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(pass_convert_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_options(pass_convert_test PRIVATE /W3 /EHsc /O2 /utf-8)
