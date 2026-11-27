@@ -191,6 +191,16 @@ endif()
 set_target_properties(pushmpc_engine PROPERTIES CXX_VISIBILITY_PRESET hidden
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
+# macOS: pushmpc-vulkan-probe next to the engine (vsplugin/engines/gpu/mac_vk_probe.h): MoltenVK's first instance in
+# a process of its own (Metal can abort the process inside vkCreateInstance on some GPUs)
+if(APPLE AND PME_VULKAN_ON)
+  add_executable(pme_vk_probe "${_g}/mac_vk_probe.c")
+  target_include_directories(pme_vk_probe PRIVATE "${PME_VULKAN_HEADERS_DIR}/include")
+  target_link_libraries(pme_vk_probe PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(pme_vk_probe PROPERTIES OUTPUT_NAME pushmpc-vulkan-probe
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out")
+  add_dependencies(pushmpc_engine pme_vk_probe)
+endif()
 if(WIN32)
   target_include_directories(pushmpc_engine PRIVATE "${ROOT}/filter/src")
   target_link_libraries(pushmpc_engine PRIVATE d3d11 dxgi d3dcompiler user32 advapi32 shell32 ole32 setupapi)

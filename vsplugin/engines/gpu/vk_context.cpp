@@ -14,6 +14,9 @@
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
+#if defined(__APPLE__)
+#include "mac_vk_probe.h"   // MoltenVK's instance tried in a process of its own first (it can abort the process)
+#endif
 
 namespace pmvs::gpu {
 
@@ -101,6 +104,16 @@ bool g_portEnum = false, g_validation = false, g_debugUtils = false;
 bool MakeInstance(bool validation, std::string& err)
 {
     if (g_inst) return true;
+#if defined(__APPLE__)
+    {   // the library volk loaded, by its vkGetInstanceProcAddr; a crash in the probe keeps Vulkan out of this process
+        Dl_info di;
+        std::string lib, why, note;
+        if (vkGetInstanceProcAddr && dladdr(reinterpret_cast<void*>(vkGetInstanceProcAddr), &di) && di.dli_fname) lib = di.dli_fname;
+        const bool ok = MacVulkanProbe(lib, why, note);
+        if (!note.empty()) std::fprintf(stderr, "pushmpc: %s\n", note.c_str());
+        if (!ok) { err = why; return false; }
+    }
+#endif
     if (const char* v = std::getenv("PUSHMPC_VK_VALIDATION")) validation = validation || (v[0] == '1');
     VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
     app.pApplicationName = "PushMPC"; app.pEngineName = "PushMPC portable GPU engine"; app.apiVersion = VK_API_VERSION_1_2;

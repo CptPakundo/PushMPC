@@ -11,7 +11,8 @@
 #   --app       desktop = /Applications/Plex.app, htpc = /Applications/Plex HTPC.app, auto = each one there (default)
 #   --app-path  the .app bundle when it is elsewhere (needs --app desktop or htpc)
 #   --from      folder with libavfilter.8.dylib (the proxy), pushmpc-avfilter-8.*.dylib, libpushmpc_engine.dylib,
-#               libpushmpc_engine_apple.dylib and libMoltenVK.dylib (the GPU engines; optional) and pushmpc-plex-selftest
+#               libpushmpc_engine_apple.dylib, pushmpc-vulkan-probe and libMoltenVK.dylib (the GPU engines; optional) and
+#               pushmpc-plex-selftest
 #               (default: here). The self-test line names the engine that ran (apple, portable-vulkan, portable-cpu).
 #   --agent     (install) also the LaunchAgent com.pushmpc.plex-reapply: at login and whenever a Plex app is replaced
 #               (an update: its Info.plist changes) it runs "install --if-needed" from this folder; uninstall removes it
@@ -77,7 +78,7 @@ conf_remove() {
 
 # our proxy (any version) exports pushmpc_proxy_status; names Plex never ships are ours
 is_our_proxy() { [ -f "$1" ] && grep -aq pushmpc_proxy_status "$1"; }
-is_ours() { case $1 in pushmpc-avfilter-8.*.dylib|libpushmpc_engine.dylib|libpushmpc_engine_apple.dylib) return 0 ;; esac; return 1; }
+is_ours() { case $1 in pushmpc-avfilter-8.*.dylib|libpushmpc_engine.dylib|libpushmpc_engine_apple.dylib|pushmpc-vulkan-probe) return 0 ;; esac; return 1; }
 
 st_detail=''
 # bounded <seconds> <command...>: the command's output; killed after that many seconds (exit 143 then). macOS has no
@@ -154,7 +155,7 @@ do_app() {   # do_app <name> <bundle> <mpv.conf>
         sha "$fw/libavfilter.8.dylib" > "$bk/proxy.sha256"
         # our files: listed before stays listed; ours by name are replaced with what we ship now; anything else is Plex's
         { echo libavfilter.8-plex.dylib; [ -z "$prev" ] || printf '%s\n' "$prev"; } > "$bk/added.new"
-        for f in "$from"/pushmpc-avfilter-8.*.dylib "$from/libpushmpc_engine.dylib" "$from/libpushmpc_engine_apple.dylib" "$from/libMoltenVK.dylib" "$from/MoltenVK-LICENSE.txt"; do
+        for f in "$from"/pushmpc-avfilter-8.*.dylib "$from/libpushmpc_engine.dylib" "$from/libpushmpc_engine_apple.dylib" "$from/pushmpc-vulkan-probe" "$from/libMoltenVK.dylib" "$from/MoltenVK-LICENSE.txt"; do
             [ -f "$f" ] || continue   # the GPU engines are optional (Auto: VideoToolbox, then Vulkan on MoltenVK, then CPU)
             b=${f##*/}
             if [ -e "$fw/$b" ] && ! is_ours "$b" && ! printf '%s\n' "$prev" | grep -qxF "$b"; then continue; fi   # never overwrite Plex's own files

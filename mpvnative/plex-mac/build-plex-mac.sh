@@ -81,10 +81,12 @@ cmake -S "$here/../engine" -B "$work/engine" -DCMAKE_BUILD_TYPE=Release -DPME_FE
     -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=$min > "$work/engine.log" 2>&1 \
     && cmake --build "$work/engine" --parallel --target pushmpc_engine pushmpc_engine_apple >> "$work/engine.log" 2>&1 || { tail -40 "$work/engine.log"; exit 1; }
 grep -q 'no Vulkan engine' "$work/engine.log" && { grep 'no Vulkan engine' "$work/engine.log"; echo "::error::the engine was built without Vulkan"; exit 1; }
-for m in libpushmpc_engine.dylib libpushmpc_engine_apple.dylib; do
+for m in libpushmpc_engine.dylib libpushmpc_engine_apple.dylib pushmpc-vulkan-probe; do
     cp "$work/engine/out/$m" "$out/"; codesign -f -s - "$out/$m"
     echo "$m ($(lipo -archs "$out/$m")), minimum macOS $(otool -l "$out/$m" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
 done
+# the probe runs MoltenVK's first instance outside Plex (mac_vk_probe.h): it must start and answer here
+DYLD_LIBRARY_PATH= "$out/pushmpc-vulkan-probe" /nonexistent | grep -q PMVKPROBE-OK || { echo "::error::pushmpc-vulkan-probe does not run"; exit 1; }
 # MoltenVK (Apache-2.0), the release pinned in gpu-pins.json: the Vulkan driver for the GPU engine, loaded from here
 mvk=$(python3 -c "import json,sys; m=json.load(open(sys.argv[1]))['moltenvk']; print(m['url'], m['sha256'], m['version'])" "$here/../../vsplugin/engines/gpu/gpu-pins.json")
 set -- $mvk

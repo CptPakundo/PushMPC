@@ -150,6 +150,7 @@ typedef struct PushMPCContext {
     int fallback;                 /* 1: download / CPU engine / upload */
     int colour_own;               /* CPU output with the engine's own colour (Linux NVIDIA engine: BT.709 / HDR10) */
     int want_depth;               /* the engine asked for a deeper stream (pmeng_output.want_out_depth): frame metadata */
+    int act_logged;               /* activate() calls described in the verbose log (the first few of a stream) */
     int source_depth;             /* option: the bits of the source before the player converted it (8 -> 10) */
     int K;                        /* output multiplier (time base divisor) */
     enum AVPixelFormat in_fmt, sw_fmt;
@@ -1051,6 +1052,12 @@ static int activate(AVFilterContext *ctx)
            request on, or nothing asks the source again. mpv's lavfi wrapper feeds a frame only when the buffersrc saw
            a failed request, and the buffersink does not ask again while its own request stands: Plex for Mac with the
            Vulkan host engine stopped after frame 0 (mpv-native run 45948718958: 1 source, 0 outputs, 120 s) */
+        if (s->act_logged < 24) {   /* where a host that feeds on request stops (Plex for Mac, macOS 15) */
+            s->act_logged++;
+            av_log(ctx, AV_LOG_VERBOSE, "activate: frame %" PRIu64 " in, %" PRIu64 " out; output wanted %d (then asked upstream), engine holds %u\n",
+                   s->frames_in, s->frames_out, ff_outlink_frame_wanted(outlink),
+                   s->eng ? s->api->pending(s->eng) : 0u);
+        }
         FF_FILTER_FORWARD_WANTED(outlink, inlink);
         return 0;
     }
@@ -1067,6 +1074,11 @@ static int activate(AVFilterContext *ctx)
         return 0;
     }
 
+    if (s->act_logged < 24 && !s->passthrough) {
+        s->act_logged++;
+        av_log(ctx, AV_LOG_VERBOSE, "activate: no frame queued (%" PRIu64 " in, %" PRIu64 " out); output wanted %d\n",
+               s->frames_in, s->frames_out, ff_outlink_frame_wanted(outlink));
+    }
     FF_FILTER_FORWARD_WANTED(outlink, inlink);
     return FFERROR_NOT_READY;
 }

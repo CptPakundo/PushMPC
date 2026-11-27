@@ -182,6 +182,10 @@ class Pushmpc < Formula
     # VapourSynth autoloads plugins from <site-packages>/vapoursynth/plugins (Homebrew links it into its prefix)
     plugin = Dir["vsplugin/bin/pushmpc_vs.*"].reject { |f| f.end_with?(".pdb") }.first
     (prefix/vs_site_packages/"vapoursynth/plugins").install plugin
+    # macOS: MoltenVK's first instance runs in this helper before the plugin uses Vulkan (Metal can abort a process
+    # inside vkCreateInstance on some GPUs; mac_vk_probe.h); it must sit next to the plugin
+    probe = "vsplugin/bin/pushmpc-vulkan-probe"
+    (prefix/vs_site_packages/"vapoursynth/plugins").install probe if OS.mac? && File.exist?(probe)
     pkgshare.install "vsplugin/scripts/pushmpc.vpy"
     # pushmpc.lua adds the filter at run time (the mpv.conf block names it, next to pushmpc.vpy)
     pkgshare.install "integrations/mpv/pushmpc.lua"
