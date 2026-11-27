@@ -254,6 +254,13 @@ private:
     Damage m_damage = 0;
     int m_dmgEvent = 0, m_dmgError = 0;
     bool m_useShm = true, m_dirty = true, m_dead = false, m_reconf = false, m_mapped = true;
+    // the frame's time: when the X server took the player's drawing (the XDamageNotify timestamp, server milliseconds,
+    // on our clock by the smallest offset seen), not when this source got round to reading it (that is quantised to the
+    // capture loop's refresh: the 24 fps clip measured as 30 fps at 30 Hz and uneven steps, capture run 45958853836)
+    double m_dmgAt = -1;        // the newest damage not yet read, on our clock (-1: none known)
+    double m_offset = 1e300;    // our clock minus the server's, smallest seen
+    uint32_t m_lastServerMs = 0;
+    double m_lastFrameAt = -1;
     Img m_img[3];
     int m_w = 0, m_h = 0, m_depth = 24;
     Visual* m_vis = nullptr;
@@ -304,7 +311,9 @@ bool X11Source::Start(std::string& err)
     XTrap t(m_d);
     XSelectInput(m_d, m_win, StructureNotifyMask);
     XCompositeRedirectWindow(m_d, m_win, CompositeRedirectAutomatic);
-    m_damage = XDamageCreate(m_d, m_win, XDamageReportNonEmpty);
+    // every drawing as its own event (its server time is the frame's time); NonEmpty reported only the first drawing after
+    // each read, so a read that came after two drawings carried the older one's time
+    m_damage = XDamageCreate(m_d, m_win, XDamageReportRawRectangles);
     if (t.End()) { err = "the window cannot be captured (it closed, or the X server refused)"; return false; }
     return Setup(err);
 }
@@ -368,7 +377,15 @@ void X11Source::Events()
     while (XPending(m_d)) {
         XEvent ev;
         XNextEvent(m_d, &ev);
-        if (ev.type == m_dmgEvent + XDamageNotify) { m_dirty = true; continue; }
+        if (ev.type == m_dmgEvent + XDamageNotify) {
+            const uint32_t ms = uint32_t(reinterpret_cast<const XDamageNotifyEvent*>(&ev)->timestamp);
+            if (ms < m_lastServerMs && m_lastServerMs - ms > 0x80000000u) m_offset = 1e300;   // the server's 32-bit time wrapped
+            m_lastServerMs = ms;
+            m_offset = std::min(m_offset, Now() - ms * 1e-3);
+            m_dmgAt = ms * 1e-3 + m_offset;   // the newest drawing (raw rectangles: one event per drawing), the one a read gets
+            m_dirty = true;
+            continue;
+        }
         switch (ev.type) {
         case ConfigureNotify:
             if (ev.xconfigure.window == m_win && (ev.xconfigure.width != m_w || ev.xconfigure.height != m_h)) m_reconf = true;
@@ -423,7 +440,12 @@ bool X11Source::Next(SourceFrame& f, int timeoutMs)
             if (free) {
                 XDamageSubtract(m_d, m_damage, 0, 0);
                 m_dirty = false;
-                const double t = Now();
+                // the drawing's own time when the server gave one (never in the future, never before the last frame's)
+                const double now = Now();
+                double t = m_dmgAt >= 0 && m_dmgAt <= now + 0.001 ? m_dmgAt : now;
+                if (t < m_lastFrameAt) t = m_lastFrameAt;
+                m_lastFrameAt = t;
+                m_dmgAt = -1;
                 if (Grab(*free)) {
                     free->busy = true;
                     f = SourceFrame{};
