@@ -133,7 +133,7 @@ done
 rm -f "$A/Stremio.app/Contents/Frameworks"/libavutil.*.dylib; printf 'avutil\n' > "$A/Stremio.app/Contents/Frameworks/libavutil.57.dylib"
 b6=$(sums)
 out=$($I install --target stremio --from "$T/from" --bridge "$T/br/pushmpc-iina.so" --json 2>/dev/null); rc=$?
-echo "$out" | grep -q '"target":"stremio".*"state":"not-active".*libavutil is 57.*FFmpeg major versions differ' && [ "$rc" = 3 ] \
+echo "$out" | grep -q '"target":"stremio".*"state":"not-active".*libavutil in the app: 57.*FFmpeg major versions differ' && [ "$rc" = 3 ] \
     && ok "libavutil 57 (ffmpeg@5, deprecated in Homebrew: no bridge built for it): not active, the reason named" || { echo "$out"; bad "libavutil 57: no clean not-active (exit $rc)"; }
 [ "$(sums)" = "$b6" ] && ok "libavutil 57: the app unchanged" || bad "libavutil 57: files changed"
 
