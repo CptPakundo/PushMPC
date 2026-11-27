@@ -1768,7 +1768,13 @@ static int Open(vlc_object_t *obj)
             pcc.measure = OptInt(f, CFG "content", 1) ? 1 : 0;   /* ContentDetect on VLC's textures, on the GPU (in the bridge) */
             int pk = 1;
             char err[300] = "";
-            sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
+            /* Auto at x1 here: pushcore is not opened at all (the Direct3D 11 output's upscaler may hold it: one pushcore
+             * per player, and an open takes it over); an older bridge cannot say: open and see, as before */
+            int dk = 1;
+            if (pmx_decide(&pcc, &dk, err, sizeof(err)) > 0 && dk <= 1)
+                snprintf(err, sizeof(err), "pushcore's Auto runs x1 here (decided without opening it)");
+            else
+                sys->pc = ZcOpen(f, &pcc, &pk, &sys->ring, err, sizeof(err));
             if (sys->pc && pk > 1) {
                 sys->zc = true;
                 sys->pc_cfg = pcc;
@@ -1846,12 +1852,20 @@ static int Open(vlc_object_t *obj)
         pcc.fullscreen = var_InheritBool(f, "fullscreen") ? 1 : 0;   /* Auto: the renderer's share per shown frame, G-SYNC fullscreen-only */
         int pk = 1;
         char err[300] = "";
-        sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
+        int dk = 1;
+        const int dr = pmx_decide(&pcc, &dk, err, sizeof(err));   /* x1: not opened (see the zero-copy path above) */
+        if (dr > 0 && dk <= 1) {
+            sys->k = 1;
+            snprintf(sys->why, sizeof(sys->why), "pushcore: %s; x1, not opened", err);
+        } else
+            sys->pc = pmx_open(&pcc, &pk, err, sizeof(err));
         if (sys->pc) {
             sys->pc_cfg = pcc;
             sys->k = pk < 1 ? 1 : pk > 16 ? 16 : pk;
             snprintf(sys->why, sizeof(sys->why), "pushcore: %s", pmx_describe(sys->pc));
             if (sys->k <= 1) { pmx_close(sys->pc); sys->pc = NULL; sys->k = 1; }
+        } else if (dr > 0 && dk <= 1) {
+            msg_Dbg(f, "PushMPC: %s", sys->why);
         } else if (engine == 2) {
             msg_Warn(f, "PushMPC: pushcore unavailable (%s)", err);
         } else {
@@ -1886,6 +1900,15 @@ static int Open(vlc_object_t *obj)
         snprintf(sys->why, sizeof(sys->why), "Smoother off: no frame generation");
     }
 
+    /* x1 (Smoother off, Auto's x1, no engine): nothing to do, so the decoder's pictures pass through as they are; the
+     * converter in front (SetupDownload) would only copy every hardware picture to the CPU and back */
+    if (sys->k <= 1 && !sys->eng && !sys->pc && !PM_CVPX_ON(sys) && sys->download) {
+        filter_chain_Delete(sys->download);
+        sys->download = NULL;
+        f->fmt_out.video = f->fmt_in.video;
+        f->fmt_out.i_codec = f->fmt_in.i_codec;
+        msg_Info(f, "PushMPC: x1: %4.4s passes through untouched (no conversion)", (const char *)&v->i_chroma);
+    }
     sys->k_open = sys->k;
     if (sys->eng && sys->k > 1 && fps > 1.0) {   /* pools for a measured rate up to 20 % below the declared one (29.97 tag, 24p body) */
         char why2[256] = "";
@@ -2044,6 +2067,9 @@ static int OpenOut(vlc_object_t *obj)
      * VLC's "chain" fallback put a CVPX -> software converter in front of this stage and the vout */
     if (pm_cvpx_bits(f->fmt_in.video.i_chroma)) opaque = true;
 #endif
+    /* D3D11 pictures (the zero-copy path, and the static filter passing them through at x1): passed on as they are; a
+     * refusal could make VLC convert them to the CPU around this stage */
+    if (f->fmt_in.video.i_chroma == VLC_CODEC_D3D11_OPAQUE || f->fmt_in.video.i_chroma == VLC_CODEC_D3D11_OPAQUE_10B) opaque = true;
     if ((!opaque && (!d || d->plane_count == 0)) || f->fmt_in.video.i_chroma != f->fmt_out.video.i_chroma)
         return VLC_EGENERIC;
     out_sys_t *s = calloc(1, sizeof(*s));

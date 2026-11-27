@@ -25,6 +25,8 @@ static struct {
     pm_pc_update_fn update;
     pm_pc_output_fn output;
     uint32_t abi;
+    /* optional (sharing the core with the Direct3D 11 output) */
+    pm_pc_decide_fn decide;
 } B;
 static SRWLOCK lockB = SRWLOCK_INIT;
 
@@ -66,6 +68,7 @@ static int LoadBridge(char *err, size_t n)
                 B.output = (pm_pc_output_fn)(void *)GetProcAddress(B.dll, "pm_pc_output");
                 B.abi = abi && B.update && B.output ? abi() : 2u;   /* an older bridge: ABI 2 (no update) */
                 if (B.abi > PM_PC_ABI) B.abi = PM_PC_ABI;
+                B.decide = (pm_pc_decide_fn)(void *)GetProcAddress(B.dll, "pm_pc_decide");
             }
         }
     }
@@ -112,6 +115,14 @@ int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n)
     return B.update(pc, cfg, err, n);
 }
 int pmx_output(pm_pc *pc, pm_pc_info *info) { return B.abi >= 3 && B.output ? B.output(pc, info) : -1; }
+int pmx_decide(const pm_pc_cfg *cfg, int *k, char *err, size_t n)
+{
+    if (k) *k = 1;
+    if (!LoadBridge(err, n)) return -1;
+    if (!B.decide) return 0;
+    pm_pc_cfg tmp;
+    return B.decide(ForBridge(cfg, &tmp), k, err, n) == 0 ? 1 : -1;
+}
 
 #else
 
@@ -139,5 +150,6 @@ int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned ss, void *dst, unsigned ds) { 
 unsigned pmx_abi(void) { return 0u; }
 int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n) { (void)pc; (void)cfg; if (err && n) snprintf(err, n, "pushcore is Windows-only"); return -1; }
 int pmx_output(pm_pc *pc, pm_pc_info *info) { (void)pc; (void)info; return -1; }
+int pmx_decide(const pm_pc_cfg *cfg, int *k, char *err, size_t n) { (void)cfg; if (k) *k = 1; if (err && n) snprintf(err, n, "pushcore is Windows-only"); return -1; }
 
 #endif

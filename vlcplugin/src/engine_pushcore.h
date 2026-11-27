@@ -23,4 +23,7 @@ int pmx_copy_d3d11(pm_pc *pc, void *src, unsigned src_slice, void *dst, unsigned
 unsigned pmx_abi(void);
 int pmx_update(pm_pc *pc, const pm_pc_cfg *cfg, char *err, size_t n);
 int pmx_output(pm_pc *pc, pm_pc_info *info);
+/* sharing the one pushcore with the Direct3D 11 output's upscaler: Auto's multiplier without opening (pm_pc_decide).
+ * 1 = decided (*k), 0 = the bridge cannot say (an older one: open to find out), < 0 = the open would fail too (err) */
+int pmx_decide(const pm_pc_cfg *cfg, int *k, char *err, size_t n);
 #endif

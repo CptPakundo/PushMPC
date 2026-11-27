@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless tests of the real module (libpushmpc_plugin) with the CSV display (libpushdump_plugin, built from
 # vlcplugin/spike/pushspike.c with -DPUSHSPIKE_DUMP_ONLY), both from one VLC_PLUGIN_PATH folder.
-# env: VLC, PLUGDIR, CLIP, CLIP10 (10-bit clip, optional), OUT, SRC_FRAMES, PY, LABEL, CASES, HWARGS, VLC_WRAP,
+# env: VLC, PLUGDIR, CLIP, CLIP10 (10-bit clip, optional), CLIP422 (4:2:2 clip, optional), OUT, SRC_FRAMES, PY, LABEL, CASES, HWARGS, VLC_WRAP,
 #      DISPLAYS (optional: real vouts for the crash/rate check, e.g. "gl xcb_x11"), NORC=1 (no rc interface: Windows)
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -69,6 +69,10 @@ if [ -n "${CLIP720:-}" ]; then
   S720=$(sed -n 's/nb_read_frames=//p' "${CLIP720%.mkv}.txt" 2>/dev/null | tr -d '\r')
   want x2_720      && SRC_FRAMES="${S720:-$SRC_FRAMES}" run x2_720      2 "$CLIP720" -- $PP --pushmpc-smoother=2
   want x2_720_sync && SRC_FRAMES="${S720:-$SRC_FRAMES}" run x2_720_sync 2 "$CLIP720" -- $PP --pushmpc-smoother=2 --no-pushmpc-worker
+fi
+# x1 on a picture format the engines do not take: passed through as it is, no converter in front (Smoother off)
+if [ -n "${CLIP422:-}" ] && want off_422; then
+  run off_422 1 "$CLIP422" -- $PP --pushmpc-smoother=1
 fi
 if [ -n "${CLIP10:-}" ] && want x4_10bit; then
   run x4_10bit 4 "$CLIP10" -- $PP --pushmpc-smoother=4
