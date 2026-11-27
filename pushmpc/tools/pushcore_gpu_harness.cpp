@@ -207,7 +207,9 @@ int wmain(int argc, wchar_t** argv) {
         DXGI_ADAPTER_DESC1 d{}; adapter->GetDesc1(&d);
         const uint32_t want = adapterPick == L"intel" ? 0x8086u : adapterPick == L"amd" ? 0x1002u : adapterPick == L"any" ? 0u : 0x10DEu;
         if ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) || (want && d.VendorId != want)) continue;
-        if (d.DedicatedVideoMemory >= bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory; }
+        // strictly more memory: DXGI can list one GPU twice (equal memory, another LUID where NGX does not init); the first
+        // such entry is the one the player and the filter use
+        if (!best || d.DedicatedVideoMemory > bestMem) { best = adapter; bestMem = d.DedicatedVideoMemory; }
     }
     if (!best) { std::cout << "no " << utf8(adapterPick) << " adapter\n"; return 1; }
     uint64_t bestLuid = 0;
