@@ -40,6 +40,11 @@ int pm_engine_repair_lag(const pm_engine *e);    /* 0: not lagged (pairs follow 
 /* a probe that pushes one picture twice and generates at once (the zero-copy round trip): 1 sets the lag and held frames
  * aside (nothing waiting is kept), 0 forgets the probe's frames and puts them back */
 void pm_engine_plain(pm_engine *e, int on);
+/* lagged on the CPU, with a worker thread: 1 = a check only keeps the books (the held-frame test, the copy, the cell
+ * grid) and leaves the frame's repair for pm_engine_run_deferred, which the worker calls (next_pair and repair_real
+ * call it too, so nothing advances unrepaired). The checks stay on the caller's thread: they say what comes out. */
+void pm_engine_defer_repair(pm_engine *e, int on);
+void pm_engine_run_deferred(pm_engine *e);
 int pm_engine_pairs_ready(const pm_engine *e);   /* lagged: the pairs pm_engine_next_pair can take now */
 /* lagged: 1 = advanced by one picture (then pm_engine_have_pair says whether a pair runs), 0 = none ready, -1 = error */
 int pm_engine_next_pair(pm_engine *e, char *err, size_t errsize);

@@ -62,7 +62,7 @@ static double RepairCentreRows(const unsigned char *p, int y0, int y1)
  * rows into a part of their own, timed to another pair) */
 static double RepairCentre(const unsigned char *p) { return RepairCentreRows(p, 110, 124); }
 
-static int TestRepair(void)
+static int TestRepair(int defer)
 {
     int fails = 0;
     char err[256] = "", why[256] = "";
@@ -75,6 +75,8 @@ static int TestRepair(void)
     if (pm_engine_set_repair(e, 1, why, sizeof(why)) != 0 || pm_engine_repair_lag(e) != 0) { printf("FAIL repair without held frames: %s\n", why); fails++; }
     pm_engine_set_dedup(e, 1);
     if (pm_engine_set_repair(e, 1, why, sizeof(why)) != 1 || pm_engine_repair_lag(e) != 3) { printf("FAIL repair: %s\n", why); pm_engine_close(e); return fails + 1; }
+    pm_engine_defer_repair(e, defer);
+    printf("repair (%s):\n", defer ? "deferred to the worker" : "in the check");
     /* the repair's budget is half a source frame of its measured cost (a busy test machine must not decide the test):
      * a 2 fps source gives it 250 ms (smoother off: nothing is measured) */
     printf("repair: %s\n", why);
@@ -263,7 +265,8 @@ int main(void)
         pm_engine_close(d);
     }
 
-    fails += TestRepair();
+    fails += TestRepair(0);
+    fails += TestRepair(1);   /* the worker mode: checks keep the books, the repair runs before the pair advances */
 
     char why[256];
     int k1 =pm_engine_decide_k(0, 23.976, 240, 1280, 720, 8, 0, 1, why, sizeof(why));

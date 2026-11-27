@@ -255,6 +255,7 @@ typedef struct pm_job {
     int n;                      /* pictures to generate */
     int done;                   /* filled so far, in order */
     bool finished, cancel, contiguous;
+    bool lag, advance;          /* the repair's lag mode: the frame's deferred repair, then (advance) the next pair, then outs */
     bool failed[PM_JOB_MAX];    /* hardware formats: the upload failed, show the real frame instead */
     picture_t *src;             /* the newest source frame (pushed to the engine by the worker) */
     picture_t *real;            /* the real frame shown before them (the fallback) */
@@ -458,6 +459,7 @@ struct filter_sys_t {
     int lagn;
     picture_t *lag_a;                 /* the picture advanced last (the next pair's first) */
     bool lag_seen;
+    uint64_t lag_jobs, lag_errors;    /* pairs advanced and generated on the worker; advances that failed there */
     mtime_t held_base;
     picture_t *still_pic;             /* held-drawing repair: the still's picture (as shown), cloned for each repeat */
     uint64_t still_out;               /* pictures that showed a still at the output rate */
@@ -736,9 +738,14 @@ static void RunJob(struct filter_sys_t *sys, pm_job *j)
                 if (pmx_poll(sys->pc, 0, RouteDest, RouteDone, &r, err, sizeof(err)) <= 0) break;
         }
     } else {
-        if (EnginePush(sys, j->src, j->contiguous, err, sizeof(err)) != 0)
+        bool advanced = true;
+        if (j->lag) {               /* lagged (LagFilter): the checked frame's repair, then its pair advances */
+            pm_engine_run_deferred(sys->eng);
+            if (j->advance && pm_engine_next_pair(sys->eng, err, sizeof(err)) != 1) { sys->lag_errors++; advanced = false; }
+        } else if (EnginePush(sys, j->src, j->contiguous, err, sizeof(err)) != 0)
             pm_engine_forget(sys->eng);
-        const bool pair = pm_engine_have_pair(sys->eng);
+        /* a failed advance leaves the previous pair: nothing from it (the real frame stands in) */
+        const bool pair = advanced && (!j->lag || j->contiguous) && pm_engine_have_pair(sys->eng);
         for (int i = 0; i < j->n; i++) {
             vlc_mutex_lock(&j->lock);
             const bool stop = j->cancel;
@@ -789,7 +796,8 @@ static void WorkerIdle(struct filter_sys_t *sys, bool cancel)
     pm_job *q = sys->queued;
     sys->queued = NULL;
     vlc_mutex_unlock(&sys->wlock);
-    if (q) {                    /* never started: finish it as empty */
+    if (q) {                    /* never started: finish it as empty, but a lag job here (its pair already left the queue) */
+        if (q->lag && !cancel) RunJob(sys, q);
         vlc_mutex_lock(&q->lock); q->finished = true; vlc_cond_broadcast(&q->cond); vlc_mutex_unlock(&q->lock);
         JobRelease(q);
     }
@@ -1218,9 +1226,13 @@ static picture_t *LagReal(filter_t *f, struct filter_sys_t *sys, picture_t *a, i
 }
 /* the portable engines with the held-drawing repair: pairs lag pm_engine_repair_lag() source frames (a held part is laid
  * in once its next drawing has been seen), so the pictures wait here and each ready pair is shown and generated */
-static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work)
+static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work, bool async)
 {
     char err[200] = "";
+    /* async (the worker, with pushmpc_out): the check below only keeps the books; the repair, the pair's advance and
+     * its pictures are the worker's (pushmpc_out waits for each); the caller made the worker idle */
+    pm_engine_defer_repair(sys->eng, async ? 1 : 0);
+    if (!async) pm_engine_run_deferred(sys->eng);
     const mtime_t dt0 = sys->lag_seen ? cur->date - sys->held_last : 0;
     const bool contiguous = sys->lag_seen && dt0 > 0 && dt0 <= 4 * sys->nominal_dt && dt0 <= CLOCK_FREQ / 4;
     sys->lag_seen = true; sys->held_last = cur->date;
@@ -1249,38 +1261,84 @@ static picture_t *LagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *cu
         sys->held = 0; sys->still = false;
         if (sys->still_pic) { picture_Release(sys->still_pic); sys->still_pic = NULL; }
     }
-    while (pm_engine_pairs_ready(sys->eng) > 0) {
-        if (pm_engine_next_pair(sys->eng, err, sizeof(err)) != 1) { msg_Warn(f, "engine: %s", err); break; }
-        const int span = sys->lagq[0].span; const bool contig = sys->lagq[0].contig; const mtime_t base = sys->lagq[0].base;
-        picture_t *b = sys->lagq[0].pic;
-        memmove(&sys->lagq[0], &sys->lagq[1], (size_t)(--sys->lagn) * sizeof(sys->lagq[0]));
-        picture_t *a = sys->lag_a;
-        sys->lag_a = b;
-        if (!a) continue;                                         /* the first picture shows with the next pair */
-        if (base) { picture_t *c = picture_Clone(a); if (c) { picture_CopyProperties(c, a); c->date = base; picture_Release(a); a = c; } }
-        a = LagReal(f, sys, a, 0);
-        LAG_EMIT(a);
-        if (!contig || !pm_engine_have_pair(sys->eng)) { sys->restarts++; continue; }
-        const mtime_t dt = sys->lag_a->date - a->date;
-        for (int j = 1; j < sys->k * span; j++) {             /* as the synchronous path, with (a, lag_a) for (prev, cur) */
-            picture_t *o = NewOut(f, sys); if (!o) break;
-            picture_t *dstpic = o;
-            picture_CopyProperties(o, a);
-            const float t = (float)j / (float)(sys->k * span);
-            if (sys->zc_hw) { if (EngineGenerateHw(sys, t, o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
-            else {
-                if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
-                pm_yuv_out dst; PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
-                pm_engine_generate(sys->eng, t, &dst);
+    const int ready = pm_engine_pairs_ready(sys->eng);
+    if (async && (ready == 0 || (ready == 1 && sys->lag_a && sys->lagn > 0 && sys->k * sys->lagq[0].span - 1 <= PM_JOB_MAX))) {
+        /* the usual step: at most one pair ready. Its real picture (repaired when its turn came) goes out now, its
+         * generated pictures go out empty and the worker fills them in order; the frame's deferred repair runs first */
+        pm_job *j = JobNew();
+        if (j) {
+            j->lag = true;
+            if (ready == 1) {
+                const int span = sys->lagq[0].span; const bool contig = sys->lagq[0].contig; const mtime_t base = sys->lagq[0].base;
+                picture_t *b = sys->lagq[0].pic;
+                memmove(&sys->lagq[0], &sys->lagq[1], (size_t)(--sys->lagn) * sizeof(sys->lagq[0]));
+                picture_t *a = sys->lag_a;
+                sys->lag_a = b;
+                if (base) { picture_t *c = picture_Clone(a); if (c) { picture_CopyProperties(c, a); c->date = base; picture_Release(a); a = c; } }
+                a = LagReal(f, sys, a, 1);   /* before the advance: the pair's B is a */
+                LAG_EMIT(a);
+                j->advance = true; j->contiguous = contig;
+                if (!contig) sys->restarts++;
+                else {
+                    j->real = picture_Hold(a);
+                    const mtime_t dt = b->date - a->date;
+                    for (int i = 0; i < sys->k * span - 1; i++) {
+                        picture_t *o = NewOut(f, sys);
+                        if (!o) break;
+                        picture_t *st = NULL;
+                        if (sys->hw && !sys->zc_hw && !(st = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
+                        picture_CopyProperties(o, a);
+                        o->date = a->date + dt * (i + 1) / (sys->k * span);
+                        o->b_force = false;
+                        j->outs[i] = picture_Hold(o);
+                        j->stage[i] = st;
+                        j->t[i] = (float)(i + 1) / (float)(sys->k * span);
+                        j->n = i + 1;
+                        JobHold(j);
+                        RegAdd(o, j, i + 1);
+                        LAG_EMIT(o); sys->generated++;
+                    }
+                }
+                sys->lag_jobs++;
             }
-            if (dstpic != o) { const int up = pm_hw_upload(sys->hw, dstpic, o); picture_Release(dstpic); if (up != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
-            o->date = a->date + dt * j / (sys->k * span); o->b_force = false;
-            RegAdd(o, NULL, 0);
-            LAG_EMIT(o); sys->generated++;
+            Submit(sys, j);
+        } else pm_engine_run_deferred(sys->eng);
+    } else {
+        if (async) pm_engine_run_deferred(sys->eng);   /* several pairs at once (after a gap): here, in order */
+        while (pm_engine_pairs_ready(sys->eng) > 0) {
+            if (pm_engine_next_pair(sys->eng, err, sizeof(err)) != 1) { msg_Warn(f, "engine: %s", err); break; }
+            const int span = sys->lagq[0].span; const bool contig = sys->lagq[0].contig; const mtime_t base = sys->lagq[0].base;
+            picture_t *b = sys->lagq[0].pic;
+            memmove(&sys->lagq[0], &sys->lagq[1], (size_t)(--sys->lagn) * sizeof(sys->lagq[0]));
+            picture_t *a = sys->lag_a;
+            sys->lag_a = b;
+            if (!a) continue;                                         /* the first picture shows with the next pair */
+            if (base) { picture_t *c = picture_Clone(a); if (c) { picture_CopyProperties(c, a); c->date = base; picture_Release(a); a = c; } }
+            a = LagReal(f, sys, a, 0);
+            LAG_EMIT(a);
+            if (!contig || !pm_engine_have_pair(sys->eng)) { sys->restarts++; continue; }
+            const mtime_t dt = sys->lag_a->date - a->date;
+            for (int j = 1; j < sys->k * span; j++) {             /* as the synchronous path, with (a, lag_a) for (prev, cur) */
+                picture_t *o = NewOut(f, sys); if (!o) break;
+                picture_t *dstpic = o;
+                picture_CopyProperties(o, a);
+                const float t = (float)j / (float)(sys->k * span);
+                if (sys->zc_hw) { if (EngineGenerateHw(sys, t, o) != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
+                else {
+                    if (sys->hw && !(dstpic = pm_hw_cpu_picture(sys->hw))) { picture_Release(o); break; }
+                    pm_yuv_out dst; PlanesOut(dstpic, &sys->wfmt, sys->bps, &dst);
+                    pm_engine_generate(sys->eng, t, &dst);
+                }
+                if (dstpic != o) { const int up = pm_hw_upload(sys->hw, dstpic, o); picture_Release(dstpic); if (up != 0) { sys->hw_up_fail++; picture_Release(o); continue; } }
+                o->date = a->date + dt * j / (sys->k * span); o->b_force = false;
+                RegAdd(o, NULL, 0);
+                LAG_EMIT(o); sys->generated++;
+            }
         }
     }
     /* a still (more repeats than PM_HOLD): the last picture now, as repaired, when nothing older still waits */
     if (sys->held > PM_HOLD && !sys->still && sys->lagn == 0 && sys->lag_a) {
+        WorkerIdle(sys, false);   /* its advance may be the worker's job just submitted */
         sys->still = true; sys->stills++; sys->held_base = sys->held_last;
         picture_t *c = LagReal(f, sys, picture_Hold(sys->lag_a), 1);
         if (c == sys->lag_a) { picture_Release(c); c = picture_Clone(sys->lag_a); if (c) picture_CopyProperties(c, sys->lag_a); }
@@ -1537,7 +1595,8 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
     ContentMeasure(f, sys, cur, work);   /* before the held-frame step: repeats are part of what is measured */
 
     const bool async = sys->worker_on && OutStages() > 0 && !sys->zc && !sys->lag;
-    if (sys->lag && !sys->pc) { WorkerIdle(sys, false); return LagFilter(f, sys, cur, work); }
+    /* the repair's lag mode: the worker too, where pushmpc_out can wait for its pictures (as above) */
+    if (sys->lag && !sys->pc) { WorkerIdle(sys, false); return LagFilter(f, sys, cur, work, sys->worker_on && OutStages() > 0 && !sys->zc); }
     if (async || sys->pc) {     /* pushcore always runs through jobs (inline when there is no worker) */
         /* worker mode: the previous job has had most of a frame interval; its last picture may still be on its way
          * (VLC asks for the next source frame while that picture is queued as "next"), so wait for it to finish */
@@ -2015,8 +2074,8 @@ static void Close(vlc_object_t *obj)
     }
     if (sys->eng && sys->lag) {
         pm_repair_stats rs; pm_engine_repair_stats_get(sys->eng, &rs);
-        msg_Info(f, "PushMPC: held-drawing repair: %" PRIu64 " frames, %" PRIu64 " parts, %" PRIu64 " spans gated, %" PRIu64 " over budget (%s)",
-                 rs.frames, rs.parts, rs.gated, rs.over_budget, rs.gpu ? "GPU" : "CPU");
+        msg_Info(f, "PushMPC: held-drawing repair: %" PRIu64 " frames, %" PRIu64 " parts, %" PRIu64 " spans gated, %" PRIu64 " over budget (%s); pairs on the worker %" PRIu64 ", failed there %" PRIu64,
+                 rs.frames, rs.parts, rs.gated, rs.over_budget, rs.gpu ? "GPU" : "CPU", sys->lag_jobs, sys->lag_errors);
     }
     LagDrop(sys);
     PcLagDrop(sys);
