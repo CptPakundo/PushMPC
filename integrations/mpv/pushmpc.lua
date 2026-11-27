@@ -443,8 +443,8 @@ local spec = "@pushmpc:vapoursynth=file=" .. quote(opts.vpy) .. ":buffered-frame
 -- dummy, which then reached the output: Homebrew Intel), so it opens with these and checks them at the first real frame
 local MATRIX = { ["bt.709"] = 1, ["bt.601"] = 6, ["bt.2020-ncl"] = 9, ["bt.2020-cl"] = 10, ["smpte-240m"] = 7, ["ycgco"] = 8, ["rgb"] = 0 }
 local TRANSFER = { ["bt.1886"] = 1, ["srgb"] = 13, ["linear"] = 8, ["pq"] = 16, ["hlg"] = 18, ["gamma2.2"] = 4, ["gamma2.8"] = 5 }
-local function colour_data()
-    local p = mp.get_property_native("video-params")
+local function colour_data(prop)
+    local p = mp.get_property_native(prop or "video-params")
     if type(p) ~= "table" then return nil end
     local t = {}
     if MATRIX[p.colormatrix] then t[#t + 1] = "matrix=" .. MATRIX[p.colormatrix] end
@@ -513,6 +513,7 @@ function vs_status_watch()
     end)
 end
 local busy = false
+local early_path = nil   -- the file whose filter went in before decoding, until its transfer is checked
 
 local function remove_native()
     for _, f in ipairs(mp.get_property_native("vf") or {}) do
@@ -568,7 +569,12 @@ local function ensure(early)
             busy = false
             return
         end
-        msg.info("PushMPC's filter added" .. (early and " before the first frame" or " while video runs"))
+        if early then
+            msg.info("PushMPC: filter added before decoding")
+            early_path = path   -- no colour arguments yet: checked once mpv knows the stream's transfer (below)
+        else
+            msg.info("PushMPC's filter added while video runs")
+        end
         vs_status_watch()
     end
     if opts["drop-d3d11vpp"] == "yes" then
@@ -595,10 +601,43 @@ mp.observe_property("vf", "native", function() ensure() end)
 -- runs, mpv could hand the first frame on unfiltered (Homebrew Intel, ml: the instance saw 299 of 300 frames, and its
 -- "EOF" for frame 299 was right for it; 599 outputs instead of 600, now and then). mpv disables a filter that fails
 -- ("Disabling filter ... because it has failed"), so video keeps playing. Before decoding there is no video-params:
--- the plugin opens with its colour guess and checks it at the first real frame (matrix and range).
+-- the plugin opens with its colour guess and corrects matrix and range at the first real frame (mpv's frames carry
+-- _ColorSpace and _ColorRange); the transfer is checked below. The native filter stays on the late add: its list
+-- (hwupload, the pixel format) needs hwdec-current and video-params, which do not exist yet.
 mp.add_hook("on_preloaded", 50, function()
     if native then return end   -- the native filter keeps its own timing (not this lane's; left as it was)
     for _, t in ipairs(mp.get_property_native("track-list") or {}) do
         if t.type == "video" and not t.albumart and not t.image then ensure(true); return end
     end
+end)
+
+-- mpv's frames carry no transfer (vf_vapoursynth sets _ColorSpace and _ColorRange only), so a filter added before
+-- decoding decided HDR on the plugin's guess (vsplugin schedule.h GuessColour: deeper than 8 bits and 3200 wide or 1800
+-- high is PQ). Once the decoder reports the stream's transfer, and its HDR-ness differs from that guess, the filter is
+-- added again with the stream's colour (Auto's HDR rules: RTX Video HDR, the anime upscaler). Playback only: the re-add
+-- drops the few frames in flight at the start; an encode keeps the instance it started with (every frame counts).
+local function guess_hdr(p)
+    local f = tostring(p.pixelformat or "")
+    local deep = f:match("^p01[026]") ~= nil or f:match("p1[026][lb]?e?$") ~= nil
+    return deep and ((tonumber(p.w) or 0) >= 3200 or (tonumber(p.h) or 0) >= 1800)
+end
+mp.observe_property("video-dec-params", "native", function(_, p)
+    if early_path == nil or type(p) ~= "table" or p.gamma == nil then return end
+    if early_path ~= mp.get_property("path") then early_path = nil; return end
+    early_path = nil   -- once per file
+    local hdr = p.gamma == "pq" or p.gamma == "hlg"
+    if hdr == guess_hdr(p) then
+        msg.info("PushMPC: the stream's transfer (" .. p.gamma .. ") matches the plugin's guess")
+        return
+    end
+    if (mp.get_property("o", "") or "") ~= "" then
+        msg.warn("PushMPC: the stream's transfer (" .. p.gamma .. ") is not the plugin's guess; encoding: the filter keeps its instance")
+        return
+    end
+    msg.info("PushMPC: the stream's transfer (" .. p.gamma .. ") is not the plugin's guess: filter added again with the stream's colour")
+    busy = true
+    mp.commandv("vf", "remove", "@pushmpc")
+    local cd = colour_data("video-dec-params")
+    mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
+    busy = false
 end)

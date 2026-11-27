@@ -601,6 +601,20 @@ jobs:
           n=$(grep -ho 'instance closed after [0-9]*' /tmp/vslog-arch/*.log | head -1 | grep -o '[0-9]*$')
           echo "frames out of the plugin in 3 s of a 30 fps clip: ${n:-?}"; [ "${n:-0}" -ge 150 ] || { echo "::error::expected about 180 frames out (x2), got ${n:-none}"; exit 1; }
           echo "ARCH_FRAMES=90 -> $n" >> "$GITHUB_ENV"
+          # the filter goes in before decoding (pushmpc.lua on_preloaded), when mpv knows no colour yet, and mpv's frames
+          # carry no transfer: a PQ-tagged 720p 10-bit clip (the plugin's guess for that format is SDR) must be added
+          # again with mpv's transfer once the decoder reports it, and the new instance must open with transfer 16
+          echo "--- PQ-tagged 10-bit 720p (transfer known only from mpv's decoder)"
+          ffmpeg -v error -f lavfi -i testsrc2=size=1280x720:rate=24:duration=2 -pix_fmt yuv420p10le -color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc -c:v ffv1 -y /tmp/pq.mkv
+          export PUSHMPC_VS_LOG_DIR=/tmp/vslog-pq
+          mpv -v /tmp/pq.mkv --vo=null --ao=null --length=1.5 > /tmp/mpv-pq.txt 2>&1 || true
+          grep -E 'PushMPC: |video-dec-params|gamma' /tmp/mpv-pq.txt | head -12 || true
+          grep -h 'colour arguments' /tmp/vslog-pq/*.log 2>/dev/null | head -4 || true
+          grep -q 'PushMPC: filter added before decoding' /tmp/mpv-pq.txt || { echo "::error::pushmpc.lua did not add the filter before decoding"; exit 1; }
+          grep -q "transfer (pq) is not the plugin's guess: filter added again" /tmp/mpv-pq.txt || { echo "::error::pushmpc.lua did not re-add the filter with the PQ transfer"; exit 1; }
+          grep -hq 'colour arguments: .*transfer 16' /tmp/vslog-pq/*.log || { echo "::error::no plugin instance opened with transfer 16"; exit 1; }
+          echo "::notice title=arch mpv PQ transfer::$(grep -h 'colour arguments' /tmp/vslog-pq/*.log | tr '\n' ' ')"
+          export PUSHMPC_VS_LOG_DIR=/tmp/vslog-arch
           rm $HOME/.config/pushmpc/settings.ini; rmdir $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           snap > /tmp/after.txt
