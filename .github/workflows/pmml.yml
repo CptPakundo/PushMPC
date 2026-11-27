@@ -53,7 +53,7 @@ jobs:
         id: data
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
       - name: Python packages (PushFPS's model preparation pins)
         timeout-minutes: 5
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Packages (Mesa lavapipe, ninja)
@@ -216,7 +216,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache@v4
@@ -249,7 +249,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache@v4
@@ -275,6 +275,16 @@ jobs:
         run: |
           build/pmml_cli.exe list --runtime rt --flavor core || true
           build/pmml_cli.exe list --runtime rt --flavor directml
+      # The anime upscalers on DirectML (WARP: placement does not depend on the device): every node of every graph must
+      # land on the GPU EP (pmml_unit fails on "SLOW: nodes on the CPU EP"; a CPU EP node stalled DVD sizes for 20 s a
+      # frame). The weights come through Setup's pinned fetch (GitHub-hosted ones only: AnimeSR is on Google Drive).
+      - name: Anime upscalers on DirectML (no CPU EP fallback)
+        timeout-minutes: 15
+        env: { PMML_DML_WARP: '1', PMML_TEST_RUNTIME: rt, PMML_TEST_GRAPHS: pmml-data/graphs, PMML_TEST_BACKEND: 'ort:directml:dml:0', PMML_TEST_SKIP_MISSING: '1' }
+        run: |
+          pwsh -NoProfile -File scripts/anime-models-fetch.ps1 -Pin scripts/anime-models-pin.json -Dest pmml-data/graphs/anime-sr -Only artcnn,cunny -Cache "$RUNNER_TEMP/anime-dl"
+          build/pmml_unit.exe | tee anime-unit.log
+          grep -q 'rgba8 on ort:directml' anime-unit.log
       - name: The pinned plugin EPs register (no GPU here, so no devices; pmml_cli must not crash)
         shell: bash
         run: |
@@ -353,7 +363,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: pmml-data
-          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/reference.py') }}
+          key: pmml-data-v1-${{ hashFiles('scripts/pushfps-pin.json', 'scripts/ml-runtime-pin.json', 'pmml/scripts/make_graphs.py', 'pmml/scripts/anime_sr_graphs.py', 'pmml/scripts/reference.py') }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Runtimes (ORT core osx-arm64 with CoreML)
