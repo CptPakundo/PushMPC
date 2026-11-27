@@ -10,6 +10,9 @@
 # one), jumps (over one and a half source frames' worth: a frame the source skipped), backward steps, the extremes and
 # the most common step sizes; then which rule failed. A failure then says whether the source (the off dump shows it
 # too) or frame generation made it. --fps: the clip's frame rate (24).
+# --source-limited yes: the source itself delivered too few pictures (capture.yml's source gate failed, e.g. the macOS
+# VM's screen capture at 13-15 a second of 24): the spread rules are printed as information only, and the run must
+# still have its mean step within 10 % of speed / hz and no step backwards by more than 0.5 px.
 # Python 3, stdlib only.
 import collections
 import statistics
@@ -96,11 +99,14 @@ def main(argv):
     back = min(on)
     print(f"with frame generation: {len(on)} steps, mean {mean_on:.3f} px (want {want:.3f}), spread {sd_on:.3f} px, lowest {back:.3f}")
     describe("with", on, want, src_step)
-    failed = []
+    limited = opt.get("--source-limited", "no") == "yes"
+    failed, info = [], []
+    spread_rules = info if limited else failed
     if not sd_on < 0.75:
-        failed.append(f"spread {sd_on:.3f} not under 0.75 px")
-    if not abs(mean_on - want) <= 0.25 * want:
-        failed.append(f"mean {mean_on:.3f} more than 25 % from {want:.3f}")
+        spread_rules.append(f"spread {sd_on:.3f} not under 0.75 px")
+    tol = 0.10 if limited else 0.25
+    if not abs(mean_on - want) <= tol * want:
+        failed.append(f"mean {mean_on:.3f} more than {tol * 100:.0f} % from {want:.3f}")
     if not back > -0.5:
         failed.append(f"a step goes back {back:.3f} px")
     if len(args) > 1:
@@ -110,7 +116,11 @@ def main(argv):
         if off:
             describe("without", off, want, src_step)
         if not sd_on < 0.5 * sd_off:
-            failed.append(f"spread {sd_on:.3f} not under half the spread without ({0.5 * sd_off:.3f})")
+            spread_rules.append(f"spread {sd_on:.3f} not under half the spread without ({0.5 * sd_off:.3f})")
+    if limited:
+        print("  the source delivered too few pictures: the spread rules are information only (mean within 10 %, no step back)")
+    for f in info:
+        print(f"  not met (information): {f}")
     for f in failed:
         print(f"  failed: {f}")
     print("FAIL" if failed else "PASS")
