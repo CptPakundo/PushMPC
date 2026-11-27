@@ -23,7 +23,7 @@ namespace pmc {
 namespace {
 
 // the player's bounds (top-left global coordinates) and whether another normal window lies over it
-bool TargetRect(uint64_t id, CGRect& r, bool& covered)
+bool TargetRect(uint64_t windowId, CGRect& r, bool& covered)
 {
     covered = false;
     CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
@@ -35,7 +35,7 @@ bool TargetRect(uint64_t id, CGRect& r, bool& covered)
     for (NSDictionary* w in (__bridge NSArray*)list) {
         CGRect b = CGRectZero;
         if (w[(id)kCGWindowBounds]) CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &b);
-        if ([w[(id)kCGWindowNumber] unsignedLongLongValue] == id) { r = b; found = true; break; }
+        if ([w[(id)kCGWindowNumber] unsignedLongLongValue] == windowId) { r = b; found = true; break; }
         if ([w[(id)kCGWindowLayer] intValue] != 0 || [w[(id)kCGWindowOwnerPID] intValue] == self) continue;
         if (w[(id)kCGWindowAlpha] && [w[(id)kCGWindowAlpha] doubleValue] <= 0.01) continue;   // invisible helper windows
         above.push_back(b);
