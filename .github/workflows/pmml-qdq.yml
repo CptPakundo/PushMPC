@@ -47,6 +47,8 @@ jobs:
       - name: PushFlow models (PushFPS's prepare_runtime.py at the pinned tag), checked against the pins
         if: steps.data.outputs.cache-hit != 'true'
         timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}   # prepare_runtime.py lists a public release with `gh release view` (read only)
         run: |
           set -euo pipefail
           repo=$(jq -r .pushfps.repository scripts/pushfps-pin.json); tag=$(jq -r .pushfps.tag scripts/pushfps-pin.json); commit=$(jq -r .pushfps.commit scripts/pushfps-pin.json)

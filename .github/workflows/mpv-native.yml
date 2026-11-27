@@ -191,9 +191,9 @@ jobs:
           cmake --build build-engine --config Release --parallel
           if ($LASTEXITCODE) { throw 'build' }
           ./build-engine/out/engine_test.exe
-          ./build-engine/out/content_gpu_test.exe   # ContentDetect's D3D11 GPU tap = the CPU reference (WARP)
-          if ($LASTEXITCODE) { throw 'content_gpu_test' }
           if ($LASTEXITCODE) { throw 'engine_test failed' }
+          ./build-engine/out/content_gpu_test.exe   # ContentDetect's D3D11 GPU tap = the CPU reference (WARP)
+          if ($LASTEXITCODE) { throw 'content_gpu_test failed' }
           # the libmpv forwarder for players with their own libmpv (scripts/pushmpc-libmpv.ps1)
           cmake -S mpvnative/libmpv-swap -B build-fwd -A x64
           cmake --build build-fwd --config Release

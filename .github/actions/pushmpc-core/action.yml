@@ -81,7 +81,13 @@ runs:
         $out = & "$d\guarded.exe"; $rc = $LASTEXITCODE; Write-Host "with /d2NoLUR: $out"
         if ($rc -ne 0) { Write-Host "::error::the MSVC loop optimiser bug is back even with /d2NoLUR: $out"; exit 1 }
         cl @flags repo/tests/msvc-loop-guard.cpp "/Fe:$d\plain.exe" "/Fo:$d\plain.obj" | Out-Null
-        $plain = & "$d\plain.exe"; Write-Host "without it: $plain (cl $((cl 2>&1 | Select-Object -First 1) -replace '.*Version\s+(\S+).*', '$1'))"
+        $plain = & "$d\plain.exe"
+        $m = cl 2>&1 | Select-String -Pattern 'Version\s+(\S+)' | Select-Object -First 1
+        $ver = if ($m) { $m.Matches[0].Groups[1].Value } else { 'unknown' }
+        Write-Host "without it: $plain (cl $ver)"
+        # plain.exe returns 1 when the bug shows and cl without arguments returns non-zero: both are informational here.
+        # The guard's own result was checked above, so the step succeeds on it alone (pwsh would exit with $LASTEXITCODE).
+        exit 0
 
     # The SDKs below (and the FidelityFX 1.x optical flow libraries built from one of them) are cached under a hash of
     # their pins: a run with the same pins restores them in seconds instead of fetching and building them (about 1 min)
