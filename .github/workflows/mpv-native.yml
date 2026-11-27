@@ -805,7 +805,7 @@ jobs:
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           # the preload, the self-test host and the hook (Plex's C plugin) as shipped: built on Debian 12 (build-hook-c.sh)
-          sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null   # the same mpv header as the shipped hook's
           sh mpvnative/hook/build-hook-c.sh "$d"
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
@@ -872,7 +872,7 @@ jobs:
           d="$RUNNER_TEMP/plexlin"; mkdir -p "$d"
           for x in $(ls -d "$RUNNER_TEMP"/hooklibs/*/ | sort -V); do cp "$x"*.so "$d/"; done
           # the preload, the self-test host and the hook (Plex's C plugin) as shipped: built on Debian 12 (build-hook-c.sh)
-          sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q --no-install-recommends libmpv-dev >/dev/null   # the same mpv header as the shipped hook's
           sh mpvnative/hook/build-hook-c.sh "$d"
           docker run --rm -v "$PWD:/w" -w /w debian:bookworm sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends cmake g++ make glslang-tools ca-certificates >/dev/null && cmake -S mpvnative/engine -B build-engine-bookworm -DCMAKE_BUILD_TYPE=Release -DPME_FETCH_GPU_DEPS=ON >/dev/null && cmake --build build-engine-bookworm --parallel --target pushmpc_engine > /tmp/b.log 2>&1 || { tail -30 /tmp/b.log; exit 1; }'
           cp build-engine-bookworm/out/libpushmpc_engine.so mpvnative/ci/SOURCES.txt "$d/"
