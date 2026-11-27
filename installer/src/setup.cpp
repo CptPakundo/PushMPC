@@ -401,6 +401,8 @@ std::atomic<bool> g_plexSwap{ true };
 // PushMPC's own mpv (a separate download): on by default, installed when an mpv-family player is here (-MpvBuild Auto),
 // and then the libmpv of mpv.net, MPC-QT, Jellyfin Desktop, Stremio; unchecked: -MpvBuild No
 std::atomic<bool> g_mpvBuild{ true };
+// --mpv-build (scripted installs): PushMPC's own mpv even when no mpv-family player is here (-MpvBuild Yes)
+std::atomic<bool> g_mpvBuildForce{ false };
 
 Result DoInstall(Op op, bool autoUpdates) {
     Result res;
@@ -452,7 +454,7 @@ Result DoInstall(Op op, bool autoUpdates) {
     fail.clear();
     if (!plan["engine"].empty()) UiLine(L"Auto's starting choice for " + Widen(plan["gpu"]) + L": " + Widen(plan["engine"]));
     rc = RunScript(script, L"install -StageDir " + QuoteArg(stage) + (g_fsrSdk ? L"" : L" -FidelityFx Package") + (g_pmml ? L"" : L" -Pmml No") +
-                   (g_plexSwap ? L"" : L" -PlexSwap No") + (opt.sandbox || !g_mpvBuild ? L" -MpvBuild No" : L""), scriptLo, 98, nullptr, fail);
+                   (g_plexSwap ? L"" : L" -PlexSwap No") + (opt.sandbox || !g_mpvBuild ? L" -MpvBuild No" : g_mpvBuildForce ? L" -MpvBuild Yes" : L""), scriptLo, 98, nullptr, fail);
     if (rc != 0) { res.message = L"The installation failed" + (fail.empty() ? Format(L" (exit %d).", rc) : L": " + fail) + L"\r\nNothing of an earlier PushMPC was removed. Details: " + JoinPath(g_installDir, L"logs\\setup.log"); RemoveTree(stage); return res; }
     if (!opt.dryRun) {
         // maintenance copy, Apps entry, update setting
@@ -990,8 +992,8 @@ bool ParseArgs() {
         else if (a == L"--dry-run") opt.dryRun = true;
         else if (a == L"--sandbox") opt.sandbox = true;
         else if (a == L"--no-existing") opt.noExisting = true;
-        else if (a == L"--mpv-build") g_mpvBuild = true;   // scripted installs: PushMPC's own mpv too
-        else if (a == L"--no-mpv-build") g_mpvBuild = false;
+        else if (a == L"--mpv-build") g_mpvBuild = g_mpvBuildForce = true;   // scripted installs: PushMPC's own mpv in any case
+        else if (a == L"--no-mpv-build") g_mpvBuild = g_mpvBuildForce = false;
         else if (a == L"--install-dir") next(opt.installDir);
         else if (a == L"--package-cache") next(opt.packageCache);
         else if (a == L"--mirror") next(opt.mirror);
