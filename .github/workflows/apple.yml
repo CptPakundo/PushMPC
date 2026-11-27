@@ -740,9 +740,10 @@ jobs:
           [ "$(snap /Applications/IINA.app)" = "$iina0" ] && echo "IINA.app bit for bit as installed" || { echo "::error::IINA.app changed"; fails=$((fails + 1)); }
           [ "$(snap /Applications/VLC.app)" = "$vlc0" ] && echo "VLC.app bit for bit as installed" || { echo "::error::VLC.app changed"; fails=$((fails + 1)); }
           [ ! -e "$plug" ] || { echo "::error::the IINA plugin is left behind"; fails=$((fails + 1)); }
-          [ "$(defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina 2>&1 || true)" = "$enabled0" ] && echo "IINA's settings as they were" || { echo "::error::IINA's PluginEnabled setting not restored"; fails=$((fails + 1)); }
+          enabled1=$(defaults read com.colliderli.iina PluginEnabled.com.pushmpc.iina 2>&1 || true)
+          [ "$enabled1" = "$enabled0" ] && echo "IINA's settings as they were" || { echo "::error::IINA's PluginEnabled setting not restored"; echo "  before: $enabled0"; echo "  after:  $enabled1"; defaults read com.colliderli.iina 2>&1 | head -n 12 | sed 's/^/  domain now: /'; fails=$((fails + 1)); }
           [ ! -e "$rc" ] && [ ! -e "$HOME/Library/LaunchAgents/io.github.pushmpc.vlc-env.plist" ] && [ ! -e "$HOME/Library/Application Support/PushMPC/vlc" ] \
-            && echo "VLC: vlcrc, the LaunchAgent and the plugin folder gone (none was there before)" || { echo "::error::VLC: something is left behind"; ls -la "$(dirname "$rc")" 2>/dev/null; fails=$((fails + 1)); }
+            && echo "VLC: vlcrc, the LaunchAgent and the plugin folder gone (none was there before)" || { echo "::error::VLC: something is left behind"; ls -la "$(dirname "$rc")" 2>/dev/null; [ ! -f "$rc" ] || grep -vE '^[[:space:]]*(#|;|\[|$)' "$rc" | head -n 8 | sed 's/^/  vlcrc active line: /'; fails=$((fails + 1)); }
           [ -z "$(launchctl getenv VLC_PLUGIN_PATH)" ] || { echo "::error::VLC_PLUGIN_PATH is still set"; fails=$((fails + 1)); }
           [ "$fails" = 0 ] || exit 1
 

@@ -378,10 +378,18 @@ uninstall_one() {
   # install created vlcrc and VLC rewrote it since (VLC writes its whole configuration, every option a commented
   # default): with PushMPC's keys out and no active setting left, it holds nothing of the user's: removed, as before
   # install. Any active line (a setting the user or VLC's GUI made) keeps the file.
-  if [ "$created" = 1 ] && [ -f "$RC" ] && ! grep -qvE '^[[:space:]]*(#|;|\[|$)' "$RC"; then
-    rm -f "$RC"; rmdir "$(dirname "$RC")" 2>/dev/null || true
-    say "PushMPC for VLC removed ($tgt); $RC removed (PushMPC had created it; only VLC's defaults were left in it)"
-    return 0
+  if [ "$created" = 1 ] && [ -f "$RC" ]; then
+    # active lines: anything but comments (#, ;), section headers ([core]) and blank lines
+    active="$(grep -vE '^[[:space:]]*(#|;|\[|$)' "$RC" | head -n 8)"
+    if [ -z "$active" ]; then
+      rm -f "$RC"; rmdir "$(dirname "$RC")" 2>/dev/null || true
+      say "PushMPC for VLC removed ($tgt); $RC removed (PushMPC had created it; only VLC's defaults were left in it)"
+      return 0
+    fi
+    say "$RC kept (PushMPC had created it, but it now holds settings besides VLC's defaults):"
+    printf '%s\n' "$active" | sed 's/^/    /'
+  elif [ -f "$RC" ]; then
+    say "$RC kept (it was there before PushMPC)"
   fi
   say "PushMPC for VLC removed ($tgt)"
 }
