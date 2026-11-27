@@ -18,6 +18,9 @@
 // or an open that did not work) closes it and tries again later with a capped exponential backoff (ShareBackoff); the
 // scaler draws meanwhile. Nothing here gives the core up for the stream, except pushcore not keeping up (the late count).
 // A bridge without those exports: the caller decides (it keeps its older check that the filter is absent).
+// pm_pc_busy is lock-free and reads "free" while another instance is inside its open or update (before Acquire sets the
+// owner). That is safe in VLC 3 because the filter's open and update and this Feed all run on the vout thread, one after
+// the other; a caller with another threading would need the host's lock around the check and the open.
 #pragma once
 #include <windows.h>
 #include <d3d11_1.h>
@@ -231,7 +234,9 @@ public:
         double frameMs = 1000.0 / 23.976;
         bool tenBit = false, hdr = false;
     };
-    struct Stats { int opens = 0, openFails = 0, lost = 0, updates = 0; double openMsMax = 0, feedMsMax = 0, feedMsSum = 0; int feeds = 0; };
+    // feed: the whole call (an open in it too); wait: from the push to the end of the drain (the bound is on this part)
+    struct Stats { int opens = 0, openFails = 0, lost = 0, updates = 0; double openMsMax = 0, feedMsMax = 0, feedMsSum = 0; int feeds = 0;
+                   double waitMsMax = 0, waitMsSum = 0; int waits = 0; };
 
     PcsrCore() = default;
     PcsrCore(const PcsrCore&) = delete;
@@ -262,7 +267,7 @@ public:
     // false: pushcore does not keep up here (anime mode): the caller ends this for the stream
     bool Feed(ID3D11Texture2D* tex, unsigned slice, int64_t pts100, bool disc, double nowS)
     {
-        const ULONGLONG t0 = GetTickCount64();
+        const double t0 = Ms();
         m_got = false;
         // a discontinuity (a new file, a seek, a resume: VLC's picture dates are the system clock's, so a new stream does
         // not step back): the backoff starts over (at most one extra try per such event; a held core stays busy)
@@ -295,15 +300,21 @@ public:
         if (!m_pc) return Done(t0);
         // the picture to pushcore, and its upscaled one back within about a frame (the bridge waits outside the lock)
         m_want = pts100; m_pending = false;
+        const double tw = Ms();
         if (m_b.push(m_pc, tex, slice, pts100, disc ? 1 : 0, err, sizeof(err)) != 0) { Lost("pushcore refused a picture", err, nowS); return Done(t0); }
-        const ULONGLONG deadline = t0 + ULONGLONG(std::clamp(1.5 * m_s.frameMs, 12.0, 50.0));
+        // the wait is bounded from the push (an open before it is not: it happens once per switch or retry)
+        const double deadline = tw + std::clamp(1.5 * m_s.frameMs, 12.0, 50.0);
         for (;;) {
-            if (m_b.pollTex(m_pc, 2, Dest, Doneb, this, err, sizeof(err)) < 0) { Lost("pushcore failed", err, nowS); return Done(t0); }
-            if (m_got || GetTickCount64() >= deadline) break;
+            const double left = deadline - Ms();
+            if (left <= 0) break;
+            if (m_b.pollTex(m_pc, uint32_t(std::min(2.0, std::max(1.0, left))), Dest, Doneb, this, err, sizeof(err)) < 0) { Lost("pushcore failed", err, nowS); return Done(t0); }
+            if (m_got) break;
         }
         for (int guard = 0; guard < 64; ++guard)
             if (m_b.pollTex(m_pc, 0, Dest, Doneb, this, err, sizeof(err)) <= 0) break;
         m_pending = false;
+        const double wms = Ms() - tw;
+        m_stats.waits++; m_stats.waitMsSum += wms; m_stats.waitMsMax = std::max(m_stats.waitMsMax, wms);
         // late pictures: the scaler draws them; when most are late, pushcore does not keep up here
         if (m_grace > 0) m_grace--;
         else {
@@ -346,9 +357,15 @@ public:
 
 private:
     void Log(bool warn, const std::string& s) { if (m_log) m_log(warn, s); }
-    bool Done(ULONGLONG t0)
+    static double Ms()
     {
-        const double ms = double(GetTickCount64() - t0);
+        LARGE_INTEGER f, c;
+        QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+        return double(c.QuadPart) * 1000.0 / double(f.QuadPart);
+    }
+    bool Done(double t0)
+    {
+        const double ms = Ms() - t0;
         m_stats.feeds++; m_stats.feedMsSum += ms; m_stats.feedMsMax = std::max(m_stats.feedMsMax, ms);
         return true;
     }
@@ -388,9 +405,9 @@ private:
         c.measure = m_meas ? 0 : 1;    // without the measuring instance, pushcore's own (an older bridge, anime mode)
         char err[300] = "";
         int k = 1;
-        const ULONGLONG t0 = GetTickCount64();
+        const double t0 = Ms();
         m_pc = m_b.open(&c, m_s.dev, m_s.mutex, &k, err, sizeof(err));
-        const double ms = double(GetTickCount64() - t0);
+        const double ms = Ms() - t0;
         m_stats.openMsMax = std::max(m_stats.openMsMax, ms);
         pm_pc_info info{};
         info.struct_size = sizeof(info);
