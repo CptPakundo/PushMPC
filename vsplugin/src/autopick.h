@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <string>
 #include "PushMpcAuto.h"
+#include "PushMpcLearned.h"   // the Learned key's model (pm::learned::kModel) and its rules
 #include "pushmpc/pushcore_abi.h"
 #include "pushmpc/unlocks.h"
 
@@ -155,12 +156,13 @@ inline PushCoreSettings ToCore(const pm::Settings& s, const pm::Choice& c, const
     return p;
 }
 
-// the learned costs the filter stores (HKCU\Software\PushMPC\Learned, model 3) for this GPU, read-only here
+// the learned costs the filter stores (HKCU\Software\PushMPC\Learned, model pm::learned::kModel: the saved values of
+// filter/src/PushMpcLearned.h, kept safe from foreign GPU load) for this GPU, read-only here
 inline void LoadLearned(pm::Costs& c, const std::wstring& gpuName)
 {
     HKEY k = nullptr;
     if (gpuName.empty() || RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PushMPC\\Learned", 0, KEY_READ, &k) != ERROR_SUCCESS) return;
-    if (pm::RegReadStr(k, L"Gpu") == gpuName && pm::RegReadStr(k, L"Model") == L"3") {
+    if (pm::RegReadStr(k, L"Gpu") == gpuName && pm::RegReadStr(k, L"Model") == pm::learned::kModel) {
         auto num = [&](const std::wstring& n, double& v, bool* flag, double lo, double hi) {
             const std::wstring s = pm::RegReadStr(k, n.c_str());
             const double x = s.empty() ? -1 : _wtof(s.c_str());
