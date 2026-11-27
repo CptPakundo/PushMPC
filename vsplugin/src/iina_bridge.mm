@@ -23,6 +23,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
@@ -53,6 +54,14 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <mpv/client.h>
+
+// AVFrame.duration is FFmpeg 6 and later (libavutil 58); older majors (Homebrew's ffmpeg@4, libavutil 56) carry the frame's
+// duration in pkt_duration. The bridge is built once per FFmpeg major (pushmpc-iina-av<libavutil major>.so)
+#if LIBAVUTIL_VERSION_MAJOR >= 58
+#define PM_DURATION(fr) ((fr)->duration)
+#else
+#define PM_DURATION(fr) ((fr)->pkt_duration)
+#endif
 }
 #include "apple_engine.h"
 #include "backend.h"        // pmvs::kPortableMaxK: the built-in portable engine's ceiling
@@ -224,7 +233,7 @@ AVFrame* WrapPixelBuffer(Bridge& b, const AVFrame* tmpl, CVPixelBufferRef pb, in
     f->data[3] = reinterpret_cast<uint8_t*>(pb);
     f->buf[0] = g_av.buffer_create(reinterpret_cast<uint8_t*>(pb), 0, ReleasePixelBuffer, pb, 0);
     f->pts = pts;
-    f->duration = duration;
+    PM_DURATION(f) = duration;
     const bool sameSize = tmpl->hw_frames_ctx && f->width == tmpl->width && f->height == tmpl->height;
     if (sameSize) f->hw_frames_ctx = g_av.buffer_ref(tmpl->hw_frames_ctx);
     else {
@@ -366,7 +375,7 @@ AVFrame* NewSoftFrame(const AVFrame* tmpl, int64_t pts, int64_t duration)
     g_av.frame_copy_props(o, tmpl);
     o->format = tmpl->format; o->width = tmpl->width; o->height = tmpl->height;
     if (g_av.frame_get_buffer(o, 0) < 0) { g_av.frame_free(&o); return nullptr; }
-    o->pts = pts; o->duration = duration;
+    o->pts = pts; PM_DURATION(o) = duration;
     return o;
 }
 
@@ -445,12 +454,12 @@ bool Feed(Bridge& b, AVFrame* f)
             b.mode = Bridge::Mode::Pass;
             return false;
         }
-        const int64_t dur = step > 0 ? step / b.k : f->duration / std::max(1, b.k);
+        const int64_t dur = step > 0 ? step / b.k : PM_DURATION(f) / std::max(1, b.k);
         for (size_t j = 0; j < gen.size(); ++j) {
             AVFrame* o = WrapPixelBuffer(b, f, static_cast<CVPixelBufferRef>(gen[j]), b.lastPts + step * int64_t(j + 1) / b.k, dur);
             if (o) b.out.push_back(o);
         }
-        if (AVFrame* o = WrapPixelBuffer(b, f, static_cast<CVPixelBufferRef>(cur), f->pts, havePair ? dur : f->duration)) b.out.push_back(o);
+        if (AVFrame* o = WrapPixelBuffer(b, f, static_cast<CVPixelBufferRef>(cur), f->pts, havePair ? dur : PM_DURATION(f))) b.out.push_back(o);
     } else if (b.mode == Bridge::Mode::Module) {
         AVFrame* src = f;
         AVFrame* dl = nullptr;
@@ -470,7 +479,7 @@ bool Feed(Bridge& b, AVFrame* f)
             b.mode = Bridge::Mode::Pass;
             return false;
         }
-        const int64_t dur = step > 0 ? step / b.k : f->duration / std::max(1, b.k);
+        const int64_t dur = step > 0 ? step / b.k : PM_DURATION(f) / std::max(1, b.k);
         pmeng_out_info oi{};
         bool generated = false;
         while (b.api->peek(b.eng, &oi, 0) == 1) {
@@ -483,13 +492,13 @@ bool Feed(Bridge& b, AVFrame* f)
             generated = true;
         }
         AVFrame* o = g_av.frame_alloc();
-        if (o) { g_av.frame_copy_props(o, src); g_av.frame_move_ref(o, src); o->duration = generated ? dur : o->duration; b.out.push_back(o); }
+        if (o) { g_av.frame_copy_props(o, src); g_av.frame_move_ref(o, src); PM_DURATION(o) = generated ? dur : PM_DURATION(o); b.out.push_back(o); }
         if (dl) g_av.frame_free(&dl);
     } else {
         portable::YuvView v; v.width = f->width; v.height = f->height; v.bits = f->format == AV_PIX_FMT_YUV420P10 ? 10 : 8;
         for (int i = 0; i < 3; ++i) { v.data[i] = f->data[i]; v.stride[i] = f->linesize[i]; }
         if (!b.port->Push(v, contiguous, err)) { Log("portable engine: %s: pass-through", err.c_str()); b.mode = Bridge::Mode::Pass; return false; }
-        const int64_t dur = step > 0 ? step / b.k : f->duration / std::max(1, b.k);
+        const int64_t dur = step > 0 ? step / b.k : PM_DURATION(f) / std::max(1, b.k);
         if (b.port->HavePair() && step > 0)
             for (int j = 1; j < b.k; ++j) {
                 AVFrame* o = NewSoftFrame(f, b.lastPts + step * j / b.k, dur);
@@ -499,7 +508,7 @@ bool Feed(Bridge& b, AVFrame* f)
                 b.out.push_back(o);
             }
         AVFrame* o = g_av.frame_alloc();
-        if (o) { g_av.frame_copy_props(o, f); g_av.frame_move_ref(o, f); o->duration = b.port->HavePair() ? dur : o->duration; b.out.push_back(o); }
+        if (o) { g_av.frame_copy_props(o, f); g_av.frame_move_ref(o, f); PM_DURATION(o) = b.port->HavePair() ? dur : PM_DURATION(o); b.out.push_back(o); }
     }
     b.prevPts = b.lastPts;
     b.lastPts = inPts;   // (f may have been moved into the output queue)
@@ -690,6 +699,27 @@ bool InstallHooks(std::string& why)
 // ------------------------------------------------------------------------------------------------ the mpv C plugin
 extern "C" __attribute__((visibility("default"))) int mpv_open_cplugin(mpv_handle* handle)
 {
+    // This build serves one FFmpeg major (its structures). In a player with another libavutil major, the build made for
+    // that major, pushmpc-iina-av<major>.so next to this file, runs instead (IINA's plugin and older Homebrew setups load
+    // pushmpc-iina.so by name); without one, this build stays "not active" and says why.
+    if (g_av.Load() && (g_av.avutil_version() >> 16) != LIBAVUTIL_VERSION_MAJOR) {
+        Dl_info self{};
+        if (dladdr(reinterpret_cast<void*>(&mpv_open_cplugin), &self) && self.dli_fname) {
+            std::string sib = self.dli_fname;
+            sib = sib.substr(0, sib.rfind('/') + 1) + "pushmpc-iina-av" + std::to_string(g_av.avutil_version() >> 16) + ".so";
+            if (sib != self.dli_fname && access(sib.c_str(), R_OK) == 0) {
+                if (void* h = dlopen(sib.c_str(), RTLD_NOW | RTLD_LOCAL)) {
+                    using OpenFn = int (*)(mpv_handle*);
+                    if (auto open = reinterpret_cast<OpenFn>(dlsym(h, "mpv_open_cplugin"))) {
+                        Log("libavutil %u here, this build is for %d: %s runs instead", g_av.avutil_version() >> 16, LIBAVUTIL_VERSION_MAJOR, sib.c_str());
+                        return open(handle);
+                    }
+                } else {
+                    Log("%s could not be loaded: %s", sib.c_str(), dlerror());
+                }
+            }
+        }
+    }
     g_mpv = handle;
     static std::once_flag once;
     static bool ok = false;

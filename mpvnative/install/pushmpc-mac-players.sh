@@ -40,9 +40,27 @@ rc=0; found=0
 iina_app() { for a in /Applications/IINA.app "$HOME/Applications/IINA.app"; do [ -d "$a" ] && { echo "$a"; return 0; }; done; return 1; }
 vlc_app() { for a in /Applications/VLC.app "$HOME/Applications/VLC.app"; do [ -d "$a" ] && { echo "$a"; return 0; }; done; return 1; }
 
+# The bridge is built once per FFmpeg major: pushmpc-iina-av<libavutil major>.so next to pushmpc-iina.so. IINA's plugin
+# loads pushmpc-iina.so by name; in a libmpv with another FFmpeg major that build hands over to the one for it (the same
+# choice pushmpc-apps-mac.sh makes per app). The self-test goes the plugin's way and says which build serves IINA.
+app_avutil() {   # app_avutil <app>: the libavutil major the app bundles, "" when it cannot be told
+    m=$(find "$1/Contents" -name 'libavutil.*.dylib' ! -path '*/_CodeSignature/*' 2>/dev/null | sed -n 's/.*libavutil\.\([0-9][0-9]*\)\..*dylib$/\1/p' | head -n 1)
+    [ -n "$m" ] || m=$(otool -L "$1/Contents/Frameworks/libmpv.2.dylib" 2>/dev/null | sed -n 's/.*libavutil\.\([0-9][0-9]*\)\.dylib.*/\1/p' | head -n 1)
+    printf '%s\n' "$m"
+}
+bridge_for() {   # bridge_for <libavutil major>: the build for it, else pushmpc-iina.so
+    if [ -n "$1" ] && [ -f "$(dirname "$bridge")/pushmpc-iina-av$1.so" ]; then printf '%s\n' "$(dirname "$bridge")/pushmpc-iina-av$1.so"; else printf '%s\n' "$bridge"; fi
+}
+
 iina_selftest() {   # IINA's own libmpv, the bridge, the engines: a generated clip at x2
     app=$1
     [ -f "$bridge" ] || { echo "IINA: self-test skipped (no bridge; brew install CptPakundo/pushmpc/pushmpc installs it)"; return 0; }
+    av=$(app_avutil "$app"); serving=$(bridge_for "$av")
+    if [ "$serving" = "$bridge" ] && [ -n "$av" ] && [ ! -f "$(dirname "$bridge")/pushmpc-iina-av$av.so" ]; then
+        echo "IINA: its libavutil is $av; no bridge build for it here (the self-test shows the reason)"
+    else
+        echo "IINA: its libavutil is ${av:-unknown}; served by $(basename "$serving")"
+    fi
     host="$from/pushmpc-plex-selftest"; [ -x "$host" ] || { echo "IINA: self-test skipped (no pushmpc-plex-selftest)"; return 0; }
     log="$HOME/Library/Logs/PushMPC/iina-bridge.log"; mark=$( [ -f "$log" ] && wc -l < "$log" || echo 0 )
     out=$(PUSHMPC_HOST_VF='@pushmpc:lavfi=[null@pushmpc]' PUSHMPC_HOST_SCRIPTS="$bridge" PUSHMPC_HOST_ACCEPT_EOF=1 \
