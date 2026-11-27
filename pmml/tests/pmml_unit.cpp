@@ -306,7 +306,19 @@ static void upscaleRun() {
     }
 }
 
+// the plugin EP device filter: the documented name, the registration name, neither (the TensorRT-RTX regression)
+static void epNames() {
+    using pmml::detail::epDeviceMatches;
+    CHECK(epDeviceMatches("NvTensorRTRTXExecutionProvider", "NvTensorRTRTXExecutionProvider", "trt-rtx"));
+    CHECK(epDeviceMatches("trt-rtx", "NvTensorRTRTXExecutionProvider", "trt-rtx"));   // ORT 1.30 + EP 0.5.0
+    CHECK(!epDeviceMatches("CPUExecutionProvider", "NvTensorRTRTXExecutionProvider", "trt-rtx"));
+    CHECK(!epDeviceMatches("qnn", "NvTensorRTRTXExecutionProvider", "trt-rtx"));
+    CHECK(!epDeviceMatches("trt-rtx", "NvTensorRTRTXExecutionProvider", ""));
+    CHECK(!epDeviceMatches(nullptr, "NvTensorRTRTXExecutionProvider", "trt-rtx") && !epDeviceMatches("", "", ""));
+}
+
 int main() {
+    epNames();
     sizes();
     affine();
     parsing();

@@ -22,6 +22,14 @@ std::vector<std::string> jsonStrings(const std::string& s, const std::string& pa
 std::vector<std::string> jsonKeys(const std::string& s, const std::string& path);
 std::string jsonEscape(const std::string& v);
 
+// A plugin EP device belongs to the EP when its EpDevice_EpName is the EP's documented name (ep.json epName) or the name
+// pmml registered the library under (eps/<id>): TensorRT-RTX 0.5.0 under ONNX Runtime 1.30 reports the latter, and
+// matching only the documented name lost every RTX device (pmml_unit checks both, and neither)
+inline bool epDeviceMatches(const char* deviceEpName, const std::string& documented, const std::string& registered) {
+    if (!deviceEpName || !*deviceEpName) return false;
+    return documented == deviceEpName || (!registered.empty() && registered == deviceEpName);
+}
+
 inline double nowMs() {
     using namespace std::chrono;
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();

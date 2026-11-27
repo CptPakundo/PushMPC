@@ -275,6 +275,18 @@ jobs:
         run: |
           build/pmml_cli.exe list --runtime rt --flavor core || true
           build/pmml_cli.exe list --runtime rt --flavor directml
+      - name: The pinned plugin EPs register (no GPU here, so no devices; pmml_cli must not crash)
+        shell: bash
+        run: |
+          set +e
+          out=$(build/pmml_cli.exe list --runtime rt --flavor core 2>&1); rc=$?
+          echo "$out"
+          [ "$rc" = 0 ] || { echo "::error::pmml_cli list exited $rc with the pinned runtime"; exit 1; }
+          for ep in trt-rtx openvino qnn; do
+            if echo "$out" | grep -q "plugin EP $ep registered"; then echo "plugin EP $ep: registered"
+            elif echo "$out" | grep -q "plugin EP $ep not registered"; then echo "::warning::plugin EP $ep did not register on this GPU-less runner: $(echo "$out" | grep "plugin EP $ep not registered")"
+            else echo "::notice::plugin EP $ep: not in this runtime"; fi
+          done
       - name: OpenVINO plugin EP on Windows (why it does not load)
         continue-on-error: true
         shell: pwsh

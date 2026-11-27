@@ -219,8 +219,7 @@ std::vector<const OrtEpDevice*> epDevices(Ort* ort, const std::string& epName, c
     if (OrtStatus* s = ort->api->GetEpDevices(ort->env, &devs, &n)) { ort->api->ReleaseStatus(s); return out; }
     for (int pass = 0; pass < 2; ++pass)
         for (size_t i = 0; i < n; ++i) {
-            const char* name = ort->api->EpDevice_EpName(devs[i]);
-            if (!name || (epName != name && (regName.empty() || regName != name))) continue;
+            if (!epDeviceMatches(ort->api->EpDevice_EpName(devs[i]), epName, regName)) continue;
             const std::string t = deviceType(ort, devs[i]);
             if (!type.empty() ? (pass == 0 && t == type) : ((pass == 0) == (t != "CPU"))) out.push_back(devs[i]);
         }
