@@ -937,11 +937,11 @@ static picture_t *FilterCvpx(filter_t *f, struct filter_sys_t *sys, picture_t *c
     sys->prev = cur;
     const mtime_t dt = prev ? cur->date - prev->date : 0;
     const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
-    void *gen[8];
+    void *gen[16];   /* up to x16: 15 generated pictures per pair */
     int ngen = 0;
     bool pair = false;
     char err[200] = "";
-    if (pm_cvpx_eng_process(sys->cvpx, pb, (int64_t)cur->date * 10, contiguous, gen, 7, &ngen, &pair, err, sizeof(err)) != 0) {
+    if (pm_cvpx_eng_process(sys->cvpx, pb, (int64_t)cur->date * 10, contiguous, gen, 15, &ngen, &pair, err, sizeof(err)) != 0) {
         if (sys->cvpx_err++ == 0) msg_Warn(f, "PushMPC: apple engine: %s (this pair shows the real frames)", err);
         pm_cvpx_eng_forget(sys->cvpx);
         ngen = 0;
@@ -1999,7 +1999,7 @@ static int Open(vlc_object_t *obj)
                 int pk = 1;
                 sys->cvpx = pm_cvpx_eng_open(v, cbits, smoother, zfps, zhz, &pk, why, sizeof(why));
                 if (sys->cvpx && pk > 1) {
-                    sys->k = pk > 8 ? 8 : pk;
+                    sys->k = pk > 16 ? 16 : pk;   /* the apple engine's ceiling (apple_convert.h kAppleMaxK) */
                     bits = cbits;
                     snprintf(sys->why, sizeof(sys->why), "apple engine (VideoToolbox), zero copy on CVPX: %s", pm_cvpx_eng_describe(sys->cvpx));
                 } else if (sys->cvpx) {

@@ -238,16 +238,21 @@ inline int ExponentFor(int k, int maxExp = 4)
 
 // ------------------------------------------------------------------------------------------------ Auto decisions
 struct AppleK { int k = 1; std::string why; };
-// smoother: 0 Auto, 1 off, 2..8 fixed; displayHz <= 0 unknown (Auto then aims at x2)
+// The multiplier ceiling: 16, as the other engines (PUSHCORE_MAX_MULTIPLIER, pmvs::kPortableMaxK). It is not a
+// VideoToolbox limit: the low-latency interpolator takes numberOfInterpolatedFrames x = 1..4 (2^x - 1 phases; macOS 26
+// accepted all four configurations at 720p, 1080p and 4K), so x = 4 is x16's native grid, and frame-rate conversion
+// takes any phase. The engine's self-test still decides whether a grid really runs here.
+inline constexpr int kAppleMaxK = 16;
+// smoother: 0 Auto, 1 off, 2..16 fixed; displayHz <= 0 unknown (Auto then aims at x2)
 inline AppleK DecideAppleK(int smoother, double srcFps, double displayHz)
 {
     AppleK r;
     char b[200];
     if (srcFps <= 0) srcFps = 23.976;
     if (smoother == 1) { r.k = 1; r.why = "Smoother off: no frame generation"; return r; }
-    if (smoother >= 2) { r.k = std::min(smoother, 8); snprintf(b, sizeof(b), "x%d (your setting)", r.k); r.why = b; return r; }
+    if (smoother >= 2) { r.k = std::min(smoother, kAppleMaxK); snprintf(b, sizeof(b), "x%d (your setting)", r.k); r.why = b; return r; }
     if (displayHz <= 0) { r.k = 2; r.why = "Auto: display rate unknown: x2"; return r; }
-    const int maxK = std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8);
+    const int maxK = std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kAppleMaxK);
     // the even cadence at a fixed refresh (PushMpcAuto.h's rule; ProMotion / VRR is not known here): among x1..maxK the one
     // that shows frames shortest, a tie going to the even cadence, then the larger (240 Hz: x5, not an uneven x8)
     double bestHold = 1e9; bool bestEven = true; r.k = 1;

@@ -887,10 +887,11 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
         }
 
         // ---- interpolation. The low-latency interpolator offers 2^x - 1 phases (x = 1: 0.5; x = 2: quarters), so
-        // x2 and x4 are native. Other multipliers use frame-rate conversion (any phase) when it runs here. x8 first
-        // tries the low-latency x = 3 grid (eighths: macOS 26 accepts it, beyond Apple's quarter-phase example) and
-        // keeps it only if it really runs. The last resort is the low-latency eighth or quarter grid with the phases
-        // rounded to it. Every candidate must pass a self-test on synthetic frames with the phases it will use.
+        // x2 and x4 are native. Other multipliers use frame-rate conversion (any phase) when it runs here. x8 and x16
+        // first try the low-latency x = 3 / x = 4 grid (eighths, sixteenths: macOS 26 accepts both configurations,
+        // beyond Apple's quarter-phase example) and keep it only if it really runs. The last resort is a low-latency
+        // grid with the phases rounded to it (x3, x5-x7: eighths, then quarters; x9-x15: sixteenths, then eighths).
+        // Every candidate must pass a self-test on synthetic frames with the phases it will use.
         auto pickFiFormat = [&]() -> bool {
             const uint32_t f = PickFormat(d.fiFormats, c.bits, c.colour.fullRange, &d.fmtLossy);
             d.rgb = false;
@@ -961,9 +962,10 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
             const int k = d.cfg.k;
             std::vector<std::pair<Fi, int>> order;
             if (fiMode == "frc") order = { { Fi::Frc, 0 } };
-            else if (fiMode == "lowlatency") { for (int x = std::min(ExponentFor(k), 3); x >= 1; --x) order.push_back({ Fi::LowLatency, x }); }
+            else if (fiMode == "lowlatency") { for (int x = std::min(ExponentFor(k), 4); x >= 1; --x) order.push_back({ Fi::LowLatency, x }); }
             else if (k == 2 || k == 4) order = { { Fi::LowLatency, k == 2 ? 1 : 2 }, { Fi::Frc, 0 } };
-            else if (k == 8) order = { { Fi::LowLatency, 3 }, { Fi::Frc, 0 }, { Fi::LowLatency, 2 } };
+            else if (k == 8 || k == 16) order = { { Fi::LowLatency, k == 8 ? 3 : 4 }, { Fi::Frc, 0 }, { Fi::LowLatency, k == 8 ? 2 : 3 } };
+            else if (k > 8) order = { { Fi::Frc, 0 }, { Fi::LowLatency, 4 }, { Fi::LowLatency, 3 } };
             else order = { { Fi::Frc, 0 }, { Fi::LowLatency, 3 }, { Fi::LowLatency, 2 } };
             for (auto& o : order) {
                 if (o.first == Fi::Frc && d.flowProc && tryFi(Fi::Frc, 0, true)) break;   // shared flow first, then FRC's own
