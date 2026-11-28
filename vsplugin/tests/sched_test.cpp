@@ -5,6 +5,7 @@
 #include <set>
 #include "autopick.h"
 #include "schedule.h"
+#include "mp_params.h"
 
 using namespace pmvs;
 
@@ -201,6 +202,88 @@ static void TestColour()
     CHECK(FfRangeFromVs(1, true) == 1 && FfRangeFromVs(0, true) == 2 && FfRangeFromVs(0, false) == 1);
 }
 
+// mpv's struct mp_image prefix as at the tags v0.39.0 .. v0.42.0 (video/mp_image.h) with libplacebo's colour structs
+// (v6.338.2 .. master, src/include/libplacebo/colorspace.h): what vf_vapoursynth copies into _MP_IMAGE
+namespace mpimg {
+struct CieXy { float x, y; };
+struct RawPrim { CieXy r, g, b, w; };
+struct Bezier { float target, kx, ky; float anchors[15]; uint8_t num; };
+struct Hdr { RawPrim prim; float minL, maxL, cll, fall; float sceneMax[3]; float sceneAvg; Bezier ootf; float maxPq, avgPq; };
+struct ColorSpace { int primaries, transfer; Hdr hdr; };
+struct BitEnc { int sample, color, shift; };
+struct ColorRepr { int sys, levels, alpha; BitEnc bits; const void* dovi; };
+struct Params { int imgfmt; const char* name; int hwSubfmt; int w, h, pw, ph; bool forceWindow; ColorSpace color; ColorRepr repr; int primOrig, trcOrig, sysOrig; int light, chroma; bool vflip; int rotate, stereo; int crop[4]; bool noDovi, noEl; };
+struct Image { int w, h; Params params; int num_planes; void* planes[4]; int stride[4]; void* bufs[8]; double pts; };
+}
+
+static void TestMpImage()
+{
+    static_assert(sizeof(mpimg::Hdr) == 148, "pl_hdr_metadata is 148 bytes");
+    // a 1080p PQ BT.2020 frame (libplacebo: BT_2020 6, PQ 12, BT_2020_NC 4, LIMITED 1); _ColorSpace 9, _ColorRange 1
+    mpimg::Image img{};
+    img.w = 1920; img.h = 1080;
+    img.params.imgfmt = 1000; img.params.w = 1920; img.params.h = 1080; img.params.pw = 1; img.params.ph = 1;
+    img.params.color.primaries = 6; img.params.color.transfer = 12; img.params.repr.sys = 4; img.params.repr.levels = 1;
+    img.params.color.hdr.maxL = 1000; img.params.color.hdr.minL = 0.005f;
+    auto blob = [](const mpimg::Image& i) { std::vector<uint8_t> b(sizeof i); std::memcpy(b.data(), &i, sizeof i); return b; };
+    std::vector<uint8_t> b = blob(img);
+    MpFrameColour r = ParseMpImage(b.data(), b.size(), 1920, 1080, 1, 1, 9, 1);
+    CHECK(r.ok && r.transfer == 16 && r.primaries == 9 && r.matrix == 9 && r.range == 1);
+    CHECK(r.anchor == offsetof(mpimg::Image, params) + offsetof(mpimg::Params, w));
+    CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, repr) == (r.anchor + 176 + sizeof(void*) - 1) / sizeof(void*) * sizeof(void*));
+    // HLG (13 -> 18), full range (FULL 2, _ColorRange 0 -> range argument 0)
+    img.params.color.transfer = 13; img.params.repr.levels = 2; b = blob(img);
+    r = ParseMpImage(b.data(), b.size(), 1920, 1080, 1, 1, 9, 0); CHECK(r.ok && r.transfer == 18 && r.range == 0);
+    // UHD 10-bit SDR: BT_1886 1 -> 1, BT_709 3 -> 1, BT_709 system 2 -> _ColorSpace 1
+    img.w = img.params.w = 3840; img.h = img.params.h = 2160; img.params.color.transfer = 1; img.params.color.primaries = 3; img.params.repr.sys = 2; img.params.repr.levels = 1; b = blob(img);
+    r = ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 1, 1); CHECK(r.ok && r.transfer == 1 && r.primaries == 1 && r.matrix == 1);
+    // an SDR curve H.273 has no code for (GAMMA24 7): SDR (1), never the format's PQ guess
+    img.params.color.transfer = 7; b = blob(img);
+    r = ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 1, 1); CHECK(r.ok && r.transfer == 1);
+    img.params.color.transfer = 1; b = blob(img);
+    // refused: _ColorSpace disagrees, _ColorRange disagrees, levels set without _ColorRange, no _ColorSpace
+    CHECK(!ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 9, 1).ok);
+    CHECK(!ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 1, 0).ok);
+    CHECK(!ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 1, -1).ok);
+    CHECK(!ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, -1, 1).ok);
+    // refused: another size or aspect (no anchor), a truncated blob, none
+    CHECK(!ParseMpImage(b.data(), b.size(), 1920, 1080, 1, 1, 1, 1).ok);
+    CHECK(!ParseMpImage(b.data(), b.size(), 3840, 2160, 4, 3, 1, 1).ok);
+    CHECK(!ParseMpImage(b.data(), r.anchor + 100, 3840, 2160, 1, 1, 1, 1).ok);
+    CHECK(!ParseMpImage(nullptr, 0, 3840, 2160, 1, 1, 1, 1).ok);
+    // refused: the anchor twice (crop = [w, h, 1, 1] by chance)
+    img.params.crop[0] = 3840; img.params.crop[1] = 2160; img.params.crop[2] = 1; img.params.crop[3] = 1; b = blob(img);
+    r = ParseMpImage(b.data(), b.size(), 3840, 2160, 1, 1, 1, 1); CHECK(!r.ok && r.why.find("not unique") != std::string::npos);
+    img.params.crop[0] = img.params.crop[1] = img.params.crop[2] = img.params.crop[3] = 0;
+    // refused: a layout shifted by 4 bytes (another struct before color): repr no longer agrees
+    {
+        std::vector<uint8_t> s(sizeof img + 8, 0);
+        const size_t a = offsetof(mpimg::Image, params) + offsetof(mpimg::Params, w);
+        std::memcpy(s.data(), &img, a + 20);   // up to color
+        std::memcpy(s.data() + a + 24, reinterpret_cast<const uint8_t*>(&img) + a + 20, sizeof img - a - 20);
+        CHECK(!ParseMpImage(s.data(), s.size(), 3840, 2160, 1, 1, 1, 1).ok);
+    }
+    // a 32-bit process: pointers of 4 bytes, repr right after hdr (anchor + 176)
+    {
+        std::vector<uint8_t> s(400, 0);
+        auto put = [&](size_t o, int32_t v) { std::memcpy(s.data() + o, &v, 4); };
+        put(0, 1280); put(4, 720);                       // mp_image w, h
+        put(8, 1000); put(12, 0); put(16, 0);            // imgfmt, imgfmt_name, hw_subfmt
+        const size_t a = 20;
+        put(a, 1280); put(a + 4, 720); put(a + 8, 1); put(a + 12, 1);
+        put(a + 20, 6); put(a + 24, 12);                 // BT_2020, PQ
+        put(a + 176, 4); put(a + 180, 1);                // BT_2020_NC, LIMITED
+        r = ParseMpImage(s.data(), s.size(), 1280, 720, 1, 1, 9, 1, 4); CHECK(r.ok && r.transfer == 16 && r.anchor == a);
+        CHECK(!ParseMpImage(s.data(), s.size(), 1280, 720, 1, 1, 9, 1, 8).ok);   // read as a 64-bit layout: refused
+    }
+    // libplacebo's system numbering before and after v7.360 (RGB 10 / 12)
+    CHECK(MpSystemMatchesAv(10, 0) && MpSystemMatchesAv(12, 0) && !MpSystemMatchesAv(4, 1) && MpSystemMatchesAv(6, 14));
+    int ma = 0, mi = 0;
+    CHECK(MpVersion("0.42.0", ma, mi) && ma == 0 && mi == 42);
+    CHECK(MpVersion("mpv v0.39.0-dev-g1234", ma, mi) && mi == 39);
+    CHECK(!MpVersion("", ma, mi) && !MpVersion("mpv git", ma, mi));
+}
+
 static void TestAuto()
 {
     pm::Settings s;   // all Auto
@@ -273,7 +356,7 @@ static void TestAuto()
 
 int main()
 {
-    TestRates(); TestPlan(); TestPipeline(); TestReuse(); TestChroma(); TestColour(); TestAuto();
+    TestRates(); TestPlan(); TestPipeline(); TestReuse(); TestChroma(); TestColour(); TestMpImage(); TestAuto();
     std::printf("sched_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

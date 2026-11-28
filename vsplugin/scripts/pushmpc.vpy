@@ -42,6 +42,7 @@ if not hasattr(core, "pushmpc"):
 clip = globals().get("video_in")
 if clip is None:
     raise vs.Error("pushmpc.vpy: no video_in (run it from mpv's vf=vapoursynth)")
+_raw = clip   # mpv's own input node (pushmpc.MpvColour reads frame 0's colour from it)
 
 # mpv's input has no rate of its own: the container's, with the exact NTSC fractions
 _fps = globals().get("container_fps", 0) or 0
@@ -73,6 +74,16 @@ for _kv in str(_ud).split(","):
         elif _k:
             _args[_k] = _v
 
+# frame 0's colour while this script loads, when the user-data has none (pushmpc.lua adds the filter before decoding,
+# when mpv knows no colour yet): mpv's dummy frame carries frame 0's params (pushmpc.MpvColour, vsplugin mp_params.h).
+# mpv logs "Frame requested during init" for that one read, by design. The user-data's colour wins when it has one.
+_mpvver = str(_args.pop("mpvver", "") or "")
+if "transfer" not in _args and hasattr(core.pushmpc, "MpvColour"):
+    _mc = core.pushmpc.MpvColour(_raw, mpvver=_mpvver)
+    if int(_mc["ok"]):
+        for _k in ("matrix", "transfer", "primaries", "range"):
+            if _k not in _args and int(_mc[_k]) >= 0:
+                _args[_k] = int(_mc[_k])
 # this script runs only inside mpv (video_in): playback, so Auto's anime upscaler is checked against real time (an
 # encode script never passes it)
 _args["playback"] = 1

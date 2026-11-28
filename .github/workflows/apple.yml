@@ -625,8 +625,16 @@ jobs:
           log=$(cat "$HOME/Library/Logs/PushMPC/"*.log 2>/dev/null || true)
           grep -q '\[vapoursynth\] using [0-9]* concurrent requests' "$RUNNER_TEMP/encode.txt" && echo "$log" | grep -qE 'instance closed after [1-9]' \
             || { echo "::error::mpv's vapoursynth filter did not run PushMPC in encode mode"; exit 1; }
-          # no frame is requested while the script loads: mpv answers that with a black dummy (it reached the output once)
-          ! grep -q 'Frame requested during init' "$RUNNER_TEMP/encode.txt" || { echo "::error::PushMPC requested a frame while mpv loaded the script (mpv's black dummy)"; exit 1; }
+          # the early add (pushmpc.lua, mpv 0.39+): the filter goes in before decoding, and pushmpc.MpvColour reads frame 0's
+          # colour from mpv's load-time dummy frame once per script load (at the input's last index, never an output), so mpv
+          # logs "Frame requested during init" for it by design. Required: the early-add line, a first-frame read in the
+          # plugin log, no more of those warnings than reads; a dummy that reached the output would break the first-frame
+          # luma and the exact 2x count below
+          grep -q 'PushMPC: filter added before decoding' "$RUNNER_TEMP/encode.txt" || { echo "::error::pushmpc.lua did not add the filter before decoding"; exit 1; }
+          iw=$(grep -c 'Frame requested during init' "$RUNNER_TEMP/encode.txt" || true); ird=$(echo "$log" | grep -c "colour from mpv's first-frame params: matrix" || true)
+          echo "frame-0 colour reads: $ird, mpv's init warnings: $iw"; echo "$log" | grep "colour from mpv's first-frame params\|colour arguments" | cut -c1-300 | head -4 || true
+          ! grep -q "frame 0's colour not read" "$RUNNER_TEMP/encode.txt" || { echo "::error::pushmpc.MpvColour could not read frame 0's colour (pushmpc.lua fell back to a re-add)"; exit 1; }
+          [ "$ird" -ge 1 ] && [ "$iw" -ge 1 ] && [ "$iw" -le "$ird" ] || { echo "::error::frames requested while mpv loaded the script other than PushMPC's colour read ($iw warnings, $ird reads)"; exit 1; }
           echo "$log" | grep -E "backend|apple|portable:|ml:|src_frames|failed: a source frame" | cut -c1-400 | head -24
           out=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height -of csv=p=0 "$RUNNER_TEMP/out.mkv")
           echo "output: $out"

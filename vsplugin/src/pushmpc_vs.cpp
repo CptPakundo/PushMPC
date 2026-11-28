@@ -41,6 +41,12 @@ static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable
 #include "schedule.h"
 #include "vslog.h"
 #include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
+#include "mp_params.h"   // mpv's frame-0 colour from the init dummy's _MP_IMAGE (pushmpc.MpvColour)
+#include <cstdio>
+#include <cstdlib>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using namespace pmvs;
 
@@ -245,7 +251,9 @@ bool CheckColour(Enhance* d, CoreHost& h, int64_t s, std::string& err)
     if (!f) return true;
     const VSMap* p = d->api->getFramePropertiesRO(f);
     bool hm, ht, hp, hr;
-    const int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm), t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropRange(p, d->api, &hr);
+    int64_t m = PropInt(p, d->api, "_Matrix", 2, &hm);
+    const int64_t t = PropInt(p, d->api, "_Transfer", 2, &ht), pr = PropInt(p, d->api, "_Primaries", 2, &hp), r = PropRange(p, d->api, &hr);
+    if (!hm) m = PropInt(p, d->api, "_ColorSpace", 2, &hm);   // mpv's vf_vapoursynth: _ColorSpace (AVColorSpace = H.273), no _Matrix
     d->api->freeFrame(f);
     const Colour c = ColourFromProps(d->colour, m, hm, t, ht, pr, hp, r, hr);
     h.RememberColour(d->src.w, d->src.h, d->inVi.format.bitsPerSample, d->inVi.fpsNum, d->inVi.fpsDen, c);
@@ -567,6 +575,10 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
         a->freeNode(node);
         return fail("the clip must be YUV 4:2:0, 8 to 16 bits, constant size and format (pushmpc.vpy converts others)");
     }
+    {   // the colour arguments: pushmpc.lua's user-data (mpv's video-params) or pushmpc.MpvColour (frame 0's params)
+        auto arg = [&](const char* k) { int e = 0; const int64_t v = a->mapGetInt(in, k, 0, &e); return e ? std::string("-") : std::to_string(v); };
+        Log("colour arguments: matrix " + arg("matrix") + " transfer " + arg("transfer") + " primaries " + arg("primaries") + " range " + arg("range") + " (- = none: guessed from the format)");
+    }
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);   // both wrap an unknown-length source (eof_guard.h)
@@ -599,6 +611,69 @@ void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const 
     a->mapSetData(out, "interp", c.interp.c_str(), -1, dtUtf8, maReplace);
 }
 
+// where pushmpc.lua looks for "the plugin could not read frame 0's colour" (next to vs_content.h's status file)
+std::string MpvColourStatusPath()
+{
+#ifdef _WIN32
+    char tmp[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tmp);
+    return std::string(tmp) + "pushmpc-vs-" + std::to_string(GetCurrentProcessId()) + ".colour";
+#else
+    const char* t = std::getenv("TMPDIR");
+    return std::string(t && *t ? t : "/tmp") + "/pushmpc-vs-" + std::to_string(getpid()) + ".colour";
+#endif
+}
+
+// pushmpc.MpvColour(clip video_in[, data mpvver]) -> {ok, matrix, transfer, primaries, range (-1: not known), why}
+// mpv's frame-0 colour while pushmpc.vpy loads (mp_params.h): one frame is requested on mpv's raw input at its last
+// index (numFrames - 1, never requested again, so the black dummy's pixels never reach an output); mpv logs "Frame
+// requested during init" for it, by design. mpvver (pushmpc.lua passes mpv-version when it added the filter before
+// decoding): below 0.39 nothing is read; when the read fails then, the status file asks pushmpc.lua to add the filter
+// again with mpv's own video-params. PUSHMPC_MPV_COLOUR_FAIL=1 forces the failure (CI).
+void VS_CC MpvColourCreate(const VSMap* in, VSMap* out, void*, VSCore*, const VSAPI* a)
+{
+    MpFrameColour r;
+    std::string ver;
+    { int e = 0; const char* v = a->mapGetData(in, "mpvver", 0, &e); if (!e && v) ver = v; }
+    int vmaj = 0, vmin = 0;
+    const bool haveVer = MpVersion(ver, vmaj, vmin);
+    VSNode* node = a->mapGetNode(in, "clip", 0, nullptr);
+    const VSVideoInfo* vi = a->getVideoInfo(node);
+    if (const char* f = std::getenv("PUSHMPC_MPV_COLOUR_FAIL"); f && std::atoi(f) == 1) r.why = "forced (PUSHMPC_MPV_COLOUR_FAIL=1)";
+    else if (haveVer && (vmaj == 0 && vmin < 39)) r.why = "mpv " + ver + " sets no _MP_IMAGE (0.39 and newer do)";
+    else if (vi->numFrames <= 0) r.why = "the clip has no frames";
+    else {
+        char err[256] = {};
+        const VSFrame* f = a->getFrame(vi->numFrames - 1, node, err, sizeof err);
+        if (!f) r.why = std::string("no frame while the script loads (") + err + ")";
+        else {
+            const VSMap* p = a->getFramePropertiesRO(f);
+            int e = 0;
+            const char* blob = a->mapGetData(p, "_MP_IMAGE", 0, &e);
+            const int n = e ? 0 : a->mapGetDataSize(p, "_MP_IMAGE", 0, &e);
+            auto prop = [&](const char* k, int64_t def) { int pe = 0; const int64_t v = a->mapGetInt(p, k, 0, &pe); return pe ? def : v; };
+            r = ParseMpImage(reinterpret_cast<const uint8_t*>(blob), n > 0 ? size_t(n) : 0, a->getFrameWidth(f, 0), a->getFrameHeight(f, 0), int(prop("_SARNum", 0)), int(prop("_SARDen", 0)),
+                             int(prop("_ColorSpace", -1)), int(prop("_ColorRange", -1)));
+            a->freeFrame(f);
+        }
+    }
+    a->freeNode(node);
+    if (r.ok) std::remove(MpvColourStatusPath().c_str());   // no failure report from an earlier load stays behind
+    if (r.ok)
+        Log(std::format("colour from mpv's first-frame params: matrix {} transfer {} primaries {} range {} (libplacebo primaries {} transfer {} system {} levels {}; mpv {})",
+                        r.matrix, r.transfer, r.primaries, r.range, r.plPrimaries, r.plTransfer, r.plSystem, r.plLevels, ver.empty() ? "version not given" : ver));
+    else {
+        Log("colour from mpv's first-frame params: not read (" + r.why + ")" + (haveVer ? "; pushmpc.lua adds the filter again with mpv's colour" : ""));
+        if (haveVer)
+            if (FILE* sf = std::fopen(MpvColourStatusPath().c_str(), "w")) { std::fprintf(sf, "colour=unknown\nwhy=%s\n", r.why.c_str()); std::fclose(sf); }
+    }
+    a->mapSetInt(out, "ok", r.ok ? 1 : 0, maReplace);
+    a->mapSetInt(out, "matrix", r.matrix, maReplace);
+    a->mapSetInt(out, "transfer", r.transfer, maReplace);
+    a->mapSetInt(out, "primaries", r.primaries, maReplace);
+    a->mapSetInt(out, "range", r.range, maReplace);
+    a->mapSetData(out, "why", r.why.c_str(), -1, dtUtf8, maReplace);
+}
+
 } // namespace
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi)
@@ -614,5 +689,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "display_w:int:opt;display_h:int:opt;display_fs:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;playback:int:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
+    vspapi->registerFunction("MpvColour", "clip:vnode;mpvver:data:opt;", "ok:int;matrix:int;transfer:int;primaries:int;range:int;why:data;", MpvColourCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }
