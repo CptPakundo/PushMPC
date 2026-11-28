@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 05a6aac..448219c 100644
+index 95bce89..276ae69 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -377,6 +377,9 @@ veyra_add_compute_shader(veyra_shader_push_hud_still PushHudStill)
@@ -62,7 +62,7 @@ index 05a6aac..448219c 100644
    add_library(veyra_sources STATIC
      src/source/NativeCaptureSink.cpp
      src/source/MediaFileSource.cpp
-@@ -2410,3 +2426,9 @@ if(TARGET veyra_qml_ui)
+@@ -2431,3 +2447,9 @@ if(TARGET veyra_qml_ui)
    configure_file(apps/veyra/veyra.manifest ${CMAKE_CURRENT_BINARY_DIR}/veyra-qml.manifest COPYONLY)
    target_link_options(veyra_qml_ui PRIVATE "/MANIFESTINPUT:veyra-qml.manifest")
  endif()

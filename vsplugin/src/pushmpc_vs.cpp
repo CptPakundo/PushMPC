@@ -161,7 +161,7 @@ void SetOutProps(Enhance* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     // mpv reads the output's colour only from _MP_IMAGE (the source's, just copied), so the blob says what comes out
     // (mp_out.h): always the matrix (4:2:0: the egress's; RGB: the one pushmpc.vpy converts with) and limited range;
     // the transfer and primaries when the core changes them: SDR out of an HDR source (the tone map: BT.709 coded for a
-    // 2.2 display, gamma 2.2: PushFPS's HdrToSdr.hlsli ToneFor22Display in patches/pushfps-4.5.5-pushmpc.patch hands its
+    // 2.2 display, gamma 2.2: PushFPS's HdrToSdr.hlsli ToneFor22Display in patches/pushfps-4.5.8-pushmpc.patch hands its
     // sRGB stage light^(1/2.2), so the stored codes are a pure 2.2 power, not the piecewise sRGB the ABI text names) or
     // HDR10 out of a source that is not PQ (RTX Video HDR, HLG: PQ BT.2020). 4:2:0: centre-sited chroma (the 2x2 average,
     // as _ChromaLocation below). (only the blob changes for gamma 2.2: the props keep _Transfer 13)

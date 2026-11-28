@@ -30,7 +30,7 @@ set NVOF_ARG=
 if defined PUSHMPC_NVOF_SDK set "NVOF_ARG=-DVEYRA_NVOF_SDK_ROOT=%PUSHMPC_NVOF_SDK:\=/%"
 rem PushFPS's version string (pushcore.dll's version resource and the core manifest) from scripts\pushfps-pin.json, on
 rem every build: part of the compared options, so a reused tree is configured again when the pin's version changes
-set PUSHFPS_DISPLAY_VERSION=4.5.5-pushmpc
+set PUSHFPS_DISPLAY_VERSION=4.5.8-pushmpc
 for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Get-Content '%REPO%\scripts\pushfps-pin.json' -Raw | ConvertFrom-Json).pushfps.displayVersion" 2^>nul`) do set "PUSHFPS_DISPLAY_VERSION=%%v"
 rem the MSVC loop optimiser bug guard for PushFPS's own targets too (cmake\msvc-loop-guard.cmake, no patch hunk needed)
 set "PUSHMPC_CFG="-DPUSHMPC_SOURCE_DIR=%CORE:\=/%" "-DCMAKE_PROJECT_INCLUDE=%REPO:\=/%/cmake/msvc-loop-guard.cmake" "-DVEYRA_DISPLAY_VERSION=%PUSHFPS_DISPLAY_VERSION%" %NVOF_ARG%"

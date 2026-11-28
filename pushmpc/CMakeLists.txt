@@ -73,7 +73,7 @@ target_link_options(pushcore_gpu_harness PRIVATE /DELAYLOAD:avformat-63.dll /DEL
 
 # G10: Intel XeSS frame generation (headless swap chain) and XeSS SR need the XeSS SDK headers (PushFPS's VEYRA_XESS_ROOT,
 # fetched by release.yml); without them pushcore builds and reports both as "built without the Intel XeSS SDK"
-# (PushCoreXessStub.cpp). XeSS SR also needs the FsrSrBackend provider slot (the XeSS hunks of patches/pushfps-4.5.5-pushmpc.patch).
+# (PushCoreXessStub.cpp). XeSS SR also needs the FsrSrBackend provider slot (the XeSS hunks of patches/pushfps-4.5.8-pushmpc.patch).
 if(VEYRA_XESS_ROOT AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h" AND EXISTS "${VEYRA_XESS_ROOT}/inc/xess/xess_d3d12.h")
   target_sources(pushcore_dll PRIVATE src/PushCoreXefg.cpp src/PushCoreXessSr.cpp)
   target_include_directories(pushcore_dll PRIVATE "${VEYRA_XESS_ROOT}/inc")
