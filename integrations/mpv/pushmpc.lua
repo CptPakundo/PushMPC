@@ -520,13 +520,16 @@ local function remove_native()
     end
 end
 
+local between_files = false   -- from end-file to file-loaded: video-params may still be the old file's
 local function ensure()
-    if busy then return end
+    if busy or between_files then return end
     -- only once video runs (soft failure), and only with real params: before the first frame enters the chain mpv
     -- answers video-params with a {w, h} fallback (command.c "Simplistic fallback for stupid scripts"), which has no
     -- colour, so the filter went in without user-data and the plugin guessed (integrations 46087052008: 5 of 12)
+    -- (the native filter keeps its old condition: it takes no colour user-data)
     local vp = mp.get_property_native("video-params")
-    if type(vp) ~= "table" or vp.pixelformat == nil then return end
+    if vp == nil then return end
+    if not native and (type(vp) ~= "table" or vp.pixelformat == nil) then return end
     local path = mp.get_property("path")
     if failed_for ~= nil and failed_for == path then return end
     local vf = mp.get_property_native("vf") or {}
@@ -589,7 +592,17 @@ end
 
 mp.register_event("file-loaded", function()
     failed_for = nil
+    between_files = false
     if opts["shaders-when"] == "always" then shaders("no better upscaler on this PC") end
+end)
+-- a playlist: the vf list keeps @pushmpc from the file before, with that file's colour in its user-data; it goes at
+-- the end of each file, so the next one is added with its own colour
+mp.register_event("end-file", function()
+    if native then return end
+    between_files = true
+    for _, f in ipairs(mp.get_property_native("vf") or {}) do
+        if f.label == "pushmpc" then busy = true; mp.commandv("vf", "remove", "@pushmpc"); busy = false; break end
+    end
 end)
 mp.observe_property("video-params", "native", function() ensure() end)
 mp.observe_property("vf", "native", function() ensure() end)

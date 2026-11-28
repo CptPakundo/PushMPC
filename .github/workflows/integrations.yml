@@ -701,7 +701,7 @@ jobs:
               li=$(grep -n -m1 'vapoursynth.*initializ' $L 2>/dev/null | cut -d: -f1)
               inst=$(grep -ho 'instance closed after [0-9]*' $V/*.log 2>/dev/null | grep -o '[0-9]*$' | tr '\n' ',')
               adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
-              luaadd=$(grep -c "PushMPC's filter added" $L 2>/dev/null)
+              luaadd=$(grep -c "PushMPC's filter added\|PushMPC: filter added before decoding" $L 2>/dev/null)
               line="clip=$n run=$mode#$r first-add-user-data=$ud transfer-arg=$tr vf-appends=${adds:-0} lua-added=${luaadd:-0} log-line(append ${la:-?}, decoder-format ${ld:-?}, vs-init ${li:-?}) out=${out:-?} control=${ctl:-?} source=${src:-?} plugin-instance-frames=${inst:-none}"
               # verdict: the transfer the plugin opened with (its "colour arguments" line when it has one, else the first
               # add's user-data) against the clip's, and every frame filtered (playback: the first instance has 2x the
@@ -718,6 +718,21 @@ jobs:
             done; done
           done
           echo "--- summary"; cat $sum
+          # two files in one mpv (a playlist): the second must open with its own colour, not the first file's
+          for mode in encode play; do
+            id=twofile-$mode; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
+            if [ $mode = encode ]; then
+              timeout 300 mpv --include=$HOME/.config/mpv/mpv.conf --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 /tmp/diag-hdr10.mkv /tmp/diag-sdr8.mkv > /dev/null 2>&1
+            else
+              timeout 300 mpv --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L /tmp/diag-hdr10.mkv /tmp/diag-sdr8.mkv > /dev/null 2>&1
+            fi
+            echo "=== $id: raw lines"
+            grep -n -E 'Run command: vf|Decoder format|PushMPC|Playing:' $L 2>/dev/null | cut -c1-300 | head -16
+            seq=$(grep 'Run command: vf.*append' $L 2>/dev/null | while read -r ln; do x=$(printf '%s' "$ln" | grep -o 'transfer=[0-9]*' | head -1 | grep -o '[0-9]*$'); printf '%s ' "${x:-none}"; done)
+            fv=FAIL; case " $seq" in *" 16 "*" 1 "*) fv=ok;; esac
+            line="two files (hdr10 then sdr8), $mode: the transfers of the vf appends, in order: ${seq:-none} $fv"
+            echo "$line" | tee -a $sum; echo "::notice title=colour diag two files $mode::$line"
+          done
           v="verdict: $(grep -c ' ok, frames .* ok$' $sum) of $(grep -c '^clip=' $sum) runs opened with the clip's transfer and filtered every frame"; echo "$v" | tee -a $sum; echo "::notice title=colour diag verdict::$v"
           { echo '## colour diagnostic (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           rm -r $HOME/.config/pushmpc; sh $HOME/.local/share/pushmpc/install.sh uninstall > /dev/null 2>&1
