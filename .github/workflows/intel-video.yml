@@ -229,7 +229,12 @@ jobs:
             "-DPUSHMPC_PMML_ORT_INCLUDE=$($env:DEPS.Replace('\','/'))/pmml/ort/core/include" `
             "-DPUSHMPC_VPL_ROOT=$($env:RUNNER_TEMP.Replace('\','/'))/vpl"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
+          # every PushFPS shader target, read from Ninja's own target list (CMake's `--target help` came back empty on CI,
+          # which left each shader no library depends on unbuilt); an empty list fails the build
+          $ninja = (Select-String -Path "$env:BUILD\CMakeCache.txt" -Pattern '^CMAKE_MAKE_PROGRAM:[A-Z]+=(.+)$').Matches[0].Groups[1].Value
+          $shaders = @(& $ninja -C $env:BUILD -t targets all | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
+          if ($shaders.Count -eq 0) { Write-Host "::error::no veyra_shader_* targets found in the build"; exit 1 }
+          Write-Host "$($shaders.Count) shader targets"
           cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_selftest pushcore_gpu_harness --parallel
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length

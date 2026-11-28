@@ -44,10 +44,11 @@ index 95bce89..84b2458 100644
    src/pipeline/VfgAmpereCompat.cpp
    src/pipeline/VfxSrBackend.cpp
  )
-@@ -530,6 +538,16 @@ else()
+@@ -530,6 +538,17 @@ else()
    message(STATUS "PushFlow: ONNX Runtime headers not found; PushFlow is built as unavailable")
  endif()
  add_dependencies(veyra_pipeline veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct veyra_shader_push_guard veyra_shader_push_predict)
++add_dependencies(veyra_pipeline veyra_shader_pushmpc_hud_count)   # PushMPC: PushHudLock's count pass (the Auto gate) ships with the lock
 +# PushMPC (local addition): PushFlow on any ONNX Runtime execution provider through PushMPC's pmml (TensorRT-RTX,
 +# OpenVINO, AMD GPU, ...), chosen by pushflow\pmml.txt or VEYRA_PUSHFLOW_PMML; DirectML stays the default and fallback.
 +set(PUSHMPC_PMML_ORT_INCLUDE "" CACHE PATH "ONNX Runtime 1.22+ C API headers for PushMPC's pmml")
@@ -61,7 +62,7 @@ index 95bce89..84b2458 100644
  
  # Optional independent RX7000 network worker. All third-party source and runtime
  # assets remain external; only our host and reproducible preparation script live here.
-@@ -855,7 +873,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
+@@ -855,7 +874,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
  
    # veyra_sources: product input sources (Playbook R3/R7). MediaFileSource
    # composes veyra_media; no second decode implementation exists.
@@ -70,7 +71,7 @@ index 95bce89..84b2458 100644
    add_library(veyra_sources STATIC
      src/source/NativeCaptureSink.cpp
      src/source/MediaFileSource.cpp
-@@ -2431,3 +2449,9 @@ if(TARGET veyra_qml_ui)
+@@ -2431,3 +2450,9 @@ if(TARGET veyra_qml_ui)
    configure_file(apps/veyra/veyra.manifest ${CMAKE_CURRENT_BINARY_DIR}/veyra-qml.manifest COPYONLY)
    target_link_options(veyra_qml_ui PRIVATE "/MANIFESTINPUT:veyra-qml.manifest")
  endif()
