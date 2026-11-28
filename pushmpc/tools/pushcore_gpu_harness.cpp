@@ -26,6 +26,16 @@
 // installed PushFPS carries its upstream shaders, without PushMPC's (VfgFourierMellin, the patched
 // VfgShotChange and YuvToLinearRgb), so the cut guard and the DV P5 path would not be what the filter runs.
 // --start defaults to 1752 s (clip A's motion scene): a shorter clip needs --start 0, else "no first frame".
+// Live HUD Lock's fidelity test (synthetic only: real content has no ground truth):
+// --hudlock 0|1|2: PushCoreSettings.hudLock (settings route); the HUD LOCK line reports its state and what it found
+// --scene logo|ticker|translucent|noise|null|slowpan|startmove: with synthetic:WxH, a textured background that pans under
+//   static overlays composited before the NV12 conversion, as broadcast video has them (HudScene below); mask.raw = the
+//   overlay's pixels (uint32 width, height, then one byte per pixel, 1 = overlay)
+// --fine K: the synthetic source at K times the rate (frame i shows time i/K, 30*K fps): the ground truth run, with
+//   --backend none, for a K-times frame generation run of the same scene
+// --dump N: every output of source frame >= N appended to dump.raw (uint32 width, height; then per output uint32
+//   source, subframe, kind (0 real, 1 generated) and the RGBA8 pixels); scored by tests/hud-lock-score.py
+// --runtime DIR: PushCoreConfig.runtimeDir (PushFlow's files in DIR\pushflow)
 #include "pushmpc/pushcore_abi.h"
 
 #define NOMINMAX
@@ -108,6 +118,110 @@ bool savePng(const std::wstring& path, const uint8_t* rgba, uint32_t w, uint32_t
     if (FAILED(fr->WritePixels(h, w * 3, UINT(bgr.size()), bgr.data())) || FAILED(fr->Commit()) || FAILED(enc->Commit())) return false;
     return true;
 }
+// Live HUD Lock's synthetic scenes (--scene): RGB at continuous time t (in source frames at 30 fps), so the ground truth at
+// any in-between time is exact. The background is smooth value noise at two scales (continuous, so a sub-pixel pan is a
+// true pan), panning by (vx, vy) per frame from t0 on; the overlays never move:
+//   logo        an opaque channel logo (top right), a scoreboard (top left) and a ticker box with static text (bottom)
+//   ticker      the ticker box only, its text scrolling 2 px a frame (the box stands still, the text inside moves)
+//   translucent a logo of strokes at 50 % over the picture (the picture shows through: expected not to lock)
+//   noise       as logo, with light noise on every pixel of every frame (sigma about 1.5 code values)
+//   null        no overlay (nothing for the lock to do)
+//   slowpan     no overlay, a very slow pan (0.15 px a frame): pixels that barely change, the false-lock risk
+//   startmove   no overlay, a still picture until frame 60, then the pan (everything locked, then released)
+struct HudScene {
+    std::string name;
+    uint32_t W = 0, H = 0;
+    double vx = 3.0, vy = 0.75, t0 = 0;
+    bool logo = false, ticker = false, scroll = false, translucent = false, grain = false;
+    bool set(const std::string& n) {
+        name = n;
+        if (n == "logo") logo = true;
+        else if (n == "ticker") { ticker = true; scroll = true; }
+        else if (n == "translucent") translucent = true;
+        else if (n == "noise") { logo = true; grain = true; }
+        else if (n == "null") {}
+        else if (n == "slowpan") { vx = 0.15; vy = 0; }
+        else if (n == "startmove") t0 = 60;
+        else return false;
+        return true;
+    }
+    static uint32_t hash(uint32_t a, uint32_t b, uint32_t c) {
+        uint32_t h = a * 374761393u + b * 668265263u + c * 2246822519u + 0x9E3779B9u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return h ^ (h >> 16);
+    }
+    static double noise(double u, double v, double cell, uint32_t c) {
+        const double fu = u / cell, fv = v / cell, iu = std::floor(fu), iv = std::floor(fv);
+        const double a = fu - iu, b = fv - iv, sa = a * a * (3 - 2 * a), sb = b * b * (3 - 2 * b);
+        const int32_t x = int32_t(iu), y = int32_t(iv);
+        auto at = [&](int32_t dx, int32_t dy) { return double(hash(uint32_t(x + dx), uint32_t(y + dy), c) & 0xFFFF) / 65535.0; };
+        return (at(0, 0) * (1 - sa) + at(1, 0) * sa) * (1 - sb) + (at(0, 1) * (1 - sa) + at(1, 1) * sa) * sb;
+    }
+    // text-like strokes: cells of 8 x 12 px, each a 3 x 5 grid of 2 px dots chosen by a hash (seed = the line)
+    static bool glyph(int x, int y, uint32_t seed) {
+        const int cx = int(std::floor(x / 8.0)), cy = int(std::floor(y / 12.0));
+        const int gx = (x - cx * 8 - 1), gy = (y - cy * 12 - 1);
+        if (gx < 0 || gy < 0 || gx >= 6 || gy >= 10) return false;
+        const uint32_t bits = hash(uint32_t(cx), uint32_t(cy), seed) | 0x2492u;   // never an empty cell
+        return (bits >> ((gy / 2) * 3 + gx / 2)) & 1u;
+    }
+    // the overlay at (x, y), frame time t: alpha 0..1 and its colour
+    double overlay(uint32_t x, uint32_t y, double t, double rgb[3]) const {
+        auto put = [&](double r, double g, double b) { rgb[0] = r; rgb[1] = g; rgb[2] = b; };
+        const int X = int(x), Y = int(y);
+        if (logo || translucent) {   // the channel logo, top right: 80 x 32
+            const int x0 = int(W) - 96, y0 = 12;
+            if (X >= x0 && X < x0 + 80 && Y >= y0 && Y < y0 + 32) {
+                const bool on = glyph(X - x0 - 4, Y - y0 - 4, 11u) && X - x0 >= 4 && X - x0 < 76 && Y - y0 >= 4 && Y - y0 < 28;
+                if (translucent) { if (!on) return 0; put(240, 240, 240); return 0.5; }
+                if (on) put(235, 235, 235); else put(20, 30, 90);
+                return 1;
+            }
+        }
+        if (logo) {   // the scoreboard, top left: 136 x 28, a red block for the score
+            if (X >= 16 && X < 152 && Y >= 12 && Y < 40) {
+                if (X >= 96 && X < 112) { if (glyph(X - 96, Y - 14, 23u) && Y >= 14 && Y < 38) put(250, 250, 250); else put(200, 30, 30); return 1; }
+                if (glyph(X - 18, Y - 14, 17u) && Y >= 14 && Y < 38 && X >= 18) put(240, 240, 240); else put(15, 15, 15);
+                return 1;
+            }
+        }
+        if (logo || ticker) {   // the ticker box, bottom: 24 px high
+            const int y0 = int(H) - 40;
+            if (X >= 16 && X < int(W) - 16 && Y >= y0 && Y < y0 + 24) {
+                const int tx = scroll ? X + int(std::lround(2.0 * t)) : X;
+                if (Y >= y0 + 6 && Y < y0 + 18 && glyph(tx - 16, Y - y0 - 6, 31u)) put(240, 220, 60); else put(10, 10, 40);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    void rgb(double t, std::vector<uint8_t>& img) const {
+        img.assign(size_t(W) * H * 3, 0);
+        const double m = std::max(0.0, t - t0), ox = vx * m, oy = vy * m;
+        const uint32_t key = uint32_t(std::llround(t * 64.0));
+        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) {
+            const double u = x + 0.5 + ox, v = y + 0.5 + oy;
+            double p[3];
+            for (uint32_t c = 0; c < 3; ++c) p[c] = 50 + 110 * noise(u, v, 16, c) + 70 * noise(u, v, 5, c + 7);
+            double o[3]{};
+            const double a = overlay(x, y, t, o);
+            for (int c = 0; c < 3; ++c) p[c] = p[c] * (1 - a) + o[c] * a;
+            if (grain) for (uint32_t c = 0; c < 3; ++c) {
+                double n = 0;
+                for (uint32_t k = 0; k < 3; ++k) n += double(hash(x * 3 + c, y, key * 3 + k) & 0xFFFF) / 65535.0;
+                p[c] += (n - 1.5) * 3.0;
+            }
+            uint8_t* q = &img[(size_t(y) * W + x) * 3];
+            for (int c = 0; c < 3; ++c) q[c] = uint8_t(std::clamp(std::lround(p[c]), 0L, 255L));
+        }
+    }
+    std::vector<uint8_t> mask() const {
+        std::vector<uint8_t> m(size_t(W) * H, 0);
+        double o[3]{};
+        for (uint32_t y = 0; y < H; ++y) for (uint32_t x = 0; x < W; ++x) m[size_t(y) * W + x] = overlay(x, y, 0, o) > 0 || (ticker && overlay(x, y, 1, o) > 0) ? 1 : 0;
+        return m;
+    }
+};
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -135,7 +249,8 @@ int wmain(int argc, wchar_t** argv) {
     // (default 0 = none), 30 fps; --check 1 reads every output back and checks the square's position in the generated
     // frames and the hold on the cut pair; --selftest xefg|xess|ivsr|vpl|bridge|all runs pushcore_selfTest on the adapter
     // (--record 1 stores the hardware results; tools/pushcore_selftest is the stand-alone version)
-    std::wstring adapterPick = L"nvidia", selfTest;
+    std::wstring adapterPick = L"nvidia", selfTest, runtimeOpt;
+    HudScene hud; bool hudWanted = false; uint32_t fine = 1; int64_t dumpFrom = -1;
     uint64_t cutAt = 0; bool checkMotion = false, selfTestRecord = false;
     PushCoreSettings ps{};
     ps.structSize = sizeof(ps); ps.source = PUSHCORE_SETTINGS_PUSHMPC; ps.sr = 1; ps.srQuality = 4; ps.srTarget = PUSHCORE_SR_TARGET_4K;
@@ -191,6 +306,11 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
         if (k == L"--held") { useSettings = true; ps.heldFrames = _wtoi(v.c_str()); continue; }
+        if (k == L"--hudlock") { useSettings = true; ps.hudLock = _wtoi(v.c_str()); continue; }
+        if (k == L"--scene") { if (!hud.set(utf8(v))) { std::cout << "unknown scene " << utf8(v) << "\n"; return 2; } hudWanted = true; continue; }
+        if (k == L"--fine") { fine = uint32_t(std::clamp(_wtoi(v.c_str()), 1, 16)); continue; }
+        if (k == L"--dump") { dumpFrom = _wtoi64(v.c_str()); continue; }
+        if (k == L"--runtime") { runtimeOpt = v; continue; }
         if (k == L"--gray") { grayWidth = uint32_t(_wtoi(v.c_str())); continue; }
         if (k == L"--pushfps") pushfps = v;
         else if (k == L"--shaders") shaderDir = v;
@@ -324,6 +444,14 @@ int wmain(int argc, wchar_t** argv) {
         if (FAILED(device->CreateTexture2D(&d, nullptr, &synTex))) { std::cout << "no NV12 texture on this device\n"; return 1; }
         d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         if (FAILED(device->CreateTexture2D(&d, nullptr, &synStaging))) { std::cout << "no NV12 staging texture\n"; return 1; }
+        if (hudWanted) {
+            hud.W = syn.W; hud.H = syn.H;
+            const auto m = hud.mask();
+            size_t n = 0; for (uint8_t b : m) n += b;
+            if (FILE* fp = _wfopen((outDir / L"mask.raw").wstring().c_str(), L"wb")) { const uint32_t dims[2] = { hud.W, hud.H }; fwrite(dims, 4, 2, fp); fwrite(m.data(), 1, m.size(), fp); fclose(fp); }
+            std::cout << std::format("HUDSCENE {} {}x{} at {} fps (time step 1/{} frame), pan {:.2f},{:.2f} px a frame from frame {:.0f}, overlay pixels {}\n",
+                                     hud.name, syn.W, syn.H, 30 * fine, fine, hud.vx, hud.vy, hud.t0, n);
+        } else
         std::cout << std::format("synthetic source {}x{} NV12 30 fps, square {} px moving {:.1f},{:.1f} px per frame, cut at {}\n", syn.W, syn.H, syn.S, syn.vx, syn.vy, cutAt);
     } else {
     if (avformat_open_input(&fmt, utf8(input).c_str(), nullptr, nullptr) < 0 || avformat_find_stream_info(fmt, nullptr) < 0) { std::cout << "cannot open input\n"; return 1; }
@@ -350,7 +478,8 @@ int wmain(int argc, wchar_t** argv) {
     auto decodeNext = [&]() -> bool {   // leaves a D3D11 frame in `decoded` (synthetic: makes the next frame)
         if (synthetic) {
             std::vector<uint8_t> rgb;
-            syn.rgb(double(synIndex), cutAt && synIndex >= cutAt ? 1 : 0, rgb);
+            if (hudWanted) hud.rgb(double(synIndex) / double(fine), rgb);
+            else syn.rgb(double(synIndex), cutAt && synIndex >= cutAt ? 1 : 0, rgb);
             D3D11_MAPPED_SUBRESOURCE m{};
             if (FAILED(imm->Map(synStaging.Get(), 0, D3D11_MAP_WRITE, 0, &m))) return false;
             syn.nv12(rgb, static_cast<uint8_t*>(m.pData), m.RowPitch);
@@ -382,7 +511,7 @@ int wmain(int argc, wchar_t** argv) {
     PushCoreStreamInfo si{};
     si.structSize = sizeof(si);
     if (synthetic) {
-        si.width = syn.W; si.height = syn.H; si.format = PUSHCORE_INPUT_NV12; si.fpsNum = 30; si.fpsDen = 1;
+        si.width = syn.W; si.height = syn.H; si.format = PUSHCORE_INPUT_NV12; si.fpsNum = 30 * fine; si.fpsDen = 1;
         si.range = AVCOL_RANGE_MPEG; si.matrix = AVCOL_SPC_BT709; si.primaries = AVCOL_PRI_BT709; si.transfer = AVCOL_TRC_BT709;
     } else {
     if (decoded->format != AV_PIX_FMT_D3D11) { std::cout << "decoder did not produce D3D11 frames\n"; return 1; }
@@ -412,14 +541,15 @@ int wmain(int argc, wchar_t** argv) {
     if (!shaderDir.empty()) cfg.shaderDir = shaderDir.c_str();
     std::cout << "shaders " << (shaderDir.empty() ? utf8(pushfps) + "\\shaders" : utf8(shaderDir)) << "\n";
     cfg.dataDir = haveData ? data.c_str() : nullptr;
+    if (!runtimeOpt.empty()) cfg.runtimeDir = runtimeOpt.c_str();
     cfg.logFile = logFile.c_str();
     cfg.sr = sr; cfg.fg = fgOpt; cfg.multiplier = mult; cfg.vfgQuality = -1;
     cfg.flags = copy ? PUSHCORE_FLAG_EGRESS_COPY : 0;
     if (useSettings) {
         if (mult >= 1) ps.multiplier = uint32_t(mult);
         cfg.settings = &ps; cfg.dataDir = L""; cfg.sr = cfg.fg = cfg.multiplier = -1;
-        std::cout << std::format("settings: backend {} x{} quality/tier {} SR {} (method {}, level {}) cut guard {} subtitle hold {}\n", ps.fgBackend, ps.multiplier,
-                                 ps.vfgQuality, ps.sr, ps.srMethod, ps.srQuality, ps.cutGuard, ps.subtitleHold);
+        std::cout << std::format("settings: backend {} x{} quality/tier {} SR {} (method {}, level {}) cut guard {} subtitle hold {} hud lock {}\n", ps.fgBackend, ps.multiplier,
+                                 ps.vfgQuality, ps.sr, ps.srMethod, ps.srQuality, ps.cutGuard, ps.subtitleHold, ps.hudLock);
     }
     char err[1024]{};
     const auto openStart = Clock::now();
@@ -465,6 +595,12 @@ int wmain(int argc, wchar_t** argv) {
     std::ofstream csv(outDir / L"outputs.csv");
     csv << "output,source,kind,subframe,pts100ns,presentMs,latenessMs\n";
     uint32_t subtitleMax = 0; uint64_t subtitleSamples = 0;   // Subtitle Hold pixels seen in the stats during the run
+    uint32_t hudMax = 0, hudLastComposing = 0; uint64_t hudComposingPolls = 0, hudPolls = 0;   // Live HUD Lock in the stats during the run
+    FILE* dump = nullptr; uint64_t dumped = 0;
+    if (dumpFrom >= 0) {
+        if (oi.dxgiFormat != 28) std::cout << "--dump: the output is not RGBA8 (format " << oi.dxgiFormat << "): nothing dumped\n";
+        else if ((dump = _wfopen((outDir / L"dump.raw").wstring().c_str(), L"wb")) != nullptr) { const uint32_t dims[2] = { oi.width, oi.height }; fwrite(dims, 4, 2, dump); }
+    }
     const auto runStart = Clock::now();
     Clock::time_point steadyStart{}; uint64_t steadyBase = 0; bool steady = false;
     const uint64_t lastSave = save.empty() ? 0 : *save.rbegin();
@@ -564,6 +700,17 @@ int wmain(int argc, wchar_t** argv) {
                 imm->Unmap(staging.Get(), 0);
             } else ++pngFail;
         }
+        if (dump && int64_t(f.sourceIndex) >= dumpFrom) {   // HUD Lock fidelity: the output as the presenter got it
+            imm->CopyResource(staging.Get(), backbuffer.Get());
+            D3D11_MAPPED_SUBRESOURCE map{};
+            if (SUCCEEDED(imm->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
+                const uint32_t head[3] = { uint32_t(f.sourceIndex), f.subframe, f.kind == PUSHCORE_FRAME_REAL ? 0u : 1u };
+                fwrite(head, 4, 3, dump);
+                for (uint32_t y = 0; y < oi.height; ++y) fwrite(static_cast<const uint8_t*>(map.pData) + size_t(y) * map.RowPitch, 4, oi.width, dump);
+                imm->Unmap(staging.Get(), 0);
+                ++dumped;
+            }
+        }
         if (checkMotion && oi.dxgiFormat == 28) {   // G10 synthetic check: every output read back (RGBA8)
             imm->CopyResource(staging.Get(), backbuffer.Get());
             D3D11_MAPPED_SUBRESOURCE map{};
@@ -613,7 +760,7 @@ int wmain(int argc, wchar_t** argv) {
     while (!failed) {
         // ingest: one decoded frame at a time, as soon as the graph has a free slot
         if (haveFrame && submitted < maxFrames && api->canSubmit(core)) {
-            const int64_t pts = synthetic ? int64_t(synIndex) * 333333 + 10000000 : av_rescale_q(decoded->best_effort_timestamp, st->time_base, AVRational{1, 10000000});
+            const int64_t pts = synthetic ? (fine > 1 ? int64_t(synIndex) * 10000000 / (30 * int64_t(fine)) : int64_t(synIndex) * 333333) + 10000000 : av_rescale_q(decoded->best_effort_timestamp, st->time_base, AVRational{1, 10000000});
             const auto t = Clock::now();
             const int r = synthetic ? api->submit(core, synTex.Get(), 0, pts, submitted == 0 ? PUSHCORE_SUBMIT_DISCONTINUITY : 0)
                                     : api->submit(core, reinterpret_cast<ID3D11Texture2D*>(decoded->data[0]), uint32_t(reinterpret_cast<intptr_t>(decoded->data[1])),
@@ -652,6 +799,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         PushCoreStats s{}; s.structSize = sizeof(s); api->stats(core, &s);
         subtitleMax = std::max(subtitleMax, s.subtitleHoldPixels); subtitleSamples += s.subtitleHoldPixels > 0 ? 1 : 0;
+        if (useSettings && ps.hudLock) { hudMax = std::max(hudMax, s.hudLockPixels); ++hudPolls; if (s.hudLockState == 1) { ++hudComposingPolls; hudLastComposing = uint32_t(submitted); } }
         if (!moreToSubmit && queue.empty() && s.pendingFrames == 0 && s.leasesOut == 0) break;
         if (msBetween(runStart, Clock::now()) > 600000) { std::cout << "TIMEOUT\n"; failed = true; break; }
     }
@@ -677,6 +825,7 @@ int wmain(int argc, wchar_t** argv) {
     PushCoreStats s{}; s.structSize = sizeof(s); s.animeSrModel = ~0u; api->stats(core, &s);
 
     if (gray) fclose(gray);
+    if (dump) fclose(dump);
     uint64_t countMismatch = 0;
     if (!heldOn) for (size_t i = 0; i < perSource.size(); ++i) if (perSource[i] != (i == 0 ? 1u : m)) ++countMismatch;
     const uint64_t expected = heldOn ? presentedCount : submitted ? 1 + (submitted - 1) * m : 0;
@@ -721,6 +870,16 @@ int wmain(int argc, wchar_t** argv) {
                                  "cuts counted {}\n", chk.gens, med, p90, tol, chk.noSquare, cutAt, chk.holdsOk, chk.holdsBad, s.cutGuardCuts);
     }
     std::cout << std::format("METHOD frame generation {} (fallback {}: {}), upscaler {}\n", s.fgBackend, s.fgFallback, s.fgNote, s.srMethod);
+    if (useSettings && ps.hudLock)
+        std::cout << std::format("HUD LOCK asked {} state {} (0 off, 1 composing, 2 unavailable, 3 not in this graph, 4 Auto: counting, not composing); "
+                                 "locked pixels last {} max {}, moving {}; polls {} composing {} (last at source {}); feature bit {}\n",
+                                 ps.hudLock, s.hudLockState, s.hudLockPixels, hudMax, s.hudLockMovingPixels, hudPolls, hudComposingPolls, hudLastComposing,
+                                 ([&] { auto f = reinterpret_cast<uint32_t (*)(void)>(GetProcAddress(dll, "pushcore_features")); return f ? f() : 0u; }() & PUSHCORE_FEATURE_HUD_LOCK) ? "yes" : "no");
+    if (dumpFrom >= 0) std::cout << std::format("DUMP {} outputs of source >= {} in dump.raw\n", dumped, dumpFrom);
+    if (warpAdapter)
+        std::cout << std::format("GRAPH ran on WARP: {} (frame generation {}, {} generated frames, {} real)\n",
+                                 m > 1 && generated > 0 && s.fgBackend != PUSHCORE_FG_NONE ? "yes" : (m == 1 && real > 0 ? "yes, without frame generation" : "no"),
+                                 s.fgBackend, generated, real);
     const bool animeOk = !animeWanted || (s.srMethod == PUSHCORE_SR_METHOD_PMML && s.animeSrModel == ps.animeSrModel && s.animeSrMs > 0);
     if (animeWanted)
         std::cout << std::format("ANIME requested model {}: running model {} (upscaler {}){}\n", ps.animeSrModel, int(s.animeSrModel), s.srMethod,

@@ -647,6 +647,11 @@ struct PushCore {
     bool signsOn = false, signsCompose = false;       // anime round 5: the sign hold (the subtitle pass over the whole picture)
     bool lineNvofOn = false, lineNvofCompose = true;  // anime round 5: NVOF FG line-art protection (PushMpcLinePass)
     uint32_t subOnRun = 0, subOffRun = 0;
+    // Live HUD Lock (settings.hudLock; PushCoreStats.hudLock*), read on the submit thread. Auto (2): the lock learns and
+    // counts on every real frame and composes only while a static overlay over a moving picture is found (gate below)
+    std::atomic<uint32_t> hudState{0}, hudPixels{0}, hudMoving{0};
+    uint32_t hudPoll = 0, hudOnRun = 0, hudOffRun = 0;
+    bool hudAutoInit = false, hudCompose = false;
     std::string fgNote;
     uint32_t family = PUSHCORE_FAMILY_UNKNOWN;
     // ---- Intel video methods (PushCoreIntel.h): a D3D11 device beside the graph on the same adapter (the bridge),
@@ -1311,9 +1316,10 @@ struct PushCore {
         if (settings.videoHdrPeak >= 400 && settings.videoHdrPeak <= 2000) s.videoHdr.peakNits = settings.videoHdrPeak;   // PushMPC's HDR boost
         order.reset();
         if (const auto e = s.validate(); !e.empty()) { fail("PushMPC settings invalid: " + e); return false; }
-        veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}, Subtitle Hold {}",
+        veyra::log::info("pushcore", std::format("PushMPC settings: SR {} (videoSrQuality {}, target {}), FG {} {} (quality/tier {}), NR {} (runtime {}, tone {:.2f} structure {:.2f}), RTX Video HDR {}, cut guard {}, Subtitle Hold {}, HUD Lock {}",
             s.sr, s.videoSrQuality, int(s.srTarget), fgName(tryFg), s.multiplier, s.vfgQuality, s.nr, nrRuntimeName(s.nrRuntime), s.model.tone, s.model.structure,
-            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold == 2 ? "Auto (while burned-in text is found)" : settings.subtitleHold ? "on" : "off"));
+            s.videoHdr.enabled ? std::format("on, peak {} cd/m2", s.videoHdr.peakNits) : std::string("off"), settings.cutGuard ? "on" : "VFG only", settings.subtitleHold == 2 ? "Auto (while burned-in text is found)" : settings.subtitleHold ? "on" : "off",
+            settings.hudLock == 2 ? "Auto (while a static overlay over a moving picture is found)" : settings.hudLock ? "on" : "off"));
         return true;
     }
 
@@ -1611,10 +1617,10 @@ struct PushCore {
     }
     veyra::engine::FailedBackend lastFailed = veyra::engine::FailedBackend::None;
     pmu::DlssgRoute lastRouteFailed = pmu::DlssgRoute::None;   // RTX 30: the backend whose start just failed
-    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false; int32_t builtAnimMode = 0; uint32_t builtHoldFlags = 0;
+    uint32_t builtFg = ~0u, builtSr = ~0u, builtTier = ~0u; bool builtGuard = true, builtSubtitles = false, builtHeld = false, builtHud = false; int32_t builtAnimMode = 0; uint32_t builtHoldFlags = 0;
     bool builtIntelSr = false, settingsProbe = false; uint32_t builtIntelTarget = 0, builtIntelMult = 0;   // Intel VSR / VPL rebuild test; probe = no stage side effects
     int buildGraph() {
-        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0; builtAnimMode = settings.animationMode; builtHoldFlags = settings.holdFlags; builtAnimeSr = settings.animeSrModel;
+        builtFg = settings.fgBackend; builtSr = settings.srMethod; builtTier = settings.fgTier; builtGuard = settings.cutGuard != 0; builtSubtitles = settings.subtitleHold != 0; builtHeld = settings.heldFrames != 0; builtAnimMode = settings.animationMode; builtHoldFlags = settings.holdFlags; builtAnimeSr = settings.animeSrModel; builtHud = settings.hudLock != 0;
         builtIntelSr = settings.sr != 0; builtIntelTarget = settings.srTarget; builtIntelMult = settings.multiplier;
         if (!haveSettings) { tryFg = PUSHCORE_FG_VFG; tryMultiplierCap = PUSHCORE_MAX_MULTIPLIER; const int r = buildGraphOnce(); runFg = fg ? PUSHCORE_FG_VFG : PUSHCORE_FG_NONE; return r; }
         const auto chain = fallbackChain();
@@ -1725,6 +1731,8 @@ struct PushCore {
 #endif
         subtitleState.store(0, std::memory_order_relaxed); subtitlePixels.store(0, std::memory_order_relaxed);
         subAutoInit = false; subCompose = false; subOnRun = subOffRun = 0; signsCompose = false; lineNvofCompose = true;
+        hudState.store(0, std::memory_order_relaxed); hudPixels.store(0, std::memory_order_relaxed); hudMoving.store(0, std::memory_order_relaxed);
+        hudAutoInit = false; hudCompose = false; hudPoll = hudOnRun = hudOffRun = 0;
         engine::describeStages(r, options.snapshot(), gd);
         gd.noFeatures = false;
         gd.runtimeAbsPath = runtimeDir;
@@ -1826,6 +1834,10 @@ struct PushCore {
         gd.nrAutoPoolLayer.reset();
         gd.shareableOutputs = (flags & PUSHCORE_FLAG_EGRESS_COPY) == 0 && !xefgRoute;   // XeFG: XefgStage's outputs are what D3D11 sees
         gd.pushMpcCutGuard = !haveSettings || settings.cutGuard != 0;   // the scene-cut guard for every backend
+        // PushFPS Live HUD Lock (PushHudLock): the graph's frame generation only (not XeFG / VPL, which generate outside it).
+        // PushFPS's still rule (hudStill, "can soften camera pans") stays off for video.
+        gd.hudLock = haveSettings && settings.hudLock != 0;
+        gd.hudStill = false;
         // its optical flow (cutGuard 3; PUSHMPC_CUT_FLOW=0/1 overrides, 2 = FidelityFX's flow on any GPU, for calibration)
         {
             int flowMode = (!haveSettings || (settings.cutGuard & 2) != 0) ? 1 : 0;
@@ -2566,6 +2578,29 @@ struct PushCore {
             subtitleState.store(state == 1 && haveSettings && settings.subtitleHold == 2 && !subCompose ? 4u : state, std::memory_order_relaxed);
             subtitlePixels.store(px, std::memory_order_relaxed);
         }
+#ifdef PUSHMPC_HUD_LOCK_GATE
+        // Live HUD Lock: its state and what it finds (PushHudLock samples every 4 real frames; its harvest runs on this
+        // thread in update(), so it is read here too), about twice a second at 24 fps
+        if (graph && haveSettings && settings.hudLock == 2 && !hudAutoInit) { graph->setHudLockCompose(false); hudAutoInit = true; }
+        if (graph && haveSettings && settings.hudLock != 0 && (++hudPoll % 12) == 0) {
+            const uint32_t state = uint32_t(graph->hudLockState()), px = graph->hudLockPixels(), moving = graph->hudLockMovingPixels();
+            // Auto gate, measured on the content: a static overlay over a moving picture = locked pixels (still for about
+            // a second, with an edge) while a quarter or more of the frame changed in that pair. Polls where the picture
+            // hardly moves decide nothing (a locked pixel there looks the same in every frame anyway). On at >= 0.05 % of
+            // the frame for 3 polls (~1.5 s at 24 fps), off below 0.02 % for 10 polls (~5 s).
+            if (state == 1 && settings.hudLock == 2 && graph->hudLockCounting()) {
+                const double area = double(graph->workWidth()) * graph->workHeight();
+                if (moving >= area * 0.25) {
+                    hudOnRun = px >= area * 0.0005 ? hudOnRun + 1 : 0;
+                    hudOffRun = px < area * 0.0002 ? hudOffRun + 1 : 0;
+                    if (!hudCompose && hudOnRun >= 3) { hudCompose = true; graph->setHudLockCompose(true); veyra::log::info("pushcore", std::format("HUD lock Auto: static overlay found ({} pixels locked, {} moving): locking", px, moving)); }
+                    else if (hudCompose && hudOffRun >= 10) { hudCompose = false; graph->setHudLockCompose(false); veyra::log::info("pushcore", "HUD lock Auto: no static overlay for ~5 s: not locking"); }
+                }
+            }
+            hudState.store(state == 1 && settings.hudLock == 2 && !hudCompose ? 4u : state, std::memory_order_relaxed);
+            hudPixels.store(px, std::memory_order_relaxed); hudMoving.store(moving, std::memory_order_relaxed);
+        }
+#endif
         return PUSHCORE_OK;
     }
 
@@ -3675,8 +3710,8 @@ struct PushCore {
         using namespace veyra;
         if (!graph) return fail("not open");
         const auto t = Clock::now();
-        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld || settings.animationMode != builtAnimMode || settings.holdFlags != builtHoldFlags || settings.animeSrModel != builtAnimeSr)) {
-            veyra::log::info("pushcore", "frame generation method, upscaler, cut guard, Subtitle Hold or held-frame re-timing changed: graph rebuild");
+        if (haveSettings && (settings.fgBackend != builtFg || settings.srMethod != builtSr || settings.fgTier != builtTier || (settings.cutGuard != 0) != builtGuard || (settings.subtitleHold != 0) != builtSubtitles || (settings.heldFrames != 0) != builtHeld || settings.animationMode != builtAnimMode || settings.holdFlags != builtHoldFlags || settings.animeSrModel != builtAnimeSr || (settings.hudLock != 0) != builtHud)) {
+            veyra::log::info("pushcore", "frame generation method, upscaler, cut guard, Subtitle Hold, HUD Lock or held-frame re-timing changed: graph rebuild");
             return PUSHCORE_NEEDS_REBUILD;
         }
         // the stages outside the graph (Intel VSR, Intel VPL) are sized at build time: a change of what they do rebuilds
@@ -4045,7 +4080,12 @@ int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* sett
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_PUSHFLOW16 | PUSHCORE_FEATURE_ZLUDA_VSR | PUSHCORE_FEATURE_AMDGPU_EP | PUSHCORE_FEATURE_TURING_DLSSG | PUSHCORE_FEATURE_HELIXSR | PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR | PUSHCORE_FEATURE_ANIME_HOLD | pushmpc::selftest::features(); }
+#ifdef PUSHMPC_HUD_LOCK_GATE
+constexpr uint32_t kHudLockFeature = PUSHCORE_FEATURE_HUD_LOCK;   // the patch's gate and count (EnhanceGraph::setHudLockCompose)
+#else
+constexpr uint32_t kHudLockFeature = 0;
+#endif
+uint32_t pushcore_features(void) { return kHudLockFeature | PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_PUSHFLOW16 | PUSHCORE_FEATURE_ZLUDA_VSR | PUSHCORE_FEATURE_AMDGPU_EP | PUSHCORE_FEATURE_TURING_DLSSG | PUSHCORE_FEATURE_HELIXSR | PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR | PUSHCORE_FEATURE_ANIME_HOLD | pushmpc::selftest::features(); }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {
@@ -4209,6 +4249,9 @@ int pushcore_stats(PushCore* core, PushCoreStats* s) {
     core->st.cutGuardCuts = core->cutsSeen.load(std::memory_order_relaxed) + (core->xguard ? core->xguard->cuts() : 0);   // + the XeFG route's own guard
     core->st.subtitleHoldState = core->subtitleState.load(std::memory_order_relaxed);
     core->st.subtitleHoldPixels = core->subtitlePixels.load(std::memory_order_relaxed);
+    core->st.hudLockState = core->hudState.load(std::memory_order_relaxed);
+    core->st.hudLockPixels = core->hudPixels.load(std::memory_order_relaxed);
+    core->st.hudLockMovingPixels = core->hudMoving.load(std::memory_order_relaxed);
     core->st.quickVsr = core->qvsr.active() ? 1u : 0u;
     std::snprintf(core->st.fgNote, sizeof(core->st.fgNote), "%s", core->fgNote.c_str());
     std::memcpy(s, &core->st, size);

@@ -174,6 +174,15 @@ typedef struct PushCoreSettings {
        generation cannot be right; default 0 (a smaller struct). */
     int32_t animationMode;
     uint32_t holdFlags;
+    /* Appended (PUSHCORE_FEATURE_HUD_LOCK): PushFPS's Live HUD Lock for video. Per pixel, over time: a pixel that has stayed
+       the same for about a second (38 real frames) and has an edge, or sits beside one, is taken from the real frame in
+       every generated frame instead of from frame generation, so a static logo, scoreboard, ticker box or caption does not
+       warp or ghost while the picture under it moves. A pixel that changes is released on that same frame. Translucent
+       overlays (the picture shows through) change with the picture and are not locked. Runs with the graph's frame
+       generation (VFG, DLSS-G, PushFlow, FSR FG, AMD FRC, NVOF); not with XeFG or VPL. 1 = on; 2 = Auto: the lock learns
+       and counts on every frame and composes only while a static overlay over a moving picture is found
+       (PushCoreStats.hudLockState 4 = running, waiting for an overlay); default 0 (a smaller struct). */
+    int32_t hudLock;
 } PushCoreSettings;
 #define PUSHCORE_ANIM_FULL 0
 #define PUSHCORE_ANIM_CAMERA_ONLY 1
@@ -355,6 +364,15 @@ typedef struct PushCoreStats {
     uint64_t holdPairs;           /* source pairs with a hold */
     uint64_t holdFrames;          /* generated frames composed */
     uint64_t holdFlashes;         /* flash / impact pairs held whole */
+    /* Appended (PUSHCORE_FEATURE_HUD_LOCK): Live HUD Lock (PushCoreSettings.hudLock). hudLockState: 0 not asked for,
+       1 running and composing, 2 asked for and unavailable (failed to start), 3 asked for and not part of this graph (no
+       frame generation, or XeFG / VPL), 4 Auto: running and counting, not composing (no static overlay found).
+       hudLockPixels: pixels the lock takes from the real frame in the frame sampled last (sampled every 4 real frames,
+       counted whether or not it composes); hudLockMovingPixels: pixels of that frame that changed from the one before. */
+    uint32_t hudLockState;
+    uint32_t hudLockPixels;
+    uint32_t hudLockMovingPixels;
+    uint32_t hudLockReserved;
 } PushCoreStats;
 #define PUSHCORE_STATS_SIZE_M2C 144u     /* sizeof(PushCoreStats) before the deband fields (x64) */
 
@@ -425,6 +443,7 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_FEATURE_TURING_DLSSG (1u << 17) /* PUSHCORE_FG_DLSSG on RTX 20 through the community port (Setup fetches it;
                                                     self-tested on the first DLSS-G open, unlock TuringDlssg); PUSHCORE_CAP_DLSSG says
                                                     whether it is usable on this card */
+#define PUSHCORE_FEATURE_HUD_LOCK (1u << 27) /* PushCoreSettings.hudLock (0 / 1 / 2 Auto), PushCoreStats.hudLock* */
 #define PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO 512u /* PushCoreSettings.subtitleHold = 2: held only while burned-in text is found */
 #define PUSHCORE_FEATURE_XEFG (1u << 20)    /* fgBackend = PUSHCORE_FG_XEFG, PUSHCORE_CAP_XEFG, PUSHCORE_SELFTEST_XEFG */
 #define PUSHCORE_FEATURE_VPL_FI (1u << 21)  /* fgBackend = PUSHCORE_FG_VPL, PUSHCORE_CAP_VPL_FI, PUSHCORE_SELFTEST_VPL_FI */
