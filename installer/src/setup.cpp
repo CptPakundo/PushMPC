@@ -652,7 +652,7 @@ const wchar_t* kLicence =
     L"NVIDIA and AMD components\r\n"
     L"PushMPC does not ship NVIDIA's files. Setup downloads Veyra's official runtime package from Veyra's GitHub release "
     L"(github.com/Likely7/Veyra-NRVideo), checks its pinned SHA-256 and installs only the parts PushMPC uses: RTX Video Super "
-    L"Resolution, RTX Video HDR, NVIDIA Video Effects frame generation, the AI enhancement runtime, the CUDA runtime, FidelityFX. "
+    L"Resolution, RTX Video HDR, NVIDIA Video Effects frame generation, the DLSS 5 Neural Rendering runtime, the CUDA runtime, FidelityFX. "
     L"NVIDIA's components are used under NVIDIA's licences, which are installed with them (runtime\\licenses\\nvidia-*). "
     L"Community-modified NVIDIA files in the package (unlocks for older RTX cards) are installed too, as PushFPS's installer does; "
     L"they are outside NVIDIA's terms, and a script install can leave them out (-ExperimentalExtras No).\r\n\r\n"

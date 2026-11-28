@@ -511,15 +511,15 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         set(PUSHCORE_CAP_ANIME_SR, true, miss.empty(), "", miss.c_str());
     }
     set(PUSHCORE_CAP_RTX_HDR, nvidia && rtx, fileExists(runtimeDir / L"nvngx_truehdr.dll"), "needs an NVIDIA RTX card", "nvngx_truehdr.dll is not installed");
-    // AI clean-up: NVIDIA's original (RTX 50) or the community SF build (RTX 20-50); AMD: lmxxf (RX 9000) or the
+    // DLSS 5 Neural Rendering (NR): NVIDIA's original (RTX 50) or the community SF build (RTX 20-50); AMD: lmxxf (RX 9000) or the
     // RedDuke ZLUDA worker (RX 7000)
     if (nvidia) {
         const bool sf = fileExists(runtimeDir / L"nr-ampere" / L"nvngx_dlssnr.dll");
         const bool original = fileExists(runtimeDir / L"nr-original" / L"nvngx_dlssnr.dll");
         const bool hw = rtx;
         const bool files = sf || (original && fam == PUSHCORE_FAMILY_RTX50);
-        set(PUSHCORE_CAP_NR, hw, files, "needs an NVIDIA RTX card", fam == PUSHCORE_FAMILY_RTX50 ? "no NR runtime installed" :
-            "needs the community SF NR runtime (nr-ampere) on this card");
+        set(PUSHCORE_CAP_NR, hw, files, "needs an NVIDIA RTX card", fam == PUSHCORE_FAMILY_RTX50 ? "no Neural Rendering runtime installed" :
+            "needs the community SF Neural Rendering runtime (nr-ampere) on this card");
         std::snprintf(c.nrRuntime, sizeof(c.nrRuntime), "%s", sf ? "SF 310.9.16 (community)" : original ? "NVIDIA 310.8.0" : "");
     } else if (amd) {
         const auto provider = veyra::pipeline::amdNrProvider(v, name);
@@ -528,17 +528,17 @@ void fillCaps(const DXGI_ADAPTER_DESC1& d, const std::filesystem::path& runtimeD
         if (provider == veyra::pipeline::AmdNrProvider::RedDukeRdna3) {
             files = veyra::pipeline::Rdna3NrBackend::runtimeAvailable((runtimeDir / L".." / L"amd-nr-rdna3").lexically_normal()) &&
                     veyra::pipeline::Rdna3NrBackend::hipRuntimeAvailable();
-            missing = "the RX 7000 NR worker (amd-nr-rdna3) or AMD's HIP 7 runtime is missing";
+            missing = "the RX 7000 Neural Rendering worker (amd-nr-rdna3) or AMD's HIP 7 runtime is missing";
             std::snprintf(c.nrRuntime, sizeof(c.nrRuntime), "RedDuke ZLUDA worker (RX 7000)");
         } else if (provider == veyra::pipeline::AmdNrProvider::LmxxfRdna4) {
             files = fileExists(runtimeDir / L".." / L"amd-nr" / L"LmxxfNrRuntime.dll") &&
                     (fileExists(system32() / L"amdhip64_7.dll") || GetModuleHandleW(L"amdhip64_7.dll"));
-            missing = "the RX 9000 NR runtime (amd-nr) or AMD's HIP 7 runtime is missing";
+            missing = "the RX 9000 Neural Rendering runtime (amd-nr) or AMD's HIP 7 runtime is missing";
             std::snprintf(c.nrRuntime, sizeof(c.nrRuntime), "lmxxf (RX 9000)");
         }
-        set(PUSHCORE_CAP_NR, provider != veyra::pipeline::AmdNrProvider::Unsupported, files, "AI clean-up on AMD needs an RX 7000 or RX 9000", missing);
+        set(PUSHCORE_CAP_NR, provider != veyra::pipeline::AmdNrProvider::Unsupported, files, "Neural Rendering on AMD needs an RX 7000 or RX 9000", missing);
     } else {
-        set(PUSHCORE_CAP_NR, false, false, "AI clean-up needs an NVIDIA RTX or AMD RX 7000 / 9000 card", "");
+        set(PUSHCORE_CAP_NR, false, false, "Neural Rendering needs an NVIDIA RTX or AMD RX 7000 / 9000 card", "");
     }
     // Intel video methods (PushCoreIntel.cpp): Intel VSR and VPL frame interpolation behind their self-tests (run here once
     // per adapter + driver on an Intel GPU, cached in SelfTest\IntelVsr / VplFi); when available, reason[] carries the
@@ -1104,7 +1104,7 @@ struct PushCore {
     // PushFPS's simple video page (qml/Veyra/WatchPage.qml) on a fresh install, switch by switch (see
     // measured): the bridge starts from EnhancementSettings{} with nrRuntime Ampere, in
     // List chain mode (runtimeOrder = nullopt); "smoother" sets multiplier (the FG node on) and content Auto; "sharper"
-    // sr on with the current videoSrQuality (standard RTX VSR family); "AI picture enhancement" turns the list's NR
+    // sr on with the current videoSrQuality (standard RTX VSR family); Neural Rendering ("AI picture enhancement") turns the list's NR
     // node on with its default parameters (one layer: flat fields, nrLayerCount 0) and PushQuickSetup's look writes
     // model.tone/structure; "SDR to HDR" videoHdr.enabled with VideoHdrSettings' defaults. One deliberate difference:
     // the frame generation backend is NVIDIA VFG (PushFPS's fresh default on NVIDIA is DLSS-G, which PushMPC does not
@@ -1298,7 +1298,7 @@ struct PushCore {
         if (!nvidia) {
             if (settings.videoHdr) veyra::log::info("pushcore", "RTX Video HDR needs NVIDIA: off (PushMPC's own SDR to HDR shader runs in the filter)");
             settings.videoHdr = 0;
-            if (s.nr && !amd) { s.nr = false; veyra::log::info("pushcore", "AI clean-up needs NVIDIA RTX or AMD RX 7000 / 9000: off"); }
+            if (s.nr && !amd) { s.nr = false; veyra::log::info("pushcore", "Neural Rendering needs NVIDIA RTX or AMD RX 7000 / 9000: off"); }
             if (s.frameGenerationBackend == FrameGenerationBackend::Vfg || s.frameGenerationBackend == FrameGenerationBackend::Dlss) s.multiplier = 1;
             if (s.opticalFlowBackend == OpticalFlowBackend::Nvidia) s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;
         }

@@ -30,7 +30,7 @@ releases are made. For using PushMPC, see the [README](../README.md) and the [us
 | `tests/` | cross-component tests |
 
 Auto's rules (multiplier from the GPU's measured 95th-percentile cost and the display cadence or VRR, then quality,
-upscaling and clean-up with the time left) are the same on every route;
+upscaling with the time left; Neural Rendering only when the user turns it on) are the same on every route;
 `filter\build\auto_test.exe` prints Auto's decisions for sample sources and displays without a GPU.
 
 ## Building on Windows
@@ -220,8 +220,8 @@ Setup (`PushMPC-Setup.exe`) runs `scripts/pushmpc-install.ps1 install` from its 
   opens the player's window directly (`screen:0:<hwnd>:0:0:2:0:0:0:0`) on tested PushFPS versions. `-Capture On|Off`.
 - **CI:** `.github/workflows/release-ux.yml` runs Setup headless on windows-2025 and `setup.sh` in Arch with players from
   their packages, and checks that uninstall leaves nothing behind.
-- **Community unlocks:** the unlocks and ports in Veyra's package (the SF AI enhancement build for RTX 20-50, the DLSS-G
-  unlocks for RTX 30/40, the AMD AI enhancement runtimes) are installed by default; `-ExperimentalExtras No` leaves them
+- **Community unlocks:** the unlocks and ports in Veyra's package (the SF Neural Rendering build for RTX 20-50, the DLSS-G
+  unlocks for RTX 30/40, the AMD Neural Rendering runtimes) are installed by default; `-ExperimentalExtras No` leaves them
   out.
 
 ## Setup and script options

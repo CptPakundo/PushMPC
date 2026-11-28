@@ -56,8 +56,8 @@
   manifest.txt: key=value lines, then "file <sha256> <size> <relative path>" per file.
 
   The runtime comes from Veyra's official release package, as PushFPS's own installer gets it: pinned SHA-256,
-  verified before use; NVIDIA files that are not NVIDIA-signed originals (community-modified, e.g. the RTX 30 AI
-  enhancement slot) are "experimental extras", left out unless chosen (-ExperimentalExtras Yes, or yes when asked).
+  verified before use; NVIDIA files that are not NVIDIA-signed originals (community-modified, e.g. the RTX 30 DLSS 5
+  Neural Rendering slot) are "experimental extras", left out unless chosen (-ExperimentalExtras Yes, or yes when asked).
 
   Works with Windows PowerShell 5.1 and PowerShell 7.
 #>
@@ -251,7 +251,7 @@ $RuntimeFilesByVendor = @{
         'runtime\experimental\nvngx_vsr.dll',                                # RTX Video Super Resolution, standard family (NGX)
         'runtime\experimental\nvngx_truehdr.dll',                            # RTX Video HDR (NGX)
         'runtime\experimental\nvngx_dlssg.dll',                              # DLSS frame generation 310.9.1 (the fallback / high-multiplier method)
-        'runtime\experimental\nr-original\nvngx_dlssnr.dll',                 # AI enhancement (NVIDIA's original NR runtime, RTX 50)
+        'runtime\experimental\nr-original\nvngx_dlssnr.dll',                 # DLSS 5 Neural Rendering (NVIDIA's original NR runtime, RTX 50)
         'runtime\nvidia-vfg\NVVideoEffects.dll', 'runtime\nvidia-vfg\NVCVImage.dll', 'runtime\nvidia-vfg\nvngxruntime.dll',
         'runtime\nvidia-vfg\cudart64_12.dll', 'runtime\nvidia-vfg\nvVFXVideoFrameGeneration.dll',  # NVIDIA VFG (Video Effects SDK; models inside)
         'runtime\nvidia-vfg\nvVFXVideoSuperRes.dll', 'runtime\nvidia-vfg\nvngx_vsr.dll',           # RTX VSR high bitrate / streaming styles
@@ -267,7 +267,7 @@ $RuntimeFilesByVendor = @{
     )
 }
 $RuntimeDirsByVendor = @{
-    NVIDIA = @('runtime\experimental\nr-ampere',              # NR: the community SF build (RTX 20-50), PushFPS's default slot
+    NVIDIA = @('runtime\experimental\nr-ampere',              # Neural Rendering (NR): the community SF build (RTX 20-50), PushFPS's default slot
                'runtime\experimental\dlssg-lite',             # DLSS-G performance mode (RTX 50)
                'runtime\experimental\fallback-dlssg-310.7',   # DLSS-G 310.7 for AdaMfgUnlock / AmpereMfgUnlock (RTX 40 / 30)
                'runtime\experimental\dlssg-kernels')          # DlssgTransfusion's kernels (RTX 30 / 40 DLSS-G)
@@ -1403,9 +1403,9 @@ function Build-RuntimeComponent([string]$zip, [string]$dest, $pkg = $Runtime) {
         if ($ExperimentalExtras -eq 'Yes') { $keep = $true }
         elseif ($ExperimentalExtras -eq 'Ask' -and -not [Console]::IsInputRedirected -and -not $DryRun) {
             Step "Optional: Veyra's experimental extras"
-            foreach ($x in $extras) { Info "- $x (community-modified NVIDIA file: PushFPS's default AI enhancement slot, for RTX 20-40)" }
+            foreach ($x in $extras) { Info "- $x (community-modified NVIDIA file: PushFPS's default DLSS 5 Neural Rendering slot, for RTX 20-40)" }
             Info 'They use NVIDIA files outside the terms NVIDIA licenses them under, so PushMPC leaves them out unless you choose them.'
-            Info "Without them, AI enhancement uses NVIDIA's original runtime (RTX 50)."
+            Info "Without them, DLSS 5 Neural Rendering uses NVIDIA's original runtime (RTX 50 only)."
             $keep = (Read-Host '    Install the experimental extras too? [y/N]') -match '^(y|yes|j|ja)$'
         }
     }

@@ -7,7 +7,7 @@
  *
  * By default (ABI 2, and ABI 3 with sr 0 and real_out 0) the output size is the source size and super resolution is
  * off; real frames stay the player's own decoded pictures and only the generated frames come from pushcore, so per-frame
- * look changes (AI clean-up, deband) are off too. HD/UHD sources only (BT.709 / BT.2020): pushcore's YUV output uses
+ * look changes (Neural Rendering, deband) are off too. HD/UHD sources only (BT.709 / BT.2020): pushcore's YUV output uses
  * those matrices.
  *
  * ABI 3 (appended, an ABI 2 caller keeps working):

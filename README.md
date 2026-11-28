@@ -25,8 +25,10 @@ and sets itself up for your graphics card and display.
 - **Smoother motion.** New frames in between the video's own (up to 16 for every frame on GeForce RTX 50 and 40
   cards), so a 24 fps film fills a 120 Hz or 240 Hz screen.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
-- **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
-  clean-up for low-quality streams.
+- **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS.
+- **DLSS 5 Neural Rendering, if you want it.** On GeForce RTX cards, and on Radeon RX 7000 and 9000 through community
+  builds, Neural Rendering uses AI to add detail and texture. It changes the look of the picture rather than restoring
+  the original, and it needs a lot of GPU power, so it stays off until you turn it on.
 - **HDR done right.** HDR10, HDR10+ and HLG stay HDR (in MPC-HC also Dolby Vision, profiles 7 and 8). On an
   SDR display, HDR video is converted to fit your screen.
 - **Made for animation.** In MPC-HC, PushMPC tells cartoons and anime from live action by looking at the picture

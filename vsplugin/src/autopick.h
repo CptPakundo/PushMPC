@@ -29,7 +29,8 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
     if (key == L"enable") { s.enable = !(is(L"0") || is(L"off") || is(L"false")); return true; }
     if (key == L"smoother") { s.smoother = pm::ParseChoice(v, 2, pm::kMaxSmoother, s.smoother); if (is(L"1")) s.smoother = pm::kOff; return true; }
     if (key == L"sharper") { s.sharper = pm::ParseChoice(v, 1, 4, s.sharper); return true; }
-    if (key == L"cleanup") { s.cleanUp = pm::ParseOnOff(v, s.cleanUp); return true; }
+    // Neural Rendering: off / on (a legacy auto is off: Auto never turns it on); neural_rendering is the same key
+    if (key == L"cleanup" || key == L"neural_rendering") { s.cleanUp = pm::ParseNeuralRendering(v, s.cleanUp); return true; }
     if (key == L"sdr_to_hdr") { s.sdrToHdr = pm::ParseOnOff(v, s.sdrToHdr); return true; }
     if (key == L"deband") { s.deband = pm::ParseOnOff(v, s.deband); return true; }
     if (key == L"fg_quality") { s.fgQuality = is(L"High") ? pm::FgQuality::High : is(L"Low") ? pm::FgQuality::Low : is(L"Medium") ? pm::FgQuality::Medium : pm::FgQuality::Auto; return true; }
@@ -44,7 +45,7 @@ inline bool ApplyOverride(pm::Settings& s, const std::wstring& key, const std::w
                                              : is(L"XeSS") ? pm::Upscaler::Xess : (is(L"IntelVSR") || is(L"IVSR")) ? pm::Upscaler::IntelVsr : is(L"Anime") ? pm::Upscaler::Anime : pm::Upscaler::Auto; return true; }
     if (key == L"target") { s.target = is(L"1440p") ? pm::UpscaleTarget::P1440 : is(L"4K") ? pm::UpscaleTarget::K4 : is(L"5K") ? pm::UpscaleTarget::K5 : pm::UpscaleTarget::Screen; return true; }
     if (key == L"vsr_style") { s.vsrStyle = is(L"HighBitrate") ? pm::VsrStyle::HighBitrate : is(L"Streaming") ? pm::VsrStyle::Streaming : is(L"Standard") ? pm::VsrStyle::Standard : pm::VsrStyle::Auto; return true; }
-    if (key == L"cleanup_strength") { s.strength = is(L"Subtle") ? pm::CleanStrength::Subtle : is(L"Balanced") ? pm::CleanStrength::Balanced : pm::CleanStrength::Strong; return true; }
+    if (key == L"cleanup_strength" || key == L"neural_rendering_strength") { s.strength = is(L"Subtle") ? pm::CleanStrength::Subtle : is(L"Balanced") ? pm::CleanStrength::Balanced : pm::CleanStrength::Strong; return true; }
     if (key == L"on_battery") { s.onBattery = is(L"Same") ? pm::BatteryMode::Same : pm::BatteryMode::Light; return true; }
     if (key == L"subtitle_hold") { s.subtitleHold = pm::ParseOnOff(v, s.subtitleHold); return true; }   // PushFPS 4.5 Subtitle Hold (Auto = off)
     return false;
