@@ -39,6 +39,9 @@ struct AppleBackendImpl : Backend<void*> {
     std::function<void(void* f)> release;
     std::function<void(int64_t pts, bool generated, void* f)> tag;
     const VSAPI* api = nullptr;
+    // the stream's colour from the arguments (pushmpc.lua's user-data, or pushmpc.MpvColour's frame-0 read): mpv's
+    // frames carry no _Transfer / _Primaries / _Matrix, so a frame's own properties only refine it
+    apple::Colour base;
     int64_t last = -1000000;
     std::vector<Out<void*>> queue;
 
@@ -51,10 +54,12 @@ struct AppleBackendImpl : Backend<void*> {
         for (int i = 0; i < 3; ++i) { v.data[i] = api->getReadPtr(f, i); v.stride[i] = api->getStride(f, i); }
         v.width = api->getFrameWidth(f, 0); v.height = api->getFrameHeight(f, 0);
         v.bits = api->getVideoFrameFormat(f)->bitsPerSample;
-        apple::Colour c;
+        apple::Colour c = base;
         const VSMap* p = api->getFramePropertiesRO(f);
         int e = 0;
-        int64_t x = api->mapGetInt(p, "_Matrix", 0, &e); if (!e && x != 2) c.matrix = int(x);
+        int64_t x = api->mapGetInt(p, "_Matrix", 0, &e);
+        if (e) x = api->mapGetInt(p, "_ColorSpace", 0, &e);   // mpv's vf_vapoursynth: _ColorSpace (AVColorSpace = H.273), no _Matrix
+        if (!e && x != 2) c.matrix = int(x);
         x = api->mapGetInt(p, "_Transfer", 0, &e); if (!e && x != 2) c.transfer = int(x);
         x = api->mapGetInt(p, "_Primaries", 0, &e); if (!e && x != 2) c.primaries = int(x);
         x = api->mapGetInt(p, "_Range", 0, &e);   // API 4.2+ (R82): 1 full, 0 limited
@@ -256,6 +261,18 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
     apple::Config c;
     c.width = vi->width; c.height = vi->height; c.bits = vi->format.bitsPerSample; c.k = ak.k; c.sr = sr; c.fi = fi; c.srcFps = srcFps;
     c.colour.fullRange = false;
+    apple::Colour base;   // the arguments (pushmpc.vpy passes mpv's colour), else BT.709 limited until the frames say otherwise
+    {
+        auto argI = [&](const char* k) { int e = 0; const int64_t v = a->mapGetInt(in, k, 0, &e); return e ? int64_t(-1) : v; };
+        const int64_t am = argI("matrix"), at = argI("transfer"), ap = argI("primaries"), ar = argI("range");
+        if (am >= 0 && am != 2) base.matrix = int(am);
+        if (at >= 0 && at != 2) base.transfer = int(at);
+        if (ap >= 0 && ap != 2) base.primaries = int(ap);
+        if (ar >= 0) base.fullRange = ar == 0;   // the arguments' range: 0 full, 1 limited
+        c.colour = base;
+        Log(std::format("apple: colour matrix {} transfer {} primaries {} {} range ({})", base.matrix, base.transfer, base.primaries, base.fullRange ? "full" : "limited",
+                        at >= 0 ? "from the arguments" : "no transfer argument: BT.1886 until a frame says otherwise"));
+    }
     {
         std::string content = ReadSetting("Content");
         for (auto& ch : content) ch = char(std::tolower(static_cast<unsigned char>(ch)));
@@ -282,6 +299,7 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
     d->pipe.Reset();
     d->be.grid = d->pipe.GridOf();
     d->be.api = a;
+    d->be.base = base;
     ABind(d);
     Log(std::format("apple: output YUV 4:2:0 {}-bit {}x{} at {}/{} fps (x{})", vi->format.bitsPerSample, d->vi.width, d->vi.height, outFps.num, outFps.den, d->k));
     VSFilterDependency deps[] = { { node, rpGeneral } };

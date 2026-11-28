@@ -625,8 +625,17 @@ jobs:
           mpv -v /tmp/clip.mp4 --vo=null --ao=null --length=3 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
           ls /tmp/vslog-arch/ 2>/dev/null || true; grep -h 'backend: \|portable: output\|portable: x' /tmp/vslog-arch/*.log 2>/dev/null | head -5
           echo "--- encode mode"
-          mpv -v /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30
+          # mpv applies no mpv.conf in encoding mode (player/configfiles.c: diverted into "playback-default"), so the block
+          # is included by hand, as apple.yml does; without it this encode never ran PushMPC (the frame check below read
+          # the playback instance)
+          rm -f /tmp/out.mkv /tmp/ctl.mkv
+          mpv -v /tmp/clip.mp4 --include=$HOME/.config/mpv/mpv.conf --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30 || true
+          mpv --no-config /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/ctl.mkv --of=matroska --ovc=ffv1 > /dev/null 2>&1 || true
           cat /tmp/vslog-arch/*.log | head -20
+          eo=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/out.mkv 2>/dev/null || true)
+          ec=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/ctl.mkv 2>/dev/null || true)
+          echo "encode through the block: ${eo:-none} frames, mpv alone ${ec:-none}"
+          [ -n "$eo" ] && [ -n "$ec" ] && [ "$eo" = "$(( ec * 2 ))" ] || { echo "::error::the encode through the block gave ${eo:-no} frames, want 2x mpv alone (${ec:-?})"; exit 1; }
           echo "::notice title=arch mpv + plugin::$(grep -h 'backend: \|portable: output\|instance closed' /tmp/vslog-arch/*.log 2>/dev/null | head -3 | tr '\n' ' ') $(mpv -v /tmp/clip.mp4 --vo=null --ao=null --frames=1 2>&1 | grep -i 'vapoursynth\]' | tail -1)"
           grep -q 'portable: output YUV.*(x2)' /tmp/vslog-arch/*.log
           n=$(grep -ho 'instance closed after [0-9]*' /tmp/vslog-arch/*.log | head -1 | grep -o '[0-9]*$')
@@ -730,13 +739,17 @@ jobs:
             rm -f /tmp/diag-ctl.mkv; timeout 120 mpv --no-config --no-audio --o=/tmp/diag-ctl.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1
             ctl=$(nframes /tmp/diag-ctl.mkv)
             echo "clip $n: source ${src:-?} frames, mpv-alone encode ${ctl:-?}"
+            # path early: mpv 0.39+'s default (the filter before decoding, frame 0's colour read by the plugin); path late:
+            # pushmpc-early=no, the late add older mpv takes (real video-params; frames lost at the start expected)
+            for pth in early late; do
+            XO=; [ $pth = late ] && XO=--script-opts-append=pushmpc-early=no
             for mode in encode play; do for r in 1 2 3; do
-              id=$n-$mode-$r; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
+              id=$n-$pth-$mode-$r; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
               if [ $mode = encode ]; then
-                timeout 180 mpv --include=$HOME/.config/mpv/mpv.conf --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1; rc=$?
+                timeout 180 mpv --include=$HOME/.config/mpv/mpv.conf $XO --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1; rc=$?
                 out=$(nframes /tmp/diag-out.mkv)
               else
-                timeout 180 mpv --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1; rc=$?
+                timeout 180 mpv $XO --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1; rc=$?
                 out=-
               fi
               echo "=== $id: mpv exit $rc, log $(wc -l < $L 2>/dev/null || echo 0) lines; raw lines in mpv log order:"
@@ -753,7 +766,7 @@ jobs:
               inst=$(grep -ho 'instance closed after [0-9]*' $V/*.log 2>/dev/null | grep -o '[0-9]*$' | tr '\n' ',')
               adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
               luaadd=$(grep -c "PushMPC's filter added\|PushMPC: filter added before decoding" $L 2>/dev/null)
-              line="clip=$n run=$mode#$r first-add-user-data=$ud transfer-arg=$tr vf-appends=${adds:-0} lua-added=${luaadd:-0} log-line(append ${la:-?}, decoder-format ${ld:-?}, vs-init ${li:-?}) out=${out:-?} control=${ctl:-?} source=${src:-?} plugin-instance-frames=${inst:-none}"
+              line="clip=$n path=$pth run=$mode#$r first-add-user-data=$ud transfer-arg=$tr vf-appends=${adds:-0} lua-added=${luaadd:-0} log-line(append ${la:-?}, decoder-format ${ld:-?}, vs-init ${li:-?}) out=${out:-?} control=${ctl:-?} source=${src:-?} plugin-instance-frames=${inst:-none}"
               # verdict: the transfer the plugin opened with (its "colour arguments" line when it has one, else the first
               # add's user-data) against the clip's, and every frame filtered (playback: the first instance has 2x the
               # source; encode: 2x the mpv-alone control)
@@ -771,8 +784,9 @@ jobs:
               ev=FAIL; [ "${ff:-x}" = "$et" ] && [ "${adds:-0}" = 1 ] && [ -n "$la" ] && [ -n "$ld" ] && [ "$la" -lt "$ld" ] && [ "${fr:-0}" = "${reads:-0}" ] && ev=ok
               line="$line verdict: transfer ${got:-none} (want $et) $cv, frames ${have:-0} (want $want) $fv, early read ${ff:-none}, appends ${adds:-0}, init warnings ${fr:-0} for ${reads:-0} reads $ev"
               echo "$line" | tee -a $sum
-              echo "::notice title=colour diag $n $mode#$r::$line"
+              echo "::notice title=colour diag $n $pth $mode#$r::$line"
             done; done
+            done
           done
           echo "--- summary"; cat $sum
           # the fallback: the read made to fail (PUSHMPC_MPV_COLOUR_FAIL=1): pushmpc.lua must add the filter again with mpv's
@@ -808,7 +822,9 @@ jobs:
             line="two files (hdr10 then sdr8), $mode: transfers the instances opened with, in order: ${seq:-none} $fv"
             echo "$line" | tee -a $sum; echo "::notice title=colour diag two files $mode::$line"
           done
-          v="verdict: $(grep -c ' ok, frames .* ok, early .* ok$' $sum) of $(grep -c '^clip=' $sum) runs opened with frame 0's transfer read by the plugin, added once before decoding, and filtered every frame"; echo "$v" | tee -a $sum; echo "::notice title=colour diag verdict::$v"
+          lv="late path (pushmpc-early=no): $(grep '^clip=[^ ]* path=late' $sum | grep -c 'verdict: transfer [0-9]* (want [0-9]*) ok') of $(grep -c '^clip=[^ ]* path=late' $sum) runs with the clip's transfer; frames (have/want): $(grep '^clip=[^ ]* path=late' $sum | grep -o 'frames [0-9]* (want [0-9]*)' | sed 's/frames \([0-9]*\) (want \([0-9]*\))/\1\/\2/' | tr '\n' ' ')"
+          echo "$lv" | tee -a $sum; echo "::notice title=colour diag late path::$lv"
+          v="verdict: $(grep '^clip=[^ ]* path=early' $sum | grep -c ' ok, frames .* ok, early .* ok$') of $(grep -c '^clip=[^ ]* path=early' $sum) runs opened with frame 0's transfer read by the plugin, added once before decoding, and filtered every frame"; echo "$v" | tee -a $sum; echo "::notice title=colour diag verdict::$v"
           { echo '## colour diagnostic (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           rm -r $HOME/.config/pushmpc; sh $HOME/.local/share/pushmpc/install.sh uninstall > /dev/null 2>&1
           exit 0
