@@ -53,6 +53,16 @@ mean_step = sum(steps) / len(steps) if steps else 0.0
 want = a.src_frames * k if a.src_frames else 0
 
 problems = []
+# source frames that reached PushMPC (its close line): on a slower runner, whose CPU engine is over budget at x8 (~70 ms a
+# source frame against ~49 on a faster one), VLC drops late source pictures before the filter and PushMPC interpolates
+# across the gap (one double-size step per dropped frame). The transport is judged on the frames it got; too few
+# reaching it is still a failure.
+ins = [int(x) for x in re.findall(r"PushMPC: close, in=(\d+) out=\d+", log)]
+got = max(ins) if ins else 0
+if a.src_frames and 1 < got < a.src_frames:
+    if got < 0.66 * a.src_frames: problems.append(f"only {got} of {a.src_frames} source frames reached PushMPC")
+    want = got * k
+    step = step * (a.src_frames - 1) / (got - 1)
 hwdec = re.search(r"Using (.*) for hardware decoding", log)
 if not hwdec or "null" not in hwdec.group(1):
     problems.append("VLC did not decode through the null driver")
@@ -90,7 +100,7 @@ m = re.search(r"PushMPC: hw path ok, x(\d+) \((.*)\)\s*$", log, re.M)
 how = m.group(2) if m else ""
 gen = re.findall(r"PushMPC: close, in=\d+ out=\d+ generated=(\d+)", log)
 hwline = re.findall(r"PushMPC: hardware path [^\n]*", log)
-res = dict(case=a.case, expect=a.expect, k=k, frames=n, expected=want, steps=len(steps), good=good, repeats=repeats, back=back, mean_step=round(mean_step, 3),
+res = dict(case=a.case, expect=a.expect, k=k, frames=n, expected=want, src_in=got, steps=len(steps), good=good, repeats=repeats, back=back, mean_step=round(mean_step, 3),
            median_step=round(statistics.median(steps), 3) if steps else None, decoder=hwdec.group(1) if hwdec else "",
            path=how, generated=int(gen[-1]) if gen else 0, late=late, closing=hwline[-1] if hwline else "", problems=problems, skipped=skipped)
 verdict = "FAIL" if problems else "SKIP" if skipped else "PASS"
