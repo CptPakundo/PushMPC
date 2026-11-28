@@ -58,8 +58,8 @@ Built on PushFPS 4.5.8 and Veyra 2.2.1.
 - Setup isn't code-signed yet, so Windows SmartScreen warns the first time.
 - MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware. The other players and cards are checked
   automatically on every build, but not all of them on real hardware yet.
-- In MPC-HC, MPC-BE and PotPlayer, interlaced video plays without PushMPC. In mpv, PushMPC doesn't recognise
-  interlaced video yet.
+- Interlaced video plays without PushMPC: PushMPC recognises it from the picture and steps aside. In mpv this
+  happens after the first few seconds, and not when saving a video with mpv (`--o`).
 - Capture mode is a little behind the sound (set the player's audio delay to about +80 ms) and can't show
   copy-protected video.
 - In mpv through VapourSynth, very high multipliers at 4K can be limited by copying frames; PushMPC's own mpv and the

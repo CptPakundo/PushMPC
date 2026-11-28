@@ -38,8 +38,8 @@ Windows may say "Windows protected your PC" because Setup isn't code-signed yet.
 
 - MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware; the other players and cards are checked
   automatically on every build.
-- In MPC-HC, MPC-BE and PotPlayer, interlaced video plays without PushMPC. In mpv, PushMPC doesn't recognise
-  interlaced video yet.
+- Interlaced video plays without PushMPC: PushMPC recognises it from the picture and steps aside. In mpv this
+  happens after the first few seconds, and not when saving a video with mpv (`--o`).
 - Capture mode (for players PushMPC can't plug into) is a preview. It is a little behind the sound and can't show
   copy-protected video.
 - Mac support is a preview.
