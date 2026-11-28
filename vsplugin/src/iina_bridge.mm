@@ -174,6 +174,9 @@ struct Bridge {
     std::deque<AVFrame*> out;
     bool eofIn = false;
     int k = 1;
+    int wantK = 0;                          // what DecideK asked for at the engine's set-up (before the engine's own ceiling)
+    double decidedFps = 0;                  // the source rate it was decided with
+    bool redecided = false;                 // set up again once for the measured rate (never more per graph)
     int64_t lastPts = AV_NOPTS_VALUE, prevPts = AV_NOPTS_VALUE;
     AVFrame* prevFrame = nullptr;           // props template of the previous source frame
     AVBufferRef* outFrames = nullptr;       // our AVHWFramesContext (super resolution changes the size)
@@ -206,17 +209,33 @@ std::shared_ptr<Bridge> BridgeOf(const AVFilterContext* ctx)
 std::atomic<double> g_displayFps{ 0 }, g_containerFps{ 0 };
 double MpvDouble(const char* name) { return std::string(name) == "display-fps" ? g_displayFps.load() : g_containerFps.load(); }
 
+// The source rate, measured on the bridge's own input: the median frame step of the decoded timestamps
+// (pushmpc::content::IntervalMeter, as Kodi and the VapourSynth filter measure it), not the container's tag ("29.97" on
+// a 24p body). mpv's estimated-vf-fps, which pushmpc.lua reads, cannot serve here: it is the rate at the filter chain's
+// OUTPUT (the bridge's own frames, source x k: the vsplugin CI and iina_bridge_host.c read it as such), so taking it
+// as the source rate would divide k back into itself after a seek. The meter runs on mpv's core thread (Feed) and lives
+// across graphs (mpv rebuilds the graph on a seek); the plugin thread asks for a reset at each new file (g_rateReset,
+// MPV_EVENT_START_FILE). container-fps stays the prior until 8 steps are measured.
+pushmpc::content::IntervalMeter g_rate;            // mpv's core thread only
+std::atomic<double> g_measuredFps{ 0 };
+std::atomic<bool> g_rateReset{ false };
+double SourceFps()
+{
+    const double m = g_measuredFps.load();
+    return m > 1.0 ? m : MpvDouble("container-fps");
+}
+
 // multiplier ceilings per engine: the bridge asks for up to the highest, then each engine takes what it can do (apple:
-// VideoToolbox, DecideAppleK's x8; the engine module reports its own; the built-in portable engine: pmvs::kPortableMaxK
-// in backend.h, 16)
-constexpr int kBridgeAppleMaxK = 8, kBridgePortableMaxK = pmvs::kPortableMaxK, kBridgeMaxK = 16;
+// apple::kAppleMaxK, 16: VideoToolbox's low-latency x = 4 grid or frame-rate conversion, its self-test decides; the
+// engine module reports its own; the built-in portable engine: pmvs::kPortableMaxK in backend.h, 16)
+constexpr int kBridgeAppleMaxK = apple::kAppleMaxK, kBridgePortableMaxK = pmvs::kPortableMaxK, kBridgeMaxK = 16;
 static_assert(kBridgeMaxK >= kBridgePortableMaxK && kBridgeMaxK >= kBridgeAppleMaxK, "the bridge asks for the highest engine ceiling");
 
 int DecideK(double srcFps)
 {
     if (const char* e = getenv("PUSHMPC_IINA_K"); e && *e) return std::clamp(atoi(e), 1, kBridgeMaxK);
     const double disp = MpvDouble("display-fps");
-    if (srcFps <= 0) srcFps = MpvDouble("container-fps");
+    if (srcFps <= 0) srcFps = SourceFps();
     if (srcFps <= 0) srcFps = 23.976;
     if (disp <= 0) return 2;
     return std::clamp(int(std::floor(disp / srcFps + 0.02)), 1, kBridgeMaxK);
@@ -263,7 +282,7 @@ bool ConfigureApple(Bridge& b, const AVFrame* f, CVPixelBufferRef pb)
     c.width = f->width; c.height = f->height;
     const OSType fmt = CVPixelBufferGetPixelFormatType(pb);
     c.bits = SwFormatOf(fmt) == AV_PIX_FMT_P010 ? 10 : 8;
-    c.srcFps = MpvDouble("container-fps");
+    c.srcFps = SourceFps();
     c.k = std::min(b.k, kBridgeAppleMaxK);
     c.colour = ColourOf(f);
     if (const char* sr = getenv("PUSHMPC_IINA_SR")) c.sr = sr;
@@ -342,7 +361,7 @@ bool ConfigureModule(Bridge& b, const AVFrame* f)
     if (fmt == PMENG_FMT_NONE) { b.why += "; engine module: format " + std::to_string(sw) + " not supported"; return false; }
     pmeng_device dev{}; dev.struct_size = sizeof(dev); dev.mem = PMENG_MEM_CPU;
     pmeng_stream st{}; st.struct_size = sizeof(st); st.width = uint32_t(f->width); st.height = uint32_t(f->height); st.fmt = fmt;
-    const double fps = MpvDouble("container-fps");
+    const double fps = SourceFps();
     if (fps > 0) { st.fps_num = int32_t(std::lround(fps * 1000)); st.fps_den = 1000; }
     st.range = f->color_range; st.matrix = f->colorspace; st.primaries = f->color_primaries; st.transfer = f->color_trc;
     pmeng_output out{}; out.struct_size = sizeof(out);
@@ -383,8 +402,29 @@ AVFrame* NewSoftFrame(const AVFrame* tmpl, int64_t pts, int64_t duration)
 bool Feed(Bridge& b, AVFrame* f)
 {
     ++b.in;
+    {   // the source rate from the input timestamps (microseconds: mpv's lavfi time base)
+        if (g_rateReset.exchange(false)) { g_rate.Reset(); g_measuredFps.store(0); }
+        const bool disc = f->pts == AV_NOPTS_VALUE || b.lastPts == AV_NOPTS_VALUE || f->pts <= b.lastPts;
+        if (f->pts != AV_NOPTS_VALUE && g_rate.Push(double(f->pts) / 1e6, disc)) {
+            g_measuredFps.store(g_rate.fps());
+            Log("source rate measured from the frame timestamps: %.3f fps (container-fps says %.3f)", g_rate.fps(), MpvDouble("container-fps"));
+        }
+        // set up before the measurement with another rate (the container's tag) whose multiplier differs: once more, with
+        // the measured one (a new pair starts; the frames already out stay)
+        const double m = g_measuredFps.load();
+        if (!b.redecided && b.mode != Bridge::Mode::Unset && b.mode != Bridge::Mode::Pass && m > 1.0 && b.decidedFps > 0 &&
+            std::fabs(m - b.decidedFps) / m > 0.05 && DecideK(m) != b.wantK) {
+            b.redecided = true;
+            Log("the measured %.3f fps asks for x%d (set up with %.3f fps: x%d): the engine is set up again", m, DecideK(m), b.decidedFps, b.wantK);
+            b.apple.reset(); b.port.reset();
+            if (b.api && b.eng) { b.api->close(b.eng); b.eng = nullptr; b.api = nullptr; }
+            b.mode = Bridge::Mode::Unset; b.why.clear();
+            b.lastPts = b.prevPts = AV_NOPTS_VALUE;   // no pair across the new set-up
+        }
+    }
     if (b.mode == Bridge::Mode::Unset) {
-        b.k = DecideK(MpvDouble("container-fps"));
+        b.decidedFps = SourceFps();
+        b.k = b.wantK = DecideK(b.decidedFps);
         if (f->format == AV_PIX_FMT_VIDEOTOOLBOX && f->data[3] && ConfigureApple(b, f, reinterpret_cast<CVPixelBufferRef>(f->data[3]))) { b.mode = Bridge::Mode::Apple; Log("engine: apple (VideoToolbox, zero copy)"); }
         else if (b.k >= 2 && ConfigureModule(b, f)) b.mode = Bridge::Mode::Module;
         else if (ConfigurePortable(b, f)) { b.mode = Bridge::Mode::Portable; Log("engine: portable-cpu (built in)"); }
@@ -739,6 +779,7 @@ extern "C" __attribute__((visibility("default"))) int mpv_open_cplugin(mpv_handl
         }
         if (e->event_id == MPV_EVENT_NONE) continue;
         if (e->event_id == MPV_EVENT_SHUTDOWN) break;
+        if (e->event_id == MPV_EVENT_START_FILE) g_rateReset.store(true);   // a new file: its rate is measured afresh
         if (e->event_id == MPV_EVENT_PROPERTY_CHANGE) {
             auto* pr = static_cast<mpv_event_property*>(e->data);
             const double v = pr->format == MPV_FORMAT_DOUBLE && pr->data ? *static_cast<double*>(pr->data) : 0.0;
