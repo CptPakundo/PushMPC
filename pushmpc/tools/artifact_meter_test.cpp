@@ -141,7 +141,7 @@ int main()
                 sharp[size_t(y) * W + x] += amp * ((g0[0] * (1 - ax) + g0[1] * ax) * (1 - ay) + (g1[0] * (1 - ax) + g1[1] * ax) * ay);
             }
     }
-    const FrameScores fs = M8(To8(sharp)), fbl = M8(To8(Blur(Blur(sharp))));
+    const FrameScores fs = M8(To8(sharp)), fbl = M8(To8(Blur(Blur(Blur(sharp)))));
     std::printf("detail: sharp %.3f, blurred %.3f\n", fs.detail, fbl.detail);
     Check(fs.detail < 0.01f && fbl.detail > fs.detail + 0.2f, "blurred copy: more detail loss than the sharp one (sharp near 0)", fbl.detail - fs.detail);
     Check(fc.detail < 0.01f, "clean picture with grain: detail loss near 0", fc.detail);

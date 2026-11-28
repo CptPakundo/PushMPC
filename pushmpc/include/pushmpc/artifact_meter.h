@@ -14,16 +14,17 @@
 //            picture carried in 10 bits still bands, a true 10-bit ramp does not). Dither, grain and texture break
 //            plateaus; an encoder that removes them leaves the steps.
 //  - detail: loss of the finest detail: the share of 8-px windows (not black) whose largest |second difference| is at
-//            most 1 code, i.e. smoother than any camera picture is (sensor noise and grain keep the finest octave alive;
+//            most 1 code: smoother than the camera masters measured (their sensor noise and grain keep the finest octave;
 //            an encoder at a high quantiser zeroes it). Camera masters read 0.0000-0.0001; flat drawn or rendered
 //            pictures read high even when clean (a no-reference measure cannot tell a flat master from a flattened
 //            encode), so the confidence is halved and the grain floor is reported beside it.
 //  - noise:  the grain floor itself (mean |second difference| of flat pixels far from edges, 8-bit codes): falls as the
 //            bitrate falls on every codec, but its clean level depends on the source, so it is context, not a score.
 // Units: block, ring and noise in 8-bit code values, band and detail shares 0..1.
-// Calibration (open 1080p50 camera masters, MPEG-2 / x264 / x265 / SVT-AV1 ladders 0.04-2.2 bits per pixel): detail
-// and band rise as PSNR falls on every codec (weakest on x265, whose in-loop filters leave the least trace); block only
-// on MPEG-2 and partly H.264; ring did not track the ladder (it falls with the near-edge texture) and is diagnostic.
+// Calibration (five open 1080p50 camera masters of one source family, MPEG-2 / x264 / x265 / SVT-AV1 ladders 0.04-2.2
+// bits per pixel): detail and band rose as PSNR fell on MPEG-2, SVT-AV1 and most x264 ladders; on x265 only 2-3 of 5
+// tracked (its in-loop filters leave the least trace). Block tracks MPEG-2 and partly H.264 only; ring did not track the
+// ladder (it falls with the near-edge texture) and is diagnostic. Not calibrated: 4K camera content, PQ, low-noise masters.
 //
 // Sampling: kLines rows and kLines columns of native-resolution luma per sampled frame (a centre crop of at most
 // 1920 x 1080 of them, the crop on the 8-pixel grid), a few frames a second: the copy (Sample) is cheap enough for
