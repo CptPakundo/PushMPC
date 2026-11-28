@@ -61,12 +61,17 @@ say() { printf '%s\n' "$*"; }
 # file with a UTF-8 byte order mark: a section is the name between the first [ and ], a BOM is skipped. (Matching the
 # whole header line missed every key of a VLC-written file: uninstall left vout / video-filter pointing at PushMPC,
 # apple run 46025032374.)
-VLCRC_AWK_SEC='function secname(l) { if (NR == 1) sub(/^\357\273\277/, "", l); if (l !~ /^[ \t]*\[[^]]*\]/) return ""; sub(/^[ \t]*\[/, "", l); sub(/\].*$/, "", l); return l }'
+# The BOM is compared as a string passed in with -v bom (index / length), not as a regex of octal bytes: macOS awk did
+# not strip it with sub(/^\357\273\277/, ...) (apple run 46086126359 printed "<BOM>###" as an active line); a byte-mode
+# and a UTF-8 awk agree on index and length of the same string.
+VLCRC_BOM=$(printf '\357\273\277')
+VLCRC_AWK_SEC='function unbom(l) { if (NR == 1 && bom != "" && index(l, bom) == 1) l = substr(l, length(bom) + 1); return l }
+function secname(l) { l = unbom(l); if (l !~ /^[ \t]*\[[^]]*\]/) return ""; sub(/^[ \t]*\[/, "", l); sub(/\].*$/, "", l); return l }'
 # vlcrc_set <file> <section> <key> <value>: set key=value inside [section] (uncommenting a "#key=" default line)
 vlcrc_set() {
   f="$1"; sec="$2"; key="$3"; val="$4"
   mkdir -p "$(dirname "$f")"; [ -f "$f" ] || : > "$f"
-  awk -v sec="$sec" -v key="$key" -v val="$val" "$VLCRC_AWK_SEC"'
+  awk -v bom="$VLCRC_BOM" -v sec="$sec" -v key="$key" -v val="$val" "$VLCRC_AWK_SEC"'
     BEGIN { insec = 0; done = 0; seen = 0 }
     { s = secname($0) }
     s != "" { if (insec && !done) { print key "=" val; done = 1 } insec = (s == sec); if (insec) seen = 1; print; next }
@@ -77,21 +82,21 @@ vlcrc_set() {
 # vlcrc_get <file> <section> <key>: the active value or nothing
 vlcrc_get() {
   [ -f "$1" ] || return 0
-  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+  awk -v bom="$VLCRC_BOM" -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
     { s = secname($0) } s != "" { insec = (s == sec); next }
     insec && index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"
 }
 # vlcrc_del <file> <section> <key>: comment the key out again (VLC's own default applies)
 vlcrc_del() {
   [ -f "$1" ] || return 0
-  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+  awk -v bom="$VLCRC_BOM" -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
     { s = secname($0) } s != "" { insec = (s == sec) }
     insec && index($0, key "=") == 1 { print "#" $0; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 # vlcrc_has <file> <section> <key>: exit 0 when the key is active (set, even to nothing) in that section
 vlcrc_has() {
   [ -f "$1" ] || return 1
-  awk -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
+  awk -v bom="$VLCRC_BOM" -v sec="$2" -v key="$3" "$VLCRC_AWK_SEC"'
     BEGIN { found = 0 } { s = secname($0) } s != "" { insec = (s == sec); next }
     insec && index($0, key "=") == 1 { found = 1; exit } END { exit !found }' "$1"
 }
@@ -145,7 +150,8 @@ vlcrc_del_pushmpc() {
 # vlcrc_active <file>: the active lines (not a comment, a section header or blank; a leading BOM skipped)
 vlcrc_active() {
   [ -f "$1" ] || return 0
-  awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$1"
+  awk -v bom="$VLCRC_BOM" "$VLCRC_AWK_SEC"'
+    { l = unbom($0) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$1"
 }
 filters_add() { # current list -> list with postproc:pushmpc_out (kept once, in that order, after the user's own)
   printf '%s' "$1" | tr ':' '\n' | grep -v -e '^postproc$' -e '^pushmpc_out$' -e '^$' | { cat; printf 'postproc\npushmpc_out\n'; } | paste -s -d: -
