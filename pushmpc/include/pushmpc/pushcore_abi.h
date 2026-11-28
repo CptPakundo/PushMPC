@@ -178,7 +178,7 @@ typedef struct PushCoreSettings {
        only when its PUSHCORE_NR_DIAL_* bit is set in nrDials; nrDials 0 (a smaller or a zeroed struct) keeps exactly what
        Neural Rendering got before: intensity 1, skin -1 (follows structure), auto mask off, style 0. An out-of-range value
        is ignored (the default stays). While playing, a change of these dials or of nrTone / nrStructure alone, applied with
-       applySettings, keeps Neural Rendering's history (no reset, no flash); seeks and a new stream still reset it. */
+       applySettings, keeps Neural Rendering's history (no reset); seeks and a new stream still reset it. */
     uint32_t nrDials;          /* PUSHCORE_NR_DIAL_* */
     float nrIntensity;         /* 0..1: how much of the model's change is used */
     float nrSkin;              /* -1 = follows structure, or 0..1; acts only with nrAutoMask 1 */
