@@ -926,8 +926,10 @@ static picture_t *HwIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
 /* ---- interlaced input. Measured in the picture as every PushMPC route measures it (pm_comb.h: content_detect.h's
  * CombMeter on the native luma, 24 moving frames, half or more combed = interlaced; PM_COMB_GIVE_UP pictures without
  * enough motion count as progressive); the decoder's b_progressive is only logged (encoders flag progressive pictures
- * as interlaced too). Whatever VLC's own deinterlacer (deinterlace=auto) did before, this measures what reaches the
- * filter. Read from: the CPU picture
+ * as interlaced too). VLC's own deinterlacer runs after this filter in the static chain (the deinterlace probe,
+ * run 46133199291: the module measured every woven clip as interlaced with --deinterlace 0, 1 bwdif, 1 yadif2x and -1),
+ * so it cannot deinterlace for us; a deinterlacer of our own in front of the engine is the way to generate here (VLC 3
+ * gives modules no libavfilter). Read from: the CPU picture
  * the engine reads; VA-API zero copy: a download of the surface; Direct3D 11 zero copy: a staging copy of the luma's
  * centre crop (what the meter reads); CVPX: the buffer locked for reading. Only while measuring. Interlaced: the
  * filter steps aside, the pictures pass through at the source rate (IlAside). */

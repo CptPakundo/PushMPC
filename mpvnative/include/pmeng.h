@@ -29,11 +29,12 @@ extern "C" {
 /* Additions within ABI 1 are append-only and never change an existing field, so every filter works with every module:
  *   minor 1: PMENG_MEM_CUDA (pmeng_device.cuda_*, pmeng_image.cuda_*), pmeng_output.want_out_depth, the source_bits option.
  *   minor 2: comb_new / comb_push / comb_counts / comb_free (interlaced input, measured in the picture).
+ *   minor 3: comb_cadence (telecine, measured in the picture).
  * A module that does not know a memory kind answers through pmeng_output.mem (PMENG_MEM_CPU: the filter's copy
  * fallback) or fails open (the filter retries with PMENG_MEM_CPU). New fields of pmeng_device and pmeng_output are read
  * only when struct_size covers them; pmeng_image's CUDA fields only when mem is PMENG_MEM_CUDA (which only a filter of
  * minor 1 or later sends). */
-#define PMENG_ABI_MINOR 2u
+#define PMENG_ABI_MINOR 3u
 
 #if defined(_WIN32)
 #define PMENG_EXPORT __declspec(dllexport)
@@ -185,6 +186,11 @@ typedef struct pmeng_api {
     int (*comb_push)(void* c, const uint8_t* luma, ptrdiff_t stride_bytes, uint32_t width, uint32_t height, uint32_t bytes_per_sample, uint32_t shift);
     void (*comb_counts)(void* c, int* measured, int* combed);
     void (*comb_free)(void* c);
+    /* minor 3: telecine (2:3 pulldown) measured on the same frames (cadence_detect.h CadenceMeter: the combed frames on
+       two neighbouring phases of a cycle of five); fed by comb_push while it measures. 0 measuring, 1 none, 2 telecine;
+       measured / combed: moving frames; phase: the first of the two phases; tff: 1 top field first, 0 bottom field first
+       (measured: the field the first combed frame repeats). Present when struct_size covers it. */
+    int (*comb_cadence)(void* c, int* measured, int* combed, int* phase, int* tff);
 } pmeng_api;
 
 typedef const pmeng_api* (*pmeng_get_api_fn)(uint32_t abi_version);

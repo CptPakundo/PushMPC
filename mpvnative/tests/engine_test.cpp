@@ -722,6 +722,28 @@ static void TestComb(const pmeng_api* api)
             std::printf("interlace (engine module): %s %s -> %s, %d of %d moving frames combed after %d frames\n", woven ? "woven" : "progressive", p010 ? "p010" : "8-bit",
                         v == 2 ? "interlaced" : v == 1 ? "progressive" : "measuring", combed, measured, n);
         }
+    // telecine (minor 3): a 2:3 pulldown of a moving pan (film frames AA BB BC CD DD); the same pan woven as 60i video is
+    // no telecine
+    const bool haveCad = api->struct_size >= offsetof(pmeng_api, comb_cadence) + sizeof(api->comb_cadence) && api->comb_cadence;
+    CHECK(haveCad, "the module offers the telecine meter (pmeng minor 3)");
+    if (!haveCad) return;
+    for (int video = 0; video < 2; ++video) {
+        static const int top[5] = { 0, 1, 1, 2, 3 }, bot[5] = { 0, 1, 2, 3, 3 };
+        void* c = api->comb_new();
+        std::vector<uint8_t> y(size_t(w) * h);
+        int cv = 0, n = 0, cm = 0, cc = 0, ph = 0, tff = -1;
+        for (; n < 240 && cv == 0; ++n) {
+            const double tt = video ? n : (4 * (n / 5) + top[n % 5]) * 1.25, tb = video ? n + 0.5 : (4 * (n / 5) + bot[n % 5]) * 1.25;
+            for (int r = 0; r < h; ++r)
+                for (int x = 0; x < w; ++x) y[size_t(r) * w + x] = uint8_t(pm_comb_synth_value(x, r, (r & 1) ? tb : tt));
+            api->comb_push(c, y.data(), w, w, h, 1, 0);
+            cv = api->comb_cadence(c, &cm, &cc, &ph, &tff);
+        }
+        api->comb_free(c);
+        CHECK(cv == (video ? 1 : 2) && (video || tff == 1), "cadence %s: verdict %d (%d of %d combed), tff %d", video ? "60i video" : "2:3 pulldown", cv, cc, cm, tff);
+        std::printf("telecine (engine module): %s -> %s, %d of %d moving frames combed after %d frames\n", video ? "60i video" : "2:3 pulldown",
+                    cv == 2 ? "telecine" : cv == 1 ? "no telecine" : "measuring", cc, cm, n);
+    }
 }
 
 int main()

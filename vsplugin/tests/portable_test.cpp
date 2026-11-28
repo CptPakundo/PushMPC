@@ -29,6 +29,7 @@
 #define PMVS_REGION_REPAIR_NO_ENGINE 1   // the repair's planning loop with a CPU stand-in for the Vulkan engine
 #include "region_repair.h"
 #include "pushmpc/content_detect.h"   // CombMeter (interlacing)
+#include "pushmpc/cadence_detect.h"   // CadenceMeter (telecine)
 #include "../../tests/comb_synth.h"
 
 using namespace pmvs;
@@ -628,6 +629,46 @@ static void TestInterlace()
     CHECK(CombMeter::kGiveUp == 240 && CombMeter::kProbe == 400 && CombMeter::kProbeFlagged == 120, "the filter's and Kodi's look");
 }
 
+// telecine (cadence_detect.h CadenceMeter): 24p film carried as 60i by 2:3 pulldown (frames AA BB BC CD DD of the film
+// frames A..D) is telecine; the same pan woven from two moments per frame (60i video) and as whole frames is not; film
+// with a video section after it is still found on the film part
+static void TelecineFrame(std::vector<uint8_t>& y, int w, int h, int n, bool video)
+{
+    // the film frame on the top and on the bottom lines of output frame n (2:3 cycle of five); video: two moments each
+    static const int top[5] = { 0, 1, 1, 2, 3 }, bot[5] = { 0, 1, 2, 3, 3 };
+    const double tt = video ? n : (4 * (n / 5) + top[n % 5]) * 1.25, tb = video ? n + 0.5 : (4 * (n / 5) + bot[n % 5]) * 1.25;
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c) y[size_t(r) * w + c] = uint8_t(pm_comb_synth_value(c, r, (r & 1) ? tb : tt));
+}
+static void TestTelecine()
+{
+    using pushmpc::content::CadenceMeter;
+    const int w = 320, h = 240;
+    std::vector<uint8_t> y(size_t(w) * h);
+    auto run = [&](int kind, int videoFrom, int& at) {   // kind 0 telecine, 1 woven video, 2 progressive
+        CadenceMeter m; at = -1;
+        for (int n = 0; n < CadenceMeter::kGiveUp && m.verdict() == CadenceMeter::kMeasuring; ++n) {
+            if (kind == 2) pm_comb_synth8(y.data(), w, w, h, n, 0, 0);
+            else TelecineFrame(y, w, h, n, kind == 1 || (videoFrom >= 0 && n >= videoFrom));
+            if (m.Push(y.data(), w, w, h, 0) != CadenceMeter::kMeasuring) at = n;
+        }
+        return m;
+    };
+    int at = 0;
+    CadenceMeter c = run(0, -1, at);
+    CHECK(c.verdict() == CadenceMeter::kTelecine, "2:3 pulldown: telecine (%d of %d moving frames combed, phase %d holds %.0f %%, at frame %d)", c.combed(), c.measured(), c.phase(), 100 * c.phaseShare(), at);
+    CHECK(c.topFieldFirst(), "2:3 pulldown, top field first: the order measured");
+    std::printf("telecine: 2:3 pulldown -> %s, %d of %d moving frames combed, phases %d-%d hold %.0f %%, after %d frames\n", c.verdict() == CadenceMeter::kTelecine ? "telecine" : "not telecine",
+                c.combed(), c.measured(), c.phase(), (c.phase() + 1) % 5, 100 * c.phaseShare(), at + 1);
+    c = run(1, -1, at);
+    CHECK(c.verdict() == CadenceMeter::kNone, "60i video: no telecine (%d of %d combed)", c.combed(), c.measured());
+    std::printf("telecine: woven 60i video -> %s, %d of %d moving frames combed\n", c.verdict() == CadenceMeter::kNone ? "no telecine" : "telecine", c.combed(), c.measured());
+    c = run(2, -1, at);
+    CHECK(c.verdict() == CadenceMeter::kNone, "progressive: no telecine (%d of %d combed)", c.combed(), c.measured());
+    c = run(0, 150, at);
+    CHECK(c.verdict() == CadenceMeter::kTelecine, "film with a video section later: telecine on the film part");
+}
+
 int main()
 {
     TestMeasuredRate();
@@ -646,6 +687,7 @@ int main()
     TestRepairGate();
     TestTransitions();
     TestInterlace();
+    TestTelecine();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

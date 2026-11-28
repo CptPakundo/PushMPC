@@ -27,8 +27,8 @@
 
 namespace pmvs {
 
-// il: the interlace verdict measured on this stream (vs_interlace.h): 0 not yet, kIlProgressive, kIlInterlaced
-inline constexpr int kIlProgressive = 1, kIlInterlaced = 2;
+// il: the interlace verdict measured on this stream (vs_interlace.h): 0 not yet, kIlProgressive, kIlInterlaced, kIlTelecine
+inline constexpr int kIlProgressive = 1, kIlInterlaced = 2, kIlTelecine = 3;   // telecine: 2:3 pulldown (cadence_detect.h)
 struct StreamMemo { double fps = 0; int cls = 0; bool cg = false; int il = 0, ilMeasured = 0, ilCombed = 0; };   // cg: drawn, rendered 3D CG
 // the status file pushmpc.lua reads (<temp>/pushmpc-vs-<pid>.txt)
 inline std::string StatusPath()
@@ -137,7 +137,9 @@ private:
                                             (m.cls == pushmpc::content::kDrawn && m.cg != m_createdCg));   // only what changes Auto
             std::fprintf(f, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=%d\n", m.fps, m_declared, m.cls, pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, (rate || cls) ? 1 : 0);
             // this instance generates frames: measured interlaced, it asks for the re-add that passes the stream through
-            std::fprintf(f, "interlaced=%d\ninterlace_reload=%d\n", m.il, m.il == kIlInterlaced ? 1 : 0);
+            // telecine (2:3 pulldown): pushmpc.lua puts field matching in front of the filter and adds it again
+            std::fprintf(f, "interlaced=%d\ntelecine=%d\ninterlace_reload=%d\n", m.il == kIlInterlaced ? kIlInterlaced : m.il ? kIlProgressive : 0, m.il == kIlTelecine ? 1 : 0,
+                         m.il == kIlInterlaced || m.il == kIlTelecine ? 1 : 0);
             // why: the last window's drawn probability, the integrator, the image model's part and the window's features
             // (pushmpc.lua logs the file on a re-add; bug reports)
             const pushmpc::content::State& st = m_det.Current();

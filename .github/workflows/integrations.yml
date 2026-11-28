@@ -252,31 +252,44 @@ jobs:
           $res.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" } | Tee-Object "$env:RUNNER_TEMP\play.txt"
           @('## win-players', '', '```') + (Get-Content "$env:RUNNER_TEMP\players.txt") + @('') + (Get-Content "$env:RUNNER_TEMP\play.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           if ($res['mpv'] -notmatch '^PLUGIN RAN') { Write-Host '::error::mpv did not run the plugin'; exit 1 }
-      - name: Interlaced input through pushmpc.lua (measured while playing, the filter added again, then the source frames)
-        timeout-minutes: 5
+      - name: Interlaced and telecined input through pushmpc.lua (measured while playing, fixed in front of the filter, then generated)
+        timeout-minutes: 8
         run: |
-          # a 20 s pan woven from two moments per frame (vsplugin/tests/ci/interlace_clip.vpy, flagged progressive in the
-          # y4m: the picture must decide). The first instance measures it (vs_interlace.h) and asks for a re-add
-          # (interlace_reload=1); pushmpc.lua adds the filter again and the next instance passes the stream through.
+          # 20 s pans (vsplugin/tests/ci/interlace_clip.vpy; every y4m says progressive: the picture must decide):
+          #   woven      60i video: the first instance measures it (vs_interlace.h), pushmpc.lua turns mpv's double-rate
+          #              deinterlacer on and adds the filter again; the next instance gets 60000/1001 progressive frames
+          #   telecine   24p film by 2:3 pulldown: the cadence is measured (cadence_detect.h), pushmpc.lua puts field
+          #              matching and decimation in front; the next instance gets 24000/1001 progressive frames
+          #   progressive  the same pan as whole frames: nothing is changed
           $env:PATH = "$env:VSSCRIPT_DIR;$env:PATH"
           $vspipe = (Get-ChildItem "$env:LOCALAPPDATA\PushMPC\vapoursynth" -Recurse -Filter vspipe.exe | Select-Object -First 1).FullName
-          $env:PUSHMPC_IL_MODE = 'clip'; $env:PUSHMPC_IL_KIND = 'woven'; $env:PUSHMPC_IL_FRAMES = '600'
-          $y4m = "$env:RUNNER_TEMP\woven.y4m"
-          & $vspipe -c y4m vsplugin/tests/ci/interlace_clip.vpy $y4m; if ($LASTEXITCODE) { throw 'woven clip' }
-          $logDir = "$env:RUNNER_TEMP\vslog-interlaced"; New-Item -ItemType Directory $logDir -Force | Out-Null
-          $env:PUSHMPC_VS_LOG_DIR = $logDir
-          $out = "$env:RUNNER_TEMP\mpv-interlaced.txt"
-          $p = Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=14', "`"$y4m`"" -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
-          if (-not $p.WaitForExit(90000)) { $p | Stop-Process -Force }
-          Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3
-          $m = (Get-Content $out, "$out.err" -Raw -ErrorAction SilentlyContinue) -join "`n"
-          $t = (Get-ChildItem $logDir -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
-          ($m -split "`n") | Select-String 'PushMPC: measured on the frames' | Select-Object -First 3 | ForEach-Object { Write-Host $_.Line }
-          ($t -split "`n") | Select-String 'interlaced: |progressive \(measured\)' | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
-          $readd = $m -match 'interlace_reload=1[^\n]*-> filter added again'
-          $aside = $t -match 'on this stream before: the clip passes through'
-          Write-Host "interlaced check (mpv + pushmpc.lua): measured interlaced $([bool]($t -match 'interlaced: interlaced input')), filter added again $readd, next instance pass-through $aside"
-          if (-not ($readd -and $aside)) { Write-Host '::error::pushmpc.lua did not hand the interlaced stream to a pass-through instance'; exit 1 }
+          $env:PUSHMPC_IL_MODE = 'clip'; $env:PUSHMPC_IL_FRAMES = '600'; $rc = 0
+          $cases = @(
+            @('woven', "mpv's double-rate deinterlacer on", '60000/1001'),
+            @('telecine', 'field matching and decimation in front of the filter', '24000/1001'),
+            @('progressive', '', '30000/1001'))
+          foreach ($c in $cases) {
+            $env:PUSHMPC_IL_KIND = $c[0]
+            $y4m = "$env:RUNNER_TEMP\$($c[0]).y4m"
+            & $vspipe -c y4m vsplugin/tests/ci/interlace_clip.vpy $y4m; if ($LASTEXITCODE) { throw "$($c[0]) clip" }
+            $logDir = "$env:RUNNER_TEMP\vslog-il-$($c[0])"; New-Item -ItemType Directory $logDir -Force | Out-Null
+            $env:PUSHMPC_VS_LOG_DIR = $logDir
+            $out = "$env:RUNNER_TEMP\mpv-il-$($c[0]).txt"
+            $p = Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=16', "`"$y4m`"" -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+            if (-not $p.WaitForExit(120000)) { $p | Stop-Process -Force }
+            Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3
+            $m = (Get-Content $out, "$out.err" -Raw -ErrorAction SilentlyContinue) -join "`n"
+            $t = (Get-ChildItem $logDir -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+            ($m -split "`n") | Select-String 'PushMPC: (interlaced input|telecine|measured on the frames)' | Select-Object -First 4 | ForEach-Object { Write-Host "  $($_.Line)" }
+            ($t -split "`n") | Select-String 'interlaced: |telecine: |progressive \(measured\)|portable: \d+x\d+' | Select-Object -First 8 | ForEach-Object { Write-Host "  $($_.Line)" }
+            $rates = [regex]::Matches($t, 'portable: \d+x\d+ \d+-bit, ([\d/]+) fps') | ForEach-Object { $_.Groups[1].Value }
+            $last = $rates | Select-Object -Last 1
+            $fixed = if ($c[1]) { $m.Contains($c[1]) } else { -not ($m -match "double-rate deinterlacer on|field matching and decimation in front") }
+            $lastVerdict = ([regex]::Matches($t, 'interlaced: interlaced input|telecine: 2:3 pulldown measured|progressive \(measured\)') | Select-Object -Last 1).Value
+            Write-Host "interlaced check (mpv + pushmpc.lua, $($c[0])): fix $(if ($c[1]) { "'$($c[1])'" } else { 'none wanted' }) $fixed; the filter's instances saw $($rates -join ' then ') (want $($c[2]) last); last verdict: $lastVerdict"
+            if (-not $fixed -or $last -ne $c[2] -or ($c[0] -ne 'progressive' -and $lastVerdict -ne 'progressive (measured)')) { Write-Host "::error::$($c[0]): pushmpc.lua did not give the filter whole frames at $($c[2])"; $rc = 1 }
+          }
+          exit $rc
       - name: Uninstall restores every file exactly
         if: always()
         run: |

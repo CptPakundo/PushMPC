@@ -26,6 +26,7 @@
 #include <string>
 #include "VapourSynth4.h"
 #include "pushmpc/content_detect.h"
+#include "pushmpc/cadence_detect.h"
 #include "eof_guard.h"
 #include "vs_content.h"
 #include "vslog.h"
@@ -40,8 +41,9 @@ inline int64_t IlArgInt(const VSMap* in, const VSAPI* a, const char* key, int64_
     const int64_t v = a->mapGetInt(in, key, 0, &err);
     return err ? def : v;
 }
-// one frame's luma into the meter (YUV or Gray, integer samples)
-inline CombMeter::Verdict PushLuma(CombMeter& m, const VSAPI* a, const VSFrame* f)
+// one frame's luma into a meter (CombMeter, CadenceMeter: YUV or Gray, integer samples)
+template <class Meter>
+inline auto PushLuma(Meter& m, const VSAPI* a, const VSFrame* f)
 {
     const VSVideoFormat* vf = a->getVideoFrameFormat(f);
     if (!vf || vf->sampleType != stInteger || (vf->colorFamily != cfYUV && vf->colorFamily != cfGray)) return m.verdict();
@@ -72,13 +74,19 @@ inline void RememberInterlace(const std::string& key, int il, int measured, int 
     m.il = il; m.ilMeasured = measured; m.ilCombed = combed;
 }
 
-// the measurement while mpv plays (in the source's guard): thread-safe, decides once
+// the measurement while mpv plays (in the source's guard): thread-safe, decides once. Two measures on the same frames:
+// the field combing (CombMeter) and the 2:3 pulldown cadence (cadence_detect.h CadenceMeter); the verdict waits for
+// both, since telecined film combs 2 of 5 frames and must not be taken for interlaced video. Telecine: the status file
+// says telecine=1 and pushmpc.lua puts field matching and decimation in front of the filter (the film frames come back
+// exactly); interlaced: interlaced=2 and pushmpc.lua turns mpv's own double-rate deinterlacer on, or, without it, lets the
+// next instance pass the stream through.
 struct IlWatch {
     std::string key;
     bool aside = false;      // the instance was created passing the stream through
     double declared = 0;
     std::mutex mx;
     CombMeter comb;
+    pushmpc::content::CadenceMeter cad;
     int seen = 0, flagged = 0;
     bool done = false;
     void Push(const VSAPI* a, const VSFrame* f)
@@ -89,24 +97,32 @@ struct IlWatch {
         if (seen < 3) Log(std::format("frame {}: _FieldBased {} (a prior; the picture decides)", seen, fb < 0 ? std::string("not set") : std::to_string(fb)));
         ++seen;
         if (fb > 0) ++flagged;
-        const CombMeter::Verdict v = PushLuma(comb, a, f);
-        if (v == CombMeter::kMeasuring && seen < CombMeter::kGiveUp) return;
+        const CombMeter::Verdict v = comb.verdict() == CombMeter::kMeasuring ? PushLuma(comb, a, f) : comb.verdict();
+        const auto cv = cad.verdict() == pushmpc::content::CadenceMeter::kMeasuring ? PushLuma(cad, a, f) : cad.verdict();
+        const bool giveUp = seen >= CombMeter::kGiveUp;
+        if (!giveUp && (v == CombMeter::kMeasuring || cv == pushmpc::content::CadenceMeter::kMeasuring)) return;
         done = true;
-        if (v == CombMeter::kMeasuring) {   // a still stretch (a seek into one): nothing measured, the instance stays as it was made
+        const bool telecine = cv == pushmpc::content::CadenceMeter::kTelecine;
+        if (v == CombMeter::kMeasuring && !telecine) {   // a still stretch (a seek into one): nothing measured, the instance stays as it was made
             Log(ProgressiveWhy(comb, v, flagged, seen) + (aside ? "; the stream keeps passing through (the earlier verdict stands)" : ""));
             return;
         }
-        const bool il = v == CombMeter::kInterlaced;
-        RememberInterlace(key, il ? kIlInterlaced : kIlProgressive, comb.measured(), comb.combed());
-        if (il) Log("interlaced: " + IlWhy(comb.combed(), comb.measured()));
+        const bool il = !telecine && v == CombMeter::kInterlaced;
+        RememberInterlace(key, il ? kIlInterlaced : telecine ? kIlTelecine : kIlProgressive, comb.measured(), comb.combed());
+        const std::string tcWhy = std::format("telecine: 2:3 pulldown measured ({} of {} moving frames combed, {:.0f} % of them on phases {}-{} of the cycle of five, {})",
+                                              cad.combed(), cad.measured(), 100 * cad.phaseShare(), cad.phase(), (cad.phase() + 1) % 5,
+                                              cad.topFieldFirst() ? "top field first" : "bottom field first");
+        if (telecine) Log(tcWhy + "; pushmpc.lua puts field matching and decimation in front of the filter");
+        else if (il) Log("interlaced: " + IlWhy(comb.combed(), comb.measured()));
         else Log(ProgressiveWhy(comb, v, flagged, seen));
-        const bool reload = il != aside;
-        if (reload) Log(il ? "interlaced: this instance generates frames; pushmpc.lua adds the filter again, and the next instance passes the stream through"
-                           : "this instance passes the stream through (an earlier verdict on a stream of the same size and rate); pushmpc.lua adds the filter again for frame generation");
+        const bool reload = telecine || il != aside;
+        if (reload && !telecine) Log(il ? "interlaced: this instance generates frames; pushmpc.lua deinterlaces the stream (mpv's own deinterlacer, double rate) or lets the next instance pass it through"
+                                        : "this instance passes the stream through (an earlier verdict on a stream of the same size and rate); pushmpc.lua adds the filter again for frame generation");
         const StreamMemo m = Recall(key);
         if (FILE* sf = std::fopen(StatusPath().c_str(), "w")) {
-            std::fprintf(sf, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=0\ninterlaced=%d\ninterlace_reload=%d\nwhy=%s\n", m.fps, declared, m.cls,
-                         pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, m.il, reload ? 1 : 0, (il ? IlWhy(comb.combed(), comb.measured()) : ProgressiveWhy(comb, v, flagged, seen)).c_str());
+            std::fprintf(sf, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=0\ninterlaced=%d\ntelecine=%d\ntelecine_order=%s\ninterlace_reload=%d\nwhy=%s\n", m.fps, declared, m.cls,
+                         pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, il ? kIlInterlaced : kIlProgressive, telecine ? 1 : 0, cad.topFieldFirst() ? "tff" : "bff", reload ? 1 : 0,
+                         (telecine ? tcWhy : il ? IlWhy(comb.combed(), comb.measured()) : ProgressiveWhy(comb, v, flagged, seen)).c_str());
             std::fclose(sf);
         }
     }

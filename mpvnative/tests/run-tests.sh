@@ -122,13 +122,14 @@ fi
 
 # 5b. interlaced input, measured in the picture (the engine module's CombMeter, pmeng minor 2): a 60i capture woven
 #     (two moments per frame, 30000/1001) and the same pan as whole frames, both flagged TFF (the flag is only a prior).
-#     Woven: after the verdict (24 moving frames) the generated frames are dropped and the source frames go on at the
-#     source rate: 1 + 23 x 4 outputs for the frames before it, then one per source frame (Dedup's lookahead can move
-#     up to 3 pairs across the switch: tolerance 9). Progressive: x4 throughout.
+#     Woven: after the verdict the generated frames are dropped and the source frames go on at the source rate. The
+#     verdict waits for the telecine cadence too (cadence_detect.h: 40 moving frames), so 1 + 39 x 4 outputs for the
+#     frames before it, then one per source frame (Dedup's lookahead can move up to 3 pairs across the switch: tolerance
+#     9). Progressive: x4 throughout.
 IL="nullsrc=s=320x240:r=60000/1001:d=4,format=gray,geq=lum='128+90*sin(2*PI*(X+0.5*Y-2*N)/24)',format=yuv420p"
-"$FF" -v error -y -f lavfi -i "$IL,tinterlace=mode=merge,setfield=tff" -c:v ffv1 "$T/woven.mkv"
+"$FF" -v error -y -f lavfi -i "$IL,tinterlace=mode=interleave_top,setfield=tff" -c:v ffv1 "$T/woven.mkv"
 "$FF" -v error -y -f lavfi -i "$IL,fps=30000/1001,setfield=tff" -c:v ffv1 "$T/woven-prog.mkv"
-NW=$(count "$T/woven.mkv"); WANT_W=$((1 + 23 * 4 + NW - 24))
+NW=$(count "$T/woven.mkv"); WANT_W=$((1 + 39 * 4 + NW - 40))
 if "$FF" -v info -y -i "$T/woven.mkv" -vf "pushmpc=smoother=4" -c:v ffv1 "$T/ff-woven.mkv" > "$T/ff-woven.log" 2>&1; then
     GOT=$(count "$T/ff-woven.mkv"); grep -iE "interlaced|progressive \(measured\)" "$T/ff-woven.log" | head -2
     echo "interlaced check (ffmpeg, woven): pass-through after the verdict, $GOT frames (want $WANT_W +- 9; x4 throughout would be $((1 + (NW - 1) * 4)))"
@@ -139,6 +140,55 @@ if "$FF" -v info -y -i "$T/woven-prog.mkv" -vf "pushmpc=smoother=4" -c:v ffv1 "$
     echo "interlaced check (ffmpeg, progressive flagged TFF): frame generation x4, $(count "$T/ff-woven-prog.mkv") of $((1 + (NW - 1) * 4)) frames"
     result ffmpeg-progressive-flagged-tff-x4 PASS
 else tail -10 "$T/ff-woven-prog.log"; result ffmpeg-progressive-flagged-tff-x4 FAIL; fi
+
+
+# 5c. telecine, measured in the picture (cadence_detect.h through the engine module, pmeng minor 3): a 24p film of a pan
+#     hard-telecined 2:3 to 30000/1001. The filter must say so (and the field order it measured); the inverse telecine
+#     pushmpc-native.lua / pushmpc.lua put in front of it must give the film frames back bit-exactly; and film with a
+#     60i video section after it must play through it (the video part deinterlaced by the chain's yadif, the film part
+#     still exact)
+FILM="nullsrc=s=320x240:r=24000/1001:d=4,format=gray,geq=lum='128+90*sin(2*PI*(X+0.5*Y-5*N)/24)',format=yuv420p"
+IVTC="fieldmatch=order=tff,yadif=deint=interlaced,decimate"   # pushmpc.lua / pushmpc-native.lua (order: as measured)
+"$FF" -v error -y -f lavfi -i "$FILM" -c:v ffv1 "$T/film.mkv"
+"$FF" -v error -y -i "$T/film.mkv" -vf "telecine=first_field=t:pattern=23,setfield=tff" -c:v ffv1 "$T/telecine.mkv"
+"$FF" -v error -y -i "$T/telecine.mkv" -i "$T/woven.mkv" -filter_complex "[0][1]concat=n=2:v=1[v]" -map "[v]" -c:v ffv1 "$T/mixed.mkv"
+NF=$(count "$T/film.mkv"); NT=$(count "$T/telecine.mkv")
+exact() {   # <output> <master>: frames bit-exact against the master, frame by frame from the first
+    "$FF" -v error -i "$1" -i "$2" -lavfi "[0]settb=1/100,setpts=N,format=yuv420p[a];[1]settb=1/100,setpts=N,format=yuv420p[b];[a][b]psnr=stats_file=$T/psnr.txt:shortest=1" -f null - 2>/dev/null
+    grep -c "psnr_avg:inf" "$T/psnr.txt" 2>/dev/null || echo 0
+}
+if "$FF" -v info -y -i "$T/telecine.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$T/ff-telecine.mkv" > "$T/ff-telecine.log" 2>&1; then
+    grep -iE "telecine|interlaced|progressive \(measured\)" "$T/ff-telecine.log" | head -2
+    grep -q "telecine: 2:3 pulldown measured.*top field first" "$T/ff-telecine.log" && ! grep -q "interlaced: interlaced input" "$T/ff-telecine.log" \
+        && result ffmpeg-telecine-measured PASS || result ffmpeg-telecine-measured FAIL
+else tail -10 "$T/ff-telecine.log"; result ffmpeg-telecine-measured FAIL; fi
+if "$FF" -v error -y -i "$T/woven.mkv" -vf "pushmpc=smoother=2" -f null - > "$T/ff-woven-tc.log" 2>&1 || true; then
+    ! grep -q "telecine: 2:3 pulldown measured" "$T/ff-woven-tc.log" && result ffmpeg-60i-not-telecine PASS || result ffmpeg-60i-not-telecine FAIL
+fi
+if [ -x "$MPV" ] || [ -f "$MPV" ]; then
+    "$MPV" --no-config "$T/telecine.mkv" "--vf=lavfi=[$IVTC]" --o="$T/mpv-ivtc.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-ivtc.log" 2>&1
+    GOT=$(count "$T/mpv-ivtc.mkv"); EX=$(exact "$T/mpv-ivtc.mkv" "$T/film.mkv")
+    echo "telecine check (mpv, the scripts' inverse telecine): $GOT frames (film $NF, telecined $NT), $EX of $NF bit-exact (want $NF)"
+    [ "$GOT" = "$NF" ] && [ "$EX" -ge $((NF - 1)) ] && result mpv-ivtc-exact PASS || result mpv-ivtc-exact FAIL
+    "$MPV" --no-config "$T/mixed.mkv" "--vf=lavfi=[$IVTC]" --o="$T/mpv-mixed.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-mixed.log" 2>&1; rc=$?
+    GOT=$(count "$T/mpv-mixed.mkv"); EX=$(exact "$T/mpv-mixed.mkv" "$T/film.mkv")
+    echo "telecine check (mpv, film then a 60i video section): exit $rc, $GOT frames, film part $EX of $NF bit-exact (want at least $((NF - 4)))"
+    [ "$rc" = 0 ] && [ "$EX" -ge $((NF - 4)) ] && [ "$GOT" -gt "$NF" ] && result mpv-ivtc-mixed-cadence PASS || result mpv-ivtc-mixed-cadence FAIL
+    # the scripts in playback (they never change a running encode): measured, fixed in front, the filter set again, and
+    # its next graph sees whole frames; the progressive pan is left alone
+    for c in woven telecine woven-prog; do
+        tmo 120 "$MPV" --no-config --vo=null --ao=null --untimed --msg-level=all=v --script="$HERE/../mpv/pushmpc-native.lua" \
+            --script-opts=pushmpc-opts=smoother=2 "$T/$c.mkv" > "$T/mpv-lua-$c.log" 2>&1
+        fix=$(grep -oE "double-rate deinterlacer on for this file|field matching and decimation in front of the filter|could not" "$T/mpv-lua-$c.log" | head -1)
+        last=$(grep -oE "interlaced: interlaced input|telecine: 2:3 pulldown measured|progressive \(measured\)" "$T/mpv-lua-$c.log" | tail -1)
+        echo "deinterlace check (mpv + pushmpc-native.lua, $c): fix: ${fix:-none}; the filter's last verdict: ${last:-none}"
+        case $c in
+            woven) [ "$fix" = "double-rate deinterlacer on for this file" ] && [ "$last" = "progressive (measured)" ] && result lua-deinterlace-60i PASS || result lua-deinterlace-60i FAIL ;;
+            telecine) [ "$fix" = "field matching and decimation in front of the filter" ] && [ "$last" = "progressive (measured)" ] && result lua-ivtc-telecine PASS || result lua-ivtc-telecine FAIL ;;
+            *) [ -z "$fix" ] && [ "$last" = "progressive (measured)" ] && result lua-progressive-untouched PASS || result lua-progressive-untouched FAIL ;;
+        esac
+    done
+fi
 
 # 6. mpv encode mode: the filter's output rate and pts reach mpv's output
 if [ -x "$MPV" ] || [ -f "$MPV" ]; then

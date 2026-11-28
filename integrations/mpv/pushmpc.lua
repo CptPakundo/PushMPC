@@ -36,6 +36,7 @@ local options = require 'mp.options'
 -- pipeline fills in (schedule.h kMaxGap). With 4, the ml route lost the last source frame (Homebrew Intel: 599 of 600).
 -- Cost: 8 decoded frames held instead of 4 (4K 10-bit: about 25 MB each); no added latency (mpv decodes on demand).
 local opts = { vpy = "", buffered = "8", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
+               deinterlace = "yes",
                shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "", ["anime-shaders"] = "", ["anime-share"] = "0.35",
                ["content-helper"] = "", early = "yes" }
 -- early=no (script-opts pushmpc-early=no): the late add even on mpv 0.39+, the path older mpv takes (CI)
@@ -476,6 +477,44 @@ local native_last = nil
 local native_up_failed = nil   -- the file on which the upload could not start: vf_pushmpc on CPU frames then
 
 local failed_for = nil   -- the file the filter failed on: no retry until the next file
+-- interlaced input and telecine, measured by PushMPC's filter in the picture (field combing, the 2:3 pulldown cadence:
+-- vsplugin/src/vs_interlace.h, pushmpc/include/pushmpc/cadence_detect.h; never names or flags). Instead of stepping
+-- aside, the script fixes the stream in front of the filter and adds it again, so the filter generates from whole frames:
+--   interlaced: mpv's own deinterlacer, double rate (deinterlace=yes: mpv runs it before the user filters, on hwdec its
+--               zero-copy one); the deinterlace probe (vlc-spike.yml on track/deint-probe, run 46133199291) scored it
+--               against 60p masters: = yadif, 38.2 dB on average over three clips, bwdif 38.0, w3fdif 37.9, estdif
+--               37.5, nnedi 32.2;
+--   telecine:   field matching and decimation (the probe: fieldmatch + decimate gave the 24p master back bit-exactly, 96
+--               of 96 frames; pullup 0 of 94); yadif on the frames fieldmatch leaves combed (a video section inside
+--               film), so a broken cadence never shows combs.
+-- The user's deinterlace setting comes back at the end of the file. pushmpc-deinterlace=no: the old step-aside (the
+-- filter passes interlaced streams through).
+local deint = { set = false, saved = nil, ivtc = false }
+-- order: the field order the cadence meter measured ("tff" | "bff": the field the first combed frame of a cycle repeats)
+local function ivtc_spec(order) return "@pushmpc-ivtc:lavfi=[fieldmatch=order=" .. (order == "bff" and "bff" or "tff") .. ",yadif=deint=interlaced,decimate]" end
+local function deint_apply(kind, order)
+    if opts.deinterlace == "no" then return false end
+    if kind == "telecine" and not deint.ivtc then
+        local ok = mp.commandv("vf", "pre", ivtc_spec(order))
+        deint.ivtc = ok and true or false
+        msg.info("PushMPC: telecine (2:3 pulldown measured): " .. (ok and "field matching and decimation in front of the filter" or "the IVTC filters could not start"))
+        return deint.ivtc
+    end
+    if kind == "interlaced" and not deint.set and not deint.ivtc then
+        deint.saved = mp.get_property("deinterlace")
+        local ok = mp.set_property("deinterlace", "yes")
+        deint.set = ok and true or false
+        msg.info("PushMPC: interlaced input (field combing measured): " .. (ok and "mpv's double-rate deinterlacer on for this file" or "mpv's deinterlacer could not be turned on"))
+        return deint.set
+    end
+    return false
+end
+mp.register_event("end-file", function()
+    if deint.set and deint.saved ~= nil then mp.set_property("deinterlace", deint.saved) end
+    if deint.ivtc then mp.commandv("vf", "remove", "@pushmpc-ivtc") end
+    deint = { set = false, saved = nil, ivtc = false }
+end)
+
 -- the VapourSynth filter measures the class and the real frame rate on the frames (vsplugin/src/vs_content.h) and writes
 -- them to <temp>/pushmpc-vs-<pid>.txt; when the running instance was created with another rate or class (reload=1),
 -- the filter is added again once (as a seek does: mpv reloads the script) and the new instance starts with them.
@@ -518,6 +557,9 @@ function vs_status_watch()
         os.remove(taken)
         if il then vs_watch.il_reloads = vs_watch.il_reloads + 1 else vs_watch.reloads = vs_watch.reloads + 1 end
         msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
+        if il then   -- telecine first: its combed frames are 2 of 5, a deinterlacer would halve the film frames' detail
+            if t:find("\ntelecine=1", 1, true) then deint_apply("telecine", t:match("\ntelecine_order=(%a+)")) elseif t:find("\ninterlaced=2", 1, true) then deint_apply("interlaced") end
+        end
         mp.commandv("vf", "remove", "@pushmpc")
         local cd = colour_data()   -- the re-added instance opens with the stream's colour too (as in ensure)
         mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
@@ -686,4 +728,19 @@ do
             end
         end)
     end
+end
+
+-- the native filter (vf_pushmpc) says what it measured in mpv's log (its own av_log lines): the same fix in front of it,
+-- then the filter is added again (its next graph sees the whole frames, at their own rate)
+if native then
+    mp.enable_messages("info")
+    mp.register_event("log-message", function(e)
+        local text = e.text or ""
+        local kind = text:find("telecine: 2:3 pulldown measured", 1, true) and "telecine" or (text:find("interlaced: interlaced input", 1, true) and "interlaced" or nil)
+        if not kind or (mp.get_property("o", "") or "") ~= "" then return end
+        if deint_apply(kind, text:find("bottom field first", 1, true) and "bff" or "tff") then
+            remove_native(); native_last = nil
+            ensure(false)
+        end
+    end)
 end
