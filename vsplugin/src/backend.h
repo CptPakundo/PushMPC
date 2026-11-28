@@ -175,6 +175,23 @@ inline int CadenceK(int maxK, double srcFps, double displayHz)
     }
     return best;
 }
+// PushFlow (pmml) on every route (vsplugin ml_vs.cpp, the engine module's ml_backend / ml_pme_backend): the multiplier
+// asked of pmml's measured candidates (pmml::choose keeps it within the measured frame budget). fixedK >= 2: the
+// setting, up to kPortableMaxK; Auto: the display rate over the source rate, up to kPortableMaxK (x2 when the display
+// is unknown). pmml renders any timestep, so the ceiling is the other engines' one; what the card can do comes from
+// the measurement, never from a fixed cap.
+inline int MlWantK(int fixedK, double srcFps, double displayHz)
+{
+    if (fixedK >= 2) return std::min(fixedK, kPortableMaxK);
+    if (srcFps <= 1) srcFps = 23.976;
+    return displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2;
+}
+// Auto's multiplier from the measured one (pmml::choose's c.multiplier): the even cadence at a fixed refresh, as
+// MlMeasuredMultiplier; a fixed setting stays as it is
+inline int MlAutoK(int fixedK, int measuredK, double srcFps, double displayHz)
+{
+    return fixedK >= 2 ? std::min(fixedK, kPortableMaxK) : CadenceK(std::min(measuredK, kPortableMaxK), srcFps, displayHz);
+}
 // smoother: 0 Auto, 1 off, 2..kPortableMaxK fixed (the same words as the registry's Smoother); displayHz <= 0: unknown (Auto then
 // aims at x2)
 // gpu: the GPU engine (no cap at 2 above 1080p: its costs are measured the same way, the cap was the CPU's)
