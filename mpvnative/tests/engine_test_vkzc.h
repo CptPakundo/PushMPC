@@ -316,7 +316,7 @@ static void TestVulkanZeroCopy(const pmeng_api* api, bool allowCpu)
             f.value += 1;   // the engine signalled value + 1 when its import was done
             drain();
         }
-        if (api->struct_size >= sizeof(pmeng_api) && api->finish) CHECK(api->finish(h) == PMENG_OK, "vulkan zero copy: finish");
+        if (api->struct_size >= offsetof(pmeng_api, finish) + sizeof(api->finish) && api->finish) CHECK(api->finish(h) == PMENG_OK, "vulkan zero copy: finish");
         drain();
         CHECK(api->pending(h) == 0, "vulkan zero copy: pending %u", api->pending(h));
         const int expect = 1 + (N - 1) * 4 - 3;   // minus the discontinuity's group

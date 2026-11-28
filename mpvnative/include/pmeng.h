@@ -28,11 +28,12 @@ extern "C" {
 #define PMENG_ABI_VERSION 1u
 /* Additions within ABI 1 are append-only and never change an existing field, so every filter works with every module:
  *   minor 1: PMENG_MEM_CUDA (pmeng_device.cuda_*, pmeng_image.cuda_*), pmeng_output.want_out_depth, the source_bits option.
+ *   minor 2: comb_new / comb_push / comb_counts / comb_free (interlaced input, measured in the picture).
  * A module that does not know a memory kind answers through pmeng_output.mem (PMENG_MEM_CPU: the filter's copy
  * fallback) or fails open (the filter retries with PMENG_MEM_CPU). New fields of pmeng_device and pmeng_output are read
  * only when struct_size covers them; pmeng_image's CUDA fields only when mem is PMENG_MEM_CUDA (which only a filter of
  * minor 1 or later sends). */
-#define PMENG_ABI_MINOR 1u
+#define PMENG_ABI_MINOR 2u
 
 #if defined(_WIN32)
 #define PMENG_EXPORT __declspec(dllexport)
@@ -175,6 +176,15 @@ typedef struct pmeng_api {
     /* end of stream: settle what the engine still holds back (Dedup's lookahead); the outputs then arrive through peek.
        Optional for the caller to check: present when struct_size covers it */
     int (*finish)(void* h);
+    /* minor 2: interlaced input, measured in the picture with the meter every PushMPC route uses (content_detect.h
+       CombMeter: field combing on moving areas of the native luma, 24 moving frames, half or more combed = interlaced).
+       No engine instance is needed. The filter hands the luma of each frame in host memory (bytes_per_sample 1 or 2;
+       shift: what takes a sample to 8 bits, 0 for 8-bit, 2 for 10-bit LSB-aligned words, 8 for P010) until a verdict:
+       comb_push returns 0 while measuring, 1 progressive, 2 interlaced. Present when struct_size covers them. */
+    void* (*comb_new)(void);
+    int (*comb_push)(void* c, const uint8_t* luma, ptrdiff_t stride_bytes, uint32_t width, uint32_t height, uint32_t bytes_per_sample, uint32_t shift);
+    void (*comb_counts)(void* c, int* measured, int* combed);
+    void (*comb_free)(void* c);
 } pmeng_api;
 
 typedef const pmeng_api* (*pmeng_get_api_fn)(uint32_t abi_version);

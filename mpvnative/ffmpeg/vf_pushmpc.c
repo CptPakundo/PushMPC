@@ -167,6 +167,13 @@ typedef struct PushMPCContext {
     int have_last;
     int64_t last_out_pts, last_out_dur;
     uint64_t frames_in, frames_out, generated, discontinuities;
+
+    /* interlaced input (pmeng minor 2): measured in the picture until a verdict; aside: the generated outputs are
+       dropped, so the source frames go on at the source rate */
+    void *comb;
+    int il_seen, il_flagged, il_done, aside;
+    uint64_t aside_dropped;
+    AVFrame *il_cpu;               /* hardware frames: the downloaded copy the meter reads (only while measuring) */
 } PushMPCContext;
 
 /* ------------------------------------------------------------------------------------------- the engine module */
@@ -476,6 +483,118 @@ static int alloc_hw_pool(AVFilterContext *ctx, AVBufferRef *device_ref, enum AVP
     return ret;
 }
 
+/* ------------------------------------------------------------------------------------------- interlaced input */
+/* Measured in the picture as every PushMPC route measures it (the engine module's comb_*: content_detect.h CombMeter,
+ * field combing on moving areas of the native luma, 24 moving frames, half or more combed = interlaced); the frames'
+ * interlace flag is only logged (a prior: encoders flag progressive pictures too). Hardware frames are downloaded for it
+ * only while measuring. Interlaced: the filter steps aside, the generated outputs are dropped and the source frames go
+ * on at the source rate (the graph's formats stay what they were negotiated as, so the real frame is the engine's real
+ * output: no frame is generated from combed pictures). The verdict is kept for the stream (size, format, rate) in the
+ * process: mpv rebuilds the graph on every seek, and the next instance starts aside; every instance measures again,
+ * so a progressive stream of the same size and rate gets its frame generation back. After PM_IL_GIVE_UP frames without
+ * a verdict (a still: no combing whatever its fields) the stream counts as progressive (CombMeter::kGiveUp). */
+#define PM_IL_GIVE_UP 240
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 7, 100)
+#define PM_FRAME_INTERLACED(f) (((f)->flags & AV_FRAME_FLAG_INTERLACED) != 0)
+#else
+#define PM_FRAME_INTERLACED(f) ((f)->interlaced_frame != 0)
+#endif
+static struct { int w, h, fmt; AVRational fr; int il, measured, combed; } g_il_memo;
+
+static int have_comb(const pmeng_api *a)
+{
+    return a && a->struct_size >= offsetof(pmeng_api, comb_free) + sizeof(a->comb_free) &&
+           a->comb_new && a->comb_push && a->comb_counts && a->comb_free;
+}
+
+static int il_memo_is(AVFilterContext *ctx)
+{
+    PushMPCContext *s = ctx->priv;
+    const AVRational fr = PM_FRAME_RATE(ctx->inputs[0]);
+    return g_il_memo.w == s->in_w && g_il_memo.h == s->in_h && g_il_memo.fmt == (int)s->sw_fmt &&
+           g_il_memo.fr.num == fr.num && g_il_memo.fr.den == fr.den;
+}
+
+/* at config, once the engine is open */
+static void il_start(AVFilterContext *ctx)
+{
+    PushMPCContext *s = ctx->priv;
+    s->il_seen = s->il_flagged = s->aside = 0;
+    s->il_done = 1;
+    if (s->comb && s->api && have_comb(s->api))
+        s->api->comb_free(s->comb);
+    s->comb = NULL;
+    if (!have_comb(s->api)) {
+        av_log(ctx, AV_LOG_INFO, "interlaced input is not measured: this engine module predates it (pmeng minor 2)\n");
+        return;
+    }
+    if (!(s->comb = s->api->comb_new()))
+        return;
+    s->il_done = 0;
+    if (il_memo_is(ctx) && g_il_memo.il == 2) {
+        s->aside = 1;
+        av_log(ctx, AV_LOG_INFO, "interlaced: interlaced input (field combing measured on %d of %d moving frames), on this stream before: "
+               "the source frames at the source rate (measured again)\n", g_il_memo.combed, g_il_memo.measured);
+    }
+}
+
+/* one source frame (src: its host-memory copy when the copy fallback made one) */
+static void il_measure(AVFilterContext *ctx, AVFrame *in, const AVFrame *src)
+{
+    PushMPCContext *s = ctx->priv;
+    const AVFrame *c = src;
+    uint32_t bps, shift;
+    int v, measured = 0, combed = 0;
+    if (s->il_done || !s->comb)
+        return;
+    if (s->il_seen < 3)
+        av_log(ctx, AV_LOG_VERBOSE, "frame %d: flagged %s (a prior; the picture decides)\n", s->il_seen,
+               PM_FRAME_INTERLACED(in) ? "interlaced" : "progressive");
+    s->il_seen++;
+    if (PM_FRAME_INTERLACED(in))
+        s->il_flagged++;
+    if (c->hw_frames_ctx) {
+        int ret;
+        if (!s->il_cpu && !(s->il_cpu = av_frame_alloc()))
+            return;
+        av_frame_unref(s->il_cpu);
+        s->il_cpu->format = s->sw_fmt;
+        if ((ret = av_hwframe_transfer_data(s->il_cpu, c, 0)) < 0) {
+            av_log(ctx, AV_LOG_WARNING, "interlaced input is not measured: the frame could not be read (%s)\n", av_err2str(ret));
+            s->il_done = 1;
+            return;
+        }
+        c = s->il_cpu;
+    }
+    switch (c->format) {
+    case AV_PIX_FMT_YUV420P: case AV_PIX_FMT_NV12: bps = 1; shift = 0; break;
+    case AV_PIX_FMT_YUV420P10: bps = 2; shift = 2; break;
+    case AV_PIX_FMT_P010: bps = 2; shift = 8; break;
+    default:
+        av_log(ctx, AV_LOG_INFO, "interlaced input is not measured on %s frames\n", av_get_pix_fmt_name(c->format));
+        s->il_done = 1;
+        return;
+    }
+    v = s->api->comb_push(s->comb, c->data[0], c->linesize[0], (uint32_t)c->width, (uint32_t)c->height, bps, shift);
+    if (v == 0 && s->il_seen < PM_IL_GIVE_UP)
+        return;
+    s->il_done = 1;
+    av_frame_free(&s->il_cpu);
+    s->api->comb_counts(s->comb, &measured, &combed);
+    g_il_memo.w = s->in_w; g_il_memo.h = s->in_h; g_il_memo.fmt = (int)s->sw_fmt; g_il_memo.fr = PM_FRAME_RATE(ctx->inputs[0]);
+    g_il_memo.il = v == 2 ? 2 : 1; g_il_memo.measured = measured; g_il_memo.combed = combed;
+    if (v == 2) {
+        av_log(ctx, AV_LOG_WARNING, "interlaced: interlaced input (field combing measured on %d of %d moving frames): "
+               "the source frames at the source rate from here (no frame generation)\n", combed, measured);
+        s->aside = 1;
+        return;
+    }
+    av_log(ctx, AV_LOG_INFO, "progressive (measured): %d of %d moving frames combed%s; flags said %d of %d frames interlaced%s\n",
+           combed, measured, v == 0 ? " (too little motion to tell: treated as progressive)" : "", s->il_flagged, s->il_seen,
+           s->aside ? "; frame generation again (the earlier verdict was another stream's)" : "");
+    s->aside = 0;
+}
+
 static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
@@ -496,6 +615,8 @@ static int config_output(AVFilterLink *outlink)
     s->K = 1;
     s->passthrough = 0;
     s->fallback = 0;
+    s->il_done = 1;   /* measured once an engine runs (il_start) */
+    s->aside = 0;
 
     /* pass-through defaults (kept unless an engine opens) */
     outlink->w = inlink->w;
@@ -668,6 +789,7 @@ static int config_output(AVFilterLink *outlink)
     av_log(ctx, AV_LOG_INFO, "%s (%s) on %s frames%s: %dx%d -> %dx%d, x%d; %s\n", s->out.engine, g_api_from,
            av_get_pix_fmt_name(s->in_fmt), s->fallback ? " through the copy fallback" : (s->in_fmt == AV_PIX_FMT_D3D11 || s->in_fmt == AV_PIX_FMT_VULKAN || s->in_fmt == AV_PIX_FMT_CUDA) ? " (zero copy)" : "",
            inlink->w, inlink->h, outlink->w, outlink->h, s->K, s->out.description);
+    il_start(ctx);
     return 0;
 }
 
@@ -818,6 +940,8 @@ static int emit_one(AVFilterContext *ctx, const pmeng_out_info *oi)
     out->sample_aspect_ratio = outlink->sample_aspect_ratio;
     out->pts = gen ? p0 * s->K + av_rescale(d * s->K, oi->subframe, m) : p1 * s->K;
     s->last_out_dur = av_rescale(d * s->K, 1, m);
+    if (s->aside)   /* interlaced input: the real frame holds its whole interval */
+        s->last_out_dur = d * s->K;
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 30, 100)   /* AVFrame.duration (FFmpeg 6.0) */
     out->duration = s->last_out_dur;
 #else
@@ -912,6 +1036,11 @@ static int drain(AVFilterContext *ctx, uint32_t timeout_ms, int until_empty)
             s->api->skip(s->eng);
             continue;
         }
+        if (s->aside && oi.subframe > 0) {   /* interlaced input: no generated frames, the source frames at the source rate */
+            s->api->skip(s->eng);
+            s->aside_dropped++;
+            continue;
+        }
         if ((ret = emit_one(ctx, &oi)) < 0)
             return ret;
         n++;
@@ -969,6 +1098,7 @@ static int process(AVFilterContext *ctx, AVFrame *in)
     } else {
         fill_image(&im, in, PMENG_MEM_CPU, pmeng_fmt_of(s->in_fmt));
     }
+    il_measure(ctx, in, src);   /* interlaced input: before the frame goes to the engine */
     im.range = in->color_range;
     im.matrix = in->colorspace;
     im.primaries = in->color_primaries;
@@ -1098,8 +1228,8 @@ static av_cold void uninit(AVFilterContext *ctx)
         char st[512] = "";
         if (s->api->stats)
             s->api->stats(s->eng, st, sizeof(st));
-        av_log(ctx, AV_LOG_VERBOSE, "%" PRIu64 " frames in, %" PRIu64 " out (%" PRIu64 " generated), %" PRIu64
-               " timestamp cuts; %s\n", s->frames_in, s->frames_out, s->generated, s->discontinuities, st);
+        av_log(ctx, AV_LOG_VERBOSE, "%" PRIu64 " frames in, %" PRIu64 " out (%" PRIu64 " generated; %" PRIu64 " generated dropped: interlaced input), %" PRIu64
+               " timestamp cuts; %s\n", s->frames_in, s->frames_out, s->generated, s->aside_dropped, s->discontinuities, st);
         s->api->close(s->eng);
         s->eng = NULL;
     }
@@ -1107,6 +1237,10 @@ static av_cold void uninit(AVFilterContext *ctx)
         av_frame_free(&s->props[i]);
     av_frame_free(&s->cpu_in);
     av_buffer_unref(&s->out_frames);
+    av_frame_free(&s->il_cpu);
+    if (s->comb && s->api && have_comb(s->api))
+        s->api->comb_free(s->comb);
+    s->comb = NULL;
 }
 
 #define OFFSET(x) offsetof(PushMPCContext, x)
