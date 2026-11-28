@@ -96,6 +96,7 @@ struct Enhance {
     pm::Settings settings; pm::Choice choice; pm::Display disp; pm::Source src;
     Colour colour; bool colourChecked = false;
     int mpTagLog = 0;          // the output's _MP_IMAGE colour: logged once per instance (mp_out.h)
+    uint64_t srcErrors = 0;    // source frames that failed (arError), logged a few times (vslog.h LogSourceError)
     PushCoreSettings ps{};
     // per getFrame call (under the host lock)
     VSCore* core = nullptr;
@@ -297,16 +298,38 @@ const VSFrame* VS_CC EnhanceGetFrame(int n, int reason, void* inst, void** frame
     CoreHost& h = CoreHost::Get();
     if (reason == arInitial) {
         int64_t from, to;
-        { std::lock_guard<std::mutex> lk(h.Lock()); d->pipe.Requests(n, from, to); }
-        frameData[0] = reinterpret_cast<void*>(intptr_t(from));
+        int64_t ends = 0;
+        { std::lock_guard<std::mutex> lk(h.Lock()); d->pipe.Requests(n, from, to); ends = d->pipe.SrcFrames() * d->k; }
+        // past the end found while playing (eof_guard.h): nothing to request, so the output fails here; a getFrame that
+        // returns nothing without an error and without requests is fatal to VapourSynth (vsplugin-gpu 46008569437)
+        if (n >= ends || from > to) { a->setFilterError(PastEnd(n).c_str(), fc); return nullptr; }
+        frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(h.Lock());
+        { int64_t rf, rt; UnpackRange(frameData[0], rf, rt); LogSourceError("nvidia", n, rf, d->srcErrors); }
+        return nullptr;
+    }
     if (reason != arAllFramesReady) return nullptr;
-    const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
+    int64_t requestedFrom, requestedTo; UnpackRange(frameData[0], requestedFrom, requestedTo);
     std::lock_guard<std::mutex> lk(h.Lock());
     if (!h.Owns(d->token)) { a->setFilterError("pushmpc.Enhance: a newer script instance took over PushMPC's core (only one Enhance per process)", fc); return nullptr; }
     d->core = core; d->api = a; d->fc = fc;
+    // the end of an unknown-length stream (mpv), found while playing (eof_guard.h): from here a clip of that many frames,
+    // so the Pipeline clamps to its last frame (the flagged end frame is never submitted to pushcore) and the last
+    // frame's K - 1 generated slots repeat it, as for a known length: K x N outputs. pushcore holds nothing back for
+    // a lookahead, so no backend End is needed
+    if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
+        d->pipe.SetEnd(end);
+        Log(std::format("the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
+    }
+    if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
+        d->fc = nullptr;
+        a->setFilterError(PastEnd(n).c_str(), fc);
+        return nullptr;
+    }
     BindHost(d, h);
     std::string err;
     if (!d->colourChecked && !CheckColour(d, h, requestedFrom, err)) {
@@ -408,7 +431,7 @@ void NvidiaCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSN
     const HostPaths paths = NvidiaPaths(in, a);
 
     auto* d = new Enhance();
-    d->node = node;
+    d->node = node = GuardUnknownLength(node, core, a);   // mpv's unknown-length source (eof_guard.h); the pass-through above is not wrapped
     d->inVi = *vi;
     d->content.Init(cdKey, *vi, cdMemo.cls, cdMemo.cg);
     d->settings = s;

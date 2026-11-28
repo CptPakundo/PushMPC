@@ -20,6 +20,7 @@
 #include "platform.h"
 #include "schedule.h"
 #include "vslog.h"
+#include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
 
 namespace pmvs {
 
@@ -106,7 +107,7 @@ struct AInst {
     AppleBackendImpl be;
     std::map<int64_t, AMeta> meta;
     std::map<int64_t, const VSFrame*> srcHeld;   // per getFrame call
-    uint64_t produced = 0, lastLogged = 0;
+    uint64_t produced = 0, lastLogged = 0, srcErrors = 0;
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
@@ -169,15 +170,35 @@ const VSFrame* VS_CC AGetFrame(int n, int reason, void* inst, void** frameData, 
     auto* d = static_cast<AInst*>(inst);
     if (reason == arInitial) {
         int64_t from, to;
-        { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); }
-        frameData[0] = reinterpret_cast<void*>(intptr_t(from));
+        int64_t ends = 0;
+        { std::lock_guard<std::mutex> lk(d->lock); d->pipe.Requests(n, from, to); ends = d->pipe.SrcFrames() * d->k; }
+        // past the end found while playing (eof_guard.h): fails here (VapourSynth needs an error with no request)
+        if (n >= ends || from > to) { a->setFilterError(PastEnd(n).c_str(), fc); return nullptr; }
+        frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(d->lock);
+        { int64_t rf, rt; UnpackRange(frameData[0], rf, rt); LogSourceError("apple", n, rf, d->srcErrors); }
+        return nullptr;
+    }
     if (reason != arAllFramesReady) return nullptr;
-    const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
+    int64_t requestedFrom, requestedTo; UnpackRange(frameData[0], requestedFrom, requestedTo);
     std::lock_guard<std::mutex> lk(d->lock);
     d->core = core; d->api = a; d->fc = fc; d->be.api = a;
+    // the end of an unknown-length stream (mpv), found while playing (eof_guard.h): a clip of that many frames from
+    // here, so the Pipeline clamps to its last frame and its K - 1 generated slots repeat it (K x N outputs); the engine
+    // works pair by pair in Submit and holds nothing back, so no backend End is needed
+    if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
+        d->pipe.SetEnd(end);
+        Log(std::format("apple: the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
+    }
+    if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
+        d->fc = nullptr;
+        a->setFilterError(PastEnd(n).c_str(), fc);
+        return nullptr;
+    }
     auto r = d->pipe.Produce(n, requestedFrom, d->be, 10000);
     for (auto& kv : d->srcHeld) a->freeFrame(kv.second);
     d->srcHeld.clear();
@@ -289,6 +310,7 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
         return PortableCreate(in, out, core, a, node, why + "; the apple backend cannot run this (" + err + "): portable");
     }
     Log("apple: " + info);
+    d->node = node = GuardUnknownLength(node, core, a);   // mpv's unknown-length source (eof_guard.h); not on the fallbacks above
     d->k = std::max(1, ak.k);
     d->vi = *vi;
     d->vi.width = d->be.engine.OutWidth(); d->vi.height = d->be.engine.OutHeight();

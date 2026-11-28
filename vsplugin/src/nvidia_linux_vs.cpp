@@ -30,6 +30,7 @@
 #include "schedule.h"
 #include "vslog.h"
 #include "mp_out.h"   // the output's colour in mpv's _MP_IMAGE
+#include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
 
 namespace pmvs {
 
@@ -60,7 +61,7 @@ struct NInst {
     bool outHdr = false; int outBits = 8;
     bool srcHdr = false; float hdrPeak = 0; int srcTransfer = 1;   // the source's HDR-ness and RTX Video HDR's peak: the output's _MP_IMAGE colour
     int mpTagLog = 0;
-    uint64_t produced = 0, lastLogged = 0;
+    uint64_t produced = 0, lastLogged = 0, srcErrors = 0;
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
     VSFrameContext* fc = nullptr;
@@ -182,16 +183,36 @@ const VSFrame* VS_CC NGetFrame(int n, int reason, void* inst, void** frameData, 
     Warm& w = W();
     if (reason == arInitial) {
         int64_t from, to;
-        { std::lock_guard<std::mutex> lk(w.lock); d->pipe.Requests(n, from, to); }
-        frameData[0] = reinterpret_cast<void*>(intptr_t(from));
+        int64_t ends = 0;
+        { std::lock_guard<std::mutex> lk(w.lock); d->pipe.Requests(n, from, to); ends = d->pipe.SrcFrames() * d->k; }
+        // past the end found while playing (eof_guard.h): fails here (VapourSynth needs an error with no request)
+        if (n >= ends || from > to) { a->setFilterError(PastEnd(n).c_str(), fc); return nullptr; }
+        frameData[0] = PackRange(from, to);
         for (int64_t i = from; i <= to; ++i) a->requestFrameFilter(int(i), d->node, fc);
         return nullptr;
     }
+    if (reason == arError) {
+        std::lock_guard<std::mutex> lk(w.lock);
+        { int64_t rf, rt; UnpackRange(frameData[0], rf, rt); LogSourceError("nvidia", n, rf, d->srcErrors); }
+        return nullptr;
+    }
     if (reason != arAllFramesReady) return nullptr;
-    const int64_t requestedFrom = int64_t(reinterpret_cast<intptr_t>(frameData[0]));
+    int64_t requestedFrom, requestedTo; UnpackRange(frameData[0], requestedFrom, requestedTo);
     std::lock_guard<std::mutex> lk(w.lock);
     if (w.owner != d->token) { a->setFilterError("pushmpc.Enhance (nvidia): a newer script instance took over the engine (only one Enhance per process)", fc); return nullptr; }
     d->core = core; d->api = a; d->fc = fc;
+    // the end of an unknown-length stream (mpv), found while playing (eof_guard.h): a clip of that many frames from
+    // here, so the Pipeline clamps to its last frame (the flagged end frame never reaches the engine) and its K - 1
+    // generated slots repeat it: K x N outputs, as for a known length
+    if (const int64_t end = ScanEnd(a, d->node, fc, requestedFrom, requestedTo); end >= 0 && end < d->pipe.SrcFrames()) {
+        d->pipe.SetEnd(end);
+        Log(std::format("nvidia: the stream ends after source frame {} ({} outputs)", end - 1, end * d->k));
+    }
+    if (n >= d->pipe.SrcFrames() * d->k) {   // past it: fails, as the source's request did (mpv ends there)
+        d->fc = nullptr;
+        a->setFilterError(PastEnd(n).c_str(), fc);
+        return nullptr;
+    }
     auto r = d->pipe.Produce(n, requestedFrom, d->be, 10000);
     for (const VSFrame* f : d->held) a->freeFrame(f);
     d->held.clear();
@@ -331,7 +352,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
         Log("nvidia: engine reused (warm): " + w.engine->Describe());
     }
     auto* d = new NInst();
-    d->node = node;
+    d->node = node = GuardUnknownLength(node, core, a);   // mpv's unknown-length source (eof_guard.h); the pass-throughs above are not wrapped
     d->inVi = *vi;
     d->engine = w.engine;
     d->token = ++w.next;

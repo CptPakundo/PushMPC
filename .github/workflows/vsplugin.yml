@@ -103,6 +103,22 @@ jobs:
           & "$env:VSDIR\python.exe" vsplugin/tests/ci/out_colour.py;   # the pinned runtime's Python (its ._pth has vapoursynth)
           if ($LASTEXITCODE) { throw 'the output _MP_IMAGE colour check failed' }
           Get-Content "$env:RUNNER_TEMP\logs-outcolour\vsplugin-*.log" | Select-String 'output colour for mpv|core for matrix' | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
+      - name: The end of a stream of unknown length (mpv's source) on the nvidia path gives the known-length output (stub core; 1 thread and the default)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $env:PUSHMPC_VS_PLUGIN = "$PWD\vsplugin\bin\pushmpc_vs.dll"
+          $env:PUSHMPC_STUB_DIR = "$PWD\vsplugin\bin\stub"
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-nveof"
+          $env:PUSHMPC_TEST_K = $env:K
+          $rc = 0
+          # (a hang, the guard's synchronous fetch on one thread, ends at the step's timeout)
+          foreach ($t in @('--threads', '1'), @()) {
+            & "$env:VSDIR\python.exe" vsplugin/tests/ci/nv_eof_probe.py @t
+            if ($LASTEXITCODE) { Write-Host "::error::nv_eof_probe $($t -join ' '): exit $LASTEXITCODE"; $rc = 1 }
+          }
+          Get-Content "$env:RUNNER_TEMP\logs-nveof\vsplugin-*.log" | Select-String 'the stream ends after|end of the stream|failed: a source frame|instance closed' | Select-Object -First 12 | ForEach-Object { Write-Host $_.Line }
+          exit $rc
       - name: mpv --vo=null with seeks (script reloads)
         shell: pwsh
         run: |
@@ -124,6 +140,34 @@ jobs:
           if ($reuse -lt 1) { throw 'the seek reloads did not reuse the warm core' }
           Write-Host "warm core reused on $reuse reloads"
 
+      - name: mpv through the nvidia path to the stream's end gives K x the frames of mpv alone (stub core, vo=image)
+        shell: pwsh
+        run: |
+          # mpv's own unknown-length source (134217727 frames, EOF past the last one) on the nvidia backend: with the end
+          # guard the last source frame's K - 1 slots repeat it, so every frame mpv shows is counted (vo=image, untimed:
+          # nothing dropped) and must be exactly K x the count of the same clip through mpv alone
+          $t = Join-Path $env:RUNNER_TEMP 'mpvend'; New-Item -ItemType Directory $t -Force | Out-Null
+          Copy-Item vsplugin\scripts\pushmpc.vpy, vsplugin\bin\pushmpc_vs.dll $t
+          vspipe -c y4m -e 47 vsplugin/tests/ci/source_clip.vpy "$t\clip.y4m"; if ($LASTEXITCODE) { throw 'test clip' }
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-mpvend"
+          $stub = "$PWD\vsplugin\bin\stub".Replace('\', '/')
+          $vpy = "$t\pushmpc.vpy".Replace('\', '/')
+          $vf = "--vf=vapoursynth=file=[$vpy]:buffered-frames=8:concurrent-frames=2:user-data=[adapter=warp,core_dir=$stub,smoother=$env:K,sharper=off,chroma=420]"
+          function Count-Shown($dir, $extra) {
+            New-Item -ItemType Directory $dir -Force | Out-Null
+            & "$env:MPVDIR\mpv.com" --no-config --vo=image --vo-image-format=png "--vo-image-outdir=$dir" --untimed --framedrop=no --ao=null --hwdec=no `
+              --hr-seek-framedrop=no --interpolation=no @extra --msg-level=all=v "$t\clip.y4m" 2>&1 | Out-File "$dir.log"
+            @(Get-ChildItem $dir -Filter *.png).Count
+          }
+          $ctl = Count-Shown "$t\ctl" @()
+          $out = Count-Shown "$t\out" @($vf)
+          $log = (Get-Content "$env:RUNNER_TEMP\logs-mpvend\vsplugin-*.log" -Raw) -join "`n"
+          Get-Content "$t\out.log" | Select-String 'vapoursynth|Exiting' | Select-Object -Last 6 | ForEach-Object { Write-Host $_.Line }
+          ($log -split "`n") | Select-String 'backend: |the stream ends after|end of the stream|instance closed' | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
+          Write-Host "mpv alone: $ctl frames shown; through the nvidia path x$($env:K): $out (want $([int]$env:K * $ctl))"
+          if ($ctl -ne 48) { throw "mpv alone showed $ctl of the clip's 48 frames" }
+          if ($log -notmatch 'the stream ends after source frame 47') { throw 'the nvidia path did not find the stream''s end (eof_guard.h)' }
+          if ($out -ne [int]$env:K * $ctl) { throw "the nvidia path gave $out frames, want $([int]$env:K * $ctl)" }
       - name: mpv.conf integration (fake roots)
         shell: pwsh
         run: pwsh -File integrations/mpv/tests/mpv-integration.tests.ps1
