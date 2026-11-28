@@ -488,6 +488,7 @@ mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:k
 function vs_status_watch()
     if vs_watch.timer then vs_watch.timer:kill() end
     vs_watch.timer = mp.add_periodic_timer(2, function()
+        if pm_colour_unknown then pm_colour_unknown() end   -- the early add's fallback (below): also when video-params came first
         local f = io.open(vs_status_path(), "r")
         if not f then return end
         local t = f:read("*a"); f:close()
@@ -520,9 +521,18 @@ local function remove_native()
     end
 end
 
-local function ensure()
+local early_path = nil   -- the file whose filter went in before decoding (pushmpc.MpvColour reads frame 0's colour)
+local mpv_version = (mp.get_property("mpv-version", "") or ""):match("(%d+%.%d+[%.%d]*)") or ""
+
+local function ensure(early)
     if busy then return end
-    if mp.get_property_native("video-params") == nil then return end   -- only once video runs: soft failure
+    -- the late add (mpv older than 0.39, or the early add did not happen): only once video runs (soft failure), and
+    -- only with real params: before the first frame enters the chain mpv answers video-params with a {w, h} fallback
+    -- (command.c "Simplistic fallback for stupid scripts") that has no colour (integrations 46087052008: 5 of 12 runs)
+    if not early then
+        local vp = mp.get_property_native("video-params")
+        if type(vp) ~= "table" or vp.pixelformat == nil then return end
+    end
     local path = mp.get_property("path")
     if failed_for ~= nil and failed_for == path then return end
     local vf = mp.get_property_native("vf") or {}
@@ -558,7 +568,8 @@ local function ensure()
             msg.info("PushMPC's native filter added: " .. want)
         end
     elseif not ours then
-        local cd = colour_data()
+        -- early: no colour yet; mpv's version tells pushmpc.vpy to read frame 0's colour (and to report a failure)
+        local cd = early and ("mpvver=" .. mpv_version) or colour_data()
         local ok, err = mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
         if not ok then
             failed_for = path
@@ -567,7 +578,12 @@ local function ensure()
             busy = false
             return
         end
-        msg.info("PushMPC's filter added")
+        if early then
+            msg.info("PushMPC: filter added before decoding")
+            early_path = path
+        else
+            msg.info("PushMPC's filter added")
+        end
         vs_status_watch()
     end
     if opts["drop-d3d11vpp"] == "yes" then
@@ -587,5 +603,52 @@ mp.register_event("file-loaded", function()
     failed_for = nil
     if opts["shaders-when"] == "always" then shaders("no better upscaler on this PC") end
 end)
-mp.observe_property("video-params", "native", function() ensure() end)
+-- the early add's fallback: pushmpc.MpvColour could not read frame 0's colour (it writes <temp>/pushmpc-vs-<pid>.colour
+-- while the script loads, before mpv has real video-params): the filter is added again once with mpv's colour, in an
+-- encode too (the right colour outweighs the frames in flight at the start)
+local function colour_unknown()
+    if early_path == nil or early_path ~= mp.get_property("path") then return end
+    local vp = mp.get_property_native("video-params")
+    if type(vp) ~= "table" or vp.pixelformat == nil then return end
+    local file = vs_status_path():gsub("%.txt$", ".colour")
+    local f = io.open(file, "r")
+    if not f then return end
+    local t = f:read("*a"); f:close(); os.remove(file)
+    early_path = nil
+    msg.info("PushMPC: frame 0's colour not read (" .. ((t:match("why=([^\n]*)")) or "?") .. "): filter added again with mpv's colour")
+    busy = true
+    mp.commandv("vf", "remove", "@pushmpc")
+    local cd = colour_data()
+    mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
+    busy = false
+end
+pm_colour_unknown = colour_unknown   -- the status timer checks it too (the file may appear after video-params)
+mp.observe_property("video-params", "native", function() colour_unknown(); ensure() end)
 mp.observe_property("vf", "native", function() ensure() end)
+
+-- a filter that fails to start in mpv (the VapourSynth core or the script, at frame 0) is disabled by mpv itself
+-- ("Disabling filter ... because it has failed", f_output_chain.c) without an error to the "vf append" here: the
+-- shader fallback then, as for an add that fails
+mp.enable_messages("error")
+mp.register_event("log-message", function(e)
+    if e.level == "error" and e.text:find("Disabling filter", 1, true) and (e.text:find("vapoursynth", 1, true) or e.text:find("pushmpc", 1, true)) then
+        failed_for = mp.get_property("path"); early_path = nil
+        msg.warn("PushMPC's filter failed in mpv (" .. e.text:gsub("%s+$", "") .. "): playing without it")
+        shaders("PushMPC's filter failed")
+    end
+end)
+
+-- mpv 0.39 and newer: the filter goes in before the decoder starts (on_preloaded; mpv's input.rst), so frame 0 passes
+-- through it too, and pushmpc.vpy reads frame 0's colour from mpv's load-time dummy frame (pushmpc.MpvColour). Older
+-- mpv has no _MP_IMAGE on its frames: the late add above, with real video-params.
+do
+    local maj, min = mpv_version:match("^(%d+)%.(%d+)")
+    maj, min = tonumber(maj) or 0, tonumber(min) or 0
+    if not native and (maj > 0 or min >= 39) then
+        mp.add_hook("on_preloaded", 50, function()
+            for _, tr in ipairs(mp.get_property_native("track-list") or {}) do
+                if tr.type == "video" and not tr.albumart and not tr.image then ensure(true); return end
+            end
+        end)
+    end
+end
