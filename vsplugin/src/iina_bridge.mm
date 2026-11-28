@@ -388,6 +388,7 @@ bool ConfigureModule(Bridge& b, const AVFrame* f)
     pmeng_output out{}; out.struct_size = sizeof(out);
     std::string opts = "smoother=" + std::to_string(b.k) + "\n";
     if (const char* be = getenv("PUSHMPC_IINA_BACKEND"); be && *be) opts += std::string("backend=") + be + "\n";
+    opts += "cleanup=off\n";   // no denoise here: this path shows the source itself as the real frame (subframe 0 is skipped)
     char err[512] = {};
     void* h = api->open(&dev, &st, opts.c_str(), &out, err, sizeof(err));
     if (!h) { b.why += std::string("; engine module: ") + err; return false; }

@@ -189,6 +189,7 @@ static pme::Backend *OpenApple(pm_engine *e, int smoother, double fps, double hz
     pme::Options o;
     o["smoother"] = smoother == 0 ? "auto" : std::to_string(smoother);
     if (hz > 0) o["display_fps"] = std::to_string(hz);
+    o["cleanup"] = "off";   // no denoise: VLC shows its own real frames, so denoised generated ones would alternate with noisy ones
     std::memset(&out, 0, sizeof(out)); out.struct_size = sizeof(out);
     return fn(&st, &o, &out, &why, nullptr);
 }
