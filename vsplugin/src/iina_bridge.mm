@@ -62,6 +62,12 @@ extern "C" {
 #else
 #define PM_DURATION(fr) ((fr)->pkt_duration)
 #endif
+// the decoder's interlace flag (a prior only): AVFrame.flags from libavutil 58.7, interlaced_frame before
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 7, 100)
+#define PM_INTERLACED(fr) (((fr)->flags & AV_FRAME_FLAG_INTERLACED) != 0)
+#else
+#define PM_INTERLACED(fr) ((fr)->interlaced_frame != 0)
+#endif
 }
 #include "apple_engine.h"
 #include "backend.h"        // pmvs::kPortableMaxK: the built-in portable engine's ceiling
@@ -218,7 +224,17 @@ double MpvDouble(const char* name) { return std::string(name) == "display-fps" ?
 // MPV_EVENT_START_FILE). container-fps stays the prior until 8 steps are measured.
 pushmpc::content::IntervalMeter g_rate;            // mpv's core thread only
 std::atomic<double> g_measuredFps{ 0 };
-std::atomic<bool> g_rateReset{ false };
+std::atomic<bool> g_rateReset{ false };            // a new file: the rate and the interlace verdict start over
+// Interlaced input, measured in the picture as the DirectShow filter, Kodi and the VapourSynth routes do
+// (content_detect.h CombMeter on the native luma: 24 moving frames, half or more combed; 240 frames without enough motion
+// count as progressive); the decoder's interlace flag is only logged. Interlaced: the graph passes through from that
+// frame on (the frames already generated go out first), and the file's later graphs (a seek) start passing through.
+// Per file, on mpv's core thread (the verdict is read there too).
+pushmpc::content::CombMeter g_comb;
+int g_ilSeen = 0, g_ilFlagged = 0;
+bool g_ilDone = false;
+std::atomic<int> g_ilVerdict{ 0 };                 // 0 measuring, 1 progressive, 2 interlaced
+std::string g_ilWhy;
 double SourceFps()
 {
     const double m = g_measuredFps.load();
@@ -403,7 +419,10 @@ bool Feed(Bridge& b, AVFrame* f)
 {
     ++b.in;
     {   // the source rate from the input timestamps (microseconds: mpv's lavfi time base)
-        if (g_rateReset.exchange(false)) { g_rate.Reset(); g_measuredFps.store(0); }
+        if (g_rateReset.exchange(false)) {
+            g_rate.Reset(); g_measuredFps.store(0);
+            g_comb.Reset(); g_ilSeen = g_ilFlagged = 0; g_ilDone = false; g_ilVerdict.store(0); g_ilWhy.clear();
+        }
         const bool disc = f->pts == AV_NOPTS_VALUE || b.lastPts == AV_NOPTS_VALUE || f->pts <= b.lastPts;
         if (f->pts != AV_NOPTS_VALUE && g_rate.Push(double(f->pts) / 1e6, disc)) {
             g_measuredFps.store(g_rate.fps());
@@ -422,6 +441,11 @@ bool Feed(Bridge& b, AVFrame* f)
             b.lastPts = b.prevPts = AV_NOPTS_VALUE;   // no pair across the new set-up
         }
     }
+    if (g_ilVerdict.load() == 2 && b.mode != Bridge::Mode::Pass) {   // measured interlaced earlier in this file (an earlier graph)
+        Log("interlaced: %s, earlier in this file: pass-through at the source rate", g_ilWhy.c_str());
+        b.mode = Bridge::Mode::Pass;
+        return false;
+    }
     if (b.mode == Bridge::Mode::Unset) {
         b.decidedFps = SourceFps();
         b.k = b.wantK = DecideK(b.decidedFps);
@@ -439,6 +463,10 @@ bool Feed(Bridge& b, AVFrame* f)
             c = f->format == AV_PIX_FMT_YUV420P
                 ? CellsFromYuv(static_cast<const uint8_t*>(f->data[0]), f->linesize[0], static_cast<const uint8_t*>(f->data[1]), static_cast<const uint8_t*>(f->data[2]), f->linesize[1], f->width, f->height, 8, true)
                 : CellsFromYuv(reinterpret_cast<const uint16_t*>(f->data[0]), f->linesize[0] / 2, reinterpret_cast<const uint16_t*>(f->data[1]), reinterpret_cast<const uint16_t*>(f->data[2]), f->linesize[1] / 2, f->width, f->height, 10, true);
+            if (!g_ilDone) {
+                if (f->format == AV_PIX_FMT_YUV420P) g_comb.Push(static_cast<const uint8_t*>(f->data[0]), ptrdiff_t(f->linesize[0]), f->width, f->height, 0);
+                else g_comb.Push(reinterpret_cast<const uint16_t*>(f->data[0]), ptrdiff_t(f->linesize[0] / 2), f->width, f->height, 2);
+            }
         } else if (f->format == AV_PIX_FMT_VIDEOTOOLBOX && f->data[3]) {
             CVPixelBufferRef pb = reinterpret_cast<CVPixelBufferRef>(f->data[3]);
             if (CVPixelBufferGetPlaneCount(pb) == 2 && CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
@@ -449,6 +477,10 @@ bool Feed(Bridge& b, AVFrame* f)
                 const ptrdiff_t ys = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 0)), cs = ptrdiff_t(CVPixelBufferGetBytesPerRowOfPlane(pb, 1));
                 c = p10 ? CellsFromYuv(static_cast<const uint16_t*>(y), ys / 2, static_cast<const uint16_t*>(uv), static_cast<const uint16_t*>(nullptr), cs / 2, w, h, 16, true)
                         : CellsFromYuv(static_cast<const uint8_t*>(y), ys, static_cast<const uint8_t*>(uv), static_cast<const uint8_t*>(nullptr), cs, w, h, 8, true);
+                if (!g_ilDone) {   // P010-style words: the sample in the high bits
+                    if (p10) g_comb.Push(static_cast<const uint16_t*>(y), ys / 2, w, h, 8);
+                    else g_comb.Push(static_cast<const uint8_t*>(y), ys, w, h, 0);
+                }
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
                 static double vtNext = -1; const double tt = double(f->pts) / 1e6;
                 if (f->pts != AV_NOPTS_VALUE && (vtNext < 0 || tt >= vtNext || tt < vtNext - 5.0)) {
@@ -479,6 +511,23 @@ bool Feed(Bridge& b, AVFrame* f)
         }
 #endif
         if (c.ok() && f->pts != AV_NOPTS_VALUE && g_content.Push(c, double(f->pts) / 1e6)) g_contentClass.store(g_content.Current().cls);
+    }
+    if (!g_ilDone) {   // interlacing: decided once per file (the filter's rule: 24 moving frames, or 240 frames without motion)
+        using pushmpc::content::CombMeter;
+        if (++g_ilSeen <= 3) Log("frame %d: %s (the decoder's flag: a prior; the picture decides)", g_ilSeen - 1, PM_INTERLACED(f) ? "interlaced" : "progressive");
+        if (PM_INTERLACED(f)) ++g_ilFlagged;
+        if (g_comb.verdict() != CombMeter::kMeasuring || g_ilSeen >= CombMeter::kGiveUp) {
+            g_ilDone = true;
+            const bool il = g_comb.verdict() == CombMeter::kInterlaced;
+            char why[200];
+            if (il) snprintf(why, sizeof(why), "interlaced input (field combing measured on %d of %d moving frames)", g_comb.combed(), g_comb.measured());
+            else snprintf(why, sizeof(why), "progressive (measured): %d of %d moving frames combed%s; flags said %d of %d frames interlaced", g_comb.combed(), g_comb.measured(),
+                          g_comb.verdict() == CombMeter::kMeasuring ? " (too little motion to tell: treated as progressive)" : "", g_ilFlagged, g_ilSeen);
+            g_ilWhy = why;
+            g_ilVerdict.store(il ? 2 : 1);
+            if (il) { Log("interlaced: %s: pass-through at the source rate from here", why); b.mode = Bridge::Mode::Pass; return false; }
+            Log("%s", why);
+        }
     }
     const bool contiguous = b.lastPts != AV_NOPTS_VALUE && f->pts != AV_NOPTS_VALUE && f->pts > b.lastPts &&
                             (b.prevPts == AV_NOPTS_VALUE || f->pts - b.lastPts <= 3 * std::max<int64_t>(1, b.lastPts - b.prevPts));
