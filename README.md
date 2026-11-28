@@ -22,11 +22,13 @@ and sets itself up for your graphics card and display.
 
 ## What you get
 
-- **Smoother motion.** Up to 16 frames for every frame of the video, so a 24 fps film fills a 120 Hz or 240 Hz screen.
+- **Smoother motion.** New frames in between the video's own (up to 16 for every frame on GeForce RTX 50 and 40
+  cards), so a 24 fps film fills a 120 Hz or 240 Hz screen.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
 - **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
   clean-up for low-quality streams.
-- **HDR done right.** HDR10, HDR10+, HLG and Dolby Vision play untouched, and SDR video can be shown as HDR.
+- **HDR done right.** On an HDR display, HDR10, HDR10+ and HLG play untouched. On an SDR display, HDR video is
+  converted to fit your screen.
 - **No fiddling.** Auto picks every setting for your graphics card and screen, and keeps adjusting while you watch.
   You can still change anything.
 - **Your player stays your player.** PushMPC plugs into it, and uninstalling puts its settings back the way they were.
@@ -42,15 +44,18 @@ In our tests on a GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps, 
 | PotPlayer | ✅ | – | – |
 | mpv, and PushMPC's own mpv | ✅ | ✅ | 🧪 |
 | mpv.net | ✅ | – | – |
-| SMPlayer, MPC-QT | ✅ | ✅ | – |
+| MPC-QT | ✅ | ✅ | – |
+| SMPlayer | 🧪 | ✅ | – |
 | Celluloid, Haruna | – | ✅ | – |
 | IINA | – | – | 🧪 |
 | VLC 3 | ✅ | ✅ | 🧪 |
 | Kodi 21 and 22 | ✅ | ✅ | – |
-| Plex (Plex for Windows, Plex HTPC, Plex for Mac; on Linux from Flathub) | ✅ | ✅ | 🧪 |
-| Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – |
-| Stremio 5.0.28 and newer | ✅ | – | – |
-| Any other player (KMPlayer, GOM, Emby Theater, ...) through **capture mode** | ✅ | – | – |
+| Plex (Plex for Windows, Plex HTPC, Plex for Mac; on Linux from Flathub or Snap) | ✅ | ✅ | 🧪 |
+| Jellyfin Desktop | ✅ | ✅ | 🧪 |
+| Jellyfin MPV Shim | ✅ | 🧪 | 🧪 |
+| Plex MPV Shim | 🧪 | 🧪 | 🧪 |
+| Stremio (on Windows 5.0.28 and newer; on Linux from Flathub) | ✅ | ✅ | 🧪 |
+| Any other player (KMPlayer, GOM, Emby Theater, ...) through **capture mode** | 🧪 | 🧪 | 🧪 |
 
 ✅ Works · 🧪 Preview (works, still being tested) · 🔜 Coming soon · – not available
 
@@ -59,7 +64,9 @@ others are checked automatically with every build.
 
 **Capture mode** covers players PushMPC can't plug into. It shows the player's picture, made smoother, in a second
 window. It is a little behind the sound, and copy-protected video (Netflix and the like) stays black, so a player from
-the list above always looks better. See [capture mode](docs/user-guide.md#capture-mode).
+the list above always looks better. On Windows, Setup adds **PushMPC Capture** to the Start menu; on Linux, Setup adds
+menu entries named "*Player* with PushMPC"; on a Mac, run `pushmpc-capture --player <app>` (macOS asks once for the
+Screen Recording permission). See [capture mode](docs/user-guide.md#capture-mode).
 
 ## Graphics cards
 
@@ -67,18 +74,20 @@ PushMPC works on any graphics card that runs DirectX 12 (Windows) or Vulkan (Lin
 
 | Graphics card | Smoother motion | Sharper picture |
 |---|---|---|
-| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 16x | RTX Video Super Resolution, RTX Video HDR |
-| **GeForce RTX 30 / 20** | NVIDIA frame generation (RTX 30), DLSS frame generation, PushFlow | RTX Video Super Resolution, RTX Video HDR |
+| **GeForce RTX 50 / 40** | NVIDIA frame generation up to 16x | RTX Video Super Resolution |
+| **GeForce RTX 30 / 20** | NVIDIA frame generation (RTX 30), DLSS frame generation, PushFlow | RTX Video Super Resolution |
 | **GeForce GTX 16 / 10** | PushFlow, FSR | RTX Video Super Resolution (GTX 16) or NIS |
 | **Radeon RX 6000 / 7000 / 9000** | PushFlow, FSR, AMD Fluid Motion | FSR |
 | **Radeon RX 5000, Intel Arc, Snapdragon X** | PushFlow, FSR | FSR or NIS |
 
-PushFlow is PushFPS's AI frame generation. On Linux, RTX cards get NVIDIA's frame generation and Super Resolution, and
-other cards get PushFlow or PushMPC's own engine. If your card can run a feature, you get it; Auto picks the best mix.
+PushFlow is PushFPS's AI frame generation. On Linux, RTX cards use NVIDIA's frame generation and Super Resolution when
+the driver offers them, and other cards get PushFlow or PushMPC's own engine. If your card can run a feature, you get
+it; Auto picks the best mix. So far PushMPC has been tested by hand on a GeForce RTX 50 card; on other cards, Auto
+checks what your card runs well and picks from that.
 
 ## Install
 
-### Windows 10 and 11
+### Windows
 
 1. Download **[PushMPC-Setup.exe](https://github.com/CptPakundo/PushMPC/releases/latest/download/PushMPC-Setup.exe)**
    and run it.
@@ -88,6 +97,7 @@ other cards get PushFlow or PushMPC's own engine. If your card can run a feature
    750 MB the first time, less if PushFPS is already installed.
 
 No administrator rights are needed. Only Plex asks for permission once, because Plex is installed for all users.
+PushMPC is tested on Windows 11; Windows 10 should work too.
 
 ### Linux
 
@@ -107,7 +117,8 @@ effects. VLC and the Kodi add-on are in the x86_64 download.
 
 ### Mac
 
-Preview, for mpv, IINA, VLC and Plex (Plex for Mac and Plex HTPC). You need [Homebrew](https://brew.sh). In Terminal:
+Preview, for mpv, IINA, VLC, Plex (Plex for Mac and Plex HTPC), Stremio, Jellyfin Desktop and capture mode. You need
+[Homebrew](https://brew.sh). In Terminal:
 
 ```sh
 brew tap CptPakundo/pushmpc https://github.com/CptPakundo/PushMPC
@@ -125,7 +136,9 @@ Just open a video in your player. PushMPC switches on by itself.
   for the first few seconds, for example `PushMPC · 10x Medium · VSR 4 · 240 fps · VRR`.
 - **Settings.** In MPC-HC and MPC-BE: **Play > Filters > PushMPC Filter**. In Kodi: the PushMPC add-on's settings. In
   VLC: **Tools > Preferences > All > Video > Filters > PushMPC**. Everything starts on Auto.
-- **Plex, mpv and the others** use Auto with the same rules and need nothing from you.
+- **Plex, mpv and the others** use Auto with the same rules and need nothing from you. On Windows they follow the
+  settings you make on MPC-HC's settings page; on Linux, settings live in `~/.config/pushmpc/settings.ini` (for
+  example `Smoother=Auto`, `Off`, or `2` to `8`).
 
 The [user guide](docs/user-guide.md) explains every setting.
 
@@ -142,13 +155,13 @@ PushMPC. In PotPlayer, choose MPC Video Renderer and a "copy-back" decoder (see 
 <details><summary><b>Do I need an HDR display?</b></summary>
 
 No. On an SDR display you get smoother motion and upscaling, and HDR video is converted to fit your screen. With Windows
-HDR on, HDR10, HDR10+, HLG and Dolby Vision pass through untouched, and SDR video can be shown as HDR. If you use an
-OLED monitor's "True Black 400" mode, set **Display peak** to 400 in the settings.
+HDR on, HDR10, HDR10+ and HLG pass through untouched. In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
+HDR10 or HLG) from its very first frame, so HDR is recognised from the start.
 </details>
 
-<details><summary><b>G-SYNC, FreeSync and VRR</b></summary>
+<details><summary><b>G-SYNC and VRR</b></summary>
 
-PushMPC reads whether G-SYNC or FreeSync is on for your player and chooses the frame rate to match. If your screen
+PushMPC reads whether G-SYNC is on for your player and chooses the frame rate to match. If your screen
 supports G-SYNC but it is off for MPC-HC, the settings page offers **Turn on G-SYNC for MPC-HC**. It changes only
 MPC-HC's own profile in the NVIDIA driver, and uninstalling puts it back.
 </details>
@@ -156,14 +169,14 @@ MPC-HC's own profile in the NVIDIA driver, and uninstalling puts it back.
 <details><summary><b>The sound is early in capture mode.</b></summary>
 
 Capture mode shows the picture about 1/20 of a second after the player. Set your player's audio delay to about
-+80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). For Plex, PushMPC does this for you.
-This only affects capture mode; every other player keeps picture and sound in sync.
++80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). This only affects capture mode; every other player keeps picture and sound in sync.
 </details>
 
 <details><summary><b>How do I uninstall?</b></summary>
 
 - **Windows:** Settings > Apps > Installed apps > PushMPC > Uninstall.
 - **Linux:** `sh ~/.local/share/pushmpc/setup.sh uninstall`
+- **Mac:** `pushmpc-setup uninstall`, then `brew uninstall pushmpc`.
 
 Your players' settings go back to how they were before PushMPC.
 </details>
@@ -187,7 +200,7 @@ no tracking of any kind.
 
 On Windows, PushMPC checks at most once a day, downloads only what changed, and installs it when your player is
 closed. If a new version doesn't work, it goes back to the previous one by itself. To update on Linux, download the new
-release and run `sh setup.sh` again.
+release and run `sh setup.sh` again. On a Mac: `brew upgrade pushmpc`, then `pushmpc-setup install`.
 </details>
 
 <details><summary><b>Do I need PushFPS or SVP?</b></summary>
@@ -197,9 +210,15 @@ PushMPC leaves SVP's own mpv alone. If SVP's filter is on in MPC-HC, Setup switc
 uninstalling turns it back on.
 </details>
 
+## Known limits
+
+- **mpv older than 0.39:** the first few frames of each video play without PushMPC. From mpv 0.39 on, PushMPC
+  starts with the very first frame.
+- **Saving a video with mpv** (`mpv --o=...`): mpv ignores your `mpv.conf` when it saves, so add
+  `--include=<path to your mpv.conf>` to the command to use PushMPC.
+
 ## Roadmap
 
-- Capture mode on Linux and Mac (for now, there's a [workaround with OBS](docs/user-guide.md#capture-mode-on-linux-and-mac)).
 - Faster AI frame generation on more graphics cards, including AMD Radeon and Snapdragon on Windows.
 
 ## Credits
@@ -214,7 +233,9 @@ PushMPC stands on the work of others:
   **[Kodi](https://kodi.tv)** and **[VapourSynth](https://www.vapoursynth.com)**: the players and tools PushMPC plugs
   into.
 - **[FFmpeg](https://ffmpeg.org)**, **[ONNX Runtime](https://onnxruntime.ai)**, **[ncnn](https://github.com/Tencent/ncnn)**,
-  the RIFE models, **NVIDIA Image Scaling** and **AMD FidelityFX**.
+  the RIFE models, **NVIDIA Image Scaling**, **AMD FidelityFX**, **Intel XeSS**, **HelixSR**, and the community's DLSS
+  frame generation ports for older GeForce cards.
+- The anime upscaling models **ArtCNN**, **CuNNy** and **AnimeSR**, and OpenAI's **CLIP** image model.
 
 PushMPC was written with the help of AI (Claude, by Anthropic).
 
