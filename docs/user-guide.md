@@ -67,7 +67,9 @@ What Setup sets up:
 - mpv (your distribution's or Flathub's), Celluloid, Haruna, SMPlayer, MPC-QT, Jellyfin Desktop and the Jellyfin and
   Plex MPV Shims;
 - VLC 3 (also from Flathub or Snap) and the Kodi add-on, in the x86_64 download;
-- Plex and Plex HTPC from Flathub (the Snap version of Plex can't be set up and is left alone);
+- Plex and Plex HTPC from Flathub or Snap, Stremio from Flathub;
+- capture mode (preview) for players PushMPC can't plug into, such as Celluloid from Flathub, see
+  [capture mode on Linux and Mac](#capture-mode-on-linux-and-mac);
 - PushFlow for your card: NVIDIA RTX, Intel, and AMD (with or without ROCm).
 
 To remove everything: `sh ~/.local/share/pushmpc/setup.sh uninstall`. To update: download the new release and run
@@ -78,7 +80,8 @@ below, for example `Smoother=Auto` (or `Off`, or `2` to `8`).
 
 ## Installing on a Mac
 
-PushMPC on the Mac is a preview. It works in mpv, IINA, VLC and Plex (Plex for Mac and Plex HTPC). You need
+PushMPC on the Mac is a preview. It works in mpv, IINA, VLC, Plex (Plex for Mac and Plex HTPC), Stremio and Jellyfin
+Desktop, and capture mode covers other apps. You need
 [Homebrew](https://brew.sh). Open Terminal and run:
 
 ```sh
@@ -115,16 +118,21 @@ PushMPC needs nothing from you in most players: Setup sets them up and Auto does
 |---|:-:|:-:|:-:|---|
 | MPC-HC, MPC-BE | ✅ | – | – | the most complete: settings page and on-screen info |
 | PotPlayer | ✅ | – | – | needs MPC Video Renderer, see [below](#potplayer) |
-| mpv, mpv.net, SMPlayer, MPC-QT | ✅ | ✅ | 🧪 mpv | see [mpv and mpv-based players](players-mpv.md) for details |
+| mpv | ✅ | ✅ | 🧪 | see [mpv and mpv-based players](players-mpv.md) for details |
+| mpv.net | ✅ | – | – | |
+| MPC-QT | ✅ | ✅ | – | |
+| SMPlayer | 🧪 | ✅ | – | |
 | PushMPC's own mpv | ✅ | – | – | optional box in Setup; on Linux, your distribution's mpv gets the same built-in route |
-| Celluloid, Haruna | – | ✅ | – | |
+| Celluloid, Haruna | – | ✅ | – | your distribution's Celluloid; Flathub's goes through [capture mode](#capture-mode-on-linux-and-mac) |
 | VLC 3 | ✅ | ✅ | 🧪 | see [VLC](#vlc) |
 | IINA | – | – | 🧪 | see [Installing on a Mac](#installing-on-a-mac) |
 | Kodi 21 and 22 | ✅ | ✅ | – | see [Kodi](#kodi) |
-| Plex for Windows, Plex HTPC, Plex for Mac | ✅ | ✅ | 🧪 | on Linux from Flathub; see [Plex](#plex) |
-| Jellyfin Desktop, Jellyfin MPV Shim, Plex MPV Shim | ✅ | ✅ | – | the shims play through mpv |
-| Stremio 5.0.28 and newer | ✅ | – | – | older versions: [capture mode](#capture-mode) |
-| KMPlayer, GOM Player, Emby Theater, other players | ✅ | – | – | [capture mode](#capture-mode) |
+| Plex for Windows, Plex HTPC, Plex for Mac | ✅ | ✅ | 🧪 | on Linux from Flathub or Snap; see [Plex](#plex) |
+| Jellyfin Desktop | ✅ | ✅ | 🧪 | |
+| Jellyfin MPV Shim | ✅ | 🧪 | 🧪 | plays through mpv |
+| Plex MPV Shim | 🧪 | 🧪 | 🧪 | plays through mpv |
+| Stremio | ✅ | ✅ | 🧪 | Windows: 5.0.28 and newer (older versions: [capture mode](#capture-mode)); Linux: from Flathub |
+| KMPlayer, GOM Player, Emby Theater, other players | 🧪 | 🧪 | 🧪 | [capture mode](#capture-mode) |
 | Zoom Player | by hand | – | – | see [below](#zoom-player-by-hand) |
 | SVP's own mpv | – | – | – | left alone: SVP manages it |
 
@@ -181,13 +189,16 @@ you uninstall. Because Plex is installed for all users, Windows asks for permiss
   can work with (on Plex versions it knows). It never does both.
 - When Plex updates itself, PushMPC sets it up again at your next sign-in.
 - Don't want this? Untick the Plex box on Setup's first page.
-- On Linux, `setup.sh` does the same for Plex and Plex HTPC from Flathub, without changing anything inside Plex.
+- On Linux, `setup.sh` does the same for Plex and Plex HTPC from Flathub or Snap, without changing anything inside
+  Plex.
 - On a Mac, `pushmpc-setup install` does the same for Plex for Mac and Plex HTPC (preview), see
   [Installing on a Mac](#installing-on-a-mac).
 
 ### Stremio, Jellyfin and the MPV Shims
 
-Stremio 5.0.28 and newer reads an mpv settings file, which Setup fills in. Jellyfin Desktop is set up the same way. The
+Stremio 5.0.28 and newer reads an mpv settings file, which Setup fills in. Jellyfin Desktop is set up the same way. On
+Linux, `setup.sh` sets up Stremio and Jellyfin Desktop from Flathub; on a Mac, `pushmpc-setup install` sets up both
+(preview). The
 Jellyfin and Plex MPV Shims play through your installed mpv, so they need mpv (Setup tells you if it's missing).
 
 ### Zoom Player (by hand)
@@ -202,8 +213,8 @@ Remove the filter there again when you uninstall PushMPC.
 
 ## Capture mode
 
-Capture mode is for players PushMPC can't plug into, such as KMPlayer, GOM Player or Emby Theater. Setup turns it on
-only if you have one of those players, and adds **PushMPC Capture** to the Start menu.
+Capture mode (preview) is for players PushMPC can't plug into, such as KMPlayer, GOM Player or Emby Theater. On
+Windows, Setup turns it on only if you have one of those players, and adds **PushMPC Capture** to the Start menu.
 
 1. Start your player and play a video.
 2. Open **PushMPC Capture** from the Start menu.
@@ -214,23 +225,22 @@ Good to know:
 - The first time, PushMPC Capture asks to download PushFPS (about 130 MB), which does the capturing. It goes into
   PushMPC's own folder; a PushFPS you already have isn't touched.
 - The picture comes about 1/20 of a second after the player's sound. If the sound seems early, set your player's audio
-  delay to about +80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization). For Plex, PushMPC does
-  this for you.
+  delay to about +80 ms (KMPlayer and GOM: audio settings; VLC: Tools > Track Synchronization).
 - Copy-protected video (Netflix and similar) stays black.
 - A player PushMPC plugs into directly always looks better than capture mode.
 
 ### Capture mode on Linux and Mac
 
-A built-in capture mode for Linux and Mac is planned. Until then, OBS Studio can turn your player's window into a
-virtual camera that PushFPS can show:
+Capture mode on Linux and Mac is a preview too. The player plays as usual, and PushMPC shows its picture, made
+smoother, in a window right over it that lets every click through.
 
-1. Install OBS Studio. On Linux also install `v4l2loopback` (for example your distribution's `v4l2loopback-dkms`). On a
-   Mac, allow OBS's camera extension when OBS asks.
-2. In OBS, add a source for the player: *Window Capture (PipeWire)* on Linux, *macOS Screen Capture* on a Mac. Set the
-   canvas to the video's size and frame rate.
-3. Click *Start Virtual Camera*.
-4. Install [PushFPS](https://github.com/DosukaSOL/PushFPS), choose *OBS Virtual Camera* as the capture card, and turn on
-   frame generation.
+- **Linux:** `setup.sh` adds a menu entry "*Player* with PushMPC" for each player it finds that PushMPC can't plug
+  into (for example Celluloid from Flathub, Totem or Clapper). It works on X11, and on Wayland through your desktop's
+  screen sharing (your desktop asks once which window to capture). For a browser, add an entry yourself:
+  `sh ~/.local/share/pushmpc/capture/pushmpc-capture.sh enable firefox`.
+- **Mac:** after installing with Homebrew, start it with `pushmpc-capture --player <app>`, for example for QuickTime
+  Player, Infuse or a browser. macOS asks once for the Screen Recording permission (for "PushMPC Capture").
+- Copy-protected video shows black to any capture; capture mode then steps aside and the player's own picture stays.
 
 ## Graphics cards
 
@@ -246,10 +256,8 @@ Auto tries the methods in this order and uses the best one your card keeps up wi
 | Radeon RX 9000 | PushFlow, then FSR 4, AMD Fluid Motion | FSR | yes |
 | Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD Fluid Motion | FSR | RX 7000, when there's time |
 
-SDR to HDR works on every card with PushMPC's own curve; RTX cards can also use RTX Video HDR.
-
-On Linux, NVIDIA RTX cards use NVIDIA's frame generation and Super Resolution (with NVIDIA's own driver), and other
-cards use PushFlow or PushMPC's own engine with NIS or FSR upscaling.
+On Linux, NVIDIA RTX cards use NVIDIA's frame generation and Super Resolution when NVIDIA's own driver offers them, and
+other cards use PushFlow or PushMPC's own engine with NIS or FSR upscaling.
 
 ## Settings
 
@@ -272,17 +280,17 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 | FG quality | Auto, Low, Medium, High | frame generation quality. Auto uses High only where it fits with time to spare |
 | FG method | Auto, NVIDIA VFG, DLSS-G, PushFlow, FSR, AMD FRC | the frame generation method; methods your card can't run are marked |
 | Refresh (VRR) | Auto, Assume VRR, Assume fixed | whether your display runs G-SYNC or FreeSync for the player. Auto reads it from the driver |
-| Upscaler | Auto, RTX VSR, FSR, NIS | Auto: RTX VSR on NVIDIA RTX, otherwise FSR |
+| Upscaler | Auto, RTX VSR, FSR, NIS, Anime upscaler | Auto: RTX VSR on NVIDIA RTX, otherwise FSR. Anime upscaler: an AI upscaler made for cartoons and anime (tested in MPC-HC with 1080p video) |
 | HDR method | Auto (PushMPC curve), RTX Video HDR | how SDR becomes HDR; RTX Video HDR needs an RTX card |
 | Limit brightness on bright scenes | on / off | on (default): very bright scenes are calmed slowly so your display can hold them |
-| Display peak | Auto, 400, 600, 1000, or a number | your display's peak brightness. Auto uses what Windows reports. On OLED monitors in "True Black 400" mode, choose 400 |
+| Display peak | Auto, 400, 600, 1000, or a number | your display's peak brightness. Auto uses what Windows reports |
 | Upscale to | Screen, 1440p, 4K, 5K | the target size |
 | Upscale style | Auto, Standard, Keep detail, Clean hard | the look of RTX Video Super Resolution; Auto picks by the video's quality |
 | Clean-up strength | Subtle, Balanced, Strong | how strong the clean-up is |
 | Deband | Auto, Off, On | smooths banding in skies and gradients |
 | Deband strength | Low, Medium, High | how strong the smoothing is |
 | Subtitle hold | Auto (on text), Off, On | keeps subtitles that are burned into the picture steady, so they don't warp. Normal subtitles never need it |
-| Animation | Auto, Off, On | cartoons and anime are often drawn for every second or third frame. PushMPC finds the repeated drawings and spreads the new frames evenly between the drawings, so motion glides instead of stepping. Auto also tunes the picture for cartoons when it finds one. Off plays every frame as before |
+| Animation | Auto, Off, On | cartoons and anime are often drawn for every second or third frame. With this on, PushMPC looks for the repeated drawings and tunes frame generation and the picture for animation. Auto turns it on when the picture is found to be animation. Off plays every frame as before |
 | On-screen status | Brief at start, Always, Off | the info line in the top-left corner: for 3 seconds at the start, always, or never |
 | On battery | Light, Same as plugged in | on a laptop's battery, Light uses less power: up to 2x, lighter upscaling, no clean-up |
 
@@ -291,25 +299,21 @@ and **Write a frame log** (only turn it on when asked for one in a bug report).
 
 ## HDR, scene cuts and G-SYNC
 
-**HDR video on an HDR display.** HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) pass through untouched. Setup
-sets MPC Video Renderer so that only content brighter than your display is toned down, and puts your old settings back
+**HDR video.** HDR10, HDR10+ and HLG pass through untouched. In MPC-HC, Dolby Vision (profiles 7 and 8) is processed
+through its HDR10 base layer and its Dolby Vision data stays with every frame. Setup sets MPC Video Renderer so that only content brighter than your display is toned down, and puts your old settings back
 when you uninstall.
 
-**HDR video on an SDR display.** MPC Video Renderer converts it to fit your screen. With HDR10+ and Dolby Vision, it
-follows each scene's brightness.
-
-**SDR to HDR.** With Windows HDR on, SDR video can be shown as HDR. PushMPC keeps shadows and mid-tones where they are
-and only lifts the highlights, as far as your display allows.
+**HDR video on an SDR display.** MPC Video Renderer converts it to fit your screen. In mpv 0.39 and newer, PushMPC
+reads each video's colour (SDR, HDR10 or HLG) from its very first frame.
 
 **Scene cuts.** At a hard cut, frame generation would blend two shots into a smear. PushMPC spots cuts and lets the new
 shot start exactly on its own frame. Fast pans, zooms, flashes and fades are left alone. When a film switches between
 two picture shapes (for example a taller picture in some scenes), that change is treated like a cut too. Large effects
 like fire or energy beams can still look a little torn with every method.
 
-**G-SYNC and FreeSync.** Auto reads whether variable refresh is on for the player and picks the frame rate to match. If
+**G-SYNC.** Auto reads whether variable refresh is on for the player and picks the frame rate to match. If
 your NVIDIA display supports G-SYNC but it's off for MPC-HC, the settings page offers **Turn on G-SYNC for MPC-HC**. It
-only changes MPC-HC's own profile in the NVIDIA driver, keeps a backup, and uninstalling puts it back. On AMD, FreeSync
-switched on in AMD Software with the player fullscreen counts as variable refresh.
+only changes MPC-HC's own profile in the NVIDIA driver, keeps a backup, and uninstalling puts it back.
 
 **Picture and sound stay in sync.** Every frame, real or generated, keeps its own timestamp. After a seek, the first
 generated frame appears in about 1/20 of a second.
