@@ -174,7 +174,21 @@ typedef struct PushCoreSettings {
        generation cannot be right; default 0 (a smaller struct). */
     int32_t animationMode;
     uint32_t holdFlags;
+    /* Appended (PUSHCORE_FEATURE_NR_DIALS): Neural Rendering's other dials, beside nrTone / nrStructure. Each value is used
+       only when its PUSHCORE_NR_DIAL_* bit is set in nrDials; nrDials 0 (a smaller or a zeroed struct) keeps exactly what
+       Neural Rendering got before: intensity 1, skin -1 (follows structure), auto mask off, style 0. An out-of-range value
+       is ignored (the default stays). While playing, a change of these dials or of nrTone / nrStructure alone, applied with
+       applySettings, keeps Neural Rendering's history (no reset, no flash); seeks and a new stream still reset it. */
+    uint32_t nrDials;          /* PUSHCORE_NR_DIAL_* */
+    float nrIntensity;         /* 0..1: how much of the model's change is used */
+    float nrSkin;              /* -1 = follows structure, or 0..1; acts only with nrAutoMask 1 */
+    int32_t nrAutoMask;        /* 0 / 1: the model's automatic character mask */
+    int32_t nrStyle;           /* 0..2: NVIDIA's models A / B / C */
 } PushCoreSettings;
+#define PUSHCORE_NR_DIAL_INTENSITY 1u
+#define PUSHCORE_NR_DIAL_SKIN 2u
+#define PUSHCORE_NR_DIAL_AUTO_MASK 4u
+#define PUSHCORE_NR_DIAL_STYLE 8u
 #define PUSHCORE_ANIM_FULL 0
 #define PUSHCORE_ANIM_CAMERA_ONLY 1
 #define PUSHCORE_ANIM_OFF 2
@@ -422,6 +436,8 @@ typedef struct PushCoreSubmitTiming {
 #define PUSHCORE_MAX_MULTIPLIER 16u
 #define PUSHCORE_FEATURE_PUSHFLOW16 16384u /* PushFlow up to PUSHCORE_MAX_MULTIPLIER (flow once above 4x: one network run per pair, every subframe rebuilt from its grids); older cores stop at 4x */
 #define PUSHCORE_FEATURE_HELIXSR (1u << 26) /* PUSHCORE_FG_HELIXFG, PUSHCORE_CAP_HELIX_FG / PUSHCORE_CAP_HLX_FSR4 */
+#define PUSHCORE_FEATURE_NR_DIALS (1u << 28) /* PushCoreSettings.nrDials / nrIntensity / nrSkin / nrAutoMask / nrStyle, and Neural
+                                                Rendering's dials change while playing without resetting its history */
 #define PUSHCORE_FEATURE_TURING_DLSSG (1u << 17) /* PUSHCORE_FG_DLSSG on RTX 20 through the community port (Setup fetches it;
                                                     self-tested on the first DLSS-G open, unlock TuringDlssg); PUSHCORE_CAP_DLSSG says
                                                     whether it is usable on this card */

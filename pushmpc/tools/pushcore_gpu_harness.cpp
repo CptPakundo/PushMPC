@@ -137,6 +137,7 @@ int wmain(int argc, wchar_t** argv) {
     // (--record 1 stores the hardware results; tools/pushcore_selftest is the stand-alone version)
     std::wstring adapterPick = L"nvidia", selfTest;
     uint64_t cutAt = 0; bool checkMotion = false, selfTestRecord = false;
+    std::wstring nrLiveSpec;   // --nrlive
     PushCoreSettings ps{};
     ps.structSize = sizeof(ps); ps.source = PUSHCORE_SETTINGS_PUSHMPC; ps.sr = 1; ps.srQuality = 4; ps.srTarget = PUSHCORE_SR_TARGET_4K;
     ps.multiplier = 4; ps.vfgQuality = 1; ps.nrTone = ps.nrStructure = 1; ps.fgBackend = PUSHCORE_FG_VFG; ps.fgTier = 1;
@@ -191,6 +192,11 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (k == L"--subtitles") { useSettings = true; ps.subtitleHold = _wtoi(v.c_str()); continue; }
         if (k == L"--held") { useSettings = true; ps.heldFrames = _wtoi(v.c_str()); continue; }
+        // Neural Rendering (settings route): --nr 1; --nrlive N:intensity=0.6,tone=0.5,structure=0.5,skin=0.3,automask=1,style=1
+        // changes those dials before source frame N with setSettings + applySettings (the no-reset live path; pushcore.log
+        // shows "nr live:" lines)
+        if (k == L"--nr") { useSettings = true; ps.nr = _wtoi(v.c_str()); continue; }
+        if (k == L"--nrlive") { useSettings = true; nrLiveSpec = v; continue; }
         if (k == L"--gray") { grayWidth = uint32_t(_wtoi(v.c_str())); continue; }
         if (k == L"--pushfps") pushfps = v;
         else if (k == L"--shaders") shaderDir = v;
@@ -612,6 +618,34 @@ int wmain(int argc, wchar_t** argv) {
     PushCoreFrame got[32];
     while (!failed) {
         // ingest: one decoded frame at a time, as soon as the graph has a free slot
+        if (!nrLiveSpec.empty() && submitted == uint64_t(_wtoi64(nrLiveSpec.c_str())) && submitted > 0) {
+            // --nrlive: the dials change mid-stream; the graph must keep NR's history (no rebuild, no reset)
+            const size_t colon = nrLiveSpec.find(L':');
+            std::wstring list = colon == std::wstring::npos ? std::wstring() : nrLiveSpec.substr(colon + 1);
+            for (size_t p = 0; p < list.size();) {
+                const size_t e = list.find(L',', p), q = list.find(L'=', p);
+                const std::wstring item = list.substr(p, e == std::wstring::npos ? std::wstring::npos : e - p);
+                if (q != std::wstring::npos && q < (e == std::wstring::npos ? list.size() : e)) {
+                    const std::wstring name = list.substr(p, q - p), value = list.substr(q + 1, (e == std::wstring::npos ? list.size() : e) - q - 1);
+                    const float f = float(_wtof(value.c_str()));
+                    if (name == L"intensity") { ps.nrDials |= PUSHCORE_NR_DIAL_INTENSITY; ps.nrIntensity = f; }
+                    else if (name == L"tone") ps.nrTone = f;
+                    else if (name == L"structure") ps.nrStructure = f;
+                    else if (name == L"skin") { ps.nrDials |= PUSHCORE_NR_DIAL_SKIN; ps.nrSkin = f; }
+                    else if (name == L"automask") { ps.nrDials |= PUSHCORE_NR_DIAL_AUTO_MASK; ps.nrAutoMask = _wtoi(value.c_str()); }
+                    else if (name == L"style") { ps.nrDials |= PUSHCORE_NR_DIAL_STYLE; ps.nrStyle = _wtoi(value.c_str()); }
+                    else std::cout << "--nrlive: unknown dial " << utf8(item) << "\n";
+                }
+                if (e == std::wstring::npos) break;
+                p = e + 1;
+            }
+            const int sr2 = api->setSettings ? api->setSettings(core, &ps) : PUSHCORE_ERROR;
+            const int ar = sr2 == PUSHCORE_OK && api->applySettings ? api->applySettings(core) : PUSHCORE_ERROR;
+            std::cout << std::format("NRLIVE before source frame {}: setSettings {} applySettings {} ({}; dials 0x{:X} intensity {:.2f} tone {:.2f} structure {:.2f} skin {:.2f} autoMask {} style {})\n",
+                                     submitted, sr2, ar, ar == PUSHCORE_OK ? "live" : ar == PUSHCORE_NEEDS_REBUILD ? "needs a rebuild: the live path refused" : "failed",
+                                     ps.nrDials, ps.nrIntensity, ps.nrTone, ps.nrStructure, ps.nrSkin, ps.nrAutoMask, ps.nrStyle);
+            nrLiveSpec.clear();
+        }
         if (haveFrame && submitted < maxFrames && api->canSubmit(core)) {
             const int64_t pts = synthetic ? int64_t(synIndex) * 333333 + 10000000 : av_rescale_q(decoded->best_effort_timestamp, st->time_base, AVRational{1, 10000000});
             const auto t = Clock::now();

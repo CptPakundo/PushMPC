@@ -27,6 +27,7 @@
 #include "pushmpc/pushcore_abi.h"
 #include "pushmpc/content_detect.h"     // IntervalMeter: the source frame interval from the submitted timestamps
 #include "PushCoreDeband.h"
+#include "PushCoreNrDials.h"         // PUSHCORE_FEATURE_NR_DIALS: the NR dials -> NrSettings (no-reset live path)
 #include "PushCoreQuickVsr.h"        // fast start Route B: driver RTX VSR through the D3D11 video processor
 #include "PushCoreXess.h"                   // G10: XeSS frame generation (headless swap chain) and XeSS SR
 #include "veyra/gfx/FsrSrBackend.h"         // its provider override: XeSS SR in the graph's temporal upscaler slot
@@ -1302,11 +1303,8 @@ struct PushCore {
             if (s.frameGenerationBackend == FrameGenerationBackend::Vfg || s.frameGenerationBackend == FrameGenerationBackend::Dlss) s.multiplier = 1;
             if (s.opticalFlowBackend == OpticalFlowBackend::Nvidia) s.opticalFlowBackend = OpticalFlowBackend::AmdFidelityFx;
         }
-        if (s.nr) {
-            auto unit = [](float v, float d) { return std::isfinite(v) && v >= 0 && v <= 1 ? v : d; };
-            s.model.tone = unit(settings.nrTone, 1.0f);
-            s.model.structure = unit(settings.nrStructure, 1.0f);
-        }
+        // tone / structure as before; intensity, skin, auto mask and style only when nrDials asks (else PushFPS's defaults)
+        if (s.nr) pushmpc::applyNrDials(settings, s.model);
         s.videoHdr.enabled = settings.videoHdr != 0;
         if (settings.videoHdrPeak >= 400 && settings.videoHdrPeak <= 2000) s.videoHdr.peakNits = settings.videoHdrPeak;   // PushMPC's HDR boost
         order.reset();
@@ -1881,6 +1879,13 @@ struct PushCore {
 #ifdef VEYRA_FSRSR_PROVIDER_OVERRIDE
         if (xessSr) gfx::FsrSrBackend::setProviderOverride(nullptr);
 #endif
+        if (started) {
+            // the settings this graph runs, as applySettingsLive will compare them (its vfgQuality override included): the first
+            // live change of Neural Rendering's dials after this build then keeps NR's history (PushMpcNrLive.h)
+            auto baseline = loadedSettings;
+            if (cfgVfgQuality >= 0) baseline.vfgQuality = uint32_t(cfgVfgQuality);
+            graph->setLiveSettingsBaseline(baseline);
+        }
         if (!started) {
             lastFailed = graph->failedBackend();
             if (zludaRun && lastFailed == engine::FailedBackend::Sr) {
@@ -4045,7 +4050,7 @@ int pushcore_prewarm2(const PushCoreConfig* config, const PushCoreSettings* sett
 static std::atomic<int> gOpenInstances{0};   // host process GPU priority goes back to Normal with the last one
 
 uint32_t pushcore_abiVersion(void) { return PUSHCORE_ABI_VERSION; }
-uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_PUSHFLOW16 | PUSHCORE_FEATURE_ZLUDA_VSR | PUSHCORE_FEATURE_AMDGPU_EP | PUSHCORE_FEATURE_TURING_DLSSG | PUSHCORE_FEATURE_HELIXSR | PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR | PUSHCORE_FEATURE_ANIME_HOLD | pushmpc::selftest::features(); }
+uint32_t pushcore_features(void) { return PUSHCORE_FEATURE_DV_P5 | PUSHCORE_FEATURE_SR_FAMILY | PUSHCORE_FEATURE_DEBAND | PUSHCORE_FEATURE_CUT_HOLD | PUSHCORE_FEATURE_FG_METHODS | PUSHCORE_FEATURE_CUT_COUNT | PUSHCORE_FEATURE_HDR_PEAK | PUSHCORE_FEATURE_DV_P5_EXACT | PUSHCORE_FEATURE_SUBTITLE_HOLD | PUSHCORE_FEATURE_SUBTITLE_HOLD_AUTO | PUSHCORE_FEATURE_NVOF_FG | PUSHCORE_FEATURE_QUICK_VSR | PUSHCORE_FEATURE_FAST_START | PUSHCORE_FEATURE_VFG16 | PUSHCORE_FEATURE_PUSHFLOW16 | PUSHCORE_FEATURE_ZLUDA_VSR | PUSHCORE_FEATURE_AMDGPU_EP | PUSHCORE_FEATURE_TURING_DLSSG | PUSHCORE_FEATURE_HELIXSR | PUSHCORE_FEATURE_HELD_FRAMES | PUSHCORE_FEATURE_ANIME_SR | PUSHCORE_FEATURE_ANIME_HOLD | PUSHCORE_FEATURE_NR_DIALS | pushmpc::selftest::features(); }
 
 PushCore* pushcore_open(const PushCoreConfig* config, const PushCoreStreamInfo* stream, ID3D11Device* device,
                         char* errorBuffer, uint32_t errorBufferSize) {

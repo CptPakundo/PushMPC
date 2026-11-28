@@ -125,6 +125,18 @@ jobs:
             "$n=$($m.Groups[1].Value)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           }
 
+      # Neural Rendering's no-reset live path without a GPU: the field classification and the applySettings decision of the
+      # patch (PushMpcNrLive.h) and pushcore's ABI mapping of the NR dials (PushCoreNrDials.h). NR cannot run on WARP; the
+      # NGX-level proof is a GPU run ("nr live" lines in pushcore.log).
+      - name: nr_live_test (NR live dials, no GPU)
+        timeout-minutes: 5
+        run: |
+          cl /nologo /std:c++20 /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /I PushFPS\include /I repo\pushmpc\include /I repo\pushmpc\src repo\pushmpc\tools\nr_live_test.cpp /Fe:nr_live_test.exe
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::nr_live_test did not build'; exit 1 }
+          .\nr_live_test.exe
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::nr_live_test failed'; exit 1 }
+          exit 0
+
       - name: SDK headers (as release.yml)
         timeout-minutes: 15
         working-directory: ${{ env.DEPS }}

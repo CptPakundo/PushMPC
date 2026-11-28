@@ -180,7 +180,7 @@ index 0f501aa..ad0d574 100644
  
  } // namespace veyra::pipeline
 diff --git a/include/veyra/pipeline/EnhanceGraph.h b/include/veyra/pipeline/EnhanceGraph.h
-index 3deeab3..e9ff171 100644
+index 3deeab3..11794d1 100644
 --- a/include/veyra/pipeline/EnhanceGraph.h
 +++ b/include/veyra/pipeline/EnhanceGraph.h
 @@ -8,6 +8,7 @@
@@ -248,7 +248,17 @@ index 3deeab3..e9ff171 100644
  class EnhanceGraph {
  public:
      EnhanceGraph(gfx::D3D12DeviceContext& context, gfx::CommandSlotRing& ring,
-@@ -746,8 +769,17 @@ public:
+@@ -686,6 +709,9 @@ public:
+     // Full-batch consumers (export/file accounting) still use resolveGeneration.
+     bool resolveFrame(FrameOutputs& out,uint32_t index);
+     bool applySettings(const engine::EnhancementSettings&);
++    // PushMPC (local addition): the settings this graph was built from, so the first live change after a build can keep
++    // NR's history when it only moves NR's live dials (PushMpcNrLive.h). Without it that first change resets, as before.
++    void setLiveSettingsBaseline(const engine::EnhancementSettings& s){liveSettingsBaseline_=s;}
+     bool selectAutoNrLevel(unsigned level);
+     bool autoNrPoolReady()const{return nrAutoPoolReady_;}
+     unsigned autoNrLevel()const{return nrAutoLevel_;}
+@@ -746,8 +772,17 @@ public:
      ID3D12Resource* unmaskedVideo(unsigned slot)const{return videoFrame_[slot%2].Get();}
      bool exclusionEnabled()const{return desc_.exclusion.enabled;}
      bool srEnabled() const { return srEnabled_; }
@@ -266,7 +276,7 @@ index 3deeab3..e9ff171 100644
      bool hdrOutput() const { return desc_.hdrOutput; }
      // Whether the *source* is HDR (PQ/HLG ingress). The brightness curve is restricted
      // to real HDR sources: an SDR source has no true highlights, so the roll-off and
-@@ -850,6 +882,16 @@ public:
+@@ -850,6 +885,16 @@ public:
      // PushFPS Subtitle Hold, as Crosshair Hold: 0 not asked, 1 running, 2 could not be made, 3 not with this method.
      int subtitleHoldState() const { if(!pipeline::overlay::subtitlesWanted())return 0; if(subtitles_)return 1; if(!desc_.subtitleHold||!fgEnabled_||presentSinkFg())return 3; return 2; }
      unsigned subtitleHoldPixels() { if(!subtitles_)return 0u; subtitles_->harvest(); return subtitles_->maskedPixels(); }
@@ -283,7 +293,7 @@ index 3deeab3..e9ff171 100644
      int hudStillState() const { if(!desc_.hudStill)return 0; if(hudLock_&&hudLock_->stillActive())return 1; if(!fgEnabled_||presentSinkFg())return 3; return 2; }
      // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
      // an NGX feature, so it also works on non-NVIDIA adapters.
-@@ -971,6 +1013,10 @@ private:
+@@ -971,6 +1016,10 @@ private:
      bool initAmfFrc();
      bool initPushFlow();
      std::unique_ptr<VfgBackend> vfgBackend_;
@@ -294,7 +304,7 @@ index 3deeab3..e9ff171 100644
      // RTX 40 series: opens the Blackwell-only multi-frame gate in the mapped
      // DLSS-G runtime. Never touched on any other architecture.
      void applyAdaMfgUnlock();
-@@ -1059,6 +1105,8 @@ private:
+@@ -1059,6 +1108,8 @@ private:
      // (uncovered background). Only with flowRefine_; VEYRA_TEST_FLOW_CONSISTENCY=0 leaves
      // NVOF forward-only (photometric refinement). NR/SR never read it.
      bool flowConsistency_=false;
@@ -303,7 +313,7 @@ index 3deeab3..e9ff171 100644
      ComPtr<ID3D12Resource> nvofReverseTex_,nvofReverseCostTex_;
      // FidelityFX flow has no backward output: FlowClaim's previous-frame claims stand in
      // for the forward-backward check (same VEYRA_TEST_FLOW_CONSISTENCY switch).
-@@ -1091,6 +1139,7 @@ private:
+@@ -1091,6 +1142,7 @@ private:
      ComputePass yuvPass_, encPass_, decPass_, blitPass_, uploadPass_, densifyPass_;
      ComputePass amdHdrEncodePass_, amdHdrRestorePass_;
      float toneMapPeakNits_=0; // latched per graph/source; never varies with frame brightness
@@ -311,7 +321,7 @@ index 3deeab3..e9ff171 100644
      ComputePass rgbPass_,hdrVideoSrPass_;
      ComputePass srPrescalePass_,srResolvePass_; // area shrinks: double SR reduction / supersample shrink after RTX Video SR
      ComputePass firstSrRestorePass_;
-@@ -1265,6 +1314,7 @@ private:
+@@ -1265,6 +1317,7 @@ private:
      // pass and, under double SR, the first pass when that family is chosen there.
      std::unique_ptr<VfxSrBackend> vfxSrBackend_;
      std::unique_ptr<VfxSrBackend> firstVfxSrBackend_;
@@ -319,7 +329,7 @@ index 3deeab3..e9ff171 100644
      std::unique_ptr<ngx::TrueHdrBackend> videoHdrBackend_;
      std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
      std::unique_ptr<gfx::FsrFgPresenter> fsrFgBackend_;
-@@ -1275,7 +1325,10 @@ private:
+@@ -1275,7 +1328,10 @@ private:
      std::unique_ptr<NisPass> nisPass_;  // PushFPS: NVIDIA Image Scaling SR
      std::unique_ptr<PushHudLock> hudLock_;  // PushFPS: Live HUD Lock
      std::unique_ptr<PushOverlayPass> overlay_;  // PushFPS: Crosshair Hold
@@ -330,6 +340,15 @@ index 3deeab3..e9ff171 100644
      bool initHudLock();
      void composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity);
      // PushFPS Crosshair Hold: the frame a method is given for real frame `parity` (the real frame itself without the pass).
+@@ -1316,6 +1372,8 @@ private:
+     uint64_t pausedNrSourceId_=0;
+     double pausedNrPts_=0;
+     std::optional<engine::EnhancementSettings> lastAppliedSettings_,pausedNrSettings_;
++    std::optional<engine::EnhancementSettings> liveSettingsBaseline_;   // PushMPC: NR live dials (applySettings)
++    bool nrLiveEvalLog_=false;                                         // PushMPC: log the next evaluate after a live change
+     uint64_t epoch_ = 0;
+     std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[kGeneratedPoolSlots];
+     uint32_t nextListSlot_ = 0;
 diff --git a/include/veyra/pipeline/ExternalSr.h b/include/veyra/pipeline/ExternalSr.h
 new file mode 100644
 index 0000000..f6714aa
@@ -591,6 +610,161 @@ index 0000000..3063916
 +    uint64_t composed_ = 0, depthWritten_ = 0;
 +};
 +}
+diff --git a/include/veyra/pipeline/PushMpcNrLive.h b/include/veyra/pipeline/PushMpcNrLive.h
+new file mode 100644
+index 0000000..a108e2e
+--- /dev/null
++++ b/include/veyra/pipeline/PushMpcNrLive.h
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: GPL-3.0-only
++// PushMPC (local addition, not upstream): Neural Rendering's live dials.
++//
++// PushFPS resets NR's temporal history on every live settings change (EnhanceGraph::applySettings bumped each layer's
++// inputRevision, which makes the next NGX evaluate pass Reset=1 and the AMD runtimes reset, and reset the layer's
++// anti-flicker history). NVIDIA's own integration (RTX Remix, dxvk-remix rtx_ngx_wrapper.cpp / rtx_context.cpp) passes
++// Intensity, LocalTone, LocalStructure, Skin, Style and UseAutoMask on every evaluate and resets the history only when
++// the view history is invalidated (camera cuts, teleports, render-mode changes), never on a dial change.
++//
++// This header decides, without a GPU, whether a requested change is confined to the dials that can change in place:
++//   Live            NGX evaluate-time dials and the graph's shader constants: the new value is used from the next frame,
++//                   no NGX Reset, no anti-flicker reset.
++//   LiveResetAtCut  the same mechanics (no reset at the change); a discrete switch of NR's model or mask whose blend with
++//                   the carried history has not been measured on video. The history renews at the next frame reset
++//                   (seek, flush, stream change, a scene cut the graph detects).
++//   Rebuild         create-time fields: EnhanceGraph::applySettings refuses them (the caller rebuilds the graph), or
++//                   they switch NR on/off (the history then resets as before).
++// Anything outside NR's dials that changes in the same request keeps PushFPS's reset.
++#pragma once
++#include "veyra/engine/EnhancementSettings.h"
++#include <algorithm>
++#include <cstdint>
++#include <format>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace veyra::pipeline {
++
++enum class NrFieldClass : uint8_t { Live, LiveResetAtCut, Rebuild };
++
++enum class NrField : uint8_t {
++    // NGX Feature 18 evaluate parameters (EnhanceGraph's NR evaluate block)
++    Intensity, LocalTone, LocalStructure, Skin, Style, UseAutoMask, UICorrection,
++    // shader constants of the residual composite (NrResidual) and the anti-flicker pass (NrTemporal)
++    ResidualGains, CorrectionValues, CorrectionEnabled, Protection,
++    // create-time
++    NetworkPreset, Runtime, Motion, LayerSet, SizePolicy, AntiFlicker, NrOnOff,
++    Count
++};
++
++constexpr NrFieldClass nrFieldClass(NrField f) {
++    switch (f) {
++    case NrField::Intensity: case NrField::LocalTone: case NrField::LocalStructure: case NrField::Skin:
++    case NrField::ResidualGains: case NrField::CorrectionValues: case NrField::CorrectionEnabled: case NrField::Protection:
++        return NrFieldClass::Live;
++    case NrField::Style: case NrField::UseAutoMask: case NrField::UICorrection:
++        return NrFieldClass::LiveResetAtCut;
++    default:
++        return NrFieldClass::Rebuild;
++    }
++}
++
++constexpr std::string_view nrFieldName(NrField f) {
++    switch (f) {
++    case NrField::Intensity: return "intensity";
++    case NrField::LocalTone: return "tone";
++    case NrField::LocalStructure: return "structure";
++    case NrField::Skin: return "skin";
++    case NrField::Style: return "style";
++    case NrField::UseAutoMask: return "autoMask";
++    case NrField::UICorrection: return "uiCorrection";
++    case NrField::ResidualGains: return "residual";
++    case NrField::CorrectionValues: return "correction";
++    case NrField::CorrectionEnabled: return "correction on/off";
++    case NrField::Protection: return "protection";
++    case NrField::NetworkPreset: return "network preset";
++    case NrField::Runtime: return "runtime";
++    case NrField::Motion: return "motion source";
++    case NrField::LayerSet: return "layers";
++    case NrField::SizePolicy: return "size";
++    case NrField::AntiFlicker: return "anti-flicker tier";
++    case NrField::NrOnOff: return "NR on/off";
++    default: return "?";
++    }
++}
++
++struct NrLiveDecision {
++    bool live = false;                 // true: no inputRevision bump, no anti-flicker reset
++    std::vector<std::string> changes;  // one log line per changed live dial
++};
++
++namespace nrlive_detail {
++inline void copyDials(const engine::NrSettings& from, engine::NrSettings& to) {
++    const bool performance = to.performance;   // the network preset is create-time
++    to = from; to.performance = performance;
++}
++inline std::string tail(NrField f) {
++    return nrFieldClass(f) == NrFieldClass::Live ? " (no reset)" : " (no reset; history renews at the next reset)";
++}
++inline void diffModel(unsigned layer, const engine::NrSettings& a, const engine::NrSettings& b, std::vector<std::string>& out) {
++    auto f = [&](NrField field, float x, float y) {
++        if (x != y) out.push_back(std::format("nr live: layer {} {} {:.2f}->{:.2f}{}", layer, nrFieldName(field), x, y, tail(field)));
++    };
++    auto i = [&](NrField field, int32_t x, int32_t y) {
++        if (x != y) out.push_back(std::format("nr live: layer {} {} {}->{}{}", layer, nrFieldName(field), x, y, tail(field)));
++    };
++    f(NrField::Intensity, a.intensity, b.intensity); f(NrField::LocalTone, a.tone, b.tone);
++    f(NrField::LocalStructure, a.structure, b.structure); f(NrField::Skin, a.skin, b.skin);
++    i(NrField::Style, a.style, b.style); i(NrField::UseAutoMask, a.autoMask, b.autoMask);
++    i(NrField::UICorrection, a.uiCorrection, b.uiCorrection);
++}
++inline void diffResidual(unsigned layer, const engine::ResidualSettings& a, const engine::ResidualSettings& b, std::vector<std::string>& out) {
++    const char* names[] = {"total", "darken", "brighten", "color", "luminance"};
++    const float x[] = {a.total, a.darken, a.brighten, a.color, a.luminance}, y[] = {b.total, b.darken, b.brighten, b.color, b.luminance};
++    for (int k = 0; k < 5; ++k)
++        if (x[k] != y[k]) out.push_back(std::format("nr live: layer {} residual {} {:.2f}->{:.2f} (no reset)", layer, names[k], x[k], y[k]));
++    if (a.correction.enabled != b.correction.enabled)
++        out.push_back(std::format("nr live: layer {} correction {}->{} (no reset)", layer, a.correction.enabled ? "on" : "off", b.correction.enabled ? "on" : "off"));
++    else if (a.correction != b.correction)
++        out.push_back(std::format("nr live: layer {} correction values (mode {}, amount {:.2f}->{:.2f}, stability {:.2f}->{:.2f}) (no reset)", layer,
++                                  b.correction.automatic ? "auto" : "manual", a.correction.autoAmount, b.correction.autoAmount,
++                                  a.correction.stability, b.correction.stability));
++}
++}  // namespace nrlive_detail
++
++// before = the settings the graph runs with (its baseline), after = the requested settings. Call only for a request that
++// EnhanceGraph::applySettings accepts (its create-time checks run first); a refused request rebuilds the graph anyway.
++inline NrLiveDecision nrLiveDecision(const engine::EnhancementSettings& before, const engine::EnhancementSettings& after) {
++    NrLiveDecision d;
++    if (!before.nr || !after.nr) return d;                 // NR switched on/off, or off: as PushFPS (reset)
++    auto a = before;
++    nrlive_detail::copyDials(after.model, a.model);
++    a.residual = after.residual;
++    a.protection = after.protection;
++    for (size_t i = 0; i < a.nrLayers.size(); ++i) {
++        nrlive_detail::copyDials(after.nrLayers[i].model, a.nrLayers[i].model);
++        a.nrLayers[i].residual = after.nrLayers[i].residual;
++    }
++    // Everything else equal as the graph sees it (revision, audio and other non-video fields ignored)?
++    if (!a.sameActiveVideoParameters(after)) return d;
++    d.live = true;
++    const auto activeBefore = before.activeVideoSettings(), activeAfter = after.activeVideoSettings();
++    const uint32_t slots = activeAfter.nrLayerCount ? std::min<uint32_t>(activeAfter.nrLayerCount, uint32_t(activeAfter.nrLayers.size())) : 1u;
++    unsigned layer = 0;
++    for (uint32_t i = 0; i < slots; ++i) {
++        const auto x = activeBefore.nrLayer(i), y = activeAfter.nrLayer(i);
++        if (activeAfter.nrLayerCount && !y.enabled) continue;
++        ++layer;
++        nrlive_detail::diffModel(layer, x.model, y.model, d.changes);
++        nrlive_detail::diffResidual(layer, x.residual, y.residual, d.changes);
++    }
++    if (!(activeBefore.protection == activeAfter.protection))
++        d.changes.push_back(std::format("nr live: protection {} -> {} (no reset)", activeBefore.protection.enabled ? "on" : "off",
++                                        activeAfter.protection.enabled ? "on" : "off"));
++    return d;
++}
++
++}  // namespace veyra::pipeline
 diff --git a/include/veyra/pipeline/PushOverlay.h b/include/veyra/pipeline/PushOverlay.h
 index 8024511..ad5c718 100644
 --- a/include/veyra/pipeline/PushOverlay.h
@@ -2705,10 +2879,18 @@ index 98ff308..69e893e 100644
      auto& p = *p_;
      if (p.context != nullptr) {
 diff --git a/src/pipeline/EnhanceGraph.cpp b/src/pipeline/EnhanceGraph.cpp
-index 17c476a..bceec13 100644
+index 17c476a..c508306 100644
 --- a/src/pipeline/EnhanceGraph.cpp
 +++ b/src/pipeline/EnhanceGraph.cpp
-@@ -64,6 +64,7 @@ extern "C" {
+@@ -44,6 +44,7 @@
+ #include "veyra/pushflow/PushFlowBackend.h"
+ #include "veyra/ngx/DlssNrParameters.h"
+ #include "veyra/ngx/DlssNrRuntimeAdapter.h"
++#include "veyra/pipeline/PushMpcNrLive.h" // PushMPC (local addition)
+ #include "veyra/ngx/DlssSrBackend.h"
+ #include "veyra/ngx/VideoSrBackend.h"
+ #include "veyra/pipeline/VfxSrBackend.h"
+@@ -64,6 +65,7 @@ extern "C" {
  }
  
  namespace veyra::pipeline {
@@ -2716,7 +2898,7 @@ index 17c476a..bceec13 100644
  using diagnostics::GpuStage;
  static_assert(diagnostics::kTimedNrLayers==engine::kMaxNrInstances&&diagnostics::kTimedColorNodes==engine::kMaxColorInstances&&
                diagnostics::kTimedAaNodes==engine::kMaxAntiAliasInstances&&diagnostics::kTimedBeautyNodes==engine::kMaxBeautyInstances,
-@@ -81,6 +82,7 @@ float uintBits(uint32_t v) { return std::bit_cast<float>(v); }
+@@ -81,6 +83,7 @@ float uintBits(uint32_t v) { return std::bit_cast<float>(v); }
  // may sit beside an RTX Video SR pass.
  uint32_t finalVideoSrQuality(const EnhanceGraphDesc& d){return d.finalSrQuality();}
  bool ngxVideoSrPass(const EnhanceGraphDesc& d){
@@ -2724,7 +2906,15 @@ index 17c476a..bceec13 100644
      return engine::ngxVideoSr(finalVideoSrQuality(d))||(d.dualSr&&engine::ngxVideoSr(d.videoSrQuality));
  }
  // The Video Effects families only enlarge: a first double SR result at the
-@@ -719,6 +721,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+@@ -678,6 +681,7 @@ bool EnhanceGraph::dispatchSlotPasses(ID3D12GraphicsCommandList* list,const std:
+ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+ {
+     fgInitResult_=0;
++    liveSettingsBaseline_.reset();nrLiveEvalLog_=false;   // PushMPC: the caller sets the new build's baseline after this
+     driverRequirementNotice_.clear();
+     failedBackend_=engine::FailedBackend::Infrastructure;
+     if(const auto error=desc.validateFixedExecutionPlan();!error.empty()){
+@@ -719,6 +723,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
      }
      desc_ = desc;lastSourceColor_={};tracker_={};prevValid_=false;fgHistorySkipped_=false;cadence_.reset();scene_.reset();sceneLastSourceId_=0;previousLuma_.clear();
      if(!engine::validVideoSrQuality(desc.videoSrQuality)){veyra::log::error("graph",std::format("invalid video SR quality value={}",desc.videoSrQuality));return false;}
@@ -2732,7 +2922,7 @@ index 17c476a..bceec13 100644
      srcW_ = desc.sourceWidth;
      srcH_ = desc.sourceHeight;
      workW_ = desc.workWidth;
-@@ -796,6 +799,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+@@ -796,6 +801,10 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
      const bool occlusionCheck=flowRefine_&&!(GetEnvironmentVariableW(L"VEYRA_TEST_FLOW_CONSISTENCY",consistency,4)&&consistency[0]==L'0');
      flowConsistency_=occlusionCheck&&nvidiaFlow;
      flowClaims_=occlusionCheck&&fidelityFlow;
@@ -2743,7 +2933,7 @@ index 17c476a..bceec13 100644
      uint64_t budget=0,usage=0;
      // Every NR layer allocates its own full set of textures, and a stabilised
      // layer adds two history/guide pairs on top. The stack is bounded (16 nodes),
-@@ -929,6 +936,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
+@@ -929,6 +938,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
          if(firstTemporal&&!createSignedHdrRestore(firstSrHdrRestore_,desc_.firstSrWidth,desc_.firstSrHeight))return false;
      }
      if (!createComputePasses()) return false;
@@ -2751,7 +2941,7 @@ index 17c476a..bceec13 100644
  
      initialized_ = true;
      failedBackend_=engine::FailedBackend::None;
-@@ -1109,11 +1117,25 @@ bool EnhanceGraph::createResources()
+@@ -1109,11 +1119,25 @@ bool EnhanceGraph::createResources()
      if(!createAdditionalColorResources())return false;
      if(!createNodeColorResources())return false;
      if(!createBeautyShared())return false;
@@ -2780,7 +2970,7 @@ index 17c476a..bceec13 100644
              if(!texture)return false;
          }
          exclusionScratch_=makeTexture(context_.device(),workW_,workH_,outputFormat(),true);
-@@ -1133,7 +1155,7 @@ bool EnhanceGraph::createResources()
+@@ -1133,7 +1157,7 @@ bool EnhanceGraph::createResources()
          // VFG owns only the selected multiplier's outputs; FSR owns one pair.
          const unsigned usedCount=fsrEnabled()?2u:desc_.frameGenerationBackend==engine::FrameGenerationBackend::Vfg?2u*(desc_.fgMultiplier-1u):10u;
          const bool used=fgEnabled_&&i<usedCount;
@@ -2789,7 +2979,7 @@ index 17c476a..bceec13 100644
          if(!genFrame_[i])return false;
      }
      nrZeroMotion_ = makeTexture(context_.device(), workW_, workH_, DXGI_FORMAT_R16G16_FLOAT, false);
-@@ -1325,7 +1347,7 @@ bool EnhanceGraph::initNvof()
+@@ -1325,7 +1349,7 @@ bool EnhanceGraph::initNvof()
      const bool inGraphFgFlow=fgEnabled_&&desc_.fgUsesFlow()&&
          (desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss||desc_.frameGenerationBackend==engine::FrameGenerationBackend::Anr||engine::fsrFrameGeneration(desc_.frameGenerationBackend));
      // DLAA takes its motion from the same flow.
@@ -2798,7 +2988,7 @@ index 17c476a..bceec13 100644
          mvecSource_="zero motion (no external flow consumer)";
          veyra::log::info("graph", "optical-flow session skipped: no external motion consumer");
          return true;
-@@ -1603,6 +1625,15 @@ bool EnhanceGraph::initHudLock() {
+@@ -1603,6 +1627,15 @@ bool EnhanceGraph::initHudLock() {
  bool EnhanceGraph::initOverlay() {
      subtitles_.reset();
      overlay_.reset();
@@ -2814,7 +3004,7 @@ index 17c476a..bceec13 100644
      initCrosshairPass();
      // PushFPS Subtitle Hold: its own pass in the subtitle band. With Crosshair Hold running it fills the same
      // copy of the frame (the two zones do not overlap), so frame generation is still given one frame.
-@@ -1611,14 +1642,17 @@ bool EnhanceGraph::initOverlay() {
+@@ -1611,14 +1644,17 @@ bool EnhanceGraph::initOverlay() {
              desc_.subtitleHold,fgEnabled_,int(desc_.frameGenerationBackend),presentSinkFg()));
          return true;
      }
@@ -2834,7 +3024,7 @@ index 17c476a..bceec13 100644
      subtitles_=std::move(pass);
      return true;
  }
-@@ -1639,12 +1673,15 @@ bool EnhanceGraph::initCrosshairPass() {
+@@ -1639,12 +1675,15 @@ bool EnhanceGraph::initCrosshairPass() {
      return true;
  }
  ID3D12Resource* EnhanceGraph::fgInput(unsigned parity) const {
@@ -2852,7 +3042,7 @@ index 17c476a..bceec13 100644
          veyra::log::warn("subtitle-hold",std::format("compose skipped slot={} parity={}",generatedSlot,parity));
  }
  void EnhanceGraph::composeHudLock(ID3D12GraphicsCommandList* list,unsigned generatedSlot,unsigned heldParity){
-@@ -1675,10 +1712,55 @@ bool EnhanceGraph::initVfg()
+@@ -1675,10 +1714,55 @@ bool EnhanceGraph::initVfg()
      failedBackend_=engine::FailedBackend::Fg;
      vfgBackend_=std::make_unique<VfgBackend>();
      if(!vfgBackend_->initialize(context_,desc_.runtimeAbsPath,workW_,workH_,outputFormat(),desc_.fgMultiplier,desc_.vfgQuality,desc_.vfgAsyncSubmission,desc_.vfgFastFallback))return false;
@@ -2908,7 +3098,7 @@ index 17c476a..bceec13 100644
  bool EnhanceGraph::amfFrcActive() const { return amfFrc_&&amfFrc_->ready(); }
  bool EnhanceGraph::pushFlowActive() const { return pushFlow_&&pushFlow_->status().ready; }
  bool EnhanceGraph::pushFlowPredicting() const { return pushFlow_ && desc_.pushFlowPredict && !pushFlowPredictPaused_ && pushFlow_->status().predict; }
-@@ -1707,7 +1789,7 @@ bool EnhanceGraph::initPushFlow()
+@@ -1707,7 +1791,7 @@ bool EnhanceGraph::initPushFlow()
      const auto encoding=linear?(desc_.hdrOutput?pushflow::Encoding::ScRgbHdr:pushflow::Encoding::LinearSdr):pushflow::Encoding::Encoded;
      pushFlow_=std::make_unique<pushflow::PushFlowBackend>();
      if(!pushFlow_->initialize(context_.device(),ring_.queue(),desc_.runtimeAbsPath,workW_,workH_,format,encoding,desc_.vfgQuality,desc_.pushFlowMotion,desc_.pushFlowEncoderCache,desc_.pushFlowGuard,desc_.pushFlowPredict)){pushFlow_.reset();return false;}
@@ -2917,7 +3107,7 @@ index 17c476a..bceec13 100644
      failedBackend_=engine::FailedBackend::None;
      return true;
  }
-@@ -1731,7 +1813,7 @@ bool EnhanceGraph::initNgxFeatures()
+@@ -1731,7 +1815,7 @@ bool EnhanceGraph::initNgxFeatures()
      if(anr){
          failedBackend_=engine::FailedBackend::Fg;
          fgBackend_=std::make_unique<ngx::DlssFgBackend>();unsigned maximum=0;
@@ -2926,7 +3116,7 @@ index 17c476a..bceec13 100644
          fgCapsAvailable_=true;fgMultiFrameMax_=int(maximum);
          if(desc_.fgMultiplier<2||desc_.fgMultiplier>maximum+1){log::error("anr","requested multiplier exceeds actual provider capability");return false;}
      }
-@@ -1748,13 +1830,20 @@ bool EnhanceGraph::initNgxFeatures()
+@@ -1748,13 +1832,20 @@ bool EnhanceGraph::initNgxFeatures()
              dlssgLiteState_==1?"active":dlssgLiteState_==2?"runtime missing":"GPU keeps the default runtime",
              utf8Of(dlssgDirectory_)));
      }
@@ -2949,7 +3139,7 @@ index 17c476a..bceec13 100644
          // Patched driver/provider state currently belongs to the graph. Keep
          // its complete init/shutdown contract even when FG is temporarily off.
          const bool enabled=!ngx::FgCompatibilitySession::requested(context_.adapter().vendorId,context_.adapter().deviceId)&&
-@@ -2010,6 +2099,15 @@ bool EnhanceGraph::initNgxFeatures()
+@@ -2010,6 +2101,15 @@ bool EnhanceGraph::initNgxFeatures()
          }
          failedBackend_=engine::FailedBackend::Infrastructure;
      }
@@ -2965,7 +3155,7 @@ index 17c476a..bceec13 100644
      const bool dlssFinal=desc_.finalSrQuality()==0,dlssFirst=desc_.firstSrRuns(0);
      if (srEnabled_ && !desc_.noFeatures && (dlssFinal||dlssFirst||ngxVideoSrPass(desc_))) {
          // DLSS SR: the final pass reads the source, or under double SR the reduced
-@@ -2433,6 +2531,12 @@ bool EnhanceGraph::createViews()
+@@ -2433,6 +2533,12 @@ bool EnhanceGraph::createViews()
          for(size_t i=0;i<kGeneratedPoolSlots;++i)generated[i]=genFrame_[i].Get();
          subtitles_->createViews(context_.device(),stager_,real,generated.data(),unsigned(generated.size()));
      }
@@ -2978,7 +3168,7 @@ index 17c476a..bceec13 100644
      // Descriptor initialization is DEFAULT ON since the RAW-upload-SRV removal
      // (2026-09-06): texture SRV/UAV views keep the device alive and NVOF
      // executing (r33b-tu: 599/599 executes, real motion/confidence, 0
-@@ -3048,7 +3152,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3048,7 +3154,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      lastSourceColor_=resolved;
      if(resolved.isHdrPath()&&!desc_.hdrOutput&&!toneMapPeakNits_){
          const auto peak=hdrToneMapPeak(resolved);toneMapPeakNits_=peak.nits;
@@ -2991,7 +3181,7 @@ index 17c476a..bceec13 100644
      }
      if(desc_.hdrInput&&!resolved.isHdrPath()){
          veyra::log::error("hdr","HDR source transfer changed to SDR; reopen/rebuild required");return false;
-@@ -3369,7 +3477,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3369,7 +3479,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
          float c[12+kColorGradeConstantCount]={uintBits(srcW_),uintBits(srcH_),uintBits(resolved.transfer==TransferFunction::PQ?4u:resolved.transfer==TransferFunction::HLG?5u:workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
              resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
@@ -3000,7 +3190,7 @@ index 17c476a..bceec13 100644
          if(grade)packColorGradeConstants(colorTables_,c+(desc_.packedInput?12:8));
          if(resolved.scRgb){c[4]=desc_.hdrWorking()?1.f:2.f;c[5]=toneMapPeakNits_;}
          rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,gpuRgb?3+parity:0).ptr,gpuHandleOf(rgbPass_,1+uavSlot).ptr,gpuHandleOf(rgbPass_,8).ptr);
-@@ -3380,7 +3488,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3380,7 +3490,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,
              resolved.transfer==TransferFunction::HLG?5.0f:resolved.transfer==TransferFunction::PQ?4.0f:float(workingTransferCode(resolved)), (nv12Texture?(nv12Texture->GetDesc().Format==DXGI_FORMAT_P010?1.0f:0.0f):(desc_.captureBitDepth==16?2.0f:desc_.wideYuvInput()?1.0f:0.0f)),
              uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrWorking()?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
@@ -3009,7 +3199,7 @@ index 17c476a..bceec13 100644
          if(grade)packColorGradeConstants(colorTables_,constants+12);
          // Dolby Vision profile 5: written on every frame because the enable flag
          // lives inside the block, so switching source content back to ordinary
-@@ -3396,6 +3504,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3396,6 +3506,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                      p7Ready_ ? 1 : 0, doviElFrame_->width, doviElFrame_->height, int(doviElFrame_->format)));
          }
          bool p7Bound = false;
@@ -3026,7 +3216,7 @@ index 17c476a..bceec13 100644
          if (p7Ready_ && doviElFrame_ != nullptr && uploadElLuma(list, doviElFrame_) &&
              uploadElChroma(list, doviElFrame_) && uploadElCurve(list)) {
              std::memcpy(constants + 12 + kColorGradeConstantCount, p7Params_, sizeof(p7Params_));
-@@ -3532,6 +3650,23 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3532,6 +3652,23 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          tracker_.transition(list,output,D3D12_RESOURCE_STATE_COMMON);
          return true;
      };
@@ -3050,7 +3240,7 @@ index 17c476a..bceec13 100644
      // First double SR pass on RTX Video SR: encode the stage input, evaluate,
      // then leave the linear first result (HDR restored against the source).
      auto firstVideoSr=[&]()->bool{
-@@ -3582,6 +3717,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3582,6 +3719,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          blitPass_.bind(list,enc,gpuHandleOf(blitPass_,prescaled?21:desc_.nrBeforeSr||sourcePostOutput_?18:0).ptr,gpuHandleOf(blitPass_,16).ptr);list->Dispatch((srInW_+15)/16,(srInH_+15)/16,1);tracker_.uavBarrier(list,videoSrInput_.Get());
          tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_COMMON);tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_COMMON);
          if(vfxSrBackend_){if(!runVfx(*vfxSrBackend_,videoSrInput_.Get(),videoSrOutput_.Get()))return false;}
@@ -3073,7 +3263,7 @@ index 17c476a..bceec13 100644
          else if(!videoSrBackend_->evaluate(list,videoSrInput_.Get(),videoSrOutput_.Get(),desc_.dualSr?desc_.dualSrQuality:desc_.videoSrQuality)){failedBackend_=engine::FailedBackend::Sr;return false;}
          tracker_.uavBarrier(list,videoSrOutput_.Get());tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
          // HDR restore and the resolve take the base that was encoded.
-@@ -3611,7 +3762,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3611,7 +3764,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      };
      // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
      bool haveFlow = false;
@@ -3082,7 +3272,7 @@ index 17c476a..bceec13 100644
      if (runMotion && (gpuDis_ || amdOf_ || (nvof_ && nvof_->initialized()))) {
          const float dims[8] = {uintBits(nvofW_),uintBits(nvofH_),uintBits(nvofW_),uintBits(nvofH_),0,0,0,0};
          if (prevValid_) {
-@@ -3662,12 +3813,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3662,12 +3815,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                      if(FAILED(hr))veyra::log::error("graph",std::format("NVOF output queue wait value={} hr=0x{:X}",value,unsigned(hr)));
                      return SUCCEEDED(hr);
                  };
@@ -3097,7 +3287,7 @@ index 17c476a..bceec13 100644
                  if(amdOf_)tracker_.transition(list,amdOf_->sceneChanges(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                  tracker_.transition(list,nvofRawTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                  tracker_.transition(list,nvofCostTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-@@ -3729,6 +3880,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3729,6 +3882,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          }
      }
  
@@ -3123,7 +3313,7 @@ index 17c476a..bceec13 100644
      // 3. SR into workRgba (or 1:1 blit bypass).
      cpuTrace.mark("flowFinish");
      if(previewCheckpoint&&!reset)previewCheckpoint();
-@@ -3903,7 +4073,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -3903,7 +4075,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          ++metrics_.srEvaluateCount;
          finishTemporalOutput(list,srHdrRestore_,workRgba_.Get());
          gpuTimer_.mark(list,GpuStage::Sr,true);
@@ -3132,7 +3322,33 @@ index 17c476a..bceec13 100644
          if(!runVideoSr())return false;
      } else if (!mixed && srEnabled_ && srBackend_ && srBackend_->created()) {
          gpuTimer_.mark(list,GpuStage::Sr);
-@@ -4407,16 +4577,42 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4103,6 +4275,8 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+                     tracker_.uavBarrier(list,layer->amdHdrProxy());
+                     tracker_.transition(list,layer->amdHdrProxy(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                 }
++                if(nrLiveEvalLog_)veyra::log::info("nr-live",std::format("nr live eval: layer {} amd reset={} inputRevision={} intensity={:.2f}",layerIndex+1,
++                    reset||!layer->historyValid||layer->inputRevision!=1?1:0,layer->inputRevision,layer->model.intensity));   // PushMPC
+                 if(!layer->amd->recordInputs(list,hdr?layer->amdHdrProxy():layer->input(),realFrameIndex_+1,reset||!layer->historyValid||layer->inputRevision!=1,layer->model.intensity))return false;
+                 // Same direct queue, producer -> HIP handoff -> consumer. No
+                 // CPU wait on this frame; only the normal allocator reuse bound.
+@@ -4167,6 +4341,8 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+                 pb.setF32(p::kSkinStructureStrength, model.skin);
+                 pb.setI32(p::kUseAutoMask, model.autoMask);
+                 pb.setI32(p::kUICorrection, model.uiCorrection);
++                if (nrLiveEvalLog_) veyra::log::info("nr-live", std::format("nr live eval: layer {} ngx reset={} inputRevision={} intensity={:.2f} tone={:.2f} structure={:.2f} skin={:.2f} style={} autoMask={} uiCorrection={}",
++                    layerIndex + 1, layerReset ? 1 : 0, layer->inputRevision, model.intensity, model.tone, model.structure, model.skin, model.style, model.autoMask, model.uiCorrection));   // PushMPC
+                 if (desc_.nrParameterProbe) desc_.nrParameterProbe(layer->parameters(), layer->proxy(), layer->neural(), nrW, nrH);
+                 static bool injectedFailureConsumed = false;
+                 if (!injectedFailureConsumed && model.style == 2 && GetEnvironmentVariableW(L"VEYRA_TEST_REJECT_NR_STYLE2", nullptr, 0)) {
+@@ -4222,6 +4398,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+             if(desc_.splitNrAcrossSr()&&desc_.stageMark)desc_.stageMark("nr-layer");
+         }
+         if(std::any_of(interNrPasses_.begin(),interNrPasses_.end(),[](const auto& passes){return !passes.empty();}))interNrColorExecutionLogged_=true;
++        nrLiveEvalLog_=false;   // PushMPC: logged once per live change
+     }
+     if (desc_.stageMark) desc_.stageMark("nr");
+     cpuTrace.mark("nr");
+@@ -4407,16 +4584,42 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(overlay_&&!overlay_->update(list,tracker_,parity,reset||!prevValid_))veyra::log::warn("crosshair-hold","update skipped");
      // Subtitle Hold after it: with Crosshair Hold it fills the copy that pass has just made.
      if(subtitles_&&!subtitles_->update(list,tracker_,parity,reset||!prevValid_))veyra::log::warn("subtitle-hold","update skipped");
@@ -3176,7 +3392,7 @@ index 17c476a..bceec13 100644
      }
      if(runFg&&amfFrc_){
          // As for VFG, the span from here to the copy back brackets AMF's own queue work.
-@@ -4425,6 +4621,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4425,6 +4628,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          if(!amfFrc_->capture(list,fgInput(parity))){failedBackend_=engine::FailedBackend::Fg;return false;}
          tracker_.transition(list,fgInput(parity),D3D12_RESOURCE_STATE_COMMON);
      }
@@ -3190,7 +3406,7 @@ index 17c476a..bceec13 100644
      if(!composeExclusion(list,parity,parity,presentSinkFg()))return false;
      // Live HUD Lock learns from this real frame against the previous one (enhanced colours).
      if(hudLock_&&!hudLock_->update(list,tracker_,parity,!prevValid_))veyra::log::warn("hud-lock","update skipped");
-@@ -4444,6 +4647,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4444,6 +4654,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
      if(!runFg)gpuTimer_.resolve(list);
      if (!submitGraph(slot)) return false;
      if(!runFg)gpuTimer_.submitted(ring_.lastSignaledValue());
@@ -3200,7 +3416,7 @@ index 17c476a..bceec13 100644
      out.videoFenceValue = ring_.lastSignaledValue();
      out.videoFenceObject = context_.fence();
      if(dualPair){
-@@ -4529,6 +4735,17 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4529,6 +4742,17 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                  if(f.pts100ns>out.batch.b100ns&&afterRealCount<afterReal.size())afterReal[afterRealCount++]=std::move(f);
                  continue;
              }
@@ -3218,7 +3434,7 @@ index 17c476a..bceec13 100644
              auto* plist=ring_.acquireNext(slot,st);if(!plist)return false;
              if(sub==1){gpuTimer_.mark(plist,GpuStage::FgBatch);gpuTimer_.mark(plist,GpuStage::Fg1);}
              // With Crosshair Hold the pair PushFlow sees is the filled pair (fgInput is the real frame otherwise).
-@@ -4537,22 +4754,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4537,22 +4761,25 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              // The pair is packed once; later subframes only rewrite the time plane.
              // The two real frames' numbers (this graph's own count, from 1) let the encoder cache keep the
              // second frame's features for the pair after this one, where it is the first.
@@ -3246,7 +3462,7 @@ index 17c476a..bceec13 100644
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
              if(sub==fgCalls){gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
              if(!submitGraph(slot))return false;
-@@ -4578,6 +4798,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4578,6 +4805,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              if(copied&&!resetFg)composeOverlay(flist,generatedSlot,parity,0.5f);
              composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
              if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
@@ -3254,7 +3470,7 @@ index 17c476a..bceec13 100644
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
              gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);
              if(!submitGraph(slot))return false;
-@@ -4601,13 +4822,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4601,13 +4829,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              if(!vfgBackend_->generate(parity,sub,resetFg?2u:outputMultiplier,resetFg,out.fgFast)){failedBackend_=engine::FailedBackend::Fg;return false;}
              auto* flist=ring_.acquireNext(slot,st);if(!flist)return false;
              tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -3273,7 +3489,7 @@ index 17c476a..bceec13 100644
              else{gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
              if(!submitGraph(slot))return false;
              if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
-@@ -4632,10 +4855,14 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4632,10 +4862,14 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          // is then what it always was). The motion and depth they are given are still worked out from the real
          // frames: where the overlay stood they say "still", in a patch the overlay is laid back over.
          auto* const colour=fgInput(parity);
@@ -3289,7 +3505,7 @@ index 17c476a..bceec13 100644
          tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
          if(!fsrFgBackend_){
          // One status resource for the whole input-frame pair, just like the
-@@ -4647,7 +4874,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4647,7 +4881,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          tracker_.transition(flist,fgDisable_[parity].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
          }
          ngx::DlssFgBackend::EvalDesc fe{};
@@ -3298,7 +3514,7 @@ index 17c476a..bceec13 100644
          fe.outputInterpolated=genFrame_[generatedSlot].Get(); fe.reset=resetFg;
          fe.outputDisableInterpolation=fgDisable_[parity].Get();
          fe.multiFrameCount=fgCalls;fe.multiFrameIndex=sub;
-@@ -4655,8 +4882,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4655,8 +4889,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          // ANR consumes current->previous pixel motion directly. NVIDIA DLSSG
          // consumes normalized reverse motion. Verified against exact translated
          // image truth; keep this conversion at the consumer, not in shared flow.
@@ -3311,7 +3527,7 @@ index 17c476a..bceec13 100644
          if(sub==1)gpuTimer_.mark(flist,GpuStage::FgBatch);
          const auto timingStage=static_cast<GpuStage>(unsigned(GpuStage::Fg1)+sub-1);gpuTimer_.mark(flist,timingStage);
          cpuTrace.mark("fgPrepare");
-@@ -4666,10 +4895,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4666,10 +4902,10 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
              tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
              tracker_.transition(flist,colour,D3D12_RESOURCE_STATE_COMMON);
              tracker_.transition(flist,motion,D3D12_RESOURCE_STATE_COMMON);
@@ -3324,7 +3540,7 @@ index 17c476a..bceec13 100644
                      genFrame_[generatedSlot].Get(),resetFg,interval)){
                  failedBackend_=engine::FailedBackend::Fg;return false;
              }
-@@ -4698,10 +4927,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
+@@ -4698,10 +4934,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
          if(!resetFg)composeOverlay(flist,generatedSlot,parity,float(sub)/float(outputMultiplier));
          composeHudLock(flist,generatedSlot,resetFg?parity:1-parity);
          if(!composeExclusion(flist,generatedSlot+2,resetFg?parity:1-parity,false))return false;
@@ -3337,7 +3553,35 @@ index 17c476a..bceec13 100644
          if(sub==fgCalls)gpuTimer_.resolve(flist);
          if(!submitGraph(slot))return false;
          if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
-@@ -5046,6 +5276,7 @@ void EnhanceGraph::shutdown()
+@@ -4881,6 +5118,9 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
+     // Switching the referenced .cube re-stages a descriptor, which needs the
+     // queue drained: treat it as a rebuild (parameters stay live).
+     if(s.color.enabled&&(s.color.lutNameString()!=desc_.color.lutNameString()||s.color.lutInputSpace!=desc_.color.lutInputSpace))return false;
++    // PushMPC (local addition, PushMpcNrLive.h): a change confined to NR's live dials keeps NR's history (no
++    // inputRevision bump, no anti-flicker reset), as NVIDIA's own integration does; anything else resets as before.
++    const auto nrLive=liveSettingsBaseline_&&desc_.enableNr&&nrEnabled_?nrLiveDecision(*liveSettingsBaseline_,s):NrLiveDecision{};
+     pausedNrResidualOnly_=false;
+     if(pausedNrSettings_){
+         auto residualEdit=*pausedNrSettings_;residualEdit.revision=s.revision;
+@@ -4957,12 +5197,17 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
+                 correction.neutral,correction.colorKeep,correction.lumaKeep,correction.shadow));
+             layer.protection=i<desc_.nrLayersProtection.size()?desc_.nrLayersProtection[i]:s.protection;
+         }
++        if(nrLive.live)continue;   // PushMPC: live dials only, the history stays
+         layer.temporal().reset();
+         // Reset this feature and its downstream consumers after input/parameter
+         // changes, not just the final temporal filter. Rejected settings above
+         // leave both the parameters and the history untouched.
+         ++layer.inputRevision;
+     }
++    // PushMPC: one line per live dial (the proof that no reset ran), then one line at the next evaluate with what NR got
++    if(nrLive.live){for(const auto& line:nrLive.changes)veyra::log::info("nr-live",line);nrLiveEvalLog_=!nrLive.changes.empty();}
++    else if(s.nr&&desc_.enableNr&&nrCreated())veyra::log::info("nr-live",std::format("nr reset: revision={} is not a live-dial-only change{}",s.revision,liveSettingsBaseline_?"":" (no baseline)"));
++    liveSettingsBaseline_=s;
+     desc_.fgMultiplier=std::max(2u,s.multiplier);
+     const bool temporalMotion=s.usesNrTemporal();
+     desc_.enableNvofStandalone=s.nr&&!desc_.stillImage&&(desc_.nrUsesFlow()||temporalMotion);nvofStandalone_=desc_.enableNvofStandalone;
+@@ -5046,6 +5291,7 @@ void EnhanceGraph::shutdown()
      }
      (void)ring_.drainQueue();(void)ring_.discardRecording();
      presentationFences_={};presentationValues_={};
@@ -3345,7 +3589,7 @@ index 17c476a..bceec13 100644
      for(auto& input:hardwareInputFrames_)input.reset();
      Status st = Status::Ok;
      if (nv12Ctx_ != nullptr) { sws_freeContext(nv12Ctx_); nv12Ctx_ = nullptr; }
-@@ -5082,6 +5313,8 @@ void EnhanceGraph::shutdown()
+@@ -5082,6 +5328,8 @@ void EnhanceGraph::shutdown()
      if(firstVideoSrBackend_){featuresReleased=firstVideoSrBackend_->release()&&featuresReleased;firstVideoSrBackend_.reset();}
      if(videoSrBackend_){featuresReleased=videoSrBackend_->release()&&featuresReleased;videoSrBackend_.reset();}
      vfxSrBackend_.reset();firstVfxSrBackend_.reset();
@@ -3354,7 +3598,7 @@ index 17c476a..bceec13 100644
      if(videoHdrBackend_)featuresReleased=videoHdrBackend_->release()&&featuresReleased;
      videoHdrBackend_.reset();videoHdrInput_.Reset();videoHdrOutput_.Reset();
      if (srBackend_) featuresReleased=srBackend_->release()&&featuresReleased;
-@@ -5220,7 +5453,7 @@ void EnhanceGraph::shutdown()
+@@ -5220,7 +5468,7 @@ void EnhanceGraph::shutdown()
      proxyTex_.Reset();
      exclusionPass_={};exclusionScratch_.Reset();
      hudLock_.reset();
