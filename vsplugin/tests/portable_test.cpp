@@ -667,6 +667,16 @@ static void TestTelecine()
     CHECK(c.verdict() == CadenceMeter::kNone, "progressive: no telecine (%d of %d combed)", c.combed(), c.measured());
     c = run(0, 150, at);
     CHECK(c.verdict() == CadenceMeter::kTelecine, "film with a video section later: telecine on the film part");
+    {   // progressive pictures with sensor-like noise (combs some frames at random phases): no telecine, decided early
+        CadenceMeter m; uint32_t seed = 7; int n = 0;
+        for (; n < CadenceMeter::kGiveUp && m.verdict() == CadenceMeter::kMeasuring; ++n) {
+            pm_comb_synth8(y.data(), w, w, h, n, 0, 0);
+            for (auto& p : y) { seed = seed * 1664525u + 1013904223u; p = uint8_t(std::clamp(int(p) + int((seed >> 24) % 21) - 10, 0, 255)); }
+            m.Push(y.data(), w, w, h, 0);
+        }
+        CHECK(m.verdict() == CadenceMeter::kNone && n < 120, "noisy progressive: no telecine (%d of %d combed, phase share %.2f, after %d frames)", m.combed(), m.measured(), m.phaseShare(), n);
+        std::printf("telecine: noisy progressive -> %s, %d of %d moving frames combed, after %d frames\n", m.verdict() == CadenceMeter::kNone ? "no telecine" : "telecine", m.combed(), m.measured(), n);
+    }
 }
 
 int main()

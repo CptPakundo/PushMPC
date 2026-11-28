@@ -631,6 +631,23 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
         node = il.node;
         if (il.aside) { a->mapConsumeNode(out, "clip", node, maReplace); return; }
     }
+    // deinterlaced in front (pushmpc.lua's deinterlaced=1: mpv's double-rate deinterlacer): a fixed Smoother is the
+    // output rate over the source it was set for, so it is halved on the fields (x4 of 30i = x2 of 60p, at least x2)
+    struct MapFree { const VSAPI* api; VSMap* m; ~MapFree() { if (m) api->freeMap(m); } } inCopy{ a, nullptr };
+    if (pmvs::IlArgInt(in, a, "deinterlaced", 0) == 1) {
+        int e = 0;
+        const char* sv = a->mapGetData(in, "smoother", 0, &e);
+        int k = pmvs::ParseSmoother(e || !sv ? std::string() : std::string(sv), 0);
+        if (k == 0) k = pmvs::ParseSmoother(pmvs::ReadSetting("Smoother"), 0);
+        if (k >= 2) {
+            inCopy.m = a->createMap();
+            a->copyMap(in, inCopy.m);
+            const std::string half = std::to_string(std::max(2, (k + 1) / 2));
+            a->mapSetData(inCopy.m, "smoother", half.c_str(), -1, dtUtf8, maReplace);
+            Log("deinterlaced input: Smoother x" + std::to_string(k) + " of the source = x" + half + " of its fields");
+            in = inCopy.m;
+        }
+    }
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);   // both wrap an unknown-length source (eof_guard.h)
@@ -752,7 +769,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
         "display_w:int:opt;display_h:int:opt;display_fs:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;playback:int:opt;"
-        "interlace_check:int:opt;",
+        "interlace_check:int:opt;deinterlaced:int:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
     vspapi->registerFunction("Interlace", "clip:vnode;", "clip:vnode;interlaced:int;why:data;", InterlaceCreate, nullptr, plugin);
     vspapi->registerFunction("MpvColour", "clip:vnode;mpvver:data:opt;", "ok:int;matrix:int;transfer:int;primaries:int;range:int;why:data;", MpvColourCreate, nullptr, plugin);

@@ -12,6 +12,7 @@ local opts = { engine = "pushmpc", opts = "", deinterlace = "yes" }
 require("mp.options").read_options(opts, "pushmpc")
 
 local last = nil
+local deint = { set = false, saved = nil, ivtc = false }   -- the fix in front of the filter (interlaced / telecine, below)
 
 local function multiple(src, disp)
     if not src or src <= 0 or not disp or disp <= 0 then return 2 end
@@ -41,7 +42,8 @@ local function apply()
         if disp > 0 then o[#o + 1] = string.format("display_fps=%.3f", disp) end
         -- full screen (Auto: no window composition per shown frame); through "extra", which every vf_pushmpc knows
         if not string.find(opts.opts, "extra=", 1, true) then
-            o[#o + 1] = "extra=[display_fs=" .. (mp.get_property_native("fullscreen") and "1" or "0") .. "]"
+            -- deinterlaced in front: a fixed Smoother keeps the output rate it asks for (the engine halves it on the fields)
+            o[#o + 1] = "extra=[display_fs=" .. (mp.get_property_native("fullscreen") and "1" or "0") .. (deint.set and "|deinterlaced=1" or "") .. "]"
         end
         if opts.opts ~= "" then o[#o + 1] = opts.opts end
         if #o > 0 then spec = spec .. "=" .. table.concat(o, ":") end
@@ -67,7 +69,6 @@ mp.observe_property("fullscreen", "bool", function() if last ~= nil then apply()
 -- average). Telecine: field matching and decimation (the probe: the 24p master back bit-exactly), yadif on the frames
 -- fieldmatch leaves combed. The user's deinterlace setting comes back at the end of the file. pushmpc-deinterlace=no:
 -- the filter steps aside as before.
-local deint = { set = false, saved = nil, ivtc = false }
 if opts.engine ~= "fruc" and opts.deinterlace ~= "no" then
     mp.enable_messages("info")
     mp.register_event("log-message", function(e)

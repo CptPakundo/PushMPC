@@ -149,7 +149,7 @@ The [user guide](docs/user-guide.md) explains every setting.
 <details><summary><b>Nothing seems to change in my player.</b></summary>
 
 Open the settings page (MPC-HC: Play > Filters > PushMPC Filter). Its "Now:" lines say what PushMPC is doing, or why
-it is resting: for example interlaced video, another video renderer, or a hardware decoder mode that leaves no room for
+it is resting: for example interlaced video with a decoder other than LAV Video, another video renderer, or a hardware decoder mode that leaves no room for
 PushMPC. In PotPlayer, choose MPC Video Renderer and a "copy-back" decoder (see the
 [user guide](docs/user-guide.md#potplayer)). After installing a new player, run Setup again so it sets that one up too.
 </details>

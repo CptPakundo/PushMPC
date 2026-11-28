@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #include "pushmpc/cadence_detect.h"   // CadenceMeter: telecine (comb_cadence, pmeng minor 3)
+#include "platform.h"                 // ReadSetting, ParseSmoother (the Smoother setting for deinterlaced input)
 #ifndef PME_SIDECAR
 #include "content_tap.h"
 #endif
@@ -308,7 +309,14 @@ void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* opti
     };
     if (!dev || !st || !out || st->width == 0 || st->height == 0) return fail("bad arguments");
     try {
-        const pme::Options o = pme::ParseOptions(options);
+        pme::Options o = pme::ParseOptions(options);
+        // deinterlaced in front (the scripts' deinterlaced=1, interlaced input at double rate): a fixed Smoother is the
+        // output rate over the source it was set for, so it is halved on the fields (x4 of 30i = x2 of 60p, at least x2)
+        if (pme::Opt(o, "deinterlaced") == "1") {
+            int k = pmvs::ParseSmoother(pme::Opt(o, "smoother"), 0);
+            if (k == 0) k = pmvs::ParseSmoother(pmvs::ReadSetting("Smoother"), 0);
+            if (k >= 2) { o["smoother"] = std::to_string(std::max(2, (k + 1) / 2)); pme::Log("deinterlaced input: Smoother x" + std::to_string(k) + " of the source = x" + o["smoother"] + " of its fields"); }
+        }
         const std::string backend = pme::Opt(o, "backend", "auto");
         std::memset(out, 0, sizeof(*out));
         out->struct_size = sizeof(*out);

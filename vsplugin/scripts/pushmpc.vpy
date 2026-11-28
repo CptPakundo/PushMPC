@@ -67,7 +67,7 @@ for _kv in str(_ud).split(","):
     if "=" in _kv:
         _k, _v = _kv.split("=", 1)
         _k, _v = _k.strip(), _v.strip()
-        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms", "display_w", "display_h", "display_fs"):
+        if _k in ("display_hdr", "matrix", "transfer", "primaries", "range", "wait_ms", "display_w", "display_h", "display_fs", "deinterlaced"):
             _args[_k] = int(_v)
         elif _k in ("display_fps", "sharpness", "display_peak"):
             _args[_k] = float(_v)

@@ -462,11 +462,15 @@ end
 
 -- the native filter's list: vf_pushmpc with the display rate when mpv knows it, and on software frames an upload to
 -- the player's D3D11 device first
+-- what the scripts put in front of the filter for interlaced / telecined input (deint_apply below)
+local deint = { set = false, saved = nil, ivtc = false }
 local function native_specs()
     local o = {}
     local disp = mp.get_property_number("display-fps", 0)
     if disp and disp > 0 then o[#o + 1] = string.format("display_fps=%.3f", disp) end
     if opts["native-opts"] ~= "" then o[#o + 1] = opts["native-opts"] end
+    -- deinterlaced in front: a fixed Smoother keeps the output rate it asks for (the engine halves it on the fields)
+    if deint.set and not opts["native-opts"]:find("extra=", 1, true) then o[#o + 1] = "extra=[deinterlaced=1]" end
     local s = "@pushmpc:pushmpc" .. (#o > 0 and ("=" .. table.concat(o, ":")) or "")
     if mp.get_property("hwdec-current", "no") == "d3d11va" then return { s } end
     local vp = mp.get_property_native("video-params") or {}
@@ -489,7 +493,6 @@ local failed_for = nil   -- the file the filter failed on: no retry until the ne
 --               film), so a broken cadence never shows combs.
 -- The user's deinterlace setting comes back at the end of the file. pushmpc-deinterlace=no: the old step-aside (the
 -- filter passes interlaced streams through).
-local deint = { set = false, saved = nil, ivtc = false }
 -- order: the field order the cadence meter measured ("tff" | "bff": the field the first combed frame of a cycle repeats)
 local function ivtc_spec(order) return "@pushmpc-ivtc:lavfi=[fieldmatch=order=" .. (order == "bff" and "bff" or "tff") .. ",yadif=deint=interlaced,decimate]" end
 local function deint_apply(kind, order)
@@ -562,6 +565,8 @@ function vs_status_watch()
         end
         mp.commandv("vf", "remove", "@pushmpc")
         local cd = colour_data()   -- the re-added instance opens with the stream's colour too (as in ensure)
+        -- deinterlaced in front: a fixed Smoother keeps the output rate it asks for (the plugin halves it on the fields)
+        if deint.set then cd = (cd and (cd .. ",") or "") .. "deinterlaced=1" end
         mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
     end)
 end
