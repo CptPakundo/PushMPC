@@ -232,7 +232,7 @@ static void TestDecisions()
 {
     CHECK(DecideAppleK(0, 23.976, 0).k == 2, "Auto, display unknown: x2");
     CHECK(DecideAppleK(0, 23.976, 120).k == 5, "Auto 24 -> 120 Hz: x5");
-    CHECK(DecideAppleK(0, 23.976, 240).k == 5, "Auto 24 -> 240 Hz: x5, the even cadence (x8 is uneven and holds as long)");
+    CHECK(DecideAppleK(0, 23.976, 240).k == 10, "Auto 24 -> 240 Hz: x10, one refresh per frame (with the old x8 ceiling: x5)");
     CHECK(DecideAppleK(0, 60, 60).k == 1, "Auto 60 -> 60: x1");
     CHECK(DecideAppleK(0, 29.97, 59.94).k == 2, "Auto 30 -> 60: x2");
     CHECK(DecideAppleK(1, 24, 120).k == 1 && DecideAppleK(3, 24, 60).k == 3, "fixed / off");

@@ -254,7 +254,7 @@ inline AppleK DecideAppleK(int smoother, double srcFps, double displayHz)
     if (displayHz <= 0) { r.k = 2; r.why = "Auto: display rate unknown: x2"; return r; }
     const int maxK = std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kAppleMaxK);
     // the even cadence at a fixed refresh (PushMpcAuto.h's rule; ProMotion / VRR is not known here): among x1..maxK the one
-    // that shows frames shortest, a tie going to the even cadence, then the larger (240 Hz: x5, not an uneven x8)
+    // that shows frames shortest, a tie going to the even cadence, then the larger (24p at 240 Hz: x10, one refresh each; 120 Hz: x5)
     double bestHold = 1e9; bool bestEven = true; r.k = 1;
     for (int k = 1; k <= maxK; ++k) {
         const double q = displayHz / (srcFps * k), n = std::round(q);
