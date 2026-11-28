@@ -8,7 +8,7 @@ Built on PushFPS 4.5.8.
 
 - **Smoother motion**, up to 16x on GeForce RTX 50 and 40 cards, so a 24 fps film fills a 120 Hz or 240 Hz screen. On a
   GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps) on a 4K 240 Hz screen without dropping a frame.
-- **Starts fast:** in MPC-HC, smooth motion usually begins within three seconds of opening a video, even
+- **Starts fast:** in MPC-HC, smooth motion begins a few seconds after you open a video, even
   the first one after starting the player. The sharpest upscaling joins a little later, without a pause.
 - **Clean scene cuts:** a new shot starts on its own frame, never a smeared blend.
 - **A sharper picture** with RTX Video Super Resolution, FSR or NIS.
