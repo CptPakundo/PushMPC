@@ -32,9 +32,10 @@ sets itself up for your graphics card and display.
   the in-between frames are spread over the whole drawing instead of moving in one step and stopping in the next.
 - Interlaced video (TV recordings, many DVDs and broadcasts) gets smooth motion too. PushMPC sees the combing in the
   picture itself (never trusting the file's labels), deinterlaces it into whole frames, one per field, and then
-  generates from those. Film carried in a TV signal (2:3 pulldown) is put back into its original 24 frames first, so
-  nothing of the film is lost. In mpv this uses mpv's own deinterlacer and its field matching; in VLC, PushMPC's own
-  deinterlacer; in MPC-HC and MPC-BE, LAV Video's deinterlacer (PushMPC puts LAV's settings back afterwards).
+  generates from those. In mpv this uses mpv's own deinterlacer, and film carried in a TV signal (2:3 pulldown) is
+  put back into its original 24 frames first, so nothing of the film is lost. In VLC, PushMPC uses its own
+  deinterlacer (film is deinterlaced like video there). In MPC-HC, MPC-BE and PotPlayer, PushMPC still steps aside on
+  interlaced video and the player deinterlaces it.
 
 ### Auto
 

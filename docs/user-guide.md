@@ -319,10 +319,9 @@ only changes MPC-HC's own profile in the NVIDIA driver, keeps a backup, and unin
 half-pictures from different moments in each frame) or film carried in a TV signal (2:3 pulldown), whatever the file
 says about itself. Interlaced video is turned into whole frames, one for each half-picture, and frame generation runs
 on those: in mpv with mpv's own deinterlacer (your deinterlace setting comes back at the end of the file), in VLC with
-PushMPC's own deinterlacer, and in MPC-HC and MPC-BE with LAV Video's deinterlacer (the file is reopened once for
-that, and LAV's settings are put back when you close it). Film in a TV signal is put back into its original 24 frames
-in mpv, exactly as it was filmed. Where none of this can run (VLC with hardware decoding kept on the GPU, a decoder
-other than LAV Video), PushMPC steps aside and the player deinterlaces as before. A fixed Smoother keeps the frame rate
+PushMPC's own deinterlacer. Film in a TV signal is put back into its original 24 frames in mpv, exactly as it was
+filmed; VLC deinterlaces it like video. In MPC-HC, MPC-BE and PotPlayer, and in VLC with hardware decoding kept on
+the GPU, PushMPC steps aside and the player deinterlaces as before. A fixed Smoother keeps the frame rate
 it gives: 4x on 30 interlaced frames a second is still 120 frames a second.
 
 **Picture and sound stay in sync.** Every frame, real or generated, keeps its own timestamp. After a seek, the first
@@ -356,7 +355,7 @@ usual reasons:
 
 - another video renderer than MPC Video Renderer is in use;
 - the decoder is in a "native" hardware mode: choose a copy-back mode;
-- the video is interlaced and the decoder is not LAV Video (MPC Video Renderer deinterlaces it; PushMPC steps aside);
+- the video is interlaced (MPC Video Renderer deinterlaces it; PushMPC steps aside);
 - the player was installed after PushMPC: run Setup again.
 
 If a frame generation method doesn't start on your card, PushMPC moves on to the next one and says so.
