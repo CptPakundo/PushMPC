@@ -735,8 +735,8 @@ jobs:
           mkdir -p "$HOME/Library/Preferences/org.videolan.vlc"
           printf '[core]\nvout=caopengllayer\nvideo-filter=postproc\n' > "$HOME/Library/Preferences/org.videolan.vlc/vlcrc"
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-players.txt" | sed -n '/IINA and VLC:/,$p' | cut -c1-400
-          iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
-          vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
+          iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1 || true)   # none: judged below
+          vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1 || true)
           echo "::notice title=IINA::$iina"; echo "::notice title=VLC::$vlc"
           echo "$iina" | grep -qE '[0-9]+ frames in, [0-9]+ out \(engine: ' || { echo "::error::IINA: no frames generated through the bridge"; tail -20 "$HOME/Library/Logs/PushMPC/iina-bridge.log" 2>/dev/null; fails=$((fails + 1)); }
           echo "$vlc" | grep -qE 'generated [0-9]+ frames' || { echo "::error::VLC: no frames generated"; tail -30 "$HOME/Library/Application Support/PushMPC/vlc/pushmpc-selftest.log" 2>/dev/null | grep -i pushmpc; fails=$((fails + 1)); }
