@@ -507,6 +507,11 @@ static int have_comb(const pmeng_api *a)
            a->comb_new && a->comb_push && a->comb_counts && a->comb_free;
 }
 
+static int have_cadence(const pmeng_api *a)   /* minor 3: telecine */
+{
+    return have_comb(a) && a->struct_size >= offsetof(pmeng_api, comb_cadence) + sizeof(a->comb_cadence) && a->comb_cadence;
+}
+
 static int il_memo_is(AVFilterContext *ctx)
 {
     PushMPCContext *s = ctx->priv;
@@ -544,7 +549,7 @@ static void il_measure(AVFilterContext *ctx, AVFrame *in, const AVFrame *src)
     PushMPCContext *s = ctx->priv;
     const AVFrame *c = src;
     uint32_t bps, shift;
-    int v, measured = 0, combed = 0;
+    int v, cv, measured = 0, combed = 0;
     if (s->il_done || !s->comb)
         return;
     if (s->il_seen < 3)
@@ -576,6 +581,23 @@ static void il_measure(AVFilterContext *ctx, AVFrame *in, const AVFrame *src)
         return;
     }
     v = s->api->comb_push(s->comb, c->data[0], c->linesize[0], (uint32_t)c->width, (uint32_t)c->height, bps, shift);
+    /* telecine (pmeng minor 3): measured on the same frames, and decided before the combing verdict counts (telecined
+       film combs 2 of 5 frames: it must not be taken for interlaced video) */
+    if (have_cadence(s->api)) {
+        int cm = 0, cc = 0, ph = 0, tff = 1;
+        cv = s->api->comb_cadence(s->comb, &cm, &cc, &ph, &tff);
+        if (cv == 0 && s->il_seen < PM_IL_GIVE_UP)
+            return;
+        if (cv == 2) {
+            s->il_done = 1;
+            av_frame_free(&s->il_cpu);
+            av_log(ctx, AV_LOG_WARNING, "telecine: 2:3 pulldown measured (%d of %d moving frames combed, on phases %d-%d of the cycle of five, %s): "
+                   "field matching and decimation in front of the filter give the film frames back\n", cc, cm, ph, (ph + 1) % 5,
+                   tff ? "top field first" : "bottom field first");
+            s->aside = 0;
+            return;
+        }
+    }
     if (v == 0 && s->il_seen < PM_IL_GIVE_UP)
         return;
     s->il_done = 1;

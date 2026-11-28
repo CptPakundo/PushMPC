@@ -11,6 +11,10 @@ them.
   source with the small patch set in `patches/`; the portable engine uses files of PushFPS's portable core
   (`vsplugin/third_party/pushfps-portable/`).
 - **MPC Video Renderer**'s DirectShow base classes and interface headers: GPL.
+- **[LAV Filters](https://github.com/Nevcairiel/LAVFilters)** (Hendrik Leppkes): the settings interface of LAV Video
+  (`LAVVideoSettings.h`, GPL-2.0-or-later), at the tag `scripts/lav-pin.json` pins. Only this header is used: the
+  DirectShow filter turns on LAV's double-rate deinterlacer for files measured interlaced. The build fetches it and
+  checks its SHA-256.
 - **VapourSynth** SDK headers: LGPL-2.1 (`vsplugin/third_party/vapoursynth/`).
 - **NVIDIA Image Scaling** 1.0.3: MIT (`vsplugin/third_party/nis/`).
 - **AMD FidelityFX Super Resolution 1** (FidelityFX SDK 1.1.4): MIT (`vsplugin/third_party/fidelityfx-fsr1/`).

@@ -27,6 +27,41 @@ target_compile_options(PushMpcFilter PRIVATE /W3 /EHsc /O2 /Z7 /utf-8)
 target_link_options(PushMpcFilter PRIVATE /DEBUG /OPT:REF /PDBALTPATH:%_PDB%)  # only the PDB file name in the binary, no build path
 target_link_libraries(PushMpcFilter PRIVATE baseclasses strmiids winmm avrt version d3d11 dxgi d3dcompiler dxguid advapi32 ole32 oleaut32 user32 shell32 uuid comctl32 bcrypt gdi32)
 
+# LAV Video's settings interface (scripts/lav-pin.json): the double-rate deinterlacer for files measured interlaced. CI
+# fetches the pinned header (-DPUSHMPC_FETCH_LAV=ON; its SHA-256 must match the pin), or -DPUSHMPC_LAV_INCLUDE=<dir>
+# names a folder that has it; without it the filter builds as before and steps aside for interlaced files.
+option(PUSHMPC_FETCH_LAV "download LAV Filters' LAVVideoSettings.h at the tag scripts/lav-pin.json pins" OFF)
+set(PUSHMPC_LAV_INCLUDE "" CACHE PATH "a folder with LAVVideoSettings.h")
+if(PUSHMPC_FETCH_LAV AND NOT PUSHMPC_LAV_INCLUDE)
+  file(READ "${CMAKE_SOURCE_DIR}/../scripts/lav-pin.json" _lav)
+  string(JSON _lav_repo GET "${_lav}" repository)
+  string(JSON _lav_tag GET "${_lav}" tag)
+  string(JSON _lav_path GET "${_lav}" path)
+  string(JSON _lav_sha GET "${_lav}" sha256)
+  set(_lav_dir "${CMAKE_BINARY_DIR}/lav-include")
+  file(DOWNLOAD "https://raw.githubusercontent.com/${_lav_repo}/${_lav_tag}/${_lav_path}" "${_lav_dir}/LAVVideoSettings.h" STATUS _lav_st)
+  list(GET _lav_st 0 _lav_rc)
+  if(NOT _lav_rc EQUAL 0)
+    message(FATAL_ERROR "LAVVideoSettings.h (${_lav_repo} ${_lav_tag}): download failed: ${_lav_st}")
+  endif()
+  file(SHA256 "${_lav_dir}/LAVVideoSettings.h" _lav_got)
+  if(_lav_sha STREQUAL "TODO")
+    # not pinned yet: the header is not used (the filter steps aside for interlaced files); the hash to pin is printed
+    message(WARNING "LAVVideoSettings.h (${_lav_repo} ${_lav_tag}) is not pinned: its SHA-256 is ${_lav_got}; put it in scripts/lav-pin.json")
+    file(REMOVE "${_lav_dir}/LAVVideoSettings.h")
+  elseif(NOT _lav_got STREQUAL _lav_sha)
+    message(FATAL_ERROR "LAVVideoSettings.h (${_lav_repo} ${_lav_tag}): SHA-256 ${_lav_got}, scripts/lav-pin.json pins ${_lav_sha}")
+  else()
+    set(PUSHMPC_LAV_INCLUDE "${_lav_dir}")
+  endif()
+endif()
+if(PUSHMPC_LAV_INCLUDE)
+  target_include_directories(PushMpcFilter PRIVATE "${PUSHMPC_LAV_INCLUDE}")
+  message(STATUS "PushMpcFilter: LAV Video's settings interface from ${PUSHMPC_LAV_INCLUDE}")
+else()
+  message(STATUS "PushMpcFilter: no LAVVideoSettings.h: interlaced files pass through for the renderer to deinterlace")
+endif()
+
 # The optional image model behind ContentDetect (PushMpcContentModel.h): pmml (../pmml) when the ONNX Runtime headers are
 # given (-DPMML_ORT_INCLUDE=...); without them the filter uses the hand-built cues only
 if(PMML_ORT_INCLUDE)

@@ -1,0 +1,7 @@
+{
+  "what": "LAV Filters' public settings interface for LAV Video (include/LAVVideoSettings.h, GPL-2.0-or-later), used by the DirectShow filter to turn on LAV's double-rate deinterlacer for a file measured interlaced. Only this header is used; fetched at configure time with -DPUSHMPC_FETCH_LAV=ON (CI) and checked against sha256",
+  "repository": "Nevcairiel/LAVFilters",
+  "tag": "0.79.2",
+  "path": "include/LAVVideoSettings.h",
+  "sha256": "233d25e22bd4c45c28b8377eb5f348865b1c41401136ef7905bd4fdbd6991c41"
+}

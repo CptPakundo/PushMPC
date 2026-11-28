@@ -120,6 +120,7 @@ jobs:
             ./build/pm_engine_test"
           mkdir -p out/linux
           cp build/libpushmpc_plugin.so build/libpushdump_plugin.so build/libpushmpc_gl_plugin.so out/linux/
+          cp build/pm_deint_tool out/linux/   # the deinterlacer on raw frames, scored against the 60p master in the test job
       - name: PushMPC's content library (libpushmpc_content.so; ContentDetect + the image model through pmml) in manylinux2014, its CPU test
         timeout-minutes: 15
         run: |
@@ -219,27 +220,47 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
-      - name: Interlaced input passes through at the source rate, measured in the picture (woven and progressive pans)
+      - name: Interlaced input deinterlaced in the module, then generated (woven and progressive pans); the deinterlacer's fidelity against 60p masters
         run: |
-          # VLC's own deinterlacer off, so the module's measurement is what decides. Woven: 24 moving frames measured, then
-          # the pictures pass through: 1 + 23 x 4 shown before the verdict, one per source picture after it (tolerance 9:
-          # the worker's last job). Progressive with the same pan: x4 throughout.
+          # VLC's own deinterlacer off (it runs after the module anyway: deint-probe run 46133199291). Woven: 24 moving
+          # frames measured (1 + 23 x 4 shown before), then the module deinterlaces (YADIF, one picture per field) and
+          # generates at the output rate set: x4 of the 30i source = x2 of its 60p fields, 4 per source picture after the
+          # switch (at least 85 %: late pictures may drop). Progressive with the same pan: x4 throughout, never deinterlaced.
           export VLC_PLUGIN_PATH=~/.local/share/pushmpc/vlc
-          n=$(sed -n 's/nb_read_frames=//p' art/clips/woven.txt | tr -d '\r'); want=$((1 + 23 * 4 + n - 24)); rc=0
+          n=$(sed -n 's/nb_read_frames=//p' art/clips/woven.txt | tr -d '\r'); rc=0
           for c in woven woven-prog; do
-            timeout 90 vlc -I dummy --no-audio --play-and-exit --no-video-title-show --no-osd --file-logging --logfile="res/linux/il-$c.log" --log-verbose=2 \
+            timeout 120 vlc -I dummy --no-audio --play-and-exit --no-video-title-show --no-osd --file-logging --logfile="res/linux/il-$c.log" --log-verbose=2 \
               --vout=pushdump --pushdump-file="res/linux/il-$c.csv" --avcodec-hw=none --deinterlace=0 --video-filter=postproc:pushmpc_out --pushmpc-smoother=4 \
               "art/clips/$c.mkv" > "res/linux/il-$c.stdout" 2>&1
             got=$(( $(wc -l < "res/linux/il-$c.csv") - 1 ))
-            grep -hE "PushMPC: (interlaced|progressive \(measured\))" "res/linux/il-$c.log" | sed 's/^[^:]*: //' | head -3
+            grep -hE "PushMPC: (interlaced|progressive \(measured\))" "res/linux/il-$c.log" | sed 's/^[^:]*: //' | head -4
             if [ "$c" = woven ]; then
-              echo "interlaced check (VLC, woven): pass-through after the verdict, $got pictures shown (want $want, at most +9; x4 throughout would be $((1 + (n - 1) * 4)))"
-              { [ "$got" -ge $((want * 9 / 10 - 9)) ] && [ "$got" -le $((want + 9)) ] && grep -q "PushMPC: interlaced: interlaced input" "res/linux/il-$c.log"; } || { echo "::error::VLC woven: $got pictures, want $want (at most +9; late pictures may drop)"; rc=1; }
+              want=$(( 1 + 23 * 4 + (n - 26) * 4 ))   # x4 as set: x2 of the fields (the same output rate)
+              echo "interlaced check (VLC, woven): deinterlaced in the module then x2 of the fields, $got pictures shown (want about $want; pass-through would be $((1 + 23 * 4 + n - 24)))"
+              { [ "$got" -ge $(( want * 85 / 100 )) ] && grep -q "PushMPC: interlaced input: deinterlaced here" "res/linux/il-$c.log" && ! grep -q "pass through from now on" "res/linux/il-$c.log"; } \
+                || { echo "::error::VLC woven: $got pictures, want about $want with the module's deinterlacer"; rc=1; }
             else
-              echo "interlaced check (VLC, progressive): frame generation x4, $got of $((1 + (n - 1) * 4)) pictures (want at least 90 %: late pictures may drop)"
-              { [ "$got" -ge $(((1 + (n - 1) * 4) * 9 / 10)) ] && grep -q "PushMPC: progressive (measured)" "res/linux/il-$c.log"; } || { echo "::error::VLC progressive: $got pictures"; rc=1; }
+              echo "interlaced check (VLC, progressive): frame generation x4, $got of $((1 + (n - 1) * 4)) pictures (want at least 90 %)"
+              { [ "$got" -ge $(((1 + (n - 1) * 4) * 9 / 10)) ] && grep -q "PushMPC: progressive (measured)" "res/linux/il-$c.log" && ! grep -q "deinterlaced here" "res/linux/il-$c.log"; } || { echo "::error::VLC progressive: $got pictures"; rc=1; }
             fi
           done
+          # fidelity: the module's deinterlacer (pm_deint_tool, the same code) and ffmpeg's yadif on 60p masters woven to
+          # 60i, luma PSNR against the master frame by frame
+          sudo apt-get -qq install -y ffmpeg >/dev/null
+          d=$(mktemp -d)
+          for m in testsrc2 pan; do
+            src="testsrc2=s=1280x720:r=60000/1001:d=4"
+            [ "$m" = pan ] && src="nullsrc=s=1280x720:r=60000/1001:d=4,format=gray,geq=lum='128+60*sin((X+3*N)*0.07)*cos((Y-N)*0.05)+30*sin((X*0.31+Y*0.17+5*N)*0.2)+random(1)*6-3'"
+            ffmpeg -v error -y -f lavfi -i "$src" -pix_fmt yuv420p -f rawvideo "$d/m.yuv"
+            ffmpeg -v error -y -f rawvideo -pix_fmt yuv420p -s 1280x720 -r 60000/1001 -i "$d/m.yuv" -vf "tinterlace=mode=interleave_top" -f rawvideo "$d/w.yuv"
+            chmod +x art/plugin-linux/pm_deint_tool; art/plugin-linux/pm_deint_tool "$d/w.yuv" "$d/o.yuv" 1280 720 1
+            ffmpeg -v error -y -f rawvideo -pix_fmt yuv420p -s 1280x720 -r 30000/1001 -i "$d/w.yuv" -vf "setfield=tff,yadif=mode=send_field:parity=tff" -f rawvideo "$d/y.yuv"
+            psnr() { ffmpeg -f rawvideo -pix_fmt yuv420p -s 1280x720 -i "$1" -f rawvideo -pix_fmt yuv420p -s 1280x720 -i "$d/m.yuv" -lavfi "[0]extractplanes=y[a];[1]extractplanes=y[b];[a][b]psnr=shortest=1" -f null - 2>&1 | grep -oE "average:[0-9.inf]+" | tail -1 | cut -d: -f2; }
+            ours=$(psnr "$d/o.yuv"); ref=$(psnr "$d/y.yuv")
+            echo "deinterlace fidelity (VLC module, $m): ${ours} dB against the 60p master (ffmpeg yadif ${ref} dB)"
+            awk -v a="$ours" -v b="$ref" 'BEGIN { exit !(a + 0 >= b - 0.5) }' || { echo "::error::the module's deinterlacer on $m: $ours dB, ffmpeg's yadif $ref dB"; rc=1; }
+          done
+          rm -rf "$d"
           exit $rc
       - name: At x1 the module passes a picture it would convert through untouched (4:2:2, Smoother off)
         run: |

@@ -5,6 +5,7 @@
 // The filter retries a failed hardware open with mem = CPU (its copy fallback), so a reason here is enough.
 #include "engine.h"
 #include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
+#include "pushmpc/cadence_detect.h"   // CadenceMeter: telecine (comb_cadence, pmeng minor 3)
 #ifndef PME_SIDECAR
 #include "content_tap.h"
 #endif
@@ -63,7 +64,6 @@ namespace {
 struct Instance {
     pme::Backend* b = nullptr;
     std::string err;
-#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
     // ContentDetect on this stream's frames (a sidecar module's frames are measured by the module that loaded it)
     std::unique_ptr<pme::ContentTap> tap;
@@ -186,7 +186,6 @@ pme::Backend* OpenMl(const pmeng_stream& st, const pme::Options& o, pmeng_output
 pme::Backend* OpenNvlCuda(const pmeng_device& dev, const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why) { return OpenSidecarOf(0, st, o, out, why, &dev); }
 #endif
 
-#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
 // software frames: backend=auto tries, in order, what can do best on this machine.
 //   macOS: the apple engine (VideoToolbox), then the portable GPU engine on its own Vulkan device (MoltenVK), then the CPU.
@@ -363,7 +362,6 @@ void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* opti
         pme::Log(std::string("open: ") + out->engine + ": " + out->description);
         auto* inst = new Instance();
         inst->b = b;
-#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         // ContentDetect: what the picture is, measured on the frames (option content=off: not measured)
         if (pme::Opt(o, "content", "auto") != "off") { inst->tap = std::make_unique<pme::ContentTap>(); b->content = inst->tap.get(); }
@@ -384,7 +382,6 @@ int Submit(void* h, const pmeng_image* src, int64_t pts, uint32_t flags)
     if (!in || !src) return PMENG_ERROR;
     try {
         const int r = in->b->Submit(*src, pts, flags);
-#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         if (in->tap) {
             // frames in host memory: measured here, after the engine took the frame (a BUSY frame comes again)
@@ -431,7 +428,6 @@ void Close(void* h)
     if (!in) return;
     try {
         pme::Log("close: " + in->b->Stats());
-#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         if (in->tap) pme::Log("close: " + in->tap->Describe());
 #endif
@@ -460,27 +456,44 @@ int Stats(void* h, char* buf, uint32_t size)
     return PMENG_OK;
 }
 
-// interlaced input (minor 2): the meter of content_detect.h, one per filter instance, no engine needed
-void* CombNew() { try { return new pushmpc::content::CombMeter(); } catch (...) { return nullptr; } }
+// interlaced input (minor 2) and telecine (minor 3): the meters of content_detect.h (field combing) and
+// cadence_detect.h (2:3 pulldown), one pair per filter instance, no engine needed. comb_push feeds both while either
+// measures; it returns the combing verdict, comb_cadence the cadence verdict
+struct CombState { pushmpc::content::CombMeter comb; pushmpc::content::CadenceMeter cad; };
+void* CombNew() { try { return new CombState(); } catch (...) { return nullptr; } }
 int CombPush(void* c, const uint8_t* luma, ptrdiff_t stride, uint32_t w, uint32_t h, uint32_t bps, uint32_t shift)
 {
-    auto* m = static_cast<pushmpc::content::CombMeter*>(c);
-    if (!m || !luma) return 0;
+    auto* s = static_cast<CombState*>(c);
+    if (!s || !luma) return 0;
     try {
-        return bps > 1 ? int(m->Push(reinterpret_cast<const uint16_t*>(luma), stride / 2, int(w), int(h), int(shift)))
-                       : int(m->Push(luma, stride, int(w), int(h), 0));
-    } catch (...) { return int(m->verdict()); }
+        if (bps > 1) {
+            const auto* y = reinterpret_cast<const uint16_t*>(luma);
+            if (s->cad.verdict() == pushmpc::content::CadenceMeter::kMeasuring) s->cad.Push(y, stride / 2, int(w), int(h), int(shift));
+            return int(s->comb.Push(y, stride / 2, int(w), int(h), int(shift)));
+        }
+        if (s->cad.verdict() == pushmpc::content::CadenceMeter::kMeasuring) s->cad.Push(luma, stride, int(w), int(h), 0);
+        return int(s->comb.Push(luma, stride, int(w), int(h), 0));
+    } catch (...) { return int(s->comb.verdict()); }
 }
 void CombCounts(void* c, int* measured, int* combed)
 {
-    auto* m = static_cast<pushmpc::content::CombMeter*>(c);
-    if (measured) *measured = m ? m->measured() : 0;
-    if (combed) *combed = m ? m->combed() : 0;
+    auto* s = static_cast<CombState*>(c);
+    if (measured) *measured = s ? s->comb.measured() : 0;
+    if (combed) *combed = s ? s->comb.combed() : 0;
 }
-void CombFree(void* c) { delete static_cast<pushmpc::content::CombMeter*>(c); }
+void CombFree(void* c) { delete static_cast<CombState*>(c); }
+int CombCadence(void* c, int* measured, int* combed, int* phase, int* tff)
+{
+    auto* s = static_cast<CombState*>(c);
+    if (measured) *measured = s ? s->cad.measured() : 0;
+    if (combed) *combed = s ? s->cad.combed() : 0;
+    if (phase) *phase = s ? s->cad.phase() : 0;
+    if (tff) *tff = s ? (s->cad.topFieldFirst() ? 1 : 0) : 1;
+    return s ? int(s->cad.verdict()) : 0;
+}
 
 const pmeng_api kApi = { sizeof(pmeng_api), PMENG_ABI_VERSION, Version, Open, Submit, Peek, Write, Skip, Pending, Flush, Close, LastError, Stats, Finish,
-                         CombNew, CombPush, CombCounts, CombFree };
+                         CombNew, CombPush, CombCounts, CombFree, CombCadence };
 
 } // namespace
 

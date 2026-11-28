@@ -9,6 +9,7 @@
 #include "pm_engine.h"
 #include "engine_portable.h"
 #include "pm_comb.h"
+#include "pm_deint.h"
 #include "../../tests/comb_synth.h"
 
 /* ---- the held-drawing repair: a painted background and a disc drawn on twos (12 px per drawing, back and forth).
@@ -231,6 +232,48 @@ static int TestComb(void)
     return fails;
 }
 
+/* the module's deinterlacer (pm_deint.h) on a pan woven from a 60p master (tests/comb_synth.h at t = n / 2): each
+ * output field against the master frame of its moment, luma PSNR; and no combing left for the meter */
+static int TestDeint(void)
+{
+    enum { W = 320, H = 240 };
+    static uint8_t woven[W * H * 3 / 2], master[W * H], out[W * H * 3 / 2];
+    int fails = 0, n = 0;
+    double se = 0;
+    pm_deint *d = pm_deint_new(W, H, 8);
+    void *c = pm_comb_new();
+    int v = PM_COMB_MEASURING;
+    if (!d || !c) return 1;
+    const uint8_t *pl[3] = { woven, woven + W * H, woven + W * H + W * H / 4 };
+    uint8_t *ol[3] = { out, out + W * H, out + W * H + W * H / 4 };
+    const ptrdiff_t st[3] = { W, W / 2, W / 2 };
+    memset(woven + W * H, 128, W * H / 2);
+    for (int f = 0; f < 40; f++) {
+        /* woven frame f: top lines at master time 2f, bottom lines at 2f + 1 (60p master, 2 px per field) */
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) woven[y * W + x] = (uint8_t)pm_comb_synth_value(x, y, (2 * f + (y & 1)) * 0.5);
+        if (pm_deint_push(d, pl, st, 1) != 2) continue;
+        for (int k = 0; k < 2; k++) {   /* the fields of frame f - 1: master moments 2 (f - 1) + k */
+            pm_deint_get(d, k, ol, st);
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    master[y * W + x] = (uint8_t)pm_comb_synth_value(x, y, (2 * (f - 1) + k) * 0.5);
+                    const double e = (double)out[y * W + x] - master[y * W + x];
+                    se += e * e;
+                }
+            n++;
+            v = pm_comb_push(c, out, W, W, H, 1, 0);
+        }
+    }
+    const double mse = se / ((double)n * W * H), psnr = mse > 0 ? 10.0 * log10(255.0 * 255.0 / mse) : 99.0;
+    printf("deinterlace (VLC): %d fields of a woven pan, %.2f dB against the 60p master; the meter on them: %s\n", n, psnr,
+           v == PM_COMB_PROGRESSIVE ? "progressive" : v == PM_COMB_INTERLACED ? "interlaced" : "measuring");
+    if (n != 2 * 39 || psnr < 30.0 || v != PM_COMB_PROGRESSIVE) { printf("FAIL deinterlace: %d fields, %.2f dB, meter %d\n", n, psnr, v); fails++; }
+    pm_comb_free(c);
+    pm_deint_free(d);
+    return fails;
+}
+
 int main(void)
 {
     int fails = 0;
@@ -305,6 +348,7 @@ int main(void)
     printf("Auto 60 fps on 60 Hz: x%d (%s)\n", k3, why);
     if (k3 != 1) fails++;
     fails += TestComb();
+    fails += TestDeint();
     printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
     return fails ? 1 : 0;
 }

@@ -8,7 +8,7 @@
 -- Setup writes the matching mpv.conf block (hwdec, video-sync=display-resample, interpolation=no) and picks the
 -- engine: fruc only when `mpv --vf=help` lists fruc_vulkan and the GPU is RTX 30 or newer, and only where it beats the
 -- VapourSynth / pushcore route (Auto's benchmark).
-local opts = { engine = "pushmpc", opts = "" }
+local opts = { engine = "pushmpc", opts = "", deinterlace = "yes" }
 require("mp.options").read_options(opts, "pushmpc")
 
 local last = nil
@@ -59,3 +59,37 @@ mp.register_event("file-loaded", function() last_src = nil; apply() end)
 mp.observe_property("estimated-vf-fps", "number", function() if last ~= nil then apply() end end)
 mp.observe_property("display-fps", "number", function() if last ~= nil or mp.get_property("path") then apply() end end)
 mp.observe_property("fullscreen", "bool", function() if last ~= nil then apply() end end)
+
+-- interlaced input and telecine, measured by vf_pushmpc in the picture (its log lines: field combing, the 2:3 pulldown
+-- cadence; never names or flags): the stream is fixed in front of the filter, which is then set again and generates
+-- from whole frames. Interlaced: mpv's own double-rate deinterlacer (deinterlace=yes; it runs before the user filters,
+-- on hwdec its zero-copy one; = yadif, the best of the deinterlacers the deinterlace probe scored against 60p masters on
+-- average). Telecine: field matching and decimation (the probe: the 24p master back bit-exactly), yadif on the frames
+-- fieldmatch leaves combed. The user's deinterlace setting comes back at the end of the file. pushmpc-deinterlace=no:
+-- the filter steps aside as before.
+local deint = { set = false, saved = nil, ivtc = false }
+if opts.engine ~= "fruc" and opts.deinterlace ~= "no" then
+    mp.enable_messages("info")
+    mp.register_event("log-message", function(e)
+        local text = e.text or ""
+        if (mp.get_property("o", "") or "") ~= "" then return end
+        local changed = false
+        if text:find("telecine: 2:3 pulldown measured", 1, true) and not deint.ivtc then
+            local order = text:find("bottom field first", 1, true) and "bff" or "tff"   -- the field order the filter measured
+            deint.ivtc = mp.commandv("vf", "pre", "@pushmpc-ivtc:lavfi=[fieldmatch=order=" .. order .. ",yadif=deint=interlaced,decimate]") and true or false
+            mp.msg.info("telecine (2:3 pulldown measured): " .. (deint.ivtc and "field matching and decimation in front of the filter" or "the IVTC filters could not start"))
+            changed = deint.ivtc
+        elseif text:find("interlaced: interlaced input", 1, true) and not deint.set and not deint.ivtc then
+            deint.saved = mp.get_property("deinterlace")
+            deint.set = mp.set_property("deinterlace", "yes") and true or false
+            mp.msg.info("interlaced input (field combing measured): " .. (deint.set and "mpv's double-rate deinterlacer on for this file" or "mpv's deinterlacer could not be turned on"))
+            changed = deint.set
+        end
+        if changed and last then mp.commandv("vf", "remove", "@pushmpc"); last = nil; apply() end
+    end)
+    mp.register_event("end-file", function()
+        if deint.set and deint.saved ~= nil then mp.set_property("deinterlace", deint.saved) end
+        if deint.ivtc then mp.commandv("vf", "remove", "@pushmpc-ivtc") end
+        deint = { set = false, saved = nil, ivtc = false }
+    end)
+end
