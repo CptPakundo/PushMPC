@@ -10,19 +10,19 @@ FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     AUTOCHECKBOX    "Enable PushMPC", IDC_PM_ENABLE, 7, 7, 200, 10
     LTEXT           "", -1, 285, 0, 15, 8   // keeps the page 300 units wide: room for its scroll bar (hosts size the page to its controls)
-    LTEXT           "Smoother", -1, 7, 26, 64, 8
+    LTEXT           "Smoother", -1, 7, 26, 62, 8
     COMBOBOX        IDC_PM_SMOOTH, 70, 24, 74, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_PM_SMOOTH_NOW, 150, 26, 135, 8, SS_ENDELLIPSIS
-    LTEXT           "Sharper", -1, 7, 42, 64, 8
+    LTEXT           "Sharper", -1, 7, 42, 62, 8
     COMBOBOX        IDC_PM_SHARP, 70, 40, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_PM_SHARP_NOW, 150, 42, 135, 8, SS_ENDELLIPSIS
-    LTEXT           "Neural Rendering", -1, 7, 58, 64, 8
+    LTEXT           "Neural Rendering", -1, 7, 58, 62, 8
     COMBOBOX        IDC_PM_CLEAN, 70, 56, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_PM_CLEAN_NOW, 150, 58, 135, 8, SS_ENDELLIPSIS
-    LTEXT           "SDR to HDR", -1, 7, 74, 64, 8
+    LTEXT           "SDR to HDR", -1, 7, 74, 62, 8
     COMBOBOX        IDC_PM_HDR, 70, 72, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_PM_HDR_NOW, 150, 74, 135, 8, SS_ENDELLIPSIS
-    LTEXT           "HDR boost", -1, 7, 90, 64, 8
+    LTEXT           "HDR boost", -1, 7, 90, 62, 8
     COMBOBOX        IDC_PM_HDRBOOST, 70, 88, 74, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Status", -1, 7, 108, 100, 8
     EDITTEXT        IDC_PM_STATUS, 7, 118, 278, 64, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
