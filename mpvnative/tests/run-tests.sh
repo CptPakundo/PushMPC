@@ -154,8 +154,10 @@ IVTC="fieldmatch=order=tff,yadif=deint=interlaced,decimate"   # pushmpc.lua / pu
 "$FF" -v error -y -i "$T/telecine.mkv" -i "$T/woven.mkv" -filter_complex "[0][1]concat=n=2:v=1[v]" -map "[v]" -c:v ffv1 "$T/mixed.mkv"
 NF=$(count "$T/film.mkv"); NT=$(count "$T/telecine.mkv")
 exact() {   # <output> <master>: frames bit-exact against the master, frame by frame from the first
-    "$FF" -v error -i "$1" -i "$2" -lavfi "[0]settb=1/100,setpts=N,format=yuv420p[a];[1]settb=1/100,setpts=N,format=yuv420p[b];[a][b]psnr=stats_file=$T/psnr.txt:shortest=1" -f null - 2>/dev/null
-    grep -c "psnr_avg:inf" "$T/psnr.txt" 2>/dev/null || echo 0
+    # the stats file by a relative name: a Windows path (C:/...) is no valid filter option value (its colon)
+    rm -f "$T/psnr.txt"
+    (cd "$T" && "$FF" -v error -i "$1" -i "$2" -lavfi "[0]settb=1/100,setpts=N,format=yuv420p[a];[1]settb=1/100,setpts=N,format=yuv420p[b];[a][b]psnr=stats_file=psnr.txt:shortest=1" -f null - 2>/dev/null)
+    local n; n=$(grep -c "psnr_avg:inf" "$T/psnr.txt" 2>/dev/null); echo "${n:-0}"
 }
 if "$FF" -v info -y -i "$T/telecine.mkv" -vf "pushmpc=smoother=2" -c:v ffv1 "$T/ff-telecine.mkv" > "$T/ff-telecine.log" 2>&1; then
     grep -iE "telecine|interlaced|progressive \(measured\)" "$T/ff-telecine.log" | head -2

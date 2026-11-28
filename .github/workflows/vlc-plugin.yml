@@ -224,8 +224,8 @@ jobs:
         run: |
           # VLC's own deinterlacer off (it runs after the module anyway: deint-probe run 46133199291). Woven: 24 moving
           # frames measured (1 + 23 x 4 shown before), then the module deinterlaces (YADIF, one picture per field) and
-          # generates x4 on the 60p pictures: 8 per source picture after the switch (at least 85 %: late pictures may
-          # drop). Progressive with the same pan: x4 throughout, never deinterlaced.
+          # generates at the output rate set: x4 of the 30i source = x2 of its 60p fields, 4 per source picture after the
+          # switch (at least 85 %: late pictures may drop). Progressive with the same pan: x4 throughout, never deinterlaced.
           export VLC_PLUGIN_PATH=~/.local/share/pushmpc/vlc
           n=$(sed -n 's/nb_read_frames=//p' art/clips/woven.txt | tr -d '\r'); rc=0
           for c in woven woven-prog; do
@@ -235,8 +235,8 @@ jobs:
             got=$(( $(wc -l < "res/linux/il-$c.csv") - 1 ))
             grep -hE "PushMPC: (interlaced|progressive \(measured\))" "res/linux/il-$c.log" | sed 's/^[^:]*: //' | head -4
             if [ "$c" = woven ]; then
-              want=$(( 1 + 23 * 4 + (n - 26) * 8 ))
-              echo "interlaced check (VLC, woven): deinterlaced in the module then x4, $got pictures shown (want about $want; pass-through would be $((1 + 23 * 4 + n - 24)))"
+              want=$(( 1 + 23 * 4 + (n - 26) * 4 ))   # x4 as set: x2 of the fields (the same output rate)
+              echo "interlaced check (VLC, woven): deinterlaced in the module then x2 of the fields, $got pictures shown (want about $want; pass-through would be $((1 + 23 * 4 + n - 24)))"
               { [ "$got" -ge $(( want * 85 / 100 )) ] && grep -q "PushMPC: interlaced input: deinterlaced here" "res/linux/il-$c.log" && ! grep -q "pass through from now on" "res/linux/il-$c.log"; } \
                 || { echo "::error::VLC woven: $got pictures, want about $want with the module's deinterlacer"; rc=1; }
             else

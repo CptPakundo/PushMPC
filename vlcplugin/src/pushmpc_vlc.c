@@ -1791,7 +1791,10 @@ static bool IlDeintStart(filter_t *f, struct filter_sys_t *sys)
     if (!sys->deint) return false;
     char why[256] = "";
     const double fps = sys->fs_fps > 0 ? sys->fs_fps : 25.0;
-    int k = pm_engine_decide(sys->eng, sys->fs_smoother, 2 * fps, sys->fs_hz, why, sizeof(why));
+    /* a fixed multiplier is the output rate the user asked for over the source: kept by halving it on the doubled rate
+     * (x4 of 30i = x2 of 60p, at least x2); Auto decides for the doubled rate */
+    int k = sys->fs_smoother >= 2 ? (sys->k + 1) / 2 : pm_engine_decide(sys->eng, sys->fs_smoother, 2 * fps, sys->fs_hz, why, sizeof(why));
+    if (sys->fs_smoother >= 2) snprintf(why, sizeof(why), "x%d of the source as set: x%d of its fields", sys->k, k < 2 ? 2 : k);
     k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
     msg_Info(f, "PushMPC: interlaced input: deinterlaced here (YADIF, one picture per field: %.3f fps), then x%d (%s)", 2 * fps, k, why);
     sys->k = k;
