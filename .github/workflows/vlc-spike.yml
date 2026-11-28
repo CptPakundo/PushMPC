@@ -277,6 +277,9 @@ jobs:
               Remove-Item "$env:TEMP\pushmpc-vs-*.txt" -ErrorAction SilentlyContinue
             }
           }
+          # an arm that mpv refuses (d3d11vpp without a D3D11 device on a GPU-less runner: "Creating filter 'd3d11vpp' failed") is an
+          # answer, not a failure of the probe
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: deint-vs-logs, path: '${{ runner.temp }}/vs/*.log*', retention-days: 5 }
