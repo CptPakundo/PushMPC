@@ -71,6 +71,7 @@
 #include "engine_portable.h"
 #include "pm_hw.h"
 #include "pm_content.h"   /* what the picture is: PushMPC's content library, loaded at run time */
+#include "pm_comb.h"     /* interlaced input, measured in the picture (pushmpc/content_detect.h CombMeter) */
 #ifdef __APPLE__
 #include "pm_cvpx.h"   /* VideoToolbox pictures zero copy into the apple engine and back (guarded, see pm_cvpx.h) */
 #define PM_CVPX_ON(s) ((s)->cvpx != NULL)
@@ -479,6 +480,15 @@ struct filter_sys_t {
     size_t tap_cap;
     double tap_clip_next;
     uint64_t tap_frames, tap_fail;
+    /* interlaced input (pm_comb.h): measured in the picture on the first pictures (IlMeasure); aside: PushMPC steps
+     * aside and the pictures pass through at the source rate */
+    void *comb;
+    int il_seen, il_flagged;
+    bool il_done, il_aside, il_switched;
+    uint64_t il_fail;
+#ifdef _WIN32
+    ID3D11Texture2D *il_stage; /* D3D11 zero copy: the luma crop the meter reads (staging, only while measuring) */
+#endif
 };
 
 /* the worker thread: one job at a time, in order (the engine keeps the pair state) */
@@ -913,6 +923,147 @@ static picture_t *HwIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
     return c;
 }
 
+/* ---- interlaced input. Measured in the picture as every PushMPC route measures it (pm_comb.h: content_detect.h's
+ * CombMeter on the native luma, 24 moving frames, half or more combed = interlaced; PM_COMB_GIVE_UP pictures without
+ * enough motion count as progressive); the decoder's b_progressive is only logged (encoders flag progressive pictures
+ * as interlaced too). Whatever VLC's own deinterlacer (deinterlace=auto) did before, this measures what reaches the
+ * filter. Read from: the CPU picture
+ * the engine reads; VA-API zero copy: a download of the surface; Direct3D 11 zero copy: a staging copy of the luma's
+ * centre crop (what the meter reads); CVPX: the buffer locked for reading. Only while measuring. Interlaced: the
+ * filter steps aside, the pictures pass through at the source rate (IlAside). */
+static void LagDrop(struct filter_sys_t *sys);
+static void PcLagDrop(struct filter_sys_t *sys);
+/* a picture to measure: counts it (the flag as a prior); false when measuring is over or impossible */
+static bool IlBegin(filter_t *f, struct filter_sys_t *sys, const picture_t *cur)
+{
+    if (sys->il_done) return false;
+    if (!sys->comb && !(sys->comb = pm_comb_new())) { sys->il_done = true; return false; }
+    if (sys->il_seen < 3)
+        msg_Dbg(f, "PushMPC: picture %d: flagged %s (a prior; the picture decides)", sys->il_seen, cur->b_progressive ? "progressive" : "interlaced");
+    sys->il_seen++;
+    if (!cur->b_progressive) sys->il_flagged++;
+    return true;
+}
+/* v: the meter's verdict so far (-1: this picture could not be read) */
+static void IlDecide(filter_t *f, struct filter_sys_t *sys, int v)
+{
+    if (v < 0) {
+        if (!sys->il_fail++) msg_Warn(f, "PushMPC: interlacing: a picture could not be read for the measurement");
+        v = PM_COMB_MEASURING;
+    }
+    if (v == PM_COMB_MEASURING && sys->il_seen < PM_COMB_GIVE_UP) return;
+    int measured = 0, combed = 0;
+    pm_comb_counts(sys->comb, &measured, &combed);
+    pm_comb_free(sys->comb);
+    sys->comb = NULL;
+    sys->il_done = true;
+#ifdef _WIN32
+    if (sys->il_stage) { ID3D11Texture2D_Release(sys->il_stage); sys->il_stage = NULL; }
+#endif
+    if (v == PM_COMB_INTERLACED) {
+        msg_Info(f, "PushMPC: interlaced: interlaced input (field combing measured on %d of %d moving frames): the pictures pass through at the source rate",
+                 combed, measured);
+        sys->il_aside = true;
+        return;
+    }
+    msg_Info(f, "PushMPC: progressive (measured): %d of %d moving frames combed%s; flags said %d of %d pictures interlaced", combed, measured,
+             v == PM_COMB_MEASURING ? " (too little motion to tell: treated as progressive)" : "", sys->il_flagged, sys->il_seen);
+}
+/* a CPU picture of format fmt (planar, LSB-aligned samples of sys->bits) */
+static int IlPushPlanar(struct filter_sys_t *sys, const picture_t *p, const video_format_t *fmt)
+{
+    if (!p || !fmt) return -1;
+    pm_yuv y;
+    const int bps = sys->bits > 8 ? 2 : 1;
+    PlanesIn(p, fmt, bps, &y);
+    return pm_comb_push(sys->comb, y.data[0], y.stride[0], (int)fmt->i_visible_width, (int)fmt->i_visible_height, bps, sys->bits > 8 ? sys->bits - 8 : 0);
+}
+#ifdef _WIN32
+/* VLC's Direct3D 11 picture ('DX11' NV12 / 'DX10' P010): the centre crop the meter reads (at most 1280 x 720, starting on
+ * an even line so the fields keep their parity) through a staging texture, under VLC's context lock */
+static int IlPushD3D11(filter_t *f, struct filter_sys_t *sys, picture_t *pic)
+{
+    pm_d3d11_picsys *ps = PicSys(pic);
+    if (!ps || !ps->texture[0] || !ps->context) return -1;
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(ps->texture[0], &td);
+    if (td.Format != DXGI_FORMAT_NV12 && td.Format != DXGI_FORMAT_P010) return -1;
+    const video_format_t *v = &f->fmt_in.video;
+    const int w = (int)v->i_visible_width, h = (int)v->i_visible_height;
+    const int cw = (w < 1280 ? w : 1280) & ~1, ch = (h < 720 ? h : 720) & ~1;
+    const int x0 = ((int)v->i_x_offset + (w - cw) / 2) & ~1, y0 = ((int)v->i_y_offset + (h - ch) / 2) & ~1;
+    if (cw < 64 || ch < 64 || x0 + cw > (int)td.Width || y0 + ch > (int)td.Height) return -1;
+    if (!sys->il_stage) {
+        D3D11_TEXTURE2D_DESC sd;
+        memset(&sd, 0, sizeof(sd));
+        sd.Width = (UINT)cw; sd.Height = (UINT)ch; sd.MipLevels = 1; sd.ArraySize = 1; sd.Format = td.Format;
+        sd.SampleDesc.Count = 1; sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Device *dev = NULL;
+        ID3D11DeviceContext_GetDevice(ps->context, &dev);
+        if (!dev) return -1;
+        const HRESULT hr = ID3D11Device_CreateTexture2D(dev, &sd, NULL, &sys->il_stage);
+        ID3D11Device_Release(dev);
+        if (FAILED(hr)) { sys->il_stage = NULL; return -1; }
+    }
+    HANDLE mutex = NULL;
+    UINT size = sizeof(mutex);
+    if (FAILED(ID3D11DeviceContext_GetPrivateData(ps->context, &PM_GUID_CONTEXT_MUTEX, &size, &mutex)) || size != sizeof(mutex)) mutex = NULL;
+    if (mutex) WaitForSingleObjectEx(mutex, INFINITE, FALSE);
+    D3D11_BOX box = { (UINT)x0, (UINT)y0, 0, (UINT)(x0 + cw), (UINT)(y0 + ch), 1 };
+    ID3D11DeviceContext_CopySubresourceRegion(ps->context, (ID3D11Resource *)sys->il_stage, 0, 0, 0, 0, (ID3D11Resource *)ps->texture[0],
+                                              ps->slice_index * (td.MipLevels ? td.MipLevels : 1), &box);
+    D3D11_MAPPED_SUBRESOURCE m;
+    int r = -1;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ps->context, (ID3D11Resource *)sys->il_stage, 0, D3D11_MAP_READ, 0, &m))) {
+        const int p010 = td.Format == DXGI_FORMAT_P010;
+        r = pm_comb_push(sys->comb, m.pData, (ptrdiff_t)m.RowPitch, cw, ch, p010 ? 2 : 1, p010 ? 8 : 0);
+        ID3D11DeviceContext_Unmap(ps->context, (ID3D11Resource *)sys->il_stage, 0);
+    }
+    if (mutex) ReleaseMutex(mutex);
+    return r;
+}
+#endif
+/* the main path's picture: cur as decoded, work what the engine reads (cur, or its CPU copy) */
+static void IlMeasure(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work)
+{
+    if (!IlBegin(f, sys, cur)) return;
+    int v;
+#ifdef _WIN32
+    if (sys->zc) { IlDecide(f, sys, IlPushD3D11(f, sys, cur)); return; }
+#endif
+    if (sys->zc_hw && sys->hw) {   /* VA-API zero copy: the surface downloaded for the measurement only */
+        picture_t *c = pm_hw_cpu_picture(sys->hw);
+        v = c && pm_hw_download(sys->hw, cur, c) == 0 ? IlPushPlanar(sys, c, pm_hw_work_format(sys->hw)) : -1;
+        if (c) picture_Release(c);
+    } else v = IlPushPlanar(sys, work, &sys->wfmt);
+    IlDecide(f, sys, v);
+}
+/* the pictures pass through at the source rate; at the switch, the picture held for the next pair goes out first (the
+ * pictures waiting in a lag queue are dropped once: they are older than it) */
+static picture_t *IlAside(filter_t *f, struct filter_sys_t *sys, picture_t *cur, picture_t *work)
+{
+    if (work && work != cur) picture_Release(work);
+    cur->p_next = NULL;
+    if (!sys->il_switched) {
+        sys->il_switched = true;
+        WorkerIdle(sys, false);
+        const int waiting = sys->lagn + sys->pcn;
+        LagDrop(sys);
+        PcLagDrop(sys);
+        if (sys->still_pic) { picture_Release(sys->still_pic); sys->still_pic = NULL; }
+        picture_t *p = sys->prev;
+        sys->prev = NULL;
+        if (p && sys->still) { picture_Release(p); p = NULL; }   /* a still showed it already */
+        sys->held = 0; sys->still = false;
+        if (sys->eng) pm_engine_forget(sys->eng);
+        msg_Info(f, "PushMPC: interlaced input: no frame generation from here (%" PRIu64 " pictures in, %" PRIu64 " out so far%s)", sys->in, sys->out,
+                 waiting ? ", the pictures waiting in the lag queue dropped" : "");
+        if (p) { p->p_next = cur; sys->out += 2; return p; }
+    }
+    sys->out++;
+    return cur;
+}
+
 #ifdef __APPLE__
 /* VideoToolbox pictures through the apple engine with no copy: the real frame is VLC's own picture, the generated ones
  * are CVPX pictures that own the engine's CVPixelBuffers. A picture that fails the checks turns this off for good:
@@ -933,15 +1084,17 @@ static picture_t *FilterCvpx(filter_t *f, struct filter_sys_t *sys, picture_t *c
         sys->out++;
         return cur;
     }
+    if (IlBegin(f, sys, cur)) IlDecide(f, sys, pm_cvpx_comb_push(pb, sys->comb));   /* interlaced input: the buffer's luma */
+    if (sys->il_aside) return IlAside(f, sys, cur, NULL);
     picture_t *prev = sys->prev;
     sys->prev = cur;
     const mtime_t dt = prev ? cur->date - prev->date : 0;
     const bool contiguous = prev && dt > 0 && dt <= 4 * sys->nominal_dt && dt <= CLOCK_FREQ / 4;
-    void *gen[8];
+    void *gen[16];   /* up to x16: 15 generated pictures per pair */
     int ngen = 0;
     bool pair = false;
     char err[200] = "";
-    if (pm_cvpx_eng_process(sys->cvpx, pb, (int64_t)cur->date * 10, contiguous, gen, 7, &ngen, &pair, err, sizeof(err)) != 0) {
+    if (pm_cvpx_eng_process(sys->cvpx, pb, (int64_t)cur->date * 10, contiguous, gen, 15, &ngen, &pair, err, sizeof(err)) != 0) {
         if (sys->cvpx_err++ == 0) msg_Warn(f, "PushMPC: apple engine: %s (this pair shows the real frames)", err);
         pm_cvpx_eng_forget(sys->cvpx);
         ngen = 0;
@@ -1625,6 +1778,7 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         if (!cur) return NULL;
     }
     if (sys->k <= 1 || (!sys->eng && !sys->pc)) { sys->out++; return cur; }
+    if (sys->il_aside) return IlAside(f, sys, cur, NULL);   /* interlaced input (IlMeasure): the pictures as they are */
     if (!sys->rate_done && sys->eng) {   /* the measured source rate (16 date steps, the median) */
         if (sys->rate_last > 0 && cur->date > sys->rate_last && cur->date - sys->rate_last < 250000) sys->rate_steps[sys->rate_n++] = cur->date - sys->rate_last;
         sys->rate_last = cur->date;
@@ -1678,6 +1832,8 @@ static picture_t *Filter(filter_t *f, picture_t *cur)
         }
     }
 
+    IlMeasure(f, sys, cur, work);        /* interlaced input: measured in the picture, the first frames */
+    if (sys->il_aside) return IlAside(f, sys, cur, work);
     ContentMeasure(f, sys, cur, work);   /* before the held-frame step: repeats are part of what is measured */
 
     if (PortableRepairWanted(f, sys)) {   /* measured as drawn: the pairs lag from this frame on */
@@ -1999,7 +2155,7 @@ static int Open(vlc_object_t *obj)
                 int pk = 1;
                 sys->cvpx = pm_cvpx_eng_open(v, cbits, smoother, zfps, zhz, &pk, why, sizeof(why));
                 if (sys->cvpx && pk > 1) {
-                    sys->k = pk > 8 ? 8 : pk;
+                    sys->k = pk > 16 ? 16 : pk;   /* the apple engine's ceiling (apple_convert.h kAppleMaxK) */
                     bits = cbits;
                     snprintf(sys->why, sizeof(sys->why), "apple engine (VideoToolbox), zero copy on CVPX: %s", pm_cvpx_eng_describe(sys->cvpx));
                 } else if (sys->cvpx) {
@@ -2143,6 +2299,11 @@ static void Close(vlc_object_t *obj)
     pm_engine_stats st = { 0 };
     Flush(f);                   /* the worker is idle after this */
     if (sys->eng) pm_engine_stats_get(sys->eng, &st);
+    if (sys->comb) { pm_comb_free(sys->comb); sys->comb = NULL; }   /* interlacing still measuring */
+#ifdef _WIN32
+    if (sys->il_stage) { ID3D11Texture2D_Release(sys->il_stage); sys->il_stage = NULL; }
+#endif
+    if (sys->il_aside) msg_Info(f, "PushMPC: interlaced input: the pictures passed through at the source rate");
     if (sys->worker_on) {
         vlc_mutex_lock(&sys->wlock);
         sys->worker_exit = true;

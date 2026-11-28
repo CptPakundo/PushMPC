@@ -206,7 +206,7 @@ static void TestCuts()
 
 static void TestPlans()
 {
-    for (int k = 2; k <= 8; ++k) {
+    for (int k = 2; k <= kAppleMaxK; ++k) {   // x9-x15 on the sixteenth grid (x = 4: max error 1/32), x16 exact
         const int x = ExponentFor(k);
         const PhasePlan p = MakePlan(k, x);
         CHECK(int(p.slot.size()) == k - 1, "k=%d slots", k);
@@ -232,10 +232,13 @@ static void TestDecisions()
 {
     CHECK(DecideAppleK(0, 23.976, 0).k == 2, "Auto, display unknown: x2");
     CHECK(DecideAppleK(0, 23.976, 120).k == 5, "Auto 24 -> 120 Hz: x5");
-    CHECK(DecideAppleK(0, 23.976, 240).k == 5, "Auto 24 -> 240 Hz: x5, the even cadence (x8 is uneven and holds as long)");
+    CHECK(DecideAppleK(0, 23.976, 240).k == 10, "Auto 24 -> 240 Hz: x10, one refresh per frame (with the old x8 ceiling: x5)");
     CHECK(DecideAppleK(0, 60, 60).k == 1, "Auto 60 -> 60: x1");
     CHECK(DecideAppleK(0, 29.97, 59.94).k == 2, "Auto 30 -> 60: x2");
     CHECK(DecideAppleK(1, 24, 120).k == 1 && DecideAppleK(3, 24, 60).k == 3, "fixed / off");
+    CHECK(kAppleMaxK == 16 && DecideAppleK(16, 24, 60).k == 16 && DecideAppleK(20, 24, 60).k == 16 && DecideAppleK(12, 24, 60).k == 12, "fixed up to x16 (the other engines' ceiling)");
+    CHECK(DecideAppleK(0, 24, 400).k == 16, "Auto 24 -> 400 Hz: x16 (shortest hold, no even cadence below it)");
+    CHECK(DecideAppleK(0, 23.976, 480).k == 10, "Auto 24 -> 480 Hz: x10, the even cadence (x16 holds as long)");
     const std::vector<float> f24 = { 2.0f, 4.0f };
     CHECK(DecideSr("auto", 1920, 1080, f24).factor == 2, "Auto SR 1080p -> x2");
     CHECK(DecideSr("auto", 1280, 720, f24).factor == 2, "Auto SR 720p -> x2");

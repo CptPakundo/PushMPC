@@ -27,7 +27,20 @@
 
 namespace pmvs {
 
-struct StreamMemo { double fps = 0; int cls = 0; bool cg = false; };   // cg: drawn, rendered 3D CG
+// il: the interlace verdict measured on this stream (vs_interlace.h): 0 not yet, kIlProgressive, kIlInterlaced
+inline constexpr int kIlProgressive = 1, kIlInterlaced = 2;
+struct StreamMemo { double fps = 0; int cls = 0; bool cg = false; int il = 0, ilMeasured = 0, ilCombed = 0; };   // cg: drawn, rendered 3D CG
+// the status file pushmpc.lua reads (<temp>/pushmpc-vs-<pid>.txt)
+inline std::string StatusPath()
+{
+#if defined(_WIN32)
+    char tmp[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tmp);
+    return std::string(tmp) + "pushmpc-vs-" + std::to_string(GetCurrentProcessId()) + ".txt";
+#else
+    const char* t = std::getenv("TMPDIR");
+    return std::string(t && *t ? t : "/tmp") + "/pushmpc-vs-" + std::to_string(getpid()) + ".txt";
+#endif
+}
 inline std::mutex& MemoLock() { static std::mutex m; return m; }
 inline std::map<std::string, StreamMemo>& Memo() { static std::map<std::string, StreamMemo> m; return m; }
 inline std::string StreamKey(const VSVideoInfo& vi)
@@ -110,21 +123,21 @@ public:
 private:
     void Publish()
     {
-        StreamMemo m; m.fps = m_iv.fps(); m.cls = m_cls; m.cg = m_cg;
-        { std::lock_guard<std::mutex> lk(MemoLock()); Memo()[m_key] = m; }
-#if defined(_WIN32)
-        char tmp[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tmp);
-        const std::string path = std::string(tmp) + "pushmpc-vs-" + std::to_string(GetCurrentProcessId()) + ".txt";
-#else
-        const char* t = std::getenv("TMPDIR");
-        const std::string path = std::string(t && *t ? t : "/tmp") + "/pushmpc-vs-" + std::to_string(getpid()) + ".txt";
-#endif
-        if (FILE* f = std::fopen(path.c_str(), "w")) {
+        StreamMemo m;
+        {   // the interlace verdict (vs_interlace.h) stays
+            std::lock_guard<std::mutex> lk(MemoLock());
+            StreamMemo& e = Memo()[m_key];
+            e.fps = m_iv.fps(); e.cls = m_cls; e.cg = m_cg;
+            m = e;
+        }
+        if (FILE* f = std::fopen(StatusPath().c_str(), "w")) {
             // reload = 1 when the running instance was created with another rate or class (pushmpc.lua re-adds the filter)
             const bool rate = m.fps > 1.0 && m_declared > 0 && std::fabs(m.fps - m_declared) / m.fps > 0.05;
             const bool cls = m.cls != 0 && ((m.cls == pushmpc::content::kDrawn) != (m_createdClass == pushmpc::content::kDrawn) ||
                                             (m.cls == pushmpc::content::kDrawn && m.cg != m_createdCg));   // only what changes Auto
             std::fprintf(f, "fps=%.4f\ndeclared=%.4f\nclass=%d\nclass_name=%s\ncg=%d\nreload=%d\n", m.fps, m_declared, m.cls, pushmpc::content::ClassName(m.cls), m.cg ? 1 : 0, (rate || cls) ? 1 : 0);
+            // this instance generates frames: measured interlaced, it asks for the re-add that passes the stream through
+            std::fprintf(f, "interlaced=%d\ninterlace_reload=%d\n", m.il, m.il == kIlInterlaced ? 1 : 0);
             // why: the last window's drawn probability, the integrator, the image model's part and the window's features
             // (pushmpc.lua logs the file on a re-add; bug reports)
             const pushmpc::content::State& st = m_det.Current();

@@ -120,8 +120,35 @@ if [ "$OS" = msys2 ]; then
     else tail -20 "$T/ff-d3d11.log"; result ffmpeg-d3d11-pushcore-x2 FAIL; fi
 fi
 
+# 5b. interlaced input, measured in the picture (the engine module's CombMeter, pmeng minor 2): a 60i capture woven
+#     (two moments per frame, 30000/1001) and the same pan as whole frames, both flagged TFF (the flag is only a prior).
+#     Woven: after the verdict (24 moving frames) the generated frames are dropped and the source frames go on at the
+#     source rate: 1 + 23 x 4 outputs for the frames before it, then one per source frame (Dedup's lookahead can move
+#     up to 3 pairs across the switch: tolerance 9). Progressive: x4 throughout.
+IL="nullsrc=s=320x240:r=60000/1001:d=4,format=gray,geq=lum='128+90*sin(2*PI*(X+0.5*Y-2*N)/24)',format=yuv420p"
+"$FF" -v error -y -f lavfi -i "$IL,tinterlace=mode=merge,setfield=tff" -c:v ffv1 "$T/woven.mkv"
+"$FF" -v error -y -f lavfi -i "$IL,fps=30000/1001,setfield=tff" -c:v ffv1 "$T/woven-prog.mkv"
+NW=$(count "$T/woven.mkv"); WANT_W=$((1 + 23 * 4 + NW - 24))
+if "$FF" -v info -y -i "$T/woven.mkv" -vf "pushmpc=smoother=4" -c:v ffv1 "$T/ff-woven.mkv" > "$T/ff-woven.log" 2>&1; then
+    GOT=$(count "$T/ff-woven.mkv"); grep -iE "interlaced|progressive \(measured\)" "$T/ff-woven.log" | head -2
+    echo "interlaced check (ffmpeg, woven): pass-through after the verdict, $GOT frames (want $WANT_W +- 9; x4 throughout would be $((1 + (NW - 1) * 4)))"
+    [ "$GOT" -ge $((WANT_W - 9)) ] && [ "$GOT" -le $((WANT_W + 9)) ] && grep -q "interlaced: interlaced input" "$T/ff-woven.log" && result ffmpeg-interlaced-pass-through PASS || result ffmpeg-interlaced-pass-through FAIL
+else tail -10 "$T/ff-woven.log"; result ffmpeg-interlaced-pass-through FAIL; fi
+if "$FF" -v info -y -i "$T/woven-prog.mkv" -vf "pushmpc=smoother=4" -c:v ffv1 "$T/ff-woven-prog.mkv" > "$T/ff-woven-prog.log" 2>&1 \
+   && check "$T/ff-woven-prog.mkv" $((1 + (NW - 1) * 4)) 120000/1001 2 && grep -q "progressive (measured)" "$T/ff-woven-prog.log"; then
+    echo "interlaced check (ffmpeg, progressive flagged TFF): frame generation x4, $(count "$T/ff-woven-prog.mkv") of $((1 + (NW - 1) * 4)) frames"
+    result ffmpeg-progressive-flagged-tff-x4 PASS
+else tail -10 "$T/ff-woven-prog.log"; result ffmpeg-progressive-flagged-tff-x4 FAIL; fi
+
 # 6. mpv encode mode: the filter's output rate and pts reach mpv's output
 if [ -x "$MPV" ] || [ -f "$MPV" ]; then
+    # interlaced input played twice in one process: the second graph starts from the first one's verdict (pass-through
+    # from its first frame: one output per source frame)
+    if "$MPV" --no-config --msg-level=all=info,ffmpeg=v "$T/woven.mkv" "$T/woven.mkv" --vf=pushmpc=smoother=4 --o="$T/mpv-woven.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-woven.log" 2>&1; then
+        GOT=$(count "$T/mpv-woven.mkv"); SECOND=$((GOT - WANT_W))
+        echo "interlaced check (mpv, the same stream twice): first play $WANT_W +- 9, second play from the verdict: pass-through, $SECOND of $NW source frames (want $NW +- 9)"
+        [ "$SECOND" -ge $((NW - 9)) ] && [ "$SECOND" -le $((NW + 9)) ] && grep -q "on this stream before" "$T/mpv-woven.log" && result mpv-interlaced-second-play-pass-through PASS || { grep -iE "interlaced|progressive \(" "$T/mpv-woven.log" | head -4; result mpv-interlaced-second-play-pass-through FAIL; }
+    else tail -10 "$T/mpv-woven.log"; result mpv-interlaced-second-play-pass-through FAIL; fi
     "$MPV" --version | head -1
     if "$MPV" --no-config --msg-level=all=info,ffmpeg=v "$T/clip.mkv" --vf=pushmpc=smoother=4 --o="$T/mpv-enc.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-enc.log" 2>&1; then
         grep -iE "pushmpc|lavfi" "$T/mpv-enc.log" | head -4

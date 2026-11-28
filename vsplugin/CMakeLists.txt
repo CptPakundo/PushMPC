@@ -51,7 +51,7 @@ target_link_libraries(pmvs_portable PUBLIC pushfps_portable ${CMAKE_DL_LIBS})   
 add_executable(portable_test tests/portable_test.cpp)
 set_target_properties(portable_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
 target_link_libraries(portable_test PRIVATE pmvs_portable)
-target_include_directories(portable_test PRIVATE engines/gpu)   # cadence.h (pure C++)
+target_include_directories(portable_test PRIVATE engines/gpu "${PUSHMPC_CORE_INCLUDE}")   # cadence.h (pure C++); content_detect.h (CombMeter)
 # vs_content.h (ContentDetect on the VS routes): needs the VapourSynth SDK header and pushmpc/content_detect.h; the test skips it without them
 if(EXISTS "${VAPOURSYNTH_SDK}/VapourSynth4.h")
   target_include_directories(portable_test PRIVATE "${VAPOURSYNTH_SDK}" "${PUSHMPC_CORE_INCLUDE}")

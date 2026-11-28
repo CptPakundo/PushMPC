@@ -34,5 +34,7 @@ void pm_cvpx_eng_forget(pm_cvpx_eng *e);
 const char *pm_cvpx_eng_describe(pm_cvpx_eng *e);
 void pm_cvpx_eng_close(pm_cvpx_eng *e);
 void pm_cvpx_release(void *pb);
+/* interlacing (pm_comb.h): the buffer's luma plane into the meter (locked for reading); the verdict so far, -1: not readable */
+int pm_cvpx_comb_push(void *pb, void *comb);
 #endif
 #endif

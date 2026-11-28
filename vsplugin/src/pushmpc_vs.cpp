@@ -41,6 +41,7 @@ static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable
 #include "schedule.h"
 #include "vslog.h"
 #include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
+#include "vs_interlace.h"   // interlaced input: measured in the picture, the clip passes through
 #include "mp_params.h"   // mpv's frame-0 colour from the init dummy's _MP_IMAGE (pushmpc.MpvColour)
 #include "mp_out.h"      // the output's colour in _MP_IMAGE (F1: mpv reads nothing else)
 #include <cstdio>
@@ -623,6 +624,13 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
         auto arg = [&](const char* k) { int e = 0; const int64_t v = a->mapGetInt(in, k, 0, &e); return e ? std::string("-") : std::to_string(v); };
         Log("colour arguments: matrix " + arg("matrix") + " transfer " + arg("transfer") + " primaries " + arg("primaries") + " range " + arg("range") + " (- = none: guessed from the format)");
     }
+    // interlaced input (vs_interlace.h): measured in the picture; interlaced, the clip passes through at the source rate.
+    // interlace_check=0: decided before (pushmpc.vpy calls pushmpc.Interlace once for its whole chain)
+    if (pmvs::IlArgInt(in, a, "interlace_check", 1)) {
+        const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a);
+        node = il.node;
+        if (il.aside) { a->mapConsumeNode(out, "clip", node, maReplace); return; }
+    }
     const BackendChoice c = Choose(in, core, a, false);
     if (!c.ok) { a->freeNode(node); return fail(c.why); }
     if (c.kind == BackendKind::Portable) return PortableCreate(in, out, core, a, node, c.why);   // both wrap an unknown-length source (eof_guard.h)
@@ -653,6 +661,18 @@ void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const 
     a->mapSetData(out, "backend", BackendName(c.kind), -1, dtUtf8, maReplace);
     a->mapSetData(out, "why", c.why.c_str(), -1, dtUtf8, maReplace);
     a->mapSetData(out, "interp", c.interp.c_str(), -1, dtUtf8, maReplace);
+}
+
+// pushmpc.Interlace(clip) -> {clip, interlaced, why}: the interlace decision of pushmpc.Enhance (vs_interlace.h) once for
+// a script's whole chain (pushmpc.vpy: also the rife preset, which has no Enhance). clip: the clip to go on with (mpv's
+// unknown-length source wrapped in its measuring guard); interlaced = 1: output it as it is.
+void VS_CC InterlaceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const VSAPI* a)
+{
+    VSNode* node = a->mapGetNode(in, "clip", 0, nullptr);
+    const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a);
+    a->mapConsumeNode(out, "clip", il.node, maReplace);
+    a->mapSetInt(out, "interlaced", il.aside ? 1 : 0, maReplace);
+    a->mapSetData(out, "why", il.why.c_str(), -1, dtUtf8, maReplace);
 }
 
 // where pushmpc.lua looks for "the plugin could not read frame 0's colour" (next to vs_content.h's status file)
@@ -731,8 +751,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "matrix:int:opt;transfer:int:opt;primaries:int:opt;range:int:opt;wait_ms:int:opt;"
         "backend:data:opt;portable_quality:data:opt;portable_threads:data:opt;portable_device:data:opt;dedup:data:opt;motion:data:opt;sharpness:float:opt;"
         "display_w:int:opt;display_h:int:opt;display_fs:int:opt;apple_sr:data:opt;apple_fi:data:opt;cuda_device:int:opt;hdr_peak:data:opt;display_peak:float:opt;"
-        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;playback:int:opt;",
+        "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;playback:int:opt;"
+        "interlace_check:int:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
+    vspapi->registerFunction("Interlace", "clip:vnode;", "clip:vnode;interlaced:int;why:data;", InterlaceCreate, nullptr, plugin);
     vspapi->registerFunction("MpvColour", "clip:vnode;mpvver:data:opt;", "ok:int;matrix:int;transfer:int;primaries:int;range:int;why:data;", MpvColourCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }

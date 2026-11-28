@@ -483,13 +483,16 @@ local failed_for = nil   -- the file the filter failed on: no retry until the ne
 -- encoding (--o: every frame counts; the encode keeps the instance it started with). The status file is removed once
 -- acted on: the new instance writes it again only when its own measurement differs (a stale reload=1 left by the
 -- previous instance re-added the filter a second time)
-local vs_watch = { timer = nil, reloads = 0 }
+-- interlace_reload=1: the field combing measured on the frames (vsplugin/src/vs_interlace.h) says the stream is interlaced
+-- while the instance generates frames, or progressive while it passes the stream through; the re-add starts the instance
+-- the verdict asks for. It has its own count (two per file), so the rate and class re-adds never use it up.
+local vs_watch = { timer = nil, reloads = 0, il_reloads = 0 }
 local function vs_status_path()
     local dir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
     local sep = package.config:sub(1, 1)
     return dir .. (dir:sub(-1) == sep and "" or sep) .. "pushmpc-vs-" .. tostring(mp.get_property_number("pid", 0)) .. ".txt"
 end
-mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; vs_watch.logged = nil; os.remove(vs_status_path()); os.remove(vs_status_path() .. ".taken") end)
+mp.register_event("end-file", function() if vs_watch.timer then vs_watch.timer:kill() end; vs_watch.reloads = 0; vs_watch.il_reloads = 0; vs_watch.logged = nil; os.remove(vs_status_path()); os.remove(vs_status_path() .. ".taken") end)
 function vs_status_watch()
     if vs_watch.timer then vs_watch.timer:kill() end
     vs_watch.timer = mp.add_periodic_timer(2, function()
@@ -498,7 +501,9 @@ function vs_status_watch()
         if not f then return end
         local t = f:read("*a"); f:close()
         local encoding = (mp.get_property("o", "") or "") ~= ""
-        local reload = t:find("reload=1", 1, true) and vs_watch.reloads < 2 and not encoding
+        -- "\nreload=1": the rate / class line (never the first line; interlace_reload=1 is not it)
+        local il = t:find("interlace_reload=1", 1, true) and vs_watch.il_reloads < 2 and not encoding
+        local reload = (il or (t:find("\nreload=1", 1, true) and vs_watch.reloads < 2)) and not encoding
         if not reload then   -- a new measurement is logged once (its why= line: the features, for bug reports)
             if t ~= vs_watch.logged then
                 vs_watch.logged = t
@@ -511,7 +516,7 @@ function vs_status_watch()
         os.remove(taken)
         if not os.rename(vs_status_path(), taken) then return end
         os.remove(taken)
-        vs_watch.reloads = vs_watch.reloads + 1
+        if il then vs_watch.il_reloads = vs_watch.il_reloads + 1 else vs_watch.reloads = vs_watch.reloads + 1 end
         msg.info("PushMPC: measured on the frames: " .. t:gsub("\n", " ") .. "-> filter added again with the measurement")
         mp.commandv("vf", "remove", "@pushmpc")
         local cd = colour_data()   -- the re-added instance opens with the stream's colour too (as in ensure)

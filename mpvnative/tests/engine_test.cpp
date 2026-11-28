@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 #include "pmeng.h"
+#include "../../tests/comb_synth.h"   // synthetic woven / progressive luma (interlace)
 #ifdef _WIN32
 #include <windows.h>
 #include <d3d11_4.h>
@@ -277,7 +278,7 @@ static void TestVulkanHost(const pmeng_api* api, uint32_t fmt, const char* name,
         CHECK(r == PMENG_OK, "%s (vulkan host): submit %d -> %d %s", name, s, r, api->last_error(h));
         drain();
     }
-    if (api->struct_size >= sizeof(pmeng_api) && api->finish) CHECK(api->finish(h) == PMENG_OK, "%s (vulkan host): finish", name);
+    if (api->struct_size >= offsetof(pmeng_api, finish) + sizeof(api->finish) && api->finish) CHECK(api->finish(h) == PMENG_OK, "%s (vulkan host): finish", name);
     drain();
     CHECK(api->pending(h) == 0, "%s (vulkan host): pending %u", name, api->pending(h));
     const int expect = 1 + (N - 1) * 4 - 3;   // minus the discontinuity's group
@@ -685,7 +686,7 @@ static void TestVulkanHostToEof(const pmeng_api* api, bool allowCpu)
         if (r != PMENG_OK) { ++errors; std::printf("vulkan host to EOF: submit %d -> %d %s\n", s, r, api->last_error(h)); break; }
         take(0, false);
     }
-    if (api->struct_size >= sizeof(pmeng_api) && api->finish) api->finish(h);
+    if (api->struct_size >= offsetof(pmeng_api, finish) + sizeof(api->finish) && api->finish) api->finish(h);
     take(10000, true);
     const double t = secs();
     std::printf("vulkan host to EOF: %d outputs of %d in %.1f s (%d busy retries), pending %u, %d errors\n", outputs, 1 + (N - 1) * k, t,
@@ -694,6 +695,33 @@ static void TestVulkanHostToEof(const pmeng_api* api, bool allowCpu)
     CHECK(outputs == 1 + (N - 1) * k, "vulkan host to EOF: %d outputs, expected %d", outputs, 1 + (N - 1) * k);
     CHECK(t < 60, "vulkan host to EOF: %.1f s for a 2 s clip", t);
     api->close(h);
+}
+
+// interlaced input (pmeng minor 2): the module's meter (content_detect.h CombMeter) on synthetic luma
+// (tests/comb_synth.h): woven fields interlaced, the same motion as whole frames progressive, at 8 bits and in P010 words
+static void TestComb(const pmeng_api* api)
+{
+    const bool have = api->struct_size >= offsetof(pmeng_api, comb_free) + sizeof(api->comb_free) && api->comb_new && api->comb_push && api->comb_counts && api->comb_free;
+    CHECK(have, "the module offers the interlace meter (pmeng minor 2)");
+    if (!have) return;
+    const int w = 320, h = 240;
+    for (int woven = 0; woven < 2; ++woven)
+        for (int p010 = 0; p010 < 2; ++p010) {
+            void* c = api->comb_new();
+            std::vector<uint8_t> y8(size_t(w) * h);
+            std::vector<uint16_t> y16(size_t(w) * h);
+            int v = 0, n = 0;
+            for (; n < 60 && v == 0; ++n) {
+                if (p010) { pm_comb_synth16(y16.data(), w, w, h, n, woven, 0, 8); v = api->comb_push(c, reinterpret_cast<const uint8_t*>(y16.data()), ptrdiff_t(w) * 2, w, h, 2, 8); }
+                else { pm_comb_synth8(y8.data(), w, w, h, n, woven, 0); v = api->comb_push(c, y8.data(), w, w, h, 1, 0); }
+            }
+            int measured = 0, combed = 0;
+            api->comb_counts(c, &measured, &combed);
+            api->comb_free(c);
+            CHECK(v == (woven ? 2 : 1), "comb %s %s: verdict %d (%d of %d combed)", woven ? "woven" : "progressive", p010 ? "p010" : "8-bit", v, combed, measured);
+            std::printf("interlace (engine module): %s %s -> %s, %d of %d moving frames combed after %d frames\n", woven ? "woven" : "progressive", p010 ? "p010" : "8-bit",
+                        v == 2 ? "interlaced" : v == 1 ? "progressive" : "measuring", combed, measured, n);
+        }
 }
 
 int main()
@@ -719,6 +747,7 @@ int main()
     TestSpacing(api, 8);
     TestStill(api, 2);
     TestStill(api, 4);
+    TestComb(api);
     if (gpuAsked || vulkanAsked) {
         TestVulkanHost(api, PMENG_FMT_YUV420P, "yuv420p", vulkanAsked);
         TestVulkanHost(api, PMENG_FMT_YUV420P10, "yuv420p10", vulkanAsked);

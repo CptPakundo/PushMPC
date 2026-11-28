@@ -5335,7 +5335,7 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
     const CombMeter::Verdict v = m_inP010 ? m_comb.Push(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 8)
                                           : m_comb.Push(src, ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 0);
     // a still picture shows no combing whatever its fields: after ~10 s without enough motion it counts as progressive
-    if (v == CombMeter::kMeasuring && m_ilSeen < 240) return;
+    if (v == CombMeter::kMeasuring && m_ilSeen < CombMeter::kGiveUp) return;
     m_ilDecided = true;
     if (v != CombMeter::kInterlaced) {
         Log(std::format("progressive (measured): {} of {} moving frames combed{}; flags said {} of {} samples interlaced", m_comb.combed(), m_comb.measured(),

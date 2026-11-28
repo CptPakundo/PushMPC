@@ -155,7 +155,7 @@ public:
     int Skip() override { return Check(m_api->skip(m_h)); }
     uint32_t Pending() override { return m_api->pending(m_h); }
     int Flush() override { return Check(m_api->flush(m_h)); }
-    int Finish() override { return m_api->struct_size >= sizeof(pmeng_api) && m_api->finish ? Check(m_api->finish(m_h)) : PMENG_OK; }
+    int Finish() override { return m_api->struct_size >= offsetof(pmeng_api, finish) + sizeof(m_api->finish) && m_api->finish ? Check(m_api->finish(m_h)) : PMENG_OK; }
     std::string Stats() override { char b[512] = {}; m_api->stats(m_h, b, sizeof(b)); return b; }
 private:
     int Check(int r) { if (r < 0) err = m_api->last_error(m_h); return r; }
@@ -454,7 +454,27 @@ int Stats(void* h, char* buf, uint32_t size)
     return PMENG_OK;
 }
 
-const pmeng_api kApi = { sizeof(pmeng_api), PMENG_ABI_VERSION, Version, Open, Submit, Peek, Write, Skip, Pending, Flush, Close, LastError, Stats, Finish };
+// interlaced input (minor 2): the meter of content_detect.h, one per filter instance, no engine needed
+void* CombNew() { try { return new pushmpc::content::CombMeter(); } catch (...) { return nullptr; } }
+int CombPush(void* c, const uint8_t* luma, ptrdiff_t stride, uint32_t w, uint32_t h, uint32_t bps, uint32_t shift)
+{
+    auto* m = static_cast<pushmpc::content::CombMeter*>(c);
+    if (!m || !luma) return 0;
+    try {
+        return bps > 1 ? int(m->Push(reinterpret_cast<const uint16_t*>(luma), stride / 2, int(w), int(h), int(shift)))
+                       : int(m->Push(luma, stride, int(w), int(h), 0));
+    } catch (...) { return int(m->verdict()); }
+}
+void CombCounts(void* c, int* measured, int* combed)
+{
+    auto* m = static_cast<pushmpc::content::CombMeter*>(c);
+    if (measured) *measured = m ? m->measured() : 0;
+    if (combed) *combed = m ? m->combed() : 0;
+}
+void CombFree(void* c) { delete static_cast<pushmpc::content::CombMeter*>(c); }
+
+const pmeng_api kApi = { sizeof(pmeng_api), PMENG_ABI_VERSION, Version, Open, Submit, Peek, Write, Skip, Pending, Flush, Close, LastError, Stats, Finish,
+                         CombNew, CombPush, CombCounts, CombFree };
 
 } // namespace
 
