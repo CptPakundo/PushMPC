@@ -628,9 +628,14 @@ jobs:
           # mpv applies no mpv.conf in encoding mode (player/configfiles.c: diverted into "playback-default"), so the block
           # is included by hand, as apple.yml does; without it this encode never ran PushMPC (the frame check below read
           # the playback instance)
+          # the 4 s are cut beforehand (as apple.yml does): with --length mpv cuts on pts, and the filter's output pts are a
+          # running sum of 1/60 s durations (vf_vapoursynth.c out_pts += pkt_duration), so output 240 lands just under
+          # 4.0 and stays while the control's frame 120 at exactly 4.0 goes (run 46092420973: 241 vs 120; the plugin
+          # itself made 244 for the 122 frames mpv fed it, exactly 2 each)
           rm -f /tmp/out.mkv /tmp/ctl.mkv
-          mpv -v /tmp/clip.mp4 --include=$HOME/.config/mpv/mpv.conf --length=4 --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30 || true
-          mpv --no-config /tmp/clip.mp4 --length=4 --no-audio --o=/tmp/ctl.mkv --of=matroska --ovc=ffv1 > /dev/null 2>&1 || true
+          ffmpeg -v error -y -i /tmp/clip.mp4 -frames:v 120 -an -c:v ffv1 /tmp/clip4.mkv || true
+          mpv -v /tmp/clip4.mkv --include=$HOME/.config/mpv/mpv.conf --no-audio --o=/tmp/out.mkv --of=matroska --ovc=ffv1 2>&1 | grep -iE 'config file|vapoursynth|pushmpc|\[vf\]|user filter|error' | head -30 || true
+          mpv --no-config /tmp/clip4.mkv --no-audio --o=/tmp/ctl.mkv --of=matroska --ovc=ffv1 > /dev/null 2>&1 || true
           cat /tmp/vslog-arch/*.log | head -20
           eo=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/out.mkv 2>/dev/null || true)
           ec=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/ctl.mkv 2>/dev/null || true)
@@ -818,7 +823,7 @@ jobs:
             echo "=== $id: raw lines"
             grep -n -E 'Run command: vf|Decoder format|PushMPC|Playing:' $L 2>/dev/null | cut -c1-300 | head -16
             seq=$(cat $V/*.log 2>/dev/null | grep -o 'colour arguments: matrix [0-9-]* transfer [0-9-]*' | grep -o '[0-9-]*$' | tr '\n' ' ')
-            fv=FAIL; case " $seq" in *" 16 "*" 1 "*) fv=ok;; esac
+            fv=FAIL; case " $seq " in *" 16 1 "*) fv=ok;; esac   # (the old pattern needed two spaces between 16 and 1)
             line="two files (hdr10 then sdr8), $mode: transfers the instances opened with, in order: ${seq:-none} $fv"
             echo "$line" | tee -a $sum; echo "::notice title=colour diag two files $mode::$line"
           done
