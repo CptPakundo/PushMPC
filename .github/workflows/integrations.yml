@@ -252,6 +252,31 @@ jobs:
           $res.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" } | Tee-Object "$env:RUNNER_TEMP\play.txt"
           @('## win-players', '', '```') + (Get-Content "$env:RUNNER_TEMP\players.txt") + @('') + (Get-Content "$env:RUNNER_TEMP\play.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           if ($res['mpv'] -notmatch '^PLUGIN RAN') { Write-Host '::error::mpv did not run the plugin'; exit 1 }
+      - name: Interlaced input through pushmpc.lua (measured while playing, the filter added again, then the source frames)
+        timeout-minutes: 5
+        run: |
+          # a 20 s pan woven from two moments per frame (vsplugin/tests/ci/interlace_clip.vpy, flagged progressive in the
+          # y4m: the picture must decide). The first instance measures it (vs_interlace.h) and asks for a re-add
+          # (interlace_reload=1); pushmpc.lua adds the filter again and the next instance passes the stream through.
+          $env:PATH = "$env:VSSCRIPT_DIR;$env:PATH"
+          $vspipe = (Get-ChildItem "$env:LOCALAPPDATA\PushMPC\vapoursynth" -Recurse -Filter vspipe.exe | Select-Object -First 1).FullName
+          $env:PUSHMPC_IL_MODE = 'clip'; $env:PUSHMPC_IL_KIND = 'woven'; $env:PUSHMPC_IL_FRAMES = '600'
+          $y4m = "$env:RUNNER_TEMP\woven.y4m"
+          & $vspipe -c y4m vsplugin/tests/ci/interlace_clip.vpy $y4m; if ($LASTEXITCODE) { throw 'woven clip' }
+          $logDir = "$env:RUNNER_TEMP\vslog-interlaced"; New-Item -ItemType Directory $logDir -Force | Out-Null
+          $env:PUSHMPC_VS_LOG_DIR = $logDir
+          $out = "$env:RUNNER_TEMP\mpv-interlaced.txt"
+          $p = Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=14', "`"$y4m`"" -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+          if (-not $p.WaitForExit(90000)) { $p | Stop-Process -Force }
+          Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3
+          $m = (Get-Content $out, "$out.err" -Raw -ErrorAction SilentlyContinue) -join "`n"
+          $t = (Get-ChildItem $logDir -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          ($m -split "`n") | Select-String 'PushMPC: measured on the frames' | Select-Object -First 3 | ForEach-Object { Write-Host $_.Line }
+          ($t -split "`n") | Select-String 'interlaced: |progressive \(measured\)' | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
+          $readd = $m -match 'interlace_reload=1[^\n]*-> filter added again'
+          $aside = $t -match 'on this stream before: the clip passes through'
+          Write-Host "interlaced check (mpv + pushmpc.lua): measured interlaced $([bool]($t -match 'interlaced: interlaced input')), filter added again $readd, next instance pass-through $aside"
+          if (-not ($readd -and $aside)) { Write-Host '::error::pushmpc.lua did not hand the interlaced stream to a pass-through instance'; exit 1 }
       - name: Uninstall restores every file exactly
         if: always()
         run: |

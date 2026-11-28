@@ -15,9 +15,10 @@ frames = int(os.environ.get("PUSHMPC_IL_FRAMES", "120"))
 mode = os.environ.get("PUSHMPC_IL_MODE", "enhance")
 
 rng = random.Random(7)
-rows = [core.std.StackHorizontal([core.std.BlankClip(format=vs.GRAY8, width=1, height=1, length=1, color=[rng.randint(24, 232)]) for _ in range(42)])
+cols = (4 * frames + 360) // 24 + 1   # room for the whole pan (2 pixels per field)
+rows = [core.std.StackHorizontal([core.std.BlankClip(format=vs.GRAY8, width=1, height=1, length=1, color=[rng.randint(24, 232)]) for _ in range(cols)])
         for _ in range(16)]
-tex = core.resize.Bicubic(core.std.StackVertical(rows), 1008, 384)   # 42 x 16 cells, 24 px each: smooth (room for 2 x 240 pixels of pan)
+tex = core.resize.Bicubic(core.std.StackVertical(rows), 24 * cols, 384)   # 24 px cells: smooth
 # 2 x frames pictures at 60000/1001, the texture 2 pixels further right each (one per field of a 60i capture)
 base = core.std.Splice([core.resize.Bicubic(tex, 320, 240, src_left=8 + 2 * n, src_top=72, src_width=320, src_height=240) for n in range(2 * frames)])
 base = core.std.AssumeFPS(base, fpsnum=60000, fpsden=1001)
