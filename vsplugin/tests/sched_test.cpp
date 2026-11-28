@@ -282,6 +282,43 @@ static void TestMpImage()
     CHECK(MpVersion("0.42.0", ma, mi) && ma == 0 && mi == 42);
     CHECK(MpVersion("mpv v0.39.0-dev-g1234", ma, mi) && mi == 39);
     CHECK(!MpVersion("", ma, mi) && !MpVersion("mpv git", ma, mi));
+
+    // the output's colour written back (PatchMpImage): a 1080p HLG source tone-mapped to SDR, as mpv would read it
+    {
+        mpimg::Image s{};
+        s.w = s.params.w = 1920; s.h = s.params.h = 1080; s.params.pw = s.params.ph = 1; s.params.imgfmt = 1000;
+        s.params.color.primaries = 6; s.params.color.transfer = 13; s.params.color.hdr.maxL = 1000; s.params.color.hdr.maxPq = 0.75f;
+        s.params.repr.sys = 4; s.params.repr.levels = 1; s.params.repr.dovi = &s;
+        s.params.primOrig = 6; s.params.trcOrig = 13; s.params.sysOrig = 4; s.params.light = 2; s.params.chroma = 1; s.params.rotate = 90; s.params.crop[2] = 1920;
+        s.num_planes = 3; s.pts = 1.5;
+        std::vector<uint8_t> b = blob(s);
+        MpOutColour o; o.plPrimaries = 3; o.plTransfer = 2; o.plSystem = 2; o.plLevels = 1;
+        std::string why;
+        CHECK(PatchMpImage(b, 1, 1, 9, 1, o, &why));
+        mpimg::Image t{}; std::memcpy(&t, b.data(), sizeof t);
+        CHECK(t.params.color.primaries == 3 && t.params.color.transfer == 2 && t.params.repr.sys == 2 && t.params.repr.levels == 1);
+        CHECK(t.params.primOrig == 3 && t.params.trcOrig == 2 && t.params.sysOrig == 2 && t.params.light == 0 && t.params.repr.dovi == nullptr);
+        mpimg::Hdr zero{}; CHECK(std::memcmp(&t.params.color.hdr, &zero, sizeof zero) == 0);
+        CHECK(t.w == 1920 && t.params.chroma == 1 && t.params.rotate == 90 && t.params.crop[2] == 1920 && t.num_planes == 3 && t.pts == 1.5 && t.params.repr.alpha == s.params.repr.alpha);
+        // read back as mpv's next filter would see it (_ColorSpace 1 for BT.709 now): SDR sRGB BT.709
+        r = ParseMpImage(b.data(), b.size(), 1920, 1080, 1, 1, 1, 1); CHECK(r.ok && r.transfer == 13 && r.primaries == 1 && r.matrix == 1);
+        // SDR to HDR10 with a peak (RTX Video HDR on Linux): PQ BT.2020, max_luma set
+        b = blob(t); MpOutColour h; h.plPrimaries = 6; h.plTransfer = 12; h.plSystem = 4; h.plLevels = 1; h.maxLuma = 1000;
+        CHECK(PatchMpImage(b, 1, 1, 1, 1, h, &why));
+        std::memcpy(&t, b.data(), sizeof t); CHECK(t.params.color.transfer == 12 && t.params.color.hdr.maxL == 1000 && t.params.color.hdr.minL == 0 && t.params.trcOrig == 12);
+        // refused: the source's props disagree (validated before the backend writes its own), an out-of-range light,
+        // no libplacebo value for the output
+        b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 1, 1, o, &why));
+        s.params.light = 9; b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 9, 1, o, &why) && why.find("light") != std::string::npos); s.params.light = 2;
+        MpOutColour bad = o; bad.plTransfer = -1; b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 9, 1, bad, &why));
+        CHECK(H273TransferToPl(16) == 12 && H273TransferToPl(13) == 2 && H273TransferToPl(1) == 1 && H273PrimariesToPl(9) == 6 && H273MatrixToPlSystem(9) == 4 && PlSystemToAv(2) == 1);
+        CHECK(VpyRgbMatrix(3840, 2160, 10) == 9 && VpyRgbMatrix(3840, 2160, 8) == 1 && VpyRgbMatrix(720, 480, 8) == 6);
+        // the replica's offsets equal the ones PatchMpImage writes (64-bit here)
+        const size_t a = offsetof(mpimg::Image, params) + offsetof(mpimg::Params, w), ss = (a + 176 + 7) / 8 * 8;
+        CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, primOrig) == ss + 32);
+        CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, light) == ss + 32 + 12);
+        CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, repr) + offsetof(mpimg::ColorRepr, dovi) == ss + 24);
+    }
 }
 
 static void TestAuto()

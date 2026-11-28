@@ -42,6 +42,7 @@ static_assert(pmvs::kPortableMaxK == int(PUSHCORE_MAX_MULTIPLIER), "the portable
 #include "vslog.h"
 #include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
 #include "mp_params.h"   // mpv's frame-0 colour from the init dummy's _MP_IMAGE (pushmpc.MpvColour)
+#include "mp_out.h"      // the output's colour in _MP_IMAGE (F1: mpv reads nothing else)
 #include <cstdio>
 #include <cstdlib>
 #ifndef _WIN32
@@ -94,6 +95,7 @@ struct Enhance {
     // what the core was opened for
     pm::Settings settings; pm::Choice choice; pm::Display disp; pm::Source src;
     Colour colour; bool colourChecked = false;
+    int mpTagLog = 0;          // the output's _MP_IMAGE colour: logged once per instance (mp_out.h)
     PushCoreSettings ps{};
     // per getFrame call (under the host lock)
     VSCore* core = nullptr;
@@ -155,6 +157,19 @@ void SetOutProps(Enhance* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     auto it = d->meta.find(s);
     const Meta m = it != d->meta.end() && it->second.durNum > 0 ? it->second : d->clipMeta;
     if (it != d->meta.end() && it->second.props) a->copyMap(it->second.props.get(), p);   // the source frame's properties first
+    // mpv reads the output's colour only from _MP_IMAGE (the source's, just copied): when the core changes it (a tone map
+    // to SDR, RTX Video HDR), the blob says what comes out. SDR out: sRGB-encoded BT.709 (PushCoreOutputInfo.hdrOutput);
+    // HDR out: PQ BT.2020. The matrix: 4:2:0 the egress's, RGB the one pushmpc.vpy converts with. Before the _ColorRange
+    // below: the blob is validated against the source's props.
+    const bool outHdr = d->outTransfer == 16;
+    if (IsHdrTransfer(d->colour.transfer) != outHdr) {
+        std::string why;
+        const int mx = OutIs420(d->fmt) ? d->outMatrix : VpyRgbMatrix(d->vi.width, d->vi.height, d->vi.format.bitsPerSample);
+        const bool ok = TagMpOutput(a, p, outHdr ? 16 : 13, outHdr ? 9 : 1, mx, 1, 0, &why);
+        if (d->mpTagLog++ == 0)
+            Log(ok ? std::format("output colour for mpv: {} (transfer {} primaries 9/1 matrix {}), the source is {}", outHdr ? "HDR10" : "SDR", outHdr ? 16 : 13, mx, outHdr ? "SDR" : "HDR")
+                   : "output colour for mpv not set (" + why + "): mpv keeps the source's colour for this output");
+    }
     const Rational dur = OutputDuration(m.durNum, m.durDen, d->k);
     if (dur.num > 0) { a->mapSetInt(p, "_DurationNum", dur.num, maReplace); a->mapSetInt(p, "_DurationDen", dur.den, maReplace); }
     if (it != d->meta.end() && it->second.sarNum > 0 && it->second.sarDen > 0) { a->mapSetInt(p, "_SARNum", it->second.sarNum, maReplace); a->mapSetInt(p, "_SARDen", it->second.sarDen, maReplace); }

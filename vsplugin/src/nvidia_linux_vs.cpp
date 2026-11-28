@@ -29,6 +29,7 @@
 #include "platform.h"
 #include "schedule.h"
 #include "vslog.h"
+#include "mp_out.h"   // the output's colour in mpv's _MP_IMAGE
 
 namespace pmvs {
 
@@ -57,6 +58,8 @@ struct NInst {
     std::map<int64_t, NMeta> meta;
     InFormat colour;             // fallback when a frame carries no colour properties
     bool outHdr = false; int outBits = 8;
+    bool srcHdr = false; float hdrPeak = 0;   // the source's HDR-ness and RTX Video HDR's peak: the output's _MP_IMAGE colour
+    int mpTagLog = 0;
     uint64_t produced = 0, lastLogged = 0;
     VSCore* core = nullptr;
     const VSAPI* api = nullptr;
@@ -103,6 +106,15 @@ void SetProps(NInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     const int64_t s = n / d->k;
     auto it = d->meta.find(s);
     if (it != d->meta.end() && it->second.props) a->copyMap(it->second.props.get(), p);
+    // mpv reads the output's colour only from _MP_IMAGE (the source's, just copied): RTX Video HDR (SDR in, PQ BT.2020
+    // out) or an SDR output of an HDR source is told in the blob (mp_out.h); validated before the _ColorRange below
+    if (d->srcHdr != d->outHdr) {
+        std::string why;
+        const bool ok = TagMpOutput(a, p, d->outHdr ? 16 : 1, d->outHdr ? 9 : 1, d->outHdr ? 9 : 1, 1, d->outHdr ? d->hdrPeak : 0.f, &why);
+        if (d->mpTagLog++ == 0)
+            Log(ok ? std::string("nvidia: output colour for mpv: ") + (d->outHdr ? "HDR10 (PQ BT.2020)" : "SDR BT.709") + ", the source is " + (d->srcHdr ? "HDR" : "SDR")
+                   : "nvidia: output colour for mpv not set (" + why + "): mpv keeps the source's colour for this output");
+    }
     const int64_t dn = it != d->meta.end() && it->second.durNum > 0 ? it->second.durNum : d->inVi.fpsDen;
     const int64_t dd = it != d->meta.end() && it->second.durNum > 0 ? it->second.durDen : d->inVi.fpsNum;
     const Rational dur = OutputDuration(dn, dd, d->k);
@@ -325,6 +337,7 @@ void NvLinuxCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VS
     d->k = std::max(1, w.engine->Config().plan.k);
     d->colour = fmt;
     d->outHdr = w.engine->OutHdr();
+    d->srcHdr = src.hdr; d->hdrPeak = float(s.hdrPeak);
     d->outBits = w.engine->OutTenBit() ? 10 : 8;
     d->vi = *vi;
     if (!a->queryVideoFormat(&d->vi.format, cfYUV, stInteger, d->outBits, 1, 1, core)) { w.owner = 0; lk.unlock(); a->freeNode(node); delete d; return fail("queryVideoFormat failed"); }
