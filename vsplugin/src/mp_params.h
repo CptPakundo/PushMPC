@@ -143,7 +143,9 @@ inline bool MpVersion(const std::string& s, int& major, int& minor)
 //   (MP_CSP_LIGHT_AUTO 0 .. SCENE_1_2 4, the same at every tag);
 //   pl_hdr_metadata at anchor + 28 .. + 176, max_luma at + 28 + 36.
 struct MpOutColour {
-    int plPrimaries = -1, plTransfer = -1, plSystem = -1, plLevels = -1;   // libplacebo values
+    // libplacebo values. plTransfer and plPrimaries -1 together: the transfer is the source's (the HDR metadata, light
+    // and Dolby Vision stay), only the matrix (system) and the levels are written
+    int plPrimaries = -1, plTransfer = -1, plSystem = -1, plLevels = -1;
     float maxLuma = 0;                                                     // cd/m2 for an HDR output; 0 = mpv's default
 };
 // H.273 / FFmpeg codes -> libplacebo (the plugin's outputs only use these); -1 = no mapping
@@ -159,7 +161,8 @@ inline int VpyRgbMatrix(int w, int h, int bits) { return bits > 8 && w >= 3200 ?
 inline bool PatchMpImage(std::vector<uint8_t>& b, int sarNum, int sarDen, int colorSpace, int colorRange, const MpOutColour& o, std::string* why, size_t ptrSize = sizeof(void*))
 {
     auto no = [&](const char* m) { if (why) *why = m; return false; };
-    if (o.plPrimaries < 0 || o.plTransfer < 0 || o.plSystem < 0 || o.plLevels < 1 || o.plLevels > 2) return no("no libplacebo value for the output colour");
+    const bool keepTransfer = o.plPrimaries < 0 && o.plTransfer < 0;
+    if ((!keepTransfer && (o.plPrimaries < 0 || o.plTransfer < 0)) || o.plSystem < 0 || o.plLevels < 1 || o.plLevels > 2) return no("no libplacebo value for the output colour");
     if (b.size() < 64) return no("no _MP_IMAGE");
     const int w = MpReadI32(b.data(), 0), h = MpReadI32(b.data(), 4);
     const MpFrameColour src = ParseMpImage(b.data(), b.size(), w, h, sarNum, sarDen, colorSpace, colorRange, ptrSize);
@@ -171,6 +174,11 @@ inline bool PatchMpImage(std::vector<uint8_t>& b, int sarNum, int sarDen, int co
     const int po = MpReadI32(b.data(), orig), to = MpReadI32(b.data(), orig + 4), so = MpReadI32(b.data(), orig + 8), li = MpReadI32(b.data(), light);
     if (po < 0 || po >= kPlPrimCount || to < 0 || to >= kPlTrcCountMax || so < 0 || so >= kPlSystemCountMax || li < 0 || li > 4) return no("the *_orig / light fields are out of range");
     auto put = [&](size_t off, int32_t v) { std::memcpy(b.data() + off, &v, 4); };
+    if (keepTransfer) {   // the matrix and the levels only (sys_orig with them, as vf_format does)
+        if (src.plSystem == 8) return true;   // Dolby Vision: mpv reshapes after the filter from repr.dovi; left as it is
+        put(s, o.plSystem); put(s + 4, o.plLevels); put(orig + 8, o.plSystem);
+        return true;
+    }
     put(a + 20, o.plPrimaries);
     put(a + 24, o.plTransfer);
     std::memset(b.data() + a + 28, 0, 148);                                // the source's HDR metadata does not describe the output

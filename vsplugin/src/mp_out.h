@@ -11,19 +11,22 @@
 namespace pmvs {
 
 // p: the output frame's props right after the source frame's were copied (before the backend writes its own _ColorRange
-// / _Range: the blob is validated against the source's). H.273 codes; range: 0 full, 1 limited. false + why when the
-// blob is absent (not mpv) or does not validate; the frame then keeps the source's blob, as before.
-inline bool TagMpOutput(const VSAPI* a, VSMap* p, int transfer, int primaries, int matrix, int range, float maxLuma, std::string* why)
+// / _Range: the blob is validated against the source's). H.273 codes; transfer and primaries -1: the source's are kept
+// (only the matrix and the range are written); range: 0 full, 1 limited. false + why when the blob does not validate
+// (the frame then keeps the source's blob, as before); *absent is set when there is none (not mpv: nothing to do).
+inline bool TagMpOutput(const VSAPI* a, VSMap* p, int transfer, int primaries, int matrix, int range, float maxLuma, std::string* why, bool* absent = nullptr)
 {
+    if (absent) *absent = false;
     int e = 0;
     const char* blob = a->mapGetData(p, "_MP_IMAGE", 0, &e);
-    if (e || !blob) { if (why) *why = "no _MP_IMAGE (not mpv)"; return false; }
+    if (e || !blob) { if (why) *why = "no _MP_IMAGE (not mpv)"; if (absent) *absent = true; return false; }
     const int n = a->mapGetDataSize(p, "_MP_IMAGE", 0, &e);
-    if (e || n <= 0) { if (why) *why = "no _MP_IMAGE (not mpv)"; return false; }
+    if (e || n <= 0) { if (why) *why = "no _MP_IMAGE (not mpv)"; if (absent) *absent = true; return false; }
     auto prop = [&](const char* k, int64_t def) { int pe = 0; const int64_t v = a->mapGetInt(p, k, 0, &pe); return pe ? def : v; };
     std::vector<uint8_t> b(reinterpret_cast<const uint8_t*>(blob), reinterpret_cast<const uint8_t*>(blob) + n);
     MpOutColour o;
-    o.plTransfer = H273TransferToPl(transfer); o.plPrimaries = H273PrimariesToPl(primaries); o.plSystem = H273MatrixToPlSystem(matrix);
+    o.plTransfer = transfer < 0 ? -1 : H273TransferToPl(transfer); o.plPrimaries = primaries < 0 ? -1 : H273PrimariesToPl(primaries); o.plSystem = H273MatrixToPlSystem(matrix);
+    if ((transfer < 0) != (primaries < 0) || (transfer >= 0 && (o.plTransfer < 0 || o.plPrimaries < 0))) { if (why) *why = "no libplacebo value for the output colour"; return false; }
     o.plLevels = range == 0 ? 2 : 1; o.maxLuma = maxLuma;
     if (!PatchMpImage(b, int(prop("_SARNum", 0)), int(prop("_SARDen", 0)), int(prop("_ColorSpace", -1)), int(prop("_ColorRange", -1)), o, why)) return false;
     a->mapSetData(p, "_MP_IMAGE", reinterpret_cast<const char*>(b.data()), int(b.size()), dtBinary, maReplace);

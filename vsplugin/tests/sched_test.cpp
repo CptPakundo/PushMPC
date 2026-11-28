@@ -311,7 +311,22 @@ static void TestMpImage()
         b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 1, 1, o, &why));
         s.params.light = 9; b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 9, 1, o, &why) && why.find("light") != std::string::npos); s.params.light = 2;
         MpOutColour bad = o; bad.plTransfer = -1; b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 9, 1, bad, &why));
-        CHECK(H273TransferToPl(16) == 12 && H273TransferToPl(13) == 2 && H273TransferToPl(1) == 1 && H273PrimariesToPl(9) == 6 && H273MatrixToPlSystem(9) == 4 && PlSystemToAv(2) == 1);
+        // keep the transfer (SDR in, SDR out): only the matrix and the levels, sys_orig with them; a BT.601 full-range
+        // source made BT.709 limited; the HDR metadata, light, dovi and *_orig transfer untouched
+        {
+            mpimg::Image f = s; f.params.color.primaries = 3; f.params.color.transfer = 1; f.params.repr.sys = 1; f.params.repr.levels = 2;
+            f.params.primOrig = 3; f.params.trcOrig = 1; f.params.sysOrig = 1; f.params.light = 1;
+            b = blob(f); MpOutColour k; k.plSystem = 2; k.plLevels = 1;
+            CHECK(PatchMpImage(b, 1, 1, 6, 0, k, &why));
+            mpimg::Image g{}; std::memcpy(&g, b.data(), sizeof g);
+            CHECK(g.params.repr.sys == 2 && g.params.repr.levels == 1 && g.params.sysOrig == 2 && g.params.color.transfer == 1 && g.params.color.primaries == 3);
+            CHECK(g.params.light == 1 && g.params.repr.dovi == f.params.repr.dovi && g.params.color.hdr.maxL == 1000 && g.params.trcOrig == 1);
+            // Dolby Vision (system 8): kept as it is in this mode
+            f.params.repr.sys = 8; f.params.repr.levels = 1; b = blob(f); const std::vector<uint8_t> before = b;
+            CHECK(PatchMpImage(b, 1, 1, 2, 1, k, &why) && b == before);
+            // one of transfer / primaries alone: refused
+            MpOutColour half = k; half.plTransfer = 2; b = blob(s); CHECK(!PatchMpImage(b, 1, 1, 9, 1, half, &why));
+        }        CHECK(H273TransferToPl(16) == 12 && H273TransferToPl(13) == 2 && H273TransferToPl(1) == 1 && H273PrimariesToPl(9) == 6 && H273MatrixToPlSystem(9) == 4 && PlSystemToAv(2) == 1);
         CHECK(VpyRgbMatrix(3840, 2160, 10) == 9 && VpyRgbMatrix(3840, 2160, 8) == 1 && VpyRgbMatrix(720, 480, 8) == 6);
         // the replica's offsets equal the ones PatchMpImage writes (64-bit here)
         const size_t a = offsetof(mpimg::Image, params) + offsetof(mpimg::Params, w), ss = (a + 176 + 7) / 8 * 8;
