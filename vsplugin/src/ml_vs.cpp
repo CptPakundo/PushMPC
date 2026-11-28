@@ -294,7 +294,10 @@ void CheckColour(MInst* d, const VSAPI* a, VSFrameContext* fc, int64_t s)
     if (!f) return;
     const VSMap* p = a->getFramePropertiesRO(f);
     int e = 0, matrix = d->colMatrix, range = d->colRange;
-    const int64_t m = a->mapGetInt(p, "_Matrix", 0, &e); if (!e && m != 2) matrix = int(m);
+    // mpv's vf_vapoursynth sets _ColorSpace (AVColorSpace, the same H.273 codes), not _Matrix
+    int64_t m = a->mapGetInt(p, "_Matrix", 0, &e);
+    if (e) m = a->mapGetInt(p, "_ColorSpace", 0, &e);
+    if (!e && m != 2) matrix = int(m);
     const int64_t r = a->mapGetInt(p, "_Range", 0, &e);   // VapourSynth R82+: 1 full, 0 limited
     if (!e) range = r == 1 ? 1 : 0;
     else { const int64_t c = a->mapGetInt(p, "_ColorRange", 0, &e); if (!e) range = c == 0 ? 1 : 0; }   // older: 0 full

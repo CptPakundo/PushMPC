@@ -136,7 +136,8 @@ void Bind(NInst* d)
         v.bits = d->api->getVideoFrameFormat(f)->bitsPerSample;
         v.fmt = d->colour; v.fmt.bits = v.bits;
         bool hm = false, hr = false, hn = false;
-        const int64_t mx = PInt(p, d->api, "_Matrix", 2, &hm);
+        int64_t mx = PInt(p, d->api, "_Matrix", 2, &hm);
+        if (!hm) mx = PInt(p, d->api, "_ColorSpace", 2, &hm);   // mpv's vf_vapoursynth: _ColorSpace (AVColorSpace = H.273), no _Matrix
         if (hm && mx != 2) v.fmt.matrix = int(mx);
         const int64_t rn = PInt(p, d->api, "_Range", 0, &hn);   // API 4.2+: 1 full
         if (hn) v.fmt.full = rn == 1;
