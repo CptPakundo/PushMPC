@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/cache@v4
         id: c
-        with: { path: clips, key: vlc-clips-v5 }
+        with: { path: clips, key: vlc-clips-v6 }
       - name: Synthetic clips (public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps; 8 and 10 bit; 720p; hardware-format clips)
         if: steps.c.outputs.cache-hit != 'true'
         run: |
@@ -66,7 +66,12 @@ jobs:
           # not drawn: a textured gradient panning every frame with sensor noise (the content library measures it as not drawn,
           # as its own test's live picture); the VLC cases check that the held-drawing repair is never set on it
           ffmpeg -hide_banner -loglevel error -f lavfi -i "nullsrc=s=320x180:r=24:d=6,format=gray,geq=lum='60+(X+3*N)*120/(W+600)+25*sin((X+3*N)*0.14)*cos(Y*0.1)+random(1)*9-4',format=yuv420p" -c:v libx264 -pix_fmt yuv420p -g 48 clips/live.mkv
-          for c in clip clip10 clip720 clip422 hwclip hwclip10 live; do ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,pix_fmt -of default=nw=1 clips/$c.mkv > clips/$c.txt; cat clips/$c.txt; done
+          # interlaced input: a pan woven from two moments per frame (a 60i capture, 30000/1001) and the same pan as whole
+          # frames, both flagged TFF (the flag is only a prior: the field combing measured in the picture decides)
+          il="nullsrc=s=320x240:r=60000/1001:d=4,format=gray,geq=lum='128+90*sin(2*PI*(X+0.5*Y-2*N)/24)',format=yuv420p"
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "$il,tinterlace=mode=merge,setfield=tff" -c:v libx264 -crf 12 -pix_fmt yuv420p -g 48 clips/woven.mkv
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "$il,fps=30000/1001,setfield=tff" -c:v libx264 -crf 12 -pix_fmt yuv420p -g 48 clips/woven-prog.mkv
+          for c in clip clip10 clip720 clip422 hwclip hwclip10 live woven woven-prog; do ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,pix_fmt -of default=nw=1 clips/$c.mkv > clips/$c.txt; cat clips/$c.txt; done
       - uses: actions/upload-artifact@v4
         with: { name: clips, path: clips, retention-days: 5 }
 
@@ -214,6 +219,28 @@ jobs:
                  SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clips/clip.txt) DISPLAYS="gl xcb_x11" \
                  LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
           xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/tests/run-module.sh
+      - name: Interlaced input passes through at the source rate, measured in the picture (woven and progressive, both flagged TFF)
+        run: |
+          # VLC's own deinterlacer off, so the module's measurement is what decides. Woven: 24 moving frames measured, then
+          # the pictures pass through: 1 + 23 x 4 shown before the verdict, one per source picture after it (tolerance 9:
+          # the worker's last job). Progressive with the same pan: x4 throughout.
+          export VLC_PLUGIN_PATH=~/.local/share/pushmpc/vlc
+          n=$(sed -n 's/nb_read_frames=//p' art/clips/woven.txt | tr -d '\r'); want=$((1 + 23 * 4 + n - 24)); rc=0
+          for c in woven woven-prog; do
+            timeout 90 vlc -I dummy --no-audio --play-and-exit --no-video-title-show --no-osd --file-logging --logfile="res/linux/il-$c.log" --log-verbose=2 \
+              --vout=pushdump --pushdump-file="res/linux/il-$c.csv" --avcodec-hw=none --deinterlace=0 --video-filter=postproc:pushmpc_out --pushmpc-smoother=4 \
+              "art/clips/$c.mkv" > "res/linux/il-$c.stdout" 2>&1
+            got=$(( $(wc -l < "res/linux/il-$c.csv") - 1 ))
+            grep -hE "PushMPC: (interlaced|progressive \(measured\))" "res/linux/il-$c.log" | sed 's/^[^:]*: //' | head -3
+            if [ "$c" = woven ]; then
+              echo "interlaced check (VLC, woven): pass-through after the verdict, $got pictures shown (want $want, at most +9; x4 throughout would be $((1 + (n - 1) * 4)))"
+              { [ "$got" -ge $((want * 9 / 10 - 9)) ] && [ "$got" -le $((want + 9)) ] && grep -q "PushMPC: interlaced: interlaced input" "res/linux/il-$c.log"; } || { echo "::error::VLC woven: $got pictures, want $want (at most +9; late pictures may drop)"; rc=1; }
+            else
+              echo "interlaced check (VLC, progressive flagged TFF): frame generation x4, $got of $((1 + (n - 1) * 4)) pictures (want at least 90 %: late pictures may drop)"
+              { [ "$got" -ge $(((1 + (n - 1) * 4) * 9 / 10)) ] && grep -q "PushMPC: progressive (measured)" "res/linux/il-$c.log"; } || { echo "::error::VLC progressive: $got pictures"; rc=1; }
+            fi
+          done
+          exit $rc
       - name: At x1 the module passes a picture it would convert through untouched (4:2:2, Smoother off)
         run: |
           grep -h "PushMPC" res/linux/off_422.log | sed 's/^[^:]*: //' | head -4

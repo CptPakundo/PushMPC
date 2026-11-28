@@ -8,6 +8,8 @@
 #include <math.h>
 #include "pm_engine.h"
 #include "engine_portable.h"
+#include "pm_comb.h"
+#include "../../tests/comb_synth.h"
 
 /* ---- the held-drawing repair: a painted background and a disc drawn on twos (12 px per drawing, back and forth).
  * Until frame RT everything is on twos (whole frames repeat: the evidence that opens the repair's animation gate, as
@@ -204,6 +206,31 @@ static double BoxCentre(const unsigned char *p)
     return n ? (double)sx / n : -1;
 }
 
+/* interlaced input (pm_comb.h over content_detect.h's CombMeter): woven fields interlaced, the same motion as whole
+ * frames progressive (tests/comb_synth.h), 8-bit and 10-bit LSB words (the module's I420 / I0AL pictures) */
+static int TestComb(void)
+{
+    static uint8_t y8[240 * 320];
+    static uint16_t y16[240 * 320];
+    int fails = 0;
+    for (int woven = 0; woven < 2; woven++)
+        for (int ten = 0; ten < 2; ten++) {
+            void *c = pm_comb_new();
+            int v = PM_COMB_MEASURING, n = 0, measured = 0, combed = 0;
+            for (; n < 60 && v == PM_COMB_MEASURING; n++) {
+                if (ten) { pm_comb_synth16(y16, 320, 320, 240, n, woven, 0, 2); v = pm_comb_push(c, y16, 640, 320, 240, 2, 2); }
+                else { pm_comb_synth8(y8, 320, 320, 240, n, woven, 0); v = pm_comb_push(c, y8, 320, 320, 240, 1, 0); }
+            }
+            pm_comb_counts(c, &measured, &combed);
+            pm_comb_free(c);
+            const int want = woven ? PM_COMB_INTERLACED : PM_COMB_PROGRESSIVE;
+            printf("interlace (VLC): %s %s -> %s, %d of %d moving frames combed after %d pictures\n", woven ? "woven" : "progressive", ten ? "10-bit" : "8-bit",
+                   v == PM_COMB_INTERLACED ? "interlaced" : v == PM_COMB_PROGRESSIVE ? "progressive" : "measuring", combed, measured, n);
+            if (v != want) { printf("FAIL interlace verdict %d, want %d\n", v, want); fails++; }
+        }
+    return fails;
+}
+
 int main(void)
 {
     int fails = 0;
@@ -277,6 +304,7 @@ int main(void)
     int k3 = pm_engine_decide_k(0, 59.94, 60, 640, 360, 8, 0, 1, why, sizeof(why));
     printf("Auto 60 fps on 60 Hz: x%d (%s)\n", k3, why);
     if (k3 != 1) fails++;
+    fails += TestComb();
     printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
     return fails ? 1 : 0;
 }

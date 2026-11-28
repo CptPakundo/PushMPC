@@ -9,6 +9,7 @@
  */
 #ifdef __APPLE__
 #include "pm_cvpx.h"
+#include "pm_comb.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreVideo/CoreVideo.h>
 #include <dlfcn.h>
@@ -168,4 +169,17 @@ int pm_cvpx_eng_process(pm_cvpx_eng *e, void *pb, int64_t pts100ns, bool contigu
 void pm_cvpx_eng_forget(pm_cvpx_eng *e) { e->forget(e->h); }
 const char *pm_cvpx_eng_describe(pm_cvpx_eng *e) { return e->describe(e->h); }
 void pm_cvpx_eng_close(pm_cvpx_eng *e) { if (e) { e->close(e->h); free(e); } }
+
+int pm_cvpx_comb_push(void *pb, void *comb)
+{
+    CVPixelBufferRef b = (CVPixelBufferRef)pb;
+    if (!b || !comb || CVPixelBufferGetPlaneCount(b) != 2 || CVPixelBufferLockBaseAddress(b, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return -1;
+    const OSType t = CVPixelBufferGetPixelFormatType(b);
+    const int p10 = t == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || t == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+    /* P010-style words: the sample in the high bits */
+    const int v = pm_comb_push(comb, CVPixelBufferGetBaseAddressOfPlane(b, 0), (ptrdiff_t)CVPixelBufferGetBytesPerRowOfPlane(b, 0),
+                               (int)CVPixelBufferGetWidth(b), (int)CVPixelBufferGetHeight(b), p10 ? 2 : 1, p10 ? 8 : 0);
+    CVPixelBufferUnlockBaseAddress(b, kCVPixelBufferLock_ReadOnly);
+    return v;
+}
 #endif
