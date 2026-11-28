@@ -30,6 +30,8 @@ ap.add_argument("--after", default="", help="command run after every Kodi run (a
 ap.add_argument("--player-clips", default="", help="the clips folder as Kodi sees it (default: --clips)")
 ap.add_argument("--baseline-case", default="", help="Kodi alone (a case of the list, 'disabled'): played first and again last; the render check of the "
                 "other cases is judged against the slower of the two (a host that slows down while the cases run)")
+ap.add_argument("--settle-baseline", action="store_true", help="start Kodi once without a file on the baseline case's settings before the "
+                "first baseline (Kodi for Android played the first baseline with the add-on on although it logged it off: job 140985967927)")
 a = ap.parse_args()
 here = os.path.dirname(os.path.abspath(__file__))
 pclips = a.player_clips or a.clips
@@ -151,8 +153,13 @@ for attempt in range(3):
     launch([], a.first, "enable", os.path.join(a.out, f"first-start-{attempt}.txt"))
     print(open(os.path.join(a.out, f"first-start-{attempt}.txt"), encoding="utf-8", errors="replace").read(), flush=True)
     dbs = sorted(glob.glob(os.path.join(ud, "Database", "Addons*.db")))
-    if dbs:
+    # Kodi's JSON-RPC answered the enable (drive.py prints DRIVE lines); without an answer Kodi may not have got as far as
+    # its add-ons (kodi-android 21 job 140985967868: no DRIVE line, the add-on left disabled, nothing played): start again
+    answered = "DRIVE enable" in open(os.path.join(a.out, f"first-start-{attempt}.txt"), encoding="utf-8", errors="replace").read()
+    if dbs and answered:
         break
+    if dbs:
+        print(f"first start {attempt + 1}: Kodi's JSON-RPC did not answer the enable: starting again", flush=True)
 print("databases:", dbs, flush=True)
 if dbs:
     con = sqlite3.connect(dbs[-1])
@@ -171,8 +178,8 @@ log = find_log()
 if log:
     shutil.copy(log, os.path.join(a.out, "first-start.log"))
 
-failed, judged = [], []
-for name, clip, settings, k, decode, size, drive_case in CASES:
+def addon_settings(settings):
+    """the add-on's settings.xml for a case; returns whether the case wants Kodi's dma-buf allocator away"""
     s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": a.threads}
     if a.gpu:
         s.update({"engine": 1, "upscale": 1})
@@ -180,6 +187,17 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
     noalloc = bool(s.pop("_noalloc", 0))
     write(os.path.join(ud, "addon_data", "inputstream.pushmpc", "settings.xml"),
           "<settings version=\"2\">\n" + "".join(f"    <setting id=\"{k_}\">{v}</setting>\n" for k_, v in s.items()) + "</settings>\n")
+    return noalloc
+
+# the baseline's settings taken by Kodi once before it is judged, as every later case finds its settings: written for the
+# run before it too (Kodi for Android played the first baseline through the add-on although the add-on logged itself off)
+if BASE and a.settle_baseline:
+    addon_settings(BASE[0][2])
+    launch([], a.first, "enable", os.path.join(a.out, "settle-baseline.txt"))   # drive.py quits Kodi once it answers
+
+failed, judged = [], []
+for name, clip, settings, k, decode, size, drive_case in CASES:
+    noalloc = addon_settings(settings)
     drive_out = os.path.join(a.out, f"{name}.drive.txt")
     if noalloc and a.alloc_off:
         subprocess.run(a.alloc_off, shell=True, check=False)

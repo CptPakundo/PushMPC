@@ -56,7 +56,7 @@ adb shell ls -la "$dev/.kodi" 2>&1 | tr -d '\r'
 adb push "$clips/." "$dev/clips/" >/dev/null || fail "cannot push the clips to $dev/clips"
 adb shell ls -l "$dev/clips"
 before="adb shell mkdir -p $dev/.kodi && adb push '$home/.' '$dev/.kodi/' >/dev/null"
-after="mkdir -p '$home/userdata' '$home/temp'; adb pull '$dev/.kodi/userdata/Database' '$home/userdata/' >/dev/null 2>&1; adb pull '$dev/.kodi/temp/kodi.log' '$home/temp/kodi.log' >/dev/null 2>&1; true"
+after="mkdir -p '$home/userdata' '$home/temp'; adb pull '$dev/.kodi/userdata/Database' '$home/userdata/' >/dev/null 2>&1; adb pull '$dev/.kodi/temp/kodi.log' '$home/temp/kodi.log' >/dev/null 2>&1; adb shell ls '$dev/.kodi/userdata/addon_data/inputstream.pushmpc'; adb shell cat '$dev/.kodi/userdata/addon_data/inputstream.pushmpc/settings.xml' 2>&1 | grep -h enabled; true"
 export PM_KODI_MAX=100
 # the CPU engine on 2 of the emulator's 4 cores: the emulator draws Kodi's GL on the same CPUs (SwiftShader), which a
 # phone does on its GPU. Kodi 22 alone renders 47.6 of 48/s here (native48, run 45976736780, 0 dropped); with the engine
@@ -65,9 +65,11 @@ export PM_KODI_MAX=100
 # the engine still keeps its budget (19.9 of 25 ms, run 45960712431)
 # The emulator's speed drifts during a job (kodi-android job 140938256053: the first cases at a 56/s render loop, the last ones at 50/s, Kodi alone 21.1/s with
 # no PushMPC in the path): Kodi alone ("disabled") plays first and again last, and the render check of every other case
-# is judged against the slower of the two (run_cases.py --baseline-case, analyze.py --baseline)
+# is judged against the slower of the two (run_cases.py --baseline-case, analyze.py --baseline). A start without a file
+# on the baseline's settings comes first (--settle-baseline): the first baseline of job 140985967927 played through the
+# add-on although the add-on logged itself off, the same case last did not
 python3 "$here/run_cases.py" --kodi "sh $here/android-kodi.sh" --kill "adb shell am force-stop org.xbmc.kodi" \
-  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" --threads 2 --baseline-case disabled \
+  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" --threads 2 --baseline-case disabled --settle-baseline \
   --home "$home" --addon "$addon" --clips "$clips" --major "$major" --out "$out" --cases "$cases"
 rc=$?
 adb logcat -d > "$out/logcat.txt" 2>&1 || true

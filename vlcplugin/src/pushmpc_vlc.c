@@ -73,6 +73,7 @@
 #include "pm_content.h"   /* what the picture is: PushMPC's content library, loaded at run time */
 #include "pm_comb.h"     /* interlaced input, measured in the picture (pushmpc/content_detect.h CombMeter) */
 #include "pm_deint.h"    /* interlaced input: a double-rate deinterlacer (YADIF) in front of the engine, CPU pictures */
+#include "pm_ivtc.h"     /* telecine: the 2:3 pulldown removed in front of the engine, CPU pictures */
 #ifdef __APPLE__
 #include "pm_cvpx.h"   /* VideoToolbox pictures zero copy into the apple engine and back (guarded, see pm_cvpx.h) */
 #define PM_CVPX_ON(s) ((s)->cvpx != NULL)
@@ -366,6 +367,9 @@ vlc_module_begin()
     add_bool(CFG "deinterlace", true, "Deinterlace interlaced video", "Video measured interlaced (field combing in the picture, "
              "never the flags) is deinterlaced here at double rate (YADIF, one picture per field) before frames are generated; "
              "VLC's own deinterlacer runs after PushMPC. Off: such video passes through unchanged.", false)
+    add_bool(CFG "deinterlace-hw", false, "Deinterlace on the hardware copy path (not verified yet)", "VA-API / VDPAU decoding "
+             "without zero copy: deinterlace the surface on the CPU and upload it back. Off (the default): interlaced video "
+             "passes through there unchanged until this path has run on a real VA-API GPU.", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
     add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
@@ -494,6 +498,17 @@ struct filter_sys_t {
     bool il_deint;
     picture_t *deint_src;       /* the input picture whose two fields come out next */
     bool deint_feed;            /* FilterPic is given our progressive pictures (no converter in front) */
+    picture_t *feed_work;       /* hardware path: the CPU picture of our own the engine reads (FilterPic skips the surface read) */
+    mtime_t il_fp;              /* time spent in frame generation (FilterPic) since the cost check's start: not the deinterlacer's */
+    bool il_hw_noted;           /* the hardware path's step-aside logged */
+    /* telecine (pm_comb_cadence, pm_ivtc.h): the phase and field order measured, the pulldown removal, its watchdog */
+    bool il_telecine, il_ivtc, il_ivtc_tried;
+    int il_phase, il_tff, il_cad_frames;
+    pm_ivtc *ivtc;
+    void *ivtc_watch;
+    mtime_t ivtc_date, ivtc_last;
+    double il_src_fps;          /* the signal's rate and multiplier before a deinterlace / pulldown removal changed them */
+    int il_src_k;
     double deint_ms;            /* its cost per input picture (average), against the source interval */
     uint64_t deint_in;
     uint64_t il_fail;
@@ -964,7 +979,22 @@ static void IlDecide(filter_t *f, struct filter_sys_t *sys, int v)
         if (!sys->il_fail++) msg_Warn(f, "PushMPC: interlacing: a picture could not be read for the measurement");
         v = PM_COMB_MEASURING;
     }
-    if (v == PM_COMB_MEASURING && sys->il_seen < PM_COMB_GIVE_UP) return;
+    /* telecine first (cadence_detect.h, on the same pictures): its 2 of 5 combed frames are no interlaced video */
+    int cm = 0, cc = 0, ph = 0, tff = 1, fr = 0;
+    const int cad = pm_comb_cadence(sys->comb, &cm, &cc, &ph, &tff, &fr);
+    if ((v == PM_COMB_MEASURING || cad == PM_CADENCE_MEASURING) && sys->il_seen < PM_COMB_GIVE_UP) return;
+    if (cad == PM_CADENCE_TELECINE) {
+        msg_Info(f, "PushMPC: telecine: 2:3 pulldown measured (%d of %d moving frames combed, on positions %d-%d of the cycle of five, %s)", cc, cm, ph, (ph + 1) % 5,
+                 tff ? "top field first" : "bottom field first");
+        sys->il_telecine = true; sys->il_phase = ph; sys->il_tff = tff;
+        sys->il_cad_frames = fr;   /* the current picture is the meter's frame fr - 1 (a picture that could not be read is not counted) */
+        pm_comb_free(sys->comb); sys->comb = NULL;
+        sys->il_done = true;
+#ifdef _WIN32
+        if (sys->il_stage) { ID3D11Texture2D_Release(sys->il_stage); sys->il_stage = NULL; }
+#endif
+        return;
+    }
     int measured = 0, combed = 0;
     pm_comb_counts(sys->comb, &measured, &combed);
     pm_comb_free(sys->comb);
@@ -1783,31 +1813,60 @@ static picture_t *PcLagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *
  * portable engines on the CPU planes; the module's converter in front of them for hardware pictures) our YADIF
  * (pm_deint.h) turns each woven picture into two progressive ones, one per field, and frame generation runs on those
  * (FilterPic), at the multiplier Auto decides for the doubled rate. Its cost is measured live: when it takes more than
- * half of the source interval on average (after 30 pictures), the module steps aside (IlAside) as before. The zero-copy
- * paths (VA-API, Direct3D 11 / pushcore, CVPX) step aside: their pictures never reach the CPU. */
+ * half of the source interval on average (after 30 pictures), the module steps aside (IlAside) as before. VA-API / VDPAU
+ * without zero copy: the surface the engine reads anyway is deinterlaced on the CPU and uploaded back (IlHand),
+ * behind the option deinterlace-hw, off by default until it has run on a real VA-API GPU (it steps aside meanwhile).
+ * The zero-copy paths step aside (their pictures never reach the CPU); a GPU deinterlace there is open work:
+ *  - VA-API (zc_hw): the video processing pipeline (VAEntrypointVideoProc, VAProcFilterDeinterlacing with
+ *    VAProcDeinterlacingMotionAdaptive / Bob, forward and backward references) is reachable on the decoder's VADisplay;
+ *    not built: no runner can exercise it (the CI's null driver pmnull_drv_video.c offers VAEntrypointVLD only).
+ *  - Direct3D 11 / pushcore (zc): the bridge's video processor (PushCoreD3D11Bridge.cpp) is set to
+ *    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE; an interlaced frame format with past surfaces and one OutputIndex per field
+ *    (a rate-conversion caps index with a deinterlace mode) would do it, behind a bridge ABI change; the hosted runners
+ *    have no GPU (WARP only) to verify a driver's deinterlace modes on.
+ *  - CVPX: VideoToolbox deinterlaces in the decompression session (kVTDecompressionPropertyKey_FieldMode,
+ *    DeinterlaceFields), which VLC's decoder owns; a video filter only receives the decoded CVPixelBuffers. */
 static picture_t *FilterPic(filter_t *f, picture_t *cur);
+/* the paths where the picture reaches the CPU: the portable engines on CPU planes (VLC's converter in front of them for
+ * DX11 / CVPX pictures) and VA-API / VDPAU without zero copy (the surface is read for the engine anyway); the engine
+ * must be the module's own (pushcore runs on textures) */
+static bool IlCpuPath(filter_t *f, struct filter_sys_t *sys)
+{
+    if (!(!sys->zc && !sys->zc_hw && !PM_CVPX_ON(sys) && !sys->pc && sys->eng && OptInt(VLC_OBJECT(f), CFG "deinterlace", 1) != 0)) return false;
+    /* VA-API / VDPAU copy path: off by default until it has run on a real VA-API GPU (no runner exercises it) */
+    if (sys->hw && OptInt(VLC_OBJECT(f), CFG "deinterlace-hw", 0) == 0) {
+        if (!sys->il_hw_noted) msg_Info(f, "PushMPC: interlaced on a hardware path: stepping aside (the hardware deinterlace path is not verified yet)");
+        sys->il_hw_noted = true;
+        return false;
+    }
+    return true;
+}
 static bool IlDeintStart(filter_t *f, struct filter_sys_t *sys)
 {
-    if (sys->zc || sys->zc_hw || sys->hw || PM_CVPX_ON(sys) || sys->pc || !sys->eng || OptInt(VLC_OBJECT(f), CFG "deinterlace", 1) == 0) return false;
+    if (!IlCpuPath(f, sys)) return false;
     const video_format_t *wf = &sys->wfmt;
     sys->deint = pm_deint_new((int)wf->i_visible_width, (int)wf->i_visible_height, sys->bits);
     if (!sys->deint) return false;
     char why[256] = "";
-    const double fps = sys->fs_fps > 0 ? sys->fs_fps : 25.0;
+    const double fps = sys->il_src_fps > 0 ? sys->il_src_fps : sys->fs_fps > 0 ? sys->fs_fps : 25.0;
+    sys->il_src_fps = fps;
     /* a fixed multiplier is the output rate the user asked for over the source: kept by halving it on the doubled rate
      * (x4 of 30i = x2 of 60p, at least x2); Auto decides for the doubled rate */
-    int k = sys->fs_smoother >= 2 ? (sys->k + 1) / 2 : pm_engine_decide(sys->eng, sys->fs_smoother, 2 * fps, sys->fs_hz, why, sizeof(why));
-    if (sys->fs_smoother >= 2) snprintf(why, sizeof(why), "x%d of the source as set: x%d of its fields", sys->k, k < 2 ? 2 : k);
+    const int kSrc = sys->il_src_k ? sys->il_src_k : sys->k;
+    sys->il_src_k = kSrc;
+    int k = sys->fs_smoother >= 2 ? (kSrc + 1) / 2 : pm_engine_decide(sys->eng, sys->fs_smoother, 2 * fps, sys->fs_hz, why, sizeof(why));
+    if (sys->fs_smoother >= 2) snprintf(why, sizeof(why), "x%d of the source as set: x%d of its fields", kSrc, k < 2 ? 2 : k);
     k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
-    msg_Info(f, "PushMPC: interlaced input: deinterlaced here (YADIF, one picture per field: %.3f fps), then x%d (%s)", 2 * fps, k, why);
+    msg_Info(f, "PushMPC: interlaced input: deinterlaced here (YADIF, one picture per field: %.3f fps%s), then x%d (%s)", 2 * fps,
+             sys->hw ? ", from the surface the engine reads, uploaded back" : "", k, why);
     sys->k = k;
     sys->fs_fps = 2 * fps;
-    sys->nominal_dt /= 2;
+    sys->nominal_dt = (mtime_t)(CLOCK_FREQ / (2 * fps));
     sys->il_deint = true;
     sys->il_aside = false;
     return true;
 }
-/* at the switch: the picture held for the next pair goes out as it is, the pairs start over on the progressive ones */
+/* at a switch: the picture held for the next pair goes out as it is, the pairs start over on the new pictures */
 static picture_t *IlDeintSwitch(struct filter_sys_t *sys)
 {
     WorkerIdle(sys, false);
@@ -1822,62 +1881,175 @@ static picture_t *IlDeintSwitch(struct filter_sys_t *sys)
     if (p) { p->p_next = NULL; sys->out++; }
     return p;
 }
-/* cur: a CPU picture in the work format (converted already) */
+/* the CPU planes of an input picture: the picture itself, or (hardware path) its surface read into a CPU picture */
+static picture_t *IlCpuIn(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
+{
+    return sys->hw ? HwIn(f, sys, cur) : cur;
+}
+/* a picture of our own to fill: a CPU picture in the work format (NULL: none free) */
+static picture_t *IlNewCpu(filter_t *f, struct filter_sys_t *sys)
+{
+    return sys->hw ? pm_hw_cpu_picture(sys->hw) : NewOut(f, sys);
+}
+/* our filled picture into frame generation (FilterPic): the CPU path hands it on; the hardware path uploads it into a
+ * surface of the module's pool, which goes on as the real frame with the CPU picture as what the engine reads */
+static picture_t *IlHand(filter_t *f, struct filter_sys_t *sys, picture_t *cpu, const picture_t *props, mtime_t date)
+{
+    picture_t *p = cpu;
+    if (sys->hw) {
+        p = pm_hw_new_picture(sys->hw);
+        if (!p || pm_hw_upload(sys->hw, cpu, p) != 0) {
+            if (p) picture_Release(p);
+            picture_Release(cpu);
+            sys->hw_up_fail++;
+            return NULL;
+        }
+    }
+    picture_CopyProperties(p, (picture_t *)props);
+    p->date = date;
+    p->b_progressive = true;
+    p->i_nb_fields = 2;
+    if (p != cpu) { picture_CopyProperties(cpu, p); sys->feed_work = cpu; }
+    sys->deint_feed = true;   /* already in the work format: FilterPic's converter (and its surface read) is skipped */
+    const mtime_t t = mdate();
+    picture_t *r = FilterPic(f, p);
+    sys->il_fp += mdate() - t;
+    sys->deint_feed = false;
+    if (sys->feed_work) { picture_Release(sys->feed_work); sys->feed_work = NULL; }   /* FilterPic returned before it took it */
+    return r;
+}
+static void IlAppend(picture_t **head, picture_t **tail, picture_t *r)
+{
+    while (r) {
+        picture_t *next = r->p_next;
+        r->p_next = NULL;
+        if (*tail) (*tail)->p_next = r; else *head = r;
+        *tail = r;
+        r = next;
+    }
+}
+static bool IlCostCheck(filter_t *f, struct filter_sys_t *sys, mtime_t t0, mtime_t dt, const char *what)
+{
+    const double ms = (double)(mdate() - t0 - sys->il_fp) / 1000.0;   /* download, deinterlace or field match, upload */
+    sys->deint_ms = sys->deint_in++ ? sys->deint_ms * 0.9 + ms * 0.1 : ms;
+    const double budget = dt > 0 ? 0.5 * (double)dt / 1000.0 : 20.0;
+    if (sys->deint_in < 30 || sys->deint_ms <= budget) return true;
+    msg_Warn(f, "PushMPC: %s takes %.1f ms per picture of a %.1f ms interval here: the pictures pass through from now on", what, sys->deint_ms, (double)dt / 1000.0);
+    sys->il_deint = false;
+    sys->il_ivtc = false;
+    sys->il_aside = true;
+    sys->il_switched = false;   /* IlAside's switch hands out what is held */
+    if (sys->deint_src) { picture_Release(sys->deint_src); sys->deint_src = NULL; }
+    return false;
+}
+/* cur: an input picture in VLC's format after the converter, if any */
 static picture_t *IlDeintPush(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
 {
     const mtime_t t0 = mdate();
+    sys->il_fp = 0;
     picture_t *src = sys->deint_src;
     if (src && (cur->date <= src->date || cur->date - src->date > CLOCK_FREQ / 4)) {   /* a seek or a gap: no pair across it */
         pm_deint_reset(sys->deint);
         picture_Release(src);
         src = sys->deint_src = NULL;
     }
+    picture_t *in = IlCpuIn(f, sys, cur);
+    if (!in) { if (src) { picture_Release(src); sys->deint_src = NULL; } picture_Release(cur); return NULL; }
     pm_yuv y;
-    PlanesIn(cur, &sys->wfmt, sys->bits > 8 ? 2 : 1, &y);
+    PlanesIn(in, &sys->wfmt, sys->bits > 8 ? 2 : 1, &y);
     const int ready = pm_deint_push(sys->deint, y.data, y.stride, cur->b_top_field_first ? 1 : 0);
+    if (in != cur) picture_Release(in);
     sys->deint_src = cur;
     if (!ready || !src) { if (src) picture_Release(src); return NULL; }
     const mtime_t dt = cur->date - src->date;
-    picture_t *fields[2] = { NULL, NULL };
-    for (int i = 0; i < 2; i++) {
-        picture_t *p = NewOut(f, sys);
-        if (!p) break;
-        picture_CopyProperties(p, src);
-        p->date = src->date + dt * i / 2;
-        p->b_progressive = true;
-        p->i_nb_fields = 1;
-        pm_yuv_out o;
-        PlanesOut(p, &sys->wfmt, sys->bits > 8 ? 2 : 1, &o);
-        pm_deint_get(sys->deint, i, o.data, o.stride);
-        fields[i] = p;
-    }
-    picture_Release(src);
-    const double ms = (double)(mdate() - t0) / 1000.0;
-    sys->deint_ms = sys->deint_in++ ? sys->deint_ms * 0.9 + ms * 0.1 : ms;
-    /* frame generation on the progressive pictures, in order */
     picture_t *head = NULL, *tail = NULL;
     for (int i = 0; i < 2; i++) {
-        if (!fields[i]) continue;
-        sys->deint_feed = true;   /* already CPU pictures: FilterPic's converter is skipped */
-        picture_t *r0 = FilterPic(f, fields[i]);
-        sys->deint_feed = false;
-        for (picture_t *r = r0; r; ) {
-            picture_t *next = r->p_next;
-            r->p_next = NULL;
-            if (tail) tail->p_next = r; else head = r;
-            tail = r;
-            r = next;
+        picture_t *c = IlNewCpu(f, sys);
+        if (!c) break;
+        pm_yuv_out o;
+        PlanesOut(c, &sys->wfmt, sys->bits > 8 ? 2 : 1, &o);
+        pm_deint_get(sys->deint, i, o.data, o.stride);
+        IlAppend(&head, &tail, IlHand(f, sys, c, src, src->date + dt * i / 2));
+    }
+    picture_Release(src);
+    IlCostCheck(f, sys, t0, dt, "interlaced input: the deinterlacer");
+    return head;
+}
+
+/* ---- telecine (2:3 pulldown, measured by cadence_detect.h through pm_comb_cadence): the film frames are put back
+ * (pm_ivtc.h: the held first combed frame of each cycle and the second woven back into the film frame they split), four
+ * pictures out of five at 4/5 of the rate, dated evenly. A watchdog measures the field combing on what comes out (a
+ * video section, an edit that breaks the cadence): when a window of it says interlaced, the module deinterlaces from
+ * there instead (IlDeintStart), as mpv's fieldmatch + yadif chain does */
+static bool IlIvtcStart(filter_t *f, struct filter_sys_t *sys)
+{
+    if (!IlCpuPath(f, sys)) return false;
+    const video_format_t *wf = &sys->wfmt;
+    /* the current picture is the cadence meter's last one: position (frames - 1) % 5 */
+    sys->ivtc = pm_ivtc_new((int)wf->i_visible_width, (int)wf->i_visible_height, sys->bits, sys->il_phase, sys->il_cad_frames - 1, sys->il_tff);
+    sys->ivtc_watch = pm_comb_new();
+    if (!sys->ivtc || !sys->ivtc_watch) {
+        if (sys->ivtc) { pm_ivtc_free(sys->ivtc); sys->ivtc = NULL; }
+        if (sys->ivtc_watch) { pm_comb_free(sys->ivtc_watch); sys->ivtc_watch = NULL; }
+        return false;
+    }
+    char why[256] = "";
+    const double fps = sys->fs_fps > 0 ? sys->fs_fps : 29.97;
+    sys->il_src_fps = fps; sys->il_src_k = sys->k;
+    /* a fixed multiplier keeps its output rate on the film frames (x4 of 30 = x5 of 24); Auto decides for 24p */
+    int k = sys->fs_smoother >= 2 ? (sys->k * 5 + 2) / 4 : pm_engine_decide(sys->eng, sys->fs_smoother, fps * 0.8, sys->fs_hz, why, sizeof(why));
+    if (sys->fs_smoother >= 2) snprintf(why, sizeof(why), "x%d of the 30i signal as set: x%d of the film", sys->k, k);
+    k = k < 2 ? 2 : k > sys->k_open ? sys->k_open : k;
+    msg_Info(f, "PushMPC: telecine: 2:3 pulldown removed here (the film frames back, %.3f fps), then x%d (%s)", fps * 0.8, k, why);
+    sys->k = k;
+    sys->fs_fps = fps * 0.8;
+    sys->nominal_dt = (mtime_t)(CLOCK_FREQ / (fps * 0.8));
+    sys->il_ivtc = true;
+    sys->ivtc_date = 0;
+    return true;
+}
+static picture_t *IlIvtcPush(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
+{
+    const mtime_t t0 = mdate();
+    sys->il_fp = 0;
+    const mtime_t dt = sys->ivtc_last > 0 && cur->date > sys->ivtc_last ? cur->date - sys->ivtc_last : (mtime_t)(CLOCK_FREQ / sys->il_src_fps);
+    if (sys->ivtc_last > 0 && (cur->date <= sys->ivtc_last || cur->date - sys->ivtc_last > CLOCK_FREQ / 4)) sys->ivtc_date = 0;   /* a gap */
+    sys->ivtc_last = cur->date;
+    picture_t *in = IlCpuIn(f, sys, cur);
+    if (!in) { picture_Release(cur); return NULL; }
+    pm_yuv y;
+    PlanesIn(in, &sys->wfmt, sys->bits > 8 ? 2 : 1, &y);
+    const int ready = pm_ivtc_push(sys->ivtc, y.data, y.stride);
+    if (in != cur) picture_Release(in);
+    picture_t *head = NULL, *tail = NULL;
+    if (ready) {
+        picture_t *c = IlNewCpu(f, sys);
+        if (c) {
+            pm_yuv_out o;
+            PlanesOut(c, &sys->wfmt, sys->bits > 8 ? 2 : 1, &o);
+            pm_ivtc_get(sys->ivtc, o.data, o.stride);
+            /* the watchdog: the combing of what comes out, a window at a time */
+            const int v = pm_comb_push(sys->ivtc_watch, o.data[0], o.stride[0], (int)sys->wfmt.i_visible_width, (int)sys->wfmt.i_visible_height,
+                                       sys->bits > 8 ? 2 : 1, sys->bits > 8 ? sys->bits - 8 : 0);
+            /* the film frames evenly at 5/4 of the signal's interval */
+            sys->ivtc_date = sys->ivtc_date > 0 ? sys->ivtc_date + dt * 5 / 4 : cur->date;
+            IlAppend(&head, &tail, IlHand(f, sys, c, cur, sys->ivtc_date));
+            if (v == PM_COMB_INTERLACED) {
+                int m = 0, cb = 0;
+                pm_comb_counts(sys->ivtc_watch, &m, &cb);
+                msg_Info(f, "PushMPC: telecine: the cadence broke (%d of %d moving frames still combed after the pulldown removal): deinterlaced from here", cb, m);
+                pm_ivtc_free(sys->ivtc); sys->ivtc = NULL;
+                pm_comb_free(sys->ivtc_watch); sys->ivtc_watch = NULL;
+                sys->il_ivtc = false;
+                sys->fs_fps = sys->il_src_fps;
+                sys->k = sys->il_src_k;
+                if (IlDeintStart(f, sys)) IlAppend(&head, &tail, IlDeintSwitch(sys));
+                else { sys->il_aside = true; sys->il_switched = false; }
+            } else if (v == PM_COMB_PROGRESSIVE) { pm_comb_free(sys->ivtc_watch); sys->ivtc_watch = pm_comb_new(); }   /* the next window */
         }
     }
-    const double budget = dt > 0 ? 0.5 * (double)dt / 1000.0 : 20.0;
-    if (sys->deint_in >= 30 && sys->deint_ms > budget) {
-        msg_Warn(f, "PushMPC: interlaced input: the deinterlacer takes %.1f ms per picture of a %.1f ms interval here: the pictures pass through from now on",
-                 sys->deint_ms, (double)dt / 1000.0);
-        sys->il_deint = false;
-        sys->il_aside = true;
-        sys->il_switched = false;   /* IlAside's switch hands out what is held */
-        if (sys->deint_src) { picture_Release(sys->deint_src); sys->deint_src = NULL; }
-    }
+    picture_Release(cur);
+    if (sys->il_ivtc) IlCostCheck(f, sys, t0, dt, "telecine: the pulldown removal");
     return head;
 }
 static picture_t *IlDeint(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
@@ -1887,12 +2059,12 @@ static picture_t *IlDeint(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
         cur = filter_chain_VideoFilter(sys->download, cur);
         if (!cur) return NULL;
     }
-    return IlDeintPush(f, sys, cur);
+    return sys->il_ivtc ? IlIvtcPush(f, sys, cur) : IlDeintPush(f, sys, cur);
 }
 static picture_t *Filter(filter_t *f, picture_t *cur)
 {
     struct filter_sys_t *sys = (struct filter_sys_t *)f->p_sys;
-    if (sys->il_deint) return IlDeint(f, sys, cur);
+    if (sys->il_deint || sys->il_ivtc) return IlDeint(f, sys, cur);
     return FilterPic(f, cur);
 }
 
@@ -1944,7 +2116,8 @@ static picture_t *FilterPic(filter_t *f, picture_t *cur)
     /* what the engine reads: cur itself, or for hardware formats a CPU copy of its surface */
     picture_t *work = cur;
     if (sys->hw) {
-        work = HwIn(f, sys, cur);
+        work = sys->feed_work ? sys->feed_work : HwIn(f, sys, cur);   /* our own picture: its CPU copy is at hand (ours from here) */
+        sys->feed_work = NULL;
         if (!work) {
             WorkerIdle(sys, false);
             if (sys->hw_failed) {   /* for good: pass-through (decided on the first picture, so nothing is held) */
@@ -1963,6 +2136,16 @@ static picture_t *FilterPic(filter_t *f, picture_t *cur)
     }
 
     IlMeasure(f, sys, cur, work);        /* interlaced input: measured in the picture, the first frames */
+    if (sys->il_telecine && !sys->ivtc && !sys->il_ivtc_tried) {   /* the film frames put back from now on */
+        sys->il_ivtc_tried = true;
+        if (IlIvtcStart(f, sys)) {
+            if (work != cur) picture_Release(work);
+            picture_t *held = IlDeintSwitch(sys);
+            picture_t *r = IlIvtcPush(f, sys, cur);
+            if (held) { held->p_next = r; return held; }
+            return r;
+        }
+    }
     if (sys->il_aside && !sys->il_switched && !sys->il_deint && !sys->deint && IlDeintStart(f, sys)) {   /* deinterlaced here from now on */
         if (work != cur) picture_Release(work);
         picture_t *held = IlDeintSwitch(sys);
@@ -2128,6 +2311,14 @@ static void Flush(filter_t *f)
     PcLagDrop(sys);
     sys->content_disc = true;            /* the detector's window starts over (its decision stays) */
     if (sys->deint) pm_deint_reset(sys->deint);   /* the deinterlacer's neighbours start over */
+    if (sys->ivtc) {   /* the cycle's position is lost: the cadence is measured again (the pictures generate as they are meanwhile) */
+        pm_ivtc_free(sys->ivtc); sys->ivtc = NULL;
+        if (sys->ivtc_watch) { pm_comb_free(sys->ivtc_watch); sys->ivtc_watch = NULL; }
+        sys->il_ivtc = false; sys->il_telecine = false; sys->il_ivtc_tried = false;
+        sys->il_done = false; sys->il_seen = sys->il_flagged = 0;
+        if (sys->il_src_fps > 0) { sys->fs_fps = sys->il_src_fps; sys->k = sys->il_src_k; sys->nominal_dt = (mtime_t)(CLOCK_FREQ / sys->il_src_fps); }
+        sys->ivtc_date = sys->ivtc_last = 0;
+    }
     if (sys->deint_src) { picture_Release(sys->deint_src); sys->deint_src = NULL; }
     if (sys->eng) pm_engine_forget(sys->eng);
     if (sys->pc) pmx_flush(sys->pc);
@@ -2440,6 +2631,8 @@ static void Close(vlc_object_t *obj)
     if (sys->eng) pm_engine_stats_get(sys->eng, &st);
     if (sys->comb) { pm_comb_free(sys->comb); sys->comb = NULL; }   /* interlacing still measuring */
     if (sys->deint) { msg_Info(f, "PushMPC: interlaced input: %" PRIu64 " pictures deinterlaced here, %.1f ms each on average", sys->deint_in, sys->deint_ms); pm_deint_free(sys->deint); sys->deint = NULL; }
+    if (sys->ivtc) { pm_ivtc_free(sys->ivtc); sys->ivtc = NULL; }
+    if (sys->ivtc_watch) { pm_comb_free(sys->ivtc_watch); sys->ivtc_watch = NULL; }
 #ifdef _WIN32
     if (sys->il_stage) { ID3D11Texture2D_Release(sys->il_stage); sys->il_stage = NULL; }
 #endif

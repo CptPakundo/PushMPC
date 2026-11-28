@@ -13,7 +13,8 @@ them.
 - **MPC Video Renderer**'s DirectShow base classes and interface headers: GPL.
 - **YADIF** ("yet another deinterlacing filter", Michael Niedermayer, the original in FFmpeg's `vf_yadif`, LGPL): VLC's
   module deinterlaces with the YADIF algorithm, written anew for PushMPC from the algorithm (`vlcplugin/src/pm_deint.cpp`,
-  GPL-3.0-or-later); no FFmpeg code is copied. In mpv, the deinterlacing and field matching are mpv's and FFmpeg's own.
+  GPL-3.0-or-later); no FFmpeg code is copied. VLC's 2:3 pulldown removal (`vlcplugin/src/pm_ivtc.cpp`) is PushMPC's own. In mpv, the deinterlacing and field matching are
+  mpv's and FFmpeg's own.
 - **[LAV Filters](https://github.com/Nevcairiel/LAVFilters)** (Hendrik Leppkes): the settings interface of LAV Video
   (`LAVVideoSettings.h`, GPL-2.0-or-later), at the tag `scripts/lav-pin.json` pins. Only this header is used: the
   DirectShow filter turns on LAV's double-rate deinterlacer for files measured interlaced. The build fetches it and
