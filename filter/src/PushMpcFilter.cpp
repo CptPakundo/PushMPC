@@ -3606,7 +3606,7 @@ void CPushMpcFilter::StartOpen(IMediaSample* first)
     std::string quickWhy;
     const bool quick = !legacy && QuickStartWanted(ps, quickWhy);
     PushCoreSettings psQuick = ps;
-    // the quick graph: Image Scaling for RTX VSR, no AI clean-up, and the cut guard without NVIDIA's optical flow (its
+    // the quick graph: Image Scaling for RTX VSR, no Neural Rendering, and the cut guard without NVIDIA's optical flow (its
     // session costs ~85 ms at the open; the guard's pair test still runs); everything else as the full graph
     if (quick) { psQuick.srMethod = PUSHCORE_SR_METHOD_NIS; psQuick.nr = 0; if (psQuick.cutGuard & 2) psQuick.cutGuard &= ~2; }
     if (!legacy) Log(quick ? std::string("quick start: a quick graph (") + (m_cfg.quickVsr && (g_coreFeatures & PUSHCORE_FEATURE_QUICK_VSR) ? "the driver's RTX VSR through D3D11 if it answers, else NVIDIA Image Scaling" : "NVIDIA Image Scaling")
@@ -3722,7 +3722,7 @@ bool CPushMpcFilter::OpenFinished()
     if (m_quickPhase) m_quickQpc = Qpc();
     return true;
 }
-// Fast start: a quick-start graph is worth it when the full open is slow because of NGX (RTX VSR / AI clean-up start the
+// Fast start: a quick-start graph is worth it when the full open is slow because of NGX (RTX VSR / Neural Rendering start the
 // NGX core: ~2 s, measured 1.8-2.3 s on an RTX 5090, most of it NGX loading and checking every feature it knows) and the
 // frame generation itself starts fast without NGX (NVIDIA VFG ~0.4 s, FSR / NVOF). The quick graph is the same graph with
 // NVIDIA Image Scaling in place of RTX VSR (same output size, same frame generation and cut guard), so the motion is
@@ -4844,7 +4844,7 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.showChoice = m_showChoice.load();
     return s;
 }
-// The stream's bitrate, for Clean up's Auto rule: the splitter's video type (dwBitRate), else the file's size over its
+// The stream's bitrate, for Auto's low-bitrate rules: the splitter's video type (dwBitRate), else the file's size over its
 // duration with 90 % of it taken as video (audio and the container are the rest). The codec FourCC comes with it.
 void CPushMpcFilter::ProbeBitrate()
 {
@@ -4896,7 +4896,7 @@ void CPushMpcFilter::ProbeBitrate()
         break;
     }
     const pm::Source s = SourceInfo();
-    Log(std::format("bitrate: {:.2f} Mbit/s from {}, codec {:08X}, {:.3f} H.264-equivalent bits per pixel ({} for Clean up's Auto, threshold {:.2f})",
+    Log(std::format("bitrate: {:.2f} Mbit/s from {}, codec {:08X}, {:.3f} H.264-equivalent bits per pixel ({} for Auto's low-bitrate rules, threshold {:.2f})",
         m_bitrate / 1e6, Narrow(m_bitrateHow), m_fourcc, s.bppEq, s.bppEq < 0 ? "unknown" : s.bppEq <= pm::kLowBitrateBpp ? "low" : "high", pm::kLowBitrateBpp));
 }
 pm::Choice CPushMpcFilter::DecideNow(const pm::Settings& s, const pm::Display& d)
@@ -5914,7 +5914,7 @@ public:
     {
         FillCombo(m_Dlg, IDC_PM_SMOOTH, { L"Auto", L"Off", L"2x", L"3x", L"4x", L"5x", L"6x", L"7x", L"8x", L"9x", L"10x", L"11x", L"12x", L"13x", L"14x", L"15x", L"16x" });
         FillCombo(m_Dlg, IDC_PM_SHARP, { L"Auto", L"Off", L"Level 1", L"Level 2", L"Level 3", L"Level 4" });
-        FillCombo(m_Dlg, IDC_PM_CLEAN, { L"Auto", L"Off", L"On" });
+        FillCombo(m_Dlg, IDC_PM_CLEAN, { L"Off", L"On" });   // Neural Rendering: no Auto (Auto never turns it on)
         FillCombo(m_Dlg, IDC_PM_HDR, { L"Auto", L"Off", L"On" });
         FillCombo(m_Dlg, IDC_PM_HDRBOOST, { L"Auto", L"Off", L"Low", L"Medium", L"High" });
         FillCombo(m_Dlg, IDC_PM_HDRMETHOD, { L"Auto (PushMPC curve)", L"RTX Video HDR" });
@@ -6117,7 +6117,7 @@ private:
             if (f > 0 && f < int(std::size(fc)) && !m_capsGpu.has(fc[f])) note += std::format(L"{}: {}; Auto's method is used. ", pm::FgMethodLabel(pm::FgMethod(f)), m_capsGpu.reason[fc[f]]);
             if (u > 0 && u < int(std::size(uc)) && !m_capsGpu.has(uc[u])) note += std::format(L"Upscaler: {}; Auto's is used. ", m_capsGpu.reason[uc[u]]);
             if (!m_capsGpu.has(pm::kCapVsrFamilies)) note += L"Upscale style: " + m_capsGpu.reason[pm::kCapVsrFamilies] + L". ";
-            if (!m_capsGpu.has(pm::kCapNr)) note += L"Clean up: " + m_capsGpu.reason[pm::kCapNr] + L". ";
+            if (!m_capsGpu.has(pm::kCapNr)) note += L"Neural Rendering: " + m_capsGpu.reason[pm::kCapNr] + L". ";
             if (ComboSel(m_Dlg, IDC_PM_HDRMETHOD) == 1 && !m_capsGpu.has(pm::kCapRtxHdr)) note += L"RTX Video HDR: " + m_capsGpu.reason[pm::kCapRtxHdr] + L"; PushMPC's curve is used. ";
             if (note.empty()) note = std::format(L"{} ({}): every choice here runs on it.", m_capsGpu.name, pm::FamilyName(m_capsGpu.family));
             else note = std::format(L"{} ({}): ", m_capsGpu.name, pm::FamilyName(m_capsGpu.family)) + note;
@@ -6135,7 +6135,7 @@ private:
         CheckDlgButton(m_Dlg, IDC_PM_ENABLE, s.enable ? BST_CHECKED : BST_UNCHECKED);
         ComboSet(m_Dlg, IDC_PM_SMOOTH, SmoothIdx(s.smoother));
         ComboSet(m_Dlg, IDC_PM_SHARP, SharpIdx(s.sharper));
-        ComboSet(m_Dlg, IDC_PM_CLEAN, OnOffIdx(s.cleanUp));
+        ComboSet(m_Dlg, IDC_PM_CLEAN, s.cleanUp == 1 ? 1 : 0);
         ComboSet(m_Dlg, IDC_PM_HDR, OnOffIdx(s.sdrToHdr));
         ComboSet(m_Dlg, IDC_PM_HDRBOOST, int(s.hdrBoost));
         ComboSet(m_Dlg, IDC_PM_HDRMETHOD, int(s.hdrMethod));
@@ -6168,7 +6168,7 @@ private:
         s.enable = IsDlgButtonChecked(m_Dlg, IDC_PM_ENABLE) == BST_CHECKED;
         s.smoother = SmoothVal(ComboSel(m_Dlg, IDC_PM_SMOOTH));
         s.sharper = SharpVal(ComboSel(m_Dlg, IDC_PM_SHARP));
-        s.cleanUp = OnOffVal(ComboSel(m_Dlg, IDC_PM_CLEAN));
+        s.cleanUp = ComboSel(m_Dlg, IDC_PM_CLEAN) == 1 ? 1 : pm::kOff;
         s.sdrToHdr = OnOffVal(ComboSel(m_Dlg, IDC_PM_HDR));
         s.hdrBoost = pm::HdrBoost(std::clamp(ComboSel(m_Dlg, IDC_PM_HDRBOOST), 0, 4));
         s.hdrMethod = pm::HdrMethod(std::clamp(ComboSel(m_Dlg, IDC_PM_HDRMETHOD), 0, 1));
@@ -6413,7 +6413,7 @@ public:
         SetDlgItemTextW(m_Dlg, IDC_AB_CREDITS,
             L"PushMPC brings PushFPS's video processing into MPC-HC and MPC-BE.\r\n"
             L"PushFPS by DosukaSOL, a modified version of Veyra by Likely7; both GPL-3.0. PushMPC is GPL-3.0 too.\r\n"
-            L"NVIDIA RTX Video Super Resolution, RTX Video HDR, the Video Effects SDK frame generation and the AI enhancement "
+            L"NVIDIA RTX Video Super Resolution, RTX Video HDR, the Video Effects SDK frame generation and the DLSS 5 Neural Rendering "
             L"runtime are NVIDIA components, used under NVIDIA's licences.\r\n"
             L"FFmpeg (avutil, swscale): LGPL/GPL, from Veyra's runtime package.\r\n"
             L"DirectShow base classes and interfaces from MPC Video Renderer (GPL).");

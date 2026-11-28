@@ -20,7 +20,7 @@ matches its pinned SHA-256, else downloaded at install time.
 | Source | Pinned | Gives |
 |---|---|---|
 | `Veyra-2.2.1-NVIDIA-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `E09150D1...544386B` and every file's SHA-256 | NVIDIA runtime, FidelityFX |
-| `Veyra-2.2.1-AMD-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `B6440744...0077BF8` and every file's SHA-256 | FidelityFX, AMD AI enhancement runtimes |
+| `Veyra-2.2.1-AMD-win64-portable.zip` (Veyra's release v2.2.1) | zip SHA-256 `B6440744...0077BF8` and every file's SHA-256 | FidelityFX, AMD Neural Rendering runtimes |
 | `PushFPS-4.5.8-win64.zip` (PushFPS's release v4.5.8), or an installed PushFPS (4.2.0 or newer: the same PushFlow files) | every PushFlow file's SHA-256 | PushFlow (ONNX Runtime, DirectML, RIFE models) |
 | `VapourSynth64-Portable-R82.zip` (VapourSynth's release R82) and `python-3.12.10-embed-amd64.zip` (python.org), only for the mpv route | each zip's SHA-256 (`scripts/vapoursynth-pin.json`) | the VapourSynth runtime in `%LOCALAPPDATA%\PushMPC\vapoursynth` (R82's wheel unpacked to `lib\site-packages`) |
 
@@ -48,8 +48,8 @@ Repair / Update / Uninstall. The script install still works from the release zip
 5. Licence handling, as in PushFPS's installer:
    - every NVIDIA file PushMPC needs must be an original with a valid NVIDIA signature, or the installer stops (the
      package is not the expected one);
-   - NVIDIA files that are not signed originals (community builds and unlocks, such as the SF AI enhancement slot for
-     RTX 20-50 or the DLSS-G files for RTX 30/40) and the AMD AI enhancement runtimes are installed by default;
+   - NVIDIA files that are not signed originals (community builds and unlocks, such as the SF Neural Rendering slot for
+     RTX 20-50 or the DLSS-G files for RTX 30/40) and the AMD Neural Rendering runtimes are installed by default;
      `-ExperimentalExtras No` leaves them out;
    - the package's `LICENSE`, `THIRD_PARTY_NOTICES.md` and `licenses\` (NVIDIA's licences under `licenses\nvidia-*`)
      go into the runtime folder with the files.
@@ -134,9 +134,9 @@ Bunny, 10 s) and runs `pushcore_gpu_harness` at 2x and 4x; a release is publishe
 | `runtime\experimental\nvngx_vsr.dll` | RTX Video Super Resolution (NVIDIA) |
 | `runtime\experimental\nvngx_truehdr.dll` | RTX Video HDR (NVIDIA) |
 | `runtime\experimental\nvngx_dlssg.dll`, `dlssg-lite\`, `fallback-dlssg-310.7\`, `dlssg-kernels\` | DLSS frame generation, its performance mode (RTX 50) and the RTX 30/40 unlock files (NVIDIA) |
-| `runtime\experimental\nr-original\nvngx_dlssnr.dll`, `nr-ampere\` | AI enhancement: NVIDIA's original runtime (RTX 50), the SF build (RTX 20-50) |
+| `runtime\experimental\nr-original\nvngx_dlssnr.dll`, `nr-ampere\` | DLSS 5 Neural Rendering: NVIDIA's original runtime (RTX 50), the SF build (RTX 20-50) |
 | `runtime\nvidia-vfg\*` (7 files) | NVIDIA VFG frame generation and the RTX VSR styles (Video Effects SDK) |
-| `runtime\amd-nr\`, `runtime\amd-nr-rdna3\` | AI enhancement on RX 9000 (lmxxf) and RX 7000 (RedDuke worker process) (AMD) |
+| `runtime\amd-nr\`, `runtime\amd-nr-rdna3\` | Neural Rendering on RX 9000 (lmxxf) and RX 7000 (RedDuke worker process) (AMD) |
 | `runtime\experimental\pushflow\*` (20 files, from PushFPS) | PushFlow frame generation (any DirectX 12 GPU) |
 | `LICENSE`, `NOTICE.md`, `THIRD_PARTY_NOTICES.md`, `licenses\*` | the package's licence texts |
 ## Building a release

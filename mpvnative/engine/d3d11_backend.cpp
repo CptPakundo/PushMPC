@@ -240,7 +240,8 @@ public:
 
         // settings: registry, then the options (same words as the VapourSynth route's arguments)
         pm::Settings s = pm::LoadSettings();
-        static const char* keys[] = { "enable", "smoother", "sharper", "cleanup", "sdr_to_hdr", "deband", "fg_quality", "fg_method", "vrr", "upscaler", "target", "vsr_style", "cleanup_strength", "on_battery", "subtitle_hold" };
+        static const char* keys[] = { "enable", "smoother", "sharper", "cleanup", "sdr_to_hdr", "deband", "fg_quality", "fg_method", "vrr", "upscaler", "target", "vsr_style", "cleanup_strength", "on_battery", "subtitle_hold",
+                                      "neural_rendering", "neural_rendering_strength" };
         std::string overrides;
         for (const char* k : keys)
             if (const std::string v = Opt(o, k); !v.empty() && pmvs::ApplyOverride(s, Widen(k), Widen(v))) overrides += std::format(" {}={}", k, v);
@@ -607,7 +608,7 @@ private:
     }
 
     // as the filter's QuickStartWanted: NVIDIA, frame generation that starts without NGX, an NGX stage in the full graph
-    // (RTX VSR / AI clean-up), no RTX Video HDR, and no full graph opened before in this process (its NGX core is warm)
+    // (RTX VSR / Neural Rendering), no RTX Video HDR, and no full graph opened before in this process (its NGX core is warm)
     bool QuickWanted(const Warm& w, std::string& why) const
     {
         wchar_t v[8] = {};

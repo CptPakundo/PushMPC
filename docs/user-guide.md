@@ -246,15 +246,19 @@ smoother, in a window right over it that lets every click through.
 
 Auto tries the methods in this order and uses the best one your card keeps up with:
 
-| Graphics card | Smoother motion | Sharper picture | Clean-up |
+| Graphics card | Smoother motion | Sharper picture | Neural Rendering (if you turn it on) |
 |---|---|---|---|
 | GeForce RTX 50 / 40 | NVIDIA frame generation, then DLSS frame generation, PushFlow, FSR | RTX Video Super Resolution | yes |
-| GeForce RTX 30 | NVIDIA frame generation, then DLSS frame generation, PushFlow, FSR | RTX Video Super Resolution | when there's time |
-| GeForce RTX 20 | DLSS frame generation, then PushFlow, NVIDIA optical flow, FSR | RTX Video Super Resolution | when there's time |
+| GeForce RTX 30 | NVIDIA frame generation, then DLSS frame generation, PushFlow, FSR | RTX Video Super Resolution | yes |
+| GeForce RTX 20 | DLSS frame generation, then PushFlow, NVIDIA optical flow, FSR | RTX Video Super Resolution | yes |
 | GeForce GTX 16 / 10 | PushFlow, then NVIDIA optical flow (GTX 16), FSR | RTX Video Super Resolution on GTX 16, else NIS | – |
 | Intel | PushFlow, then FSR | NIS | – |
 | Radeon RX 9000 | PushFlow, then FSR 4, AMD Fluid Motion | FSR | yes |
-| Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD Fluid Motion | FSR | RX 7000, when there's time |
+| Radeon RX 5000-7000 | PushFlow, then FSR 3.1, AMD Fluid Motion | FSR | RX 7000 |
+
+Auto never turns Neural Rendering on (see Settings). It runs on Windows (not in VLC or Kodi). GeForce RTX 50 cards
+can use NVIDIA's own version; RTX 20 to 40 and the Radeon cards use community builds, which Setup installs. It is
+heavy on every card, most of all on RTX 30 and RTX 20 and on the Radeon RX 7000.
 
 On Linux, NVIDIA RTX cards use NVIDIA's frame generation and Super Resolution when NVIDIA's own driver offers them, and
 other cards use PushFlow or PushMPC's own engine with NIS or FSR upscaling.
@@ -269,7 +273,7 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 | Enable PushMPC | on / off | |
 | Smoother | Auto, Off, 2x-16x | the highest multiplier your card keeps up with and your display can show. On a fixed-refresh display, an even rhythm wins a tie |
 | Sharper | Auto, Off, level 1-4 | upscales to your screen size with the time left over |
-| Clean up | Auto, Off, On | AI clean-up for low-quality video, when your card has time for it |
+| Neural Rendering | Off, On | Off unless you turn it on (Auto never does). DLSS 5 Neural Rendering uses AI to add detail and texture: it changes the look of the picture rather than restoring the original, and it needs a lot of GPU power |
 | SDR to HDR | Auto, Off, On | when Windows HDR is on and the video is SDR, shows it as HDR |
 | HDR boost | Auto, Off, Low, Medium, High | how bright SDR highlights get. Off keeps SDR exactly as it is; Low, Medium and High lift highlights up to 2x, 3.2x or 5x, never above what your display can show. Auto: High for clean sources, Medium for web video, Low for low-quality video |
 
@@ -286,13 +290,13 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 | Display peak | Auto, 400, 600, 1000, or a number | your display's peak brightness. Auto uses what Windows reports |
 | Upscale to | Screen, 1440p, 4K, 5K | the target size |
 | Upscale style | Auto, Standard, Keep detail, Clean hard | the look of RTX Video Super Resolution; Auto picks by the video's quality |
-| Clean-up strength | Subtle, Balanced, Strong | how strong the clean-up is |
+| Neural Rendering strength | Subtle, Balanced, Strong | how strongly Neural Rendering changes the picture, when it is on |
 | Deband | Auto, Off, On | smooths banding in skies and gradients |
 | Deband strength | Low, Medium, High | how strong the smoothing is |
 | Subtitle hold | Auto (on text), Off, On | keeps subtitles that are burned into the picture steady, so they don't warp. Normal subtitles never need it |
 | Animation | Auto, Off, On | cartoons and anime are often drawn for every second or third frame. With this on, PushMPC looks for the repeated drawings and tunes frame generation and the picture for animation. Auto turns it on when the picture is found to be animation. Off plays every frame as before |
 | On-screen status | Brief at start, Always, Off | the info line in the top-left corner: for 3 seconds at the start, always, or never |
-| On battery | Light, Same as plugged in | on a laptop's battery, Light uses less power: up to 2x, lighter upscaling, no clean-up |
+| On battery | Light, Same as plugged in | on a laptop's battery, Light uses less power: up to 2x, lighter upscaling, no Neural Rendering |
 
 Also on the page: **Turn on G-SYNC for MPC-HC** (see below), **Import my PushFPS settings** when PushFPS is installed,
 and **Write a frame log** (only turn it on when asked for one in a bug report).

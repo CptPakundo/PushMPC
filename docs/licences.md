@@ -31,8 +31,8 @@ The licence texts of these two are installed with pushcore in `core\licenses\` (
 ## Downloaded by Setup, never shipped by PushMPC
 
 - **Veyra's runtime package** (from Veyra's GitHub release, SHA-256 checked): FFmpeg (LGPL/GPL) and the NVIDIA and AMD
-  components. NVIDIA's parts (RTX Video Super Resolution, RTX Video HDR, the Video Effects frame generation, the AI
-  enhancement runtime, the CUDA runtime) are under NVIDIA's licences, AMD's under AMD's. The package's `LICENSE`,
+  components. NVIDIA's parts (RTX Video Super Resolution, RTX Video HDR, the Video Effects frame generation, the DLSS 5
+  Neural Rendering runtime, the CUDA runtime) are under NVIDIA's licences, AMD's under AMD's. The package's `LICENSE`,
   `THIRD_PARTY_NOTICES.md` and `licenses\` are installed with them. The community unlocks and ports in the package are
   installed by default, as PushMPC's aim is to give every card everything it can run; see
   [building](building.md#how-setup-works) to leave them out.

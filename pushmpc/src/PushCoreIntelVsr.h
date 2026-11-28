@@ -4,7 +4,7 @@
 // Where it sits: on the D3D11 bridge (PushCoreD3D11Bridge), between the ingress and the graph. The source frame (NV12 /
 // P010, copied into the ingress ring as always) goes through the driver's video processor with Intel's VPE extension
 // set to super resolution, into an NV12 / P010 texture at the output size; the graph then takes that frame as its
-// source with its own upscaler off, so colour, AI clean-up, frame generation and the cut guard run at the output size as
+// source with its own upscaler off, so colour, Neural Rendering, frame generation and the cut guard run at the output size as
 // after any other upscaler. The bridge signals a fence the graph's queue waits on (no CPU wait).
 //
 // Self-test (unlock IntelVsr, cached in SelfTest\IntelVsr per vendor:device:driver): the extension calls return S_OK and

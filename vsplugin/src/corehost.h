@@ -4,7 +4,7 @@
 // pushcore_flush when the stream matches, re-set with setSettings + reload when only the settings differ, and reopened
 // otherwise (pushcore's own NGX warm cache keeps the models across that).
 //
-// Fast start (as the MPC-HC filter and mpv's own route): a cold open whose full graph waits for NGX (RTX VSR / AI clean-up,
+// Fast start (as the MPC-HC filter and mpv's own route): a cold open whose full graph waits for NGX (RTX VSR / Neural Rendering,
 // ~2 s) opens a quick graph first (the driver's RTX VSR through the D3D11 video processor where it answers, else NVIDIA
 // Image Scaling; no NGX: ~0.5 s) and the full graph on a worker thread (pushcore's GPU-only warm-up: no use of the
 // immediate context, so no lock). At a submit after the full graph is ready, that source frame also goes into the full
