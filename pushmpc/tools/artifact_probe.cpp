@@ -58,7 +58,7 @@ int main(int argc, char** argv)
     if (!in) std::fclose(f);
     const Shot r = m.Running(), st = m.Stream();
     const Shot& s = st.valid ? (r.valid ? r : st) : r;   // a single-shot clip: the running shot
-    std::printf("RESULT %s %dx%d %d-bit frames %d sampled %d: block %.3f ring %.3f band %.4f detail %.3f conf %.2f/%.2f/%.2f/%.2f shots %u cpu %.2f ms/frame (Sample %.2f + Measure)\n",
-                label, w, h, bits, n, sampled, s.block, s.ring, s.band, s.detail, s.confBlock, s.confRing, s.confBand, s.confDetail, m.shots(), sampled ? ms / sampled : 0.0, sampled ? msS / sampled : 0.0);
+    std::printf("RESULT %s %dx%d %d-bit frames %d sampled %d: block %.3f ring %.3f band %.4f detail %.4f noise %.3f conf %.2f/%.2f/%.2f/%.2f shots %u cpu %.2f ms/frame (Sample %.2f + Measure)\n",
+                label, w, h, bits, n, sampled, s.block, s.ring, s.band, s.detail, s.noise, s.confBlock, s.confRing, s.confBand, s.confDetail, m.shots(), sampled ? ms / sampled : 0.0, sampled ? msS / sampled : 0.0);
     return 0;
 }

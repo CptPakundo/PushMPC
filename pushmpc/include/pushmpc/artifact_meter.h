@@ -10,14 +10,20 @@
 //            minus the same activity on flat pixels far from any edge (the grain floor). Grain is everywhere, codec
 //            noise sits at edges, so a grainy master reads near 0.
 //  - band:   CAMBI-like banding: share of the picture in plateaus (runs of one code value, at the native bit depth)
-//            at least kBandRun px long next to another such plateau 1-2 codes away. Dither, grain and texture break
+//            at least kBandRun px long next to another such plateau a visible step away (0.5-2 8-bit codes: an 8-bit
+//            picture carried in 10 bits still bands, a true 10-bit ramp does not). Dither, grain and texture break
 //            plateaus; an encoder that removes them leaves the steps.
-//  - detail: loss of the finest detail against a content-adaptive expectation: the structure function S(d) =
-//            mean |v[i] - (v[i-d] + v[i+d]) / 2| on textured pixels at d = 1, 2, 4; detail = log2(S2/S1) - log2(S4/S2),
-//            the change in slope at the top octave (0 for a self-similar spectrum, white grain or a smooth ramp; a
-//            codec that drops the top octave makes it positive). A soft master (an upscale, a soft lens) reads the same
-//            as low-bitrate blur: no no-reference measure can tell them apart, so this score has the lowest weight.
-// Units: block and ring in 8-bit code values, band a share 0..1, detail in octaves (log2).
+//  - detail: loss of the finest detail: the share of 8-px windows (not black) whose largest |second difference| is at
+//            most 1 code, i.e. smoother than any camera picture is (sensor noise and grain keep the finest octave alive;
+//            an encoder at a high quantiser zeroes it). Camera masters read 0.0000-0.0001; flat drawn or rendered
+//            pictures read high even when clean (a no-reference measure cannot tell a flat master from a flattened
+//            encode), so the confidence is halved and the grain floor is reported beside it.
+//  - noise:  the grain floor itself (mean |second difference| of flat pixels far from edges, 8-bit codes): falls as the
+//            bitrate falls on every codec, but its clean level depends on the source, so it is context, not a score.
+// Units: block, ring and noise in 8-bit code values, band and detail shares 0..1.
+// Calibration (open 1080p50 camera masters, MPEG-2 / x264 / x265 / SVT-AV1 ladders 0.04-2.2 bits per pixel): detail
+// and band rise as PSNR falls on every codec (weakest on x265, whose in-loop filters leave the least trace); block only
+// on MPEG-2 and partly H.264; ring did not track the ladder (it falls with the near-edge texture) and is diagnostic.
 //
 // Sampling: kLines rows and kLines columns of native-resolution luma per sampled frame (a centre crop of at most
 // 1920 x 1080 of them, the crop on the 8-pixel grid), a few frames a second: the copy (Sample) is cheap enough for
@@ -48,13 +54,15 @@ struct Tiles {
 struct FrameScores {
     float block = 0, ring = 0, band = 0, detail = 0;
     float blockN = 0, ringN = 0, bandN = 0, detailN = 0;   // qualifying samples behind each score
+    float noise = 0;   // the grain floor (far-flat activity)
 };
 
 struct Shot {
     bool valid = false;
     double t0 = 0, t1 = 0;      // stream time of the first and last sampled frame
-    int frames = 0;             // sampled frames
     float block = 0, ring = 0, band = 0, detail = 0;              // medians over the shot
+    float noise = 0;                                              // the grain floor (median)
+    int frames = 0;             // sampled frames
     float confBlock = 0, confRing = 0, confBand = 0, confDetail = 0;   // 0..1: how much of the picture qualified
     bool endedByCut = false;
 };
@@ -121,8 +129,8 @@ public:
         f.ring = a.edgeN > 0 && a.flatN > 0 ? std::max(0.f, float(a.edgeAct / a.edgeN - a.flatAct / a.flatN)) : 0.f;
         f.ringN = float(std::min(a.edgeN, a.flatN));
         f.band = a.bandTot > 0 ? float(a.bandPix / a.bandTot) : 0.f; f.bandN = float(a.bandTot);
-        if (a.s1 > 0 && a.s2 > 0 && a.s4 > 0) f.detail = float(std::log2(a.s2 / a.s1) - std::log2(a.s4 / a.s2));
-        f.detailN = float(a.sN);
+        f.detail = a.winN > 0 ? float(a.winSmooth / a.winN) : 0.f; f.detailN = float(a.winN);
+        f.noise = a.flatN > 0 ? float(a.flatAct / a.flatN) : 0.f;
         return f;
     }
 
@@ -158,7 +166,7 @@ private:
         double be[8] = {}, bn[8] = {};
         double edgeAct = 0, edgeN = 0, flatAct = 0, flatN = 0;   // (not near / far: macros in windows.h)
         double bandPix = 0, bandTot = 0;
-        double s1 = 0, s2 = 0, s4 = 0, sN = 0;
+        double winSmooth = 0, winN = 0;
     };
     struct Sampled { double t = 0; FrameScores f; };
 
@@ -171,26 +179,25 @@ private:
         sc.v.resize(size_t(n)); sc.dist.assign(size_t(n), uint8_t(kFar));
         float* v = sc.v.data(); uint8_t* dist = sc.dist.data();
         for (int i = 0; i < n; ++i) v[i] = float(c[i]) * u;
-        double be[8] = {}, bn[8] = {}, s1 = 0, s2 = 0, s4 = 0, sN = 0;
+        double be[8] = {}, bn[8] = {}, ws = 0, wn = 0;
+        float wMax = 0, wSum = 0;   // the 8-px window (aligned to the line start): largest second difference, sum
         // block: step across the boundary i-1 | i minus the steps beside it, low-activity areas only;
-        // detail: the structure function on textured pixels; ring, first: distance to the strong edge before
+        // detail: the over-smooth 8-px windows; ring, first: distance to the strong edge before
         int last = -1000;
         for (int i = 1; i + 1 < n; ++i) {
             const float g = std::fabs(v[i + 1] - v[i - 1]);
             if (g >= 24.f) last = i;
             dist[i] = uint8_t(std::min(kFar, i - last));
+            wMax = std::max(wMax, std::fabs(2.f * v[i] - v[i - 1] - v[i + 1])); wSum += v[i];
+            if (i % 8 == 0) { if (wSum > 8.f * 24.f) { ws += wMax <= 1.f ? 1 : 0; wn += 1; } wMax = 0; wSum = 0; }   // not black
             if (i >= 2) {
                 const float step = std::fabs(v[i] - v[i - 1]);
                 const float inner = 0.5f * (std::fabs(v[i - 1] - v[i - 2]) + std::fabs(v[i + 1] - v[i]));
                 if (!(step == 0.f && inner == 0.f) && inner <= 3.f && step <= 12.f) { const int p = (pos0 + i) & 7; be[p] += step - inner; bn[p] += 1; }
             }
-            if (i >= 4 && i + 4 < n) {
-                const float d4 = std::fabs(v[i] - 0.5f * (v[i - 4] + v[i + 4]));
-                if (d4 >= 4.f) { s1 += std::fabs(v[i] - 0.5f * (v[i - 1] + v[i + 1])); s2 += std::fabs(v[i] - 0.5f * (v[i - 2] + v[i + 2])); s4 += d4; sN += 1; }
-            }
         }
         for (int p = 0; p < 8; ++p) { a.be[p] += be[p]; a.bn[p] += bn[p]; }
-        a.s1 += s1; a.s2 += s2; a.s4 += s4; a.sN += sN;
+        a.winSmooth += ws; a.winN += wn;
         // ring: the strong edge after, then the activity of flat-ish pixels 3-5 px from an edge against far ones
         last = 1 << 20;
         double ea = 0, en = 0, fa = 0, fn = 0;
@@ -206,7 +213,10 @@ private:
         a.edgeAct += ea; a.edgeN += en; a.flatAct += fa; a.flatN += fn;
         // band: runs of one native code value, decided once both neighbours are known (a 3-run window)
         struct Run { int len = 0; int val = -100000; };
-        const auto banded = [&](const Run& r, const Run& x) { const int d = std::abs(x.val - r.val); return x.len >= bandRun && d >= 1 && d <= 2; };
+        // a visible step: half an 8-bit code to two 8-bit codes (8-bit: 1-2 codes; 10-bit: 2-8, so an 8-bit picture carried
+        // in 10 bits still bands, a true 10-bit ramp in 1-code steps does not)
+        const int per8 = int(std::lround(1.f / u)), dMin = std::max(1, per8 / 2), dMax = 2 * per8;
+        const auto banded = [&](const Run& r, const Run& x) { const int d = std::abs(x.val - r.val); return x.len >= bandRun && d >= dMin && d <= dMax; };
         double bp = 0, bt = 0;
         Run p0, p1;
         const auto finish = [&](const Run& r, const Run& before, const Run& after) {
@@ -263,12 +273,17 @@ private:
         for (const Sampled& x : fr) {
             q[0].push_back(x.f.block); q[1].push_back(x.f.ring); q[2].push_back(x.f.band); q[3].push_back(x.f.detail);
             q[4].push_back(std::min(1.f, x.f.blockN / 20000.f)); q[5].push_back(std::min(1.f, x.f.ringN / 2000.f));
-            q[6].push_back(std::min(1.f, x.f.bandN / 20000.f)); q[7].push_back(std::min(1.f, x.f.detailN / 20000.f));
+            q[6].push_back(std::min(1.f, x.f.bandN / 20000.f)); q[7].push_back(std::min(1.f, x.f.detailN / 10000.f));
         }
         const float frames = std::min(1.f, float(fr.size()) / 12.f);
         s.block = Med(q[0]); s.ring = Med(q[1]); s.band = Med(q[2]); s.detail = Med(q[3]);
+        {
+            std::vector<float> n;
+            for (const Sampled& x : fr) n.push_back(x.f.noise);
+            s.noise = Med(n);
+        }
         s.confBlock = frames * Med(q[4]); s.confRing = frames * Med(q[5]); s.confBand = frames * Med(q[6]);
-        s.confDetail = 0.5f * frames * Med(q[7]);   // detail: a soft master reads as damage (see the top)
+        s.confDetail = 0.5f * frames * Med(q[7]);   // detail: a flat master reads as damage (see the top)
         return s;
     }
     bool Close(bool cut)

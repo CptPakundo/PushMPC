@@ -3,7 +3,7 @@
 //  - an 8x8 block-averaged copy reads blocky (also on a crop offset that is not on the grid);
 //  - a smooth ramp in plateaus 1 code apart reads banded, the same ramp dithered does not (8-bit and 10-bit);
 //  - noise only beside the edges (mosquito noise) reads ringing, the same noise everywhere (grain) does not;
-//  - a blurred copy of the texture reads more detail loss than the sharp one;
+//  - a blurred copy of the texture reads more detail loss (over-smooth windows) than the sharp one;
 //  - a scene cut closes a shot, a still or a moving picture does not.
 #include <cmath>
 #include <cstdio>
@@ -51,14 +51,17 @@ static Plane Blocky(const Plane& s)   // each 8x8 block replaced by its mean (th
     return p;
 }
 // a slow ramp (sky): 60..80 over the width (one code every 96 px), plus a vertical component; dither: noise before rounding
-static std::vector<uint16_t> Ramp(int bits, float dither, std::mt19937& rng)
+// from8: rounded to 8-bit codes first, then carried at the native depth (an 8-bit picture in a 10-bit plane)
+static std::vector<uint16_t> Ramp(int bits, float dither, std::mt19937& rng, bool from8 = false)
 {
     std::vector<uint16_t> o(size_t(W) * H);
     std::normal_distribution<float> g(0.f, dither);
     const float sc = float(1 << (bits - 8));   // native codes per 8-bit code
     for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x)
-            o[size_t(y) * W + x] = uint16_t(std::lround((60.f + 20.f * float(x) / W + 8.f * float(y) / H) * sc + g(rng)));
+        for (int x = 0; x < W; ++x) {
+            const float v8 = 60.f + 20.f * float(x) / W + 8.f * float(y) / H;
+            o[size_t(y) * W + x] = uint16_t(from8 ? std::lround(std::round(v8) * sc) : std::lround(v8 * sc + g(rng)));
+        }
     return o;
 }
 static Plane Edges(std::mt19937& rng, bool mosquito)
@@ -107,13 +110,17 @@ int main()
     Check(fbo.block > 0.5f, "8x8 block means, crop 3 px off the grid: still blocky", fbo.block);
 
     for (int bits : { 8, 10 }) {
-        const auto flat = Ramp(bits, 0.f, rng), dith = Ramp(bits, bits > 8 ? 2.5f : 0.7f, rng);
-        const int shift = 0;
-        const FrameScores ff = ArtifactMeter::Measure(ArtifactMeter::Sample(flat.data(), ptrdiff_t(W), W, H, shift, bits, 0.0));
-        const FrameScores fd = ArtifactMeter::Measure(ArtifactMeter::Sample(dith.data(), ptrdiff_t(W), W, H, shift, bits, 0.0));
-        std::printf("ramp %d-bit: plateaus band %.4f, dithered band %.4f\n", bits, ff.band, fd.band);
-        Check(ff.band > 0.5f, std::to_string(bits) + "-bit ramp in plateaus: banded", ff.band);
+        const auto flat = Ramp(bits, 0.f, rng, true), dith = Ramp(bits, bits > 8 ? 2.5f : 0.7f, rng);
+        const FrameScores ff = ArtifactMeter::Measure(ArtifactMeter::Sample(flat.data(), ptrdiff_t(W), W, H, 0, bits, 0.0));
+        const FrameScores fd = ArtifactMeter::Measure(ArtifactMeter::Sample(dith.data(), ptrdiff_t(W), W, H, 0, bits, 0.0));
+        std::printf("ramp %d-bit: 8-bit plateaus band %.4f, dithered band %.4f\n", bits, ff.band, fd.band);
+        Check(ff.band > 0.5f, std::to_string(bits) + "-bit plane, ramp in 8-bit plateaus: banded", ff.band);
         Check(fd.band < 0.1f, std::to_string(bits) + "-bit dithered ramp: not banded", fd.band);
+        if (bits > 8) {   // a true 10-bit ramp (1-code steps, a quarter of an 8-bit code): not visible banding
+            const auto fine = Ramp(bits, 0.f, rng);
+            const FrameScores f10 = ArtifactMeter::Measure(ArtifactMeter::Sample(fine.data(), ptrdiff_t(W), W, H, 0, bits, 0.0));
+            Check(f10.band < 0.1f, "true 10-bit ramp in 1-code steps: not banded", f10.band);
+        }
     }
 
     const FrameScores fg = M8(To8(Edges(rng, false))), fm = M8(To8(Edges(rng, true)));
@@ -136,7 +143,8 @@ int main()
     }
     const FrameScores fs = M8(To8(sharp)), fbl = M8(To8(Blur(Blur(sharp))));
     std::printf("detail: sharp %.3f, blurred %.3f\n", fs.detail, fbl.detail);
-    Check(fbl.detail > fs.detail + 0.2f, "blurred copy: more detail loss than the sharp one", fbl.detail - fs.detail);
+    Check(fs.detail < 0.01f && fbl.detail > fs.detail + 0.2f, "blurred copy: more detail loss than the sharp one (sharp near 0)", fbl.detail - fs.detail);
+    Check(fc.detail < 0.01f, "clean picture with grain: detail loss near 0", fc.detail);
 
     {   // shots: a still clip does not cut, a cut closes the first shot with its scores
         ArtifactMeter m; int closed = 0;

@@ -5452,9 +5452,9 @@ void CPushMpcFilter::LogArtifacts(const pushmpc::artifacts::Shot& sh)
     const std::string rule = bpp < 0 ? std::string("unknown (bitrate unknown)")
         : std::format("{} ({:.3f} bits per pixel, threshold {:.2f})", bpp <= pm::kLowBitrateBpp ? "on" : "off", bpp, pm::kLowBitrateBpp);
     const pushmpc::artifacts::Shot st = m_art.Stream();
-    Log(std::format("artifacts (measured, shadow): shot {:.1f}-{:.1f} s ({} frames{}): block {:.2f} ring {:.2f} band {:.3f} detail {:.2f}, "
-                    "confidence {:.2f}/{:.2f}/{:.2f}/{:.2f}; stream so far block {:.2f} ring {:.2f} band {:.3f} detail {:.2f} ({} shots{}); bpp rule says {}",
-                    sh.t0, sh.t1, sh.frames, sh.endedByCut ? ", cut" : "", sh.block, sh.ring, sh.band, sh.detail,
+    Log(std::format("artifacts (measured, shadow): shot {:.1f}-{:.1f} s ({} frames{}): block {:.2f} ring {:.2f} band {:.3f} detail {:.3f} (grain {:.2f}), "
+                    "confidence {:.2f}/{:.2f}/{:.2f}/{:.2f}; stream so far block {:.2f} ring {:.2f} band {:.3f} detail {:.3f} ({} shots{}); bpp rule says {}",
+                    sh.t0, sh.t1, sh.frames, sh.endedByCut ? ", cut" : "", sh.block, sh.ring, sh.band, sh.detail, sh.noise,
                     sh.confBlock, sh.confRing, sh.confBand, sh.confDetail, st.block, st.ring, st.band, st.detail, m_art.shots(),
                     m_artSkipped ? std::format(", {} not logged", m_artSkipped) : std::string(), rule));
     m_artLogT = sh.t1; m_artSkipped = 0;
