@@ -37,7 +37,8 @@ local options = require 'mp.options'
 -- Cost: 8 decoded frames held instead of 4 (4K 10-bit: about 25 MB each); no added latency (mpv decodes on demand).
 local opts = { vpy = "", buffered = "8", concurrent = "2", ["drop-d3d11vpp"] = "yes", mode = "vs", scaling = "nvidia",
                shaders = "", ["shaders-when"] = "fallback", native = "auto", ["native-opts"] = "", ["anime-shaders"] = "", ["anime-share"] = "0.35",
-               ["content-helper"] = "" }
+               ["content-helper"] = "", early = "yes" }
+-- early=no (script-opts pushmpc-early=no): the late add even on mpv 0.39+, the path older mpv takes (CI)
 options.read_options(opts, "pushmpc")
 
 local shaders_on = false
@@ -443,12 +444,16 @@ local spec = "@pushmpc:vapoursynth=file=" .. quote(opts.vpy) .. ":buffered-frame
 -- dummy, which then reached the output: Homebrew Intel), so it opens with these and checks them at the first real frame
 local MATRIX = { ["bt.709"] = 1, ["bt.601"] = 6, ["bt.2020-ncl"] = 9, ["bt.2020-cl"] = 10, ["smpte-240m"] = 7, ["ycgco"] = 8, ["rgb"] = 0 }
 local TRANSFER = { ["bt.1886"] = 1, ["srgb"] = 13, ["linear"] = 8, ["pq"] = 16, ["hlg"] = 18, ["gamma2.2"] = 4, ["gamma2.8"] = 5 }
+-- mpv's primaries names (video/csputils.c pl_csp_prim_names) -> H.273, as the plugin's arguments
+local PRIMARIES = { ["bt.601-525"] = 6, ["bt.601-625"] = 5, ["bt.709"] = 1, ["bt.2020"] = 9, ["bt.470m"] = 4, ["cie1931"] = 10, ["dci-p3"] = 11,
+                    ["display-p3"] = 12, ["ebu3213"] = 22, ["film-c"] = 8 }
 local function colour_data()
     local p = mp.get_property_native("video-params")
     if type(p) ~= "table" then return nil end
     local t = {}
     if MATRIX[p.colormatrix] then t[#t + 1] = "matrix=" .. MATRIX[p.colormatrix] end
     if TRANSFER[p.gamma] then t[#t + 1] = "transfer=" .. TRANSFER[p.gamma] end
+    if PRIMARIES[p.primaries] then t[#t + 1] = "primaries=" .. PRIMARIES[p.primaries] end   -- every add with colour: late, fallback, measurement reload
     if p.colorlevels == "full" then t[#t + 1] = "range=0" elseif p.colorlevels == "limited" then t[#t + 1] = "range=1" end
     if #t == 0 then return nil end
     return table.concat(t, ",")
@@ -652,7 +657,7 @@ end)
 do
     local maj, min = mpv_version:match("^(%d+)%.(%d+)")
     maj, min = tonumber(maj) or 0, tonumber(min) or 0
-    if not native and (maj > 0 or min >= 39) then
+    if not native and (maj > 0 or min >= 39) and opts.early ~= "no" then
         mp.add_hook("on_preloaded", 50, function()
             for _, tr in ipairs(mp.get_property_native("track-list") or {}) do
                 if tr.type == "video" and not tr.albumart and not tr.image then
