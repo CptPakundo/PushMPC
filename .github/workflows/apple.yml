@@ -711,6 +711,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          # GitHub runs this with bash -e: a failing unguarded command ends the step, so it names itself (Intel run
+          # 46083183579 stopped without a word when VLC's log had no CVPX line and the grep below found nothing)
+          trap 'echo "::error::IINA and VLC step: line $LINENO exited $?: $BASH_COMMAND"' ERR
           fails=0
           # the official apps: IINA's release DMG (github.com/iina/iina), VLC.app through Homebrew's cask (VideoLAN's DMG)
           mkdir -p "$RUNNER_TEMP/iina-dmg"
@@ -732,8 +735,8 @@ jobs:
           mkdir -p "$HOME/Library/Preferences/org.videolan.vlc"
           printf '[core]\nvout=caopengllayer\nvideo-filter=postproc\n' > "$HOME/Library/Preferences/org.videolan.vlc/vlcrc"
           PUSHMPC_NO_PROMPT=1 pushmpc-setup install --no-pmml --no-artcnn 2>&1 | tee "$RUNNER_TEMP/setup-players.txt" | sed -n '/IINA and VLC:/,$p' | cut -c1-400
-          iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
-          vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1)
+          iina=$(grep -o 'IINA: self-test: .*' "$RUNNER_TEMP/setup-players.txt" | head -1 || true)   # none: judged below
+          vlc=$(grep -o 'self-test (macos): .*' "$RUNNER_TEMP/setup-players.txt" | head -1 || true)
           echo "::notice title=IINA::$iina"; echo "::notice title=VLC::$vlc"
           echo "$iina" | grep -qE '[0-9]+ frames in, [0-9]+ out \(engine: ' || { echo "::error::IINA: no frames generated through the bridge"; tail -20 "$HOME/Library/Logs/PushMPC/iina-bridge.log" 2>/dev/null; fails=$((fails + 1)); }
           echo "$vlc" | grep -qE 'generated [0-9]+ frames' || { echo "::error::VLC: no frames generated"; tail -30 "$HOME/Library/Application Support/PushMPC/vlc/pushmpc-selftest.log" 2>/dev/null | grep -i pushmpc; fails=$((fails + 1)); }
@@ -749,7 +752,7 @@ jobs:
           env VLC_PLUGIN_PATH="$HOME/Library/Application Support/PushMPC/vlc" perl -e 'alarm 60; exec @ARGV' /Applications/VLC.app/Contents/MacOS/VLC \
             -I dummy --vout=dummy --no-audio --play-and-exit --codec=videotoolbox,avcodec --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 \
             --file-logging --logfile="$RUNNER_TEMP/vlc-vt.log" --log-verbose=2 "$RUNNER_TEMP/vt.mp4" > /dev/null 2>&1 || true
-          vtpath=$(grep -oE 'zero copy on CVPX|CVPX zero copy (not used|stopped) \([^)]*\)|[A-Za-z0-9]{4} converted to [A-Za-z0-9]{4} in front of the engine' "$RUNNER_TEMP/vlc-vt.log" | head -2 | tr '\n' ' ')
+          vtpath=$(grep -oE 'zero copy on CVPX|CVPX zero copy (not used|stopped) \([^)]*\)|[A-Za-z0-9]{4} converted to [A-Za-z0-9]{4} in front of the engine' "$RUNNER_TEMP/vlc-vt.log" | head -2 | tr '\n' ' ' || true)   # none (Intel: no CVPX pictures) is reported, not fatal
           echo "::notice title=VLC with VideoToolbox decoding::${vtpath:-no CVPX pictures reached PushMPC}; $(grep -o 'PushMPC: close, in=[0-9]* out=[0-9]* generated=[0-9]*' "$RUNNER_TEMP/vlc-vt.log" | tail -1)"
           pushmpc-setup uninstall 2>&1 | sed -n '/IINA and VLC:/,$p' | cut -c1-300
           [ "$(snap /Applications/IINA.app)" = "$iina0" ] && echo "IINA.app bit for bit as installed" || { echo "::error::IINA.app changed"; fails=$((fails + 1)); }
