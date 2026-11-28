@@ -530,10 +530,8 @@ jobs:
           print("python API:", c.num_frames, "frames at", c.fps, "rendered, version", vs.core.version_number())
           PY
       - name: pushmpc.MpvColour on mpv's load-time dummy frame (a synthetic _MP_IMAGE in mpv 0.39-0.42's layout)
-        continue-on-error: true   # new: never blocks the tarball the later jobs need; the result is the ::notice:: below
         run: |
           set -eu
-          trap 'echo "::notice title=MpvColour synthetic::FAIL (exit $?)"' EXIT
           export PUSHMPC_VS_PLUGIN=$PWD/vsplugin/bin/pushmpc_vs.so
           /opt/python/cp312-cp312/bin/python - <<'PY'
           import os, struct, vapoursynth as vs
@@ -559,7 +557,7 @@ jobs:
           r = run(9, 1, 6, 12, 4, 1, ver="0.38.0"); print("mpv 0.38:", dict(r)); assert r["ok"] == 0
           print("pushmpc.MpvColour: 5 cases as expected")
           PY
-          trap - EXIT; echo "::notice title=MpvColour synthetic::PASS (5 cases)"
+          echo "::notice title=MpvColour synthetic::PASS (5 cases)"
       - name: Release tarball
         run: |
           set -eu
@@ -683,25 +681,29 @@ jobs:
           rm -r $HOME/.config/pushmpc
           sh $HOME/.local/share/pushmpc/install.sh uninstall
           { echo '## linux-arch'; echo; echo '```'; cat /tmp/versions.txt; echo "mpv encode: ${ARCH_FRAMES:-}"; cat $res; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      # DIAGNOSTIC (never fails the job): does the installed block add the filter with the stream's colour, and before
-      # or after frame 0? Four tagged clips, each 3x as an encode (--o) and 3x as a playback-shaped run (vo=null), with
-      # mpv's own debug log (--log-file is at least -v -v: every "Run command: vf ..." with its user-data, the decoder's
-      # format line and vf_vapoursynth's "initializing", in order). The portable backend logs no colour, so the colour
-      # source is the first vf append's user-data: transfer=... = from the arguments, none = the plugin guesses.
-      # Frames: encode vs one mpv-alone control (--no-config) per clip; playback: the plugin's "instance closed after N".
-      - name: DIAGNOSTIC colour source and first frame (tagged clips, encode and playback, 3x each)
+      # Release check: mpv opens every stream with its real colour and filters every frame. Four tagged 1 s clips (1080p
+      # HDR10, 1080p HLG, 2160p 10-bit SDR, 1080p 8-bit SDR), each 2x as an encode (--o, with the block's mpv.conf
+      # included: mpv applies none in encoding mode) and 2x as playback (vo=null), on two paths:
+      #   early (mpv 0.39+'s default): pushmpc.lua adds the filter once, before decoding, and the plugin reads frame 0's
+      #     colour from mpv's load-time dummy (pushmpc.MpvColour); the transfer it opened with must be the clip's, every
+      #     frame filtered (encode 2x an mpv-alone control, playback 2x the source), mpv's "Frame requested during init"
+      #     no more often than the plugin's reads;
+      #   late (pushmpc-early=no, the path older mpv takes): the transfer must be the clip's on every run; its frames may
+      #     be short (the late add's first-frame race) and are printed.
+      # Also: the plugin's colour read made to fail (PUSHMPC_MPV_COLOUR_FAIL=1) must end in a re-add with mpv's colour,
+      # two files in one mpv must open with 16 then 1, and the _MP_IMAGE layout and enum values must hold for this
+      # runner's libplacebo headers. mpv's debug log (--log-file) is printed only for a run that fails.
+      - name: mpv colour and first frame (four tagged clips, early and late add, encode and playback)
         if: ${{ !cancelled() }}
-        continue-on-error: true
         timeout-minutes: 25
         run: |
-          # every command may fail without ending the step (the runner's sh -e): nothing below is a check
+          # no command ends the step on its own (the runner's sh -e); every check reports through fail() and the exit code
           set +e; set -u
-          export HOME=/tmp/home-diag; mkdir -p $HOME/.config/mpv
+          bad=0; fail() { echo "::error title=mpv colour::$*"; bad=1; }
+          export HOME=/tmp/home-colour; mkdir -p $HOME/.config/mpv
           tar -xzf dist/pushmpc-linux-x86_64-*.tar.gz -C /tmp
-          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no > /tmp/install-diag.txt 2>&1; echo "install.sh exit $?"; tail -4 /tmp/install-diag.txt
-          echo "--- mpv.conf (PushMPC lines)"; grep -n -i 'pushmpc\|script' $HOME/.config/mpv/mpv.conf | cut -c1-300 | head -12
+          sh /tmp/pushmpc-linux-x86_64-*/install.sh --flatpak no > /tmp/install-colour.txt 2>&1 || { tail -8 /tmp/install-colour.txt; fail "install.sh failed"; exit 1; }
           mkdir -p $HOME/.config/pushmpc; printf 'Smoother=2\n' > $HOME/.config/pushmpc/settings.ini
-          ffmpeg -hide_banner -encoders 2>/dev/null | grep -E ' libx26[45] '
           # the _MP_IMAGE layout pushmpc.MpvColour relies on (vsplugin/src/mp_params.h), from this runner's libplacebo headers
           pacman -S --noconfirm --needed gcc > /dev/null 2>&1
           cat > /tmp/pl_layout.c <<'EOF'
@@ -714,125 +716,110 @@ jobs:
           int main(void) {
               size_t a = offsetof(struct image, params) + offsetof(struct params, w), ps = sizeof(void *);
               size_t sys = offsetof(struct image, params) + offsetof(struct params, repr), want = (a + 176 + ps - 1) / ps * ps;
-              printf("libplacebo %d layout: primaries +%zu transfer +%zu (want 20 24), repr.sys at %zu (want %zu), levels +4: %s; enums PQ %d HLG %d BT_2020 %d BT_709 %d BT_1886 %d BT_2020_NC %d LIMITED %d FULL %d (want 12 13 6 3 1 4 1 2)\n",
-                     PL_API_VER, offsetof(struct image, params.color.primaries) - a, offsetof(struct image, params.color.transfer) - a, sys, want,
-                     offsetof(struct image, params.repr.levels) - sys == 4 ? "yes" : "NO", PL_COLOR_TRC_PQ, PL_COLOR_TRC_HLG, PL_COLOR_PRIM_BT_2020, PL_COLOR_PRIM_BT_709,
-                     PL_COLOR_TRC_BT_1886, PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_LEVELS_LIMITED, PL_COLOR_LEVELS_FULL);
-              return 0;
+              size_t pr = offsetof(struct image, params.color.primaries) - a, tr = offsetof(struct image, params.color.transfer) - a;
+              size_t lv = offsetof(struct image, params.repr.levels) - sys;
+              int ok = pr == 20 && tr == 24 && sys == want && lv == 4 && PL_COLOR_TRC_PQ == 12 && PL_COLOR_TRC_HLG == 13 && PL_COLOR_PRIM_BT_2020 == 6
+                       && PL_COLOR_PRIM_BT_709 == 3 && PL_COLOR_TRC_BT_1886 == 1 && PL_COLOR_SYSTEM_BT_2020_NC == 4 && PL_COLOR_LEVELS_LIMITED == 1 && PL_COLOR_LEVELS_FULL == 2;
+              printf("libplacebo %d layout: primaries +%zu transfer +%zu (want 20 24), repr.sys at %zu (want %zu), levels +%zu (want 4); enums PQ %d HLG %d BT_2020 %d BT_709 %d BT_1886 %d BT_2020_NC %d LIMITED %d FULL %d (want 12 13 6 3 1 4 1 2): %s\n",
+                     PL_API_VER, pr, tr, sys, want, lv, PL_COLOR_TRC_PQ, PL_COLOR_TRC_HLG, PL_COLOR_PRIM_BT_2020, PL_COLOR_PRIM_BT_709,
+                     PL_COLOR_TRC_BT_1886, PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_LEVELS_LIMITED, PL_COLOR_LEVELS_FULL, ok ? "ok" : "MISMATCH");
+              return ok ? 0 : 1;
           }
           EOF
-          gcc -o /tmp/pl_layout /tmp/pl_layout.c 2>&1 | head -5; lay=$(/tmp/pl_layout 2>&1); echo "$lay"; echo "::notice title=colour diag libplacebo layout::$lay"
+          gcc -o /tmp/pl_layout /tmp/pl_layout.c 2>&1 | head -5
+          lay=$(/tmp/pl_layout 2>&1); lrc=$?; echo "$lay"; echo "::notice title=libplacebo layout::$lay"
+          [ $lrc = 0 ] || fail "the _MP_IMAGE layout or the enum values differ from vsplugin/src/mp_params.h ($lay)"
           mk() {   # mk <name> <size> <pix_fmt> <primaries> <trc> <matrix>: 1 s at 24 fps, colour in the bitstream (VUI) when x264 / x265 exist
             local n=$1 sz=$2 pf=$3 pr=$4 tr=$5 mx=$6 c
             local col="-color_primaries $pr -color_trc $tr -colorspace $mx -color_range tv"
             for c in "-c:v libx265 -preset ultrafast -x265-params log-level=error:colorprim=$pr:transfer=$tr:colormatrix=$mx" "-c:v libx264 -preset ultrafast" "-c:v ffv1"; do
               case "$pf:$c" in *p10le:*libx264*) continue;; esac
-              ffmpeg -v error -y -f lavfi -i testsrc2=size=$sz:rate=24:duration=1 -pix_fmt $pf $col $c /tmp/diag-$n.mkv && { echo "clip $n: $c"; return 0; }
+              ffmpeg -v error -y -f lavfi -i testsrc2=size=$sz:rate=24:duration=1 -pix_fmt $pf $col $c /tmp/colour-$n.mkv && return 0
             done
             return 1
           }
           nframes() { ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1" 2>/dev/null; }
-          mk hdr10   1920x1080 yuv420p10le bt2020 smpte2084    bt2020nc
-          mk hlg     1920x1080 yuv420p10le bt2020 arib-std-b67 bt2020nc
-          mk uhdsdr  3840x2160 yuv420p10le bt709  bt709        bt709
-          mk sdr8    1920x1080 yuv420p     bt709  bt709        bt709
-          sum=/tmp/diag-summary.txt; : > $sum
-          for n in ${DIAG_CLIPS:-hdr10 hlg uhdsdr sdr8}; do
-            f=/tmp/diag-$n.mkv; [ -f $f ] || { echo "clip $n: NOT MADE" | tee -a $sum; continue; }
-            src=$(nframes $f)
-            ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,color_primaries,color_transfer,color_space,color_range -of compact=p=0 $f | sed "s/^/clip $n ffprobe: /"
-            rm -f /tmp/diag-ctl.mkv; timeout 120 mpv --no-config --no-audio --o=/tmp/diag-ctl.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1
-            ctl=$(nframes /tmp/diag-ctl.mkv)
-            echo "clip $n: source ${src:-?} frames, mpv-alone encode ${ctl:-?}"
-            # path early: mpv 0.39+'s default (the filter before decoding, frame 0's colour read by the plugin); path late:
-            # pushmpc-early=no, the late add older mpv takes (real video-params; frames lost at the start expected)
+          # mpv's debug log and the plugin's log of a run, for one that failed
+          dump() {
+            echo "--- $1: mpv log (vf commands, decoder format, vapoursynth, PushMPC)"
+            grep -n -E 'Run command: vf|Decoder format|vapoursynth|Frame requested during init|PushMPC|Disabling filter|Playing:' "$2" 2>/dev/null | cut -c1-300 | head -30
+            echo "--- $1: plugin log"; cat "$3"/*.log 2>/dev/null | cut -c1-300 | head -24
+          }
+          # play <id> <mode> <extra mpv options> <files...>: sets L (mpv log), V (plugin log folder), out (encode frames)
+          play() {
+            id=$1 mode=$2 xo=$3; shift 3
+            L=/tmp/colour-mpv-$id.log; V=/tmp/vslog-colour-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/colour-out.mkv $L
+            if [ $mode = encode ]; then
+              timeout 300 mpv --include=$HOME/.config/mpv/mpv.conf $xo --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/colour-out.mkv --of=matroska --ovc=ffv1 "$@" > /dev/null 2>&1
+              out=$(nframes /tmp/colour-out.mkv)
+            else
+              timeout 300 mpv $xo --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L "$@" > /dev/null 2>&1
+              out=-
+            fi
+          }
+          sum=/tmp/colour-summary.txt; : > $sum
+          early_ok=0; early_n=0; late_ok=0; late_n=0
+          for spec in "hdr10 1920x1080 yuv420p10le bt2020 smpte2084 bt2020nc 16" "hlg 1920x1080 yuv420p10le bt2020 arib-std-b67 bt2020nc 18" \
+                      "uhdsdr 3840x2160 yuv420p10le bt709 bt709 bt709 1" "sdr8 1920x1080 yuv420p bt709 bt709 bt709 1"; do
+            set -- $spec; n=$1; et=$7
+            case " ${COLOUR_CLIPS:-hdr10 hlg uhdsdr sdr8} " in *" $n "*) ;; *) continue;; esac
+            mk $n $2 $3 $4 $5 $6 || { fail "clip $n: ffmpeg could not make it"; continue; }
+            f=/tmp/colour-$n.mkv; src=$(nframes $f)
+            rm -f /tmp/colour-ctl.mkv; timeout 120 mpv --no-config --no-audio --o=/tmp/colour-ctl.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1
+            ctl=$(nframes /tmp/colour-ctl.mkv)
+            echo "clip $n: $(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,color_primaries,color_transfer,color_space -of compact=p=0 $f); source ${src:-?} frames, mpv alone ${ctl:-?}"
             for pth in early late; do
-            XO=; [ $pth = late ] && XO=--script-opts-append=pushmpc-early=no
-            for mode in encode play; do for r in 1 2 3; do
-              id=$n-$pth-$mode-$r; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
-              if [ $mode = encode ]; then
-                timeout 180 mpv --include=$HOME/.config/mpv/mpv.conf $XO --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1; rc=$?
-                out=$(nframes /tmp/diag-out.mkv)
-              else
-                timeout 180 mpv $XO --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1; rc=$?
-                out=-
-              fi
-              echo "=== $id: mpv exit $rc, log $(wc -l < $L 2>/dev/null || echo 0) lines; raw lines in mpv log order:"
-              grep -n -E 'Run command|Decoder format|vapoursynth|Frame requested during init|PushMPC|pushmpc|Disabling filter|\[cplayer\] .*[Ss]cript' $L 2>/dev/null | cut -c1-400 | head -40
-              grep -q 'Run command: vf' $L 2>/dev/null || echo "($id: no vf add logged as 'Run command: vf')"
-              echo "--- $id: plugin log"
-              cat $V/*.log 2>/dev/null | cut -c1-300 | head -20; [ -n "$(ls $V 2>/dev/null)" ] || echo "($id: no plugin log)"
-              first=$(grep -m1 'Run command: vf.*append' $L 2>/dev/null)
-              ud=$(printf '%s' "$first" | grep -o 'user-data=\[[^]]*\]' | head -1); [ -n "$ud" ] || ud="none"
-              [ -n "$first" ] || ud="no-vf-add-logged"
-              tr=$(printf '%s' "$ud" | grep -o 'transfer=[0-9]*' | head -1); [ -n "$tr" ] || tr="none"
-              la=$(grep -n -m1 'Run command: vf.*append' $L 2>/dev/null | cut -d: -f1); ld=$(grep -n -m1 'Decoder format' $L 2>/dev/null | cut -d: -f1)
-              li=$(grep -n -m1 'vapoursynth.*initializ' $L 2>/dev/null | cut -d: -f1)
-              inst=$(grep -ho 'instance closed after [0-9]*' $V/*.log 2>/dev/null | grep -o '[0-9]*$' | tr '\n' ',')
-              adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
-              luaadd=$(grep -c "PushMPC's filter added\|PushMPC: filter added before decoding" $L 2>/dev/null)
-              line="clip=$n path=$pth run=$mode#$r first-add-user-data=$ud transfer-arg=$tr vf-appends=${adds:-0} lua-added=${luaadd:-0} log-line(append ${la:-?}, decoder-format ${ld:-?}, vs-init ${li:-?}) out=${out:-?} control=${ctl:-?} source=${src:-?} plugin-instance-frames=${inst:-none}"
-              # verdict: the transfer the plugin opened with (its "colour arguments" line when it has one, else the first
-              # add's user-data) against the clip's, and every frame filtered (playback: the first instance has 2x the
-              # source; encode: 2x the mpv-alone control)
-              case $n in hdr10) et=16;; hlg) et=18;; *) et=1;; esac
-              pt=$(grep -ho 'colour arguments: [^(]*transfer [0-9-]*' $V/*.log 2>/dev/null | head -1 | grep -o 'transfer [0-9-]*' | grep -o '[0-9-]*$')
-              got=${pt:-$(printf '%s' "$tr" | grep -o '[0-9]*$')}
-              first_inst=$(printf '%s' "$inst" | cut -d, -f1)
-              if [ $mode = encode ]; then want=$(( ${ctl:-0} * 2 )); have=${out:-0}; else want=$(( ${src:-0} * 2 )); have=${first_inst:-0}; fi
-              cv=FAIL; [ "${got:-x}" = "$et" ] && cv=ok; fv=FAIL; [ "${have:-0}" = "$want" ] && fv=ok
-              # the early add (track/ff-mpimage): the plugin read frame 0's transfer itself, the filter went in once and
-              # before the decoder's first frame, and mpv's "Frame requested during init" came once per read
-              ff=$(cat $V/*.log 2>/dev/null | grep -o "colour from mpv's first-frame params: matrix [0-9-]* transfer [0-9-]*" | head -1 | grep -o '[0-9-]*$')
-              reads=$(cat $V/*.log 2>/dev/null | grep -c "colour from mpv's first-frame params: matrix")
-              fr=$(grep -c 'Frame requested during init' $L 2>/dev/null)
-              ev=FAIL; [ "${ff:-x}" = "$et" ] && [ "${adds:-0}" = 1 ] && [ -n "$la" ] && [ -n "$ld" ] && [ "$la" -lt "$ld" ] && [ "${fr:-0}" = "${reads:-0}" ] && ev=ok
-              line="$line verdict: transfer ${got:-none} (want $et) $cv, frames ${have:-0} (want $want) $fv, early read ${ff:-none}, appends ${adds:-0}, init warnings ${fr:-0} for ${reads:-0} reads $ev"
-              echo "$line" | tee -a $sum
-              echo "::notice title=colour diag $n $pth $mode#$r::$line"
-            done; done
+              xo=; [ $pth = late ] && xo=--script-opts-append=pushmpc-early=no
+              for mode in encode play; do for r in 1 2; do
+                play $n-$pth-$mode-$r $mode "$xo" $f
+                got=$(cat $V/*.log 2>/dev/null | grep -o 'colour arguments: matrix [0-9-]* transfer [0-9-]*' | head -1 | grep -o '[0-9-]*$')
+                inst=$(grep -ho 'instance closed after [0-9]*' $V/*.log 2>/dev/null | head -1 | grep -o '[0-9]*$')
+                if [ $mode = encode ]; then want=$(( ${ctl:-0} * 2 )); have=${out:-0}; else want=$(( ${src:-0} * 2 )); have=${inst:-0}; fi
+                adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
+                la=$(grep -n -m1 'Run command: vf.*append' $L 2>/dev/null | cut -d: -f1); ld=$(grep -n -m1 'Decoder format' $L 2>/dev/null | cut -d: -f1)
+                ff=$(cat $V/*.log 2>/dev/null | grep -o "colour from mpv's first-frame params: matrix [0-9-]* transfer [0-9-]*" | head -1 | grep -o '[0-9-]*$')
+                reads=$(cat $V/*.log 2>/dev/null | grep -c "colour from mpv's first-frame params: matrix")
+                fr=$(grep -c 'Frame requested during init' $L 2>/dev/null)
+                tv=FAIL; [ "${got:-x}" = "$et" ] && tv=ok
+                fv=FAIL; [ "$have" = "$want" ] && fv=ok
+                line="$n $pth $mode#$r: transfer ${got:-none} (want $et) $tv, frames $have (want $want) $fv"
+                if [ $pth = early ]; then
+                  early_n=$((early_n + 1))
+                  ev=FAIL; [ "${ff:-x}" = "$et" ] && [ "${adds:-0}" = 1 ] && [ -n "$la" ] && [ -n "$ld" ] && [ "$la" -lt "$ld" ] && [ "${fr:-0}" -le "${reads:-0}" ] && ev=ok
+                  line="$line, frame-0 read ${ff:-none}, vf appends ${adds:-0} (line ${la:-?}, decoder format ${ld:-?}), init warnings ${fr:-0} for ${reads:-0} reads $ev"
+                  if [ $tv = ok ] && [ $fv = ok ] && [ $ev = ok ]; then early_ok=$((early_ok + 1)); else fail "$line"; dump $n-$pth-$mode-$r $L $V; fi
+                else
+                  late_n=$((late_n + 1))
+                  if [ $tv = ok ]; then late_ok=$((late_ok + 1)); else fail "$line"; dump $n-$pth-$mode-$r $L $V; fi
+                fi
+                echo "$line" | tee -a $sum
+              done; done
             done
           done
-          echo "--- summary"; cat $sum
-          # the fallback: the read made to fail (PUSHMPC_MPV_COLOUR_FAIL=1): pushmpc.lua must add the filter again with mpv's
-          # colour (encode too), and an instance must open with transfer 16
-          f=/tmp/diag-hdr10.mkv
+          # the plugin's read made to fail: pushmpc.lua adds the filter again with mpv's colour (encode too)
           for mode in encode play; do
-            id=forced-$mode; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
-            if [ $mode = encode ]; then
-              PUSHMPC_MPV_COLOUR_FAIL=1 timeout 180 mpv --include=$HOME/.config/mpv/mpv.conf --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1
-            else
-              PUSHMPC_MPV_COLOUR_FAIL=1 timeout 180 mpv --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1
-            fi
-            echo "=== $id: raw lines"
-            grep -n -E 'Run command: vf|Decoder format|PushMPC|Frame requested during init' $L 2>/dev/null | cut -c1-300 | head -12
-            cat $V/*.log 2>/dev/null | grep -E 'colour|instance closed' | cut -c1-300 | head -8
+            [ -f /tmp/colour-hdr10.mkv ] || break
+            export PUSHMPC_MPV_COLOUR_FAIL=1; play forced-$mode $mode "" /tmp/colour-hdr10.mkv; unset PUSHMPC_MPV_COLOUR_FAIL
             re=$(grep -c "frame 0's colour not read" $L 2>/dev/null); a16=$(cat $V/*.log 2>/dev/null | grep -c 'colour arguments: matrix [0-9-]* transfer 16')
-            fv=FAIL; [ "${re:-0}" -ge 1 ] && [ "${a16:-0}" -ge 1 ] && fv=ok
-            line="forced read failure, $mode: lua re-add lines ${re:-0}, instances with transfer 16 ${a16:-0} $fv"
-            echo "$line" | tee -a $sum; echo "::notice title=colour diag forced failure $mode::$line"
+            line="forced read failure, $mode: re-add lines ${re:-0}, instances with transfer 16 ${a16:-0}"
+            if [ "${re:-0}" -ge 1 ] && [ "${a16:-0}" -ge 1 ]; then line="$line ok"; else line="$line FAIL"; fail "$line"; dump forced-$mode $L $V; fi
+            echo "$line" | tee -a $sum
           done
-          # two files in one mpv (a playlist): the second must open with its own colour, not the first file's
+          # two files in one mpv (a playlist): the second opens with its own colour
           for mode in encode play; do
-            id=twofile-$mode; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
-            if [ $mode = encode ]; then
-              timeout 300 mpv --include=$HOME/.config/mpv/mpv.conf --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 /tmp/diag-hdr10.mkv /tmp/diag-sdr8.mkv > /dev/null 2>&1
-            else
-              timeout 300 mpv --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L /tmp/diag-hdr10.mkv /tmp/diag-sdr8.mkv > /dev/null 2>&1
-            fi
-            echo "=== $id: raw lines"
-            grep -n -E 'Run command: vf|Decoder format|PushMPC|Playing:' $L 2>/dev/null | cut -c1-300 | head -16
+            [ -f /tmp/colour-hdr10.mkv ] && [ -f /tmp/colour-sdr8.mkv ] || break
+            play twofile-$mode $mode "" /tmp/colour-hdr10.mkv /tmp/colour-sdr8.mkv
             seq=$(cat $V/*.log 2>/dev/null | grep -o 'colour arguments: matrix [0-9-]* transfer [0-9-]*' | grep -o '[0-9-]*$' | tr '\n' ' ')
-            fv=FAIL; case " $seq " in *" 16 1 "*) fv=ok;; esac   # (the old pattern needed two spaces between 16 and 1)
-            line="two files (hdr10 then sdr8), $mode: transfers the instances opened with, in order: ${seq:-none} $fv"
-            echo "$line" | tee -a $sum; echo "::notice title=colour diag two files $mode::$line"
+            line="two files (hdr10 then sdr8), $mode: transfers in order: ${seq:-none}"
+            case " $seq " in *" 16 1 "*) line="$line ok";; *) line="$line FAIL"; fail "$line"; dump twofile-$mode $L $V;; esac
+            echo "$line" | tee -a $sum
           done
-          lv="late path (pushmpc-early=no): $(grep '^clip=[^ ]* path=late' $sum | grep -c 'verdict: transfer [0-9]* (want [0-9]*) ok') of $(grep -c '^clip=[^ ]* path=late' $sum) runs with the clip's transfer; frames (have/want): $(grep '^clip=[^ ]* path=late' $sum | grep -o 'frames [0-9]* (want [0-9]*)' | sed 's/frames \([0-9]*\) (want \([0-9]*\))/\1\/\2/' | tr '\n' ' ')"
-          echo "$lv" | tee -a $sum; echo "::notice title=colour diag late path::$lv"
-          v="verdict: $(grep '^clip=[^ ]* path=early' $sum | grep -c ' ok, frames .* ok, early .* ok$') of $(grep -c '^clip=[^ ]* path=early' $sum) runs opened with frame 0's transfer read by the plugin, added once before decoding, and filtered every frame"; echo "$v" | tee -a $sum; echo "::notice title=colour diag verdict::$v"
-          { echo '## colour diagnostic (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          v="early add: $early_ok of $early_n runs with frame 0's transfer, every frame, one add before decoding; late add: $late_ok of $late_n runs with the clip's transfer (frames: $(grep ' late ' $sum | grep -o 'frames [0-9]* (want [0-9]*)' | sed 's/frames \([0-9]*\) (want \([0-9]*\))/\1\/\2/' | tr '\n' ' '))"
+          echo "$v" | tee -a $sum; echo "::notice title=mpv colour::$v"
+          [ "$early_n" -gt 0 ] && [ "$early_ok" = "$early_n" ] && [ "$late_ok" = "$late_n" ] || fail "$v"
+          { echo '## mpv colour and first frame (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           rm -r $HOME/.config/pushmpc; sh $HOME/.local/share/pushmpc/install.sh uninstall > /dev/null 2>&1
-          exit 0
+          exit $bad
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: linux-arch-logs, path: "/tmp/vslog-*\n/tmp/*.txt\n/tmp/*.out" }
