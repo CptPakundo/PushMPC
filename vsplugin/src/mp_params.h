@@ -37,6 +37,7 @@ struct MpFrameColour {
     bool ok = false;
     std::string why;                  // the reason when not ok
     int plPrimaries = -1, plTransfer = -1, plSystem = -1, plLevels = -1;
+    int plChroma = -1;                                                     // chroma location (both modes); -1 = the source's
     // H.273 / FFmpeg codes for the plugin's arguments; -1 = not known (the plugin then keeps its fallback)
     int matrix = -1, transfer = -1, primaries = -1;
     int range = -1;                   // the arguments' convention: 0 full, 1 limited
@@ -140,12 +141,15 @@ inline bool MpVersion(const std::string& s, int& major, int& minor)
 //   pl_color_repr: sys S, levels S + 4, alpha S + 8, bits S + 12 .. S + 24, const pl_dovi_metadata *dovi at
 //   round_up(S + 24, ptr); its size R = round_up(24 + ptr, ptr) (32 on 64-bit, 28 on 32-bit);
 //   then enum primaries_orig S + R, transfer_orig S + R + 4, sys_orig S + R + 8, enum mp_csp_light light S + R + 12
-//   (MP_CSP_LIGHT_AUTO 0 .. SCENE_1_2 4, the same at every tag);
+//   (MP_CSP_LIGHT_AUTO 0 .. SCENE_1_2 4, the same at every tag), enum pl_chroma_location chroma_location S + R + 16
+//   (right after light at v0.39.0 .. v0.42.0; libplacebo v6.338.2 .. master: UNKNOWN 0, LEFT 1, CENTER 2 .. BOTTOM_CENTER
+//   6; mpv prints LEFT as "mpeg2/4/h264", CENTER as "mpeg1/jpeg"; vf_vapoursynth's _ChromaLocation = it - 1);
 //   pl_hdr_metadata at anchor + 28 .. + 176, max_luma at + 28 + 36.
 struct MpOutColour {
     // libplacebo values. plTransfer and plPrimaries -1 together: the transfer is the source's (the HDR metadata, light
     // and Dolby Vision stay), only the matrix (system) and the levels are written
     int plPrimaries = -1, plTransfer = -1, plSystem = -1, plLevels = -1;
+    int plChroma = -1;                                                     // chroma location (both modes); -1 = the source's
     float maxLuma = 0;                                                     // cd/m2 for an HDR output; 0 = mpv's default
 };
 // H.273 / FFmpeg codes -> libplacebo (the plugin's outputs only use these); -1 = no mapping
@@ -169,11 +173,14 @@ inline bool PatchMpImage(std::vector<uint8_t>& b, int sarNum, int sarDen, int co
     if (!src.ok) { if (why) *why = src.why; return false; }
     const size_t a = src.anchor, s = (a + 176 + ptrSize - 1) / ptrSize * ptrSize;
     const size_t dovi = (s + 24 + ptrSize - 1) / ptrSize * ptrSize, r = (24 + ptrSize + ptrSize - 1) / ptrSize * ptrSize;
-    const size_t orig = s + r, light = orig + 12;
-    if (light + 4 > b.size()) return no("_MP_IMAGE is shorter than mpv 0.39's layout");
+    const size_t orig = s + r, light = orig + 12, chroma = light + 4;
+    if (chroma + 4 > b.size()) return no("_MP_IMAGE is shorter than mpv 0.39's layout");
     const int po = MpReadI32(b.data(), orig), to = MpReadI32(b.data(), orig + 4), so = MpReadI32(b.data(), orig + 8), li = MpReadI32(b.data(), light);
-    if (po < 0 || po >= kPlPrimCount || to < 0 || to >= kPlTrcCountMax || so < 0 || so >= kPlSystemCountMax || li < 0 || li > 4) return no("the *_orig / light fields are out of range");
+    const int cl = MpReadI32(b.data(), chroma);
+    if (po < 0 || po >= kPlPrimCount || to < 0 || to >= kPlTrcCountMax || so < 0 || so >= kPlSystemCountMax || li < 0 || li > 4 || cl < 0 || cl > 6) return no("the *_orig / light / chroma location fields are out of range");
+    if (o.plChroma > 6) return no("no libplacebo value for the chroma location");
     auto put = [&](size_t off, int32_t v) { std::memcpy(b.data() + off, &v, 4); };
+    if (o.plChroma >= 0) put(chroma, o.plChroma);
     if (keepTransfer) {   // the matrix and the levels only (sys_orig with them, as vf_format does)
         if (src.plSystem == 8) return true;   // Dolby Vision: mpv reshapes after the filter from repr.dovi; left as it is
         put(s, o.plSystem); put(s + 4, o.plLevels); put(orig + 8, o.plSystem);

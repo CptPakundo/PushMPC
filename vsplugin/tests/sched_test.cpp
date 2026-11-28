@@ -332,6 +332,18 @@ static void TestMpImage()
         const size_t a = offsetof(mpimg::Image, params) + offsetof(mpimg::Params, w), ss = (a + 176 + 7) / 8 * 8;
         CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, primOrig) == ss + 32);
         CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, light) == ss + 32 + 12);
+        CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, chroma) == ss + 32 + 16);
+        // the chroma location (centre, libplacebo 2) in both modes; out of range refused; -1 leaves it
+        {
+            b = blob(s); MpOutColour c = o; c.plChroma = 2;
+            CHECK(PatchMpImage(b, 1, 1, 9, 1, c, &why)); mpimg::Image g{}; std::memcpy(&g, b.data(), sizeof g); CHECK(g.params.chroma == 2 && g.params.color.transfer == 2);
+            b = blob(s); MpOutColour k2; k2.plSystem = 4; k2.plLevels = 1; k2.plChroma = 2;
+            CHECK(PatchMpImage(b, 1, 1, 9, 1, k2, &why)); std::memcpy(&g, b.data(), sizeof g); CHECK(g.params.chroma == 2 && g.params.color.transfer == 13 && g.params.light == 2);
+            b = blob(s); k2.plChroma = 7; CHECK(!PatchMpImage(b, 1, 1, 9, 1, k2, &why));
+            mpimg::Image u = s; u.params.chroma = 9; b = blob(u); k2.plChroma = -1; CHECK(!PatchMpImage(b, 1, 1, 9, 1, k2, &why));
+            b = blob(s); CHECK(PatchMpImage(b, 1, 1, 9, 1, k2, &why)); std::memcpy(&g, b.data(), sizeof g); CHECK(g.params.chroma == 1);
+            CHECK(H273TransferToPl(4) == 6);   // gamma 2.2: the tone-mapped SDR output
+        }
         CHECK(offsetof(mpimg::Image, params) + offsetof(mpimg::Params, repr) + offsetof(mpimg::ColorRepr, dovi) == ss + 24);
     }
 }

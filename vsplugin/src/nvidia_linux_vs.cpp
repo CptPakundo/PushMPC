@@ -113,7 +113,7 @@ void SetProps(NInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind)
     {
         const bool rtxHdr = d->outHdr && !d->srcHdr;
         std::string why; bool absent = false;
-        const bool ok = TagMpOutput(a, p, rtxHdr ? 16 : -1, rtxHdr ? 9 : -1, d->outHdr ? 9 : 1, 1, rtxHdr ? d->hdrPeak : 0.f, &why, &absent);
+        const bool ok = TagMpOutput(a, p, rtxHdr ? 16 : -1, rtxHdr ? 9 : -1, d->outHdr ? 9 : 1, 1, rtxHdr ? d->hdrPeak : 0.f, &why, &absent, 1);   // centre-sited, as _ChromaLocation below
         if (!absent && d->mpTagLog++ == 0)
             Log(ok ? std::string("nvidia: output colour for mpv: matrix ") + (d->outHdr ? "BT.2020" : "BT.709") + ", limited" + (rtxHdr ? ", PQ BT.2020 (RTX Video HDR)" : ", the source's transfer")
                    : "nvidia: output colour for mpv not set (" + why + "): mpv keeps the source's colour for this output");
