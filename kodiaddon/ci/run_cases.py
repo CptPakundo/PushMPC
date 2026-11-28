@@ -7,7 +7,7 @@ usage: run_cases.py --kodi "<command>" --home <kodi home> --addon <built add-on 
 <kodi>/portable_data). Android (an emulator over adb): <kodi home> is a local mirror; --before pushes it to the device
 before every start, --after pulls Kodi's log and add-on database back, and --player-clips is where the clips are on the
 device (Kodi and drive.py get that path)."""
-import argparse, glob, os, shlex, shutil, sqlite3, subprocess, sys, time
+import argparse, glob, os, re, shlex, shutil, sqlite3, subprocess, sys, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--kodi", required=True)
@@ -28,6 +28,8 @@ ap.add_argument("--threads", type=int, default=0, help="the CPU engine's threads
 ap.add_argument("--before", default="", help="command run before every Kodi start, after the settings are written")
 ap.add_argument("--after", default="", help="command run after every Kodi run (after --kill)")
 ap.add_argument("--player-clips", default="", help="the clips folder as Kodi sees it (default: --clips)")
+ap.add_argument("--baseline-case", default="", help="Kodi alone (a case of the list, 'disabled'): played first and again last; the render check of the "
+                "other cases is judged against the slower of the two (a host that slows down while the cases run)")
 a = ap.parse_args()
 here = os.path.dirname(os.path.abspath(__file__))
 pclips = a.player_clips or a.clips
@@ -73,6 +75,10 @@ EXTRA = [("zerocopy", "h264.mp4", {"smoother": 2, "engine": 0, "upscale": 1}, 2,
 if a.cases:
     keep = set(a.cases.split(","))
     CASES = [c for c in CASES + EXTRA if c[0] in keep]
+# the Kodi-only baseline: first, and once more (as <name>_last) after every other case
+BASE = [c for c in CASES if c[0] == a.baseline_case] if a.baseline_case else []
+if BASE:
+    CASES = BASE + [c for c in CASES if c[0] != a.baseline_case] + [(BASE[0][0] + "_last",) + tuple(BASE[0][1:])]
 
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -165,7 +171,7 @@ log = find_log()
 if log:
     shutil.copy(log, os.path.join(a.out, "first-start.log"))
 
-failed = []
+failed, judged = [], []
 for name, clip, settings, k, decode, size, drive_case in CASES:
     s = {"enabled": "true", "smoother": 0, "quality": 1, "hdr": "true", "upscale": 0, "engine": 0, "displayhz": 0, "threads": a.threads}
     if a.gpu:
@@ -195,10 +201,39 @@ for name, clip, settings, k, decode, size, drive_case in CASES:
         shutil.copy(log, lp)
     else:
         write(lp, "")
-    r = subprocess.run([sys.executable, os.path.join(here, "analyze.py"), lp, drive_out, name, str(k), "1" if decode else "0",
-                        str((48000 if clip and "_48" in clip else 24000) / 1001), size, summary])
+    args = [sys.executable, os.path.join(here, "analyze.py"), lp, drive_out, name, str(k), "1" if decode else "0",
+            str((48000 if clip and "_48" in clip else 24000) / 1001), size, summary]
+    if BASE:   # judged once the last baseline ran
+        judged.append((name, args))
+        continue
+    r = subprocess.run(args)
     if r.returncode:
         failed.append(name)
+if BASE:
+    def analyze(args):
+        r = subprocess.run(args, capture_output=True, text=True)
+        print(r.stdout, end="", flush=True)
+        if r.stderr:
+            print(r.stderr, end="", file=sys.stderr, flush=True)
+        m = re.search(r"^render-rate: ([\d.]+)", r.stdout, re.M)
+        return r.returncode, float(m.group(1)) if m else 0.0
+    rates = {}
+    for name, args in judged:
+        if name in (BASE[0][0], BASE[0][0] + "_last"):
+            rc, rates[name] = analyze(args)
+            if rc:
+                failed.append(name)
+    first, last = rates.get(BASE[0][0], 0.0), rates.get(BASE[0][0] + "_last", 0.0)
+    y = min(v for v in (first, last) if v > 0) if (first > 0 or last > 0) else 0.0
+    print(f"Kodi-only baseline: first {first:.1f}/s, last {last:.1f}/s: the cases are judged against {y:.1f}/s", flush=True)
+    with open(summary, "a", encoding="utf-8") as f:
+        f.write(f"Kodi-only baseline ({BASE[0][0]}): first {first:.1f}/s, last {last:.1f}/s; render judged against {y:.1f}/s\n\n")
+    for name, args in judged:
+        if name in (BASE[0][0], BASE[0][0] + "_last"):
+            continue
+        rc, _ = analyze(args + (["--baseline", f"{y:.3f},{first:.3f},{last:.3f}"] if y > 0 else []))
+        if rc:
+            failed.append(name)
 # the HDR file through Kodi alone is the reference: when Kodi itself cannot show it on this runner (no 10-bit / HDR path
 # in software GL), the add-on's HDR case is not judged
 if "hdr10_kodi" in failed:

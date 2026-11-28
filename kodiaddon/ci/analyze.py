@@ -11,6 +11,12 @@ Checks (each printed; exit 1 if a required one fails):
 import json, re, statistics, sys
 
 log_path, drive_path, case, k, decode, fps, size, summary = sys.argv[1:9]
+# --baseline Y,A,B (run_cases.py --baseline-case): Kodi alone on the same host in this run, measured first (A) and last
+# (B); Y = the slower of the two, what the host could render at the source rate while the cases ran
+base = None
+if "--baseline" in sys.argv:
+    _b = [float(v) for v in sys.argv[sys.argv.index("--baseline") + 1].split(",")]
+    base = {"y": _b[0], "first": _b[1], "last": _b[2]}
 k, decode, fps = int(k), decode == "1", float(fps)
 _text0 = open(log_path, encoding="utf-8", errors="replace").read()
 if k == 0:  # Auto: take the multiplier the add-on chose
@@ -92,7 +98,18 @@ if len(rend) > 10:
     rate = distinct / span if span > 0 else 0
     loop = len(rend) / span if span > 0 else 0
     want = fps * (k if decode else 1)
-    res["render"] = rate >= 0.85 * min(want, loop)
+    need = 0.85 * min(want, loop)   # without a baseline (and on a healthy host): 85 % of what the source and the loop allow
+    floor = 0.6 * need              # whatever the baseline says: below this a run is broken
+    if base and base["y"] > 0:
+        # the host's capacity, measured with Kodi alone on the x1 source in this run: an x1 case must reach 90 % of it; an xN
+        # case the usual 85 % of min(source x k, loop), scaled by how far Kodi alone fell short of the source rate (never
+        # raised above the usual requirement: a healthy host is judged as before)
+        scale = min(1.0, base["y"] / fps)
+        need = max(floor, 0.90 * base["y"] if want <= fps * 1.01 else need * scale)
+    res["render"] = rate >= need
+    print(f"render: {rate:.1f}/s vs Kodi-only baseline " + (f"{base['y']:.1f}/s (first {base['first']:.1f}, last {base['last']:.1f})" if base else "none") +
+          f": need {need:.1f}/s: {'ok' if res['render'] else 'FAIL'}")
+    print(f"render-rate: {rate:.3f}")
     notes.append(f"renderer took {distinct} distinct pictures in {span:.1f} s = {rate:.1f}/s; render loop {loop:.1f}/s; source x{k if decode else 1} = "
                  f"{want:.1f}/s; display mode {hz or 'unknown'} Hz")
 else:
