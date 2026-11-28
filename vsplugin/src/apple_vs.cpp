@@ -4,7 +4,8 @@
 // resolution are copied unchanged. When this Mac cannot run the configuration, the portable backend takes over.
 // Settings: platform.h (~/.config/pushmpc/settings.ini: Smoother, AppleSuperResolution = auto|off|2|4|editing|artcnn|
 // artcnn32|artcnn16|lowlatency, AppleInterpolation, Content = live|anime (Auto's upscaler order), AppleSrModelDownload =
-// auto|never, AppleTenBit = auto|off), then the plugin arguments (smoother, apple_sr, apple_fi).
+// auto|never, AppleTenBit = auto|off, CleanUp = auto|off|on with CleanUpStrength = subtle|balanced|strong|0..1: VideoToolbox's
+// temporal noise filter, Auto = off), then the plugin arguments (smoother, apple_sr, apple_fi, cleanup, cleanup_strength).
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -232,7 +233,7 @@ void VS_CC AFree(void* inst, VSCore*, const VSAPI* a)
         std::lock_guard<std::mutex> lk(d->lock);
         d->pipe.ClearWith([a](void* f) { a->freeFrame(static_cast<const VSFrame*>(f)); });
         const auto& st = d->be.engine.Stat();
-        Log(std::format("apple: instance closed after {} frames ({} pairs, {} scene cuts, {} VideoToolbox calls, {} failed; {})", d->produced, st.pairs, st.cuts, st.vtCalls, st.vtErrors,
+        Log(std::format("apple: instance closed after {} frames ({} pairs, {} scene cuts, {} VideoToolbox calls, {} failed; denoised {}, not denoised {} (no reference) + {} (failed); {})", d->produced, st.pairs, st.cuts, st.vtCalls, st.vtErrors, st.tnfFrames, st.tnfPassed, st.tnfErrors,
             d->be.engine.Describe()));
     }
     a->freeNode(d->node);
@@ -257,10 +258,13 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
     const VSVideoInfo* vi = a->getVideoInfo(node);
     PortableSettings s = LoadPortableSettings([](const char* n) { return ReadSetting(n); });
     std::string sr = ReadSetting("AppleSuperResolution"), fi = ReadSetting("AppleInterpolation"), overrides;
+    std::string cleanup = ReadSetting("CleanUp"), cleanupStrength = ReadSetting("CleanUpStrength");   // the temporal noise filter (Auto = off)
     if (const std::string v = AArg(in, a, "enable"); !v.empty()) { s.enable = ParseBool(v, s.enable); overrides += " enable=" + v; }
     if (const std::string v = AArg(in, a, "smoother"); !v.empty()) { s.smoother = ParseSmoother(v, s.smoother); overrides += " smoother=" + v; }
     if (const std::string v = AArg(in, a, "apple_sr"); !v.empty()) { sr = v; overrides += " apple_sr=" + v; }
     if (const std::string v = AArg(in, a, "apple_fi"); !v.empty()) { fi = v; overrides += " apple_fi=" + v; }
+    if (const std::string v = AArg(in, a, "cleanup"); !v.empty()) { cleanup = v; overrides += " cleanup=" + v; }
+    if (const std::string v = AArg(in, a, "cleanup_strength"); !v.empty()) { cleanupStrength = v; overrides += " cleanup_strength=" + v; }
     if (sr.empty()) sr = "auto";
     if (fi.empty()) fi = "auto";
     Log("backend: " + why);
@@ -300,6 +304,8 @@ void AppleCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNo
         c.anime = content == "anime";
         if (const std::string md = ReadSetting("AppleSrModelDownload"); !md.empty()) c.modelDownload = md;
         if (const std::string tb = ReadSetting("AppleTenBit"); !tb.empty()) c.tenBit = tb;
+        if (!cleanup.empty()) c.denoise = cleanup;
+        c.denoiseStrength = cleanupStrength;
     }
     d->be.engine.log = [](const std::string& m) { Log(m); };
     std::string err, info;

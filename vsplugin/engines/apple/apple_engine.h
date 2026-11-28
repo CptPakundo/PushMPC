@@ -20,6 +20,10 @@
 //   10-bit          when the low-latency interpolator lists only 8-bit formats and the source has more bits, the
 //                   generated frames get their 2 lost bits back on Metal (apple_nn.h RecoverTenBitPlane), in the same
 //                   command buffer as the VideoToolbox call. Frame-rate conversion (half float) stays the exact path.
+//   denoise         VTTemporalNoiseFilter (macOS 26; CleanUp = On, off by default: apple_convert.h DecideDenoise) on each
+//                   source frame before everything else, with up to the configuration's previousFrameCount earlier
+//                   source frames as references (no future frames: every route is one frame in, one out). The real
+//                   frames then come back denoised too. It must pass a self-test; if not, the chain runs without it.
 //   cuts            our thumbnail guard (apple_convert.h): a cut pair is never interpolated.
 //   real time       apple_convert.h Ladder: steps down (super resolution -> plain VTPixelTransfer scale, then fewer
 //                   phases, then none) when a pair keeps taking longer than the source frame interval.
@@ -45,6 +49,7 @@ struct Caps {
     bool frc = false;              // VTFrameRateConversionConfiguration.isSupported (macOS 15.4+)
     bool superResolution = false;  // VTSuperResolutionScalerConfiguration.isSupported (macOS 26+; editing grade)
     bool opticalFlow = false;      // VTOpticalFlowConfiguration.isSupported (macOS 15.4+)
+    bool noiseFilter = false;      // VTTemporalNoiseFilterConfiguration.isSupported (macOS 26+)
     bool commandBuffer = false;    // VTFrameProcessor processWithCommandBuffer:parameters: exists
     std::string metal;             // the Metal device ("" = none)
     bool sizeQueries = false;      // maximumDimensionForSpatialScaleFactor: exists (macOS 27+)
@@ -69,11 +74,15 @@ struct Config {
     bool anime = false;            // content hint for Auto's upscaler order (ArtCNN first for anime)
     std::string modelDownload = "auto";   // the editing-grade super-resolution model: auto (background download) | never
     std::string tenBit = "auto";   // 10-bit recovery for an 8-bit-only interpolator: auto | off
+    std::string denoise = "auto";  // the temporal noise filter (CleanUp): auto (= off) | off | on
+    std::string denoiseStrength;   // CleanUpStrength: subtle | balanced | strong | 0..1 ("" = balanced)
 };
 struct Stats {
     uint64_t pairs = 0, cuts = 0, generated = 0, vtCalls = 0, vtErrors = 0, fiErrors = 0, srErrors = 0, flowCalls = 0, flowErrors = 0, recovered = 0;
     double pairMs = 0; int ladder = 0;
     double benchFiMs = 0, benchSrMs = 0, benchFlowMs = 0;   // Configure's measurements (per call)
+    uint64_t tnfFrames = 0, tnfErrors = 0, tnfPassed = 0;    // denoised, failed, passed through (no reference yet)
+    double benchTnfMs = 0;
 };
 // the editing-grade super-resolution model (Apple's one-time download). status: -1 not available here, 0 download
 // required, 1 downloading, 2 ready. Download: starts it (asynchronous) and returns at once; wait > 0 waits up to that
@@ -107,6 +116,7 @@ public:
     // conversion takes any phase; the low-latency grid rounds them (MakePlan). Back to 1 after that call.
     void SetSpan(int g);
     bool LastPairWasCut() const;
+    bool Denoising() const;        // the temporal noise filter is in the chain (Configure kept it)
     const Stats& Stat() const;
     std::string Describe() const;  // the active chain, the ladder level
     std::function<void(const std::string&)> log;   // ladder steps, VideoToolbox errors (optional)

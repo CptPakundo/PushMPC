@@ -72,6 +72,15 @@ long ClassIntForFloat(const char* cls, const char* sel, float arg)
     if (!c || ![c respondsToSelector:s]) return -1;
     return long(((NSInteger(*)(id, SEL, float))objc_msgSend)(c, s, arg));
 }
+// a class-level NSArray property by selector (nil when the class or the selector is absent)
+NSArray<NSNumber*>* ClassArray(const char* cls, const char* sel)
+{
+    Class c = NSClassFromString([NSString stringWithUTF8String:cls]);
+    SEL s = sel_registerName(sel);
+    if (!c || ![c respondsToSelector:s]) return nil;
+    id v = ((id(*)(id, SEL))objc_msgSend)(c, s);
+    return [v isKindOfClass:[NSArray class]] ? (NSArray<NSNumber*>*)v : nil;
+}
 std::string Sysctl(const char* name)
 {
     char b[256] = {}; size_t n = sizeof(b) - 1;
@@ -227,6 +236,9 @@ const Caps& Probe()
             c.frc = frc == 1;
 #endif
             c.superResolution = fsr == 1;
+#ifdef PMVS_VT_LL
+            c.noiseFilter = tnf == 1;
+#endif
             Class llc = NSClassFromString(@"VTLowLatencyFrameInterpolationConfiguration");
             c.sizeQueries = llc && [llc respondsToSelector:sel_registerName("maximumDimensionForSpatialScaleFactor:")];
             auto st = [](int x) { return x == 1 ? "supported" : x == 0 ? "not supported" : x == -1 ? "class absent" : "no isSupported"; };
@@ -264,6 +276,20 @@ std::string ProbeReport()
             const CMVideoDimensions mx = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions;
             const CMVideoDimensions mn = VTLowLatencySuperResolutionScalerConfiguration.minimumDimensions;
             r += Fmt("  low-latency super resolution: minimum %dx%d, maximum %dx%d\n", int(mn.width), int(mn.height), int(mx.width), int(mx.height));
+            // the temporal noise filter: what it lists, and per size and format whether a configuration exists
+            {
+                const CMVideoDimensions tmx = VTTemporalNoiseFilterConfiguration.maximumDimensions;
+                const CMVideoDimensions tmn = VTTemporalNoiseFilterConfiguration.minimumDimensions;
+                r += Fmt("  temporal noise filter: isSupported=%d, minimum %dx%d, maximum %dx%d, source formats %s\n", int(VTTemporalNoiseFilterConfiguration.isSupported),
+                         int(tmn.width), int(tmn.height), int(tmx.width), int(tmx.height), FormatList(Formats(ClassArray("VTTemporalNoiseFilterConfiguration", "supportedSourcePixelFormats"))).c_str());
+                for (auto& s : sizes)
+                    for (uint32_t f : { k420v, kx420 }) {
+                        VTTemporalNoiseFilterConfiguration* tc = [[VTTemporalNoiseFilterConfiguration alloc] initWithFrameWidth:s[0] frameHeight:s[1] sourcePixelFormat:f];
+                        r += tc ? Fmt("  temporal noise filter %dx%d %s: formats %s, previous frames %ld, next frames %ld\n", s[0], s[1], FourCCText(f).c_str(),
+                                      FormatList(Formats(tc.frameSupportedPixelFormats)).c_str(), long(tc.previousFrameCount), long(tc.nextFrameCount))
+                                : Fmt("  temporal noise filter %dx%d %s: nil (not offered)\n", s[0], s[1], FourCCText(f).c_str());
+                    }
+            }
         }
 #endif
         // isSupported, and the size queries per spatial scale factor
@@ -366,12 +392,24 @@ struct Engine::Impl {
     Buf srLastSrc, srLastOut;
     float srLastPhase = 0;
     bool srHaveLast = false;
+    // the temporal noise filter: its session, the format it filters (fmt, or ofmt with the 10-bit recovery), the
+    // earlier raw source frames it takes as references (oldest first), whether this frame came out denoised
+    id tnfProc = nil;
+    NSDictionary* tnfAttrs = nil;
+    uint32_t tnfFmt = 0;
+    bool tnfOn16 = false;      // it filters cur16 (the 10-bit copy); cur is then made from the result
+    float tnfStrength = 0.5f;
+    int tnfPrevMax = 0;
+    int tnfFailRun = 0;
+    Pool tnfPool;
+    std::vector<std::pair<Buf, int64_t>> tnfRefs;
+    bool curDenoised = false;
 
     ~Impl()
     {
         if (scaler) { VTPixelTransferSessionInvalidate(scaler); CFRelease(scaler); }
         if (xfer) { VTPixelTransferSessionInvalidate(xfer); CFRelease(xfer); }
-        if (@available(macOS 15.4, *)) { if (fiProc) [fiProc endSession]; if (srProc) [srProc endSession]; if (flowProc) [flowProc endSession]; }
+        if (@available(macOS 15.4, *)) { if (fiProc) [fiProc endSession]; if (srProc) [srProc endSession]; if (flowProc) [flowProc endSession]; if (tnfProc) [tnfProc endSession]; }
     }
     void Log(const std::function<void(const std::string&)>& log, const std::string& s) const { if (log) log(s); }
     Buf Src() const { return recover ? cur16 : cur; }       // the current real frame as the output stage sees it
@@ -387,9 +425,10 @@ struct Engine::Impl {
         if (rgb && !vtSrcPool.Make(fiSrcAttrs, w, h, vtFmt, err)) return false;
         if (fi != Fi::None && !fiDstPool.Make(fiDstAttrs, w, h, vtFmt, err)) return false;
         if (srFactor && !srDstPool.Make(srDstAttrs, outW, outH, ofmt, err)) return false;
+        if (tnfProc && !tnfPool.Make(tnfAttrs, w, h, tnfFmt, err)) return false;
         return true;
     }
-    void ResetPair() { prev = cur = prev16 = cur16 = prevVt = curVt = prevOut = curOut = flowF = flowB = srLastSrc = srLastOut = Buf(); flowValid = false; srHaveLast = false; havePrev = haveCur = false; freshPair = true; }
+    void ResetPair() { prev = cur = prev16 = cur16 = prevVt = curVt = prevOut = curOut = flowF = flowB = srLastSrc = srLastOut = Buf(); flowValid = false; srHaveLast = false; havePrev = haveCur = false; freshPair = true; tnfRefs.clear(); }
     // the first frame's range differs from the guess: the other range tag, if every processor lists it
     void FollowRange(bool fullRange, const std::function<void(const std::string&)>& log)
     {
@@ -398,11 +437,29 @@ struct Engine::Impl {
         if (want == fmt && wantO == ofmt) return;
         auto listed = [&](const std::vector<uint32_t>& l, uint32_t f) { return l.empty() || std::find(l.begin(), l.end(), f) != l.end(); };
         if ((!rgb && fi != Fi::None && !listed(fiFormats, want)) || (srFactor && srKind != SrKind::ArtCnn32 && srKind != SrKind::ArtCnn16 && !listed(srFormats, wantO))) return;
+        // the noise filter is configured for one source format: a new session for the other range tag, else it goes off
+        // (the right range matters more than the denoise)
+        auto tnfOff = [&] { if (tnfProc) { if (@available(macOS 15.4, *)) [tnfProc endSession]; } tnfProc = nil; tnfRefs.clear(); };
+        if (tnfProc && (tnfOn16 ? wantO : want) != tnfFmt) {
+            const uint32_t tf = tnfOn16 ? wantO : want;
+            id np = nil;
+#ifdef PMVS_VT_LL
+            if (@available(macOS 26.0, *)) {
+                VTTemporalNoiseFilterConfiguration* tc = [[VTTemporalNoiseFilterConfiguration alloc] initWithFrameWidth:cfg.width frameHeight:cfg.height sourcePixelFormat:tf];
+                VTFrameProcessor* p = tc ? [[VTFrameProcessor alloc] init] : nil;
+                if (p && [p startSessionWithConfiguration:tc error:nil]) { np = p; tnfAttrs = tc.destinationPixelBufferAttributes; }
+            }
+#endif
+            tnfOff();
+            tnfProc = np; tnfReset = true;
+            if (np) tnfFmt = tf;
+            else Log(log, "apple: the noise filter takes no " + FourCCText(tf) + ": denoise off for this stream");
+        }
         const uint32_t old = fmt, oldO = ofmt;
         fmt = want; ofmt = wantO;
         if (!rgb) vtFmt = want;
         std::string err;
-        if (!MakePools(err)) { fmt = old; ofmt = oldO; if (!rgb) vtFmt = old; MakePools(err); Log(log, "apple: could not switch to " + FourCCText(want) + ": " + err); return; }
+        if (!MakePools(err)) { tnfOff(); fmt = old; ofmt = oldO; if (!rgb) vtFmt = old; MakePools(err); Log(log, "apple: could not switch to " + FourCCText(want) + ": " + err); return; }
         ResetPair();
         Log(log, "apple: the stream is " + std::string(fullRange ? "full" : "limited") + " range: pixel format " + FourCCText(want));
     }
@@ -417,7 +474,16 @@ struct Engine::Impl {
         if (st != noErr) { err = Fmt("pixel transfer %s -> %s failed (%d)", FourCCText(CVPixelBufferGetPixelFormatType(src.ref)).c_str(), FourCCText(pool.fmt).c_str(), int(st)); return Buf(); }
         return dst;
     }
-    void FillGrey(const Buf& b, int shade)
+    // a synthetic picture: a gentle luma ramp from shade, grey chroma; noise > 0 adds uniform luma noise of +-noise
+    // codes (a hash of x, y, seed: the same picture every run)
+    static int Ramp(int shade, int x, int y, int n, int rows) { return shade + (x * 32) / std::max(1, n) + (y * 16) / std::max(1, rows); }
+    static int Hash(int x, int y, uint32_t seed, int noise)
+    {
+        uint32_t h = uint32_t(x) * 73856093u ^ uint32_t(y) * 19349663u ^ (seed + 1u) * 83492791u;
+        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+        return int(h % uint32_t(2 * noise + 1)) - noise;
+    }
+    void FillGrey(const Buf& b, int shade, int noise = 0, uint32_t seed = 0)
     {
         Locked l(b.ref, false);
         if (!l.Ok()) return;
@@ -426,11 +492,104 @@ struct Engine::Impl {
             for (int y = 0; y < rows; ++y) {
                 uint8_t* r = l.v.data[p] + y * l.v.stride[p];
                 for (int x = 0; x < n; ++x) {
-                    const int v8 = p ? 128 : shade + (x * 32) / std::max(1, n) + (y * 16) / std::max(1, rows);
+                    const int v8 = p ? 128 : std::clamp(Ramp(shade, x, y, n, rows) + (noise > 0 ? Hash(x, y, seed, noise) : 0), 0, 255);
                     if (l.v.bytes == 1) r[x] = uint8_t(v8); else { const uint16_t u = uint16_t(v8 << 8); std::memcpy(r + 2 * x, &u, 2); }
                 }
             }
         }
+    }
+    // RMS distance of the luma (8-bit scale) from FillGrey's clean ramp, over the centre half of the picture
+    static double RampRms(const Buf& b, int shade)
+    {
+        Locked l(b.ref, true);
+        if (!l.Ok()) return -1;
+        const int w = l.v.width, h = l.v.height;
+        double s = 0; long n = 0;
+        for (int y = h / 4; y < h * 3 / 4; ++y) {
+            const uint8_t* r = l.v.data[0] + y * l.v.stride[0];
+            for (int x = w / 4; x < w * 3 / 4; ++x) {
+                const double v = l.v.bytes == 1 ? double(r[x]) : double(detail::Rd16(r, x)) / 256.0;
+                const double e = v - double(Ramp(shade, x, y, w, h));
+                s += e * e; ++n;
+            }
+        }
+        return n ? std::sqrt(s / double(n)) : -1;
+    }
+
+    // ---- the temporal noise filter on one source frame (src: tnfFmt, ours or the host's; pts in 100 ns). Returns the
+    // denoised frame (tnfPool), or src itself when there is no reference yet or the call failed (curDenoised says which).
+    // src is kept as a reference for the next frames, copied when it is the host's (holding decoder buffers would starve
+    // its pool). discontinuity: a seek or a cut (the references are dropped, the processor resets).
+    bool tnfReset = true;
+    std::string tnfLastErr;
+    Buf RunTnf(const Buf& src, bool own, int64_t pts, bool discontinuity, const std::function<void(const std::string&)>& log)
+    {
+        curDenoised = false;
+        if (!tnfProc || !src) return src;
+        if (discontinuity) { tnfRefs.clear(); tnfReset = true; }
+        Buf ref = src;
+        if (!own) { std::string cerr; ref = Convert(src, tnfPool, cerr); }
+        Buf out = src;
+#ifdef PMVS_VT_LL
+        if (@available(macOS 26.0, *)) {
+            if (tnfRefs.empty()) ++stats.tnfPassed;   // Apple: at least one reference frame (past or future) per call
+            else {
+                Buf d = tnfPool.Get();
+                if (d) Tag(d.ref, colour);
+                VTFrameProcessorFrame* s = [[VTFrameProcessorFrame alloc] initWithBuffer:src.ref presentationTimeStamp:Pts(pts)];
+                VTFrameProcessorFrame* df = d ? [[VTFrameProcessorFrame alloc] initWithBuffer:d.ref presentationTimeStamp:Pts(pts)] : nil;
+                NSMutableArray<VTFrameProcessorFrame*>* prevs = [NSMutableArray array];
+                for (auto& r : tnfRefs) {
+                    VTFrameProcessorFrame* f = [[VTFrameProcessorFrame alloc] initWithBuffer:r.first.ref presentationTimeStamp:Pts(r.second)];
+                    if (f) [prevs addObject:f];
+                }
+                VTTemporalNoiseFilterParameters* p = s && df && prevs.count
+                    ? [[VTTemporalNoiseFilterParameters alloc] initWithSourceFrame:s nextFrames:@[] previousFrames:prevs destinationFrame:df filterStrength:tnfStrength hasDiscontinuity:tnfReset]
+                    : nil;
+                NSError* e = nil;
+                ++stats.vtCalls;
+                if (p && [tnfProc processWithParameters:p error:&e]) { out = d; curDenoised = true; ++stats.tnfFrames; tnfFailRun = 0; tnfReset = false; }
+                else {
+                    ++stats.vtErrors; ++stats.tnfErrors; ++tnfFailRun;
+                    tnfLastErr = p ? ErrText(e) : std::string(d ? "no parameters object" : "no output buffer");
+                    if (stats.tnfErrors <= 3 || stats.tnfErrors % 240 == 0) Log(log, "apple: the noise filter failed (" + tnfLastErr + "): this frame is not denoised");
+                }
+            }
+        }
+#endif
+        (void)pts;
+        if (ref) { tnfRefs.push_back({ ref, pts }); while (int(tnfRefs.size()) > std::max(1, tnfPrevMax)) tnfRefs.erase(tnfRefs.begin()); }
+        return out;
+    }
+    // Configure's check: 4 noisy synthetic frames (a ramp +-12 codes); from the second on each must come back denoised,
+    // with a picture (a VM can accept a call and leave the output empty) that differs from its source
+    bool SelfTestTnf(std::string& err, double* ms, double* rmsIn, double* rmsOut)
+    {
+        std::vector<Buf> in;
+        for (int i = 0; i < 4; ++i) {
+            Buf b = tnfPool.Get();
+            if (!b) { err = "no buffers"; return false; }
+            Tag(b.ref, colour);
+            FillGrey(b, 60, 12, uint32_t(i));
+            in.push_back(b);
+        }
+        tnfRefs.clear(); tnfReset = true;
+        std::vector<double> t;
+        Buf last;
+        for (int i = 0; i < 4; ++i) {
+            const double t0 = NowMs();
+            last = RunTnf(in[size_t(i)], true, int64_t(i) * 417083, i == 0, nullptr);
+            if (i >= 1 && !curDenoised) { err = tnfLastErr.empty() ? "no frame came back denoised" : tnfLastErr; tnfRefs.clear(); return false; }
+            if (i >= 1) t.push_back(NowMs() - t0);
+        }
+        tnfRefs.clear(); tnfReset = true;
+        if (!Plausible(last, 55, 135)) { err = "the denoised frame is empty (the effect did not really run)"; return false; }
+        const double a = RampRms(in[3], 60), b = RampRms(last, 60);
+        if (rmsIn) *rmsIn = a;
+        if (rmsOut) *rmsOut = b;
+        if (std::fabs(a - b) < 1e-9) { err = "the filter returned its source unchanged"; return false; }
+        if (ms) *ms = Median(t);
+        return true;
     }
 
     // ---- optical flow (once per pair; shared by frame-rate conversion, editing super resolution and the recovery)
@@ -840,6 +999,7 @@ int Engine::OutWidth() const { return m->outW; }
 int Engine::OutHeight() const { return m->outH; }
 int Engine::K() const { return m->cfg.k; }
 bool Engine::LastPairWasCut() const { return m->lastCut; }
+bool Engine::Denoising() const { return m->tnfProc != nil; }
 void Engine::SetSpan(int g) { m->span = std::clamp(g, 1, 8); }
 const Stats& Engine::Stat() const { m->stats.ladder = m->ladder.Level(); return m->stats; }
 std::string Engine::Describe() const { return m->chain + "; ladder: " + m->ladder.Describe(); }
@@ -1089,14 +1249,55 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
             notes.push_back(Fmt("%s: %.1f ms a frame", name.c_str(), ms));
             break;
         }
-        if (!d.srFactor) { d.outW = w; d.outH = h; if (d.fi == Fi::None) { err = "nothing for VideoToolbox to do (x1 and no super resolution): " + joined(); return false; } }
+        if (!d.srFactor) { d.outW = w; d.outH = h; }
+
+        // ---- the temporal noise filter (CleanUp = On; Auto is off), on the source frames before everything else
+        const DenoisePick dn = DecideDenoise(c.denoise, c.denoiseStrength);
+        std::string dnNote = "denoise " + dn.why;
+        if (dn.on) {
+            if (!caps.noiseFilter) dnNote = "denoise: the temporal noise filter is not supported here (" + caps.os + ")";
+#ifdef PMVS_VT_LL
+            else if (@available(macOS 26.0, *)) {
+                // the format it must take: the chain's (the 10-bit copy with the recovery); denoise alone picks its own
+                const bool alone = d.fi == Fi::None && !d.srFactor;
+                d.tnfOn16 = d.recover;
+                uint32_t want = d.recover ? d.ofmt : d.fmt;
+                if (alone) {
+                    const uint32_t f = PickFormat(Formats(ClassArray("VTTemporalNoiseFilterConfiguration", "supportedSourcePixelFormats")), c.bits, c.colour.fullRange, &d.fmtLossy);
+                    if (f) { want = f; d.fmt = d.vtFmt = d.ofmt = f; }
+                }
+                VTTemporalNoiseFilterConfiguration* tc = [[VTTemporalNoiseFilterConfiguration alloc] initWithFrameWidth:w frameHeight:h sourcePixelFormat:want];
+                NSError* e = nil;
+                VTFrameProcessor* p = tc ? [[VTFrameProcessor alloc] init] : nil;
+                if (!tc) dnNote = Fmt("denoise: the temporal noise filter is not offered for %dx%d %s", w, h, FourCCText(want).c_str());
+                else if (![p startSessionWithConfiguration:tc error:&e]) dnNote = "denoise: the temporal noise filter's startSession failed: " + ErrText(e);
+                else {
+                    d.tnfProc = p; d.tnfFmt = want; d.tnfStrength = dn.strength; d.tnfAttrs = tc.destinationPixelBufferAttributes;
+                    d.tnfPrevMax = int(std::clamp<long>(long(tc.previousFrameCount), 1, 8));
+                    std::string perr;
+                    double ms = 0, a = 0, b = 0;
+                    if (!d.MakePools(perr) || !d.SelfTestTnf(perr, &ms, &a, &b)) {
+                        dnNote = "denoise: the temporal noise filter is listed but does not run here (self-test: " + perr + ")";
+                        [p endSession]; d.tnfProc = nil; d.tnfAttrs = nil; d.tnfPool.Reset();
+                    } else {
+                        d.stats.benchTnfMs = ms;
+                        dnNote = Fmt("denoise: temporal noise filter, strength %.2f, %d earlier frames as references (it offers %ld past, %ld future; no future frames "
+                                     "on this route), %.1f ms a frame; self-test noise %.2f -> %.2f codes RMS", double(dn.strength), d.tnfPrevMax, long(tc.previousFrameCount),
+                                     long(tc.nextFrameCount), ms, a, b);
+                    }
+                }
+            }
+#endif
+        }
+        notes.push_back(dnNote);
+        if (!d.srFactor && d.fi == Fi::None && !d.tnfProc) { err = "nothing for VideoToolbox to do (x1, no super resolution, no denoise): " + joined(); return false; }
         if (!d.MakePools(err)) return false;
         // the flow session stays only when a stage uses it
         if (d.flowProc && !(d.frcFlow || d.recover || (d.srKind == SrKind::Editing && d.editFlow))) { if (@available(macOS 15.4, *)) [d.flowProc endSession]; d.flowProc = nil; }
 
         const Stats bench = d.stats;
         d.stats = Stats();
-        d.stats.benchFiMs = bench.benchFiMs; d.stats.benchSrMs = bench.benchSrMs; d.stats.benchFlowMs = bench.benchFlowMs;
+        d.stats.benchFiMs = bench.benchFiMs; d.stats.benchSrMs = bench.benchSrMs; d.stats.benchFlowMs = bench.benchFlowMs; d.stats.benchTnfMs = bench.benchTnfMs;
         d.ladder.Init(c.srcFps, d.srFactor > 0, d.fi == Fi::LowLatency ? d.exponent : d.fi == Fi::Frc ? 2 : 0);
 
         const PhasePlan plan = d.fi == Fi::LowLatency ? MakePlan(d.cfg.k, d.exponent) : MakePlan(d.cfg.k, 0, true);
@@ -1106,6 +1307,7 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
                 : d.fi == Fi::Frc ? Fmt("frame-rate conversion x%d (phases %s%s)", d.cfg.k, phases.c_str(), d.frcFlow ? ", shared optical flow" : "")
                 : std::string("no interpolation");
         if (d.recover) d.chain += " + 10-bit recovery on Metal";
+        if (d.tnfProc) d.chain = Fmt("temporal noise filter (strength %.2f) + ", double(d.tnfStrength)) + d.chain;
         if (d.srFactor) d.chain += Fmt(" + %s x%d (%dx%d -> %dx%d%s)", SrKindName(d.srKind), d.srFactor, w, h, d.outW, d.outH, d.editFlow ? ", shared optical flow" : "");
         d.chain += Fmt(", pixel format %s%s%s", FourCCText(d.fmt).c_str(), d.rgb ? (" via " + FourCCText(d.vtFmt)).c_str() : "", d.fmtLossy && !d.recover ? " (fewer bits than the source)" : "");
         if (d.ofmt != d.fmt) d.chain += ", output " + FourCCText(d.ofmt);
@@ -1118,6 +1320,36 @@ bool Engine::Configure(const Config& c, std::string& err, std::string& info)
 void Engine::Forget() { m->ResetPair(); m->lastCut = false; }
 
 namespace {
+// the noise filter on the new frame (d.cur, or d.cur16 with the 10-bit recovery, then d.cur from it), before the pair.
+// The cut test uses the raw frame's thumbnail; own: the buffer it filters is ours (not the host's).
+void Denoise(Engine::Impl& d, int64_t pts, const Thumb& thumb, bool own, const std::function<void(const std::string&)>& log)
+{
+    d.curDenoised = false;
+    if (!d.tnfProc) return;
+    const bool disc = !d.havePrev || IsCut(ScoreCut(d.prevThumb, thumb));
+    if (d.tnfOn16) {
+        Buf o = d.RunTnf(d.cur16, own, pts, disc, log);
+        if (d.curDenoised) {
+            Buf b = d.srcPool.Get();
+            bool ok = false;
+            if (b) {
+                Tag(b.ref, d.colour);
+                Locked li(o.ref, true), lo(b.ref, false);
+                if (li.Ok() && lo.Ok()) { Bi16To8(li.v, lo.v); ok = true; }
+            }
+            if (ok) { d.cur16 = o; d.cur = d.curVt = b; }
+            else d.curDenoised = false;
+        }
+    } else {
+        Buf o = d.RunTnf(d.cur, own, pts, disc, log);
+        if (d.curDenoised) d.cur = d.curVt = o;
+    }
+    if (d.tnfFailRun >= 48) {   // two seconds of failures: off for this stream
+        if (@available(macOS 15.4, *)) [d.tnfProc endSession];
+        d.tnfProc = nil; d.tnfRefs.clear();
+        if (log) log("apple: the noise filter keeps failing (" + d.tnfLastErr + "): denoise off from here");
+    }
+}
 // the shared middle of Process / ProcessBuffer: the new frame is uploaded (d.cur, d.cur16, d.curVt); runs the pair
 bool Step(Engine::Impl& d, int64_t pts, const Thumb& thumb, std::vector<Buf>& out, bool& havePair, std::string& err, const std::function<void(const std::string&)>& log)
 {
@@ -1181,10 +1413,13 @@ bool Engine::Process(const PlanarView& v, const Colour& colour, int64_t pts, boo
             d.cur16 = b16;
         }
         std::vector<Buf> out;
-        if (!Step(d, pts, MakeThumb(v), out, havePair, err, log)) return false;
+        const Thumb th = MakeThumb(v);
+        Denoise(d, pts, th, true, log);
+        if (!Step(d, pts, th, out, havePair, err, log)) return false;
         for (size_t i = 0; i < out.size() && i < gen.size(); ++i) if (!d.Emit(out[i], gen[i], err)) return false;
-        // the real frame: bit-exact copy without super resolution
+        // the real frame: bit-exact copy without super resolution (the denoised frame when the noise filter ran)
         if (d.srFactor) { if (!d.Emit(d.curOut, curOut, err)) return false; }
+        else if (d.curDenoised) { if (!d.Emit(d.Src(), curOut, err)) return false; }
         else CopyPlanar(v, curOut);
         return true;
     }
@@ -1232,9 +1467,10 @@ bool Engine::ProcessBuffer(void* pixelBuffer, const Colour& colour, int64_t pts,
             th = MakeThumb(pv);
         }
         std::vector<Buf> out;
+        Denoise(d, pts, th, d.tnfOn16 ? d.cur16.ref != in : d.cur.ref != in, log);
         if (!Step(d, pts, th, out, havePair, err, log)) return false;
         for (const Buf& b : out) gen.push_back(CVPixelBufferRetain(b.ref));
-        const Buf& c = d.srFactor ? d.curOut : (d.recover ? d.cur16 : inBuf);
+        const Buf& c = d.srFactor ? d.curOut : (d.recover ? d.cur16 : (d.curDenoised ? d.cur : inBuf));
         curRet = CVPixelBufferRetain(c.ref);
         return true;
     }
@@ -1263,6 +1499,7 @@ int Engine::K() const { return 1; }
 bool Engine::Process(const PlanarView&, const Colour&, int64_t, bool, const std::vector<PlanarOut>&, const PlanarOut&, bool& havePair, std::string& err) { havePair = false; err = "unavailable"; return false; }
 void Engine::Forget() {}
 bool Engine::LastPairWasCut() const { return false; }
+bool Engine::Denoising() const { return false; }
 void Engine::SetSpan(int) {}
 const Stats& Engine::Stat() const { return m->stats; }
 std::string Engine::Describe() const { return "unavailable"; }

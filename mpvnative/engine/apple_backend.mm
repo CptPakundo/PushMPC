@@ -55,6 +55,9 @@ public:
         c.width = m_w; c.height = m_h; c.bits = m_bits; c.k = ak.k; c.srcFps = srcFps;
         c.sr = "off";   // pmeng outputs keep the source size (mpv scales)
         c.fi = O(o, "apple_fi", "auto");
+        // the temporal noise filter (Auto = off): the real frames come back through Write (vf_pushmpc writes subframe 0 too)
+        c.denoise = O(o, "cleanup", ReadSetting("CleanUp")); c.denoiseStrength = O(o, "cleanup_strength", ReadSetting("CleanUpStrength"));
+        if (c.denoise.empty()) c.denoise = "auto";
         c.colour.matrix = st.matrix; c.colour.transfer = st.transfer; c.colour.primaries = st.primaries;
         c.colour.fullRange = st.range == 2;   // AVCOL_RANGE_JPEG
         m_col = c.colour;
@@ -287,6 +290,9 @@ extern "C" PMENG_EXPORT void* pme_apple_cvpx_open(int w, int h, int bits, int sm
     auto* c = new CvpxEngine();
     apple::Config cfg;
     cfg.width = w; cfg.height = h; cfg.bits = bits; cfg.k = ak.k; cfg.srcFps = fps > 0 ? fps : 23.976; cfg.sr = "off";
+    // no denoise here: the caller (VLC) shows its own picture for the real frames, so denoised generated frames would
+    // alternate with noisy real ones
+    cfg.denoise = "off";
     c->col.matrix = matrix > 0 && matrix != 2 ? matrix : 1; c->col.transfer = transfer > 0 && transfer != 2 ? transfer : 1;
     c->col.primaries = primaries > 0 && primaries != 2 ? primaries : 1; c->col.fullRange = fullRange != 0;
     cfg.colour = c->col;

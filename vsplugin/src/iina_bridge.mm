@@ -71,6 +71,7 @@ extern "C" {
 }
 #include "apple_engine.h"
 #include "backend.h"        // pmvs::kPortableMaxK: the built-in portable engine's ceiling
+#include "platform.h"       // pmvs::ReadSetting: CleanUp / CleanUpStrength (the temporal noise filter)
 #include "pmeng.h"
 #include "portable_engine.h"
 
@@ -303,6 +304,10 @@ bool ConfigureApple(Bridge& b, const AVFrame* f, CVPixelBufferRef pb)
     c.colour = ColourOf(f);
     if (const char* sr = getenv("PUSHMPC_IINA_SR")) c.sr = sr;
     if (const char* ct = getenv("PUSHMPC_IINA_CONTENT")) c.anime = std::string(ct) == "anime";
+    // the temporal noise filter: settings.ini CleanUp / CleanUpStrength (Auto = off), PUSHMPC_IINA_CLEANUP overrides
+    c.denoise = pmvs::ReadSetting("CleanUp"); c.denoiseStrength = pmvs::ReadSetting("CleanUpStrength");
+    if (const char* cu = getenv("PUSHMPC_IINA_CLEANUP"); cu && *cu) c.denoise = cu;
+    if (c.denoise.empty()) c.denoise = "auto";
     b.apple = std::make_unique<apple::Engine>();
     b.apple->log = [](const std::string& m) { Log("%s", m.c_str()); };
     if (!b.apple->Configure(c, err, info)) { b.why = err; b.apple.reset(); return false; }

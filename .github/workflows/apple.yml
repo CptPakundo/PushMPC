@@ -269,6 +269,9 @@ jobs:
           system_profiler SPDisplaysDataType | sed -n 1,20p || true
           echo "--- VTFrameProcessor error codes in this SDK"
           grep -rn -A16 "VTFrameProcessorError" "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers/VTErrors.h" | grep -E "= *-?[0-9]+|VTFrameProcessorError" | sed 's/^ *//' | head -40 || true
+          echo "--- the temporal noise filter's declarations in this SDK"
+          grep -rhn -E "initWithFrameWidth.*sourcePixelFormat|initWithSourceFrame.*nextFrames|filterStrength|hasDiscontinuity|previousFrameCount|nextFrameCount|supportedSourcePixelFormats" \
+            "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers/" 2>/dev/null | sed 's/^ *//' | head -20 || true
 
       - uses: actions/cache@v4
         with:
@@ -311,6 +314,9 @@ jobs:
           r=$(grep -o 'APPLE_VT_RESULT=[a-z]*' "$RUNNER_TEMP/apple_vt_test.txt" | cut -d= -f2)
           echo "APPLE_VT=$r" >> "$GITHUB_ENV"
           echo "::notice title=VideoToolbox on ${{ matrix.os }}::$(grep '^apple probe' "$RUNNER_TEMP/apple_vt_test.txt" | head -1 | cut -c1-900)"
+          # the temporal noise filter: ok only when its output was measured against the clean master
+          tnf=$(grep -o 'APPLE_TNF_RESULT=[a-z]*' "$RUNNER_TEMP/apple_vt_test.txt" | cut -d= -f2 || true)
+          echo "::notice title=Temporal noise filter on ${{ matrix.os }}::APPLE_TNF_RESULT=${tnf:-missing}: $(grep -E '^    (not exercisable here|PSNR against)' "$RUNNER_TEMP/apple_vt_test.txt" | head -1 | cut -c5-700)"
 
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }

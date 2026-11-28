@@ -105,6 +105,10 @@ gets a short test picture to check that PushMPC really makes extra frames there:
   turn Terminal on, and run `pushmpc-setup install` again.
 - In mpv, IINA, VLC and Plex, PushMPC uses Apple's own frame interpolation (macOS 15.4 or newer) when your Mac can run
   it. Otherwise it uses the graphics chip, and if that isn't possible, the processor.
+- Noise reduction (experimental, off by default): on macOS 26, mpv, IINA and Plex can use Apple's own video noise
+  filter. Turn it on with `CleanUp=On` in `~/.config/pushmpc/settings.ini`; `CleanUpStrength=Subtle`, `Balanced` (the
+  default) or `Strong` sets how hard it works. It stays off unless you turn it on, because film grain is part of the
+  picture. It hasn't run on a real Mac yet, and VLC doesn't use it.
 - To remove everything: `pushmpc-setup uninstall`, then `brew uninstall pushmpc`. Plex, IINA, VLC and your mpv
   settings go back exactly as they were.
 - To update: `brew upgrade pushmpc`, then `pushmpc-setup install` again.

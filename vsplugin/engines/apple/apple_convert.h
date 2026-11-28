@@ -382,6 +382,34 @@ inline bool FitsRealTime(double srMs, double fiMs, double flowMs, int k, double 
     return cost <= budget;
 }
 
+// ------------------------------------------------------------------------------------------------ denoise
+// VideoToolbox's temporal noise filter (VTTemporalNoiseFilter, macOS 26) from the shared settings CleanUp = Auto | Off |
+// On and CleanUpStrength = Subtle | Balanced | Strong (or a number 0..1). Auto is off: a measured noise level cannot tell
+// film grain (picture, kept by the fidelity rule) from sensor or codec noise, and no rule has been checked against a
+// ground truth yet. The strength names map onto Apple's 0..1 scale (0.25 / 0.5 / 0.75; not measured); absent = Balanced.
+struct DenoisePick { bool on = false; float strength = 0.5f; std::string why; };
+inline DenoisePick DecideDenoise(std::string mode, std::string strength)
+{
+    auto lower = [](std::string s) { for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c))); return s; };
+    mode = lower(mode); strength = lower(strength);
+    DenoisePick r;
+    if (strength == "subtle" || strength == "low") r.strength = 0.25f;
+    else if (strength == "strong" || strength == "high") r.strength = 0.75f;
+    else if (strength == "balanced" || strength == "medium" || strength.empty()) r.strength = 0.5f;
+    else {
+        char* end = nullptr;
+        const double v = std::strtod(strength.c_str(), &end);
+        if (end && end != strength.c_str() && *end == 0 && std::isfinite(v)) r.strength = float(std::clamp(v, 0.0, 1.0));
+    }
+    char b[96];
+    if (mode == "on" || mode == "1" || mode == "yes" || mode == "true") {
+        r.on = r.strength > 0.0f;
+        snprintf(b, sizeof(b), r.on ? "on, strength %.2f (your setting)" : "off (strength 0)", double(r.strength));
+        r.why = b;
+    } else r.why = mode == "off" || mode == "0" || mode == "no" || mode == "false" ? "off (your setting)" : "off (Auto: grain counts as picture; turn it on with CleanUp = On)";
+    return r;
+}
+
 // ------------------------------------------------------------------------------------------------ step-down ladder
 // Each pair's processing time against the source frame interval. After kOverRun pairs in a row over budget it steps
 // down once: 0 full -> 1 super resolution replaced by a plain scale (if it was on) -> 2 one interpolated phase (0.5;

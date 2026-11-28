@@ -10,11 +10,15 @@
 //      timings are printed (a virtual machine's numbers say nothing about a real Mac);
 //   3. when the Mac offers nothing (a VM without the ML effects), the reasons are printed and Configure must fail
 //      cleanly (the plugin then falls back to the portable backend). Exit 0 in that case: CI records it.
+//   4. the temporal noise filter (denoise) against a clean master with synthetic noise, PSNR per strength and a null
+//      arm (TestNoiseFilter); APPLE_TNF_RESULT says whether its output was measured at all.
 // Exit code: 1 when an offered chain fails a check.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 #include "apple_engine.h"
@@ -121,12 +125,100 @@ static void Run(const char* name, int w, int h, int bits, int k, const char* sr,
     CHECK(st.vtErrors == 0, "%s: VideoToolbox errors", name);
 }
 
+// ---- the temporal noise filter against a ground truth: a clean master (a panning texture with a moving box), the
+// same with Gaussian luma noise (sigma 8 codes, fixed seed). Each strength, and no denoise, is scored by luma PSNR
+// against the clean master over frames 4..15 (after the filter has references). Checks, only when the filter runs:
+//   - every frame from the second on comes back denoised;
+//   - Balanced and Strong move the noisy clip toward the master (at least +0.5 dB over no denoise);
+//   - the null arm: the clean master through Strong stays at 40 dB or more against itself (no restyling).
+// APPLE_TNF_RESULT=ok | failed | unsupported | notrun (a self-test failed: the VM accepts calls and returns nothing,
+// or the session does not start). Only ok means the output was measured.
+static const int kTnfFrames = 16, kTnfW = 1280, kTnfH = 720;
+static Pic TnfMaster(int f)
+{
+    Pic p(kTnfW, kTnfH, 8);
+    const double pi = 3.14159265358979;
+    for (int y = 0; y < kTnfH; ++y)
+        for (int x = 0; x < kTnfW; ++x) {
+            double v = 110.0 + 50.0 * std::sin(2 * pi * (x + 3 * f) / 23.0) * std::cos(2 * pi * y / 17.0);
+            if (x >= 200 + 8 * f && x < 296 + 8 * f && y >= 300 && y < 396) v = 220;
+            p.Set(0, x, y, int(std::lround(v)));
+        }
+    for (int i = 1; i < 3; ++i) for (int y = 0; y < ChromaH(kTnfH); ++y) for (int x = 0; x < ChromaW(kTnfW); ++x) p.Set(i, x, y, 128);
+    return p;
+}
+static Pic AddNoise(const Pic& m, std::mt19937& rng)
+{
+    Pic p = m;
+    std::normal_distribution<double> nd(0.0, 8.0);
+    for (int y = 0; y < m.h; ++y) for (int x = 0; x < m.w; ++x) p.Set(0, x, y, std::clamp(int(std::lround(m.Get(0, x, y) + nd(rng))), 16, 235));
+    return p;
+}
+static double LumaPsnr(const Pic& a, const Pic& b)
+{
+    double se = 0;
+    for (int y = 0; y < a.h; ++y) for (int x = 0; x < a.w; ++x) { const double d = a.Get(0, x, y) - b.Get(0, x, y); se += d * d; }
+    const double mse = se / double(a.w * a.h);
+    return mse <= 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+}
+// one arm: the clip through a denoise-only chain (x1); returns the mean PSNR, or -1 when it does not configure (why)
+static double TnfArm(const char* strength, const std::vector<Pic>& in, const std::vector<Pic>& master, std::string& why)
+{
+    Engine e;
+    e.log = [](const std::string& m) { std::printf("    log: %s\n", m.c_str()); };
+    Config c; c.width = kTnfW; c.height = kTnfH; c.bits = 8; c.k = 1; c.sr = "off"; c.srcFps = 23.976;
+    c.denoise = "on"; c.denoiseStrength = strength;
+    std::string err, info;
+    if (!e.Configure(c, err, info)) { why = err; return -1; }
+    std::printf("    chain (%s): %s\n", strength, info.c_str());
+    if (!e.Denoising()) { why = "configured without the noise filter: " + info; return -1; }
+    Colour col;
+    double sum = 0; int n = 0;
+    for (int f = 0; f < kTnfFrames; ++f) {
+        Pic out(kTnfW, kTnfH, 8);
+        bool havePair = false;
+        const bool ok = e.Process(in[size_t(f)].View(), col, int64_t(f) * 417083, true, {}, out.Out(), havePair, err);
+        CHECK(ok, "denoise %s: frame %d: %s", strength, f, err.c_str());
+        if (!ok) return -2;
+        if (f >= 4) { sum += LumaPsnr(out, master[size_t(f)]); ++n; }
+    }
+    const Stats& st = e.Stat();
+    std::printf("    denoise %s: %llu frames denoised, %llu without a reference, %llu failed; %.1f ms a frame in Configure's test (VM timing)\n", strength,
+                (unsigned long long)st.tnfFrames, (unsigned long long)st.tnfPassed, (unsigned long long)st.tnfErrors, st.benchTnfMs);
+    CHECK(st.tnfFrames == uint64_t(kTnfFrames - 1) && st.tnfErrors == 0, "denoise %s: every frame from the second on denoised", strength);
+    return n ? sum / n : -1;
+}
+static std::string TestNoiseFilter(const Caps& c)
+{
+    std::printf("--- temporal noise filter (denoise), %dx%d 8-bit, Gaussian luma noise sigma 8\n", kTnfW, kTnfH);
+    if (!c.noiseFilter) { std::printf("    not exercisable here: the temporal noise filter is not supported (%s); nothing about its output is verified\n", c.os.c_str()); return "unsupported"; }
+    std::vector<Pic> master, noisy;
+    std::mt19937 rng(20261128u);
+    for (int f = 0; f < kTnfFrames; ++f) { master.push_back(TnfMaster(f)); noisy.push_back(AddNoise(master.back(), rng)); }
+    double off = 0;
+    for (int f = 4; f < kTnfFrames; ++f) off += LumaPsnr(noisy[size_t(f)], master[size_t(f)]);
+    off /= double(kTnfFrames - 4);
+    std::printf("    no denoise: %.2f dB against the clean master\n", off);
+    std::string why;
+    const double sub = TnfArm("subtle", noisy, master, why);
+    if (sub == -1) { std::printf("    not exercisable here: %s; nothing about its output is verified\n", why.c_str()); return "notrun"; }
+    if (sub < 0) return "failed";
+    const double bal = TnfArm("balanced", noisy, master, why), str = TnfArm("strong", noisy, master, why);
+    const double nul = TnfArm("strong", master, master, why);
+    std::printf("    PSNR against the clean master: no denoise %.2f, subtle %.2f, balanced %.2f, strong %.2f dB; null arm (clean master, strong) %.2f dB\n", off, sub, bal, str, nul);
+    CHECK(bal >= off + 0.5, "balanced moves toward the master: %.2f vs %.2f dB", bal, off);
+    CHECK(str >= off + 0.5, "strong moves toward the master: %.2f vs %.2f dB", str, off);
+    CHECK(nul >= 40.0, "null arm: the clean master is not restyled (%.2f dB)", nul);
+    return g_fail ? "failed" : "ok";
+}
+
 int main()
 {
     std::printf("%s", ProbeReport().c_str());
     const Caps& c = Probe();
-    std::printf("summary: built=%d frameProcessor=%d lowLatencyFI=%d lowLatencySR=%d frc=%d superResolution=%d sizeQueries=%d\n", int(c.built), int(c.frameProcessor),
-                int(c.lowLatencyFI), int(c.lowLatencySR), int(c.frc), int(c.superResolution), int(c.sizeQueries));
+    std::printf("summary: built=%d frameProcessor=%d lowLatencyFI=%d lowLatencySR=%d frc=%d superResolution=%d noiseFilter=%d sizeQueries=%d\n", int(c.built), int(c.frameProcessor),
+                int(c.lowLatencyFI), int(c.lowLatencySR), int(c.frc), int(c.superResolution), int(c.noiseFilter), int(c.sizeQueries));
+    std::printf("APPLE_TNF_RESULT=%s\n", TestNoiseFilter(c).c_str());
     if (!c.AnyInterpolation() && !c.lowLatencySR) {
         Engine e; Config cfg; cfg.width = 1280; cfg.height = 720;
         std::string err, info;

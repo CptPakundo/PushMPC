@@ -69,6 +69,8 @@ Built on PushFPS 4.5.8 and Veyra 2.2.1.
   deinterlaces as before. Film in a TV signal is restored to 24 frames in mpv only; VLC deinterlaces it instead.
 - In mpv, deinterlacing or restoring film starts a few seconds into the file, once the picture is measured, and not
   when saving a video with mpv (`--o`).
+- Mac noise reduction (`CleanUp=On`, macOS 26) is new and hasn't run on a real Mac yet. It is off by default and not
+  used in VLC.
 - Capture mode is a little behind the sound (set the player's audio delay to about +80 ms) and can't show
   copy-protected video.
 - In mpv through VapourSynth, very high multipliers at 4K can be limited by copying frames; PushMPC's own mpv and the

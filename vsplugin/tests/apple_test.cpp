@@ -10,7 +10,8 @@
 //  - backend selection with the apple backend (backend.h);
 //  - apple_nn.h: the .pmnn parser and the ArtCNN float reference (padding, ReLU, long skip, DCR depth-to-space, clip),
 //    the 10-bit recovery (a PQ gradient pan through a simulated 8-bit interpolator), the super-resolution order and the
-//    real-time check.
+//    real-time check;
+//  - the temporal noise filter setting (DecideDenoise: Auto off, strengths).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -375,6 +376,22 @@ static void TestRecovery()
     CHECK(Residual(1023) == 3 && Residual(2) == -2 && Residual(1) == 1 && To8(1023) == 255, "residual range");
 }
 
+// the temporal noise filter's setting: Auto and absent are off (grain is picture), On takes the strength names or 0..1
+static void TestDenoise()
+{
+    CHECK(!DecideDenoise("auto", "").on, "Auto is off");
+    CHECK(!DecideDenoise("", "strong").on, "absent is off");
+    CHECK(!DecideDenoise("Off", "strong").on, "Off");
+    const DenoisePick on = DecideDenoise("On", "");
+    CHECK(on.on && std::fabs(on.strength - 0.5f) < 1e-6f, "On without a strength: balanced 0.5 (%.2f)", double(on.strength));
+    CHECK(std::fabs(DecideDenoise("on", "Subtle").strength - 0.25f) < 1e-6f, "subtle 0.25");
+    CHECK(std::fabs(DecideDenoise("on", "STRONG").strength - 0.75f) < 1e-6f, "strong 0.75");
+    CHECK(std::fabs(DecideDenoise("1", "0.9").strength - 0.9f) < 1e-6f, "a number");
+    CHECK(std::fabs(DecideDenoise("on", "7").strength - 1.0f) < 1e-6f, "clamped to 1");
+    CHECK(std::fabs(DecideDenoise("on", "junk").strength - 0.5f) < 1e-6f, "junk keeps balanced");
+    CHECK(!DecideDenoise("on", "0").on, "strength 0 is off");
+}
+
 static void TestSrOrder()
 {
     SrInputs in; in.w = 1920; in.h = 1080; in.editing = true; in.artcnn32 = in.artcnn16 = true;
@@ -410,6 +427,7 @@ int main()
     TestNn();
     TestRecovery();
     TestSrOrder();
+    TestDenoise();
     std::printf("apple_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
