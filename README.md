@@ -27,8 +27,10 @@ and sets itself up for your graphics card and display.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
 - **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
   clean-up for low-quality streams.
-- **HDR done right.** On an HDR display, HDR10, HDR10+ and HLG play untouched. On an SDR display, HDR video is
-  converted to fit your screen.
+- **HDR done right.** HDR10, HDR10+ and HLG play untouched (in MPC-HC also Dolby Vision, profiles 7 and 8). On an
+  SDR display, HDR video is converted to fit your screen.
+- **Made for animation.** In MPC-HC, PushMPC tells cartoons and anime from live action by looking at the picture
+  itself, and you can switch on an anime upscaler for them (tested with 1080p video).
 - **No fiddling.** Auto picks every setting for your graphics card and screen, and keeps adjusting while you watch.
   You can still change anything.
 - **Your player stays your player.** PushMPC plugs into it, and uninstalling puts its settings back the way they were.
@@ -46,7 +48,7 @@ In our tests on a GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps, 
 | mpv.net | ✅ | – | – |
 | MPC-QT | ✅ | ✅ | – |
 | SMPlayer | 🧪 | ✅ | – |
-| Celluloid, Haruna | – | ✅ | – |
+| Celluloid (your distribution's), Haruna | – | ✅ | – |
 | IINA | – | – | 🧪 |
 | VLC 3 | ✅ | ✅ | 🧪 |
 | Kodi 21 and 22 | ✅ | ✅ | – |
@@ -154,8 +156,8 @@ PushMPC. In PotPlayer, choose MPC Video Renderer and a "copy-back" decoder (see 
 
 <details><summary><b>Do I need an HDR display?</b></summary>
 
-No. On an SDR display you get smoother motion and upscaling, and HDR video is converted to fit your screen. With Windows
-HDR on, HDR10, HDR10+ and HLG pass through untouched. In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
+No. On an SDR display you get smoother motion and upscaling, and HDR video is converted to fit your screen. PushMPC
+passes HDR10, HDR10+ and HLG on untouched, and in MPC-HC also Dolby Vision (profiles 7 and 8). In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
 HDR10 or HLG) from its very first frame, so HDR is recognised from the start.
 </details>
 
