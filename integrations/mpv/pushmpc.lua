@@ -526,8 +526,9 @@ local function colour_file() return (vs_status_path():gsub("%.txt$", ".colour"))
 mp.register_event("end-file", function() os.remove(colour_file()) end)
 local mpv_version = (mp.get_property("mpv-version", "") or ""):match("(%d+%.%d+[%.%d]*)") or ""
 
+local between_files = false   -- late add only: from end-file to file-loaded video-params may still be the old file's
 local function ensure(early)
-    if busy then return end
+    if busy or (between_files and not early) then return end
     -- the late add (mpv older than 0.39, or the early add did not happen): only once video runs (soft failure), and
     -- only with real params: before the first frame enters the chain mpv answers video-params with a {w, h} fallback
     -- (command.c "Simplistic fallback for stupid scripts") that has no colour (integrations 46087052008: 5 of 12 runs)
@@ -607,6 +608,7 @@ end
 
 mp.register_event("file-loaded", function()
     failed_for = nil
+    between_files = false
     if opts["shaders-when"] == "always" then shaders("no better upscaler on this PC") end
 end)
 -- the early add's fallback: pushmpc.MpvColour could not read frame 0's colour (it writes <temp>/pushmpc-vs-<pid>.colour
@@ -662,6 +664,15 @@ do
                     ensure(true)
                     return
                 end
+            end
+        end)
+    elseif not native then
+        -- the late add on a playlist: @pushmpc stays in the vf list with the file before's colour; it goes at end-file
+        -- and the next file's late add carries its own colour
+        mp.register_event("end-file", function()
+            between_files = true
+            for _, f in ipairs(mp.get_property_native("vf") or {}) do
+                if f.label == "pushmpc" then busy = true; mp.commandv("vf", "remove", "@pushmpc"); busy = false; break end
             end
         end)
     end
