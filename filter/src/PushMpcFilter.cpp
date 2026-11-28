@@ -54,6 +54,7 @@
 #include "pushmpc/unlocks.h"            // T5b: vendor unlocks (off switches, self-test results)
 #include "pushmpc/content_detect.h"     // what the picture is (class per shot), interlacing and the frame interval, measured
 #include "pushmpc/content_model.h"      // the optional image model behind ContentDetect (pmml, its own thread)
+#include "pushmpc/artifact_meter.h"     // compression damage measured in the picture (shadow mode: logged, decides nothing)
 #include "resource.h"
 #include "version.h"
 #include "PushMpcSettings.h"
@@ -2105,6 +2106,7 @@ public:
             m_inInterlaced = m_typeInterlaced && (il & AMINTERLACE_1FieldPerSample) != 0;
             m_ilDecided = false; m_ilSeen = m_ilCount = 0; m_comb.Reset();   // interlacing: measured in the picture (CheckInterlace)
             StopContent(); m_content.Reset(); m_contentClass = 0; m_contentConf = 0.f; m_contentCg = false; m_contentLogged = -1;
+            m_art.Reset(); m_artNext = -1; m_artSeq = 0; m_artLogT = -1e18; m_artSkipped = 0;   // the worker is stopped: safe
             m_baseStepMs = 0; m_ptsStepMs = 0; m_tracker = pm::StepTracker{}; m_trackReset = false; m_openFps = 0; m_reopenForRate = false; m_openDeferred = false;   // a new stream: measured again
             m_inArX = ax; m_inArY = ay;
             DXVA2_ExtendedFormat ex; ex.value = m_inCtrl;
@@ -2936,10 +2938,20 @@ private:
     std::atomic<float> m_contentConf = 0.f;
     std::atomic<bool> m_contentCg = false;   // drawn and rendered 3D CG (DrawnPolicy kPolicyDrawnCg)
     int m_contentLogged = -1;
+    // The artifact meter (artifact_meter.h), shadow mode (audit B12): the four bitrate-keyed Auto rules (Clean up, HDR
+    // boost, the VSR style, deband) still decide from bppEq; the meter's per-shot scores are only logged beside what the
+    // bitrate rule says, for calibration. Sampled lines a few times a second on the streaming thread (only while one of
+    // those settings is on Auto: m_artInPlay, set by the Auto tick), measured on the content worker.
+    std::atomic<bool> m_artInPlay = false;
+    std::atomic<double> m_bppNow = -1.0;           // bppEq as SourceInfo saw it last (the log line's "bpp rule says")
+    double m_artNext = -1; uint32_t m_artSeq = 0;  // streaming thread
+    pushmpc::artifacts::ArtifactMeter m_art;       // content worker only
+    double m_artLogT = -1e18; int m_artSkipped = 0;
+    void LogArtifacts(const pushmpc::artifacts::Shot& shot);
     void MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool disc);
     // ContentDetect runs on its own thread (~8 ms a 1080p frame, up to ~27 ms when a window is evaluated, measured): the
     // streaming thread only makes the cell grid and hands it over (a full queue drops frames: a discontinuity there)
-    struct ContentJob { pushmpc::content::Cells cells; double t = 0; bool disc = false; };
+    struct ContentJob { pushmpc::content::Cells cells; double t = 0; bool disc = false; pushmpc::artifacts::Tiles tiles; };
     std::mutex m_cdMx; std::condition_variable m_cdCv; std::deque<ContentJob> m_cdQueue; std::thread m_cdThread; bool m_cdStop = false;
     void ContentLoop();
     void StopContent() { { std::lock_guard<std::mutex> lk(m_cdMx); m_cdStop = true; } m_cdCv.notify_all(); if (m_cdThread.joinable()) m_cdThread.join(); m_cdStop = false; m_cdQueue.clear(); }
@@ -4837,6 +4849,7 @@ pm::Source CPushMpcFilter::SourceInfo()
     s.tenBit = m_inP010;
     // bits per pixel per frame at the measured frame rate (a "29.97" tag on a 24p body would make it 25 % low)
     s.bppEq = pm::BitsPerPixel(m_bitrate, s.w, s.h, step > 1.0 ? 1000.0 / m_baseStepMs.load() : 1e7 / double(m_atpf > 0 ? m_atpf : 417083), m_fourcc);
+    m_bppNow = s.bppEq;
     s.heldShare = m_heldShare.load();
     s.contentClass = m_contentClass.load(); s.contentConf = m_contentConf.load(); s.contentCg = m_contentCg.load();
     // the page may set this show's choice while it plays (Shows\<key>\Choice)
@@ -5372,6 +5385,13 @@ void CPushMpcFilter::MeasureContent(IMediaSample* pIn, REFERENCE_TIME pts, bool 
                        ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 16, limited)
         : CellsFromYuv(static_cast<const uint8_t*>(src), ptrdiff_t(m_inStride), static_cast<const uint8_t*>(src + size_t(m_inStride) * m_inH), static_cast<const uint8_t*>(nullptr),
                        ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 8, limited);
+    // the artifact meter's lines (shadow mode), ~6 a second, only while a bitrate-keyed rule is on Auto: nothing otherwise
+    if (m_artInPlay.load(std::memory_order_relaxed) && (m_artNext < 0 || job.t >= m_artNext || job.t < m_artNext - 5.0)) {
+        using pushmpc::artifacts::ArtifactMeter;
+        m_artNext = job.t + 1.0 / ArtifactMeter::kSampleHz;
+        job.tiles = m_inP010 ? ArtifactMeter::Sample(reinterpret_cast<const uint16_t*>(src), ptrdiff_t(m_inStride / 2), int(m_inW), int(m_inH), 6, 10, job.t, m_artSeq++)
+                             : ArtifactMeter::Sample(static_cast<const uint8_t*>(src), ptrdiff_t(m_inStride), int(m_inW), int(m_inH), 0, 8, job.t, m_artSeq++);
+    }
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
     {   // the image model's evidence: a 224x224 thumbnail about once a second, run on the model's own thread
         if (!m_contentModel) m_contentModel = std::make_unique<pushmpc::content::ContentModel>([this](const std::string& m) { Log(m); });
@@ -5403,7 +5423,9 @@ void CPushMpcFilter::ContentLoop()
             if (m_cdStop) return;
             job = std::move(m_cdQueue.front()); m_cdQueue.pop_front();
         }
-        if (job.disc) m_content.Discontinuity();
+        if (job.disc) { m_content.Discontinuity(); m_art.Discontinuity(); }
+        // the artifact meter (shadow mode): its own cut test on the sampled lines (ContentDetector's cut is private)
+        if (job.tiles.ok() && m_art.Push(job.tiles)) LogArtifacts(m_art.LastShot());
 #if defined(PUSHMPC_CONTENT_MODEL) && PUSHMPC_CONTENT_MODEL
         double p, pt;
         double pc; if (m_contentModel && m_contentModel->Take(p, pt, pc)) m_content.SetImageEvidence(p, pt, pc);
@@ -5419,6 +5441,23 @@ void CPushMpcFilter::ContentLoop()
                             ClassName(st.cls), st.cg ? " (rendered 3D CG)" : "", 100.0 * st.confidence, job.t, st.drawnShare, st.logOdds, st.imageEvidence ? " (with the image model)" : " (hand-built cues only)", st.changes));
         }
     }
+}
+// One line per shot (at most one every 5 s of stream time; the shots in between are counted), beside what the bitrate
+// rule decides today. Shadow mode: nothing reads these scores.
+void CPushMpcFilter::LogArtifacts(const pushmpc::artifacts::Shot& sh)
+{
+    if (!sh.valid) return;
+    if (sh.t1 >= m_artLogT && sh.t1 - m_artLogT < 5.0) { ++m_artSkipped; return; }
+    const double bpp = m_bppNow.load();
+    const std::string rule = bpp < 0 ? std::string("unknown (bitrate unknown)")
+        : std::format("{} ({:.3f} bits per pixel, threshold {:.2f})", bpp <= pm::kLowBitrateBpp ? "on" : "off", bpp, pm::kLowBitrateBpp);
+    const pushmpc::artifacts::Shot st = m_art.Stream();
+    Log(std::format("artifacts (measured, shadow): shot {:.1f}-{:.1f} s ({} frames{}): block {:.2f} ring {:.2f} band {:.3f} detail {:.2f}, "
+                    "confidence {:.2f}/{:.2f}/{:.2f}/{:.2f}; stream so far block {:.2f} ring {:.2f} band {:.3f} detail {:.2f} ({} shots{}); bpp rule says {}",
+                    sh.t0, sh.t1, sh.frames, sh.endedByCut ? ", cut" : "", sh.block, sh.ring, sh.band, sh.detail,
+                    sh.confBlock, sh.confRing, sh.confBand, sh.confDetail, st.block, st.ring, st.band, st.detail, m_art.shots(),
+                    m_artSkipped ? std::format(", {} not logged", m_artSkipped) : std::string(), rule));
+    m_artLogT = sh.t1; m_artSkipped = 0;
 }
 // The user's own animation-mode choice for this show (a preference store addressed by the series folder; nothing is
 // detected from the path: the picture's class comes from ContentDetect)
@@ -5480,6 +5519,8 @@ void CPushMpcFilter::AutoLoop()
             s = pm::LoadSettings();
             std::wstring e; if (EnvStr(L"Enable", e)) s.enable = _wtoi(e.c_str()) != 0;
         }
+        // the artifact meter (shadow mode) samples only while a rule it would key is on Auto
+        m_artInPlay = s.enable && (s.cleanUp == pm::kAuto || s.deband == pm::kAuto || s.vsrStyle == pm::VsrStyle::Auto || s.hdrBoost == pm::HdrBoost::Auto);
         if (g_benchSerial.load() != benchSeen) { benchSeen = g_benchSerial.load(); m_learnedLoaded = false; LoadLearned(); m_lastCostChangeQpc = 0; }
         pm::Display d = pm::QueryDisplay(wnd, s.vrr, m_gpu.nvidia());
         {

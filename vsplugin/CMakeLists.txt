@@ -57,6 +57,11 @@ if(EXISTS "${VAPOURSYNTH_SDK}/VapourSynth4.h")
   target_include_directories(portable_test PRIVATE "${VAPOURSYNTH_SDK}" "${PUSHMPC_CORE_INCLUDE}")
 endif()
 add_test(NAME portable_test COMMAND portable_test)
+# the artifact meter (pushmpc/artifact_meter.h, header-only): synthetic blocky, banded, ringing, blurred and clean frames
+add_executable(artifact_meter_test ../pushmpc/tools/artifact_meter_test.cpp)
+set_target_properties(artifact_meter_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+target_include_directories(artifact_meter_test PRIVATE "${PUSHMPC_CORE_INCLUDE}")
+add_test(NAME artifact_meter_test COMMAND artifact_meter_test)
 
 # ---- the portable GPU engine (engines/gpu): Vulkan 1.2 compute, the Vulkan library loaded at run time through volk.
 # Needs Vulkan-Headers and volk (PMVS_VULKAN_HEADERS_DIR / PMVS_VOLK_DIR, or -DPMVS_FETCH_GPU_DEPS=ON to fetch the

@@ -2,7 +2,7 @@
 # CPU) on hosted runners with no GPU, on Windows, Linux and macOS:
 #   - builds the portable engine (a static library) and portable_test with CMake (MSVC, gcc, Apple clang) and runs it:
 #     backend selection, the CPU budget, settings.ini and folders, the engine on synthetic frames (a moving box, a hard
-#     cut, a seek), the calibration;
+#     cut, a seek), the calibration; artifact_meter_test (pushmpc/artifact_meter.h on synthetic frames);
 #   - Linux and macOS: the mpv.conf integration's fake-HOME tests (POSIX sh and dash);
 #   - Linux and macOS: pushmpc_vs.so / .dylib built with the headers of the pinned VapourSynth wheel, then the portable
 #     backend through the Python API and vspipe (TODO-pin guard:
@@ -12,9 +12,9 @@ name: vsplugin-portable
 
 on:
   push:
-    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json', '.github/workflows/vsplugin-portable.yml']
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json', 'pushmpc/include/pushmpc/artifact_meter.h', 'pushmpc/tools/artifact_meter_test.cpp', '.github/workflows/vsplugin-portable.yml']
   pull_request:
-    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json']
+    paths: ['vsplugin/**', 'integrations/mpv/**', 'scripts/vapoursynth-pin.json', 'pushmpc/include/pushmpc/artifact_meter.h', 'pushmpc/tools/artifact_meter_test.cpp']
   workflow_dispatch:
 
 jobs:
@@ -36,11 +36,11 @@ jobs:
         shell: bash
         run: |
           cmake -S vsplugin -B build-portable -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-portable --config Release --target portable_test apple_test --parallel
+          cmake --build build-portable --config Release --target portable_test apple_test artifact_meter_test --parallel
 
       - name: Unit tests
         shell: bash
-        run: ctest --test-dir build-portable -C Release -R "portable_test|apple_test" --output-on-failure
+        run: ctest --test-dir build-portable -C Release -R "portable_test|apple_test|artifact_meter_test" --output-on-failure
 
       - name: mpv.conf integration (fake HOME)
         if: runner.os != 'Windows'
