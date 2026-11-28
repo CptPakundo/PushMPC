@@ -168,6 +168,56 @@ jobs:
           if ($ctl -ne 48) { throw "mpv alone showed $ctl of the clip's 48 frames" }
           if ($log -notmatch 'the stream ends after source frame 47') { throw 'the nvidia path did not find the stream''s end (eof_guard.h)' }
           if ($out -ne [int]$env:K * $ctl) { throw "the nvidia path gave $out frames, want $([int]$env:K * $ctl)" }
+      - name: Interlaced input passes through at the source rate, measured in the picture (vspipe and mpv, stub core)
+        shell: pwsh
+        run: |
+          # interlace_clip.vpy: a panning texture woven from two moments per frame (flagged TFF, or flagged progressive),
+          # and the same pan as whole frames flagged TFF. The field combing decides (vs_interlace.h), never _FieldBased.
+          $env:PUSHMPC_VS_PLUGIN = "$PWD\vsplugin\bin\pushmpc_vs.dll"
+          $env:PUSHMPC_STUB_DIR = "$PWD\vsplugin\bin\stub"
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-il"
+          $env:PUSHMPC_TEST_K = $env:K
+          $k = [int]$env:K; $n = 120; $rc = 0
+          # vspipe: a clip of known length is probed at create; interlaced, the output is the clip itself (N of N)
+          foreach ($c in @(@('woven', $n, '30000/1001'), @('woven-unflagged', $n, '30000/1001'), @('progressive', ($k * $n), "$(30000 * $k)/1001"))) {
+            $env:PUSHMPC_IL_KIND = $c[0]
+            $info = vspipe --info vsplugin/tests/ci/interlace_clip.vpy 2>&1 | Out-String
+            $got = if ($info -match 'Frames:\s+(\d+)') { [int]$Matches[1] } else { -1 }
+            $fps = if ($info -match 'FPS:\s+(\d+/\d+)') { $Matches[1] } else { '?' }
+            $what = if ($c[0] -eq 'progressive') { "frame generation x$k" } else { 'pass-through' }
+            Write-Host "interlaced check (vspipe, $($c[0])): $what, $got of $($c[1]) frames (want $($c[1])) at $fps (want $($c[2]))"
+            if ($got -ne $c[1] -or $fps -ne $c[2]) { Write-Host "::error::vspipe $($c[0]): $got frames at $fps, want $($c[1]) at $($c[2])"; $rc = 1 }
+            vspipe vsplugin/tests/ci/interlace_clip.vpy -- ; if ($LASTEXITCODE) { Write-Host "::error::vspipe $($c[0]) failed to render"; $rc = 1 }
+          }
+          # mpv: its source has no length while the script loads, so the first instance measures as it plays (and asks
+          # pushmpc.lua for a re-add); the same stream played again in the process starts from that verdict: exactly
+          # K x N frames shown for the first play, N for the second (vo=image, untimed: nothing dropped)
+          $t = Join-Path $env:RUNNER_TEMP 'mpvil'; New-Item -ItemType Directory $t -Force | Out-Null
+          Copy-Item vsplugin\scripts\pushmpc.vpy, vsplugin\bin\pushmpc_vs.dll $t
+          $env:PUSHMPC_IL_MODE = 'clip'
+          foreach ($c in 'woven', 'progressive') { $env:PUSHMPC_IL_KIND = $c; vspipe -c y4m vsplugin/tests/ci/interlace_clip.vpy "$t\$c.y4m"; if ($LASTEXITCODE) { throw "clip $c" } }
+          Remove-Item Env:PUSHMPC_IL_MODE
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-mpvil"
+          $stub = "$PWD\vsplugin\bin\stub".Replace('\', '/')
+          $vpy = "$t\pushmpc.vpy".Replace('\', '/')
+          $vf = "--vf=vapoursynth=file=[$vpy]:buffered-frames=8:concurrent-frames=2:user-data=[adapter=warp,core_dir=$stub,smoother=$env:K,sharper=off,chroma=420,backend=nvidia]"
+          function Count-Shown($dir, $files) {
+            New-Item -ItemType Directory $dir -Force | Out-Null
+            & "$env:MPVDIR\mpv.com" --no-config --vo=image --vo-image-format=png "--vo-image-outdir=$dir" --untimed --framedrop=no --ao=null --hwdec=no `
+              --hr-seek-framedrop=no --interpolation=no $vf --msg-level=all=v @files 2>&1 | Out-File "$dir.log"
+            @(Get-ChildItem $dir -Filter *.png).Count
+          }
+          $two = Count-Shown "$t\woven2" @("$t\woven.y4m", "$t\woven.y4m")
+          $second = $two - $k * $n
+          Write-Host "interlaced check (mpv, first play measured while playing): frame generation x$k until the re-add, $($k * $n) shown (want $($k * $n)); second play: pass-through, $second of $n source frames (want $n)"
+          if ($second -ne $n) { Write-Host "::error::mpv woven twice: $two frames, want $($k * $n + $n)"; $rc = 1 }
+          $prog = Count-Shown "$t\prog" @("$t\progressive.y4m")
+          Write-Host "interlaced check (mpv, progressive flagged TFF): frame generation x$k, $prog of $($k * $n) frames (want $($k * $n))"
+          if ($prog -ne $k * $n) { Write-Host "::error::mpv progressive: $prog frames, want $($k * $n)"; $rc = 1 }
+          $log = (Get-Content "$env:RUNNER_TEMP\logs-il\vsplugin-*.log", "$env:RUNNER_TEMP\logs-mpvil\vsplugin-*.log" -Raw) -join "`n"
+          ($log -split "`n") | Select-String 'interlaced: |progressive \(measured\)' | Select-Object -First 12 | ForEach-Object { Write-Host $_.Line }
+          if ($log -notmatch 'on this stream before: the clip passes through') { Write-Host '::error::the second mpv play did not start from the measured verdict'; $rc = 1 }
+          exit $rc
       - name: mpv.conf integration (fake roots)
         shell: pwsh
         run: pwsh -File integrations/mpv/tests/mpv-integration.tests.ps1

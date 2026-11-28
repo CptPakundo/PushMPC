@@ -831,7 +831,7 @@ private:
         else if (IsHdrTransfer(trc) && !PM_KODI22 && !m_settings.hdr21Sdr)
             why = "HDR: Kodi 21 cannot take HDR pictures from an add-on (frame generation in SDR is an add-on setting)";
         // every stream is measured; a stream flagged progressive gets a shorter look (the flag is only a prior)
-        else if (ProbeCombing(p->field_order == AV_FIELD_PROGRESSIVE ? 120 : 400) == pushmpc::content::CombMeter::kInterlaced) why = "interlaced (field combing measured): Kodi deinterlaces it";
+        else if (ProbeCombing(p->field_order == AV_FIELD_PROGRESSIVE ? pushmpc::content::CombMeter::kProbeFlagged : pushmpc::content::CombMeter::kProbe) == pushmpc::content::CombMeter::kInterlaced) why = "interlaced (field combing measured): Kodi deinterlaces it";
         else if (p->width < 16 || p->height < 16) why = "picture too small";
         // the frame rate the decoded timestamps show wins over the container's tag (measured while probing above)
         if (why.empty() && m_probeFps > 1.0 && (m_fps <= 0 || std::fabs(m_probeFps - m_fps) / m_probeFps > 0.05)) {

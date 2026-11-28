@@ -8,11 +8,17 @@
 // place of a failed one hands on a frame flagged PushMPCEnd. The backends take the first flagged frame as the end
 // of a known length (ScanEnd, then Pipeline::SetEnd and their End). Outputs at or past that end still fail, so mpv
 // finishes as before. A source with a real length is not wrapped.
+// The same node also carries the interlace measurement of an unknown-length stream (vs_interlace.h): watch sees each
+// source frame as it passes. Without a backend behind it (the pass-through of an interlaced stream, the rife preset)
+// substitute is off: a failed frame stays a failure, as from the source itself.
 #pragma once
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <mutex>
+#include <set>
 #include <string>
 #include "VapourSynth4.h"
 #include "vslog.h"
@@ -26,17 +32,27 @@ struct EofGuard {
     VSNode* up = nullptr;
     VSVideoInfo vi{};
     std::atomic<bool> logged{ false };
+    bool substitute = true;                                        // a failed frame at the end becomes a flagged one
+    std::function<void(const VSAPI*, const VSFrame*, int)> watch;  // each frame passed on (thread-safe itself)
+    VSNode* self = nullptr;
 };
+// the guards alive: a backend handed a guard already (pushmpc.Enhance wraps the source before it picks a backend) does
+// not wrap it again
+inline std::mutex& GuardLock() { static std::mutex m; return m; }
+inline std::set<const VSNode*>& Guards() { static std::set<const VSNode*> s; return s; }
 
 inline const VSFrame* VS_CC EofGuardGetFrame(int n, int reason, void* inst, void**, VSFrameContext* fc, VSCore* core, const VSAPI* a)
 {
     auto* g = static_cast<EofGuard*>(inst);
     if (reason != arInitial) return nullptr;
     char err[512] = "";
-    if (const VSFrame* f = a->getFrame(n, g->up, err, sizeof(err))) return f;
+    if (const VSFrame* f = a->getFrame(n, g->up, err, sizeof(err))) {
+        if (g->watch) g->watch(a, f, n);
+        return f;
+    }
     // only mpv's end ("EOF or filter EOF/reinit", vf_vapoursynth.c: no frame will come) is an end. Any other failure (a
     // frame mpv no longer holds, a decoder error) stays an error, as without the guard: it must not cut the stream short
-    if (n == 0 || !std::strstr(err, "EOF")) {
+    if (!g->substitute || n == 0 || !std::strstr(err, "EOF")) {
         a->setFilterError(("pushmpc.Enhance: source frame " + std::to_string(n) + " failed: " + std::string(err)).c_str(), fc);
         return nullptr;
     }
@@ -51,20 +67,26 @@ inline const VSFrame* VS_CC EofGuardGetFrame(int n, int reason, void* inst, void
 inline void VS_CC EofGuardFree(void* inst, VSCore*, const VSAPI* a)
 {
     auto* g = static_cast<EofGuard*>(inst);
+    { std::lock_guard<std::mutex> lk(GuardLock()); Guards().erase(g->self); }
     a->freeNode(g->up);
     delete g;
 }
 
-// node wrapped when its length is the unknown one (the reference to node passes to the guard), else node itself
-inline VSNode* GuardUnknownLength(VSNode* node, VSCore* core, const VSAPI* a)
+// node wrapped when its length is the unknown one (the reference to node passes to the guard), else node itself; a
+// guard already (made by WatchUnknownLength) stays as it is
+inline VSNode* GuardUnknownLength(VSNode* node, VSCore* core, const VSAPI* a,
+                                  std::function<void(const VSAPI*, const VSFrame*, int)> watch = {}, bool substitute = true)
 {
     const VSVideoInfo* vi = a->getVideoInfo(node);
     if (vi->numFrames < kUnknownLengthFrames) return node;
+    { std::lock_guard<std::mutex> lk(GuardLock()); if (Guards().count(node)) return node; }
     auto* g = new EofGuard();
-    g->up = node; g->vi = *vi;
+    g->up = node; g->vi = *vi; g->watch = std::move(watch); g->substitute = substitute;
     VSFilterDependency deps[] = { { node, rpGeneral } };
     VSNode* out = a->createVideoFilter2("PushMPCEndGuard", vi, EofGuardGetFrame, EofGuardFree, fmParallel, deps, 1, g, core);
     if (!out) { delete g; return node; }
+    std::lock_guard<std::mutex> lk(GuardLock());
+    g->self = out; Guards().insert(out);
     return out;
 }
 

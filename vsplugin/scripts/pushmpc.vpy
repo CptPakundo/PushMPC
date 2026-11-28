@@ -140,7 +140,18 @@ try:
     _interp = _text(_sel["interp"])
 except (KeyError, IndexError):
     _interp = ""
-if _backend == "rife":
+# interlaced input (vsplugin vs_interlace.h): field combing measured in the picture once for the whole chain (the
+# frames' _FieldBased is only a prior). Interlaced: PushMPC steps aside and the source frames pass through at the source
+# rate. mpv's source has no length yet, so the first frames are measured as they play; a verdict that differs from how
+# this script started makes pushmpc.lua add the filter again (interlace_reload in the status file).
+_il = None
+if hasattr(core.pushmpc, "Interlace"):
+    _il = core.pushmpc.Interlace(clip, end_frames=0 if (_backend == "rife" or _interp == "rife") else 1)
+    clip = _il["clip"]
+    _args["interlace_check"] = 0
+if _il is not None and int(_il["interlaced"]):
+    pass
+elif _backend == "rife":
     clip = _rife(clip, _args)
 else:
     if _backend == "nvidia" and _interp == "rife":

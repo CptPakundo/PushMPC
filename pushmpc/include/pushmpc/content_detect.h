@@ -1631,6 +1631,11 @@ class CombMeter {
 public:
     static constexpr float kCombR = 1.0f;
     static constexpr int kNeed = 24;           // measurable (moving) frames for a verdict
+    // the routes that measure while playing (the DirectShow filter, mpv, VLC): a still picture shows no combing whatever
+    // its fields, so after this many frames without a verdict (~10 s) the stream counts as progressive. The routes that
+    // probe ahead (Kodi, a VapourSynth clip of known length) read kProbeFlagged frames when the stream's own flags say
+    // progressive, kProbe otherwise (the flags are a prior that sizes the look, never the verdict).
+    static constexpr int kGiveUp = 240, kProbe = 400, kProbeFlagged = 120;
     enum Verdict { kMeasuring = 0, kProgressive = 1, kInterlaced = 2 };
     void Reset() { *this = CombMeter(); }
     Verdict verdict() const { return m_v; }

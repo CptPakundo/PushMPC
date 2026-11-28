@@ -28,6 +28,8 @@
 #include "veyra/portable/Interpolate.h"
 #define PMVS_REGION_REPAIR_NO_ENGINE 1   // the repair's planning loop with a CPU stand-in for the Vulkan engine
 #include "region_repair.h"
+#include "pushmpc/content_detect.h"   // CombMeter (interlacing)
+#include "../../tests/comb_synth.h"
 
 using namespace pmvs;
 using namespace pmvs::portable;
@@ -586,6 +588,42 @@ static void TestMeasuredRate()
 #endif
 }
 
+// ------------------------------------------------------------------------------------------------ interlacing
+// CombMeter (content_detect.h), the meter every route uses for interlaced input (the VapourSynth routes:
+// vs_interlace.h), on synthetic luma (tests/comb_synth.h): woven fields from different moments are interlaced within the
+// filter's 24 moving frames, the same motion as progressive frames is not, a still never decides (the routes then count
+// it as progressive after CombMeter::kGiveUp frames), and 10-bit words measure as 8-bit codes.
+static void TestInterlace()
+{
+    using pushmpc::content::CombMeter;
+    const int w = 320, h = 240;
+    auto run8 = [&](int woven, int still, int frames, int& at) {
+        CombMeter m; std::vector<uint8_t> y(size_t(w) * h); at = -1;
+        for (int n = 0; n < frames && m.verdict() == CombMeter::kMeasuring; ++n) {
+            pm_comb_synth8(y.data(), w, w, h, n, woven, still);
+            if (m.Push(y.data(), w, w, h, 0) != CombMeter::kMeasuring) at = n;
+        }
+        return m;
+    };
+    int at = 0;
+    CombMeter c = run8(1, 0, 60, at);
+    CHECK(c.verdict() == CombMeter::kInterlaced && at == CombMeter::kNeed, "woven fields: interlaced after %d frames (%d of %d combed)", at, c.combed(), c.measured());
+    std::printf("interlace: woven 8-bit -> %s, %d of %d moving frames combed\n", c.verdict() == CombMeter::kInterlaced ? "interlaced" : "not interlaced", c.combed(), c.measured());
+    c = run8(0, 0, 60, at);
+    CHECK(c.verdict() == CombMeter::kProgressive && c.combed() == 0, "progressive motion: progressive (%d of %d combed)", c.combed(), c.measured());
+    std::printf("interlace: progressive 8-bit -> %s, %d of %d moving frames combed\n", c.verdict() == CombMeter::kProgressive ? "progressive" : "not progressive", c.combed(), c.measured());
+    c = run8(1, 1, CombMeter::kGiveUp, at);
+    CHECK(c.verdict() == CombMeter::kMeasuring && c.measured() == 0, "a still: no verdict (%d measured)", c.measured());
+    {   // 10-bit (LSB-aligned words, shift 2) and P010 (MSB-aligned, shift 8)
+        for (int sh : { 2, 8 }) {
+            CombMeter m; std::vector<uint16_t> y(size_t(w) * h);
+            for (int n = 0; n < 40 && m.verdict() == CombMeter::kMeasuring; ++n) { pm_comb_synth16(y.data(), w, w, h, n, 1, 0, sh); m.Push(y.data(), w, w, h, sh); }
+            CHECK(m.verdict() == CombMeter::kInterlaced, "woven fields in 16-bit words (shift %d): interlaced", sh);
+        }
+    }
+    CHECK(CombMeter::kGiveUp == 240 && CombMeter::kProbe == 400 && CombMeter::kProbeFlagged == 120, "the filter's and Kodi's look");
+}
+
 int main()
 {
     TestMeasuredRate();
@@ -603,6 +641,7 @@ int main()
     TestCadence();
     TestRepairGate();
     TestTransitions();
+    TestInterlace();
     TestCalibrate();
     std::printf("portable_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
