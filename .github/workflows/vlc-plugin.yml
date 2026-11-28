@@ -72,8 +72,7 @@ jobs:
           ffmpeg -hide_banner -loglevel error -f lavfi -i "$il,tinterlace=mode=merge,setfield=tff" -c:v libx264 -crf 12 -pix_fmt yuv420p -g 48 clips/woven.mkv
           ffmpeg -hide_banner -loglevel error -f lavfi -i "$il,fps=30000/1001,setfield=tff" -c:v libx264 -crf 12 -pix_fmt yuv420p -g 48 clips/woven-prog.mkv
           # telecine: a 24p film of the pan hard-telecined 2:3 (x264 codes progressive frames: the cadence measured in the
-          # picture decides), and that film followed by the woven 60i pan (mixed cadence); a woven pan for the hardware
-          # decoders (no B-frames, as hwclip)
+          # picture decides), and that film followed by the woven 60i pan (mixed cadence)
           film="nullsrc=s=320x240:r=24000/1001:d=6,format=gray,geq=lum='128+90*sin(2*PI*(X+0.5*Y-5*N)/24)',format=yuv420p"
           ffmpeg -hide_banner -loglevel error -f lavfi -i "$film,telecine=first_field=t:pattern=23" -c:v libx264 -qp 0 -pix_fmt yuv420p -g 48 clips/telecine.mkv
           ffmpeg -hide_banner -loglevel error -f lavfi -i "$film,telecine=first_field=t:pattern=23" -f lavfi -i "$il,tinterlace=mode=interleave_top" -filter_complex "[0][1]concat=n=2:v=1[v]" -map '[v]' -c:v libx264 -qp 0 -pix_fmt yuv420p -g 48 clips/mixed.mkv
@@ -286,7 +285,11 @@ jobs:
             grep -hE "PushMPC: (telecine|interlaced)" "res/linux/tc-$c.log" | sed 's/^[^:]*: //' | head -5
             echo "telecine check (VLC, $c): $got pictures shown"
             grep -q "2:3 pulldown removed here" "res/linux/tc-$c.log" || { echo "::error::VLC $c: the pulldown was not removed"; rc=1; }
-            if [ "$c" = mixed ]; then grep -q "the cadence broke" "res/linux/tc-$c.log" && grep -q "deinterlaced here" "res/linux/tc-$c.log" || { echo "::error::VLC mixed: the video section was not handed to the deinterlacer"; rc=1; }; fi
+            if [ "$c" = mixed ]; then
+              { [ "$(grep -c "the cadence broke" "res/linux/tc-$c.log")" = 1 ] && grep -q "deinterlaced here" "res/linux/tc-$c.log"; } || { echo "::error::VLC mixed: the video section was not handed to the deinterlacer once"; rc=1; }
+            else   # the film throughout: a wrong phase or field order leaves combing, the watchdog would hand it to the deinterlacer
+              grep -qE "the cadence broke|deinterlaced here" "res/linux/tc-$c.log" && { echo "::error::VLC telecine: combing left after the pulldown removal"; rc=1; }
+            fi
             grep -q "pass through from now on" "res/linux/tc-$c.log" && { echo "::error::VLC $c: the module could not keep up"; rc=1; }
           done
           rm -rf "$d"

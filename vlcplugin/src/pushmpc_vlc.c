@@ -496,6 +496,7 @@ struct filter_sys_t {
     picture_t *deint_src;       /* the input picture whose two fields come out next */
     bool deint_feed;            /* FilterPic is given our progressive pictures (no converter in front) */
     picture_t *feed_work;       /* hardware path: the CPU picture of our own the engine reads (FilterPic skips the surface read) */
+    mtime_t il_fp;              /* time spent in frame generation (FilterPic) since the cost check's start: not the deinterlacer's */
     /* telecine (pm_comb_cadence, pm_ivtc.h): the phase and field order measured, the pulldown removal, its watchdog */
     bool il_telecine, il_ivtc, il_ivtc_tried;
     int il_phase, il_tff, il_cad_frames;
@@ -982,7 +983,7 @@ static void IlDecide(filter_t *f, struct filter_sys_t *sys, int v)
         msg_Info(f, "PushMPC: telecine: 2:3 pulldown measured (%d of %d moving frames combed, on positions %d-%d of the cycle of five, %s)", cc, cm, ph, (ph + 1) % 5,
                  tff ? "top field first" : "bottom field first");
         sys->il_telecine = true; sys->il_phase = ph; sys->il_tff = tff;
-        sys->il_cad_frames = sys->il_seen;   /* the current picture is the meter's frame il_seen - 1 */
+        sys->il_cad_frames = fr;   /* the current picture is the meter's frame fr - 1 (a picture that could not be read is not counted) */
         pm_comb_free(sys->comb); sys->comb = NULL;
         sys->il_done = true;
 #ifdef _WIN32
@@ -1808,8 +1809,18 @@ static picture_t *PcLagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *
  * portable engines on the CPU planes; the module's converter in front of them for hardware pictures) our YADIF
  * (pm_deint.h) turns each woven picture into two progressive ones, one per field, and frame generation runs on those
  * (FilterPic), at the multiplier Auto decides for the doubled rate. Its cost is measured live: when it takes more than
- * half of the source interval on average (after 30 pictures), the module steps aside (IlAside) as before. The zero-copy
- * paths (VA-API, Direct3D 11 / pushcore, CVPX) step aside: their pictures never reach the CPU. */
+ * half of the source interval on average (after 30 pictures), the module steps aside (IlAside) as before. VA-API / VDPAU
+ * without zero copy: the surface the engine reads anyway is deinterlaced on the CPU and uploaded back (IlHand).
+ * The zero-copy paths step aside (their pictures never reach the CPU); a GPU deinterlace there is open work:
+ *  - VA-API (zc_hw): the video processing pipeline (VAEntrypointVideoProc, VAProcFilterDeinterlacing with
+ *    VAProcDeinterlacingMotionAdaptive / Bob, forward and backward references) is reachable on the decoder's VADisplay;
+ *    not built: no runner can exercise it (the CI's null driver pmnull_drv_video.c offers VAEntrypointVLD only).
+ *  - Direct3D 11 / pushcore (zc): the bridge's video processor (PushCoreD3D11Bridge.cpp) is set to
+ *    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE; an interlaced frame format with past surfaces and one OutputIndex per field
+ *    (a rate-conversion caps index with a deinterlace mode) would do it, behind a bridge ABI change; the hosted runners
+ *    have no GPU (WARP only) to verify a driver's deinterlace modes on.
+ *  - CVPX: VideoToolbox deinterlaces in the decompression session (kVTDecompressionPropertyKey_FieldMode,
+ *    DeinterlaceFields), which VLC's decoder owns; a video filter only receives the decoded CVPixelBuffers. */
 static picture_t *FilterPic(filter_t *f, picture_t *cur);
 /* the paths where the picture reaches the CPU: the portable engines on CPU planes (VLC's converter in front of them for
  * DX11 / CVPX pictures) and VA-API / VDPAU without zero copy (the surface is read for the engine anyway); the engine
@@ -1888,9 +1899,11 @@ static picture_t *IlHand(filter_t *f, struct filter_sys_t *sys, picture_t *cpu, 
     p->i_nb_fields = 2;
     if (p != cpu) { picture_CopyProperties(cpu, p); sys->feed_work = cpu; }
     sys->deint_feed = true;   /* already in the work format: FilterPic's converter (and its surface read) is skipped */
+    const mtime_t t = mdate();
     picture_t *r = FilterPic(f, p);
+    sys->il_fp += mdate() - t;
     sys->deint_feed = false;
-    sys->feed_work = NULL;
+    if (sys->feed_work) { picture_Release(sys->feed_work); sys->feed_work = NULL; }   /* FilterPic returned before it took it */
     return r;
 }
 static void IlAppend(picture_t **head, picture_t **tail, picture_t *r)
@@ -1905,7 +1918,7 @@ static void IlAppend(picture_t **head, picture_t **tail, picture_t *r)
 }
 static bool IlCostCheck(filter_t *f, struct filter_sys_t *sys, mtime_t t0, mtime_t dt, const char *what)
 {
-    const double ms = (double)(mdate() - t0) / 1000.0;
+    const double ms = (double)(mdate() - t0 - sys->il_fp) / 1000.0;   /* download, deinterlace or field match, upload */
     sys->deint_ms = sys->deint_in++ ? sys->deint_ms * 0.9 + ms * 0.1 : ms;
     const double budget = dt > 0 ? 0.5 * (double)dt / 1000.0 : 20.0;
     if (sys->deint_in < 30 || sys->deint_ms <= budget) return true;
@@ -1921,6 +1934,7 @@ static bool IlCostCheck(filter_t *f, struct filter_sys_t *sys, mtime_t t0, mtime
 static picture_t *IlDeintPush(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
 {
     const mtime_t t0 = mdate();
+    sys->il_fp = 0;
     picture_t *src = sys->deint_src;
     if (src && (cur->date <= src->date || cur->date - src->date > CLOCK_FREQ / 4)) {   /* a seek or a gap: no pair across it */
         pm_deint_reset(sys->deint);
@@ -1985,6 +1999,7 @@ static bool IlIvtcStart(filter_t *f, struct filter_sys_t *sys)
 static picture_t *IlIvtcPush(filter_t *f, struct filter_sys_t *sys, picture_t *cur)
 {
     const mtime_t t0 = mdate();
+    sys->il_fp = 0;
     const mtime_t dt = sys->ivtc_last > 0 && cur->date > sys->ivtc_last ? cur->date - sys->ivtc_last : (mtime_t)(CLOCK_FREQ / sys->il_src_fps);
     if (sys->ivtc_last > 0 && (cur->date <= sys->ivtc_last || cur->date - sys->ivtc_last > CLOCK_FREQ / 4)) sys->ivtc_date = 0;   /* a gap */
     sys->ivtc_last = cur->date;
@@ -2089,7 +2104,8 @@ static picture_t *FilterPic(filter_t *f, picture_t *cur)
     /* what the engine reads: cur itself, or for hardware formats a CPU copy of its surface */
     picture_t *work = cur;
     if (sys->hw) {
-        work = sys->feed_work ? sys->feed_work : HwIn(f, sys, cur);   /* our own picture: its CPU copy is at hand */
+        work = sys->feed_work ? sys->feed_work : HwIn(f, sys, cur);   /* our own picture: its CPU copy is at hand (ours from here) */
+        sys->feed_work = NULL;
         if (!work) {
             WorkerIdle(sys, false);
             if (sys->hw_failed) {   /* for good: pass-through (decided on the first picture, so nothing is held) */

@@ -12,7 +12,7 @@ static_assert(int(CombMeter::kInterlaced) == PM_COMB_INTERLACED && int(CombMeter
 static_assert(int(CadenceMeter::kTelecine) == PM_CADENCE_TELECINE && int(CadenceMeter::kNone) == PM_CADENCE_NONE, "cadence codes");
 
 namespace {
-struct State { CombMeter comb; CadenceMeter cad; };
+struct State { CombMeter comb; CadenceMeter cad; int pushed = 0; };   // pushed: every frame, also after the cadence verdict
 }
 
 extern "C" void *pm_comb_new(void) { return new (std::nothrow) State(); }
@@ -20,6 +20,7 @@ extern "C" int pm_comb_push(void *c, const void *luma, ptrdiff_t stride, int w, 
 {
     auto *s = static_cast<State *>(c);
     if (!s || !luma) return PM_COMB_MEASURING;
+    s->pushed++;   // the cadence phase of the current frame stays (pushed - 1) % 5 when the comb verdict comes later
     try {
         if (bps > 1) {
             const auto *y = static_cast<const uint16_t *>(luma);
@@ -44,7 +45,7 @@ extern "C" int pm_comb_cadence(void *c, int *measured, int *combed, int *phase, 
     if (combed) *combed = s ? s->cad.combed() : 0;
     if (phase) *phase = s ? s->cad.phase() : 0;
     if (tff) *tff = s ? (s->cad.topFieldFirst() ? 1 : 0) : 1;
-    if (frames) *frames = s ? s->cad.frames() : 0;
+    if (frames) *frames = s ? s->pushed : 0;
     return s ? int(s->cad.verdict()) : PM_CADENCE_MEASURING;
 }
 extern "C" void pm_comb_free(void *c) { delete static_cast<State *>(c); }
