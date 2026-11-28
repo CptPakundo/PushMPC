@@ -7,7 +7,7 @@
 Without them `build.cmd` builds only the stub core and the tests that need no VapourSynth (`sched_test`, `core_test`).
 
 `pushfps-portable/` holds the files of PushFPS's portable core that the `portable` backend compiles (motion estimation,
-its scene-cut rule, the interpolation reference, Subtitle Hold), copied unmodified from PushFPS v4.5.3 under
+its scene-cut rule, the interpolation reference, Subtitle Hold), copied unmodified from PushFPS v4.5.8 under
 GPL-3.0-or-later. See its own README.md; `portable_test` builds from it on every OS with no VapourSynth needed.
 
 `nis/` (NVIDIA Image Scaling 1.0.3, MIT) and `fidelityfx-fsr1/` (AMD FSR1 from the FidelityFX SDK 1.1.4, MIT) are the
