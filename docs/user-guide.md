@@ -315,6 +315,16 @@ like fire or energy beams can still look a little torn with every method.
 your NVIDIA display supports G-SYNC but it's off for MPC-HC, the settings page offers **Turn on G-SYNC for MPC-HC**. It
 only changes MPC-HC's own profile in the NVIDIA driver, keeps a backup, and uninstalling puts it back.
 
+**Interlaced video and film in a TV signal.** PushMPC measures in the picture whether a video is interlaced (two
+half-pictures from different moments in each frame) or film carried in a TV signal (2:3 pulldown), whatever the file
+says about itself. Interlaced video is turned into whole frames, one for each half-picture, and frame generation runs
+on those: in mpv with mpv's own deinterlacer (your deinterlace setting comes back at the end of the file), in VLC with
+PushMPC's own deinterlacer, and in MPC-HC and MPC-BE with LAV Video's deinterlacer (the file is reopened once for
+that, and LAV's settings are put back when you close it). Film in a TV signal is put back into its original 24 frames
+in mpv, exactly as it was filmed. Where none of this can run (VLC with hardware decoding kept on the GPU, a decoder
+other than LAV Video), PushMPC steps aside and the player deinterlaces as before. A fixed Smoother keeps the frame rate
+it gives: 4x on 30 interlaced frames a second is still 120 frames a second.
+
 **Picture and sound stay in sync.** Every frame, real or generated, keeps its own timestamp. After a seek, the first
 generated frame appears in about 1/20 of a second.
 
@@ -346,7 +356,7 @@ usual reasons:
 
 - another video renderer than MPC Video Renderer is in use;
 - the decoder is in a "native" hardware mode: choose a copy-back mode;
-- the video is interlaced (MPC Video Renderer handles it; PushMPC steps aside);
+- the video is interlaced and the decoder is not LAV Video (MPC Video Renderer deinterlaces it; PushMPC steps aside);
 - the player was installed after PushMPC: run Setup again.
 
 If a frame generation method doesn't start on your card, PushMPC moves on to the next one and says so.

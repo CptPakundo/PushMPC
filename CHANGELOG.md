@@ -30,6 +30,11 @@ sets itself up for your graphics card and display.
 - Subtitle Hold keeps subtitles that are burned into the picture steady.
 - Smooth motion for cartoons and anime drawn "on twos" or "on threes" (each drawing shown for two or three frames):
   the in-between frames are spread over the whole drawing instead of moving in one step and stopping in the next.
+- Interlaced video (TV recordings, many DVDs and broadcasts) gets smooth motion too. PushMPC sees the combing in the
+  picture itself (never trusting the file's labels), deinterlaces it into whole frames, one per field, and then
+  generates from those. Film carried in a TV signal (2:3 pulldown) is put back into its original 24 frames first, so
+  nothing of the film is lost. In mpv this uses mpv's own deinterlacer and its field matching; in VLC, PushMPC's own
+  deinterlacer; in MPC-HC and MPC-BE, LAV Video's deinterlacer (PushMPC puts LAV's settings back afterwards).
 
 ### Auto
 
@@ -58,8 +63,11 @@ Built on PushFPS 4.5.8 and Veyra 2.2.1.
 - Setup isn't code-signed yet, so Windows SmartScreen warns the first time.
 - MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware. The other players and cards are checked
   automatically on every build, but not all of them on real hardware yet.
-- Interlaced video plays without PushMPC: PushMPC recognises it from the picture and steps aside. In mpv this
-  happens after the first few seconds, and not when saving a video with mpv (`--o`).
+- Interlaced video: in VLC with hardware decoding kept on the GPU (the default on Linux and with Direct3D 11 on
+  Windows), and in MPC-HC or MPC-BE with a decoder other than LAV Video, PushMPC still steps aside and the player
+  deinterlaces as before. Film in a TV signal is restored to 24 frames in mpv only; VLC deinterlaces it instead.
+- In mpv, deinterlacing or restoring film starts a few seconds into the file, once the picture is measured, and not
+  when saving a video with mpv (`--o`).
 - Capture mode is a little behind the sound (set the player's audio delay to about +80 ms) and can't show
   copy-protected video.
 - In mpv through VapourSynth, very high multipliers at 4K can be limited by copying frames; PushMPC's own mpv and the

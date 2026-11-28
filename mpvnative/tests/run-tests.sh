@@ -167,6 +167,23 @@ else tail -10 "$T/ff-telecine.log"; result ffmpeg-telecine-measured FAIL; fi
 if "$FF" -v error -y -i "$T/woven.mkv" -vf "pushmpc=smoother=2" -f null - > "$T/ff-woven-tc.log" 2>&1 || true; then
     ! grep -q "telecine: 2:3 pulldown measured" "$T/ff-woven-tc.log" && result ffmpeg-60i-not-telecine PASS || result ffmpeg-60i-not-telecine FAIL
 fi
+# 5d. no false telecine: progressive pictures with noise (the VLC tests' panning gradient with sensor noise, which combs
+#     9 of 24 moving frames) and real camera footage (Xiph's 50p test sequences, the first 64 frames; skipped when the
+#     server cannot be reached) must never be taken for 2:3 pulldown; the filter must still reach its verdict
+"$FF" -v error -y -f lavfi -i "nullsrc=s=320x180:r=24:d=6,format=gray,geq=lum='60+(X+3*N)*120/(W+600)+25*sin((X+3*N)*0.14)*cos(Y*0.1)+random(1)*9-4',format=yuv420p" -c:v ffv1 "$T/noisy.mkv"
+FT_CLIPS="$T/noisy.mkv"
+for n in park_joy ducks_take_off crowd_run; do
+    curl -fsS -r 0-$((64 * 1382406 + 512)) -o "$T/$n.y4m" "https://media.xiph.org/video/derf/y4m/${n}_420_720p50.y4m" 2>/dev/null && FT_CLIPS="$FT_CLIPS $T/$n.y4m" || echo "false-telecine check: $n not fetched (skipped)"
+done
+for c in $FT_CLIPS; do
+    b=$(basename "$c"); "$FF" -v info -y -i "$c" -vf "pushmpc=smoother=2" -f null - > "$T/ft-$b.log" 2>&1
+    v=$(grep -oE "telecine: 2:3 pulldown measured|interlaced: interlaced input|progressive \(measured\)[^;]*" "$T/ft-$b.log" | head -1)
+    echo "false-telecine check ($b): ${v:-no verdict}"
+    grep -q "progressive (measured)" "$T/ft-$b.log" && ! grep -q "telecine: 2:3 pulldown measured" "$T/ft-$b.log" && result "no-false-telecine-${b%.*}" PASS || result "no-false-telecine-${b%.*}" FAIL
+    rm -f "$c.tmp"
+done
+rm -f "$T"/park_joy.y4m "$T"/ducks_take_off.y4m "$T"/crowd_run.y4m
+
 if [ -x "$MPV" ] || [ -f "$MPV" ]; then
     "$MPV" --no-config "$T/telecine.mkv" "--vf=lavfi=[$IVTC]" --o="$T/mpv-ivtc.mkv" --of=matroska --ovc=ffv1 --no-audio > "$T/mpv-ivtc.log" 2>&1
     GOT=$(count "$T/mpv-ivtc.mkv"); EX=$(exact "$T/mpv-ivtc.mkv" "$T/film.mkv")

@@ -68,7 +68,14 @@ jobs:
           git -C MpcVideoRenderer checkout -q FETCH_HEAD
           git -C MpcVideoRenderer submodule update -q --init --depth 1 external/BaseClasses
           cmake -S filter -B "$env:RUNNER_TEMP\fb" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$PWD\MpcVideoRenderer" -DPUSHMPC_FETCH_LAV=ON; if ($LASTEXITCODE) { exit 1 }
-          cmake --build "$env:RUNNER_TEMP\fb" --parallel; if ($LASTEXITCODE) { exit 1 }
+          # LAV Video's settings interface: fetched and hash-checked (configure), compiled in (the filter's pragma), and
+          # the parts of it the deinterlace path relies on (a non-saving runtime mode, the hardware deinterlacer's options)
+          $lavh = "$env:RUNNER_TEMP\fb\lav-include\LAVVideoSettings.h"
+          if (-not (Test-Path $lavh)) { Write-Host '::error::LAVVideoSettings.h was not fetched'; exit 1 }
+          Select-String -Path $lavh -Pattern 'RuntimeConfig|HWAccelDeint|HWDeint|SWDeint|DeintOutput|DeintMode|DeintFieldOrder|STDMETHOD.*HWAccel\b|HWAccel_' | ForEach-Object { Write-Host "  LAVVideoSettings.h:$($_.LineNumber): $($_.Line.Trim())" }
+          cmake --build "$env:RUNNER_TEMP\fb" --parallel 2>&1 | Tee-Object "$env:RUNNER_TEMP\fb-build.log"; if ($LASTEXITCODE) { exit 1 }
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\fb-build.log" -SimpleMatch "compiled with LAV Video's settings interface" -Quiet)) { Write-Host '::error::the filter was compiled without the LAV path'; exit 1 }
+          Write-Host "LAV path compiled in; LAVVideoSettings.h SHA-256 $((Get-FileHash $lavh -Algorithm SHA256).Hash.ToLower())"
           cmake -S vsplugin -B "$env:RUNNER_TEMP\vb" -G Ninja -DCMAKE_BUILD_TYPE=Release; if ($LASTEXITCODE) { exit 1 }
           cmake --build "$env:RUNNER_TEMP\vb" --target pushmpc_vs --parallel; if ($LASTEXITCODE) { exit 1 }
           $o = "$env:RUNNER_TEMP\bits"; New-Item -ItemType Directory $o | Out-Null
@@ -253,7 +260,7 @@ jobs:
           @('## win-players', '', '```') + (Get-Content "$env:RUNNER_TEMP\players.txt") + @('') + (Get-Content "$env:RUNNER_TEMP\play.txt") + @('```') -join "`n" >> $env:GITHUB_STEP_SUMMARY
           if ($res['mpv'] -notmatch '^PLUGIN RAN') { Write-Host '::error::mpv did not run the plugin'; exit 1 }
       - name: Interlaced and telecined input through pushmpc.lua (measured while playing, fixed in front of the filter, then generated)
-        timeout-minutes: 8
+        timeout-minutes: 14
         run: |
           # 20 s pans (vsplugin/tests/ci/interlace_clip.vpy; every y4m says progressive: the picture must decide):
           #   woven      60i video: the first instance measures it (vs_interlace.h), pushmpc.lua turns mpv's double-rate
@@ -289,6 +296,40 @@ jobs:
             Write-Host "interlaced check (mpv + pushmpc.lua, $($c[0])): fix $(if ($c[1]) { "'$($c[1])'" } else { 'none wanted' }) $fixed; the filter's instances saw $($rates -join ' then ') (want $($c[2]) last); last verdict: $lastVerdict"
             if (-not $fixed -or $last -ne $c[2] -or ($c[0] -ne 'progressive' -and $lastVerdict -ne 'progressive (measured)')) { Write-Host "::error::$($c[0]): pushmpc.lua did not give the filter whole frames at $($c[2])"; $rc = 1 }
           }
+          # playlists: the second file (the progressive pan) gets its own measurement, with nothing left in front of the
+          # filter from the first (no field matching, mpv's deinterlace back to the user's setting)
+          $env:PUSHMPC_IL_KIND = 'progressive'
+          foreach ($first in 'telecine', 'woven') {
+            $logDir = "$env:RUNNER_TEMP\vslog-pl-$first"; New-Item -ItemType Directory $logDir -Force | Out-Null
+            $env:PUSHMPC_VS_LOG_DIR = $logDir
+            $out = "$env:RUNNER_TEMP\mpv-pl-$first.txt"
+            $p = Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=12', '--msg-level=all=info', "`"$env:RUNNER_TEMP\$first.y4m`"", "`"$env:RUNNER_TEMP\progressive.y4m`"" -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+            if (-not $p.WaitForExit(150000)) { $p | Stop-Process -Force }
+            Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3
+            $m = (Get-Content $out, "$out.err" -Raw -ErrorAction SilentlyContinue) -join "`n"
+            $t = (Get-ChildItem $logDir -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+            $second = $m.Substring([Math]::Max(0, $m.LastIndexOf('progressive.y4m')))
+            $rates = [regex]::Matches($t, 'portable: \d+x\d+ \d+-bit, ([\d/]+) fps') | ForEach-Object { $_.Groups[1].Value }
+            $leftover = $second -match 'double-rate deinterlacer on|field matching and decimation in front|pushmpc-ivtc'
+            Write-Host "playlist check ($first, then progressive): the filter's instances saw $($rates -join ' then '); the second file fixed in front: $leftover (want False, last rate 30000/1001)"
+            if ($leftover -or ($rates | Select-Object -Last 1) -ne '30000/1001') { Write-Host "::error::playlist $first then progressive: the second file did not start clean"; $rc = 1 }
+          }
+          # a fixed Smoother keeps its output rate once mpv deinterlaces: Smoother 4 on 30i = x2 of the 60p fields (120/s)
+          $env:PUSHMPC_IL_KIND = 'woven'
+          New-Item 'HKCU:\Software\PushMPC' -Force | Out-Null
+          $was = (Get-ItemProperty 'HKCU:\Software\PushMPC' -Name Smoother -ErrorAction SilentlyContinue).Smoother
+          Set-ItemProperty 'HKCU:\Software\PushMPC' -Name Smoother -Value 4 -Type DWord
+          $logDir = "$env:RUNNER_TEMP\vslog-smoother4"; New-Item -ItemType Directory $logDir -Force | Out-Null
+          $env:PUSHMPC_VS_LOG_DIR = $logDir
+          $p = Start-Process "$env:LOCALAPPDATA\Programs\mpv\mpv.com" -ArgumentList '--vo=null', '--ao=null', '--length=12', "`"$env:RUNNER_TEMP\woven.y4m`"" -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\mpv-s4.txt"
+          if (-not $p.WaitForExit(120000)) { $p | Stop-Process -Force }
+          Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3
+          if ($null -eq $was) { Remove-ItemProperty 'HKCU:\Software\PushMPC' -Name Smoother -ErrorAction SilentlyContinue } else { Set-ItemProperty 'HKCU:\Software\PushMPC' -Name Smoother -Value $was -Type DWord }
+          $t = (Get-ChildItem $logDir -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          $half = [regex]::Match($t, 'deinterlaced input: Smoother x4 of the source = x2 of its fields').Success
+          $mult = [regex]::Matches($t, 'portable: [^;\r\n]*?(x\d+)[^\r\n]*') | ForEach-Object { $_.Groups[1].Value }
+          Write-Host "smoother parity check (Smoother 4, woven 30i): halved on the fields $half; the instances ran $($mult -join ' then ') (want x4 then x2: 120 frames/s either way)"
+          if (-not $half) { Write-Host '::error::Smoother 4 was not halved on the deinterlaced fields'; $rc = 1 }
           exit $rc
       - name: Uninstall restores every file exactly
         if: always()
@@ -1278,9 +1319,18 @@ jobs:
           $lav = $t -match 'LAV Video deinterlaces this file'
           $prog = $t -match 'progressive \(measured\)'
           $rate = [regex]::Matches($t, 'input type: \S+ \d+x\d+ \(visible \d+x\d+\), atpf (\d+)') | ForEach-Object { $_.Groups[1].Value }
-          "dshow deinterlace check (MPC-HC + LAV Video): interlaced verdict $il; LAV told to deinterlace $lav; progressive verdict after $prog; input atpf $($rate -join ' then ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
-          if ($t -match 'LAV refused a setting') { Write-Host '::error::LAV Video refused a deinterlace setting'; exit 1 }
-          if ($il -and -not $lav -and -not ($t -match 'no LAV settings interface|not LAV Video')) { Write-Host '::warning::interlaced, but the filter neither told LAV nor said why' }
+          # On a hosted runner the filter passes the frames through before it measures anything: it needs a DirectX 12
+          # hardware adapter (pushcore; the DirectShow filter has no WARP mode), and Mode::PassSys returns before
+          # CheckInterlace. Then this check is NOT EXERCISED and says why; on a machine with a GPU every step must show.
+          $why = [regex]::Match($t, 'no DirectX 12 hardware adapter|pass-through[^\r\n]*').Value
+          if (-not $il -and -not $prog) {
+            "dshow deinterlace check (MPC-HC + LAV Video): NOT EXERCISED: the filter reached no interlace verdict ($(if ($why) { $why } else { 'no reason in its log' }))" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+            if (-not ($t -match 'no DirectX 12 hardware adapter')) { Write-Host '::error::the filter reached no verdict, and not for the missing GPU'; exit 1 }
+          } else {
+            "dshow deinterlace check (MPC-HC + LAV Video): interlaced verdict $il; LAV told to deinterlace $lav; progressive verdict after $prog; input atpf $($rate -join ' then ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+            if ($t -match 'LAV refused a setting') { Write-Host '::error::LAV Video refused a deinterlace setting'; exit 1 }
+            if ($il -and -not ($lav -and $prog) -and -not ($t -match 'no LAV settings interface|not LAV Video')) { Write-Host '::error::interlaced, but LAV did not deinterlace and the filter did not say why'; exit 1 }
+          }
       - name: Uninstall (Setup --uninstall --quiet)
         if: always()
         run: |

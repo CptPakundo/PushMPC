@@ -93,7 +93,9 @@ private:
         const double combedShare = m_n ? double(m_comb) / m_n : 0.0;
         const bool telecine = m_n >= kNeed && combedShare >= 0.25 && combedShare <= 0.6 && m_share >= 0.8 && rate(p) >= 0.7 && rate(q) >= 0.7;
         if (telecine) m_v = kTelecine;
-        else if (last || combedShare > 0.6 || combedShare < 0.15 || m_n >= 3 * kNeed) m_v = kNone;   // clearly not, or looked long enough
+        // clearly not: nearly every frame combed (60i video), nearly none (progressive), or the combed frames spread over the
+        // cycle (noise, edits: telecine puts them on two neighbouring phases); or looked long enough
+        else if (last || combedShare > 0.6 || combedShare < 0.15 || m_share < 0.6 || m_n >= 3 * kNeed) m_v = kNone;
     }
     std::vector<uint8_t> m_prev;
     std::array<int, 5> m_seen{}, m_combAt{}, m_topRep{}, m_botRep{};

@@ -77,8 +77,10 @@
 #if __has_include(<LAVVideoSettings.h>)
 #include <LAVVideoSettings.h>
 #define PM_HAVE_LAV 1
+#pragma message("PushMpcFilter: compiled with LAV Video's settings interface (LAVVideoSettings.h): the double-rate deinterlacer path is in")
 #else
 #define PM_HAVE_LAV 0
+#pragma message("PushMpcFilter: compiled WITHOUT LAVVideoSettings.h: interlaced files pass through for the renderer to deinterlace")
 #endif
 
 using Microsoft::WRL::ComPtr;
@@ -1922,26 +1924,34 @@ public:
     {
 #if PM_HAVE_LAV
         if (m_lav) return true;
-        IPin* up = m_pInput->GetConnected();
-        if (!up) return false;
-        PIN_INFO pi = {};
-        if (FAILED(up->QueryPinInfo(&pi)) || !pi.pFilter) return false;
-        ComPtr<IBaseFilter> f;
-        f.Attach(pi.pFilter);
-        ComPtr<ILAVVideoSettings> lav;
-        if (FAILED(f->QueryInterface(__uuidof(ILAVVideoSettings), reinterpret_cast<void**>(lav.GetAddressOf()))) || !lav) {
+        ComPtr<ILAVVideoSettings> lav = UpstreamLav();
+        if (!lav) {
             Log("interlaced: the decoder is not LAV Video (no ILAVVideoSettings): the file passes through for the renderer to deinterlace");
             return false;
         }
+        LavRecover(lav.Get());   // a session that died with LAV changed: its settings back first
         m_lavWas.mode = lav->GetDeinterlacingMode();
         m_lavWas.sw = lav->GetSWDeintMode();
         m_lavWas.swOut = lav->GetSWDeintOutput();
+        m_lavWas.hwMode = lav->GetHWAccelDeintMode();
         m_lavWas.hwOut = lav->GetHWAccelDeintOutput();
+        // the journal first: a standalone LAV saves every change at once, so a player killed before the restore below
+        // would keep them; the next filter that finds this file puts them back (LavRecover)
+        if (FILE* jf = _wfopen(LavJournal().c_str(), L"w")) {
+            std::fprintf(jf, "%d %d %d %d %d\n", int(m_lavWas.mode), int(m_lavWas.sw), int(m_lavWas.swOut), int(m_lavWas.hwMode), int(m_lavWas.hwOut));
+            std::fclose(jf);
+        }
+        // software decoding: LAV's YADIF; LAV's own hardware decoding with copy-back (DXVA2 / D3D11 / NVDEC copy-back): the
+        // decoder's own hardware deinterlacer, also one frame per field. LAV's native hardware modes hand the decoder's
+        // surfaces on untouched (no deinterlacer of LAV's runs there), so this path covers software decoding and
+        // copy-back; the filter takes system-memory samples anyway
         const bool ok = SUCCEEDED(lav->SetDeinterlacingMode(DeintMode_Force)) && SUCCEEDED(lav->SetSWDeintMode(SWDeintMode_YADIF)) &&
-                        SUCCEEDED(lav->SetSWDeintOutput(DeintOutput_FramePerField)) && SUCCEEDED(lav->SetHWAccelDeintOutput(DeintOutput_FramePerField));
+                        SUCCEEDED(lav->SetSWDeintOutput(DeintOutput_FramePerField)) && SUCCEEDED(lav->SetHWAccelDeintMode(HWDeintMode_Hardware)) &&
+                        SUCCEEDED(lav->SetHWAccelDeintOutput(DeintOutput_FramePerField));
         m_lav = lav;
-        Log(std::format("interlaced: LAV Video deinterlaces this file (forced, YADIF, one frame per field; it was mode {} software {} output {}/{}): {}",
-                        int(m_lavWas.mode), int(m_lavWas.sw), int(m_lavWas.swOut), int(m_lavWas.hwOut), ok ? "frame generation runs on its 50/60p frames" : "LAV refused a setting"));
+        Log(std::format("interlaced: LAV Video deinterlaces this file (forced, YADIF in software, its hardware deinterlacer with copy-back; one frame "
+                        "per field; it was mode {} software {} output {} hardware {} output {}): {}", int(m_lavWas.mode), int(m_lavWas.sw), int(m_lavWas.swOut),
+                        int(m_lavWas.hwMode), int(m_lavWas.hwOut), ok ? "frame generation runs on its 50/60p frames" : "LAV refused a setting"));
         if (!ok) LavRestore();
         return ok;
 #else
@@ -1956,11 +1966,57 @@ public:
         m_lav->SetDeinterlacingMode(m_lavWas.mode);
         m_lav->SetSWDeintMode(m_lavWas.sw);
         m_lav->SetSWDeintOutput(m_lavWas.swOut);
+        m_lav->SetHWAccelDeintMode(m_lavWas.hwMode);
         m_lav->SetHWAccelDeintOutput(m_lavWas.hwOut);
         m_lav.Reset();
+        _wremove(LavJournal().c_str());
         Log("LAV Video's deinterlacing settings restored");
 #endif
     }
+#if PM_HAVE_LAV
+    // %LOCALAPPDATA%\PushMPC\lav-restore.txt: LAV's deinterlacing settings as they were before this filter changed them
+    static std::wstring LavJournal()
+    {
+        wchar_t b[MAX_PATH] = {};
+        const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", b, MAX_PATH);
+        std::wstring d = n && n < MAX_PATH ? std::wstring(b, n) + L"\\PushMPC" : std::wstring(L".");
+        CreateDirectoryW(d.c_str(), nullptr);
+        return d + L"\\lav-restore.txt";
+    }
+    ComPtr<ILAVVideoSettings> UpstreamLav() const
+    {
+        ComPtr<ILAVVideoSettings> lav;
+        IPin* up = m_pInput->GetConnected();
+        if (!up) return lav;
+        PIN_INFO pi = {};
+        if (FAILED(up->QueryPinInfo(&pi)) || !pi.pFilter) return lav;
+        ComPtr<IBaseFilter> f;
+        f.Attach(pi.pFilter);
+        f->QueryInterface(__uuidof(ILAVVideoSettings), reinterpret_cast<void**>(lav.GetAddressOf()));
+        return lav;
+    }
+    // a journal left by a session that ended before LavRestore (a killed player): those values back into LAV (a
+    // standalone LAV saves them), then the journal goes. Called whenever the input connects behind LAV
+    void LavRecover(ILAVVideoSettings* lav)
+    {
+        if (!lav || m_lav) return;
+        FILE* jf = _wfopen(LavJournal().c_str(), L"r");
+        if (!jf) return;
+        int mode = 0, sw = 0, swOut = 0, hwMode = 0, hwOut = 0;
+        const bool read = std::fscanf(jf, "%d %d %d %d %d", &mode, &sw, &swOut, &hwMode, &hwOut) == 5;
+        std::fclose(jf);
+        if (read) {
+            lav->SetDeinterlacingMode(LAVDeintMode(mode));
+            lav->SetSWDeintMode(LAVSWDeintModes(sw));
+            lav->SetSWDeintOutput(LAVDeintOutput(swOut));
+            lav->SetHWAccelDeintMode(LAVHWDeintModes(hwMode));
+            lav->SetHWAccelDeintOutput(LAVDeintOutput(hwOut));
+            Log(std::format("LAV Video's deinterlacing settings from an earlier session that ended before its restore: put back (mode {} software {} output {} hardware {} output {})",
+                            mode, sw, swOut, hwMode, hwOut));
+        }
+        _wremove(LavJournal().c_str());
+    }
+#endif
     // Dolby Vision profile from the stream's configuration record (dvcC/dvvC/dvwC: version major, minor, then
     // profile(7) level(6) rpu(1) el(1) bl(1)) if the splitter's type carries it; -1 = not found.
     int UpstreamDvProfile() const
@@ -2006,6 +2062,9 @@ public:
         if (m_inInterlaced) return L"interlaced input (one field per sample)";
         {   // a file whose frames this process already found interlaced (it was reopened for that): LAV Video deinterlaces it
             // at double rate (LavDeinterlace), or the source format goes on, so MPC Video Renderer deinterlaces it
+#if PM_HAVE_LAV
+            if (!m_lav) if (ComPtr<ILAVVideoSettings> l = UpstreamLav()) LavRecover(l.Get());   // a killed session's LAV settings back
+#endif
             const std::wstring f = SourceFile();
             bool known = false;
             { std::lock_guard<std::mutex> lk(g_ilLock); known = !f.empty() && g_interlacedFiles.count(f) != 0; }
@@ -2992,7 +3051,7 @@ private:
     pushmpc::content::CombMeter m_comb;              // streaming thread only
 #if PM_HAVE_LAV
     ComPtr<ILAVVideoSettings> m_lav;                 // the decoder told to deinterlace (LavDeinterlace); restored at disconnect
-    struct { LAVDeintMode mode; LAVSWDeintModes sw; LAVDeintOutput swOut, hwOut; } m_lavWas{};
+    struct { LAVDeintMode mode; LAVSWDeintModes sw; LAVDeintOutput swOut; LAVHWDeintModes hwMode; LAVDeintOutput hwOut; } m_lavWas{};
 #endif
     std::atomic<int> m_contentClass = 0;
     std::atomic<bool> m_contentDisc = false;

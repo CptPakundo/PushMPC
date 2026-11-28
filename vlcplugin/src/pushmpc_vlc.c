@@ -363,6 +363,9 @@ vlc_module_begin()
     add_bool(CFG "content", true, "Measure what the picture is", "Drawn animation or not (rendered 3D CG or hand-drawn), "
              "measured per shot from the decoded frames by PushMPC's content library next to the module, with PushMPC's "
              "image model when it is installed (else the hand-built cues); shown in VLC's log. Off: not measured.", true)
+    add_bool(CFG "deinterlace", true, "Deinterlace interlaced video", "Video measured interlaced (field combing in the picture, "
+             "never the flags) is deinterlaced here at double rate (YADIF, one picture per field) before frames are generated; "
+             "VLC's own deinterlacer runs after PushMPC. Off: such video passes through unchanged.", false)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
     add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
