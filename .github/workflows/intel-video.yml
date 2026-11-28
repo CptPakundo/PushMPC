@@ -230,7 +230,7 @@ jobs:
             "-DPUSHMPC_VPL_ROOT=$($env:RUNNER_TEMP.Replace('\','/'))/vpl"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $shaders = @(cmake --build $env:BUILD --target help | ForEach-Object { ($_ -split ':')[0].Trim() } | Where-Object { $_ -match '^veyra_shader_[A-Za-z0-9_]+$' } | Sort-Object -Unique)
-          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_selftest pushcore_gpu_harness veyra_push_gpu_tests --parallel
+          cmake --build $env:BUILD --target @shaders pushcore_dll pushcore_selftest pushcore_gpu_harness --parallel
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-Item "$env:BUILD\pushmpc\pushcore.dll" | Format-List Name, Length
 
@@ -296,7 +296,7 @@ jobs:
           exit 0
 
       - name: Live HUD Lock on WARP (the pass, then the pushcore graph with PushFlow, scored against the ground truth)
-        if: hashFiles('repo/tests/hud-lock-score.py') != ''
+        if: ${{ !cancelled() && hashFiles('repo/tests/hud-lock-score.py') != '' }}
         timeout-minutes: 100
         run: |
           $ErrorActionPreference = 'Continue'
@@ -311,18 +311,21 @@ jobs:
           Copy-Item -Recurse "$env:DEPS\pushflow\runtime\pushflow" "$run\rt\pushflow"
           Get-ChildItem "$run\rt\pushflow" -Recurse | Select-Object -First 12 | ForEach-Object { $_.FullName.Substring($run.Length) }
           $fail = 0
-          # 1. the pass on WARP (PushFPS's GPU tests, only HUD Lock's: the lock, the still rule, the count and the gate)
+          "| check | result |`n|---|---|" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          # 1. the pass on WARP (PushFPS's GPU tests, only HUD Lock's: the lock, the still rule, the count and the gate).
+          #    Built on its own: this build has never made that target; a failure here is reported, the graph still runs.
+          cmake --build $env:BUILD --target veyra_push_gpu_tests --parallel 2>&1 | Select-Object -Last 30
           $t = Get-ChildItem $env:BUILD -Recurse -Filter veyra_push_gpu_tests.exe | Select-Object -First 1
-          if (-not $t) { Write-Host "::error::veyra_push_gpu_tests.exe was not built"; $fail++ }
+          if (-not $t) { Write-Host "::error::veyra_push_gpu_tests.exe was not built"; $fail++; $passText = 'not built' }
           else {
             Copy-Item $t.FullName $run
             $env:VEYRA_PUSH_GPU_TESTS = 'hud'
             & "$run\veyra_push_gpu_tests.exe" 2>&1 | Tee-Object -FilePath "$out\pass-tests.txt"
             $pc = $LASTEXITCODE
             Remove-Item Env:VEYRA_PUSH_GPU_TESTS
-            if ($pc -ne 0) { Write-Host "::error::HUD Lock pass tests on WARP failed (exit $pc)"; $fail++ } else { "HUD LOCK PASS TESTS OK" }
-            "| HUD Lock pass tests on WARP (lock, still rule, count, gate) | $(if ($pc -eq 0) { 'pass' } else { "FAIL (exit $pc)" }) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            if ($pc -ne 0) { Write-Host "::error::HUD Lock pass tests on WARP failed (exit $pc)"; $fail++; $passText = "FAIL (exit $pc)" } else { "HUD LOCK PASS TESTS OK"; $passText = 'pass' }
           }
+          "| HUD Lock pass tests on WARP (lock, still rule, PushMPC's count and gate) | $passText |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           # 2. the graph: synthetic scenes at 448x256, PushFlow Fast x2 on WARP; the ground truth at twice the rate
           $common = @('--pushfps', $run, '--shaders', "$run\shaders", '--runtime', "$run\rt", '--adapter', 'warp', '--srq', '0', '--deband', 'off',
                       '--paced', '0', '--warmup', '4', '--save', '70')
@@ -334,7 +337,20 @@ jobs:
             $lines = Get-Content "$dir\harness.txt"
             $lines | Select-String -Pattern '^(HUDSCENE|pushcore:|METHOD|HUD LOCK|GRAPH ran|RESULT|DUMP|PASS|FAIL|OPEN FAILED|SUBMIT FAILED)' | ForEach-Object { "  $name | $($_.Line)" } | Out-Host
             "  $name | exit $code, $([math]::Round($sw.Elapsed.TotalSeconds)) s" | Out-Host
-            return @{ code = $code; lines = $lines }
+            $h = $lines | Select-String -Pattern '^HUD LOCK .* state (\d+).*locked pixels last (\d+) max (\d+), moving (\d+)' | Select-Object -First 1
+            if ($h) { "| HUD Lock stats, $name (final state; locked pixels max; moving last) | $($h.Matches[0].Groups[1].Value); $($h.Matches[0].Groups[3].Value); $($h.Matches[0].Groups[4].Value) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+            return @{ code = $code; lines = $lines; seconds = $sw.Elapsed.TotalSeconds; hud = $h }
+          }
+          $venv = Join-Path $env:RUNNER_TEMP 'hud-venv'; & '${{ steps.py.outputs.python-path }}' -m venv $venv
+          & "$venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q numpy==1.26.4
+          function Invoke-Score([string]$tag) {
+            "### Scores ($tag)" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            & "$venv\Scripts\python.exe" -I repo/tests/hud-lock-score.py --root $out --mult 2 --summary $env:GITHUB_STEP_SUMMARY --json "$out\hud-lock-$tag.json" 2>&1 | Tee-Object -FilePath "$out\score-$tag.txt" | Out-Host
+            return $LASTEXITCODE
+          }
+          # the ground truth first (no frame generation: cheap): the scenes at twice the rate, through the same colour path
+          foreach ($sc in 'logo', 'null', 'slowpan', 'ticker', 'translucent', 'noise', 'startmove') {
+            $null = Invoke-Hud "gt-$sc" @('--backend', 'none', '--multiplier', '1', '--fine', '2', '--frames', '280', '--dump', '110', '--scene', $sc)
           }
           $fg = @('--backend', 'pushflow', '--q', '0', '--multiplier', '2', '--frames', '84', '--dump', '56')
           $first = Invoke-Hud 'logo-on' ($fg + @('--scene', 'logo', '--hudlock', '1'))
@@ -348,12 +364,19 @@ jobs:
             if (Test-Path "$out\logo-on\pushcore.log") { Get-Content "$out\logo-on\pushcore.log" -Tail 80 }
             $fail++
           } else {
-            # in order of importance (a timeout still leaves the first ones to look at)
+            $per = $first.seconds
+            "PushFlow on WARP: one 84-frame run took $([math]::Round($per)) s; the rest: 6 more for rules R1-R5 (~$([math]::Round(6 * $per / 60)) min), then 8 secondary and 2 Auto runs (~$([math]::Round((8 + 2 * 140 / 84) * $per / 60)) min)" | Out-Host
+            "| one 84-frame PushFlow run on WARP (s; fidelity only, never speed) | $([math]::Round($per)) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            # what rules R1-R5 need, then a first score (a timeout after it still leaves a verdict)
             $plan = @(
               @('logo-off', @('--scene', 'logo', '--hudlock', '0')),
               @('null-off', @('--scene', 'null', '--hudlock', '0')), @('null-on', @('--scene', 'null', '--hudlock', '1')),
               @('slowpan-off', @('--scene', 'slowpan', '--hudlock', '0')), @('slowpan-on', @('--scene', 'slowpan', '--hudlock', '1')),
-              @('logo-off-r2', @('--scene', 'logo', '--hudlock', '0')), @('null-off-r2', @('--scene', 'null', '--hudlock', '0')),
+              @('logo-off-r2', @('--scene', 'logo', '--hudlock', '0')), @('null-off-r2', @('--scene', 'null', '--hudlock', '0')))
+            foreach ($p in $plan) { $null = Invoke-Hud $p[0] ($fg + $p[1]) }
+            if ((Invoke-Score 'rules') -ne 0) { Write-Host "::error::the HUD Lock scorer failed"; $fail++ }
+            # the other scenes
+            $plan = @(
               @('ticker-off', @('--scene', 'ticker', '--hudlock', '0')), @('ticker-on', @('--scene', 'ticker', '--hudlock', '1')),
               @('translucent-off', @('--scene', 'translucent', '--hudlock', '0')), @('translucent-on', @('--scene', 'translucent', '--hudlock', '1')),
               @('noise-off', @('--scene', 'noise', '--hudlock', '0')), @('noise-on', @('--scene', 'noise', '--hudlock', '1')),
@@ -363,30 +386,23 @@ jobs:
             $fgAuto = @('--backend', 'pushflow', '--q', '0', '--multiplier', '2', '--frames', '140', '--dump', '112')
             foreach ($sc in 'logo', 'null') {
               $r = Invoke-Hud "$sc-auto" ($fgAuto + @('--scene', $sc, '--hudlock', '2'))
-              $h = $r.lines | Select-String -Pattern '^HUD LOCK .* state (\d+)' | Select-Object -First 1
-              $state = if ($h) { $h.Matches[0].Groups[1].Value } else { '?' }
+              $state = if ($r.hud) { $r.hud.Matches[0].Groups[1].Value } else { '?' }
               $want = if ($sc -eq 'logo') { '1' } else { '4' }
               "| HUD Lock Auto, $sc scene: final state (want $want; 1 composing, 4 counting only) | $state |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
               if ($state -ne $want) { Write-Host "::error::HUD Lock Auto on the $sc scene ended in state $state (want $want)"; $fail++ }
             }
-            # the ground truth: the same scenes at twice the rate, no frame generation, through the same colour path
-            foreach ($sc in 'logo', 'null', 'slowpan', 'ticker', 'translucent', 'noise', 'startmove') {
-              $null = Invoke-Hud "gt-$sc" @('--backend', 'none', '--multiplier', '1', '--fine', '2', '--frames', '280', '--dump', '110', '--scene', $sc)
-            }
-            $venv = Join-Path $env:RUNNER_TEMP 'hud-venv'; & '${{ steps.py.outputs.python-path }}' -m venv $venv
-            & "$venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q numpy==1.26.4
-            & "$venv\Scripts\python.exe" -I repo/tests/hud-lock-score.py --root $out --mult 2 --summary $env:GITHUB_STEP_SUMMARY --json "$out\hud-lock.json" 2>&1 | Tee-Object -FilePath "$out\score.txt"
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::the HUD Lock scorer failed"; $fail++ }
+            if ((Invoke-Score 'all') -ne 0) { Write-Host "::error::the HUD Lock scorer failed"; $fail++ }
           }
-          # the dumps stay on the runner (hundreds of MB); logs, scores and the frame-70 PNGs are uploaded
-          Get-ChildItem $out -Recurse -Filter dump.raw | Remove-Item -Force
           if ($fail) { exit 1 }
           exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: hud-lock-warp
-          path: ${{ runner.temp }}/hud-out
+          # logs, scores, the frame-70 PNGs; the dumps (hundreds of MB) stay on the runner
+          path: |
+            ${{ runner.temp }}/hud-out
+            !${{ runner.temp }}/hud-out/**/dump.raw
           retention-days: 7
           if-no-files-found: ignore
 

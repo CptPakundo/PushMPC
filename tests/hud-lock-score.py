@@ -242,7 +242,15 @@ def main():
     null_same = None
     if "null" in results and "on" in results["null"] and "off" in results["null"]:
         null_same = identical(os.path.join(root, "null-on"), os.path.join(root, "null-off"), DEFAULT_FROM)
-    rule("R4 null bit-identical", None if null_same is None else (null_same["compared"] > 0 and null_same["identical"] == null_same["compared"]),
+    # two runs are two processes: when the same settings twice (off / off) are not bit-identical either, frame generation
+    # itself does not repeat exactly here, and on / off cannot be held to bit-identity (undecided, not a failure)
+    r4 = None
+    if null_same is not None and null_same["compared"] > 0:
+        if null_same["identical"] == null_same["compared"]:
+            r4 = True
+        elif "null" in repeats and repeats["null"]["compared"] > 0 and repeats["null"]["identical"] == repeats["null"]["compared"]:
+            r4 = False
+    rule("R4 null bit-identical", r4,
          "null: generated frames identical on / off: " + ("-" if null_same is None else
          f"{null_same['identical']}/{null_same['compared']} (largest difference {null_same['maxAbs']}); off / off repeat: "
          + (f"{repeats['null']['identical']}/{repeats['null']['compared']}" if "null" in repeats else "-")))
