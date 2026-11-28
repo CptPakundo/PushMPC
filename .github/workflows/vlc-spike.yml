@@ -1,3 +1,5 @@
+# On track/deint-probe this file carries the deinterlace probe (main keeps the VLC spike; a dispatch with
+# --ref track/deint-probe runs this version).
 # Deinterlace probe (dispatch only; nothing in the product changes): can PushMPC deinterlace (or inverse-telecine)
 # interlaced video FIRST and then generate frames, instead of stepping aside? Exact ground truth: 60p masters woven into
 # 60i (two fields per frame, top first), and a 24p master hard-telecined (2:3) to 30i; every arm's output is scored
@@ -11,7 +13,7 @@
 #   mpv-native  Linux, PushMPC's own mpv (the mpv-native AppImage artifact): the same arms through vf=pushmpc
 #   vlc      Linux, the distro VLC 3 + the PushMPC module (vlc-plugin artifact): --deinterlace=0/1/-1 with bwdif and
 #            yadif2x, where the deinterlace filter sits against PushMPC's (VLC's chain log), the verdict and the rate
-name: deint-probe
+name: vlc-spike (deint-probe on track/deint-probe)
 
 on:
   workflow_dispatch:
@@ -128,7 +130,8 @@ jobs:
       - name: PushMPC's mpv (the AppImage of an mpv-native run) and ffmpeg for the scores
         run: |
           set -eu
-          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg libfuse2 >/dev/null
+          # the AppImage takes the X11 / graphics / audio stack from the host (make-appimage.sh)
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg libfuse2 libxpresent1 libxss1 libxv1 libxrandr2 libxinerama1 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 libegl1 libgl1 libgbm1 libvulkan1 libva2 libva-drm2 libva-x11-2 libvdpau1 libasound2t64 libpulse0 >/dev/null
           id="${{ inputs.native_run }}"
           [ -n "$id" ] || id=$(gh run list -R "$GITHUB_REPOSITORY" -w mpv-native.yml -s success -L 1 --json databaseId -q '.[0].databaseId')
           echo "mpv-native run $id"
@@ -138,7 +141,7 @@ jobs:
         run: |
           set -u
           M="env -u LD_LIBRARY_PATH -u PUSHMPC_ENGINE APPIMAGE_EXTRACT_AND_RUN=1 $(ls app/*.AppImage)"
-          $M --version | head -1
+          $M --version 2>&1 | head -3   # a missing host library shows here
           for m in testsrc2 pan; do
             for a in "" "--deinterlace=yes" "--deinterlace=auto" "--vf=lavfi=[bwdif=mode=send_field],pushmpc=smoother=2" "--vf=pushmpc=smoother=2,lavfi=[bwdif=mode=send_field]"; do
               vf="--vf=pushmpc=smoother=2"; case "$a" in --vf=*) vf="$a"; a="" ;; esac
@@ -258,7 +261,7 @@ jobs:
             @('--deinterlace=auto', @('--deinterlace=auto', "--vf=vapoursynth=file=[$vpy]:user-data=[$ud]")),
             @('bwdif before', @("--vf=lavfi=[bwdif=mode=send_field],vapoursynth=file=[$vpy]:user-data=[$ud]")),
             @('bwdif after', @("--vf=vapoursynth=file=[$vpy]:user-data=[$ud],lavfi=[bwdif=mode=send_field]")),
-            @('d3d11vpp deint (hwdec d3d11va)', @('--hwdec=d3d11va', '--vf=d3d11vpp=deint=yes:mode=best', "--vf-append=vapoursynth=file=[$vpy]:user-data=[$ud]"))
+            @('d3d11vpp adaptive deint (hwdec d3d11va)', @('--hwdec=d3d11va', '--vf=d3d11vpp=deint=yes:mode=adaptive', "--vf-append=vapoursynth=file=[$vpy]:user-data=[$ud]"))
           )
           foreach ($m in 'testsrc2', 'pan') {
             foreach ($a in $arms) {
