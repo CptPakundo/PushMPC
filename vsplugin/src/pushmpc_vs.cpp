@@ -657,6 +657,7 @@ void VS_CC MpvColourCreate(const VSMap* in, VSMap* out, void*, VSCore*, const VS
         }
     }
     a->freeNode(node);
+    if (r.ok) std::remove(MpvColourStatusPath().c_str());   // no failure report from an earlier load stays behind
     if (r.ok)
         Log(std::format("colour from mpv's first-frame params: matrix {} transfer {} primaries {} range {} (libplacebo primaries {} transfer {} system {} levels {}; mpv {})",
                         r.matrix, r.transfer, r.primaries, r.range, r.plPrimaries, r.plTransfer, r.plSystem, r.plLevels, ver.empty() ? "version not given" : ver));

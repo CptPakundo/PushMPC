@@ -522,6 +522,8 @@ local function remove_native()
 end
 
 local early_path = nil   -- the file whose filter went in before decoding (pushmpc.MpvColour reads frame 0's colour)
+local function colour_file() return (vs_status_path():gsub("%.txt$", ".colour")) end   -- pushmpc.MpvColour's failure report
+mp.register_event("end-file", function() os.remove(colour_file()) end)
 local mpv_version = (mp.get_property("mpv-version", "") or ""):match("(%d+%.%d+[%.%d]*)") or ""
 
 local function ensure(early)
@@ -529,9 +531,11 @@ local function ensure(early)
     -- the late add (mpv older than 0.39, or the early add did not happen): only once video runs (soft failure), and
     -- only with real params: before the first frame enters the chain mpv answers video-params with a {w, h} fallback
     -- (command.c "Simplistic fallback for stupid scripts") that has no colour (integrations 46087052008: 5 of 12 runs)
+    -- (the native filter keeps its old condition: it takes no colour user-data)
     if not early then
         local vp = mp.get_property_native("video-params")
-        if type(vp) ~= "table" or vp.pixelformat == nil then return end
+        if vp == nil then return end
+        if not native and (type(vp) ~= "table" or vp.pixelformat == nil) then return end
     end
     local path = mp.get_property("path")
     if failed_for ~= nil and failed_for == path then return end
@@ -568,7 +572,9 @@ local function ensure(early)
             msg.info("PushMPC's native filter added: " .. want)
         end
     elseif not ours then
-        -- early: no colour yet; mpv's version tells pushmpc.vpy to read frame 0's colour (and to report a failure)
+        -- early: no colour yet; mpv's version tells pushmpc.vpy to read frame 0's colour (and to report a failure). A
+        -- report left from before (another file, a reused pid) must not trigger the fallback
+        if early then os.remove(colour_file()) end
         local cd = early and ("mpvver=" .. mpv_version) or colour_data()
         local ok, err = mp.commandv("vf", "append", cd and (spec .. ":user-data=[" .. cd .. "]") or spec)
         if not ok then
@@ -610,7 +616,7 @@ local function colour_unknown()
     if early_path == nil or early_path ~= mp.get_property("path") then return end
     local vp = mp.get_property_native("video-params")
     if type(vp) ~= "table" or vp.pixelformat == nil then return end
-    local file = vs_status_path():gsub("%.txt$", ".colour")
+    local file = colour_file()
     local f = io.open(file, "r")
     if not f then return end
     local t = f:read("*a"); f:close(); os.remove(file)
@@ -647,7 +653,15 @@ do
     if not native and (maj > 0 or min >= 39) then
         mp.add_hook("on_preloaded", 50, function()
             for _, tr in ipairs(mp.get_property_native("track-list") or {}) do
-                if tr.type == "video" and not tr.albumart and not tr.image then ensure(true); return end
+                if tr.type == "video" and not tr.albumart and not tr.image then
+                    -- the filter stays in the vf list from the file before (with that file's user-data, which may hold
+                    -- its colour): each file gets a fresh early add, so its own frame 0 is read
+                    for _, f in ipairs(mp.get_property_native("vf") or {}) do
+                        if f.label == "pushmpc" then busy = true; mp.commandv("vf", "remove", "@pushmpc"); busy = false; break end
+                    end
+                    ensure(true)
+                    return
+                end
             end
         end)
     end
