@@ -63,8 +63,11 @@ export PM_KODI_MAX=100
 # on all 4 cores the x2 case's render loop fell to 42.9-51.9/s and Kodi dropped 14-38 pictures (40.4 and 40.7 of the
 # 40.8/s needed in runs 45965854931 and 45971594219; a pass at 37.2 of 36.5 only because the loop fell). On 2 threads
 # the engine still keeps its budget (19.9 of 25 ms, run 45960712431)
+# The emulator's speed drifts during a job (kodi-android job 140938256053: the first cases at a 56/s render loop, the last ones at 50/s, Kodi alone 21.1/s with
+# no PushMPC in the path): Kodi alone ("disabled") plays first and again last, and the render check of every other case
+# is judged against the slower of the two (run_cases.py --baseline-case, analyze.py --baseline)
 python3 "$here/run_cases.py" --kodi "sh $here/android-kodi.sh" --kill "adb shell am force-stop org.xbmc.kodi" \
-  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" --threads 2 \
+  --before "$before" --after "$after" --first 90 --player-clips "$dev/clips" --threads 2 --baseline-case disabled \
   --home "$home" --addon "$addon" --clips "$clips" --major "$major" --out "$out" --cases "$cases"
 rc=$?
 adb logcat -d > "$out/logcat.txt" 2>&1 || true
