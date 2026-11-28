@@ -92,6 +92,23 @@ check hwnone avcodec avcodec-hw -; no_pushmpc_keys hwnone
 run_case macuser macos '[core]
 fullscreen=1' 'vlcrc_set "$RC" core vout macosx'
 check macuser core vout macosx; no_pushmpc_keys macuser
+# 10. no vlcrc before, and VLC's rewrite holds only its defaults (BOM + "###" banner, commented options): uninstall
+# removes the file, on both targets (the BOM line must not count as a setting)
+for t in native macos; do
+  run_case "defaults$t" "$t" none 'vlcrc_del "$RC" auhal auhal-audio-device'
+  if [ -e "$RC" ]; then echo "FAIL defaults$t: vlcrc kept: $(vlcrc_active "$RC" | head -n 3 | tr '\n' ' ')"; fails=$((fails + 1))
+  else echo "ok   defaults$t: the defaults-only vlcrc PushMPC created is gone"; fi
+done
+# 11. the BOM on line 1 is skipped before a comment, a key and a section header (its length is 1 in a UTF-8 awk, 3 in
+# a byte awk; printed with the awk's version, so a run shows which kind it had)
+RC="$work/bom"
+printf '\357\273\277###\n#vout=\n' > "$RC"
+a=$(vlcrc_active "$RC"); [ -z "$a" ] && echo "ok   bom: BOM + ### is no active line" || { echo "FAIL bom: active line(s) after BOM + ###: $a"; fails=$((fails + 1)); }
+printf '\357\273\277pushmpc-smoother=4\n[core]\n' > "$RC"
+a=$(vlcrc_active "$RC"); [ "$a" = 'pushmpc-smoother=4' ] && echo "ok   bom: BOM + key gives the key" || { echo "FAIL bom: BOM + key gave '$a'"; fails=$((fails + 1)); }
+printf '\357\273\277[core] # core program\nvout=macosx\n' > "$RC"
+check bom core vout macosx
+echo "awk here: BOM length $(awk -v b="$VLCRC_BOM" 'BEGIN { print length(b) }'); $(awk --version 2>/dev/null | head -n 1)"
 
 [ "$fails" = 0 ] && echo "pushmpc-vlc-test: all cases passed" || echo "pushmpc-vlc-test: $fails check(s) failed"
 [ "$fails" = 0 ]

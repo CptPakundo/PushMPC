@@ -764,10 +764,22 @@ jobs:
             && echo "VLC: the LaunchAgent and the plugin folder gone" || { echo "::error::VLC: the LaunchAgent or the plugin folder is left behind"; fails=$((fails + 1)); }
           # vlcrc (the user's, seeded above): their vout and video-filter back, no active PushMPC key left (VLC may have
           # rewritten the file as its whole configuration; a leading BOM and "[core] # ..." headers handled)
+          # The BOM goes in as a string (-v bom, index / length): this awk did not strip it as sub(/^\357\273\277/, ...)
+          # (run 46086126359 printed "<BOM>###" as active); the key check also allows a BOM in front of a key. Two
+          # canaries prove both on this runner's awk and grep.
+          bom=$(printf '\357\273\277')
+          active_of() { awk -v bom="$bom" '{ l = $0; if (NR == 1 && bom != "" && index(l, bom) == 1) l = substr(l, length(bom) + 1) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$1"; }
+          has_pushmpc_key() { grep -qE "^($bom)?(pushmpc-|vout=.*pushmpc|video-filter=.*pushmpc_out)"; }
+          printf '%s###\n#vout=\n' "$bom" > "$RUNNER_TEMP/bom-banner"; printf '%spushmpc-smoother=4\n' "$bom" > "$RUNNER_TEMP/bom-key"
+          old=$(awk '{ sub(/^\357\273\277/, ""); print; exit }' "$RUNNER_TEMP/bom-key" || true)
+          echo "awk: $(awk --version 2>/dev/null | head -n 1 || true); BOM length $(awk -v b="$bom" 'BEGIN { print length(b) }' || true); the old regex strip $( [ "$old" = pushmpc-smoother=4 ] && echo works || echo 'does not work' ) here"
+          [ -z "$(active_of "$RUNNER_TEMP/bom-banner")" ] && active_of "$RUNNER_TEMP/bom-key" | has_pushmpc_key && has_pushmpc_key < "$RUNNER_TEMP/bom-key" \
+            && echo "BOM canaries: BOM + ### no active line; BOM + key flagged (stripped and unstripped)" \
+            || { echo "::error::BOM canaries failed: this runner's awk or grep mishandles a BOM before a vlcrc line"; fails=$((fails + 1)); }
           if [ -f "$rc" ]; then
-            act=$(awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$rc")
+            act=$(active_of "$rc")
             printf '%s\n' "$act" | sed '/^$/d; s/^/  vlcrc after uninstall, active line: /'
-            if printf '%s\n' "$act" | grep -qE '^pushmpc-|^vout=.*pushmpc|^video-filter=.*pushmpc_out'; then
+            if printf '%s\n' "$act" | has_pushmpc_key; then
               echo "::error::VLC: vlcrc still holds PushMPC settings after uninstall"; fails=$((fails + 1))
             fi
             printf '%s\n' "$act" | grep -qx 'vout=caopengllayer' && printf '%s\n' "$act" | grep -qx 'video-filter=postproc' \

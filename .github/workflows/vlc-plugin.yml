@@ -512,10 +512,18 @@ jobs:
           sh vlcplugin/install/pushmpc-vlc.sh uninstall --target snap
           # the installer created this vlcrc: after uninstall it may be gone (only VLC's defaults were left in it), or stay
           # with no active PushMPC key (the rule apple.yml uses; a leading BOM and "[core] # ..." headers handled)
+          # the BOM as a string (-v bom, index / length; macOS awk did not strip the regex form), a BOM allowed before a
+          # key too; two canaries prove both on this runner
+          bom=$(printf '\357\273\277')
+          active_of() { awk -v bom="$bom" '{ l = $0; if (NR == 1 && bom != "" && index(l, bom) == 1) l = substr(l, length(bom) + 1) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' "$1"; }
+          has_pushmpc_key() { grep -qE "^($bom)?(pushmpc-|vout=.*pushmpc|video-filter=.*pushmpc_out|extraintf=.*luaintf|lua-intf=pushmpc_boot)"; }
+          printf '%s###\n#vout=\n' "$bom" > /tmp/bom-banner; printf '%slua-intf=pushmpc_boot\n' "$bom" > /tmp/bom-key
+          [ -z "$(active_of /tmp/bom-banner)" ] && active_of /tmp/bom-key | has_pushmpc_key && has_pushmpc_key < /tmp/bom-key \
+            || { echo "::error::BOM canaries failed: this runner's awk or grep mishandles a BOM before a vlcrc line"; exit 1; }
           if [ -f $c/vlcrc ]; then
-            act=$(awk '{ l = $0; if (NR == 1) sub(/^\357\273\277/, "", l) } l !~ /^[ \t]*(#|;|\[|$)/ { print l }' $c/vlcrc)
+            act=$(active_of $c/vlcrc)
             printf '%s\n' "$act" | sed '/^$/d; s/^/  vlcrc after uninstall, active line: /'
-            if printf '%s\n' "$act" | grep -qE '^pushmpc-|^vout=.*pushmpc|^video-filter=.*pushmpc_out|^extraintf=.*luaintf|^lua-intf=pushmpc_boot'; then
+            if printf '%s\n' "$act" | has_pushmpc_key; then
               echo "::error::vlcrc still holds PushMPC settings after uninstall (snap)"; exit 1
             fi
             echo "vlcrc kept after uninstall, no PushMPC key in it"
