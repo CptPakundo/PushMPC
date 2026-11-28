@@ -2,7 +2,7 @@ The first release of **PushMPC**: smoother, sharper video in the player you alre
 generation and upscaling to MPC-HC, MPC-BE, PotPlayer, mpv, VLC, Kodi, Plex, Jellyfin, Stremio and more, and sets
 itself up for your graphics card and display.
 
-PushFPS engine: <version>
+Built on PushFPS 4.5.8.
 
 ## Highlights
 
