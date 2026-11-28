@@ -12,6 +12,9 @@ Built on PushFPS 4.5.8.
   the first one after starting the player. The sharpest upscaling joins a little later, without a pause.
 - **Clean scene cuts:** a new shot starts on its own frame, never a smeared blend.
 - **A sharper picture** with RTX Video Super Resolution, FSR or NIS.
+- **DLSS 5 Neural Rendering, if you want it:** on GeForce RTX cards, and on Radeon RX 7000 and 9000 through community
+  builds, AI adds detail and texture. It changes the look of the picture and needs a lot of GPU power, so it is off
+  until you turn it on.
 - **HDR done right:** HDR10, HDR10+ and HLG stay HDR (in MPC-HC also Dolby Vision, profiles 7 and 8). On an SDR
   display, HDR video is converted to fit your screen. In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
   HDR10 or HLG) from its very first frame.

@@ -23,8 +23,9 @@ sets itself up for your graphics card and display.
   FSR and AMD Fluid Motion, whichever your card runs best.
 - A scene-cut guard for every method, so a new shot starts on its own frame. Sudden changes of the picture's shape are
   handled like cuts.
-- Upscaling to your screen with RTX Video Super Resolution, FSR or NIS, plus an AI clean-up and a deband pass for
-  low-quality video.
+- Upscaling to your screen with RTX Video Super Resolution, FSR or NIS, plus a deband pass for low-quality video.
+- DLSS 5 Neural Rendering on GeForce RTX cards, and on Radeon RX 7000 and 9000 through community builds: AI adds
+  detail and texture. It changes the look of the picture and needs a lot of GPU power, so it is off unless you turn it on.
 - HDR10, HDR10+ and HLG stay HDR, and in MPC-HC Dolby Vision (profiles 7 and 8) keeps its Dolby Vision data. On an
   SDR display, HDR video is converted to fit your screen.
 - Subtitle Hold keeps subtitles that are burned into the picture steady.

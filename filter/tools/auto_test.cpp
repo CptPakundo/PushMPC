@@ -539,18 +539,49 @@ int main()
             check(c1 && c2 && c3 && c4 && c5, L"delivery check: one step down, back up after 60 s clean, 120 s after a second failure",
                   std::format(L"{} {} {} {} {} (n {})", c1, c2, c3, c4, c5, n));
         }
-        {   // bits per pixel at 1080p quality, and clean-up Auto only inside the budget
+        {   // bits per pixel at 1080p quality; Neural Rendering (CleanUp) only when the user turns it on, never by Auto
             const DWORD hvc1 = DWORD('H' | ('V' << 8) | ('C' << 16) | ('1' << 24)), h264 = DWORD('H' | ('2' << 8) | ('6' << 16) | ('4' << 24));
             const double web4k = BitsPerPixel(16.55e6, 3840, 2160, 24.0, hvc1), web1080 = BitsPerPixel(6e6, 1920, 1080, 23.976, h264), uhdbd = BitsPerPixel(60e6, 3840, 2160, 23.976, hvc1);
             check(web4k > kLowBitrateBpp && web1080 <= kLowBitrateBpp && uhdbd >= kHighBitrateBpp,
                   L"bits per pixel at 1080p quality: 4K HEVC 16.5 Mbit/s not low, 1080p H.264 6 Mbit/s low, UHD Blu-ray high",
                   std::format(L"{:.3f} / {:.3f} / {:.3f}", web4k, web1080, uhdbd));
+            // the setting: Off by default; a legacy Auto (registry CleanUp, cleanup=auto) reads as Off; On / Off as before
+            check(Settings{}.cleanUp == kOff && ParseNeuralRendering(L"Auto", kOff) == kOff && ParseNeuralRendering(L"auto", 1) == kOff &&
+                  ParseNeuralRendering(L"On", kOff) == 1 && ParseNeuralRendering(L"1", kOff) == 1 && ParseNeuralRendering(L"Off", 1) == kOff &&
+                  ParseNeuralRendering(L"", kOff) == kOff && ParseNeuralRendering(L"nonsense", 1) == 1,
+                  L"Neural Rendering setting: default Off, a legacy Auto is Off, On / Off / unknown words as before");
+            // (a) the default never turns it on, even where the old Auto rule fired (low bitrate, an NR runtime, budget to spare)
+            const Source low1080{ 1920, 1080, 23.976, false, 0.10, false };
+            Settings on; on.cleanUp = 1;
+            Settings legacy; legacy.cleanUp = kAuto;
+            const Choice cd = Decide({}, low1080, d60, {}, {});
+            const Choice cl = Decide(legacy, low1080, d60, {}, {});
+            const Choice co = Decide(on, low1080, d60, {}, {});
+            check(!cd.nr && cd.cleanNote == L"off", L"Neural Rendering: the default never turns it on (low-bitrate 1080p, RTX 50, 60 Hz)",
+                  std::format(L"nr {} ({})", int(cd.nr), cd.cleanNote));
+            // (b) a legacy Auto that reached Decide unparsed is Off too, on the same inputs
+            check(!cl.nr && cl.cleanNote == L"off", L"Neural Rendering: a legacy Auto never turns it on, even at 0.10 bits per pixel with time to spare",
+                  std::format(L"nr {} ({})", int(cl.nr), cl.cleanNote));
+            // (c) On turns it on there, and the plan with it fits at the same multiplier (where the old Auto turned it on)
+            check(co.nr && co.cleanNote == L"on" && co.multiplier == cd.multiplier && co.predictedMs <= co.budgetMs,
+                  L"Neural Rendering On: on, at the same multiplier, inside the budget",
+                  std::format(L"nr {} ({}), {}x / {}x, {:.1f} of {:.1f} ms", int(co.nr), co.cleanNote, co.multiplier, cd.multiplier, co.predictedMs, co.budgetMs));
+            // On is the user's choice: no budget gate (as before), so the plan with Smoother 12x at 4K keeps it on
             Settings f10; f10.smoother = 12;
             const Source low4k{ 3840, 2160, 24.0, true, 0.10, true };
+            Settings f10on = f10; f10on.cleanUp = 1;
             const Choice ch = Decide(f10, low4k, d4k, {}, {});
-            check(!ch.nr && ch.cleanNote.find(L"would not fit") != std::wstring::npos, L"clean-up Auto stays off when the plan with it (Smoother 12x, 4K) would not fit", ch.cleanNote);
+            const Choice chOn = Decide(f10on, low4k, d4k, {}, {});
+            check(!ch.nr && chOn.nr && chOn.cleanNote == L"on", L"Neural Rendering: off by default with Smoother 12x at 4K; On keeps it on there",
+                  std::format(L"default nr {} ({}); On nr {} ({})", int(ch.nr), ch.cleanNote, int(chOn.nr), chOn.cleanNote));
+            // On still follows the GPU (no NR runtime: off with the reason) and the battery rule (Light: off)
+            const Choice cg = Decide(on, low1080, d60, {}, Family(kGtx, L"GTX 1660"));
+            Display d60Battery = d60; d60Battery.battery = true;
+            const Choice cb = Decide(on, low1080, d60Battery, {}, {});
+            check(!cg.nr && cg.cleanNote.rfind(L"off, ", 0) == 0 && !cb.nr && cb.cleanNote == L"off (on battery)",
+                  L"Neural Rendering On: off on a GPU without an NR runtime, and on battery (Light)", cg.cleanNote + L" / " + cb.cleanNote);
             const Choice ca = Decide({}, low4k, d4k, {}, {});
-            check(ca.predictedMs <= ca.budgetMs, L"Auto's own plan for a low-bitrate 4K HDR source fits its budget",
+            check(ca.predictedMs <= ca.budgetMs && !ca.nr, L"Auto's own plan for a low-bitrate 4K HDR source fits its budget, without Neural Rendering",
                   std::format(L"{}x nr {} {:.1f} of {:.1f} ms", ca.multiplier, int(ca.nr), ca.predictedMs, ca.budgetMs));
         }
         wprintf(L"  vendor paths: %d failed\n", fails);

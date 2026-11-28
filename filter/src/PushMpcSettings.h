@@ -5,7 +5,8 @@
 //   Enable           DWORD 1/0                       default 1
 //   Smoother         Auto | Off | 2..16              default Auto   (NVIDIA VFG frame generation multiplier)
 //   Sharper          Auto | Off | 1..4               default Auto   (RTX Video Super Resolution quality)
-//   CleanUp          Auto | Off | On                 default Auto   (PushFPS "AI picture enhancement", NR)
+//   CleanUp          Off | On                        default Off    (DLSS 5 Neural Rendering, PushFPS "AI picture enhancement", NR;
+//                                                                    a stored Auto, from older versions, reads as Off: Auto never turns it on)
 //   SdrToHdr         Auto | Off | On                 default Auto   (SDR video as HDR10 when Windows HDR is on)
 //   HdrBoost         Auto | Off | Low | Medium | High   default Auto (highlight expansion of SDR to HDR; Off = SDR at 203 cd/m2)
 //   HdrMethod        Auto | RTX                      default Auto   (Auto: PushMPC's curve on every GPU; RTX: RTX Video HDR, NVIDIA RTX)
@@ -16,7 +17,7 @@
 //   HdrLimit         DWORD 1/0                       default 1      (SDR to HDR: limit brightness on bright scenes)
 //   DisplayPeak      Auto | 100..10000 (cd/m2)       default Auto   (the display's peak: Auto = what Windows reports)
 //   Osd              Off | Brief | Always            default Brief  (on-screen status: about 3 s at start and on changes)
-//   OnBattery        Light | Same                    default Light  (on battery: 2x at most, VSR level 2 at most, no clean-up / deband)
+//   OnBattery        Light | Same                    default Light  (on battery: 2x at most, VSR level 2 at most, no Neural Rendering / deband)
 //   FgQuality        Auto | High | Medium | Low      default Auto   (Auto: Medium, High only where it fits at the same multiplier; PushFlow: Low/Medium/High = Fast/Balanced/Quality)
 //   FgMethod         Auto | VFG | DLSSG | PushFlow | FSR | AMDFRC | NVOF | XeFG | VPL   default Auto (frame generation method; Auto by GPU family and budget)
 //   Vrr              Auto | On | Off                 default Auto   (Auto: detected (NVIDIA G-SYNC state); On/Off: assume VRR / fixed refresh)
@@ -26,7 +27,7 @@
 //   AnimeModel       Auto | artcnn-c4f16 | artcnn-c4f32 | artcnn-r8f64 | cunny-fast | cunny-4x16 | cunny-8x32 | animesr-v2 (+ -ds / -dn ArtCNN C)
 //                                                   default Auto   (the anime upscaler: Auto = the best that fits the source and this GPU)
 //   UpscaleTarget    Screen | 1440p | 4K | 5K        default Screen
-//   CleanUpStrength  Subtle | Balanced | Strong      default Strong (PushFPS's presets; Strong is its default)
+//   CleanUpStrength  Subtle | Balanced | Strong      default Strong (Neural Rendering strength: PushFPS's presets; Strong is its default)
 //   VsrStyle         Auto | Standard | HighBitrate | Streaming   default Auto (RTX VSR model family; Auto picks it by the source bitrate)
 //   Deband           Auto | Off | On                 default Auto   (PushMPC's own deband pass, 8-bit SDR sources)
 //   DebandStrength   Low | Medium | High             default Medium
@@ -73,7 +74,7 @@ struct Settings {
     int smoother = kAuto;   // kAuto, kOff, 2..16
     int autoCap = 0;        // runtime only (never stored): Auto's multiplier cap after frames came late at the higher one
     int sharper = kAuto;    // kAuto, kOff, 1..4
-    int cleanUp = kAuto;    // kAuto, kOff, 1 = on
+    int cleanUp = kOff;     // Neural Rendering: kOff, 1 = on (never kAuto: ParseNeuralRendering reads a legacy Auto as Off)
     int sdrToHdr = kAuto;   // kAuto, kOff, 1 = on
     HdrBoost hdrBoost = HdrBoost::Auto;
     HdrMethod hdrMethod = HdrMethod::Auto;
@@ -173,6 +174,12 @@ inline int ParseOnOff(const std::wstring& s, int def)
     if (_wcsicmp(s.c_str(), L"On") == 0 || s == L"1") return 1;
     return def;
 }
+// Neural Rendering (CleanUp / cleanup / neural_rendering): Off or On only. Auto was a choice in older versions; it is
+// still accepted (old settings, scripts) and means Off: Auto never turns Neural Rendering on. Anything else keeps def.
+inline int ParseNeuralRendering(const std::wstring& s, int def)
+{
+    return ParseOnOff(s, def) == 1 ? 1 : kOff;
+}
 
 inline std::wstring RegReadStr(HKEY k, const wchar_t* name)
 {
@@ -201,7 +208,7 @@ inline Settings LoadSettings()
     s.enable = RegReadBool(k, L"Enable", true);
     s.smoother = ParseChoice(RegReadStr(k, L"Smoother"), 2, kMaxSmoother, kAuto);
     s.sharper = ParseChoice(RegReadStr(k, L"Sharper"), 1, 4, kAuto);
-    s.cleanUp = ParseOnOff(RegReadStr(k, L"CleanUp"), kAuto);
+    s.cleanUp = ParseNeuralRendering(RegReadStr(k, L"CleanUp"), kOff);
     s.sdrToHdr = ParseOnOff(RegReadStr(k, L"SdrToHdr"), kAuto);
     const std::wstring q = RegReadStr(k, L"FgQuality");
     s.fgQuality = _wcsicmp(q.c_str(), L"High") == 0 ? FgQuality::High : _wcsicmp(q.c_str(), L"Low") == 0 ? FgQuality::Low

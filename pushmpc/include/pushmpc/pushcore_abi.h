@@ -107,7 +107,7 @@ typedef struct PushCoreConfig {
 
 /* ABI 3: PushMPC's settings, already resolved (the caller decides "Auto"). pushcore builds PushFPS's EnhancementSettings
    from a fresh PushFPS install's defaults, then sets exactly the fields PushFPS's simple video page (WatchPage.qml:
-   smoother / sharper / AI picture enhancement / SDR to HDR) sets for its switches, plus these values. */
+   smoother / sharper / Neural Rendering / SDR to HDR) sets for its switches, plus these values. */
 #define PUSHCORE_SETTINGS_PUSHMPC 0u    /* the values below */
 #define PUSHCORE_SR_TARGET_1440P 0u     /* veyra::pipeline::SrTarget values */
 #define PUSHCORE_SR_TARGET_4K 1u
@@ -120,7 +120,7 @@ typedef struct PushCoreSettings {
     uint32_t srTarget;         /* PUSHCORE_SR_TARGET_* */
     uint32_t multiplier;       /* 1 = no frame generation, 2..8 = NVIDIA VFG multiplier (2..16 with PUSHCORE_FEATURE_VFG16) */
     uint32_t vfgQuality;       /* 0 Low, 1 Medium, 2 High (NvVFX model) */
-    int32_t nr;                /* 1 = AI picture enhancement (PushFPS "AI 画面增强", NR) */
+    int32_t nr;                /* 1 = DLSS 5 Neural Rendering (PushFPS "AI 画面增强", NR) */
     float nrTone, nrStructure; /* 0..1, PushFPS's look presets: 0.4/0.5 subtle, 0.7/0.8 balanced, 1/1 strong */
     int32_t videoHdr;          /* 1 = RTX Video HDR (SDR to HDR; only shown as HDR when StreamInfo.displayHdr) */
     /* Appended in the same ABI (read only when structSize covers them; a smaller struct gets the defaults below):
@@ -362,7 +362,7 @@ typedef struct PushCoreStats {
 typedef struct PushCoreGpuTiming {
     uint64_t sourceFrameId;    /* graph source frame id (1-based submit sequence) */
     double colorMs, srMs, fgBatchMs, fg1Ms, graphMs;
-    double nrMs, videoHdrMs;   /* ABI 3: AI enhancement (NR, all layers) and RTX Video HDR */
+    double nrMs, videoHdrMs;   /* ABI 3: Neural Rendering (NR, all layers) and RTX Video HDR */
 } PushCoreGpuTiming;
 
 PUSHCORE_API uint32_t pushcore_abiVersion(void);
@@ -465,7 +465,7 @@ PUSHCORE_API uint32_t pushcore_features(void); /* additive export; absent in old
 #define PUSHCORE_CAP_FSR_SR 8u
 #define PUSHCORE_CAP_NIS 9u
 #define PUSHCORE_CAP_RTX_HDR 10u     /* RTX Video HDR */
-#define PUSHCORE_CAP_NR 11u          /* AI clean-up: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
+#define PUSHCORE_CAP_NR 11u          /* DLSS 5 Neural Rendering: NVIDIA's NR runtimes, or the AMD ones (RX 9000 lmxxf, RX 7000 RedDuke) */
 #define PUSHCORE_CAP_DLSSG_LITE 12u
 #define PUSHCORE_CAP_NVOF_FG 13u     /* PUSHCORE_FG_NVOF: NVOFA + this build's NVOF support + the FidelityFX files */
 #define PUSHCORE_CAP_XEFG 14u        /* PUSHCORE_FG_XEFG: Intel GPU (else forced on), the pinned Intel-signed libxess_fg.dll + libxell.dll,
@@ -496,7 +496,7 @@ typedef struct PushCoreCaps {
     uint32_t hardware;         /* bit set = the GPU can run it (files aside) */
     char adapter[128];         /* UTF-8 adapter name */
     char reason[PUSHCORE_CAP_COUNT][96]; /* UTF-8: why a capability is not available (empty when it is) */
-    char nrRuntime[48];        /* the AI clean-up runtime that would run ("NVIDIA 310.8.0", "lmxxf (RX 9000)", ...) */
+    char nrRuntime[48];        /* the Neural Rendering runtime that would run ("NVIDIA 310.8.0", "lmxxf (RX 9000)", ...) */
 } PushCoreCaps;
 /* adapterLuid 0 = the first hardware adapter in DXGI's high-performance order */
 PUSHCORE_API int pushcore_capabilities(uint64_t adapterLuid, const wchar_t* rootDir, PushCoreCaps* out);
@@ -527,7 +527,7 @@ PUSHCORE_API int pushcore_pushFlowBench(uint64_t adapterLuid, const wchar_t* roo
    after 30 s. adapterLuid 0 = the first hardware adapter in DXGI's high-performance order. */
 PUSHCORE_API int pushcore_prewarm(uint64_t adapterLuid);
 typedef int (*PushCorePrewarmFn)(uint64_t);
-/* As pushcore_prewarm, plus the NGX core when these settings need one (RTX VSR, AI clean-up, RTX Video HDR; not for DLSS-G):
+/* As pushcore_prewarm, plus the NGX core when these settings need one (RTX VSR, Neural Rendering, RTX Video HDR; not for DLSS-G):
    it is initialised on the prewarm thread, outside the graph lock, and kept in the process-wide cache under the key the
    graph builds; the next graph that needs it waits for it instead of initialising a second one. config gives the runtime
    root (pushfpsDir / runtimeDir) exactly as pushcore_open gets it. Additive export (GetProcAddress). */

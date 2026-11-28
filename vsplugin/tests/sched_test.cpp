@@ -413,6 +413,26 @@ static void TestAuto()
     CHECK(ApplyOverride(o, L"target", L"1440p") && o.target == pm::UpscaleTarget::P1440);
     CHECK(ApplyOverride(o, L"enable", L"0") && !o.enable);
     CHECK(!ApplyOverride(o, L"nonsense", L"1"));
+    // Neural Rendering: off by default; cleanup / neural_rendering on and off; a legacy auto is off (even over an on)
+    {
+        pm::Settings n;
+        CHECK(n.cleanUp == pm::kOff);
+        CHECK(ApplyOverride(n, L"cleanup", L"on") && n.cleanUp == 1);
+        CHECK(ApplyOverride(n, L"cleanup", L"auto") && n.cleanUp == pm::kOff);
+        CHECK(ApplyOverride(n, L"neural_rendering", L"On") && n.cleanUp == 1);
+        CHECK(ApplyOverride(n, L"neural_rendering", L"Auto") && n.cleanUp == pm::kOff);
+        CHECK(ApplyOverride(n, L"neural_rendering", L"1") && n.cleanUp == 1);
+        CHECK(ApplyOverride(n, L"cleanup", L"off") && n.cleanUp == pm::kOff);
+        CHECK(ApplyOverride(n, L"neural_rendering_strength", L"Subtle") && n.strength == pm::CleanStrength::Subtle);
+        CHECK(ApplyOverride(n, L"cleanup_strength", L"Balanced") && n.strength == pm::CleanStrength::Balanced);
+        // the plan: a legacy auto never sets nr; on does where the GPU has an NR runtime (the test GPU has every cap)
+        pm::Settings la; CHECK(ApplyOverride(la, L"cleanup", L"auto"));
+        pm::Source lowSrc = src; lowSrc.bppEq = 0.10;
+        pm::Display dn = d; dn.battery = false;   // the battery rule turns it off; not what this checks
+        CHECK(!pm::Decide(la, lowSrc, dn, costs, g).nr);
+        pm::Settings lo; CHECK(ApplyOverride(lo, L"neural_rendering", L"on"));
+        CHECK(pm::Decide(lo, lowSrc, dn, costs, g).nr && g.has(pm::kCapNr));
+    }
     // disabled: pass-through settings
     const PushCoreSettings off = ToCore(o, c, d, src.w, src.h, false, false, nullptr);
     CHECK(off.multiplier == 1 && off.sr == 0);

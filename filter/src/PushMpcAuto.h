@@ -14,8 +14,9 @@
 //  3. Then the rest of the budget goes to RTX VSR quality 1 -> 4. Frame generation is never lowered to raise VSR.
 //  4. A source already at the output size gets VSR's artifact reduction only when its bitrate is low and it fits after
 //     frame generation (never at the cost of a frame generation step).
-//  5. Clean up (AI enhancement) Auto: on for a low bitrate per pixel where the GPU has an NR runtime; it may cost
-//     frame generation steps above 2x but never 2x itself; its cost (per family, then measured) gates it.
+//  5. Neural Rendering (DLSS 5 NR, setting CleanUp): never chosen by Auto. Off unless the user turns it on (it changes
+//     the look of the picture and is very heavy); a stored legacy Auto is Off. When on, its cost (per family, then
+//     measured) counts against the budget like every other stage.
 //  6. SDR to HDR Auto: on when Windows HDR is on for the window's display and the source is SDR: RTX Video HDR on an
 //     NVIDIA RTX card, else PushMPC's own inverse tone map (BT.2446 method A) in the filter.
 //  7. Deband Auto (PushMPC's own pass on the source): on for 8-bit SDR sources with a low bitrate; never on 10-bit or
@@ -196,7 +197,7 @@ struct Costs {
     double deband1080 = 0.15;                       // deband pass at 1080p (medium), p95 prior
     double vsrP95 = 1.20;
     double base4k = 0.45;                           // colour, conversion, upload (whole graph minus stages)
-    double nrMs = 4.0;                              // AI enhancement p95 (prior; per family below until measured)
+    double nrMs = 4.0;                              // Neural Rendering p95 (prior; per family below until measured)
     double hdr4k = 2.0;                             // RTX Video HDR at 4K (prior)
     double itm4k = 0.2;                             // PushMPC's inverse tone map in the filter (estimate)
     // The renderer's work per SHOWN frame at 4K (MPC Video Renderer, RTX 5090), seen as the extra VFG batch time at 10x in
@@ -261,8 +262,8 @@ inline constexpr double kHighSpareMs = 3.0;       // High (PushFlow Quality) onl
 // (2026-11-26, 240 Hz windowed, 10x): clip A at a graph p95 of 34.9 of the 35.4 ms budget played clean; a 4K HDR episode
 // at 40.0 dropped frames.
 inline constexpr double kFixedRefreshSpareMs = 1.0;
-// Clean up Auto: H.264-equivalent bits per pixel per frame at or below this is "streaming level". Blu-ray 1080p H.264
-// at 25-35 Mbit/s is 0.5-0.7; a web stream 1080p24 at 6 Mbit/s H.264 is 0.12, YouTube AV1 at 2.5 Mbit/s ~0.09
+// Low bitrate (for the Auto rules below that use it): H.264-equivalent bits per pixel per frame at or below this is
+// "streaming level". Blu-ray 1080p H.264 at 25-35 Mbit/s is 0.5-0.7; a web stream 1080p24 at 6 Mbit/s H.264 is 0.12, YouTube AV1 at 2.5 Mbit/s ~0.09
 // equivalent; a UHD Blu-ray HEVC at 60 Mbit/s is ~0.68 equivalent, a 4K HEVC web stream at 16.5 Mbit/s 0.19 (at
 // 1080p quality, BitsPerPixel). Codec factors in CodecEfficiency.
 inline constexpr double kLowBitrateBpp = 0.18;
@@ -688,7 +689,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         r.hdr = true;
         // the method: PushMPC's curve on every GPU (the default); RTX Video HDR only when asked for and available
         r.hdrItm = !(s.hdrMethod == HdrMethod::Rtx && g.has(kCapRtxHdr));
-        // the boost: Auto by the source (High for a clean source, Low where the low-bitrate clean-up rule fires)
+        // the boost: Auto by the source (High for a clean source, Low at a low bitrate (kLowBitrateBpp))
         std::wstring why;
         if (s.hdrBoost != HdrBoost::Auto) r.hdrBoost = s.hdrBoost;
         else if (src.bppEq >= 0 && src.bppEq <= kLowBitrateBpp) { r.hdrBoost = HdrBoost::Low; why = std::format(L", low bitrate ({:.2f} bits per pixel)", src.bppEq); }
@@ -869,23 +870,12 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (chooseFg(baseCost(false)).mult < without) { r.holdFlags &= ~6u; holdMs = 0; r.animModeNote += L"; line art and sign hold off (they would cost a frame generation step)"; }
     }
 
-    // --- clean up: fixed, off, or Auto (low bitrate, an NR runtime on this GPU; never at the cost of 2x)
-    const int mNoNr = chooseFg(baseCost(false)).mult;
+    // --- Neural Rendering (DLSS 5 NR, the AMD ports): only when the user turns it on (and this GPU has an NR runtime).
+    // Auto never turns it on: it changes the look of the picture and is very heavy; a legacy Auto (kAuto) is Off.
     bool nr = false;
-    if (s.cleanUp == kOff) { r.cleanNote = L"off"; }
+    if (s.cleanUp == kOff || s.cleanUp == kAuto) { r.cleanNote = L"off"; }
     else if (!g.has(kCapNr)) { r.cleanNote = L"off, " + g.reason[kCapNr]; }
-    else if (s.cleanUp != kAuto) { nr = true; r.cleanNote = L"on"; }
-    else if (!lowBitrate) { r.cleanNote = L"off, " + rateNote; }
-    else {
-        const Pick withNr = chooseFg(baseCost(true));
-        const int mNr = withNr.mult;
-        // the whole plan with clean-up must fit: frame generation at the multiplier it then gets (a fixed Smoother does not
-        // step down for it), the upscaler at its lowest level
-        const double planNr = baseCost(true) + vsr(level) + (mNr >= 2 ? FgCost(c, withNr.m, withNr.q, mNr, pixFg) + c.guardScore * c.card : 0.0) + show(mNr);
-        if (mNoNr >= 2 && mNr < 2) r.cleanNote = L"off, " + rateNote + L" but it would cost frame generation";
-        else if (planNr > r.budgetMs) r.cleanNote = std::format(L"off, {:.1f} ms would not fit the budget (the plan with it: {:.1f} of {:.1f} ms)", nrPrior, planNr, r.budgetMs);
-        else { nr = true; r.cleanNote = L"on, " + rateNote; }
-    }
+    else { nr = true; r.cleanNote = L"on"; }
     r.nr = nr;
     Pick fg = chooseFg(baseCost(nr));
     r.multiplier = fg.mult; r.fgMethod = fg.m; r.fgQuality = fg.q; r.stoppedAt = fg.stop;
@@ -941,7 +931,7 @@ inline Choice Decide(const Settings& s, const Source& src, const Display& d, con
         if (r.guardFlow) r.predictedMs += flowMs;
         r.guardNote = r.guardFlow ? L"with optical flow" : std::format(L"scene score only (optical flow would take {:.1f} ms more)", flowMs);
     } else r.guardNote = r.multiplier >= 2 ? L"scene score only (no NVIDIA optical flow)" : L"";
-    // on battery (OnBattery = Light): frame generation 2x at most, VSR level 2 at most, no clean-up / deband, SDR to HDR
+    // on battery (OnBattery = Light): frame generation 2x at most, VSR level 2 at most, no Neural Rendering / deband, SDR to HDR
     // boost Low, the cut guard without optical flow
     if (d.battery && s.onBattery == BatteryMode::Light) {
         if (r.multiplier > 2) { r.multiplier = 2; r.smootherNote = std::format(L"{} 2x (on battery)", FgMethodLabel(r.fgMethod)); }
