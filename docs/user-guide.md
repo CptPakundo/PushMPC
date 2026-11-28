@@ -321,7 +321,7 @@ says about itself. Interlaced video is turned into whole frames, one for each ha
 on those: in mpv with mpv's own deinterlacer (your deinterlace setting comes back at the end of the file), in VLC with
 PushMPC's own deinterlacer. Film in a TV signal is put back into its original 24 frames in mpv and VLC, exactly as it
 was filmed; if the film pattern breaks (a video section, an edit), PushMPC deinterlaces from there. In MPC-HC, MPC-BE
-and PotPlayer, and in VLC with hardware decoding, PushMPC steps aside and the player deinterlaces as before. A fixed
+and PotPlayer, and in VLC with hardware decoding kept on the GPU, PushMPC steps aside and the player deinterlaces as before. A fixed
 Smoother keeps the frame rate it gives: 4x on 30 interlaced frames a second is still 120 frames a second.
 
 **Picture and sound stay in sync.** Every frame, real or generated, keeps its own timestamp. After a seek, the first

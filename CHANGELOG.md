@@ -35,7 +35,7 @@ sets itself up for your graphics card and display.
   generates from those. In mpv this uses mpv's own deinterlacer, and film carried in a TV signal (2:3 pulldown) is
   put back into its original 24 frames first, so nothing of the film is lost. In VLC, PushMPC uses its own
   deinterlacer and puts film back into its 24 frames the same way. In MPC-HC, MPC-BE and PotPlayer, and in VLC with
-  hardware decoding, PushMPC still steps aside on interlaced video and the player deinterlaces it.
+  hardware decoding kept on the GPU, PushMPC still steps aside on interlaced video and the player deinterlaces it.
 
 ### Auto
 
