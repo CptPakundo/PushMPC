@@ -4,6 +4,7 @@
 //   CUDA frames   -> NVIDIA's engine (libpushmpc_engine_nvl.so) device to device (Linux, hwdec=nvdec).
 // The filter retries a failed hardware open with mem = CPU (its copy fallback), so a reason here is enough.
 #include "engine.h"
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
 #include "content_tap.h"
 #endif
@@ -62,6 +63,7 @@ namespace {
 struct Instance {
     pme::Backend* b = nullptr;
     std::string err;
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
     // ContentDetect on this stream's frames (a sidecar module's frames are measured by the module that loaded it)
     std::unique_ptr<pme::ContentTap> tap;
@@ -184,6 +186,7 @@ pme::Backend* OpenMl(const pmeng_stream& st, const pme::Options& o, pmeng_output
 pme::Backend* OpenNvlCuda(const pmeng_device& dev, const pmeng_stream& st, const pme::Options& o, pmeng_output& out, std::string& why) { return OpenSidecarOf(0, st, o, out, why, &dev); }
 #endif
 
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
 // software frames: backend=auto tries, in order, what can do best on this machine.
 //   macOS: the apple engine (VideoToolbox), then the portable GPU engine on its own Vulkan device (MoltenVK), then the CPU.
@@ -360,6 +363,7 @@ void* OpenFull(const pmeng_device* dev, const pmeng_stream* st, const char* opti
         pme::Log(std::string("open: ") + out->engine + ": " + out->description);
         auto* inst = new Instance();
         inst->b = b;
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         // ContentDetect: what the picture is, measured on the frames (option content=off: not measured)
         if (pme::Opt(o, "content", "auto") != "off") { inst->tap = std::make_unique<pme::ContentTap>(); b->content = inst->tap.get(); }
@@ -380,6 +384,7 @@ int Submit(void* h, const pmeng_image* src, int64_t pts, uint32_t flags)
     if (!in || !src) return PMENG_ERROR;
     try {
         const int r = in->b->Submit(*src, pts, flags);
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         if (in->tap) {
             // frames in host memory: measured here, after the engine took the frame (a BUSY frame comes again)
@@ -426,6 +431,7 @@ void Close(void* h)
     if (!in) return;
     try {
         pme::Log("close: " + in->b->Stats());
+#include "pushmpc/content_detect.h"   // CombMeter: the interlace meter of every route (comb_*, pmeng minor 2), sidecars too
 #ifndef PME_SIDECAR
         if (in->tap) pme::Log("close: " + in->tap->Describe());
 #endif

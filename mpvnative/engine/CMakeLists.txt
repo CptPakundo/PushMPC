@@ -238,7 +238,7 @@ endif()
 # Neither links CUDA, NVIDIA's runtime or ONNX Runtime: all are loaded at run time.
 set(PME_NVL_FATBIN "" CACHE FILEPATH "nvl_kernels.fatbin for libpushmpc_engine_nvl.so")
 set(PME_NVL_GUARD_DIR "" CACHE PATH "nvl_guard_sc.fatbin / nvl_guard_fm.fatbin (the GPU cut guard)")
-set(PME_SIDECAR_DIRS "${CMAKE_CURRENT_SOURCE_DIR}" "${ROOT}/mpvnative/include" "${ROOT}/vsplugin/src")
+set(PME_SIDECAR_DIRS "${CMAKE_CURRENT_SOURCE_DIR}" "${ROOT}/mpvnative/include" "${ROOT}/vsplugin/src" "${ROOT}/pushmpc/include")   # pushmpc/content_detect.h: the interlace meter in pmeng_module.cpp
 if(UNIX AND NOT APPLE AND PME_NVL_FATBIN)
   set(_n "${ROOT}/vsplugin/engines/nvidia-linux")
   set(_nsrc "${_n}/nvl_loader.cpp" "${_n}/nvl_engine.cpp" "${_n}/nvl_ampere.cpp" "${_n}/nvl_selftest.cpp" "${_n}/nvl_gpuguard.cpp" "${_n}/nvl_nvof.cpp"
