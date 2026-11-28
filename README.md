@@ -140,7 +140,7 @@ Just open a video in your player. PushMPC switches on by itself.
   VLC: **Tools > Preferences > All > Video > Filters > PushMPC**. Everything starts on Auto.
 - **Plex, mpv and the others** use Auto with the same rules and need nothing from you. On Windows they follow the
   settings you make on MPC-HC's settings page; on Linux, settings live in `~/.config/pushmpc/settings.ini` (for
-  example `Smoother=Auto`, `Off`, or `2` to `8`).
+  example `Smoother=Auto`, `Off`, or `2` to `16`).
 
 The [user guide](docs/user-guide.md) explains every setting.
 
@@ -218,10 +218,6 @@ uninstalling turns it back on.
   starts with the very first frame.
 - **Saving a video with mpv** (`mpv --o=...`): mpv ignores your `mpv.conf` when it saves, so add
   `--include=<path to your mpv.conf>` to the command to use PushMPC.
-
-## Roadmap
-
-- Faster AI frame generation on more graphics cards, including AMD Radeon and Snapdragon on Windows.
 
 ## Credits
 

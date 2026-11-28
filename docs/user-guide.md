@@ -76,7 +76,7 @@ To remove everything: `sh ~/.local/share/pushmpc/setup.sh uninstall`. To update:
 `sh setup.sh` again.
 
 PushMPC's settings on Linux live in `~/.config/pushmpc/settings.ini`, with the same names as the [settings](#settings)
-below, for example `Smoother=Auto` (or `Off`, or `2` to `8`).
+below, for example `Smoother=Auto` (or `Off`, or `2` to `16`).
 
 ## Installing on a Mac
 
