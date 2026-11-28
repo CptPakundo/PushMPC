@@ -13,7 +13,7 @@ set DEPS=%PUSHMPC_DEPS%
 set REPO=%PUSHMPC_PUSHFPS_SRC%
 set BUILD=%PUSHMPC_BUILD_DIR%
 rem The PushFPS version this tree is (tag vX.Y.Z of PushFPS) plus our suffix; also stamps pushcore.dll's PushFPSVersion
-set PUSHFPS_DISPLAY_VERSION=4.5.5-pushmpc
+set PUSHFPS_DISPLAY_VERSION=4.5.8-pushmpc
 set FFMPEG=%DEPS%\vcpkg\installed\x64-windows
 set STREAM=%DEPS%\stream-installed\x64-windows-static
 set PKG_CONFIG_PATH=%STREAM%\lib\pkgconfig

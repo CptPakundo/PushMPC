@@ -37,7 +37,7 @@ upscaling and clean-up with the time left) are the same on every route;
 
 Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools break on spaces). Layout:
 
-    <repo>\PushFPS            PushFPS 4.5.5 source (tag v4.5.5) with patches\pushfps-4.5.5-pushmpc.patch applied
+    <repo>\PushFPS            PushFPS 4.5.8 source (tag v4.5.8) with patches\pushfps-4.5.8-pushmpc.patch applied
     <repo>\MpcVideoRenderer   MPC Video Renderer source (DirectShow base classes and interfaces)
     <repo>\pushmpc            pushcore (C ABI, built inside PushFPS's CMake tree)
     <repo>\filter             the DirectShow filter
@@ -48,7 +48,7 @@ Clone into a folder **without spaces** in its path (FFmpeg/vcpkg and MSYS tools 
 
 Tools: Visual Studio 2022 or newer with C++ (found with vswhere; `PUSHMPC_VS` overrides), CMake and Ninja (bundled with VS).
 
-    git -C PushFPS apply ..\patches\pushfps-4.5.5-pushmpc.patch
+    git -C PushFPS apply ..\patches\pushfps-4.5.8-pushmpc.patch
     scripts\build-pushmpc.cmd release         (the shaders, pushcore.dll and its helpers; pushcore only, no PushFPS app)
     filter\build.cmd                          (PushMpcFilter.ax, PushMpcExit.dll, auto_test.exe)
     updater\build.cmd                         (PushMpcUpdater.exe; developer build: unsigned feeds allowed)

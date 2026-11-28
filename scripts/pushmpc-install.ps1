@@ -1025,11 +1025,13 @@ $RuntimeFileHashes = if ($GpuVendor -eq 'AMD') { $RuntimeFileHashesAmd } else { 
 # PushFPS's release ships it in PushFPS-files\runtime\experimental\pushflow. Identical in PushFPS 4.2.0, 4.3.0, 4.3.1,
 # 4.4.0, 4.5.3, 4.5.4 and 4.5.5 (per-file SHA-256 below; 4.5.3 checked on an official 4.5.3 install and in its release zip, all 20
 # files; 4.5.4 checked in its release zip by runtime-pins.yml, job pushflow; 4.5.5 changes no PushFlow file (v4.5.4..v4.5.5 diff:
-# interface, virtual camera, capture-card list), its zip checked by the same job). Sources, in order: an
+# interface, virtual camera, capture-card list), its zip checked by the same job). 4.5.6-4.5.8 change no PushFlow or packaging
+# file either (v4.5.5..v4.5.8 diff: mouse and keyboard, voice chat, Discord status, HUD boxes on Linux and macOS); the 4.5.8 zip
+# below is checked by the same job. Sources, in order: an
 # installed PushFPS, a PushFPS-<v>-win64.zip in -PackageCache or the own download folder, else PushFPS's GitHub release.
 $PushFlow = @{
-    Asset = 'PushFPS-4.5.5-win64.zip'
-    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.5/PushFPS-4.5.5-win64.zip'
+    Asset = 'PushFPS-4.5.8-win64.zip'
+    Url   = 'https://github.com/DosukaSOL/PushFPS/releases/download/v4.5.8/PushFPS-4.5.8-win64.zip'
     Rel   = 'runtime\experimental\pushflow'
     Files = @{
         'DirectML.dll' = '9C9E6D822561C6C41B90E6994B3E8857CF1D66DBFB1E0C4C799C7C89B4E92DA1 18527776'
@@ -2908,7 +2910,7 @@ function Show-AutoPlan($p) {
     Info "AMD FSR SDK 2.4: $($p.fsrSdk240)"
 }
 # pmml.txt beside PushFlow's models (<InstallDir>\runtime\runtime\experimental\pushflow: the runtime component keeps the
-# package's runtime\ folder): pushcore reads runtime= and backend= from it (patches/pushfps-4.5.5-pushmpc.patch,
+# package's runtime\ folder): pushcore reads runtime= and backend= from it (patches/pushfps-4.5.8-pushmpc.patch,
 # pmmlChoice); without it, or with dml, PushFlow runs on its own DirectML session.
 function Write-PmmlChoice($p, $state) {
     $dir = Join-Path (Join-Path $InstallDir 'runtime') $PushFlow.Rel
