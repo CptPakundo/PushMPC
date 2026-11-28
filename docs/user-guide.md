@@ -290,7 +290,7 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 | Deband | Auto, Off, On | smooths banding in skies and gradients |
 | Deband strength | Low, Medium, High | how strong the smoothing is |
 | Subtitle hold | Auto (on text), Off, On | keeps subtitles that are burned into the picture steady, so they don't warp. Normal subtitles never need it |
-| Animation | Auto, Off, On | cartoons and anime are often drawn for every second or third frame. PushMPC finds the repeated drawings and spreads the new frames evenly between the drawings, so motion glides instead of stepping. Auto also tunes the picture for cartoons when it finds one. Off plays every frame as before |
+| Animation | Auto, Off, On | cartoons and anime are often drawn for every second or third frame. With this on, PushMPC looks for the repeated drawings and tunes frame generation and the picture for animation. Auto turns it on when the picture is found to be animation. Off plays every frame as before |
 | On-screen status | Brief at start, Always, Off | the info line in the top-left corner: for 3 seconds at the start, always, or never |
 | On battery | Light, Same as plugged in | on a laptop's battery, Light uses less power: up to 2x, lighter upscaling, no clean-up |
 
