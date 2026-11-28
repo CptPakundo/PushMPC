@@ -25,6 +25,8 @@
 #include "portable_backend.h"
 #include "schedule.h"
 #include "vs_content.h"
+#include "mp_out.h"   // the output's _MP_IMAGE colour (CI test hook only here)
+#include <atomic>
 #include "vslog.h"
 #include "eof_guard.h"   // mpv's unknown-length source: its end becomes a known one
 #ifdef PMVS_GPU
@@ -88,6 +90,15 @@ void SetPropsOf(const VSAPI* a, VSFrame* f, int64_t n, int k, const std::map<int
     a->mapSetInt(p, "PushMPCFrameKind", kind, maReplace);   // 0 real, 1 generated, 2 repeated
     a->mapSetInt(p, "PushMPCSource", s, maReplace);
     a->mapSetData(p, "PushMPCEngine", engine, -1, dtUtf8, maReplace);
+    // portable keeps the source's colour; CI's PUSHMPC_TEST_OUT_COLOUR tags the output otherwise (mp_out.h)
+    if (const MpTestOutColour& tc = TestOutColour(); tc.on) {
+        static std::atomic<int> logged{ 0 };
+        std::string why;
+        const bool ok = TagMpOutput(a, p, tc.transfer, tc.primaries, tc.matrix, tc.range, 0, &why);
+        if (logged.fetch_add(1) == 0)
+            Log(ok ? std::format("portable: output colour tagged for mpv (test): transfer {} primaries {} matrix {} range {}", tc.transfer, tc.primaries, tc.matrix, tc.range)
+                   : "portable: output colour not tagged for mpv (test): " + why);
+    }
 }
 void SetProps(PInst* d, const VSAPI* a, VSFrame* f, int64_t n, int kind) { SetPropsOf(a, f, n, d->k, d->meta, d->inVi, kind, "cpu"); }
 

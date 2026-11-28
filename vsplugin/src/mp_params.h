@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace pmvs {
 
@@ -127,6 +128,67 @@ inline bool MpVersion(const std::string& s, int& major, int& minor)
         return true;
     }
     return false;
+}
+
+// ------------------------------------------------------------------------------------------------ the output's colour
+// mpv takes an output frame's colour only from its _MP_IMAGE (vf_vapoursynth.c vs_frame_done: img = *mpi, then
+// mp_image_new_copy -> mp_image_copy_attributes copies params.color, repr, light, and from 0.42 primaries_orig /
+// transfer_orig / sys_orig); the plugin's _Transfer / _Primaries / _Matrix are not read. The plugin copies the source
+// frame's props, so a route that changes the colour (a tone map to SDR, RTX Video HDR) must patch the blob, as mpv's own
+// vf_format does (set_params: transfer changed -> hdr metadata cleared, light AUTO; *_orig = the new values).
+// Further fields used here, after repr.sys at S (mp_params.h layout above), from the 0.39-0.42 struct and libplacebo:
+//   pl_color_repr: sys S, levels S + 4, alpha S + 8, bits S + 12 .. S + 24, const pl_dovi_metadata *dovi at
+//   round_up(S + 24, ptr); its size R = round_up(24 + ptr, ptr) (32 on 64-bit, 28 on 32-bit);
+//   then enum primaries_orig S + R, transfer_orig S + R + 4, sys_orig S + R + 8, enum mp_csp_light light S + R + 12
+//   (MP_CSP_LIGHT_AUTO 0 .. SCENE_1_2 4, the same at every tag);
+//   pl_hdr_metadata at anchor + 28 .. + 176, max_luma at + 28 + 36.
+struct MpOutColour {
+    // libplacebo values. plTransfer and plPrimaries -1 together: the transfer is the source's (the HDR metadata, light
+    // and Dolby Vision stay), only the matrix (system) and the levels are written
+    int plPrimaries = -1, plTransfer = -1, plSystem = -1, plLevels = -1;
+    float maxLuma = 0;                                                     // cd/m2 for an HDR output; 0 = mpv's default
+};
+// H.273 / FFmpeg codes -> libplacebo (the plugin's outputs only use these); -1 = no mapping
+inline int H273TransferToPl(int t) { switch (t) { case 1: return 1; case 13: return 2; case 8: return 3; case 4: return 6; case 5: return 9; case 16: return 12; case 18: return 13; default: return -1; } }
+inline int H273PrimariesToPl(int p) { switch (p) { case 6: return 1; case 5: return 2; case 1: return 3; case 4: return 4; case 9: return 6; case 11: return 11; case 12: return 12; default: return -1; } }
+inline int H273MatrixToPlSystem(int m) { switch (m) { case 5: case 6: return 1; case 1: return 2; case 7: return 3; case 9: return 4; case 10: return 5; default: return -1; } }   // not RGB: its value moved in v7.360
+inline int PlSystemToAv(int s) { switch (s) { case 1: return 6; case 2: return 1; case 3: return 7; case 4: return 9; case 5: return 10; default: return 2; } }
+// the matrix pushmpc.vpy converts the plugin's RGB output to YUV 4:4:4 with (its _mat rule; keep both in step)
+inline int VpyRgbMatrix(int w, int h, int bits) { return bits > 8 && w >= 3200 ? 9 : (w < 1024 && h < 600 ? 6 : 1); }
+
+// patches a copy of a validated blob (the anchor search and checks of ParseMpImage, with the size from the blob's own
+// mp_image w / h); false and why when it does not validate or a field to write holds an out-of-range value
+inline bool PatchMpImage(std::vector<uint8_t>& b, int sarNum, int sarDen, int colorSpace, int colorRange, const MpOutColour& o, std::string* why, size_t ptrSize = sizeof(void*))
+{
+    auto no = [&](const char* m) { if (why) *why = m; return false; };
+    const bool keepTransfer = o.plPrimaries < 0 && o.plTransfer < 0;
+    if ((!keepTransfer && (o.plPrimaries < 0 || o.plTransfer < 0)) || o.plSystem < 0 || o.plLevels < 1 || o.plLevels > 2) return no("no libplacebo value for the output colour");
+    if (b.size() < 64) return no("no _MP_IMAGE");
+    const int w = MpReadI32(b.data(), 0), h = MpReadI32(b.data(), 4);
+    const MpFrameColour src = ParseMpImage(b.data(), b.size(), w, h, sarNum, sarDen, colorSpace, colorRange, ptrSize);
+    if (!src.ok) { if (why) *why = src.why; return false; }
+    const size_t a = src.anchor, s = (a + 176 + ptrSize - 1) / ptrSize * ptrSize;
+    const size_t dovi = (s + 24 + ptrSize - 1) / ptrSize * ptrSize, r = (24 + ptrSize + ptrSize - 1) / ptrSize * ptrSize;
+    const size_t orig = s + r, light = orig + 12;
+    if (light + 4 > b.size()) return no("_MP_IMAGE is shorter than mpv 0.39's layout");
+    const int po = MpReadI32(b.data(), orig), to = MpReadI32(b.data(), orig + 4), so = MpReadI32(b.data(), orig + 8), li = MpReadI32(b.data(), light);
+    if (po < 0 || po >= kPlPrimCount || to < 0 || to >= kPlTrcCountMax || so < 0 || so >= kPlSystemCountMax || li < 0 || li > 4) return no("the *_orig / light fields are out of range");
+    auto put = [&](size_t off, int32_t v) { std::memcpy(b.data() + off, &v, 4); };
+    if (keepTransfer) {   // the matrix and the levels only (sys_orig with them, as vf_format does)
+        if (src.plSystem == 8) return true;   // Dolby Vision: mpv reshapes after the filter from repr.dovi; left as it is
+        put(s, o.plSystem); put(s + 4, o.plLevels); put(orig + 8, o.plSystem);
+        return true;
+    }
+    put(a + 20, o.plPrimaries);
+    put(a + 24, o.plTransfer);
+    std::memset(b.data() + a + 28, 0, 148);                                // the source's HDR metadata does not describe the output
+    if (o.maxLuma > 0) std::memcpy(b.data() + a + 28 + 36, &o.maxLuma, 4);
+    put(s, o.plSystem);
+    put(s + 4, o.plLevels);
+    std::memset(b.data() + dovi, 0, ptrSize);                              // no Dolby Vision reshaping of the output
+    put(orig, o.plPrimaries); put(orig + 4, o.plTransfer); put(orig + 8, o.plSystem);
+    put(light, 0);                                                         // MP_CSP_LIGHT_AUTO: mpv infers it from the transfer
+    return true;
 }
 
 } // namespace pmvs

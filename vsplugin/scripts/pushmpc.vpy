@@ -158,6 +158,7 @@ else:
 # mpv's vf=vapoursynth takes planar YUV only ("Unsupported output format" for RGB): the plugin's full-chroma RGB output
 # (chroma auto/444) goes to YUV 4:4:4, so no chroma resolution is lost. mpv keeps the input's colour parameters for the
 # output, and none are known while the script loads: the same matrix guess as the plugin's and _rife's.
+# Keep this rule in step with vsplugin/src/mp_params.h VpyRgbMatrix: the plugin writes it into the output's _MP_IMAGE.
 if clip.format.color_family == vs.RGB:
     _b = clip.format.bits_per_sample
     _mat = "2020ncl" if _b > 8 and clip.width >= 3200 else ("170m" if clip.width < 1024 and clip.height < 600 else "709")
