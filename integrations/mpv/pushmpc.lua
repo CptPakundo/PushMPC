@@ -522,7 +522,11 @@ end
 
 local function ensure()
     if busy then return end
-    if mp.get_property_native("video-params") == nil then return end   -- only once video runs: soft failure
+    -- only once video runs (soft failure), and only with real params: before the first frame enters the chain mpv
+    -- answers video-params with a {w, h} fallback (command.c "Simplistic fallback for stupid scripts"), which has no
+    -- colour, so the filter went in without user-data and the plugin guessed (integrations 46087052008: 5 of 12)
+    local vp = mp.get_property_native("video-params")
+    if type(vp) ~= "table" or vp.pixelformat == nil then return end
     local path = mp.get_property("path")
     if failed_for ~= nil and failed_for == path then return end
     local vf = mp.get_property_native("vf") or {}

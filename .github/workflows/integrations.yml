@@ -682,7 +682,7 @@ jobs:
             for mode in encode play; do for r in 1 2 3; do
               id=$n-$mode-$r; L=/tmp/diag-mpv-$id.log; V=/tmp/vslog-diag-$id; export PUSHMPC_VS_LOG_DIR=$V; rm -rf $V; rm -f /tmp/diag-out.mkv $L
               if [ $mode = encode ]; then
-                timeout 180 mpv --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1; rc=$?
+                timeout 180 mpv --include=$HOME/.config/mpv/mpv.conf --no-audio --msg-level=all=debug --log-file=$L --o=/tmp/diag-out.mkv --of=matroska --ovc=ffv1 $f > /dev/null 2>&1; rc=$?
                 out=$(nframes /tmp/diag-out.mkv)
               else
                 timeout 180 mpv --no-audio --msg-level=all=debug --vo=null --framedrop=no --log-file=$L $f > /dev/null 2>&1; rc=$?
@@ -703,11 +703,22 @@ jobs:
               adds=$(grep -c 'Run command: vf.*append' $L 2>/dev/null)
               luaadd=$(grep -c "PushMPC's filter added" $L 2>/dev/null)
               line="clip=$n run=$mode#$r first-add-user-data=$ud transfer-arg=$tr vf-appends=${adds:-0} lua-added=${luaadd:-0} log-line(append ${la:-?}, decoder-format ${ld:-?}, vs-init ${li:-?}) out=${out:-?} control=${ctl:-?} source=${src:-?} plugin-instance-frames=${inst:-none}"
+              # verdict: the transfer the plugin opened with (its "colour arguments" line when it has one, else the first
+              # add's user-data) against the clip's, and every frame filtered (playback: the first instance has 2x the
+              # source; encode: 2x the mpv-alone control)
+              case $n in hdr10) et=16;; hlg) et=18;; *) et=1;; esac
+              pt=$(grep -ho 'colour arguments: [^(]*transfer [0-9-]*' $V/*.log 2>/dev/null | head -1 | grep -o 'transfer [0-9-]*' | grep -o '[0-9-]*$')
+              got=${pt:-$(printf '%s' "$tr" | grep -o '[0-9]*$')}
+              first_inst=$(printf '%s' "$inst" | cut -d, -f1)
+              if [ $mode = encode ]; then want=$(( ${ctl:-0} * 2 )); have=${out:-0}; else want=$(( ${src:-0} * 2 )); have=${first_inst:-0}; fi
+              cv=FAIL; [ "${got:-x}" = "$et" ] && cv=ok; fv=FAIL; [ "${have:-0}" = "$want" ] && fv=ok
+              line="$line verdict: transfer ${got:-none} (want $et) $cv, frames ${have:-0} (want $want) $fv"
               echo "$line" | tee -a $sum
               echo "::notice title=colour diag $n $mode#$r::$line"
             done; done
           done
           echo "--- summary"; cat $sum
+          v="verdict: $(grep -c ' ok, frames .* ok$' $sum) of $(grep -c '^clip=' $sum) runs opened with the clip's transfer and filtered every frame"; echo "$v" | tee -a $sum; echo "::notice title=colour diag verdict::$v"
           { echo '## colour diagnostic (Arch, portable)'; echo; echo '```'; cat $sum; echo '```'; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           rm -r $HOME/.config/pushmpc; sh $HOME/.local/share/pushmpc/install.sh uninstall > /dev/null 2>&1
           exit 0
