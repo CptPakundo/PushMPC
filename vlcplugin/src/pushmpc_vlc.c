@@ -367,6 +367,9 @@ vlc_module_begin()
     add_bool(CFG "deinterlace", true, "Deinterlace interlaced video", "Video measured interlaced (field combing in the picture, "
              "never the flags) is deinterlaced here at double rate (YADIF, one picture per field) before frames are generated; "
              "VLC's own deinterlacer runs after PushMPC. Off: such video passes through unchanged.", false)
+    add_bool(CFG "deinterlace-hw", false, "Deinterlace on the hardware copy path (not verified yet)", "VA-API / VDPAU decoding "
+             "without zero copy: deinterlace the surface on the CPU and upload it back. Off (the default): interlaced video "
+             "passes through there unchanged until this path has run on a real VA-API GPU.", true)
     add_integer(CFG "alloc", 0, "Output pictures", "Where generated pictures come from (diagnostics)", true)
         change_integer_list(alloc_values, alloc_texts)
     add_bool(CFG "zerocopy", true, "Zero copy with hardware decoding", "Windows, pushcore: Direct3D 11 pictures; macOS, Apple's interpolation: VideoToolbox pictures. Hardware-decoded "
@@ -497,6 +500,7 @@ struct filter_sys_t {
     bool deint_feed;            /* FilterPic is given our progressive pictures (no converter in front) */
     picture_t *feed_work;       /* hardware path: the CPU picture of our own the engine reads (FilterPic skips the surface read) */
     mtime_t il_fp;              /* time spent in frame generation (FilterPic) since the cost check's start: not the deinterlacer's */
+    bool il_hw_noted;           /* the hardware path's step-aside logged */
     /* telecine (pm_comb_cadence, pm_ivtc.h): the phase and field order measured, the pulldown removal, its watchdog */
     bool il_telecine, il_ivtc, il_ivtc_tried;
     int il_phase, il_tff, il_cad_frames;
@@ -1810,7 +1814,8 @@ static picture_t *PcLagFilter(filter_t *f, struct filter_sys_t *sys, picture_t *
  * (pm_deint.h) turns each woven picture into two progressive ones, one per field, and frame generation runs on those
  * (FilterPic), at the multiplier Auto decides for the doubled rate. Its cost is measured live: when it takes more than
  * half of the source interval on average (after 30 pictures), the module steps aside (IlAside) as before. VA-API / VDPAU
- * without zero copy: the surface the engine reads anyway is deinterlaced on the CPU and uploaded back (IlHand).
+ * without zero copy: the surface the engine reads anyway is deinterlaced on the CPU and uploaded back (IlHand),
+ * behind the option deinterlace-hw, off by default until it has run on a real VA-API GPU (it steps aside meanwhile).
  * The zero-copy paths step aside (their pictures never reach the CPU); a GPU deinterlace there is open work:
  *  - VA-API (zc_hw): the video processing pipeline (VAEntrypointVideoProc, VAProcFilterDeinterlacing with
  *    VAProcDeinterlacingMotionAdaptive / Bob, forward and backward references) is reachable on the decoder's VADisplay;
@@ -1827,7 +1832,14 @@ static picture_t *FilterPic(filter_t *f, picture_t *cur);
  * must be the module's own (pushcore runs on textures) */
 static bool IlCpuPath(filter_t *f, struct filter_sys_t *sys)
 {
-    return !sys->zc && !sys->zc_hw && !PM_CVPX_ON(sys) && !sys->pc && sys->eng && OptInt(VLC_OBJECT(f), CFG "deinterlace", 1) != 0;
+    if (!(!sys->zc && !sys->zc_hw && !PM_CVPX_ON(sys) && !sys->pc && sys->eng && OptInt(VLC_OBJECT(f), CFG "deinterlace", 1) != 0)) return false;
+    /* VA-API / VDPAU copy path: off by default until it has run on a real VA-API GPU (no runner exercises it) */
+    if (sys->hw && OptInt(VLC_OBJECT(f), CFG "deinterlace-hw", 0) == 0) {
+        if (!sys->il_hw_noted) msg_Info(f, "PushMPC: interlaced on a hardware path: stepping aside (the hardware deinterlace path is not verified yet)");
+        sys->il_hw_noted = true;
+        return false;
+    }
+    return true;
 }
 static bool IlDeintStart(filter_t *f, struct filter_sys_t *sys)
 {
