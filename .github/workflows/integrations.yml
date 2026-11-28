@@ -67,7 +67,7 @@ jobs:
           git -C MpcVideoRenderer fetch -q --depth 1 origin $pin.mpcvr.commit
           git -C MpcVideoRenderer checkout -q FETCH_HEAD
           git -C MpcVideoRenderer submodule update -q --init --depth 1 external/BaseClasses
-          cmake -S filter -B "$env:RUNNER_TEMP\fb" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$PWD\MpcVideoRenderer"; if ($LASTEXITCODE) { exit 1 }
+          cmake -S filter -B "$env:RUNNER_TEMP\fb" -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPUSHMPC_MPCVR_DIR=$PWD\MpcVideoRenderer" -DPUSHMPC_FETCH_LAV=ON; if ($LASTEXITCODE) { exit 1 }
           cmake --build "$env:RUNNER_TEMP\fb" --parallel; if ($LASTEXITCODE) { exit 1 }
           cmake -S vsplugin -B "$env:RUNNER_TEMP\vb" -G Ninja -DCMAKE_BUILD_TYPE=Release; if ($LASTEXITCODE) { exit 1 }
           cmake --build "$env:RUNNER_TEMP\vb" --target pushmpc_vs --parallel; if ($LASTEXITCODE) { exit 1 }
@@ -1147,7 +1147,7 @@ jobs:
 
   # the x64 Setup silently on x64 (baseline) and on ARM64 under Prism, then MPC-HC x64 with MPC Video Renderer on WARP
   setup-graph:
-    needs: release-artifact
+    needs: [release-artifact, win-build]
     if: needs.release-artifact.outputs.run != ''
     strategy:
       fail-fast: false
@@ -1247,6 +1247,40 @@ jobs:
             if ($v.Value -eq 14 -and $f.Count) { $mpcvrOk = $true }
           }
           "ARM_FILTER=$mpcvrOk" >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@v4
+        if: runner.arch == 'X64'
+        with: { name: t4-windows-bits, path: '${{ runner.temp }}/bits' }
+      - name: Interlaced input through MPC-HC's LAV Video (this branch's filter, with LAV's settings interface)
+        if: runner.arch == 'X64'
+        timeout-minutes: 8
+        run: |
+          # A 60i pan woven from a 60p master (ffmpeg on the runner) through MPC-HC x64 (its internal LAV Video) and the
+          # filter built in win-build (LAVVideoSettings.h from scripts/lav-pin.json). Wanted in the filter's logs: the
+          # interlaced verdict, the reopen, LAV told to deinterlace at double rate, then a progressive verdict on the
+          # 50/60p frames. Frame generation itself needs an RTX GPU (pushcore), which hosted runners do not have.
+          $ff = "$env:RUNNER_TEMP\ffmpeg"; New-Item -ItemType Directory $ff -Force | Out-Null
+          Invoke-WebRequest 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' -OutFile "$ff\ff.zip"
+          Expand-Archive "$ff\ff.zip" $ff -Force
+          $ffx = (Get-ChildItem $ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          $clip = "$env:RUNNER_TEMP\woven.mkv"
+          & $ffx -v error -y -f lavfi -i "testsrc2=s=1280x720:r=60000/1001:d=20" -vf "tinterlace=mode=interleave_top,setfield=tff" -c:v libx264 -crf 14 -flags +ildct+ilme -x264-params tff=1 -pix_fmt yuv420p $clip
+          $dst = "$env:LOCALAPPDATA\PushMPC\filter"
+          Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          Copy-Item "$env:RUNNER_TEMP\bits\PushMpcFilter.ax" $dst -Force
+          $logs = "$env:LOCALAPPDATA\PushMPC\logs"; Remove-Item "$logs\filter-*.log" -ErrorAction SilentlyContinue
+          Set-ItemProperty 'HKCU:\Software\MPC-HC\MPC-HC\Settings' -Name DSVidRen -Value 14 -Type DWord
+          $m = Start-Process "$env:ProgramFiles\MPC-HC\mpc-hc64.exe" -ArgumentList "`"$clip`"", '/play' -PassThru; Start-Sleep 35
+          if (-not $m.HasExited) { [void]$m.CloseMainWindow(); if (-not $m.WaitForExit(15000)) { $m.Kill() } }
+          Start-Sleep 2
+          $t = (Get-ChildItem $logs -Filter 'filter-*.log' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          ($t -split "`n") | Select-String 'interlaced|progressive \(measured\)|LAV Video|reopen|input type|status:' | Select-Object -First 16 | ForEach-Object { Write-Host "  $($_.Line)" }
+          $il = $t -match 'interlaced: interlaced input'
+          $lav = $t -match 'LAV Video deinterlaces this file'
+          $prog = $t -match 'progressive \(measured\)'
+          $rate = [regex]::Matches($t, 'input type: \S+ \d+x\d+ \(visible \d+x\d+\), atpf (\d+)') | ForEach-Object { $_.Groups[1].Value }
+          "dshow deinterlace check (MPC-HC + LAV Video): interlaced verdict $il; LAV told to deinterlace $lav; progressive verdict after $prog; input atpf $($rate -join ' then ')" | Tee-Object -Append "$env:RUNNER_TEMP\arm.txt"
+          if ($t -match 'LAV refused a setting') { Write-Host '::error::LAV Video refused a deinterlace setting'; exit 1 }
+          if ($il -and -not $lav -and -not ($t -match 'no LAV settings interface|not LAV Video')) { Write-Host '::warning::interlaced, but the filter neither told LAV nor said why' }
       - name: Uninstall (Setup --uninstall --quiet)
         if: always()
         run: |

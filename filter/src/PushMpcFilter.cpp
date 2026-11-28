@@ -71,6 +71,15 @@
 #include <VersionHelpers.h>
 #include <IVideoRenderer.h>   // MPC Video Renderer's settings interface (live HDR settings)
 #include <sstream>
+// LAV Video's settings interface (LAVFilters' include/LAVVideoSettings.h, GPL-2.0-or-later): the double-rate
+// deinterlacer for a file measured interlaced. The header comes from the pinned LAVFilters tag at configure time
+// (scripts/lav-pin.json, -DPUSHMPC_FETCH_LAV=ON in CI); without it the filter keeps stepping aside for such files.
+#if __has_include(<LAVVideoSettings.h>)
+#include <LAVVideoSettings.h>
+#define PM_HAVE_LAV 1
+#else
+#define PM_HAVE_LAV 0
+#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -1903,6 +1912,55 @@ public:
         }
         return r;
     }
+    // A file measured interlaced (CheckInterlace) is reopened; when the decoder is LAV Video, its own double-rate
+    // deinterlacer (one frame per field, forced: the picture said combed, whatever the flags say) gives this filter
+    // 50/60p progressive frames, and frame generation runs on them instead of stepping aside. LAV's settings are taken
+    // back to what they were when the input disconnects (a standalone LAV saves every change it is given). The mode:
+    // YADIF, the best on average of the deinterlacers scored against 60p masters (deint-probe, run 46133199291:
+    // 38.2 dB; bwdif 38.0, w3fdif 37.9). Returns true when LAV now deinterlaces.
+    bool LavDeinterlace()
+    {
+#if PM_HAVE_LAV
+        if (m_lav) return true;
+        IPin* up = m_pInput->GetConnected();
+        if (!up) return false;
+        PIN_INFO pi = {};
+        if (FAILED(up->QueryPinInfo(&pi)) || !pi.pFilter) return false;
+        ComPtr<IBaseFilter> f;
+        f.Attach(pi.pFilter);
+        ComPtr<ILAVVideoSettings> lav;
+        if (FAILED(f->QueryInterface(__uuidof(ILAVVideoSettings), reinterpret_cast<void**>(lav.GetAddressOf()))) || !lav) {
+            Log("interlaced: the decoder is not LAV Video (no ILAVVideoSettings): the file passes through for the renderer to deinterlace");
+            return false;
+        }
+        m_lavWas.mode = lav->GetDeinterlacingMode();
+        m_lavWas.sw = lav->GetSWDeintMode();
+        m_lavWas.swOut = lav->GetSWDeintOutput();
+        m_lavWas.hwOut = lav->GetHWAccelDeintOutput();
+        const bool ok = SUCCEEDED(lav->SetDeinterlacingMode(DeintMode_Force)) && SUCCEEDED(lav->SetSWDeintMode(SWDeintMode_YADIF)) &&
+                        SUCCEEDED(lav->SetSWDeintOutput(DeintOutput_FramePerField)) && SUCCEEDED(lav->SetHWAccelDeintOutput(DeintOutput_FramePerField));
+        m_lav = lav;
+        Log(std::format("interlaced: LAV Video deinterlaces this file (forced, YADIF, one frame per field; it was mode {} software {} output {}/{}): {}",
+                        int(m_lavWas.mode), int(m_lavWas.sw), int(m_lavWas.swOut), int(m_lavWas.hwOut), ok ? "frame generation runs on its 50/60p frames" : "LAV refused a setting"));
+        if (!ok) LavRestore();
+        return ok;
+#else
+        Log("interlaced: this build has no LAV settings interface (LAVVideoSettings.h): the file passes through for the renderer to deinterlace");
+        return false;
+#endif
+    }
+    void LavRestore()
+    {
+#if PM_HAVE_LAV
+        if (!m_lav) return;
+        m_lav->SetDeinterlacingMode(m_lavWas.mode);
+        m_lav->SetSWDeintMode(m_lavWas.sw);
+        m_lav->SetSWDeintOutput(m_lavWas.swOut);
+        m_lav->SetHWAccelDeintOutput(m_lavWas.hwOut);
+        m_lav.Reset();
+        Log("LAV Video's deinterlacing settings restored");
+#endif
+    }
     // Dolby Vision profile from the stream's configuration record (dvcC/dvvC/dvwC: version major, minor, then
     // profile(7) level(6) rpu(1) el(1) bl(1)) if the splitter's type carries it; -1 = not found.
     int UpstreamDvProfile() const
@@ -1946,12 +2004,12 @@ public:
         if (!m_cfg.forceFallback.empty()) return L"ForceFallback: " + m_cfg.forceFallback;
         if (!m_cfg.enable) return L"PushMPC is switched off (Enable PushMPC on its property page)";
         if (m_inInterlaced) return L"interlaced input (one field per sample)";
-        if (m_typeInterlaced) {
-            // a file whose frames this process already found interlaced (it was reopened for that): the source format,
-            // so MPC Video Renderer deinterlaces it
+        {   // a file whose frames this process already found interlaced (it was reopened for that): LAV Video deinterlaces it
+            // at double rate (LavDeinterlace), or the source format goes on, so MPC Video Renderer deinterlaces it
             const std::wstring f = SourceFile();
-            std::lock_guard<std::mutex> lk(g_ilLock);
-            if (!f.empty() && g_interlacedFiles.count(f)) return L"interlaced input (the decoder marks its frames interlaced)";
+            bool known = false;
+            { std::lock_guard<std::mutex> lk(g_ilLock); known = !f.empty() && g_interlacedFiles.count(f) != 0; }
+            if (known && !LavDeinterlace() && m_typeInterlaced) return L"interlaced input (the decoder marks its frames interlaced)";
         }
         if (!HasHardwareAdapter()) return L"no DirectX 12 hardware adapter";
         m_rt = ResolveRuntime(m_cfg);
@@ -2180,6 +2238,7 @@ public:
         if (dir == PINDIR_INPUT) {
             if (!m_teardownTail.watch && m_openStarted) m_teardownTail.watch = StartTeardownWatch();   // RC2 F2: a stuck close explains itself
             StopThreads(); StopWatcher(); StopAuto(); StopContent(); CloseCore(); m_openStarted = false; m_openDeferred = false; m_mode = Mode::None; m_bitrateProbed = false;
+            LavRestore();   // LAV's deinterlacer back to the user's settings
         }
         if (dir == PINDIR_OUTPUT) { Out()->ours = nullptr; m_down.Reset(); }
         return S_OK;
@@ -2931,6 +2990,10 @@ private:
     std::atomic<double> m_heldShare = -1.0;
     pushmpc::content::ContentDetector m_content;     // streaming thread only
     pushmpc::content::CombMeter m_comb;              // streaming thread only
+#if PM_HAVE_LAV
+    ComPtr<ILAVVideoSettings> m_lav;                 // the decoder told to deinterlace (LavDeinterlace); restored at disconnect
+    struct { LAVDeintMode mode; LAVSWDeintModes sw; LAVDeintOutput swOut, hwOut; } m_lavWas{};
+#endif
     std::atomic<int> m_contentClass = 0;
     std::atomic<bool> m_contentDisc = false;
     std::atomic<float> m_contentConf = 0.f;
@@ -5346,6 +5409,13 @@ void CPushMpcFilter::CheckInterlace(IMediaSample* pIn)
     if (!file.empty()) { std::lock_guard<std::mutex> lk(g_ilLock); g_interlacedFiles.insert(file); }
     const std::wstring why = std::format(L"interlaced input (field combing measured on {} of {} moving frames)", m_comb.combed(), m_comb.measured());
     LogW(L"interlaced: " + why);
+#if PM_HAVE_LAV
+    if (m_lav) {   // combed even with LAV's deinterlacer on: no second reopen, the source frames go on
+        m_veto.Bump();
+        if (m_mode == Mode::Warmup || m_mode == Mode::Active) { CloseCore(); Fallback(why + L" (LAV Video's deinterlacer was on)"); }
+        return;
+    }
+#endif
     m_veto.Bump();   // never taken over again by a late reload, whatever the mode now
     if (m_mode == Mode::Warmup || m_mode == Mode::Active) {
         CloseCore();
