@@ -729,7 +729,7 @@ jobs:
             echo "=== $id: raw lines"
             grep -n -E 'Run command: vf|Decoder format|PushMPC|Playing:' $L 2>/dev/null | cut -c1-300 | head -16
             seq=$(grep 'Run command: vf.*append' $L 2>/dev/null | while read -r ln; do x=$(printf '%s' "$ln" | grep -o 'transfer=[0-9]*' | head -1 | grep -o '[0-9]*$'); printf '%s ' "${x:-none}"; done)
-            fv=FAIL; case " $seq" in *" 16 "*" 1 "*) fv=ok;; esac
+            fv=FAIL; case " $seq " in *" 16 1 "*) fv=ok;; esac
             line="two files (hdr10 then sdr8), $mode: the transfers of the vf appends, in order: ${seq:-none} $fv"
             echo "$line" | tee -a $sum; echo "::notice title=colour diag two files $mode::$line"
           done
