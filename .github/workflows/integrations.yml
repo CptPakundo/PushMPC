@@ -711,7 +711,7 @@ jobs:
           #include <stddef.h>
           #include <stdbool.h>
           #include <libplacebo/colorspace.h>
-          struct params { int imgfmt; const char *name; int hw; int w, h; int p_w, p_h; bool fw; struct pl_color_space color; struct pl_color_repr repr; enum pl_color_primaries po; enum pl_color_transfer to; enum pl_color_system so; int light; };
+          struct params { int imgfmt; const char *name; int hw; int w, h; int p_w, p_h; bool fw; struct pl_color_space color; struct pl_color_repr repr; enum pl_color_primaries po; enum pl_color_transfer to; enum pl_color_system so; int light; enum pl_chroma_location chroma; };
           struct image { int w, h; struct params params; };
           int main(void) {
               size_t a = offsetof(struct image, params) + offsetof(struct params, w), ps = sizeof(void *);
@@ -721,8 +721,11 @@ jobs:
               /* what the output writer (mp_params.h PatchMpImage) touches: hdr, repr.dovi, the *_orig trio, light */
               size_t r = (24 + ps + ps - 1) / ps * ps, dovi = offsetof(struct image, params.repr.dovi) - sys, orig = offsetof(struct image, params.po) - sys;
               size_t light = offsetof(struct image, params.light) - sys, hdr = offsetof(struct image, params.color.hdr) - a, maxl = offsetof(struct pl_hdr_metadata, max_luma);
-              int wok = dovi == (24 + ps - 1) / ps * ps && orig == r && light == r + 12 && hdr == 28 && sizeof(struct pl_hdr_metadata) == 148 && maxl == 36;
-              printf("writer: hdr +%zu size %zu max_luma +%zu (want 28 148 36), dovi sys+%zu, *_orig sys+%zu (want %zu), light sys+%zu: %s\n", hdr, sizeof(struct pl_hdr_metadata), maxl, dovi, orig, r, light, wok ? "ok" : "MISMATCH");
+              size_t cl = offsetof(struct image, params.chroma) - sys;
+              int wok = dovi == (24 + ps - 1) / ps * ps && orig == r && light == r + 12 && cl == r + 16 && hdr == 28 && sizeof(struct pl_hdr_metadata) == 148 && maxl == 36
+                        && PL_CHROMA_LEFT == 1 && PL_CHROMA_CENTER == 2 && PL_CHROMA_BOTTOM_CENTER == 6 && PL_COLOR_TRC_GAMMA22 == 6;
+              printf("writer: hdr +%zu size %zu max_luma +%zu (want 28 148 36), dovi sys+%zu, *_orig sys+%zu (want %zu), light sys+%zu, chroma location sys+%zu (want light + 4), PL_CHROMA_CENTER %d (want 2), GAMMA22 %d (want 6): %s\n",
+                     hdr, sizeof(struct pl_hdr_metadata), maxl, dovi, orig, r, light, cl, PL_CHROMA_CENTER, PL_COLOR_TRC_GAMMA22, wok ? "ok" : "MISMATCH");
               int ok = pr == 20 && tr == 24 && sys == want && lv == 4 && PL_COLOR_TRC_PQ == 12 && PL_COLOR_TRC_HLG == 13 && PL_COLOR_PRIM_BT_2020 == 6
                        && PL_COLOR_PRIM_BT_709 == 3 && PL_COLOR_TRC_BT_1886 == 1 && PL_COLOR_SYSTEM_BT_2020_NC == 4 && PL_COLOR_LEVELS_LIMITED == 1 && PL_COLOR_LEVELS_FULL == 2;
               printf("libplacebo %d layout: primaries +%zu transfer +%zu (want 20 24), repr.sys at %zu (want %zu), levels +%zu (want 4); enums PQ %d HLG %d BT_2020 %d BT_709 %d BT_1886 %d BT_2020_NC %d LIMITED %d FULL %d (want 12 13 6 3 1 4 1 2): %s\n",
@@ -821,14 +824,17 @@ jobs:
           done
           # the output's colour as mpv takes it ("[vf] [out]"): mpv reads it only from _MP_IMAGE, which a colour-changing
           # route rewrites (vsplugin mp_out.h). Portable never changes the colour, so PUSHMPC_TEST_OUT_COLOUR tags its
-          # output as a tone map to SDR (sRGB BT.709) and as RTX Video HDR would (PQ BT.2020); mpv must show exactly that
-          for spec in "hlg 13,1,1,1 bt.709/bt.709/srgb/limited" "sdr8 16,9,9,1 bt.2020-ncl/bt.2020/pq/limited"; do
-            set -- $spec; c=$1; tc=$2; wo=$3
+          # output as the Windows tone map to SDR does (gamma 2.2 BT.709, centre-sited chroma: mpv "mpeg1/jpeg") and as
+          # RTX Video HDR would (PQ BT.2020, the source's siting kept: not judged); mpv must show exactly that
+          for spec in "hlg 4,1,1,1,1 bt.709/bt.709/gamma2.2/limited mpeg1/jpeg" "sdr8 16,9,9,1 bt.2020-ncl/bt.2020/pq/limited any"; do
+            set -- $spec; c=$1; tc=$2; wo=$3; wcl=$4
             [ -f /tmp/colour-$c.mkv ] || { fail "output colour: clip $c missing"; continue; }
             export PUSHMPC_TEST_OUT_COLOUR=$tc; play outcolour-$c play "" /tmp/colour-$c.mkv; unset PUSHMPC_TEST_OUT_COLOUR
-            o=$(grep '\[vf\] \[out\]' $L 2>/dev/null | tail -1 | grep -o ' [a-z0-9.-]*/[a-z0-9.-]*/[a-z0-9.-]*/[a-z]*/[a-z0-9_-]*' | head -1 | tr -d ' ')
-            line="output colour ($c tagged $tc): mpv's [vf] [out] ${o:-none} (want $wo/...)"
-            case "$o" in "$wo"/*) line="$line ok";; *) line="$line FAIL"; fail "$line"; dump outcolour-$c $L $V; grep '\[vf\] \[' $L | tail -4;; esac
+            ol=$(grep '\[vf\] \[out\]' $L 2>/dev/null | tail -1)
+            o=$(printf '%s' "$ol" | grep -o ' [a-z0-9.-]*/[a-z0-9.-]*/[a-z0-9.-]*/[a-z]*/[a-z0-9_-]*' | head -1 | tr -d ' ')
+            ocl=$(printf '%s' "$ol" | grep -o 'CL=[^ ]*' | head -1 | sed 's/^CL=//')
+            line="output colour ($c tagged $tc): mpv's [vf] [out] ${o:-none} CL=${ocl:-none} (want $wo/... CL=$wcl)"
+            case "$o" in "$wo"/*) { [ "$wcl" = any ] || [ "$ocl" = "$wcl" ]; } && line="$line ok" || { line="$line FAIL"; fail "$line"; dump outcolour-$c $L $V; };; *) line="$line FAIL"; fail "$line"; dump outcolour-$c $L $V; grep '\[vf\] \[' $L | tail -4;; esac
             echo "$line" | tee -a $sum
           done
           v="early add: $early_ok of $early_n runs with frame 0's transfer, every frame, one add before decoding; late add: $late_ok of $late_n runs with the clip's transfer (frames: $(grep ' late ' $sum | grep -o 'frames [0-9]* (want [0-9]*)' | sed 's/frames \([0-9]*\) (want \([0-9]*\))/\1\/\2/' | tr '\n' ' '))"

@@ -94,9 +94,9 @@ void SetPropsOf(const VSAPI* a, VSFrame* f, int64_t n, int k, const std::map<int
     if (const MpTestOutColour& tc = TestOutColour(); tc.on) {
         static std::atomic<int> logged{ 0 };
         std::string why;
-        const bool ok = TagMpOutput(a, p, tc.transfer, tc.primaries, tc.matrix, tc.range, 0, &why);
+        const bool ok = TagMpOutput(a, p, tc.transfer, tc.primaries, tc.matrix, tc.range, 0, &why, nullptr, tc.chroma);
         if (logged.fetch_add(1) == 0)
-            Log(ok ? std::format("portable: output colour tagged for mpv (test): transfer {} primaries {} matrix {} range {}", tc.transfer, tc.primaries, tc.matrix, tc.range)
+            Log(ok ? std::format("portable: output colour tagged for mpv (test): transfer {} primaries {} matrix {} range {} chroma location {}", tc.transfer, tc.primaries, tc.matrix, tc.range, tc.chroma)
                    : "portable: output colour not tagged for mpv (test): " + why);
     }
 }
