@@ -279,7 +279,7 @@ where it did. Changes apply within a couple of seconds, without restarting the v
 |---|---|---|
 | FG quality | Auto, Low, Medium, High | frame generation quality. Auto uses High only where it fits with time to spare |
 | FG method | Auto, NVIDIA VFG, DLSS-G, PushFlow, FSR, AMD FRC | the frame generation method; methods your card can't run are marked |
-| Refresh (VRR) | Auto, Assume VRR, Assume fixed | whether your display runs G-SYNC or FreeSync for the player. Auto reads it from the driver |
+| Refresh (VRR) | Auto, Assume VRR, Assume fixed | whether your display runs G-SYNC (variable refresh) for the player. Auto reads it from the driver |
 | Upscaler | Auto, RTX VSR, FSR, NIS, Anime upscaler | Auto: RTX VSR on NVIDIA RTX, otherwise FSR. Anime upscaler: an AI upscaler made for cartoons and anime (tested in MPC-HC with 1080p video) |
 | HDR method | Auto (PushMPC curve), RTX Video HDR | how SDR becomes HDR; RTX Video HDR needs an RTX card |
 | Limit brightness on bright scenes | on / off | on (default): very bright scenes are calmed slowly so your display can hold them |
@@ -299,7 +299,7 @@ and **Write a frame log** (only turn it on when asked for one in a bug report).
 
 ## HDR, scene cuts and G-SYNC
 
-**HDR video.** HDR10, HDR10+ and HLG pass through untouched. In MPC-HC, Dolby Vision (profiles 7 and 8) is processed
+**HDR video.** HDR10, HDR10+ and HLG stay HDR. In MPC-HC, Dolby Vision (profiles 7 and 8) is processed
 through its HDR10 base layer and its Dolby Vision data stays with every frame. Setup sets MPC Video Renderer so that only content brighter than your display is toned down, and puts your old settings back
 when you uninstall.
 

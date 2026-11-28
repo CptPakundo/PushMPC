@@ -8,11 +8,11 @@ Built on PushFPS 4.5.8.
 
 - **Smoother motion**, up to 16x on GeForce RTX 50 and 40 cards, so a 24 fps film fills a 120 Hz or 240 Hz screen. On a
   GeForce RTX 5090, MPC-HC played a 1080p film at 10x (240 fps) on a 4K 240 Hz screen without dropping a frame.
-- **Starts fast:** in MPC-HC and MPC-BE, smooth motion usually begins within three seconds of opening a video, even
+- **Starts fast:** in MPC-HC, smooth motion usually begins within three seconds of opening a video, even
   the first one after starting the player. The sharpest upscaling joins a little later, without a pause.
 - **Clean scene cuts:** a new shot starts on its own frame, never a smeared blend.
 - **A sharper picture** with RTX Video Super Resolution, FSR or NIS.
-- **HDR done right:** HDR10, HDR10+ and HLG play untouched (in MPC-HC also Dolby Vision, profiles 7 and 8). On an SDR
+- **HDR done right:** HDR10, HDR10+ and HLG stay HDR (in MPC-HC also Dolby Vision, profiles 7 and 8). On an SDR
   display, HDR video is converted to fit your screen. In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
   HDR10 or HLG) from its very first frame.
 - **Made for animation:** in MPC-HC, PushMPC tells cartoons and anime from live action by looking at the picture
@@ -38,7 +38,8 @@ Windows may say "Windows protected your PC" because Setup isn't code-signed yet.
 
 - MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware; the other players and cards are checked
   automatically on every build.
-- In MPC-HC, MPC-BE and PotPlayer, interlaced video plays without PushMPC.
+- In MPC-HC, MPC-BE and PotPlayer, interlaced video plays without PushMPC. In mpv, PushMPC doesn't recognise
+  interlaced video yet.
 - Capture mode (for players PushMPC can't plug into) is a preview. It is a little behind the sound and can't show
   copy-protected video.
 - Mac support is a preview.

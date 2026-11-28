@@ -9,10 +9,11 @@ sets itself up for your graphics card and display.
 
 ### Players
 
-- **Windows:** MPC-HC, MPC-BE, PotPlayer, mpv, mpv.net, SMPlayer, MPC-QT, VLC 3, Kodi 21 and 22 (its own add-on),
-  Plex for Windows and Plex HTPC, Jellyfin Desktop, the Jellyfin and Plex MPV Shims, and Stremio 5.0.28 and newer.
+- **Windows:** MPC-HC, MPC-BE, PotPlayer, mpv, mpv.net, MPC-QT, VLC 3, Kodi 21 and 22 (its own add-on), Plex for
+  Windows and Plex HTPC, Jellyfin Desktop, the Jellyfin MPV Shim, and Stremio 5.0.28 and newer. SMPlayer and the Plex
+  MPV Shim are a preview.
 - **PushMPC's own mpv** for Windows, with PushMPC built in (an optional box in Setup).
-- **Capture mode** for every other Windows player (KMPlayer, GOM Player, Emby Theater and more).
+- **Capture mode** (preview) for every other Windows player (KMPlayer, GOM Player, Emby Theater and more).
 - **Linux:** mpv (your distribution's or Flathub's), Celluloid, Haruna, SMPlayer, MPC-QT, VLC 3, Kodi with its add-on,
   Plex from Flathub, Jellyfin Desktop and the MPV Shims, on x86_64 and ARM.
 
@@ -24,18 +25,18 @@ sets itself up for your graphics card and display.
   handled like cuts.
 - Upscaling to your screen with RTX Video Super Resolution, FSR or NIS, plus an AI clean-up and a deband pass for
   low-quality video.
-- SDR to HDR with PushMPC's own curve on every card, or RTX Video HDR, tuned to your display's brightness.
-- HDR10, HDR10+, HLG and Dolby Vision (profiles 5, 7 and 8) pass through untouched.
+- HDR10, HDR10+ and HLG stay HDR, and in MPC-HC Dolby Vision (profiles 7 and 8) keeps its Dolby Vision data. On an
+  SDR display, HDR video is converted to fit your screen.
 - Subtitle Hold keeps subtitles that are burned into the picture steady.
 - Smooth motion for cartoons and anime drawn "on twos" or "on threes" (each drawing shown for two or three frames):
   the in-between frames are spread over the whole drawing instead of moving in one step and stopping in the next.
 
 ### Auto
 
-- Every setting picks itself for your graphics card, display, refresh rate (fixed, G-SYNC or FreeSync) and video, and
+- Every setting picks itself for your graphics card, display, refresh rate (fixed or G-SYNC) and video, and
   keeps adjusting while you watch. It steps down rather than dropping frames.
 - A lighter profile on laptop battery.
-- Quick start in MPC-HC and MPC-BE: the picture appears sooner and smooth motion usually starts within three seconds of
+- Quick start in MPC-HC: the picture appears sooner and smooth motion usually starts within three seconds of
   opening a video, even the first one after starting the player. The sharpest upscaling joins a little later, without
   a pause.
 
@@ -57,9 +58,11 @@ Built on PushFPS 4.5.8 and Veyra 2.2.1.
 - Setup isn't code-signed yet, so Windows SmartScreen warns the first time.
 - MPC-HC with a GeForce RTX 50 card has had the most testing on real hardware. The other players and cards are checked
   automatically on every build, but not all of them on real hardware yet.
-- Interlaced video plays without PushMPC.
+- In MPC-HC, MPC-BE and PotPlayer, interlaced video plays without PushMPC. In mpv, PushMPC doesn't recognise
+  interlaced video yet.
 - Capture mode is a little behind the sound (set the player's audio delay to about +80 ms) and can't show
   copy-protected video.
 - In mpv through VapourSynth, very high multipliers at 4K can be limited by copying frames; PushMPC's own mpv and the
   built-in Linux route are faster.
-- Mac support is coming soon.
+- Mac support is a preview (install with Homebrew).
+- In mpv older than 0.39, the first few frames of each video play without PushMPC.

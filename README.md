@@ -27,7 +27,7 @@ and sets itself up for your graphics card and display.
 - **Clean scene cuts.** A new shot starts on its own frame instead of a smeared blend.
 - **A sharper picture.** Video is upscaled to your screen with RTX Video Super Resolution, FSR or NIS, with an optional
   clean-up for low-quality streams.
-- **HDR done right.** HDR10, HDR10+ and HLG play untouched (in MPC-HC also Dolby Vision, profiles 7 and 8). On an
+- **HDR done right.** HDR10, HDR10+ and HLG stay HDR (in MPC-HC also Dolby Vision, profiles 7 and 8). On an
   SDR display, HDR video is converted to fit your screen.
 - **Made for animation.** In MPC-HC, PushMPC tells cartoons and anime from live action by looking at the picture
   itself, and you can switch on an anime upscaler for them (tested with 1080p video).
@@ -157,7 +157,7 @@ PushMPC. In PotPlayer, choose MPC Video Renderer and a "copy-back" decoder (see 
 <details><summary><b>Do I need an HDR display?</b></summary>
 
 No. On an SDR display you get smoother motion and upscaling, and HDR video is converted to fit your screen. PushMPC
-passes HDR10, HDR10+ and HLG on untouched, and in MPC-HC also Dolby Vision (profiles 7 and 8). In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
+keeps HDR10, HDR10+ and HLG in HDR, and in MPC-HC also Dolby Vision (profiles 7 and 8). In mpv 0.39 and newer, PushMPC reads each video's colour (SDR,
 HDR10 or HLG) from its very first frame, so HDR is recognised from the start.
 </details>
 
