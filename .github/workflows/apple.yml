@@ -562,7 +562,7 @@ jobs:
           grep -h -E "backend|apple" "$PUSHMPC_VS_LOG_DIR"/*.log | cut -c1-400 | head
 
       - name: Homebrew mpv in encode mode through pushmpc-setup's mpv.conf (public clip)
-        timeout-minutes: 10
+        timeout-minutes: 25
         shell: bash
         run: |
           set -euo pipefail
@@ -655,6 +655,44 @@ jobs:
           # (N x k) on every route; the old range allowed the last frames' loss (Intel ml: 599 of 600 with buffered-frames 4)
           [ "$outn" -eq $((2 * ctrln)) ] || { echo "::error::mpv output has $outn frames for $ctrln frames from mpv alone (want exactly $((2 * ctrln)))"; exit 1; }
           echo "::notice title=Homebrew mpv encode::$srcn source frames -> $outn output frames ($out)"
+          # repetition: a first-frame race (the filter added once video runs, frame 0 passing unfiltered: Intel ml 599 of
+          # 600 now and then) must not pass by luck. The source's first 36 frames (stream copy) are encoded 5 times, each
+          # with its own plugin log and its own "mpv alone" control, and judged by the rules above: exit 0, the early-add
+          # line, no "colour not read", at least one frame-0 colour read and one init warning, no more warnings than reads,
+          # the first frame's mean luma the source's (catches mpv's black dummy), exactly 2x the control (with the early
+          # add, the count is what catches an unfiltered frame 0)
+          pre='PushMPC: filter added before decoding'
+          short="$RUNNER_TEMP/clip/short.mp4"; rm -f "$short"
+          ffmpeg -v error -i "$clip" -map 0:v:0 -frames:v 36 -c copy -an "$short"
+          yss=$(y0 "$short" | tr -d ',\r' || true); repfail=0
+          for n in 1 2 3 4 5; do
+            r="$RUNNER_TEMP/rep-$n"; rm -f "$r.mkv" "$r.txt" "$r-ctl.mkv" "$r-ctl.txt"; mkdir -p "$r-log"
+            rrc=0; PUSHMPC_VS_LOG_DIR="$r-log" MPV_HOME="$HOME/.config/mpv" mpv "$short" --include="$HOME/.config/mpv/mpv.conf" --no-audio --o="$r.mkv" --ovc=ffv1 --of=matroska --msg-level=all=info,vapoursynth=v > "$r.txt" 2>&1 || rrc=$?
+            MPV_HOME="$RUNNER_TEMP/mpv-none" mpv "$short" --no-config --load-scripts=no --no-audio --o="$r-ctl.mkv" --ovc=ffv1 --of=matroska > "$r-ctl.txt" 2>&1 || true
+            cn=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$r-ctl.mkv" 2>/dev/null | tr -d ',\r' || true)
+            pn=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$r.mkv" 2>/dev/null | tr -d ',\r' || true)
+            case $cn in ''|*[!0-9]*) cn='' ;; esac; case $pn in ''|*[!0-9]*) pn='' ;; esac   # ffprobe's N/A (no frames)
+            yr=$( [ -f "$r.mkv" ] && y0 "$r.mkv" | tr -d ',\r' || true)
+            rlog=$(cat "$r-log"/*.log 2>/dev/null || true)
+            grep -qF "$pre" "$r.txt" && pl=yes || pl=no
+            grep -q "frame 0's colour not read" "$r.txt" && nr=yes || nr=no
+            iw=$(grep -c 'Frame requested during init' "$r.txt" || true); ird=$(printf '%s\n' "$rlog" | grep -c "colour from mpv's first-frame params: matrix" || true)
+            tr0=$(printf '%s\n' "$rlog" | sed -n "s/.*colour from mpv's first-frame params: matrix [^ ]* transfer \([^ ]*\).*/\1/p" | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+            echo "repeat $n: control ${cn:-?}, PushMPC ${pn:-?}, first-frame luma ${yss:-?}/${yr:-?}, preloaded $pl, colour reads $ird (transfer ${tr0:-not logged}), init warnings $iw, colour not read $nr, exit $rrc"
+            ok=1
+            [ "$rrc" = 0 ] || ok=0
+            [ -n "$cn" ] && [ "$cn" -gt 0 ] && [ -n "$pn" ] && [ "$pn" -eq $((2 * cn)) ] || ok=0
+            [ -n "$yss" ] && [ -n "$yr" ] && awk -v a="$yss" -v b="$yr" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 8) }' || ok=0
+            [ "$pl" = yes ] && [ "$nr" = no ] || ok=0
+            [ "${ird:-0}" -ge 1 ] && [ "${iw:-0}" -ge 1 ] && [ "${iw:-0}" -le "${ird:-0}" ] || ok=0
+            if [ "$ok" = 0 ]; then
+              repfail=$((repfail + 1)); echo "::error::repeat $n failed (want exit 0, exactly $((2 * ${cn:-0})) frames, luma ${yss:-?}, the early-add line, no 'colour not read', 1 <= init warnings <= colour reads)"
+              grep -E 'pushmpc|vapoursynth|Disabling filter|Frame requested|rror' "$r.txt" | tail -n 15 | cut -c1-300 || true
+              printf '%s\n' "$rlog" | grep -E 'colour|closed after|error|failed' | tail -n 8 | cut -c1-300 || true
+            fi
+          done
+          [ "$repfail" = 0 ] || { echo "::error::$repfail of 5 repeated encodes failed"; exit 1; }
+          echo "::notice title=Homebrew mpv encode, 5 repeats::each exactly 2x its mpv-alone control, first frame the source's, filter added before decoding, init warnings within the colour reads"
           # PushFlow through pmml (the ml backend) with Homebrew's ONNX Runtime (CoreML; the VM has no GPU for it, so the
           # CPU may run it): pushmpc-setup put the runtime in ~/.local/share/pushmpc/pmml
           pm="$HOME/.local/share/pushmpc/pmml"; ls -la "$pm" "$pm/ort/core" "$pm/models" | head -20
