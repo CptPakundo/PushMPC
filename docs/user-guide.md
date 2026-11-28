@@ -258,7 +258,7 @@ Auto tries the methods in this order and uses the best one your card keeps up wi
 
 Auto never turns Neural Rendering on (see Settings). It runs on Windows (not in VLC or Kodi). GeForce RTX 50 cards
 can use NVIDIA's own version; RTX 20 to 40 and the Radeon cards use community builds, which Setup installs. It is
-heavy on every card, most of all on RTX 30 and on the Radeon RX 7000.
+heavy on every card.
 
 On Linux, NVIDIA RTX cards use NVIDIA's frame generation and Super Resolution when NVIDIA's own driver offers them, and
 other cards use PushFlow or PushMPC's own engine with NIS or FSR upscaling.
