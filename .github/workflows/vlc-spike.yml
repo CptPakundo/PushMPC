@@ -1,265 +1,279 @@
-# VLC 3.0.x feasibility spike: can a third-party video filter module in the vout's STATIC chain
-# (shortcut "postproc") output more frames than it receives, change the output size, and receive D3D11 textures?
-# Builds vlcplugin/spike/pushspike.c (a frame multiplier + a CSV "pushdump" vout display) against:
-#   - Linux: Ubuntu 24.04's libvlccore-dev (VLC 3.0.20), tested with the distro VLC and, optionally, the Flathub VLC;
-#   - Windows: the official VLC 3.0.x win64 7z (its sdk/ folder), cross-compiled with mingw-w64, tested with that VLC;
-#   - macOS (dispatch input, 10x minutes while private): the VLC.app cask, headers from the same SDK.
-# Runs headless (dummy interface, pushdump vout) and summarises frame counts and timestamps per case.
-name: vlc-spike
+# Deinterlace probe (dispatch only; nothing in the product changes): can PushMPC deinterlace (or inverse-telecine)
+# interlaced video FIRST and then generate frames, instead of stepping aside? Exact ground truth: 60p masters woven into
+# 60i (two fields per frame, top first), and a 24p master hard-telecined (2:3) to 30i; every arm's output is scored
+# against its master (tests/deint-probe/score.py: frame count, rate, luma PSNR frame by frame, exact frames), and
+# PushMPC's own CombMeter (tests/deint-probe/comb_probe.cpp) says what combing is left. Evidence lines start "probe:".
+#   ffmpeg   the deinterlacers themselves (bwdif, yadif, w3fdif, estdif, nnedi) and the inverse telecine (fieldmatch +
+#            decimate, pullup), the reference for what each algorithm reaches
+#   mpv-vs   Windows, the pinned mpv + VapourSynth + pushmpc_vs (portable backend, CPU): with --deinterlace=yes / auto
+#            and an explicit bwdif before or after the filter, the rate and the combing verdict PushMPC's filter sees
+#            (its log), mpv's filter chain order (-v), and d3d11vpp's deinterlacer where the runner offers it
+#   mpv-native  Linux, PushMPC's own mpv (the mpv-native AppImage artifact): the same arms through vf=pushmpc
+#   vlc      Linux, the distro VLC 3 + the PushMPC module (vlc-plugin artifact): --deinterlace=0/1/-1 with bwdif and
+#            yadif2x, where the deinterlace filter sits against PushMPC's (VLC's chain log), the verdict and the rate
+name: deint-probe
 
 on:
-  # push on the track branch only (a dispatch needs the file on main first); "[macos]" in the commit message adds macOS
-  push:
-    branches: ['track/vlc']
-    paths: ['vlcplugin/spike/run-*.sh', '.github/workflows/vlc-spike.yml']
   workflow_dispatch:
     inputs:
-      macos:
-        description: 'Also run the macOS job (costs 10x minutes while the repo is private)'
-        type: boolean
-        default: false
-      flatpak:
-        description: 'Also test the Flathub VLC (org.videolan.VLC) on Linux'
-        type: boolean
-        default: true
+      native_run:
+        description: 'mpv-native run id for the AppImage (empty: the newest successful run)'
+        type: string
+        default: ''
+      vlc_run:
+        description: 'vlc-plugin run id for plugin-linux (empty: the newest successful run)'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  VLC_WIN_VERSION: '3.0.24'
-
 jobs:
-  clip:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Test clip (synthetic, public by construction; 4 s testsrc2 + hard cut + 2 s smptebars, 24 fps)
-        run: |
-          set -eu
-          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg >/dev/null
-          ffmpeg -hide_banner -loglevel error -filter_complex \
-            "testsrc2=s=320x180:r=24:d=4[a];smptebars=s=320x180:r=24:d=2[b];[a][b]concat=n=2:v=1[v]" \
-            -map '[v]' -c:v libx264 -pix_fmt yuv420p -g 48 -bf 2 clip.mkv
-          ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,width,height,r_frame_rate -of default=nw=1 clip.mkv | tee clip.txt
-      - uses: actions/upload-artifact@v4
-        with: { name: clip, path: 'clip.*', retention-days: 5 }
-
-  build:
+  clips:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache VLC win64 7z (SDK headers + import library)
-        uses: actions/cache@v4
-        with:
-          path: ~/vlc-dl
-          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
-      - name: Fetch VLC win64 ${{ env.VLC_WIN_VERSION }} (official mirror, SHA-256 from videolan.org)
+      - name: Masters (60p and 24p, synthetic, public by construction), woven 60i, hard-telecined 30i
         run: |
           set -eu
-          mkdir -p ~/vlc-dl && cd ~/vlc-dl
-          f=vlc-${VLC_WIN_VERSION}-win64.7z
-          base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
-          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
-          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
-          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
-      - name: Toolchains (libvlccore-dev, mingw-w64)
-        run: |
-          sudo apt-get -qq update >/dev/null
-          sudo apt-get -qq install -y libvlccore-dev gcc-mingw-w64-x86-64 p7zip-full >/dev/null
-          pkg-config --modversion vlc-plugin; pkg-config --cflags --libs vlc-plugin
-      - name: Build Linux plugin (VLC 3.0.x, libvlccore-dev)
-        run: |
-          set -eux
-          mkdir -p out/linux
-          # export both plug-in entry names (Debian/Ubuntu t64 builds: __3_0_0ft64; upstream/Flatpak: __3_0_0f)
-          if grep -q '3_0_0ft64' /usr/include/vlc/plugins/vlc_plugin.h; then alt=vlc_entry__3_0_0f; else alt=vlc_entry__3_0_0ft64; fi
-          gcc -std=gnu11 -O2 -Wall -fPIC -shared -DMODULE_STRING='"pushspike"' -DPM_ALT_ENTRY=$alt $(pkg-config --cflags vlc-plugin) \
-            vlcplugin/spike/pushspike.c -o out/linux/libpushspike_plugin.so $(pkg-config --libs vlc-plugin)
-          nm -D out/linux/libpushspike_plugin.so | grep vlc_entry
-          objdump -T out/linux/libpushspike_plugin.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
-      - name: Build Windows plugin (mingw-w64 against the official SDK)
-        run: |
-          set -eux
-          7z x -y -o"$RUNNER_TEMP/vlcwin" ~/vlc-dl/vlc-${VLC_WIN_VERSION}-win64.7z "vlc-${VLC_WIN_VERSION}/sdk" >/dev/null
-          sdk="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk"
-          ls "$sdk" "$sdk/lib" "$sdk/include/vlc" | head -40
-          mkdir -p out/win64
-          x86_64-w64-mingw32-gcc -std=gnu11 -O2 -Wall -shared -D__PLUGIN__ -DMODULE_STRING='"pushspike"' \
-            -I"$sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c -o out/win64/libpushspike_plugin.dll \
-            -L"$sdk/lib" -lvlccore -static-libgcc
-          x86_64-w64-mingw32-objdump -p out/win64/libpushspike_plugin.dll | grep -E "DLL Name|vlc_entry" | head
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg >/dev/null
+          mkdir -p clips && cd clips
+          # 4 s each, 1280x720: a test pattern, a Mandelbrot zoom (fine detail everywhere), a textured pan with noise
+          ffmpeg -v error -y -f lavfi -i "testsrc2=s=1280x720:r=60000/1001:d=4" -pix_fmt yuv420p -c:v ffv1 m60-testsrc2.mkv
+          ffmpeg -v error -y -f lavfi -i "mandelbrot=s=1280x720:r=60000/1001:end_scale=0.5,trim=duration=4" -pix_fmt yuv420p -c:v ffv1 m60-mandel.mkv
+          ffmpeg -v error -y -f lavfi -i "nullsrc=s=1280x720:r=60000/1001:d=4,format=gray,geq=lum='128+60*sin((X+3*N)*0.07)*cos((Y-N)*0.05)+30*sin((X*0.31+Y*0.17+5*N)*0.2)+random(1)*6-3',format=yuv420p" -c:v ffv1 m60-pan.mkv
+          ffmpeg -v error -y -f lavfi -i "mandelbrot=s=1280x720:r=24000/1001:end_scale=0.5,trim=duration=4" -pix_fmt yuv420p -c:v ffv1 m24-mandel.mkv
+          for m in testsrc2 mandel pan; do
+            # 60i: the top field of master frame 2j, the bottom field of 2j+1 (top first); ffv1 for the filters, and
+            # lossless x264 with interlaced coding for the players (their decoders flag the frames interlaced)
+            ffmpeg -v error -y -i m60-$m.mkv -vf "tinterlace=mode=interleave_top,setfield=tff" -c:v ffv1 i60-$m.mkv
+            ffmpeg -v error -y -i m60-$m.mkv -vf "tinterlace=mode=interleave_top,setfield=tff" -c:v libx264 -qp 0 -flags +ildct+ilme -x264-params tff=1 -pix_fmt yuv420p i60-$m-x264.mkv
+          done
+          ffmpeg -v error -y -i m24-mandel.mkv -vf "telecine=first_field=t:pattern=23,setfield=tff" -c:v ffv1 tc30-mandel.mkv
+          ffmpeg -v error -y -i m24-mandel.mkv -vf "telecine=first_field=t:pattern=23,setfield=tff" -c:v libx264 -qp 0 -flags +ildct+ilme -x264-params tff=1 -pix_fmt yuv420p tc30-mandel-x264.mkv
+          for f in *.mkv; do echo "$f: $(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,avg_frame_rate,field_order -of csv=p=0 $f)"; done
       - uses: actions/upload-artifact@v4
-        with: { name: plugins, path: out, retention-days: 5 }
+        with: { name: deint-clips, path: clips, retention-days: 5 }
 
-  linux:
-    needs: [clip, build]
+  ffmpeg:
+    needs: clips
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: art }
-      - name: VLC (Ubuntu 24.04 packages)
+        with: { name: deint-clips, path: clips }
+      - name: ffmpeg, the meter tool, nnedi's weights
         run: |
-          sudo apt-get -qq update >/dev/null
-          sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base >/dev/null
-          cvlc --version 2>/dev/null | head -1
-      - name: Spike cases (distro VLC, VLC_PLUGIN_PATH, no root, no cache-gen)
-        run: |
-          mkdir -p ~/.local/share/pushspike && cp art/plugins/linux/libpushspike_plugin.so ~/.local/share/pushspike/
-          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Ubuntu VLC $(dpkg-query -W -f='${Version}' vlc-bin)"
-          bash vlcplugin/spike/run-cases.sh
-      - name: Real displays under Xvfb (gl on llvmpipe, xcb_x11)
-        timeout-minutes: 10
-        run: |
-          sudo apt-get -qq install -y --no-install-recommends xvfb vlc-plugin-video-output libgl1-mesa-dri >/dev/null
-          export VLC=$(command -v vlc) PLUGDIR=~/.local/share/pushspike CLIP=art/clip/clip.mkv OUT=res/linux-display \
-                 VOUTS="gl xcb_x11" HWARGS="--avcodec-hw=none" LABEL="Linux, Ubuntu VLC"
-          xvfb-run -a -s "-screen 0 1280x720x24" bash vlcplugin/spike/run-display.sh
-      - name: Flathub VLC (org.videolan.VLC) with the same plugin through VLC_PLUGIN_PATH
-        if: ${{ github.event_name == 'push' || inputs.flatpak }}
-        timeout-minutes: 20
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg g++ >/dev/null
+          g++ -O2 -std=c++20 -Ipushmpc/include tests/deint-probe/comb_probe.cpp -o comb_probe
+          curl -fsSL -o nnedi3_weights.bin https://github.com/dubhater/vapoursynth-nnedi3/raw/master/src/nnedi3_weights.bin
+          sha256sum nnedi3_weights.bin
+      - name: The deinterlacers against the 60p masters (double rate, one output per field)
         run: |
           set -u
-          sudo apt-get -qq install -y flatpak >/dev/null
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y --noninteractive flathub org.videolan.VLC >/dev/null 2>&1 || { echo "::warning::flatpak install failed"; exit 0; }
-          flatpak info --user org.videolan.VLC | head -12
-          d=~/.var/app/org.videolan.VLC/pushspike; mkdir -p "$d" && cp art/plugins/linux/libpushspike_plugin.so "$d/"
-          cp art/clip/clip.mkv ~/.var/app/org.videolan.VLC/clip.mkv
-          echo "--- does the sandboxed VLC see the plugin? (VLC_PLUGIN_PATH=$d)"
-          flatpak run --user --env=VLC_PLUGIN_PATH="$d" --command=sh org.videolan.VLC -c \
-            'echo "env: $VLC_PLUGIN_PATH"; ls -la "$VLC_PLUGIN_PATH"; ldd "$VLC_PLUGIN_PATH"/libpushspike_plugin.so; ls /app/lib/vlc/plugins | head; ldd --version | head -1' || true
-          flatpak run --user --env=VLC_PLUGIN_PATH="$d" org.videolan.VLC -I dummy -vv --list 2>&1 | grep -iE "pushspike|pushdump|browsing|cannot load|plugins.dat|error" | head -20 || true
-          echo "--- extension point: the same plugin through /app/lib/vlc/plugins/extra (org.videolan.VLC.Plugin)"
-          flatpak run --user --command=sh org.videolan.VLC -c 'ls -la /app/lib/vlc/plugins/extra /app/share/vlc/extra 2>&1 | head' || true
-          # the app's command is vlc, so VLC stays empty and the wrapper is the whole command
-          export VLC="" PLUGDIR="$d" CLIP=$HOME/.var/app/org.videolan.VLC/clip.mkv OUT=res/flatpak \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="Linux, Flathub VLC" \
-                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 scale2 vlcrc_m4" \
-                 VLC_WRAP="flatpak run --user --env=VLC_PLUGIN_PATH=$d org.videolan.VLC"
-          bash vlcplugin/spike/run-cases.sh
+          comb() { ffmpeg -v error -i "$1" -vf format=gray -f rawvideo -y /tmp/g.raw && ./comb_probe /tmp/g.raw 1280 720; }
+          for m in testsrc2 mandel pan; do
+            echo "probe: ffmpeg $m woven 60i, no deinterlace: $(comb clips/i60-$m.mkv)"
+            for a in "bwdif=mode=send_field:parity=tff" "yadif=mode=send_field:parity=tff" "w3fdif=deint=all" "estdif=mode=field:parity=tff" "nnedi=weights=nnedi3_weights.bin:field=af"; do
+              n=${a%%=*}
+              vf="$a"; [ "$n" = w3fdif ] && vf="setfield=tff,$a"
+              t0=$(date +%s.%N)
+              if ffmpeg -v error -y -i clips/i60-$m.mkv -vf "$vf" -c:v ffv1 out-$n-$m.mkv; then
+                t1=$(date +%s.%N)
+                echo "probe: ffmpeg $m $n: $(python3 tests/deint-probe/score.py ffmpeg ffprobe out-$n-$m.mkv clips/m60-$m.mkv); $(comb out-$n-$m.mkv); $(echo "($t1 - $t0) / 4" | bc -l | cut -c1-5) s per s of video (runner CPU)"
+              else echo "probe: ffmpeg $m $n: failed"; fi
+              rm -f out-$n-$m.mkv
+            done
+          done
+      - name: Inverse telecine against the 24p master
+        run: |
+          set -u
+          for a in "fieldmatch=order=tff,decimate" "fieldmatch=order=tff:combmatch=full,decimate" "pullup,fps=24000/1001"; do
+            ffmpeg -v error -y -i clips/tc30-mandel.mkv -vf "$a" -c:v ffv1 ivtc.mkv && echo "probe: ffmpeg telecine $a: $(python3 tests/deint-probe/score.py ffmpeg ffprobe ivtc.mkv clips/m24-mandel.mkv)" || echo "probe: ffmpeg telecine $a: failed"
+          done
+          ffmpeg -v error -i clips/tc30-mandel.mkv -vf format=gray -f rawvideo -y /tmp/g.raw && echo "probe: telecined 30i itself: $(./comb_probe /tmp/g.raw 1280 720)"
+      - name: The distro mpv's own deinterlacer (encode mode, no PushMPC) against the masters
+        run: |
+          set -u
+          sudo apt-get -qq install -y mpv >/dev/null; mpv --version | head -1
+          for m in testsrc2 pan; do
+            for a in "--deinterlace=yes" "--vf=lavfi=[bwdif=mode=send_field]" "--vf=lavfi=[yadif=mode=send_field]"; do
+              mpv --no-config -v clips/i60-$m-x264.mkv $a --o=mpv.mkv --of=matroska --ovc=ffv1 --no-audio > mpv.log 2>&1 || true
+              echo "probe: mpv $(mpv --version | head -1 | cut -d' ' -f2) $m $a: $(python3 tests/deint-probe/score.py ffmpeg ffprobe mpv.mkv clips/m60-$m.mkv)"
+              grep -iE "deint|bwdif|yadif" mpv.log | grep -iE "vf|filter|userdeint" | head -3 | sed 's/^/  /'
+            done
+          done
+          for a in "--vf=lavfi=[fieldmatch=order=tff,decimate]" "--vf=lavfi=[pullup]"; do
+            mpv --no-config clips/tc30-mandel-x264.mkv $a --o=mpv.mkv --of=matroska --ovc=ffv1 --no-audio > mpv.log 2>&1 || true
+            echo "probe: mpv telecine $a: $(python3 tests/deint-probe/score.py ffmpeg ffprobe mpv.mkv clips/m24-mandel.mkv)"
+          done
+
+  mpv-native:
+    needs: clips
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: deint-clips, path: clips }
+      - name: PushMPC's mpv (the AppImage of an mpv-native run) and ffmpeg for the scores
+        run: |
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y ffmpeg libfuse2 >/dev/null
+          id="${{ inputs.native_run }}"
+          [ -n "$id" ] || id=$(gh run list -R "$GITHUB_REPOSITORY" -w mpv-native.yml -s success -L 1 --json databaseId -q '.[0].databaseId')
+          echo "mpv-native run $id"
+          gh run download "$id" -R "$GITHUB_REPOSITORY" -n mpvnative-appimage -D app
+          chmod +x app/*.AppImage; ls -la app
+      - name: Deinterlace arms through vf=pushmpc (x2, CPU engine)
+        run: |
+          set -u
+          M="env -u LD_LIBRARY_PATH -u PUSHMPC_ENGINE APPIMAGE_EXTRACT_AND_RUN=1 $(ls app/*.AppImage)"
+          $M --version | head -1
+          for m in testsrc2 pan; do
+            for a in "" "--deinterlace=yes" "--deinterlace=auto" "--vf=lavfi=[bwdif=mode=send_field],pushmpc=smoother=2" "--vf=pushmpc=smoother=2,lavfi=[bwdif=mode=send_field]"; do
+              vf="--vf=pushmpc=smoother=2"; case "$a" in --vf=*) vf="$a"; a="" ;; esac
+              $M --no-config -v --msg-level=all=v clips/i60-$m-x264.mkv $a $vf --o=n.mkv --of=matroska --ovc=ffv1 --no-audio > n.log 2>&1 || true
+              v=$(grep -hoE "interlaced: interlaced input \([^)]*\)|progressive \(measured\): [0-9]+ of [0-9]+ moving frames combed" n.log | head -1)
+              fr=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,avg_frame_rate -of csv=p=0 n.mkv 2>/dev/null)
+              echo "probe: mpv-native $m ${a:-no deinterlace} $vf: PushMPC saw: ${v:-no verdict logged}; output frames,rate: $fr (source 120 frames 60i = 240 fields)"
+              grep -E "\[vf\]" n.log | grep -iE "deint|bwdif|yadif|pushmpc|lavfi" | head -4 | sed 's/^/  /'
+            done
+          done
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: results-linux, path: res, retention-days: 7 }
+        with: { name: deint-native-logs, path: '*.log', retention-days: 5 }
 
-  windows:
-    needs: [clip, build]
+  vlc:
+    needs: clips
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: deint-clips, path: clips }
+      - name: Distro VLC 3 and the PushMPC module (plugin-linux of a vlc-plugin run)
+        run: |
+          set -eu
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y --no-install-recommends vlc-bin vlc-plugin-base vlc-plugin-video-output >/dev/null
+          id="${{ inputs.vlc_run }}"
+          [ -n "$id" ] || id=$(gh run list -R "$GITHUB_REPOSITORY" -w vlc-plugin.yml -s success -L 1 --json databaseId -q '.[0].databaseId')
+          echo "vlc-plugin run $id"
+          gh run download "$id" -R "$GITHUB_REPOSITORY" -n plugin-linux -D plug
+          ls -la plug; vlc --version 2>/dev/null | head -1
+      - name: --deinterlace 0 / 1 (bwdif, yadif2x) / -1 (auto) in front of PushMPC (x2)
+        run: |
+          set -u
+          export VLC_PLUGIN_PATH="$PWD/plug"
+          for m in testsrc2 pan; do
+            for a in "--deinterlace=0" "--deinterlace=1 --deinterlace-mode=bwdif" "--deinterlace=1 --deinterlace-mode=yadif2x" "--deinterlace=-1 --deinterlace-mode=bwdif"; do
+              # shellcheck disable=SC2086
+              timeout 90 vlc -I dummy --no-audio --play-and-exit --no-video-title-show --no-osd --file-logging --logfile=v.log --log-verbose=2 \
+                --vout=pushdump --pushdump-file=v.csv --avcodec-hw=none $a --video-filter=postproc:pushmpc_out --pushmpc-smoother=2 clips/i60-$m-x264.mkv > /dev/null 2>&1 || true
+              got=$(( $(wc -l < v.csv) - 1 ))
+              v=$(grep -hoE "PushMPC: (interlaced: interlaced input \([^)]*\)|progressive \(measured\): [0-9]+ of [0-9]+ moving frames combed)" v.log | head -1)
+              echo "probe: vlc $m $a: PushMPC saw: ${v:-no verdict logged}; $got pictures shown (source 120 frames 60i = 240 fields; x2 of 240 = 480)"
+              grep -hE "as static|as interactive|deinterlac" v.log | sed 's/^[^:]*: //' | sort -u | head -6 | sed 's/^/  /'
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: deint-vlc-logs, path: '*.log', retention-days: 5 }
+
+  mpv-vs:
+    needs: clips
     runs-on: windows-latest
-    timeout-minutes: 30
-    defaults: { run: { shell: bash } }
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: art }
-      - name: Cache VLC win64 7z
-        uses: actions/cache@v4
-        with:
-          path: ~/vlc-dl
-          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
-      - name: VLC ${{ env.VLC_WIN_VERSION }} (portable 7z, official, SHA-256 checked)
+        with: { name: deint-clips, path: clips }
+      - name: Fetch the pinned VapourSynth runtime and mpv
+        shell: pwsh
         run: |
-          set -eu
-          mkdir -p ~/vlc-dl && cd ~/vlc-dl
-          f=vlc-${VLC_WIN_VERSION}-win64.7z
-          base=https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64
-          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "$base/$f"
-          curl -fsSL --retry 3 -o "$f.sha256" "$base/$f.sha256"
-          echo "$(cut -d' ' -f1 "$f.sha256")  $f" | sha256sum -c -
-          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" >/dev/null
-          ls "$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}" | head
-      - name: Spike cases (official VLC, per-user plugin dir via VLC_PLUGIN_PATH, no admin, no cache-gen)
+          $pin = Get-Content scripts/vapoursynth-pin.json -Raw | ConvertFrom-Json
+          $vs = Join-Path $env:RUNNER_TEMP 'vs'; $mpv = Join-Path $env:RUNNER_TEMP 'mpv'
+          New-Item -ItemType Directory $vs, $mpv -Force | Out-Null
+          function Fetch($entry, $file) {
+            if ($entry.sha256 -match 'TODO' -or $entry.url -match 'TODO') { throw "scripts/vapoursynth-pin.json: $($entry.what) is not pinned yet (TODO)" }
+            Invoke-WebRequest -Uri $entry.url -OutFile $file
+            $h = (Get-FileHash $file -Algorithm SHA256).Hash
+            if ($h -ne $entry.sha256.ToUpperInvariant()) { throw "SHA-256 mismatch for $($entry.url): $h" }
+          }
+          Fetch $pin.python "$env:RUNNER_TEMP\python.zip"; Expand-Archive "$env:RUNNER_TEMP\python.zip" $vs -Force
+          Fetch $pin.vapoursynth "$env:RUNNER_TEMP\vs.zip"; Expand-Archive "$env:RUNNER_TEMP\vs.zip" $vs -Force
+          # R7x+ portable: the runtime is a wheel inside the zip, installed as its vspipe.bat expects
+          # (lib\site-packages\vapoursynth); lib\site-packages goes into the embeddable Python's ._pth
+          if ($pin.vapoursynth.wheel) {
+            $sp = Join-Path $vs $pin.vapoursynth.wheelTo; New-Item -ItemType Directory $sp -Force | Out-Null
+            foreach ($w in Get-ChildItem (Join-Path $vs $pin.vapoursynth.wheel)) { Write-Host "wheel $($w.Name)"; tar -xf $w.FullName -C $sp; if ($LASTEXITCODE) { throw "unpack $($w.Name)" } }
+            foreach ($pth in Get-ChildItem $vs -Filter 'python*._pth') { Add-Content $pth.FullName $pin.vapoursynth.wheelTo.Replace('/', '\') }
+          }
+          Fetch $pin.mpvForCi "$env:RUNNER_TEMP\mpv.7z"; 7z x "$env:RUNNER_TEMP\mpv.7z" "-o$mpv" -y | Out-Null
+          Write-Host '--- runtime layout'; Get-ChildItem $vs -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.bat', '.pyd', '.h', '._pth' } | ForEach-Object { Write-Host "  $($_.FullName.Substring($vs.Length + 1))" }
+          foreach ($b in Get-ChildItem $vs -Filter *.bat) { Write-Host "--- $($b.Name)"; Get-Content $b.FullName | Write-Host }
+          Get-ChildItem $vs -Filter *._pth | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_.FullName | Write-Host }
+          # SDK headers from the pinned package, the LGPL text from the pinned source of the same tag
+          $sdk = 'vsplugin/third_party/vapoursynth'; New-Item -ItemType Directory $sdk -Force | Out-Null
+          foreach ($h in $pin.vapoursynth.sdkHeaders) { Copy-Item (Join-Path $vs $h) $sdk }
+          Fetch $pin.vapoursynth.source "$env:RUNNER_TEMP\vs-src.tar.gz"
+          $src = Join-Path $env:RUNNER_TEMP 'vs-src'; New-Item -ItemType Directory $src -Force | Out-Null; tar -xzf "$env:RUNNER_TEMP\vs-src.tar.gz" -C $src
+          $lic = Get-ChildItem $src -Recurse -File | Where-Object { $_.Name -match '^COPYING.LESSER$|^COPYING.*LGPL|^LICENSE.*LGPL' } | Select-Object -First 1
+          if (-not $lic) { Get-ChildItem $src -Depth 1 | ForEach-Object { Write-Host "  src: $($_.Name)" }; throw 'no LGPL licence file in the VapourSynth source' }
+          Copy-Item $lic.FullName $sdk
+          @("VapourSynth SDK headers from VapourSynth $($pin.vapoursynth.tag) (github.com/vapoursynth/vapoursynth), LGPL-2.1-or-later;",
+            "see $($lic.Name). Fetched by .github/workflows/vsplugin.yml from the packages pinned in scripts/vapoursynth-pin.json.") | Set-Content "$sdk/README.txt"
+          Get-ChildItem $sdk | ForEach-Object { Write-Host "sdk: $($_.Name) $($_.Length)" }
+          $vss = Get-ChildItem $vs -Recurse -Filter VSScript.dll | Select-Object -First 1
+          if (-not $vss) { throw 'VSScript.dll not found in the runtime' }
+          "$vs" | Out-File -Append $env:GITHUB_PATH
+          if ($vss.DirectoryName -ne $vs) { $vss.DirectoryName | Out-File -Append $env:GITHUB_PATH }
+          "VSDIR=$vs" | Out-File -Append $env:GITHUB_ENV
+          "MPVDIR=$mpv" | Out-File -Append $env:GITHUB_ENV
+      - name: Build pushmpc_vs (stub core; the portable backend runs on the CPU)
+        shell: cmd
+        run: vsplugin\build.cmd notest
+      - name: Deinterlace arms through pushmpc.vpy (portable x2), d3d11vpp where offered
+        shell: pwsh
         run: |
-          d="$LOCALAPPDATA/pushspike"; mkdir -p "$d" && cp art/plugins/win64/libpushspike_plugin.dll "$d/"
-          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$d")" CLIP=art/clip/clip.mkv \
-                 OUT=res/windows SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt | tr -d '\r') PY=python \
-                 LABEL="Windows, VLC ${VLC_WIN_VERSION} win64" D3D11=1
-          bash vlcplugin/spike/run-cases.sh
-          grep -hE "D3D11 opaque picture|d3d11va|D3D11VA" res/windows/d3d11_m4.log | head -12 || true
-      - name: Real displays (direct3d11 and direct3d9 on WARP, glwin32)
-        timeout-minutes: 10
-        run: |
-          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" PLUGDIR="$(cygpath -w "$LOCALAPPDATA/pushspike")" \
-                 CLIP=art/clip/clip.mkv OUT=res/windows-display VOUTS="direct3d11 direct3d9 glwin32" HWARGS="--avcodec-hw=none" \
-                 RCARGS="--rc-quiet" LABEL="Windows, VLC ${VLC_WIN_VERSION}"
-          bash vlcplugin/spike/run-display.sh
-      - name: direct3d11 display (real vout on the runner's WARP adapter) with d3d11va and the static filter
-        run: |
-          export VLC="$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/vlc.exe" VLC_PLUGIN_PATH="$(cygpath -w "$LOCALAPPDATA/pushspike")"
-          mkdir -p res
-          timeout 60 "$VLC" -I dummy --no-audio --play-and-exit --file-logging --logfile=res/direct3d11.log --log-verbose=2 \
-            --vout=direct3d11 --avcodec-hw=d3d11va --video-filter=postproc --pushspike-mult=4 art/clip/clip.mkv || true
-          grep -iE "pushspike|d3d11va|direct3d11|as static|Using D3D11|adapter|late|lost" res/direct3d11.log | head -40 || true
+          $t = Join-Path $env:RUNNER_TEMP 'vs'; New-Item -ItemType Directory $t -Force | Out-Null
+          Copy-Item vsplugin\scripts\pushmpc.vpy, vsplugin\bin\pushmpc_vs.dll $t
+          $vpy = "$t\pushmpc.vpy".Replace('\', '/')
+          $ud = 'backend=portable,smoother=2'
+          & "$env:MPVDIR\mpv.com" --version | Select-Object -First 1
+          $arms = @(
+            @('no deinterlace', @("--vf=vapoursynth=file=[$vpy]:user-data=[$ud]")),
+            @('--deinterlace=yes', @('--deinterlace=yes', "--vf=vapoursynth=file=[$vpy]:user-data=[$ud]")),
+            @('--deinterlace=auto', @('--deinterlace=auto', "--vf=vapoursynth=file=[$vpy]:user-data=[$ud]")),
+            @('bwdif before', @("--vf=lavfi=[bwdif=mode=send_field],vapoursynth=file=[$vpy]:user-data=[$ud]")),
+            @('bwdif after', @("--vf=vapoursynth=file=[$vpy]:user-data=[$ud],lavfi=[bwdif=mode=send_field]")),
+            @('d3d11vpp deint (hwdec d3d11va)', @('--hwdec=d3d11va', '--vf=d3d11vpp=deint=yes:mode=best', "--vf-append=vapoursynth=file=[$vpy]:user-data=[$ud]"))
+          )
+          foreach ($m in 'testsrc2', 'pan') {
+            foreach ($a in $arms) {
+              $log = Join-Path $t ("vs-$m-" + ($a[0] -replace '\W', '') + '.log'); $plog = "$log.plugin"; New-Item -ItemType Directory $plog -Force | Out-Null
+              $env:PUSHMPC_VS_LOG_DIR = $plog
+              & "$env:MPVDIR\mpv.com" --no-config -v --vo=null --ao=null --untimed --hwdec=no @($a[1]) "clips\i60-$m-x264.mkv" 2>&1 | Out-File $log
+              $p = (Get-ChildItem $plog -Filter *.log | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+              $v = [regex]::Match($p, 'interlaced: interlaced input \([^)]*\)|progressive \(measured\)[^\r\n]*').Value
+              $r = [regex]::Match($p, 'portable: \d+x\d+ \d+-bit, [\d/]+ fps').Value
+              $st = (Get-Content "$env:TEMP\pushmpc-vs-*.txt" -ErrorAction SilentlyContinue | Select-String '^fps=') -join ' '
+              Write-Host "probe: mpv-vs $m $($a[0]): PushMPC saw: $(if ($v) { $v } else { 'no verdict logged' }); clip as declared: $(if ($r) { $r } else { 'no portable line' }); measured $st"
+              Get-Content $log | Select-String '\[vf\].*(userdeint|deint|bwdif|yadif|vapoursynth|d3d11vpp)|d3d11vpp|Could not|failed' | Select-Object -First 4 | ForEach-Object { Write-Host "  $($_.Line)" }
+              Remove-Item "$env:TEMP\pushmpc-vs-*.txt" -ErrorAction SilentlyContinue
+            }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: results-windows, path: res, retention-days: 7 }
-
-  macos:
-    if: ${{ inputs.macos || contains(github.event.head_commit.message, '[macos]') }}
-    needs: [clip, build]
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { path: art }
-      - name: Cache Homebrew downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/Homebrew/downloads
-          key: brew-vlc-cask-v1
-      - name: Cache VLC win64 7z (headers)
-        uses: actions/cache@v4
-        with:
-          path: ~/vlc-dl
-          key: vlc-win64-${{ env.VLC_WIN_VERSION }}
-      - name: VLC.app (Homebrew cask) and SDK headers
-        run: |
-          set -eu
-          brew install --cask vlc >/dev/null
-          /Applications/VLC.app/Contents/MacOS/VLC --version 2>/dev/null | head -1 || true
-          codesign -dv --entitlements - /Applications/VLC.app 2>&1 | grep -iE "flags|runtime|library|TeamIdentifier|disable" || true
-          mkdir -p ~/vlc-dl && cd ~/vlc-dl
-          f=vlc-${VLC_WIN_VERSION}-win64.7z
-          [ -s "$f" ] || curl -fsSL --retry 3 -o "$f" "https://download.videolan.org/pub/videolan/vlc/${VLC_WIN_VERSION}/win64/$f"
-          brew install p7zip >/dev/null 2>&1 || true
-          7z x -y -o"$RUNNER_TEMP/vlcwin" "$f" "vlc-${VLC_WIN_VERSION}/sdk/include" >/dev/null
-      - name: Build macOS plugin (Apple clang, symbols resolved from VLC's libvlccore at load)
-        run: |
-          set -eux
-          mkdir -p out/mac
-          clang -std=gnu11 -O2 -Wall -dynamiclib -undefined dynamic_lookup -arch arm64 -D__PLUGIN__ -DMODULE_STRING='"pushspike"' \
-            -I"$RUNNER_TEMP/vlcwin/vlc-${VLC_WIN_VERSION}/sdk/include/vlc/plugins" vlcplugin/spike/pushspike.c \
-            -o out/mac/libpushspike_plugin.dylib
-          codesign -s - -f out/mac/libpushspike_plugin.dylib
-          file out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/VLC
-      - name: Spike cases (VLC_PLUGIN_PATH, ad-hoc signed plugin outside the bundle)
-        run: |
-          d=~/Library/Application\ Support/pushspike; mkdir -p "$d" && cp out/mac/libpushspike_plugin.dylib "$d/"
-          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, VLC.app cask" \
-                 CASES="base pp_m2 pp_m4 pp_m8 heap_m8 plusi_m8 named_m2 scale2 vlcrc_m4" \
-                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
-          bash vlcplugin/spike/run-cases.sh
-          grep -ihE "pushspike|library validation|code signature|not valid|dlopen|cannot load" res/macos/pp_m2.log | head -20 || true
-      - name: Real display (macosx vout in the runner's GUI session)
-        timeout-minutes: 8
-        run: |
-          d=~/Library/Application\ Support/pushspike
-          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR="$d" CLIP=art/clip/clip.mkv OUT=res/macos-display \
-                 VOUTS="macosx" HWARGS="--codec=avcodec,none --avcodec-hw=none" LABEL="macOS, VLC.app cask"
-          bash vlcplugin/spike/run-display.sh
-      - name: Same plugin inside the bundle (plugins dir; CI only, breaks the bundle signature)
-        run: |
-          cp out/mac/libpushspike_plugin.dylib /Applications/VLC.app/Contents/MacOS/plugins/ || true
-          export VLC=/Applications/VLC.app/Contents/MacOS/VLC PLUGDIR=/nonexistent CLIP=art/clip/clip.mkv OUT=res/macos-bundle \
-                 SRC_FRAMES=$(sed -n 's/nb_read_frames=//p' art/clip/clip.txt) LABEL="macOS, plugin inside VLC.app" CASES="pp_m2" \
-                 HWARGS="--codec=avcodec,none --avcodec-hw=none"
-          bash vlcplugin/spike/run-cases.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: results-macos, path: res, retention-days: 7 }
+        with: { name: deint-vs-logs, path: '${{ runner.temp }}/vs/*.log*', retention-days: 5 }
