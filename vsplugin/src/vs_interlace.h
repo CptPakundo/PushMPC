@@ -92,6 +92,10 @@ struct IlWatch {
         const CombMeter::Verdict v = PushLuma(comb, a, f);
         if (v == CombMeter::kMeasuring && seen < CombMeter::kGiveUp) return;
         done = true;
+        if (v == CombMeter::kMeasuring) {   // a still stretch (a seek into one): nothing measured, the instance stays as it was made
+            Log(ProgressiveWhy(comb, v, flagged, seen) + (aside ? "; the stream keeps passing through (the earlier verdict stands)" : ""));
+            return;
+        }
         const bool il = v == CombMeter::kInterlaced;
         RememberInterlace(key, il ? kIlInterlaced : kIlProgressive, comb.measured(), comb.combed());
         if (il) Log("interlaced: " + IlWhy(comb.combed(), comb.measured()));
@@ -132,10 +136,10 @@ inline IlProbe ProbeInterlace(VSNode* node, const VSAPI* a)
 }
 
 // the decision at create: aside = pass the clip through (node: what to output), else node is what the backend reads
-// (an unknown-length source wrapped in its measuring guard). substitute: a PushMPC backend follows (the guard hands it
-// a flagged end frame); off for a pass-through or another plugin (the rife preset). The reference to node passes on.
+// (an unknown-length source wrapped in its measuring guard: it hands a flagged end frame on only once a PushMPC backend
+// takes it, eof_guard.h). The reference to node passes on.
 struct IlDecision { bool aside = false; VSNode* node = nullptr; std::string why; };
-inline IlDecision DecideInterlace(VSNode* node, VSCore* core, const VSAPI* a, bool substitute)
+inline IlDecision DecideInterlace(VSNode* node, VSCore* core, const VSAPI* a)
 {
     IlDecision d;
     const VSVideoInfo* vi = a->getVideoInfo(node);
@@ -147,7 +151,7 @@ inline IlDecision DecideInterlace(VSNode* node, VSCore* core, const VSAPI* a, bo
         w->declared = vi->fpsNum > 0 && vi->fpsDen > 0 ? double(vi->fpsNum) / double(vi->fpsDen) : 0.0;
         d.aside = w->aside;
         if (d.aside) d.why = IlWhy(m.ilCombed, m.ilMeasured) + ", on this stream before";
-        d.node = GuardUnknownLength(node, core, a, [w](const VSAPI* api, const VSFrame* f, int) { w->Push(api, f); }, substitute && !d.aside);
+        d.node = WatchUnknownLength(node, core, a, [w](const VSAPI* api, const VSFrame* f, int) { w->Push(api, f); });
         if (d.aside) Log("interlaced: " + d.why + ": the clip passes through at the source rate (measured again as it plays)");
         else Log("interlacing: measured on the first frames as they pass (field combing; _FieldBased is only a prior)");
         return d;

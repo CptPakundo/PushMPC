@@ -581,6 +581,10 @@ static void il_measure(AVFilterContext *ctx, AVFrame *in, const AVFrame *src)
     s->il_done = 1;
     av_frame_free(&s->il_cpu);
     s->api->comb_counts(s->comb, &measured, &combed);
+    if (v == 0 && s->aside) {   /* a still stretch (a seek into one): nothing measured, the earlier verdict stands */
+        av_log(ctx, AV_LOG_INFO, "interlacing: too little motion to tell in %d frames; the source frames go on at the source rate\n", s->il_seen);
+        return;
+    }
     g_il_memo.w = s->in_w; g_il_memo.h = s->in_h; g_il_memo.fmt = (int)s->sw_fmt; g_il_memo.fr = PM_FRAME_RATE(ctx->inputs[0]);
     g_il_memo.il = v == 2 ? 2 : 1; g_il_memo.measured = measured; g_il_memo.combed = combed;
     if (v == 2) {

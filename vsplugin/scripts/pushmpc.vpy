@@ -146,7 +146,7 @@ except (KeyError, IndexError):
 # this script started makes pushmpc.lua add the filter again (interlace_reload in the status file).
 _il = None
 if hasattr(core.pushmpc, "Interlace"):
-    _il = core.pushmpc.Interlace(clip, end_frames=0 if (_backend == "rife" or _interp == "rife") else 1)
+    _il = core.pushmpc.Interlace(clip)
     clip = _il["clip"]
     _args["interlace_check"] = 0
 if _il is not None and int(_il["interlaced"]):

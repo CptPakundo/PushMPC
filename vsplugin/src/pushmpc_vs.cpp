@@ -627,7 +627,7 @@ void VS_CC EnhanceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const
     // interlaced input (vs_interlace.h): measured in the picture; interlaced, the clip passes through at the source rate.
     // interlace_check=0: decided before (pushmpc.vpy calls pushmpc.Interlace once for its whole chain)
     if (pmvs::IlArgInt(in, a, "interlace_check", 1)) {
-        const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a, true);
+        const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a);
         node = il.node;
         if (il.aside) { a->mapConsumeNode(out, "clip", node, maReplace); return; }
     }
@@ -663,14 +663,13 @@ void VS_CC SelectCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const 
     a->mapSetData(out, "interp", c.interp.c_str(), -1, dtUtf8, maReplace);
 }
 
-// pushmpc.Interlace(clip[, end_frames]) -> {clip, interlaced, why}: the interlace decision of pushmpc.Enhance
-// (vs_interlace.h) once for a script's whole chain (pushmpc.vpy: also the rife preset, which has no Enhance). clip:
-// the clip to go on with (mpv's unknown-length source wrapped in its measuring guard); interlaced = 1: output it as it
-// is. end_frames = 1 (default): a PushMPC backend follows and takes the guard's flagged end frame; 0 for anything else.
+// pushmpc.Interlace(clip) -> {clip, interlaced, why}: the interlace decision of pushmpc.Enhance (vs_interlace.h) once for
+// a script's whole chain (pushmpc.vpy: also the rife preset, which has no Enhance). clip: the clip to go on with (mpv's
+// unknown-length source wrapped in its measuring guard); interlaced = 1: output it as it is.
 void VS_CC InterlaceCreate(const VSMap* in, VSMap* out, void*, VSCore* core, const VSAPI* a)
 {
     VSNode* node = a->mapGetNode(in, "clip", 0, nullptr);
-    const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a, pmvs::IlArgInt(in, a, "end_frames", 1) != 0);
+    const pmvs::IlDecision il = pmvs::DecideInterlace(node, core, a);
     a->mapConsumeNode(out, "clip", il.node, maReplace);
     a->mapSetInt(out, "interlaced", il.aside ? 1 : 0, maReplace);
     a->mapSetData(out, "why", il.why.c_str(), -1, dtUtf8, maReplace);
@@ -755,7 +754,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
         "ml_runtime:data:opt;ml_models:data:opt;ml_backend:data:opt;ml_tier:data:opt;ml_flow_once:data:opt;ml_line_art:data:opt;anime_model:data:opt;animation:data:opt;playback:int:opt;"
         "interlace_check:int:opt;",
         "clip:vnode;", EnhanceCreate, nullptr, plugin);
-    vspapi->registerFunction("Interlace", "clip:vnode;end_frames:int:opt;", "clip:vnode;interlaced:int;why:data;", InterlaceCreate, nullptr, plugin);
+    vspapi->registerFunction("Interlace", "clip:vnode;", "clip:vnode;interlaced:int;why:data;", InterlaceCreate, nullptr, plugin);
     vspapi->registerFunction("MpvColour", "clip:vnode;mpvver:data:opt;", "ok:int;matrix:int;transfer:int;primaries:int;range:int;why:data;", MpvColourCreate, nullptr, plugin);
     vspapi->registerFunction("SelectBackend", "backend:data:opt;rife:int:opt;core_dir:data:opt;runtime_dir:data:opt;cuda_device:int:opt;width:int:opt;height:int:opt;fpsnum:int:opt;fpsden:int:opt;display_fps:float:opt;", "backend:data;why:data;interp:data;", SelectCreate, nullptr, plugin);
 }

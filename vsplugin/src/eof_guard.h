@@ -18,7 +18,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
-#include <set>
+#include <map>
 #include <string>
 #include "VapourSynth4.h"
 #include "vslog.h"
@@ -32,14 +32,16 @@ struct EofGuard {
     VSNode* up = nullptr;
     VSVideoInfo vi{};
     std::atomic<bool> logged{ false };
-    bool substitute = true;                                        // a failed frame at the end becomes a flagged one
+    std::atomic<bool> substitute{ true };                          // a failed frame at the end becomes a flagged one
     std::function<void(const VSAPI*, const VSFrame*, int)> watch;  // each frame passed on (thread-safe itself)
     VSNode* self = nullptr;
 };
-// the guards alive: a backend handed a guard already (pushmpc.Enhance wraps the source before it picks a backend) does
-// not wrap it again
+// the guards alive: pushmpc.Enhance wraps mpv's source in a measuring guard (WatchUnknownLength) before it picks a
+// backend, without substitution: a pass-through (Enable = 0, x1, a fallback) hands it to mpv as it is, and mpv ends at
+// the source's own failure. A backend's GuardUnknownLength finds that guard and turns substitution on instead of
+// wrapping it again (the backends call it only after their pass-through paths returned).
 inline std::mutex& GuardLock() { static std::mutex m; return m; }
-inline std::set<const VSNode*>& Guards() { static std::set<const VSNode*> s; return s; }
+inline std::map<const VSNode*, EofGuard*>& Guards() { static std::map<const VSNode*, EofGuard*> s; return s; }
 
 inline const VSFrame* VS_CC EofGuardGetFrame(int n, int reason, void* inst, void**, VSFrameContext* fc, VSCore* core, const VSAPI* a)
 {
@@ -52,7 +54,7 @@ inline const VSFrame* VS_CC EofGuardGetFrame(int n, int reason, void* inst, void
     }
     // only mpv's end ("EOF or filter EOF/reinit", vf_vapoursynth.c: no frame will come) is an end. Any other failure (a
     // frame mpv no longer holds, a decoder error) stays an error, as without the guard: it must not cut the stream short
-    if (!g->substitute || n == 0 || !std::strstr(err, "EOF")) {
+    if (!g->substitute.load() || n == 0 || !std::strstr(err, "EOF")) {
         a->setFilterError(("pushmpc.Enhance: source frame " + std::to_string(n) + " failed: " + std::string(err)).c_str(), fc);
         return nullptr;
     }
@@ -72,22 +74,32 @@ inline void VS_CC EofGuardFree(void* inst, VSCore*, const VSAPI* a)
     delete g;
 }
 
-// node wrapped when its length is the unknown one (the reference to node passes to the guard), else node itself; a
-// guard already (made by WatchUnknownLength) stays as it is
-inline VSNode* GuardUnknownLength(VSNode* node, VSCore* core, const VSAPI* a,
-                                  std::function<void(const VSAPI*, const VSFrame*, int)> watch = {}, bool substitute = true)
+// the guard on an unknown-length node (the reference to node passes to it), else node itself. substitute: a PushMPC
+// backend reads it (its flagged end frame); a guard already there gets substitution turned on
+inline VSNode* MakeGuard(VSNode* node, VSCore* core, const VSAPI* a, std::function<void(const VSAPI*, const VSFrame*, int)> watch, bool substitute)
 {
     const VSVideoInfo* vi = a->getVideoInfo(node);
     if (vi->numFrames < kUnknownLengthFrames) return node;
-    { std::lock_guard<std::mutex> lk(GuardLock()); if (Guards().count(node)) return node; }
+    {
+        std::lock_guard<std::mutex> lk(GuardLock());
+        auto it = Guards().find(node);
+        if (it != Guards().end()) { if (substitute) it->second->substitute.store(true); return node; }
+    }
     auto* g = new EofGuard();
-    g->up = node; g->vi = *vi; g->watch = std::move(watch); g->substitute = substitute;
+    g->up = node; g->vi = *vi; g->watch = std::move(watch); g->substitute.store(substitute);
     VSFilterDependency deps[] = { { node, rpGeneral } };
     VSNode* out = a->createVideoFilter2("PushMPCEndGuard", vi, EofGuardGetFrame, EofGuardFree, fmParallel, deps, 1, g, core);
     if (!out) { delete g; return node; }
     std::lock_guard<std::mutex> lk(GuardLock());
-    g->self = out; Guards().insert(out);
+    g->self = out; Guards()[out] = g;
     return out;
+}
+// a backend's input: mpv's source gets its end guard (or the measuring guard already on it hands on the end frame)
+inline VSNode* GuardUnknownLength(VSNode* node, VSCore* core, const VSAPI* a) { return MakeGuard(node, core, a, {}, true); }
+// the interlace measurement on mpv's source (vs_interlace.h): no substitution until a backend takes it
+inline VSNode* WatchUnknownLength(VSNode* node, VSCore* core, const VSAPI* a, std::function<void(const VSAPI*, const VSFrame*, int)> watch)
+{
+    return MakeGuard(node, core, a, std::move(watch), false);
 }
 
 // arInitial's request range kept in frameData[0] (from, and the count after it: both well under 2^31)

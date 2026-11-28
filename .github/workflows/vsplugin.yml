@@ -169,10 +169,12 @@ jobs:
           if ($log -notmatch 'the stream ends after source frame 47') { throw 'the nvidia path did not find the stream''s end (eof_guard.h)' }
           if ($out -ne [int]$env:K * $ctl) { throw "the nvidia path gave $out frames, want $([int]$env:K * $ctl)" }
       - name: Interlaced input passes through at the source rate, measured in the picture (vspipe and mpv, stub core)
+        timeout-minutes: 15
         shell: pwsh
         run: |
-          # interlace_clip.vpy: a panning texture woven from two moments per frame (flagged TFF, or flagged progressive),
-          # and the same pan as whole frames flagged TFF. The field combing decides (vs_interlace.h), never _FieldBased.
+          # interlace_clip.vpy: a panning texture woven from two moments per frame (_FieldBased TFF, or progressive), and
+          # the same pan as whole frames with _FieldBased TFF; the y4m files mpv plays say progressive for all. The field
+          # combing decides (vs_interlace.h), never the flag.
           $env:PUSHMPC_VS_PLUGIN = "$PWD\vsplugin\bin\pushmpc_vs.dll"
           $env:PUSHMPC_STUB_DIR = "$PWD\vsplugin\bin\stub"
           $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-il"
@@ -212,8 +214,17 @@ jobs:
           Write-Host "interlaced check (mpv, first play measured while playing): frame generation x$k until the re-add, $($k * $n) shown (want $($k * $n)); second play: pass-through, $second of $n source frames (want $n)"
           if ($second -ne $n) { Write-Host "::error::mpv woven twice: $two frames, want $($k * $n + $n)"; $rc = 1 }
           $prog = Count-Shown "$t\prog" @("$t\progressive.y4m")
-          Write-Host "interlaced check (mpv, progressive flagged TFF): frame generation x$k, $prog of $($k * $n) frames (want $($k * $n))"
+          Write-Host "interlaced check (mpv, progressive, y4m flagged progressive): frame generation x$k, $prog of $($k * $n) frames (want $($k * $n))"
           if ($prog -ne $k * $n) { Write-Host "::error::mpv progressive: $prog frames, want $($k * $n)"; $rc = 1 }
+          # a backend's own pass-through behind the measuring guard (Enable = 0; the portable backend at x1) must still end
+          # where mpv's source ends: N frames, then the file closes (the guard hands on a flagged end frame only to a
+          # backend that takes it)
+          foreach ($c in @(@('enable=0', "adapter=warp,core_dir=$stub,enable=0,backend=nvidia"), @('portable x1', 'backend=portable,smoother=1'))) {
+            $vf = "--vf=vapoursynth=file=[$vpy]:buffered-frames=8:concurrent-frames=2:user-data=[$($c[1])]"
+            $got = Count-Shown "$t\pass-$($c[0] -replace '\W', '')" @("$t\progressive.y4m")   # a hang ends at the step's timeout
+            Write-Host "interlaced check (mpv, $($c[0]) behind the guard): $got of $n frames, then the end (want $n)"
+            if ("$got" -ne "$n") { Write-Host "::error::mpv $($c[0]): $got frames, want $n and an exit"; $rc = 1 }
+          }
           $log = (Get-Content "$env:RUNNER_TEMP\logs-il\vsplugin-*.log", "$env:RUNNER_TEMP\logs-mpvil\vsplugin-*.log" -Raw) -join "`n"
           ($log -split "`n") | Select-String 'interlaced: |progressive \(measured\)' | Select-Object -First 12 | ForEach-Object { Write-Host $_.Line }
           if ($log -notmatch 'on this stream before: the clip passes through') { Write-Host '::error::the second mpv play did not start from the measured verdict'; $rc = 1 }
