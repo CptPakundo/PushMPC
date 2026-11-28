@@ -94,6 +94,14 @@ jobs:
           $log = (Get-Content "$env:RUNNER_TEMP\logs-vspipe\vsplugin-*.log" -Raw) -join "`n"   # one log per process
           if ($log -notmatch 'flush \(warm core reused\)') { throw 'the script reloads did not reuse the warm core' }
 
+      - name: The output's _MP_IMAGE colour after the stub core's tone map (mpv reads the output colour only from it)
+        shell: pwsh
+        run: |
+          $env:PUSHMPC_VS_PLUGIN = "$PWD\vsplugin\bin\pushmpc_vs.dll"
+          $env:PUSHMPC_STUB_DIR = "$PWD\vsplugin\bin\stub"
+          $env:PUSHMPC_VS_LOG_DIR = "$env:RUNNER_TEMP\logs-outcolour"
+          python vsplugin/tests/ci/out_colour.py; if ($LASTEXITCODE) { throw 'the output _MP_IMAGE colour check failed' }
+          Get-Content "$env:RUNNER_TEMP\logs-outcolour\vsplugin-*.log" | Select-String 'output colour for mpv|core for matrix' | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
       - name: mpv --vo=null with seeks (script reloads)
         shell: pwsh
         run: |
