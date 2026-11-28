@@ -434,9 +434,9 @@ int MlMeasuredMultiplier(const std::string& runtimeDir, int width, int height, d
     const auto results = CachedResults(runtimeDir + "/pmml-autobench.json", width, height);
     if (results.empty()) return -1;
     if (fps <= 1) fps = 23.976;
-    const int wantK = displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, kPortableMaxK) : 2;
+    const int wantK = MlWantK(0, fps, displayHz);
     const auto c = pmml::choose(results, fps, wantK);
-    return c.ok ? CadenceK(c.multiplier, fps, displayHz) : 0;   // the even cadence at a fixed refresh (VRR is not known here)
+    return c.ok ? MlAutoK(0, c.multiplier, fps, displayHz) : 0;   // the even cadence at a fixed refresh (VRR is not known here)
 }
 
 bool MlRuntimePresent(const std::string& dir)
@@ -490,7 +490,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const bool realtime = a->mapGetInt(in, "playback", 0, &errPlayback) != 0 && !errPlayback;
     const std::string smoother = MArg(in, a, "smoother");
     const int fixedK = smoother.empty() ? 0 : std::atoi(smoother.c_str());
-    const int wantK = fixedK >= 2 ? std::min(fixedK, kPortableMaxK) : (!err && displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, kPortableMaxK) : 2);
+    const int wantK = MlWantK(fixedK, srcFps, err ? 0.0 : displayHz);
     // the anime upscaler (upscaler=anime [anime_model=<id>], or upscaler=auto with animation=on): enlarged pictures only
     const std::string upArg = MArg(in, a, "upscaler"), modelArg = MArg(in, a, "anime_model"), animArg = MArg(in, a, "animation");
     const bool animeAsked = upArg == "anime" || upArg == "Anime";
@@ -539,7 +539,7 @@ void MlCreate(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* a, VSNode*
     const auto results = CachedResults(rt + "/pmml-autobench.json", w, h);
     if (reqBackend.empty() && !results.empty()) {
         const auto c = pmml::choose(results, srcFps, wantK);
-        if (c.ok) { o.backend = c.candidate.backend; o.tier = c.candidate.tier; flowOnce = c.candidate.flowOnce; k = fixedK >= 2 ? wantK : CadenceK(c.multiplier, srcFps, err ? 0.0 : displayHz); decision = "Auto (measured): " + c.why + (k < c.multiplier ? std::format("; x{}, the even cadence at {:.2f} Hz (fixed refresh assumed)", k, displayHz) : std::string()); }
+        if (c.ok) { o.backend = c.candidate.backend; o.tier = c.candidate.tier; flowOnce = c.candidate.flowOnce; k = MlAutoK(fixedK, c.multiplier, srcFps, err ? 0.0 : displayHz); decision = "Auto (measured): " + c.why + (k < c.multiplier ? std::format("; x{}, the even cadence at {:.2f} Hz (fixed refresh assumed)", k, displayHz) : std::string()); }
     }
     if (decision.empty()) {
         if (!reqBackend.empty() && !pmml::Backend::parse(reqBackend, &o.backend)) return fail("ml_backend '" + reqBackend + "' is not a pmml backend");

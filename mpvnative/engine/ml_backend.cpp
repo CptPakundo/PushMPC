@@ -28,6 +28,7 @@
 #include <dlfcn.h>
 #include "engine.h"
 #include "platform.h"
+#include "backend.h"   // MlWantK / MlAutoK: the multiplier asked of pmml and Auto's pick from its measurement (every PushFlow route)
 #include "yuv_io.h"
 #include "pmml/autobench.h"
 #include "pmml/pmml.h"
@@ -153,8 +154,8 @@ public:
         if (ps.smoother == 1) { why = "Smoother off"; return false; }
         const double fps = st.fps_num > 0 && st.fps_den > 0 ? double(st.fps_num) / st.fps_den : 23.976;
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
-        const int fixedK = ps.smoother >= 2 ? std::min(ps.smoother, 8) : 0;
-        const int wantK = fixedK ? fixedK : displayHz > 0 ? std::clamp(int(std::floor(displayHz / fps + 0.02)), 1, 8) : 2;
+        const int fixedK = ps.smoother >= 2 ? std::min(ps.smoother, kPortableMaxK) : 0;
+        const int wantK = MlWantK(fixedK, fps, displayHz);
         if (wantK <= 1) { why = "the display is not faster than the source: x1"; return false; }
 
         pmml::Options po;
@@ -170,7 +171,7 @@ public:
         const auto cached = CachedResults(rt + "/pmml-autobench.json", m_w, m_h);
         if (reqBackend.empty() && !cached.empty()) {
             const auto c = pmml::choose(cached, fps, wantK);
-            if (c.ok) { po.backend = c.candidate.backend; po.tier = c.candidate.tier; m_flowOnce = c.candidate.flowOnce; m_k = fixedK ? fixedK : c.multiplier; decision = "Auto (measured by pmml_cli auto): " + c.why; }
+            if (c.ok) { po.backend = c.candidate.backend; po.tier = c.candidate.tier; m_flowOnce = c.candidate.flowOnce; m_k = MlAutoK(fixedK, c.multiplier, fps, displayHz); decision = "Auto (measured by pmml_cli auto): " + c.why; }
             else decision.clear();
         }
         bool quick = false;
@@ -225,7 +226,7 @@ public:
             }
             const auto c = pmml::choose(rs, fps, wantK);
             if (!c.ok && !fixedK) { why = "pmml " + po.backend.key() + " is too slow here (" + c.why + ")"; return false; }
-            m_k = fixedK ? fixedK : c.multiplier;
+            m_k = MlAutoK(fixedK, c.multiplier, fps, displayHz);
             m_flowOnce = c.ok ? c.candidate.flowOnce : m_k > 2;
             char b2[256];
             std::snprintf(b2, sizeof(b2), "Auto (quick measurement: pair %.1f ms, network %.1f ms, rebuild %.1f ms): ", rs[0].packMs, rs[0].netMs, rs[0].synthMs);
@@ -233,7 +234,7 @@ public:
             if (reqBackend.empty()) StartAutobench(rt, m_w, m_h, fps, wantK);
         }
         if (const std::string v = Opt(o, "ml_flow_once"); !v.empty()) m_flowOnce = ParseBool(v, m_flowOnce);
-        m_k = std::clamp(m_k, 2, 8);
+        m_k = std::clamp(m_k, 2, kPortableMaxK);
         Log("ml: " + decision);
         Log("ml: " + m_interp->describe() + (m_flowOnce ? "; flow once" : "; network per timestep"));
         for (int i = 0; i < 2; ++i) m_pic[i].Resize(m_w, m_h, 16);

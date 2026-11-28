@@ -21,6 +21,7 @@
 #include "engine.h"
 #include "ml_backend.h"        // Planes16, LooksLikeCut
 #include "platform.h"          // ReadSetting, EnvA, ParseSmoother
+#include "backend.h"           // MlWantK / MlAutoK: the multiplier asked of pmml and Auto's pick from its measurement (every PushFlow route)
 #include "pmml/autobench.h"
 #include "pmml/pmml.h"
 
@@ -105,7 +106,7 @@ public:
         const double srcFps = st.fps_num > 0 && st.fps_den > 0 ? double(st.fps_num) / st.fps_den : 23.976;
         const double displayHz = std::atof(Opt(o, "display_fps", "0").c_str());
         const int fixedK = Opt(o, "smoother").empty() ? 0 : pmvs::ParseSmoother(Opt(o, "smoother"), 0);
-        const int wantK = fixedK >= 2 ? std::min(fixedK, 8) : displayHz > 0 ? std::clamp(int(std::floor(displayHz / srcFps + 0.02)), 1, 8) : 2;
+        const int wantK = pmvs::MlWantK(fixedK, srcFps, displayHz);
         if (wantK <= 1) { why = "x1 at this display rate: nothing to generate"; return false; }
 
         pmml::Options po;
@@ -131,7 +132,7 @@ public:
         const auto results = Measured(rt + "/pmml-autobench.json", m_w, m_h, measuredAt);
         if (reqBackend.empty() && !results.empty()) {
             const auto c = pmml::choose(results, srcFps, wantK);
-            if (c.ok) { po.backend = c.candidate.backend; po.tier = c.candidate.tier; m_flowOnce = c.candidate.flowOnce; k = fixedK >= 2 ? wantK : c.multiplier; decision = "Auto (measured at " + measuredAt + "): " + c.why; }
+            if (c.ok) { po.backend = c.candidate.backend; po.tier = c.candidate.tier; m_flowOnce = c.candidate.flowOnce; k = pmvs::MlAutoK(fixedK, c.multiplier, srcFps, displayHz); decision = "Auto (measured at " + measuredAt + "): " + c.why; }
             else if (!explicitChoice) { why = "pmml's measured candidates do not fit this clip's frame budget (" + c.why + ")"; return false; }
         }
         if (decision.empty()) {
@@ -164,7 +165,7 @@ public:
         std::string e;
         m_interp = pmml::Interpolator::create(po, &e);
         if (!m_interp) { why = "pmml: " + e; return false; }
-        m_k = std::clamp(k, 2, 8);
+        m_k = std::clamp(k, 2, pmvs::kPortableMaxK);
         m_cur.w = m_prev.w = m_out.w = m_w; m_cur.h = m_prev.h = m_out.h = m_h;
         for (int i = 0; i < 3; ++i) {
             const size_t n = i ? size_t(m_w / 2) * (m_h / 2) : size_t(m_w) * m_h;

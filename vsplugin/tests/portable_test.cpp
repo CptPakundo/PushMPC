@@ -621,6 +621,10 @@ static void TestInterlace()
             CHECK(m.verdict() == CombMeter::kInterlaced, "woven fields in 16-bit words (shift %d): interlaced", sh);
         }
     }
+    {   // PushFlow's multiplier on every route (backend.h MlWantK / MlAutoK): up to the other engines' x16, Auto from the measurement
+        CHECK(MlWantK(0, 23.976, 240) == 10 && MlWantK(20, 24, 60) == 16 && MlWantK(12, 24, 60) == 12 && MlWantK(0, 24, 0) == 2 && MlWantK(0, 24, 400) == 16, "ml: the multiplier asked of pmml");
+        CHECK(MlAutoK(0, 16, 23.976, 240) == 10 && MlAutoK(0, 6, 24, 400) == 6 && MlAutoK(12, 3, 24, 60) == 12 && MlAutoK(0, 20, 24, 0) == 16, "ml: Auto from the measured multiplier (even cadence)");
+    }
     CHECK(CombMeter::kGiveUp == 240 && CombMeter::kProbe == 400 && CombMeter::kProbeFlagged == 120, "the filter's and Kodi's look");
 }
 
